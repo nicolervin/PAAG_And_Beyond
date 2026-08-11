@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import add_project_model, project_models, update_project_model_rows
+from utils.table_filters import filter_table
 
 
 project_id = st.session_state.get("project_id")
@@ -44,8 +45,17 @@ for column in definition_columns:
     if column not in models.columns:
         models[column] = pd.NA
 
+models_for_editing = models.reindex(columns=definition_columns)
+visible_models = filter_table(
+    models_for_editing,
+    key="model_definition_filters",
+    dropdown_columns=["active", "platform_size", "package_type", "base_model"],
+    search_columns=["model_number", "display_name", "description", "notes", "appearance"],
+    labels={"active": "Planning status"},
+    reset_widget_keys=["model_definitions_editor"],
+)
 edited_models = st.data_editor(
-    models.reindex(columns=definition_columns),
+    visible_models,
     key="model_definitions_editor",
     hide_index=True,
     num_rows="fixed",
@@ -75,4 +85,3 @@ with st.container(horizontal=True, horizontal_alignment="right"):
         count = update_project_model_rows(project_id, edited_models)
         st.toast(f"Saved {count} model definitions", icon=":material/check_circle:")
         st.rerun()
-

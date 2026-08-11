@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import get_project, project_table, replace_work_elements
+from utils.table_filters import filter_table, merge_filtered_edits
 
 
 project_id = st.session_state.get("project_id")
@@ -21,8 +22,17 @@ if elements.empty:
 else:
     elements = elements.reindex(columns=columns)
 
-edited = st.data_editor(
+visible_elements = filter_table(
     elements,
+    key="process_filters",
+    dropdown_columns=["station", "status", "part_number", "model_applicability"],
+    search_columns=["operation", "description", "station", "part_number", "tool", "quality_requirement", "ergo_requirement", "location"],
+    reset_widget_keys=["process_editor"],
+    multi_value_columns=["model_applicability"],
+    universal_values={"model_applicability": ["All", "All models", ""]},
+)
+edited = st.data_editor(
+    visible_elements,
     key="process_editor",
     hide_index=True,
     num_rows="dynamic",
@@ -46,7 +56,8 @@ edited = st.data_editor(
 
 with st.container(horizontal=True, horizontal_alignment="right"):
     if st.button("Save process plan", type="primary", icon=":material/save:"):
-        replace_work_elements(project_id, edited)
+        combined_elements = merge_filtered_edits(elements, visible_elements, edited)
+        replace_work_elements(project_id, combined_elements)
         st.toast("Process plan saved", icon=":material/check_circle:")
         st.rerun()
 
@@ -60,4 +71,3 @@ if not edited.empty:
     metric_cols[2].metric("Stations represented", len(stations), border=True)
     st.subheader("Draft Yamazumi by station")
     st.bar_chart(stations, x="station", y="cycle_time_s", x_label="Station", y_label="Cycle time (s)")
-

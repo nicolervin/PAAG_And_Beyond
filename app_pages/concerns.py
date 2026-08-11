@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import project_table, replace_concerns
+from utils.table_filters import filter_table, merge_filtered_edits
 
 
 project_id = st.session_state.get("project_id")
@@ -17,8 +18,15 @@ if concerns.empty:
 else:
     concerns = concerns.reindex(columns=columns)
 
+visible_concerns = filter_table(
+    concerns,
+    key="concerns_filters",
+    dropdown_columns=["category", "priority", "status", "owner"],
+    search_columns=["subject", "detail", "owner", "related_part", "related_station"],
+    reset_widget_keys=["concerns_editor"],
+)
 edited = st.data_editor(
-    concerns, key="concerns_editor", num_rows="dynamic", hide_index=True, height=430,
+    visible_concerns, key="concerns_editor", num_rows="dynamic", hide_index=True, height=430,
     disabled=["id", "created_at"], column_order=[column for column in columns if column != "id"],
     column_config={
         "id": None,
@@ -32,7 +40,7 @@ edited = st.data_editor(
 )
 with st.container(horizontal=True, horizontal_alignment="right"):
     if st.button("Save concerns", type="primary", icon=":material/save:"):
-        replace_concerns(project_id, edited)
+        combined_concerns = merge_filtered_edits(concerns, visible_concerns, edited)
+        replace_concerns(project_id, combined_concerns)
         st.toast("Concerns saved", icon=":material/check_circle:")
         st.rerun()
-

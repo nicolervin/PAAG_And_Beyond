@@ -27,7 +27,7 @@ pages = {
         st.Page("app_pages/exchange.py", title="Import PITS & export", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
         st.Page("app_pages/parts.py", title="Parts", icon=":material/category:"),
-        st.Page("app_pages/fishbone.py", title="PITS to fishbone", icon=":material/device_hub:"),
+        st.Page("app_pages/fishbone.py", title="Parts to fishbone", icon=":material/device_hub:"),
     ],
     "Process planning": [
         st.Page("app_pages/process.py", title="Process plan", icon=":material/account_tree:"),

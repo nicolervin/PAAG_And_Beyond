@@ -6,7 +6,15 @@ from datetime import date, datetime
 
 import pandas as pd
 
-from utils.store import get_project, pits_records, pits_revisions, project_models, project_table
+from utils.store import (
+    assembly_sections,
+    fishbone_part_assignments,
+    get_project,
+    pits_records,
+    pits_revisions,
+    project_models,
+    project_table,
+)
 
 
 ALIASES = {
@@ -198,6 +206,8 @@ def export_workbook(project_id: str) -> bytes:
     elements = project_table("work_elements", project_id, "sequence")
     concerns = project_table("concerns", project_id, "created_at")
     fishbone = project_table("fishbone_nodes", project_id, "sequence")
+    framework_sections = assembly_sections(project_id)
+    framework_parts = fishbone_part_assignments(project_id)
     source_records = pits_records(project_id)
     source_revisions = pits_revisions(project_id)
     models = project_models(project_id)
@@ -218,6 +228,12 @@ def export_workbook(project_id: str) -> bytes:
         fishbone.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="MBOM Review", index=False)
         confirmed_fishbone.drop(columns=["project_id"], errors="ignore").to_excel(
             writer, sheet_name="Assembly Fishbone", index=False
+        )
+        framework_sections.drop(columns=["project_id"], errors="ignore").to_excel(
+            writer, sheet_name="Fishbone Sections", index=False
+        )
+        framework_parts.drop(columns=["project_id"], errors="ignore").to_excel(
+            writer, sheet_name="Fishbone Parts", index=False
         )
         source_records.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="PITS Current", index=False)
         source_revisions.to_excel(writer, sheet_name="PITS Revision History", index=False)

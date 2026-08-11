@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import project_models, project_table
+from utils.table_filters import filter_table
 
 
 project_id = st.session_state.get("project_id")
@@ -81,6 +82,13 @@ visible["assembly hierarchy"] = visible.apply(
 )
 visible["models"] = visible["applicable_models"].apply(
     lambda value: ", ".join(assigned_models(value)) if assigned_models(value) else "All models"
+)
+visible = filter_table(
+    visible,
+    key="legacy_assembly_filters",
+    dropdown_columns=["branch_name"],
+    search_columns=["pits_id", "part_number", "description", "branch_name", "subsystem", "comments"],
+    labels={"branch_name": "Subassembly branch"},
 )
 st.dataframe(
     visible[["pits_id", "sequence", "assembly hierarchy", "part_number", "quantity", "branch_name", "subsystem", "models", "comments"]],

@@ -109,6 +109,20 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL, display_name TEXT DEFAULT '', description TEXT DEFAULT '',
                 active INTEGER DEFAULT 1, notes TEXT DEFAULT '', UNIQUE(project_id, model_number)
             );
+            CREATE TABLE IF NOT EXISTS assembly_sections (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
+                sequence INTEGER NOT NULL DEFAULT 10, description TEXT DEFAULT '', active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(project_id, name), FOREIGN KEY(parent_id) REFERENCES assembly_sections(id)
+            );
+            CREATE TABLE IF NOT EXISTS fishbone_part_assignments (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                section_id TEXT NOT NULL REFERENCES assembly_sections(id), sequence INTEGER NOT NULL DEFAULT 10,
+                quantity INTEGER NOT NULL DEFAULT 1, notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
+                UNIQUE(project_id, part_id)
+            );
             """
         )
         fishbone_columns = {row[1] for row in conn.execute("PRAGMA table_info(fishbone_nodes)").fetchall()}
@@ -186,7 +200,7 @@ def get_project(project_id: str) -> dict | None:
 
 
 def project_table(table: str, project_id: str, order_by: str = "updated_at DESC") -> pd.DataFrame:
-    allowed = {"parts", "work_elements", "concerns", "fishbone_nodes"}
+    allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
     if table not in allowed:
         raise ValueError("Unsupported table")
     return pd.DataFrame(query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,)))
@@ -293,6 +307,221 @@ def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -
 
 def part_images(part_id: str) -> list[dict]:
     return query("SELECT * FROM part_images WHERE part_id = ? ORDER BY created_at", (part_id,))
+
+
+def assembly_sections(project_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        "SELECT * FROM assembly_sections WHERE project_id = ? ORDER BY sequence, name",
+        (project_id,),
+    ))
+
+
+def add_assembly_section(
+    project_id: str,
+    name: str,
+    section_type: str,
+    parent_id: str | None,
+    description: str,
+) -> str:
+    name = name.strip()
+    if not name:
+        raise ValueError("Section or subassembly name is required.")
+    if section_type not in {"Main spine", "Subassembly"}:
+        raise ValueError("Choose Main spine or Subassembly.")
+    parent_id = parent_id or None
+    if section_type == "Subassembly" and not parent_id:
+        raise ValueError("A subassembly must have a parent assembly.")
+    if section_type == "Main spine":
+        parent_id = None
+    timestamp = now_iso()
+    section_id = str(uuid4())
+    try:
+        with connection() as conn:
+            next_sequence = conn.execute(
+                """SELECT COALESCE(MAX(sequence), 0) + 10 FROM assembly_sections
+                   WHERE project_id=? AND parent_id IS ?""",
+                (project_id, parent_id),
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO assembly_sections
+                   (id, project_id, name, section_type, parent_id, sequence, description, active, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (section_id, project_id, name, section_type, parent_id, next_sequence, description.strip(), timestamp, timestamp),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"A section named {name} already exists in this project.") from exc
+    return section_id
+
+
+def reorder_assembly_section(project_id: str, section_id: str, action: str) -> bool:
+    allowed = {"Move earlier", "Move later", "Move to start", "Move to end"}
+    if action not in allowed:
+        raise ValueError("Unsupported framework reorder action.")
+    with connection() as conn:
+        target = conn.execute(
+            "SELECT id, parent_id FROM assembly_sections WHERE id=? AND project_id=?",
+            (section_id, project_id),
+        ).fetchone()
+        if not target:
+            raise ValueError("The selected framework item no longer exists.")
+        siblings = conn.execute(
+            """SELECT id FROM assembly_sections WHERE project_id=? AND parent_id IS ?
+               ORDER BY sequence, name""",
+            (project_id, target["parent_id"]),
+        ).fetchall()
+        ordered_ids = [row["id"] for row in siblings]
+        old_index = ordered_ids.index(section_id)
+        new_index = old_index
+        if action == "Move earlier":
+            new_index = max(0, old_index - 1)
+        elif action == "Move later":
+            new_index = min(len(ordered_ids) - 1, old_index + 1)
+        elif action == "Move to start":
+            new_index = 0
+        elif action == "Move to end":
+            new_index = len(ordered_ids) - 1
+        ordered_ids.insert(new_index, ordered_ids.pop(old_index))
+        timestamp = now_iso()
+        for index, sibling_id in enumerate(ordered_ids, start=1):
+            conn.execute(
+                "UPDATE assembly_sections SET sequence=?, updated_at=? WHERE id=?",
+                (index * 10, timestamp, sibling_id),
+            )
+    return new_index != old_index
+
+
+def update_assembly_section_rows(project_id: str, edited: pd.DataFrame) -> int:
+    required = {"id", "name", "section_type", "parent_id", "sequence", "description", "active"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The assembly framework table is missing required columns.")
+    records = edited.to_dict("records")
+    ids = {str(row["id"]) for row in records}
+    names = [str(row.get("name") or "").strip() for row in records]
+    if any(not name for name in names):
+        raise ValueError("Every framework row needs a name.")
+    if len({name.casefold() for name in names}) != len(names):
+        raise ValueError("Framework names must be unique within the project.")
+
+    parent_by_id: dict[str, str | None] = {}
+    for row in records:
+        section_id = str(row["id"])
+        section_type = str(row.get("section_type") or "")
+        parent_id = row.get("parent_id")
+        parent_id = None if parent_id is None or pd.isna(parent_id) or not str(parent_id).strip() else str(parent_id)
+        if section_type not in {"Main spine", "Subassembly"}:
+            raise ValueError("Each framework row must be Main spine or Subassembly.")
+        if section_type == "Main spine":
+            parent_id = None
+        elif not parent_id:
+            raise ValueError(f"Subassembly {row['name']} needs a parent assembly.")
+        if parent_id == section_id or (parent_id and parent_id not in ids):
+            raise ValueError(f"Choose a valid parent for {row['name']}.")
+        parent_by_id[section_id] = parent_id
+
+    for section_id in ids:
+        visited: set[str] = set()
+        cursor = section_id
+        while cursor:
+            if cursor in visited:
+                raise ValueError("The assembly framework cannot contain a circular parent relationship.")
+            visited.add(cursor)
+            cursor = parent_by_id.get(cursor)
+
+    timestamp = now_iso()
+    try:
+        with connection() as conn:
+            for row in records:
+                section_id = str(row["id"])
+                conn.execute(
+                    """UPDATE assembly_sections SET name=?, section_type=?, parent_id=?, sequence=?,
+                       description=?, active=?, updated_at=? WHERE id=? AND project_id=?""",
+                    (
+                        str(row["name"]).strip(), str(row["section_type"]), parent_by_id[section_id],
+                        int(row.get("sequence") or 0), str(row.get("description") or "").strip(),
+                        1 if bool(row.get("active")) else 0, timestamp, section_id, project_id,
+                    ),
+                )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("Framework names must be unique within the project.") from exc
+    return len(records)
+
+
+def fishbone_part_assignments(project_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity, a.notes,
+                  a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
+                  s.name AS section_name
+           FROM fishbone_part_assignments a
+           JOIN parts p ON p.id = a.part_id
+           JOIN assembly_sections s ON s.id = a.section_id
+           WHERE a.project_id = ? ORDER BY s.sequence, a.sequence, p.part_number""",
+        (project_id,),
+    ))
+
+
+def assign_parts_to_section(project_id: str, part_ids: list[str], section_id: str) -> int:
+    if not part_ids:
+        return 0
+    timestamp = now_iso()
+    count = 0
+    with connection() as conn:
+        section = conn.execute(
+            "SELECT id FROM assembly_sections WHERE id=? AND project_id=? AND active=1",
+            (section_id, project_id),
+        ).fetchone()
+        if not section:
+            raise ValueError("Choose an active assembly section.")
+        next_sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM fishbone_part_assignments WHERE project_id=? AND section_id=?",
+            (project_id, section_id),
+        ).fetchone()[0]
+        for part_id in dict.fromkeys(part_ids):
+            part = conn.execute("SELECT quantity FROM parts WHERE id=? AND project_id=?", (part_id, project_id)).fetchone()
+            if not part:
+                continue
+            next_sequence += 10
+            quantity = max(0, int(round(part["quantity"] if part["quantity"] is not None else 1)))
+            assignment_id = str(uuid4())
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, part_id, section_id, sequence, quantity, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, '', ?)
+                   ON CONFLICT(project_id, part_id) DO UPDATE SET section_id=excluded.section_id,
+                   sequence=excluded.sequence, updated_at=excluded.updated_at""",
+                (assignment_id, project_id, part_id, section_id, next_sequence, quantity, timestamp),
+            )
+            count += 1
+    return count
+
+
+def replace_fishbone_part_assignments(project_id: str, edited: pd.DataFrame) -> int:
+    required = {"id", "part_id", "section_id", "sequence", "quantity", "notes"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The part assignment table is missing required columns.")
+    if edited["part_id"].astype(str).duplicated().any():
+        raise ValueError("A part can appear only once in the current fishbone framework.")
+    timestamp = now_iso()
+    with connection() as conn:
+        valid_parts = {row[0] for row in conn.execute("SELECT id FROM parts WHERE project_id=?", (project_id,))}
+        valid_sections = {row[0] for row in conn.execute("SELECT id FROM assembly_sections WHERE project_id=?", (project_id,))}
+        records = []
+        for _, row in edited.iterrows():
+            part_id, section_id = str(row["part_id"]), str(row["section_id"])
+            if part_id not in valid_parts or section_id not in valid_sections:
+                raise ValueError("Every assignment must reference a valid project part and assembly section.")
+            quantity = float(row.get("quantity") or 0)
+            if not quantity.is_integer():
+                raise ValueError("Fishbone quantities must be whole numbers.")
+            records.append((
+                str(row.get("id") or uuid4()), project_id, part_id, section_id,
+                int(row.get("sequence") or 0), int(quantity), str(row.get("notes") or "").strip(), timestamp,
+            ))
+        conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
+        conn.executemany(
+            "INSERT INTO fishbone_part_assignments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            records,
+        )
+    return len(records)
 
 
 def replace_fishbone_nodes(project_id: str, edited: pd.DataFrame) -> None:

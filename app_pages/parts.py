@@ -4,6 +4,7 @@ import streamlit as st
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.store import add_part_image, part_images, project_models, project_table, set_part_image, update_part_rows, upsert_part
+from utils.table_filters import filter_table
 
 
 project_id = st.session_state.get("project_id")
@@ -46,7 +47,9 @@ def readable_model_applicability(value) -> str:
 with st.expander("Add part", icon=":material/add:", expanded=parts.empty):
     new_part_clipboard_key = f"clipboard_new_part_{project_id}"
     new_part_pending_key = f"pending_new_part_image_{project_id}"
-    with st.form("part_form"):
+    part_form_version_key = f"part_form_version_{project_id}"
+    st.session_state.setdefault(part_form_version_key, 0)
+    with st.form(f"part_form_{st.session_state[part_form_version_key]}"):
         row = st.columns([2, 3, 1, 1])
         part_number = row[0].text_input("Part number")
         description = row[1].text_input("Description")
@@ -102,6 +105,7 @@ with st.expander("Add part", icon=":material/add:", expanded=parts.empty):
                     set_part_image(part_id, as_uploaded_file(pending_new_part_image))
                 if new_part_pending_key in st.session_state:
                     del st.session_state[new_part_pending_key]
+                st.session_state[part_form_version_key] += 1
                 st.toast("Part saved", icon=":material/check_circle:")
                 st.rerun()
 
@@ -128,6 +132,16 @@ parts_for_editing["model_applicability"] = parts_for_editing["model_applicabilit
     lambda assigned: [model_choice_labels.get(model_number, model_number) for model_number in assigned]
 )
 parts_for_editing["view_details"] = ":material/visibility: View details"
+parts_for_editing = filter_table(
+    parts_for_editing,
+    key="part_catalog_filters",
+    dropdown_columns=["source", "revision", "model_applicability"],
+    search_columns=["part_number", "description", "model_applicability", "notes", "source"],
+    labels={"model_applicability": "Model"},
+    reset_widget_keys=["parts_catalog_editor"],
+    multi_value_columns=["model_applicability"],
+    universal_values={"model_applicability": ["All", "All models", ""]},
+)
 editor_model_options = ["All models", *model_choice_labels.values()]
 selected_part_key = f"parts_selected_id_{project_id}"
 
