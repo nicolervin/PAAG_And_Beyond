@@ -1,0 +1,11 @@
+[theme]
+primaryColor = "#1565C0"
+backgroundColor = "#FAFBFC"
+secondaryBackgroundColor = "#EEF3F8"
+textColor = "#17212B"
+baseRadius = "0.5rem"
+buttonRadius = "0.4rem"
+
+[server]
+maxUploadSize = 50
+
