@@ -1,4 +1,3 @@
-import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -13,6 +12,7 @@ from utils.store import (
     update_assembly_section_rows,
 )
 from utils.table_filters import filter_table, matches_filter_value, merge_filtered_edits, split_filter_values
+from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 
 
 project_id = st.session_state.get("project_id")
@@ -36,6 +36,9 @@ metrics[0].metric("Parts available", len(parts), border=True)
 metrics[1].metric("Framework sections", len(sections), border=True)
 metrics[2].metric("Parts placed", len(assignments), border=True)
 metrics[3].metric("Parts remaining", max(0, len(parts) - len(assignments)), border=True)
+
+st.subheader("Fishbone framework")
+fishbone_visual_slot = st.empty()
 
 st.header("1 · Build the assembly framework")
 st.caption("Main-spine sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent section or subassembly.")
@@ -200,9 +203,8 @@ else:
         except ValueError as exc:
             st.error(str(exc))
 
-st.subheader("Fishbone framework")
 if sections.empty:
-    st.caption("The visual framework will appear after the first section is added.")
+    fishbone_visual_slot.caption("The visual framework will appear after the first section is added.")
 else:
     visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
     records = {str(row["id"]): row.to_dict() for _, row in visible_sections.iterrows()}
@@ -238,36 +240,68 @@ else:
         })
         parent_id = normalized_parent_id(row.get("parent_id"))
         if parent_id in coordinates:
-            parent_x, parent_y, _ = coordinates[parent_id]
-            edge_rows.append({"x": parent_x, "y": parent_y, "x2": x, "y2": y})
+            edge_rows.append({"from": parent_id, "to": section_id})
     for left_id, right_id in zip(main_ids, main_ids[1:]):
-        left_x, left_y, _ = coordinates[left_id]
-        right_x, right_y, _ = coordinates[right_id]
-        edge_rows.append({"x": left_x, "y": left_y, "x2": right_x, "y2": right_y})
+        edge_rows.append({"from": left_id, "to": right_id})
 
     if not node_rows:
-        st.info("Activate at least one main-spine section to draw the framework.")
+        fishbone_visual_slot.info("Activate at least one main-spine section to draw the framework.")
     else:
-        nodes_chart = pd.DataFrame(node_rows)
-        edges_chart = pd.DataFrame(edge_rows, columns=["x", "y", "x2", "y2"])
-        base = alt.Chart(nodes_chart).encode(
-            x=alt.X("x:Q", axis=None),
-            y=alt.Y("y:Q", axis=None),
-            tooltip=[
-                alt.Tooltip("name:N", title="Assembly section"),
-                alt.Tooltip("type:N", title="Type"),
-                alt.Tooltip("order:Q", title="Order"),
-                alt.Tooltip("parts:Q", title="Assigned parts"),
-            ],
+        image_path_by_part = (
+            parts.set_index(parts["id"].astype(str))["image_path"].to_dict()
+            if not parts.empty and "image_path" in parts.columns
+            else {}
         )
-        chart = base.mark_circle(size=420).encode(color=alt.Color("type:N", title="Framework type"))
-        chart += base.mark_text(dy=-22, fontSize=12, fontWeight="bold").encode(text="name:N")
-        if not edges_chart.empty:
-            edges = alt.Chart(edges_chart).mark_rule(color="#8B98A5", strokeWidth=2).encode(
-                x=alt.X("x:Q", axis=None), y=alt.Y("y:Q", axis=None), x2="x2:Q", y2="y2:Q"
+        visual_model_options = sorted(
+            {
+                model
+                for value in assignments.get("model_applicability", pd.Series(dtype=str))
+                for model in split_filter_values(value)
+                if model.casefold() not in {"all", "all models"}
+            },
+            key=str.casefold,
+        )
+        with fishbone_visual_slot.container():
+            selected_visual_model = st.selectbox(
+                "View fishbone for model",
+                options=[None, *visual_model_options],
+                format_func=lambda value: "All models · complete fishbone" if value is None else value,
+                key=f"fishbone_visual_model_{project_id}",
+                help="A specific model includes parts assigned to that model plus parts tagged All models.",
             )
-            chart = edges + chart
-        st.altair_chart(chart.properties(height=max(240, 170 + int(nodes_chart["depth"].max()) * 80)))
+            visual_parts = []
+            for _, assignment in assignments.iterrows():
+                part_id = str(assignment["part_id"])
+                section_id = str(assignment["section_id"])
+                if section_id not in coordinates:
+                    continue
+                if selected_visual_model is not None and not matches_filter_value(
+                    assignment["model_applicability"],
+                    selected_visual_model,
+                    universal_values=["All", "All models", ""],
+                ):
+                    continue
+                visual_parts.append({
+                    "id": part_id,
+                    "section_id": section_id,
+                    "section_name": str(assignment["section_name"]),
+                    "part_number": str(assignment["part_number"] or ""),
+                    "description": str(assignment["description"] or ""),
+                    "quantity": int(assignment["quantity"] or 0),
+                    "models": str(assignment["model_applicability"] or "All"),
+                    "image": part_thumbnail(image_path_by_part.get(part_id, "")),
+                })
+            visible_counts: dict[str, int] = {}
+            for part in visual_parts:
+                visible_counts[part["section_id"]] = visible_counts.get(part["section_id"], 0) + 1
+            for node in node_rows:
+                node["parts"] = visible_counts.get(node["id"], 0)
+            interactive_fishbone(
+                node_rows,
+                edge_rows,
+                visual_parts,
+                key=f"interactive_fishbone_{project_id}",
+            )
 
 st.header("2 · Place parts into the framework")
 if parts.empty:
