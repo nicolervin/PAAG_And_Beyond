@@ -5,10 +5,13 @@ from utils.store import (
     add_assembly_section,
     assembly_sections,
     assign_parts_to_section,
+    delete_fishbone_part_assignment,
     fishbone_part_assignments,
+    project_models,
     project_table,
     reorder_assembly_section,
     replace_fishbone_part_assignments,
+    save_fishbone_plan,
     update_assembly_section_rows,
 )
 from utils.table_filters import filter_table, matches_filter_value, merge_filtered_edits, split_filter_values
@@ -24,6 +27,19 @@ if not project_id:
 parts = project_table("parts", project_id, "part_number")
 sections = assembly_sections(project_id)
 assignments = fishbone_part_assignments(project_id)
+models = project_models(project_id)
+familiar_model_names = {
+    str(row["model_number"]).strip(): str(row["display_name"]).strip()
+    for _, row in models.iterrows()
+    if str(row["display_name"]).strip()
+}
+
+
+def familiar_models(value) -> str:
+    model_numbers = split_filter_values(value)
+    if not model_numbers or any(model.casefold() in {"all", "all models"} for model in model_numbers):
+        return "All models"
+    return ", ".join(familiar_model_names.get(model, "Familiar name not defined") for model in model_numbers)
 
 
 def normalized_parent_id(value) -> str:
@@ -31,16 +47,25 @@ def normalized_parent_id(value) -> str:
         return ""
     return str(value).strip()
 
+
 metrics = st.columns(4)
 metrics[0].metric("Parts available", len(parts), border=True)
 metrics[1].metric("Framework sections", len(sections), border=True)
-metrics[2].metric("Parts placed", len(assignments), border=True)
-metrics[3].metric("Parts remaining", max(0, len(parts) - len(assignments)), border=True)
+placed_catalog_parts = assignments["part_id"].nunique() if not assignments.empty else 0
+metrics[2].metric("Part uses placed", len(assignments), border=True)
+metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_parts), border=True)
 
 st.subheader("Fishbone framework")
 fishbone_visual_slot = st.empty()
 
-st.header("1 · Build the assembly framework")
+section_1_title, section_1_action = st.columns([4, 1], vertical_alignment="center")
+section_1_title.header("1 · Build the assembly framework")
+refresh_framework = section_1_action.button(
+    "Refresh assembly framework",
+    type="primary",
+    icon=":material/refresh:",
+    key="refresh_assembly_framework_top",
+)
 st.caption("Main-spine sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent section or subassembly.")
 
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
@@ -190,13 +215,13 @@ else:
         },
     )
     st.caption("🟦 Main-spine section · 🟧 Subassembly · indentation shows the parent-child relationship.")
-    if st.button("Refresh assembly framework", type="primary", icon=":material/refresh:"):
+    id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
+    framework_to_save = merge_filtered_edits(full_framework, framework, framework_editor)
+    framework_to_save["parent_id"] = framework_to_save["parent_assembly"].apply(
+        lambda name: None if name == "Product / main assembly" else id_by_name.get(name)
+    )
+    if refresh_framework:
         try:
-            id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
-            framework_to_save = merge_filtered_edits(full_framework, framework, framework_editor)
-            framework_to_save["parent_id"] = framework_to_save["parent_assembly"].apply(
-                lambda name: None if name == "Product / main assembly" else id_by_name.get(name)
-            )
             count = update_assembly_section_rows(project_id, framework_to_save)
             st.toast(f"Saved {count} framework items", icon=":material/check_circle:")
             st.rerun()
@@ -219,15 +244,31 @@ else:
     main_ids.sort(key=lambda section_id: (int(records[section_id]["sequence"]), records[section_id]["name"]))
     coordinates: dict[str, tuple[float, float, int]] = {}
 
-    def place_branch(section_id: str, x: float, depth: int) -> None:
-        coordinates[section_id] = (x, -float(depth), depth)
-        siblings = children.get(section_id, [])
-        center = (len(siblings) - 1) / 2
-        for index, child_id in enumerate(siblings):
-            place_branch(child_id, x + (index - center) * 0.28, depth + 1)
+    def place_fin(section_id: str, x: float, y: float, depth: int, side: int) -> None:
+        """Continue nested subassemblies outward on a diagonal fin."""
+        coordinates[section_id] = (x, y, depth)
+        for index, child_id in enumerate(children.get(section_id, [])):
+            place_fin(
+                child_id,
+                x - 0.48 - index * 0.10,
+                y + side * (0.88 + index * 0.16),
+                depth + 1,
+                side,
+            )
 
-    for index, section_id in enumerate(main_ids):
-        place_branch(section_id, float(index), 0)
+    for main_index, section_id in enumerate(main_ids):
+        coordinates[section_id] = (float(main_index), 0.0, 0)
+        direct_subassemblies = children.get(section_id, [])
+        for branch_index, child_id in enumerate(direct_subassemblies):
+            side = -1 if (main_index + branch_index) % 2 == 0 else 1
+            lane = branch_index // 2
+            place_fin(
+                child_id,
+                float(main_index) - 0.48 - lane * 0.10,
+                side * (1.0 + lane * 0.18),
+                1,
+                side,
+            )
 
     node_rows = []
     edge_rows = []
@@ -262,13 +303,35 @@ else:
             key=str.casefold,
         )
         with fishbone_visual_slot.container():
-            selected_visual_model = st.selectbox(
-                "View fishbone for model",
-                options=[None, *visual_model_options],
-                format_func=lambda value: "All models · complete fishbone" if value is None else value,
-                key=f"fishbone_visual_model_{project_id}",
-                help="A specific model includes parts assigned to that model plus parts tagged All models.",
-            )
+            visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
+            selected_visual_model = visual_controls.selectbox(
+                    "View fishbone for model",
+                    options=[None, *visual_model_options],
+                    format_func=lambda value: (
+                        "All models · complete fishbone"
+                        if value is None
+                        else familiar_model_names.get(value, "Familiar name not defined")
+                    ),
+                    key=f"fishbone_visual_model_{project_id}",
+                    help="A specific model includes parts assigned to that model plus parts tagged All models.",
+                )
+            if visual_controls.button(
+                "Edit parts & photos",
+                icon=":material/edit:",
+                key="fishbone_edit_parts_visual",
+                help="Open the Parts page to edit part details or add more photos.",
+            ):
+                st.switch_page("app_pages/parts.py")
+            fishbone_refresh_key = f"fishbone_refresh_version_{project_id}"
+            st.session_state.setdefault(fishbone_refresh_key, 0)
+            if visual_controls.button(
+                "Save all changes & refresh",
+                icon=":material/refresh:",
+                type="primary",
+                key="fishbone_refresh_visual",
+                help="Save edits in Sections 1 and 3, then rebuild the fishbone. Section 2 selections are preserved.",
+            ):
+                st.session_state[f"fishbone_save_all_{project_id}"] = True
             visual_parts = []
             for _, assignment in assignments.iterrows():
                 part_id = str(assignment["part_id"])
@@ -282,13 +345,15 @@ else:
                 ):
                     continue
                 visual_parts.append({
-                    "id": part_id,
+                    "id": str(assignment["id"]),
+                    "part_id": part_id,
                     "section_id": section_id,
                     "section_name": str(assignment["section_name"]),
                     "part_number": str(assignment["part_number"] or ""),
                     "description": str(assignment["description"] or ""),
+                    "use_description": str(assignment["use_description"] or ""),
                     "quantity": int(assignment["quantity"] or 0),
-                    "models": str(assignment["model_applicability"] or "All"),
+                    "models": familiar_models(assignment["model_applicability"]),
                     "image": part_thumbnail(image_path_by_part.get(part_id, "")),
                 })
             visible_counts: dict[str, int] = {}
@@ -300,7 +365,7 @@ else:
                 node_rows,
                 edge_rows,
                 visual_parts,
-                key=f"interactive_fishbone_{project_id}",
+                key=f"interactive_fishbone_{project_id}_{st.session_state[fishbone_refresh_key]}",
             )
 
 st.header("2 · Place parts into the framework")
@@ -309,11 +374,33 @@ if parts.empty:
 elif active_sections.empty:
     st.info("Create and activate a framework section before placing parts.")
 else:
-    placed_by_part = assignments.set_index("part_id")["section_name"].to_dict() if not assignments.empty else {}
+    pending_use_key = f"fishbone_pending_additional_uses_{project_id}"
+    pending_use_ids = {
+        str(part_id) for part_id in st.session_state.get(pending_use_key, [])
+        if str(part_id) in set(parts["id"].astype(str))
+    }
+    placed_by_part = {}
+    if not assignments.empty:
+        for part_id, uses in assignments.groupby("part_id", sort=False):
+            section_names = list(dict.fromkeys(uses["section_name"].astype(str)))
+            section_summary = ", ".join(section_names)
+            placed_by_part[str(part_id)] = f"{len(uses)} use{'s' if len(uses) != 1 else ''} · {section_summary}"
     part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
     part_pool["fishbone_section"] = part_pool["id"].map(placed_by_part).fillna("Not placed")
+    part_pool.loc[
+        part_pool["id"].astype(str).isin(pending_use_ids), "fishbone_section"
+    ] = "Ready for another use"
+    part_pool.loc[
+        part_pool["id"].astype(str).isin(pending_use_ids), "quantity"
+    ] = 1
     pool_controls = st.container(horizontal=True)
-    placement_filter = pool_controls.segmented_control("Show", ["Not placed", "Placed", "All"], default="Not placed")
+    placement_filter_key = f"fishbone_placement_filter_{project_id}"
+    placement_filter = pool_controls.segmented_control(
+        "Show",
+        ["Not placed", "Ready for another use", "Placed", "All"],
+        default="Not placed",
+        key=placement_filter_key,
+    )
     part_search = pool_controls.text_input("Search parts", placeholder="Part number or description")
     pool_model_options = sorted(
         {
@@ -327,13 +414,21 @@ else:
     selected_pool_model = pool_controls.selectbox(
         "Model",
         options=[None, *pool_model_options],
-        format_func=lambda value: "All" if value is None else value,
+        format_func=lambda value: (
+            "All models"
+            if value is None
+            else familiar_model_names.get(value, "Familiar name not defined")
+        ),
     )
     visible_parts = part_pool.copy()
     if placement_filter == "Not placed":
         visible_parts = visible_parts[visible_parts["fishbone_section"] == "Not placed"]
+    elif placement_filter == "Ready for another use":
+        visible_parts = visible_parts[visible_parts["fishbone_section"] == "Ready for another use"]
     elif placement_filter == "Placed":
-        visible_parts = visible_parts[visible_parts["fishbone_section"] != "Not placed"]
+        visible_parts = visible_parts[
+            ~visible_parts["fishbone_section"].isin(["Not placed", "Ready for another use"])
+        ]
     if part_search:
         searchable = visible_parts[["part_number", "description"]].fillna("").astype(str).agg(" ".join, axis=1)
         visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
@@ -348,7 +443,7 @@ else:
             )
         ]
 
-    pool_key = f"parts_fishbone_pool_{project_id}"
+    pool_key = f"parts_fishbone_pool_v2_{project_id}"
     pool_signature_key = f"parts_fishbone_pool_signature_{project_id}"
     pool_signature = (
         placement_filter,
@@ -360,64 +455,187 @@ else:
         st.session_state[pool_signature_key] = pool_signature
         st.session_state.pop(pool_key, None)
 
-    pool_event = st.dataframe(
+    visible_parts = visible_parts.copy()
+    visible_parts["place"] = False
+    visible_parts["edit_part"] = ":material/edit: Edit part"
+    visible_parts["models_familiar"] = visible_parts["model_applicability"].apply(familiar_models)
+
+    def open_pool_part() -> None:
+        click = st.session_state.get("fishbone_pool_edit_part")
+        if not click or not 0 <= click["row"] < len(visible_parts):
+            return
+        row = visible_parts.iloc[click["row"]]
+        st.session_state[f"parts_selected_id_{project_id}"] = str(row["id"])
+        st.session_state["part_catalog_filters_keyword"] = str(row["part_number"])
+        st.session_state["part_catalog_filters_source"] = None
+        st.session_state["part_catalog_filters_revision"] = None
+        st.session_state["part_catalog_filters_model_applicability"] = None
+        st.session_state[f"fishbone_open_pool_part_{project_id}"] = True
+
+    edited_pool = st.data_editor(
         visible_parts,
         key=pool_key,
         hide_index=True,
         height=330,
-        on_select="rerun",
-        selection_mode="multi-row",
-        column_order=["part_number", "description", "quantity", "revision", "model_applicability", "fishbone_section"],
+        num_rows="fixed",
+        disabled=["id", "part_number", "description", "revision", "model_applicability", "models_familiar", "fishbone_section"],
+        column_order=["place", "edit_part", "part_number", "description", "quantity", "revision", "models_familiar", "fishbone_section"],
         column_config={
             "id": None,
+            "place": st.column_config.CheckboxColumn(
+                "Place?",
+                pinned=True,
+                help="Check one or more rows to enable the appropriate placement button below.",
+            ),
+            "edit_part": st.column_config.ButtonColumn(
+                "Select",
+                pinned=True,
+                type="tertiary",
+                on_click=open_pool_part,
+                key="fishbone_pool_edit_part",
+                help="Open this exact catalog part on the Parts page to edit its models, details, and photos.",
+            ),
             "part_number": st.column_config.TextColumn("Part number", pinned=True),
             "description": st.column_config.TextColumn("Description", width="large"),
-            "quantity": st.column_config.NumberColumn("Qty", format="%d"),
-            "model_applicability": st.column_config.TextColumn("Models", width="large"),
-            "fishbone_section": st.column_config.TextColumn("Current section", width="large"),
+            "quantity": st.column_config.NumberColumn(
+                "Qty for this use", min_value=0, step=1, format="%d",
+                help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
+            ),
+            "model_applicability": None,
+            "models_familiar": st.column_config.TextColumn("Models", width="medium"),
+            "fishbone_section": st.column_config.TextColumn("Fishbone uses", width="large"),
         },
     )
-    selected_rows = [
-        int(row_index)
-        for row_index in pool_event.selection.rows
-        if 0 <= int(row_index) < len(visible_parts)
-    ]
-    selected_part_ids = visible_parts.iloc[selected_rows]["id"].astype(str).tolist() if selected_rows else []
+    if st.session_state.pop(f"fishbone_open_pool_part_{project_id}", False):
+        st.switch_page("app_pages/parts.py")
+    selected_parts = edited_pool.loc[edited_pool["place"].fillna(False).astype(bool)].copy()
+    selected_part_ids = selected_parts["id"].astype(str).tolist()
+    selected_quantities = {
+        str(row["id"]): int(row["quantity"])
+        for _, row in selected_parts.iterrows()
+    }
+    placed_part_ids = set(assignments["part_id"].astype(str)) if not assignments.empty else set()
+    selected_unplaced_ids = [part_id for part_id in selected_part_ids if part_id not in placed_part_ids]
+    selected_additional_use_ids = [part_id for part_id in selected_part_ids if part_id in pending_use_ids]
     placement_row = st.container(horizontal=True, vertical_alignment="bottom")
     target_section_id = placement_row.selectbox(
         "Place selected parts in",
         options=active_sections["id"].astype(str).tolist(),
         format_func=lambda section_id: section_name_by_id.get(section_id, section_id),
     )
+    use_description_key = f"fishbone_new_use_description_{project_id}"
+    clear_use_description_key = f"fishbone_clear_use_description_{project_id}"
+    if st.session_state.pop(clear_use_description_key, False):
+        st.session_state.pop(use_description_key, None)
+    use_description = placement_row.text_input(
+        "Use / installation location",
+        placeholder="Example: Door hinge — upper left",
+        help="Describe this occurrence so repeated uses of the same part are easy to distinguish.",
+        key=use_description_key,
+    )
     if placement_row.button(
         "Place selected parts",
         type="primary",
         icon=":material/arrow_downward:",
-        disabled=not selected_part_ids,
+        disabled=not (selected_unplaced_ids or selected_additional_use_ids),
+        help="Places first-time parts and staged additional uses with the correct behavior automatically.",
     ):
         try:
-            count = assign_parts_to_section(project_id, selected_part_ids, target_section_id)
-            st.toast(f"Placed {count} parts in {section_name_by_id[target_section_id]}", icon=":material/check_circle:")
+            count = 0
+            if selected_unplaced_ids:
+                count += assign_parts_to_section(
+                    project_id,
+                    selected_unplaced_ids,
+                    target_section_id,
+                    use_description,
+                    quantities_by_part={part_id: selected_quantities[part_id] for part_id in selected_unplaced_ids},
+                )
+            if selected_additional_use_ids:
+                count += assign_parts_to_section(
+                    project_id,
+                    selected_additional_use_ids,
+                    target_section_id,
+                    use_description,
+                    allow_additional_use=True,
+                    quantities_by_part={part_id: selected_quantities[part_id] for part_id in selected_additional_use_ids},
+                )
+            pending_use_ids.difference_update(selected_additional_use_ids)
+            st.session_state[pending_use_key] = sorted(pending_use_ids)
+            st.toast(f"Placed {count} part uses in {section_name_by_id[target_section_id]}", icon=":material/check_circle:")
+            st.session_state[clear_use_description_key] = True
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
+    st.caption(
+        "Place selected parts automatically handles both first-time parts and additional uses staged from Section 3."
+    )
 
-st.header("3 · Order assigned parts")
+section_3_title, section_3_action = st.columns([4, 1], vertical_alignment="center")
+section_3_title.header("3 · Order assigned parts")
+refresh_part_placement = section_3_action.button(
+    "Refresh part placement and order",
+    type="primary",
+    icon=":material/refresh:",
+    key="refresh_part_placement_top",
+)
 if assignments.empty:
     st.caption("Assigned parts will appear here for ordering within each framework section.")
 else:
     full_assignment_editor = assignments.copy()
     full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_name_by_id)
+    full_assignment_editor["model_applicability"] = full_assignment_editor["model_applicability"].apply(
+        familiar_models
+    )
     assignment_editor = filter_table(
         full_assignment_editor,
         key="fishbone_assignment_filters",
         dropdown_columns=["section", "revision", "model_applicability"],
-        search_columns=["section", "part_number", "description", "revision", "model_applicability", "notes"],
+        search_columns=["section", "part_number", "description", "use_description", "revision", "model_applicability", "notes"],
         labels={"section": "Assembly section", "model_applicability": "Models"},
         reset_widget_keys=["fishbone_assignment_editor"],
         multi_value_columns=["model_applicability"],
         universal_values={"model_applicability": ["All", "All models", ""]},
     )
+    assignment_editor["edit_part"] = ":material/edit: Edit part"
+    assignment_editor["add_use"] = ":material/content_copy: Add use"
+    assignment_editor["delete_use"] = ":material/delete: Delete use"
+
+    def open_assigned_part() -> None:
+        click = st.session_state.get("fishbone_assignment_edit_part")
+        if not click or not 0 <= click["row"] < len(assignment_editor):
+            return
+        part_id = str(assignment_editor.iloc[click["row"]]["part_id"])
+        part_number = str(assignment_editor.iloc[click["row"]]["part_number"])
+        st.session_state[f"parts_selected_id_{project_id}"] = part_id
+        st.session_state["part_catalog_filters_keyword"] = part_number
+        st.session_state["part_catalog_filters_source"] = None
+        st.session_state["part_catalog_filters_revision"] = None
+        st.session_state["part_catalog_filters_model_applicability"] = None
+        # Navigation triggers a rerun, so defer it until the callback has finished.
+        st.session_state[f"fishbone_open_part_{project_id}"] = True
+
+    def add_assigned_part_use() -> None:
+        click = st.session_state.get("fishbone_assignment_add_use")
+        if not click or not 0 <= click["row"] < len(assignment_editor):
+            return
+        row = assignment_editor.iloc[click["row"]]
+        staged_ids = set(st.session_state.get(f"fishbone_pending_additional_uses_{project_id}", []))
+        staged_ids.add(str(row["part_id"]))
+        st.session_state[f"fishbone_pending_additional_uses_{project_id}"] = sorted(staged_ids)
+        st.session_state[f"fishbone_placement_filter_{project_id}"] = "Ready for another use"
+        st.toast("Part returned to Section 2 and is ready to place again.", icon=":material/arrow_upward:")
+
+    def delete_assigned_part_use() -> None:
+        click = st.session_state.get("fishbone_assignment_delete_use")
+        if not click or not 0 <= click["row"] < len(assignment_editor):
+            return
+        row = assignment_editor.iloc[click["row"]]
+        if delete_fishbone_part_assignment(project_id, str(row["id"])):
+            st.toast(
+                f"Deleted this use of {row['part_number']}. The master part remains in Parts.",
+                icon=":material/delete:",
+            )
+
     edited_assignments = st.data_editor(
         assignment_editor,
         key="fishbone_assignment_editor",
@@ -425,35 +643,97 @@ else:
         num_rows="delete",
         height=430,
         disabled=["id", "part_id", "part_number", "description", "revision", "model_applicability", "updated_at"],
-        column_order=["section", "sequence", "part_number", "description", "quantity", "revision", "model_applicability", "notes"],
+        column_order=[
+            "edit_part", "add_use", "delete_use", "section", "part_number", "description",
+            "quantity", "model_applicability", "revision", "use_description", "notes", "sequence",
+        ],
         column_config={
             "id": None,
             "project_id": None,
             "part_id": None,
             "section_id": None,
             "section_name": None,
-            "section": st.column_config.SelectboxColumn(
-                "Assembly section", options=active_sections["name"].astype(str).tolist(), required=True, pinned=True, width="large"
+            "edit_part": st.column_config.ButtonColumn(
+                "Select",
+                pinned=True,
+                type="tertiary",
+                on_click=open_assigned_part,
+                key="fishbone_assignment_edit_part",
+                help="Open this exact part on the Parts page to edit its catalog details and photos.",
             ),
-            "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d", pinned=True),
+            "add_use": st.column_config.ButtonColumn(
+                "Another use",
+                pinned=True,
+                type="tertiary",
+                on_click=add_assigned_part_use,
+                key="fishbone_assignment_add_use",
+                help="Return this catalog part to Section 2 so its additional use can be placed deliberately.",
+            ),
+            "delete_use": st.column_config.ButtonColumn(
+                "Delete use",
+                pinned=True,
+                type="tertiary",
+                on_click=delete_assigned_part_use,
+                key="fishbone_assignment_delete_use",
+                help="Delete only this fishbone occurrence. The master catalog part and its other uses remain.",
+            ),
+            "section": st.column_config.SelectboxColumn(
+                "Assembly section",
+                options=active_sections["name"].astype(str).tolist(),
+                required=True,
+                pinned=True,
+                width="medium",
+            ),
+            "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d"),
             "part_number": st.column_config.TextColumn("Part number", pinned=True),
-            "description": st.column_config.TextColumn("Description", width="large"),
+            "description": st.column_config.TextColumn("Description", width="medium", pinned=True),
+            "use_description": st.column_config.TextColumn(
+                "Use / installation location",
+                width="large",
+                help="What this occurrence does or where it is installed.",
+            ),
             "quantity": st.column_config.NumberColumn("Qty", min_value=0, step=1, format="%d"),
-            "model_applicability": st.column_config.TextColumn("Models", width="large"),
+            "model_applicability": st.column_config.TextColumn("Models", width="medium"),
             "notes": st.column_config.TextColumn("IE notes", width="large"),
             "updated_at": None,
         },
     )
-    st.caption("Delete a row here to return that part to the unplaced pool; the part remains in the Parts table.")
-    if st.button("Refresh part placement and order", type="primary", icon=":material/refresh:"):
+    if st.session_state.pop(f"fishbone_open_part_{project_id}", False):
+        st.switch_page("app_pages/parts.py")
+    st.caption(
+        "Each row is one use of a catalog part. Edit its location, Qty, section, or order, then select Save all changes & refresh above the fishbone. "
+        "Another use stages the part in Section 2 instead of creating a duplicate here. Deleting a row removes only that occurrence; the master part remains in Parts."
+    )
+    assignments_to_save = merge_filtered_edits(
+        full_assignment_editor, assignment_editor, edited_assignments
+    )
+    assignments_to_save = assignments_to_save.drop(
+        columns=["edit_part", "add_use", "delete_use"], errors="ignore"
+    )
+    section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
+    assignments_to_save["section_id"] = assignments_to_save["section"].map(section_id_by_name)
+    if refresh_part_placement:
         try:
-            section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
-            assignments_to_save = merge_filtered_edits(
-                full_assignment_editor, assignment_editor, edited_assignments
-            )
-            assignments_to_save["section_id"] = assignments_to_save["section"].map(section_id_by_name)
             count = replace_fishbone_part_assignments(project_id, assignments_to_save)
             st.toast(f"Saved {count} fishbone part assignments", icon=":material/check_circle:")
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
+
+if st.session_state.pop(f"fishbone_save_all_{project_id}", False):
+    try:
+        framework_count, assignment_count = save_fishbone_plan(
+            project_id,
+            framework_to_save if not sections.empty else None,
+            assignments_to_save if not assignments.empty else None,
+        )
+        st.session_state[f"fishbone_refresh_version_{project_id}"] = (
+            st.session_state.get(f"fishbone_refresh_version_{project_id}", 0) + 1
+        )
+        st.toast(
+            f"Saved {framework_count} framework items and {assignment_count} part uses",
+            icon=":material/check_circle:",
+        )
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))

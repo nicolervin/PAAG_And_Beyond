@@ -119,28 +119,63 @@ export default function(component) {
   const sectionLayer = svgElement("g", { class: "section-layer" })
   const partLayer = svgElement("g", { class: "part-layer" })
   world.append(edgeLayer, partEdgeLayer, sectionLayer, partLayer)
-  const sectionById = new Map()
+  const sectionById = new Map(sections.map((section) => [section.id, section]))
+  const parentBySection = new Map()
+  const parentIdBySection = new Map()
   const partsBySection = new Map()
+  const placedPartPositions = []
   parts.forEach((part) => {
     const group = partsBySection.get(part.section_id) || []
     group.push(part)
     partsBySection.set(part.section_id, group)
   })
 
+  edges.forEach((edge) => {
+    const child = sectionById.get(edge.to)
+    if (child && child.type !== "Main spine") parentIdBySection.set(edge.to, edge.from)
+  })
+
   const xSpacing = 390
-  const ySpacing = 270
-  sections.forEach((section) => {
-    section.sx = Number(section.x) * xSpacing
-    section.sy = Number(section.depth) * ySpacing
-    sectionById.set(section.id, section)
+  const ySpacing = 245
+  const mainSections = sections
+    .filter((section) => section.type === "Main spine")
+    .sort((left, right) => Number(left.order) - Number(right.order))
+  let spineCursor = 0
+  mainSections.forEach((section) => {
+    const partCount = (partsBySection.get(section.id) || []).length
+    section.mainWidth = Math.max(220, 110 + partCount * 78)
+    section.sx = spineCursor + section.mainWidth / 2
+    section.sy = 0
+    spineCursor += section.mainWidth + 34
+  })
+
+  const rootMainSection = (section) => {
+    let current = section
+    const visited = new Set()
+    while (current && current.type !== "Main spine" && !visited.has(current.id)) {
+      visited.add(current.id)
+      current = sectionById.get(parentIdBySection.get(current.id))
+    }
+    return current && current.type === "Main spine" ? current : null
+  }
+  sections.filter((section) => section.type !== "Main spine").forEach((section) => {
+    const root = rootMainSection(section)
+    const originalRootX = root ? Number(root.x) * xSpacing : 0
+    section.sx = Number(section.x) * xSpacing + (root ? root.sx - originalRootX : 0)
+    section.sy = Number(section.y || 0) * ySpacing
   })
 
   edges.forEach((edge) => {
     const start = sectionById.get(edge.from)
     const end = sectionById.get(edge.to)
     if (!start || !end) return
+    if (end.type !== "Main spine") parentBySection.set(end.id, start)
+    const bothMain = start.type === "Main spine" && end.type === "Main spine"
     edgeLayer.appendChild(svgElement("line", {
-      x1: start.sx, y1: start.sy, x2: end.sx, y2: end.sy,
+      x1: bothMain ? start.sx + start.mainWidth / 2 : start.sx,
+      y1: start.sy,
+      x2: bothMain ? end.sx - end.mainWidth / 2 : end.sx,
+      y2: end.sy,
       stroke: "var(--st-border-color)", "stroke-width": 5, "stroke-linecap": "round"
     }))
   })
@@ -148,8 +183,9 @@ export default function(component) {
   sections.forEach((section) => {
     const group = svgElement("g", { transform: `translate(${section.sx} ${section.sy})` })
     const isMain = section.type === "Main spine"
+    const sectionWidth = isMain ? section.mainWidth : 216
     group.appendChild(svgElement("rect", {
-      x: -108, y: -29, width: 216, height: 58, rx: 14,
+      x: -sectionWidth / 2, y: -29, width: sectionWidth, height: 58, rx: 14,
       fill: isMain ? "var(--st-primary-color)" : "var(--st-secondary-background-color)",
       stroke: "var(--st-primary-color)", "stroke-width": 3
     }))
@@ -167,16 +203,40 @@ export default function(component) {
     sectionLayer.appendChild(group)
 
     const sectionParts = partsBySection.get(section.id) || []
-    const columns = Math.min(4, Math.max(1, sectionParts.length))
+    const parentSection = parentBySection.get(section.id)
     sectionParts.forEach((part, index) => {
-      const column = index % columns
-      const row = Math.floor(index / columns)
-      const px = section.sx + (column - (columns - 1) / 2) * 88
-      const py = section.depth === 0 ? section.sy - 142 - row * 102 : section.sy + 74 + row * 102
-      partEdgeLayer.appendChild(svgElement("line", {
-        x1: section.sx, y1: section.sy + (section.depth === 0 ? -29 : 29), x2: px, y2: py,
-        stroke: "var(--st-border-color)", "stroke-width": 2
-      }))
+      let px
+      let py
+      if (parentSection) {
+        const dx = section.sx - parentSection.sx
+        const dy = section.sy - parentSection.sy
+        const length = Math.max(Math.hypot(dx, dy), 1)
+        // Keep fin photos away from the main spine and cluster them into a
+        // shorter portion of the fin. Staggering uses the perpendicular axis.
+        const fraction = sectionParts.length === 1
+          ? .62
+          : .42 + (index / (sectionParts.length - 1)) * .36
+        const compactOffsets = [0, 76, -76, 38, -38]
+        const offset = compactOffsets[index % compactOffsets.length]
+        px = parentSection.sx + dx * fraction + (-dy / length) * offset
+        py = parentSection.sy + dy * fraction + (dx / length) * offset
+        // Resolve collisions with photos already placed on this or nearby fins.
+        // Move outward along the fin until the cards have a small visual gap.
+        let attempts = 0
+        while (
+          placedPartPositions.some((position) => Math.abs(position.x - px) < 78 && Math.abs(position.y - py) < 88)
+          && attempts < 30
+        ) {
+          px += (dx / length) * 18
+          py += (dy / length) * 18
+          attempts += 1
+        }
+      } else {
+        const photoSpacing = 78
+        px = section.sx + (index - (sectionParts.length - 1) / 2) * photoSpacing
+        py = section.sy - 76
+      }
+      placedPartPositions.push({ x: px, y: py })
       const card = svgElement("g", { class: "part-card", transform: `translate(${px} ${py})`, tabindex: 0 })
       card.style.cursor = "pointer"
       card.appendChild(svgElement("rect", {
@@ -203,7 +263,8 @@ export default function(component) {
       const showTooltip = (event) => {
         tooltipNumber.textContent = part.part_number
         tooltipName.textContent = part.description || "No description"
-        tooltipMeta.textContent = `${part.section_name} · Qty ${part.quantity} · ${part.models || "All models"}`
+        const use = part.use_description ? `Use: ${part.use_description} · ` : ""
+        tooltipMeta.textContent = `${use}${part.section_name} · Qty ${part.quantity} · ${part.models || "All models"}`
         tooltipImage.hidden = !part.image
         tooltipNoImage.hidden = Boolean(part.image)
         if (part.image) tooltipImage.src = part.image
@@ -308,7 +369,7 @@ export default function(component) {
 
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "interactive_fishbone_canvas",
+    "interactive_fishbone_compact_fins",
     html=_HTML,
     css=_CSS,
     js=_JS,

@@ -1,8 +1,8 @@
 import pandas as pd
 import streamlit as st
 
-from utils.store import get_project, project_table, replace_work_elements
-from utils.table_filters import filter_table, merge_filtered_edits
+from utils.store import get_project, project_models, project_table, replace_work_elements
+from utils.table_filters import filter_table, merge_filtered_edits, split_filter_values
 
 
 project_id = st.session_state.get("project_id")
@@ -14,6 +14,12 @@ if not project_id:
 project = get_project(project_id)
 elements = project_table("work_elements", project_id, "sequence")
 parts = project_table("parts", project_id, "part_number")
+models = project_models(project_id)
+model_labels = {
+    str(row["model_number"]): (str(row["display_name"]).strip() or "Familiar name not defined")
+    for _, row in models.iterrows()
+}
+model_numbers_by_label = {label: number for number, label in model_labels.items()}
 columns = ["id", "sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
            "quality_requirement", "ergo_requirement", "location", "conveyor_height_mm", "platform_height_mm", "pit_depth_mm",
            "model_applicability", "status"]
@@ -21,6 +27,12 @@ if elements.empty:
     elements = pd.DataFrame(columns=columns)
 else:
     elements = elements.reindex(columns=columns)
+elements["model_applicability"] = elements["model_applicability"].apply(
+    lambda value: [
+        "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
+        for model in (split_filter_values(value) or ["All"])
+    ]
+)
 
 visible_elements = filter_table(
     elements,
@@ -50,6 +62,11 @@ edited = st.data_editor(
         "conveyor_height_mm": st.column_config.NumberColumn("Conveyor (mm)", min_value=0.0),
         "platform_height_mm": st.column_config.NumberColumn("Platform (mm)", min_value=0.0),
         "pit_depth_mm": st.column_config.NumberColumn("Pit depth (mm)", min_value=0.0),
+        "model_applicability": st.column_config.MultiselectColumn(
+            "Models",
+            options=["All models", *model_labels.values()],
+            help="Familiar model names are shown; official identifiers remain stored internally.",
+        ),
         "status": st.column_config.SelectboxColumn("Status", options=["Draft", "In review", "Released"]),
     },
 )
@@ -57,6 +74,12 @@ edited = st.data_editor(
 with st.container(horizontal=True, horizontal_alignment="right"):
     if st.button("Save process plan", type="primary", icon=":material/save:"):
         combined_elements = merge_filtered_edits(elements, visible_elements, edited)
+        combined_elements["model_applicability"] = combined_elements["model_applicability"].apply(
+            lambda assigned: ", ".join(
+                "All" if label == "All models" else model_numbers_by_label.get(label, label)
+                for label in (assigned or ["All models"])
+            )
+        )
         replace_work_elements(project_id, combined_elements)
         st.toast("Process plan saved", icon=":material/check_circle:")
         st.rerun()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import hashlib
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -120,10 +120,40 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
                 section_id TEXT NOT NULL REFERENCES assembly_sections(id), sequence INTEGER NOT NULL DEFAULT 10,
-                quantity INTEGER NOT NULL DEFAULT 1, notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
-                UNIQUE(project_id, part_id)
+                quantity INTEGER NOT NULL DEFAULT 1, use_description TEXT DEFAULT '',
+                notes TEXT DEFAULT '', updated_at TEXT NOT NULL
             );
             """
+        )
+        assignment_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(fishbone_part_assignments)").fetchall()
+        }
+        if "use_description" not in assignment_columns:
+            # The original table allowed only one fishbone placement per catalog part.
+            # Rebuild it so each row represents one use/installation occurrence.
+            conn.executescript(
+                """
+                CREATE TABLE fishbone_part_assignments_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                    section_id TEXT NOT NULL REFERENCES assembly_sections(id),
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    quantity INTEGER NOT NULL DEFAULT 1,
+                    use_description TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO fishbone_part_assignments_new
+                    (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
+                SELECT id, project_id, part_id, section_id, sequence, quantity, '', notes, updated_at
+                FROM fishbone_part_assignments;
+                DROP TABLE fishbone_part_assignments;
+                ALTER TABLE fishbone_part_assignments_new RENAME TO fishbone_part_assignments;
+                """
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fishbone_assignment_part ON fishbone_part_assignments(project_id, part_id)"
         )
         fishbone_columns = {row[1] for row in conn.execute("PRAGMA table_info(fishbone_nodes)").fetchall()}
         if "review_status" not in fishbone_columns:
@@ -390,7 +420,12 @@ def reorder_assembly_section(project_id: str, section_id: str, action: str) -> b
     return new_index != old_index
 
 
-def update_assembly_section_rows(project_id: str, edited: pd.DataFrame) -> int:
+def update_assembly_section_rows(
+    project_id: str,
+    edited: pd.DataFrame,
+    *,
+    _connection: sqlite3.Connection | None = None,
+) -> int:
     required = {"id", "name", "section_type", "parent_id", "sequence", "description", "active"}
     if not required.issubset(edited.columns):
         raise ValueError("The assembly framework table is missing required columns.")
@@ -429,7 +464,7 @@ def update_assembly_section_rows(project_id: str, edited: pd.DataFrame) -> int:
 
     timestamp = now_iso()
     try:
-        with connection() as conn:
+        with (nullcontext(_connection) if _connection is not None else connection()) as conn:
             for row in records:
                 section_id = str(row["id"])
                 conn.execute(
@@ -448,7 +483,8 @@ def update_assembly_section_rows(project_id: str, edited: pd.DataFrame) -> int:
 
 def fishbone_part_assignments(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query(
-        """SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity, a.notes,
+        """SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
+                  a.use_description, a.notes,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
                   s.name AS section_name
            FROM fishbone_part_assignments a
@@ -459,7 +495,15 @@ def fishbone_part_assignments(project_id: str) -> pd.DataFrame:
     ))
 
 
-def assign_parts_to_section(project_id: str, part_ids: list[str], section_id: str) -> int:
+def assign_parts_to_section(
+    project_id: str,
+    part_ids: list[str],
+    section_id: str,
+    use_description: str = "",
+    *,
+    allow_additional_use: bool = False,
+    quantities_by_part: dict[str, int] | None = None,
+) -> int:
     if not part_ids:
         return 0
     timestamp = now_iso()
@@ -479,29 +523,57 @@ def assign_parts_to_section(project_id: str, part_ids: list[str], section_id: st
             part = conn.execute("SELECT quantity FROM parts WHERE id=? AND project_id=?", (part_id, project_id)).fetchone()
             if not part:
                 continue
+            already_placed = conn.execute(
+                "SELECT 1 FROM fishbone_part_assignments WHERE project_id=? AND part_id=? LIMIT 1",
+                (project_id, part_id),
+            ).fetchone()
+            if already_placed and not allow_additional_use:
+                continue
             next_sequence += 10
-            quantity = max(0, int(round(part["quantity"] if part["quantity"] is not None else 1)))
+            requested_quantity = (
+                quantities_by_part.get(part_id)
+                if quantities_by_part and part_id in quantities_by_part
+                else part["quantity"]
+            )
+            numeric_quantity = float(requested_quantity if requested_quantity is not None else 1)
+            if not numeric_quantity.is_integer() or numeric_quantity < 0:
+                raise ValueError("Placement quantities must be non-negative whole numbers.")
+            quantity = int(numeric_quantity)
             assignment_id = str(uuid4())
             conn.execute(
                 """INSERT INTO fishbone_part_assignments
-                   (id, project_id, part_id, section_id, sequence, quantity, notes, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, '', ?)
-                   ON CONFLICT(project_id, part_id) DO UPDATE SET section_id=excluded.section_id,
-                   sequence=excluded.sequence, updated_at=excluded.updated_at""",
-                (assignment_id, project_id, part_id, section_id, next_sequence, quantity, timestamp),
+                   (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)""",
+                (
+                    assignment_id, project_id, part_id, section_id, next_sequence,
+                    quantity, use_description.strip(), timestamp,
+                ),
             )
             count += 1
     return count
 
 
-def replace_fishbone_part_assignments(project_id: str, edited: pd.DataFrame) -> int:
-    required = {"id", "part_id", "section_id", "sequence", "quantity", "notes"}
+def delete_fishbone_part_assignment(project_id: str, assignment_id: str) -> bool:
+    """Delete one fishbone use while leaving its master Parts record untouched."""
+    with connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM fishbone_part_assignments WHERE id=? AND project_id=?",
+            (assignment_id, project_id),
+        )
+        return cursor.rowcount > 0
+
+
+def replace_fishbone_part_assignments(
+    project_id: str,
+    edited: pd.DataFrame,
+    *,
+    _connection: sqlite3.Connection | None = None,
+) -> int:
+    required = {"id", "part_id", "section_id", "sequence", "quantity", "use_description", "notes"}
     if not required.issubset(edited.columns):
         raise ValueError("The part assignment table is missing required columns.")
-    if edited["part_id"].astype(str).duplicated().any():
-        raise ValueError("A part can appear only once in the current fishbone framework.")
     timestamp = now_iso()
-    with connection() as conn:
+    with (nullcontext(_connection) if _connection is not None else connection()) as conn:
         valid_parts = {row[0] for row in conn.execute("SELECT id FROM parts WHERE project_id=?", (project_id,))}
         valid_sections = {row[0] for row in conn.execute("SELECT id FROM assembly_sections WHERE project_id=?", (project_id,))}
         records = []
@@ -514,14 +586,38 @@ def replace_fishbone_part_assignments(project_id: str, edited: pd.DataFrame) -> 
                 raise ValueError("Fishbone quantities must be whole numbers.")
             records.append((
                 str(row.get("id") or uuid4()), project_id, part_id, section_id,
-                int(row.get("sequence") or 0), int(quantity), str(row.get("notes") or "").strip(), timestamp,
+                int(row.get("sequence") or 0), int(quantity),
+                str(row.get("use_description") or "").strip(),
+                str(row.get("notes") or "").strip(), timestamp,
             ))
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         conn.executemany(
-            "INSERT INTO fishbone_part_assignments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            """INSERT INTO fishbone_part_assignments
+               (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             records,
         )
     return len(records)
+
+
+def save_fishbone_plan(
+    project_id: str,
+    framework: pd.DataFrame | None,
+    assignments: pd.DataFrame | None,
+) -> tuple[int, int]:
+    """Validate and save framework and placement edits in one transaction."""
+    with connection() as conn:
+        framework_count = (
+            update_assembly_section_rows(project_id, framework, _connection=conn)
+            if framework is not None
+            else 0
+        )
+        assignment_count = (
+            replace_fishbone_part_assignments(project_id, assignments, _connection=conn)
+            if assignments is not None
+            else 0
+        )
+    return framework_count, assignment_count
 
 
 def replace_fishbone_nodes(project_id: str, edited: pd.DataFrame) -> None:

@@ -11,8 +11,8 @@ from utils.excel_io import (
     read_bom,
     suggest_mapping,
 )
-from utils.store import get_project, import_fishbone_nodes, import_pits_id_snapshot, upsert_part
-from utils.table_filters import filter_table
+from utils.store import get_project, import_fishbone_nodes, import_pits_id_snapshot, project_models, upsert_part
+from utils.table_filters import filter_table, split_filter_values
 
 
 project_id = st.session_state.get("project_id")
@@ -20,6 +20,12 @@ st.title("Import and export")
 st.caption("Start from a draft BOM and publish a stable, tabular snapshot for Excel or Lucid data linking.")
 if not project_id:
     st.stop()
+
+defined_models = project_models(project_id)
+model_labels = {
+    str(row["model_number"]): (str(row["display_name"]).strip() or "Familiar name not defined")
+    for _, row in defined_models.iterrows()
+}
 
 import_col, export_col = st.columns(2)
 with import_col.container(border=True):
@@ -91,8 +97,15 @@ with import_col.container(border=True):
                 suggested = suggestions[target]
                 mapping[target] = st.selectbox(label, options, index=options.index(suggested) if suggested in options else 0, key=f"map_{target}")
             preview = mapped_bom(raw, mapping)
+            preview_for_display = preview.copy()
+            preview_for_display["model_applicability"] = preview_for_display["model_applicability"].apply(
+                lambda value: ", ".join(
+                    "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
+                    for model in (split_filter_values(value) or ["All"])
+                )
+            )
             mapped_preview = filter_table(
-                preview,
+                preview_for_display,
                 key="mapped_bom_preview_filters",
                 dropdown_columns=["revision", "model_applicability"],
                 search_columns=["part_number", "description", "revision", "model_applicability"],

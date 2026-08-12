@@ -23,9 +23,7 @@ else:
     active_model_numbers = active_models["model_number"].fillna("").astype(str).tolist()
     model_labels = {
         str(row["model_number"]): (
-            f"{row['display_name']} ({row['model_number']})"
-            if str(row.get("display_name") or "").strip()
-            else str(row["model_number"])
+            str(row["display_name"]).strip() or "Familiar name not defined"
         )
         for _, row in models.iterrows()
     }
@@ -176,7 +174,7 @@ edited_parts = st.data_editor(
         "model_applicability": st.column_config.MultiselectColumn(
             "Model applicability",
             options=editor_model_options,
-            help="Choose All models or one or more defined model numbers.",
+            help="Choose All models or one or more familiar model names.",
             width="large",
         ),
         "notes": st.column_config.TextColumn("Notes", width="large"),

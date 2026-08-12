@@ -32,10 +32,18 @@ metric_cols[2].metric("Still awaiting MBOM review", pending, border=True)
 
 models_df = project_models(project_id)
 model_options = models_df["model_number"].tolist() if not models_df.empty else []
+model_names = {
+    str(row["model_number"]): (str(row["display_name"]).strip() or "Familiar name not defined")
+    for _, row in models_df.iterrows()
+}
 subsystems = sorted(value for value in confirmed["subsystem"].dropna().unique().tolist() if value)
 filters = st.container(horizontal=True)
 selected_subsystem = filters.selectbox("Subsystem", ["All"] + subsystems)
-selected_model = filters.selectbox("Model", ["All models"] + model_options)
+selected_model = filters.selectbox(
+    "Model",
+    ["All models"] + model_options,
+    format_func=lambda value: "All models" if value == "All models" else model_names.get(str(value), "Familiar name not defined"),
+)
 visible = confirmed if selected_subsystem == "All" else confirmed[confirmed["subsystem"] == selected_subsystem]
 
 
@@ -81,7 +89,11 @@ visible["assembly hierarchy"] = visible.apply(
     lambda row: f"{'    ' * max(row['depth'] - 1, 0)}{'-> ' if row['depth'] > 1 else ''}{row['node']}", axis=1
 )
 visible["models"] = visible["applicable_models"].apply(
-    lambda value: ", ".join(assigned_models(value)) if assigned_models(value) else "All models"
+    lambda value: (
+        ", ".join(model_names.get(str(model), "Familiar name not defined") for model in assigned_models(value))
+        if assigned_models(value)
+        else "All models"
+    )
 )
 visible = filter_table(
     visible,
