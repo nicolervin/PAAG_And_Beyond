@@ -123,6 +123,13 @@ def init_db() -> None:
                 value TEXT DEFAULT '', updated_at TEXT NOT NULL,
                 PRIMARY KEY(model_id, feature_id)
             );
+            CREATE TABLE IF NOT EXISTS part_feature_rules (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                feature_id TEXT NOT NULL REFERENCES complexity_features(id) ON DELETE CASCADE,
+                value TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(part_id, feature_id, value)
+            );
             CREATE TABLE IF NOT EXISTS assembly_sections (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
@@ -136,6 +143,11 @@ def init_db() -> None:
                 section_id TEXT NOT NULL REFERENCES assembly_sections(id), sequence INTEGER NOT NULL DEFAULT 10,
                 quantity INTEGER NOT NULL DEFAULT 1, use_description TEXT DEFAULT '',
                 notes TEXT DEFAULT '', updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                table_name TEXT NOT NULL, action TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0,
+                editor_name TEXT DEFAULT '', details TEXT DEFAULT '{}', created_at TEXT NOT NULL
             );
             """
         )
@@ -243,6 +255,44 @@ def get_project(project_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def record_audit_event(
+    project_id: str,
+    table_name: str,
+    action: str,
+    row_count: int,
+    editor_name: str = "",
+    details: dict | None = None,
+) -> None:
+    """Record a concise, project-scoped history entry for a persisted table action."""
+    execute(
+        """INSERT INTO audit_log
+           (id, project_id, table_name, action, row_count, editor_name, details, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            str(uuid4()), project_id, table_name, action, int(row_count), editor_name.strip(),
+            json.dumps(details or {}, ensure_ascii=False), now_iso(),
+        ),
+    )
+
+
+def audit_history(project_id: str, table_name: str | None = None, limit: int = 100) -> pd.DataFrame:
+    """Return the newest audit entries for a project or one logical table."""
+    if table_name:
+        rows = query(
+            """SELECT action, row_count, editor_name, details, created_at
+               FROM audit_log WHERE project_id=? AND table_name=?
+               ORDER BY created_at DESC LIMIT ?""",
+            (project_id, table_name, int(limit)),
+        )
+    else:
+        rows = query(
+            """SELECT table_name, action, row_count, editor_name, details, created_at
+               FROM audit_log WHERE project_id=? ORDER BY created_at DESC LIMIT ?""",
+            (project_id, int(limit)),
+        )
+    return pd.DataFrame(rows)
+
+
 def project_table(table: str, project_id: str, order_by: str = "updated_at DESC") -> pd.DataFrame:
     allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
     if table not in allowed:
@@ -312,17 +362,64 @@ def update_part_rows(project_id: str, edited: pd.DataFrame) -> int:
 
     timestamp = now_iso()
     with connection() as conn:
+        existing_ids = {
+            str(existing[0]) for existing in conn.execute(
+                "SELECT id FROM parts WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
         for _, row in edited.iterrows():
+            part_id = (
+                str(row["id"])
+                if row.get("id") is not None and not pd.isna(row.get("id")) and str(row.get("id")).strip()
+                else str(uuid4())
+            )
             quantity = row.get("quantity")
             quantity = None if quantity is None or pd.isna(quantity) else float(quantity)
-            conn.execute(
-                """UPDATE parts SET part_number=?, description=?, quantity=?, revision=?,
-                   model_applicability=?, notes=?, updated_at=? WHERE id=? AND project_id=?""",
-                (str(row["part_number"]).strip(), clean_text(row.get("description")), quantity,
-                 clean_text(row.get("revision")), normalize_model_applicability(row.get("model_applicability")),
-                 clean_text(row.get("notes")), timestamp, str(row["id"]), project_id),
+            values = (
+                str(row["part_number"]).strip(), clean_text(row.get("description")), quantity,
+                clean_text(row.get("revision")), normalize_model_applicability(row.get("model_applicability")),
+                clean_text(row.get("notes")), timestamp,
             )
+            if part_id in existing_ids:
+                conn.execute(
+                    """UPDATE parts SET part_number=?, description=?, quantity=?, revision=?,
+                       model_applicability=?, notes=?, updated_at=? WHERE id=? AND project_id=?""",
+                    (*values, part_id, project_id),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO parts
+                       (id, project_id, part_number, description, quantity, revision, source,
+                        image_path, model_applicability, notes, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)""",
+                    (part_id, project_id, values[0], values[1], values[2], values[3],
+                     clean_text(row.get("source")) or "Manual", values[4], values[5], values[6]),
+                )
     return len(edited)
+
+
+def delete_project_part(project_id: str, part_id: str) -> str:
+    """Delete one catalog part and its cascading fishbone uses and image records."""
+    with connection() as conn:
+        part = conn.execute(
+            "SELECT part_number, image_path FROM parts WHERE id=? AND project_id=?",
+            (part_id, project_id),
+        ).fetchone()
+        if not part:
+            raise ValueError("That part no longer exists.")
+        supplemental_paths = [row[0] for row in conn.execute(
+            "SELECT image_path FROM part_images WHERE part_id=?", (part_id,)
+        ).fetchall()]
+        conn.execute("DELETE FROM parts WHERE id=? AND project_id=?", (part_id, project_id))
+    for raw_path in [part["image_path"], *supplemental_paths]:
+        if raw_path:
+            path = Path(raw_path)
+            try:
+                if path.exists() and path.is_file() and UPLOAD_DIR.resolve() in path.resolve().parents:
+                    path.unlink()
+            except OSError:
+                pass
+    return str(part["part_number"])
 
 
 def set_part_image(part_id: str, uploaded_file) -> str:
@@ -723,6 +820,74 @@ def complexity_tree(project_id: str) -> pd.DataFrame:
     return result
 
 
+def part_feature_rules(project_id: str) -> pd.DataFrame:
+    """Return saved manufacturing-feature applicability rules for project parts."""
+    return pd.DataFrame(query(
+        """SELECT r.part_id, r.feature_id, r.value, f.category, f.name AS feature_name
+           FROM part_feature_rules r
+           JOIN complexity_features f ON f.id=r.feature_id
+           WHERE r.project_id=? ORDER BY f.sequence, f.category, f.name, r.value""",
+        (project_id,),
+    ))
+
+
+def update_part_feature_rules(project_id: str, selections_by_part: dict[str, list[str]]) -> int:
+    """Save feature rules and resolve them to official model numbers for downstream use."""
+    features = complexity_features(project_id)
+    feature_by_id = {str(row["id"]): row for _, row in features.iterrows()}
+    tree = complexity_tree(project_id)
+    valid_parts = {str(row["id"]) for row in query("SELECT id FROM parts WHERE project_id=?", (project_id,))}
+    timestamp = now_iso()
+    updated = 0
+    with connection() as conn:
+        for part_id, raw_tokens in selections_by_part.items():
+            if part_id not in valid_parts:
+                continue
+            tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
+            if not tokens:
+                continue  # Preserve legacy model-number applicability until the user tags it.
+            if "All models" in tokens:
+                conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
+                conn.execute(
+                    "UPDATE parts SET model_applicability='All', updated_at=? WHERE id=? AND project_id=?",
+                    (timestamp, part_id, project_id),
+                )
+                updated += 1
+                continue
+            selected_by_feature: dict[str, set[str]] = {}
+            for token in tokens:
+                if "::" not in token:
+                    raise ValueError("Choose All models or values defined in Feature definitions.")
+                feature_id, value = token.split("::", 1)
+                feature = feature_by_id.get(feature_id)
+                allowed = json.loads(feature["allowed_values"] or "[]") if feature is not None else []
+                if value not in allowed:
+                    raise ValueError("A selected feature choice is no longer defined.")
+                selected_by_feature.setdefault(feature_id, set()).add(value)
+
+            matches = tree.copy()
+            for feature_id, selected_values in selected_by_feature.items():
+                matches = matches[matches[feature_id].isin(selected_values)]
+            if matches.empty:
+                raise ValueError("A feature rule matches no official models. Update the Complexity tree or the part rule.")
+            model_numbers = matches["official_model_number"].dropna().astype(str).tolist()
+            conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
+            conn.executemany(
+                """INSERT INTO part_feature_rules
+                   (project_id, part_id, feature_id, value, updated_at) VALUES (?, ?, ?, ?, ?)""",
+                [
+                    (project_id, part_id, feature_id, value, timestamp)
+                    for feature_id, values in selected_by_feature.items() for value in sorted(values)
+                ],
+            )
+            conn.execute(
+                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                (normalize_model_applicability(model_numbers), timestamp, part_id, project_id),
+            )
+            updated += 1
+    return updated
+
+
 def complexity_planning_snapshot(project_id: str) -> dict:
     with connection() as conn:
         return {
@@ -732,15 +897,28 @@ def complexity_planning_snapshot(project_id: str) -> dict:
             "values": [dict(row) for row in conn.execute(
                 "SELECT * FROM model_feature_values WHERE project_id=?", (project_id,)
             ).fetchall()],
+            "part_rules": [dict(row) for row in conn.execute(
+                "SELECT * FROM part_feature_rules WHERE project_id=?", (project_id,)
+            ).fetchall()],
+            "part_applicability": [dict(row) for row in conn.execute(
+                "SELECT id, model_applicability, updated_at FROM parts WHERE project_id=?", (project_id,)
+            ).fetchall()],
         }
 
 
 def restore_complexity_planning_snapshot(project_id: str, snapshot: dict) -> None:
     with connection() as conn:
+        conn.execute("DELETE FROM part_feature_rules WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM model_feature_values WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM complexity_features WHERE project_id=?", (project_id,))
         _insert_snapshot_rows(conn, "complexity_features", snapshot.get("features", []))
         _insert_snapshot_rows(conn, "model_feature_values", snapshot.get("values", []))
+        _insert_snapshot_rows(conn, "part_feature_rules", snapshot.get("part_rules", []))
+        for row in snapshot.get("part_applicability", []):
+            conn.execute(
+                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                (row.get("model_applicability"), row.get("updated_at"), row.get("id"), project_id),
+            )
 
 
 def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
@@ -781,7 +959,16 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
         )}
         retained_ids = {record["id"] for record in records}
         for feature_id in existing_ids - retained_ids:
+            affected_part_ids = [row[0] for row in conn.execute(
+                "SELECT DISTINCT part_id FROM part_feature_rules WHERE project_id=? AND feature_id=?",
+                (project_id, feature_id),
+            ).fetchall()]
             conn.execute("DELETE FROM complexity_features WHERE id=? AND project_id=?", (feature_id, project_id))
+            for part_id in affected_part_ids:
+                conn.execute(
+                    "UPDATE parts SET model_applicability='', updated_at=? WHERE id=? AND project_id=?",
+                    (timestamp, part_id, project_id),
+                )
         for record in records:
             conn.execute(
                 """INSERT INTO complexity_features
@@ -800,6 +987,22 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
                     AND value NOT IN ({placeholders})""",
                 (project_id, record["id"], *choices),
             )
+            affected_part_ids = [row[0] for row in conn.execute(
+                f"""SELECT DISTINCT part_id FROM part_feature_rules
+                    WHERE project_id=? AND feature_id=? AND value NOT IN ({placeholders})""",
+                (project_id, record["id"], *choices),
+            ).fetchall()]
+            conn.execute(
+                f"""DELETE FROM part_feature_rules WHERE project_id=? AND feature_id=?
+                    AND value NOT IN ({placeholders})""",
+                (project_id, record["id"], *choices),
+            )
+            # Affected parts require an explicit review because their prior rule is no longer complete.
+            for part_id in affected_part_ids:
+                conn.execute(
+                    "UPDATE parts SET model_applicability='', updated_at=? WHERE id=? AND project_id=?",
+                    (timestamp, part_id, project_id),
+                )
     return len(records)
 
 
@@ -838,6 +1041,40 @@ def update_complexity_tree(project_id: str, edited: pd.DataFrame) -> int:
                         "DELETE FROM model_feature_values WHERE project_id=? AND model_id=? AND feature_id=?",
                         (project_id, model_id, feature_id),
                     )
+        # Re-resolve every feature-tagged part when the model matrix changes.
+        model_rows = conn.execute(
+            "SELECT id, model_number FROM project_models WHERE project_id=?", (project_id,)
+        ).fetchall()
+        value_rows = conn.execute(
+            "SELECT model_id, feature_id, value FROM model_feature_values WHERE project_id=?", (project_id,)
+        ).fetchall()
+        values_by_model = {
+            str(model["id"]): {
+                str(value["feature_id"]): str(value["value"])
+                for value in value_rows if str(value["model_id"]) == str(model["id"])
+            }
+            for model in model_rows
+        }
+        rule_rows = conn.execute(
+            "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+        rules_by_part: dict[str, dict[str, set[str]]] = {}
+        for rule in rule_rows:
+            rules_by_part.setdefault(str(rule["part_id"]), {}).setdefault(
+                str(rule["feature_id"]), set()
+            ).add(str(rule["value"]))
+        for part_id, part_rules in rules_by_part.items():
+            matching_numbers = [
+                str(model["model_number"])
+                for model in model_rows
+                if all(values_by_model[str(model["id"])].get(feature_id) in choices
+                       for feature_id, choices in part_rules.items())
+            ]
+            conn.execute(
+                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                (normalize_model_applicability(matching_numbers) if matching_numbers else "", timestamp, part_id, project_id),
+            )
     return saved
 
 

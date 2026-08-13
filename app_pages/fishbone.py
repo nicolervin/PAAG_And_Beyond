@@ -9,6 +9,7 @@ from utils.store import (
     fishbone_assignment_snapshot,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
+    part_feature_rules,
     project_models,
     project_table,
     reorder_assembly_section,
@@ -35,6 +36,7 @@ st.title("Parts to assembly fishbone")
 st.caption("Build the assembly framework first, then place approved Parts-table content into its sections and subassemblies.")
 if not project_id:
     st.stop()
+pool_editor_key = f"parts_fishbone_pool_v2_{project_id}"
 for editor_key in (
     "assembly_framework_editor",
     "fishbone_assignment_editor",
@@ -46,10 +48,17 @@ parts = project_table("parts", project_id, "part_number")
 sections = assembly_sections(project_id)
 assignments = fishbone_part_assignments(project_id)
 models = project_models(project_id)
+feature_rules = part_feature_rules(project_id)
+feature_labels_by_part: dict[str, list[str]] = {}
+if not feature_rules.empty:
+    for part_id, part_rules in feature_rules.groupby("part_id", sort=False):
+        feature_labels_by_part[str(part_id)] = [
+            f"{row['category']} · {row['feature_name']} = {row['value']}"
+            for _, row in part_rules.iterrows()
+        ]
 framework_undo_key = f"fishbone_framework_undo_{project_id}"
 assignment_undo_key = f"fishbone_assignment_undo_{project_id}"
 pending_use_key = f"fishbone_pending_additional_uses_{project_id}"
-pool_editor_key = f"parts_fishbone_pool_v2_{project_id}"
 current_plan_snapshot = fishbone_plan_snapshot(project_id)
 current_assignment_undo = {
     "assignments": fishbone_assignment_snapshot(project_id),
@@ -67,6 +76,15 @@ def familiar_models(value) -> str:
     if not model_numbers or any(model.casefold() in {"all", "all models"} for model in model_numbers):
         return "All models"
     return ", ".join(familiar_model_names.get(model, "Familiar name not defined") for model in model_numbers)
+
+
+def feature_applicability(part_id, legacy_value) -> str:
+    labels = feature_labels_by_part.get(str(part_id), [])
+    if labels:
+        return "; ".join(labels)
+    if str(legacy_value or "").strip().casefold() in {"all", "all models"}:
+        return "All models"
+    return "Needs feature tagging"
 
 
 def normalized_parent_id(value) -> str:
@@ -351,27 +369,17 @@ else:
             if not parts.empty and "image_path" in parts.columns
             else {}
         )
-        visual_model_options = sorted(
-            {
-                model
-                for value in assignments.get("model_applicability", pd.Series(dtype=str))
-                for model in split_filter_values(value)
-                if model.casefold() not in {"all", "all models"}
-            },
-            key=str.casefold,
+        visual_feature_options = sorted(
+            {label for labels in feature_labels_by_part.values() for label in labels}, key=str.casefold
         )
         with fishbone_visual_slot.container():
             visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
-            selected_visual_model = visual_controls.selectbox(
-                    "View fishbone for model",
-                    options=[None, *visual_model_options],
-                    format_func=lambda value: (
-                        "All models · complete fishbone"
-                        if value is None
-                        else familiar_model_names.get(value, "Familiar name not defined")
-                    ),
-                    key=f"fishbone_visual_model_{project_id}",
-                    help="A specific model includes parts assigned to that model plus parts tagged All models.",
+            selected_visual_feature = visual_controls.selectbox(
+                    "View fishbone for feature",
+                    options=[None, *visual_feature_options],
+                    format_func=lambda value: "All feature configurations · complete fishbone" if value is None else value,
+                    key=f"fishbone_visual_feature_{project_id}",
+                    help="A feature view includes parts tagged to that choice plus parts tagged All models.",
                 )
             if visual_controls.button(
                 "Edit parts & photos",
@@ -396,11 +404,8 @@ else:
                 section_id = str(assignment["section_id"])
                 if section_id not in coordinates:
                     continue
-                if selected_visual_model is not None and not matches_filter_value(
-                    assignment["model_applicability"],
-                    selected_visual_model,
-                    universal_values=["All", "All models", ""],
-                ):
+                applicability_label = feature_applicability(part_id, assignment["model_applicability"])
+                if selected_visual_feature is not None and applicability_label != "All models" and selected_visual_feature not in feature_labels_by_part.get(part_id, []):
                     continue
                 visual_parts.append({
                     "id": str(assignment["id"]),
@@ -411,7 +416,7 @@ else:
                     "description": str(assignment["description"] or ""),
                     "use_description": str(assignment["use_description"] or ""),
                     "quantity": int(assignment["quantity"] or 0),
-                    "models": familiar_models(assignment["model_applicability"]),
+                    "models": applicability_label,
                     "image": part_thumbnail(image_path_by_part.get(part_id, "")),
                 })
             visible_counts: dict[str, int] = {}
@@ -468,13 +473,15 @@ else:
             section_summary = ", ".join(section_names)
             placed_by_part[str(part_id)] = f"{len(uses)} use{'s' if len(uses) != 1 else ''} · {section_summary}"
     part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
+    # Quantity belongs to each fishbone use, not the master catalog part.
+    part_pool["quantity"] = 1
+    part_pool["feature_applicability"] = part_pool.apply(
+        lambda row: feature_applicability(row["id"], row["model_applicability"]), axis=1
+    )
     part_pool["fishbone_section"] = part_pool["id"].map(placed_by_part).fillna("Not placed")
     part_pool.loc[
         part_pool["id"].astype(str).isin(pending_use_ids), "fishbone_section"
     ] = "Ready for another use"
-    part_pool.loc[
-        part_pool["id"].astype(str).isin(pending_use_ids), "quantity"
-    ] = 1
     pool_controls = st.container(horizontal=True)
     placement_filter_key = f"fishbone_placement_filter_{project_id}"
     placement_filter = pool_controls.segmented_control(
@@ -484,23 +491,13 @@ else:
         key=placement_filter_key,
     )
     part_search = pool_controls.text_input("Search parts", placeholder="Part number or description")
-    pool_model_options = sorted(
-        {
-            model
-            for value in part_pool["model_applicability"]
-            for model in split_filter_values(value)
-            if model.casefold() not in {"all", "all models"}
-        },
-        key=str.casefold,
+    pool_feature_options = sorted(
+        {label for labels in feature_labels_by_part.values() for label in labels}, key=str.casefold
     )
-    selected_pool_model = pool_controls.selectbox(
-        "Model",
-        options=[None, *pool_model_options],
-        format_func=lambda value: (
-            "All models"
-            if value is None
-            else familiar_model_names.get(value, "Familiar name not defined")
-        ),
+    selected_pool_feature = pool_controls.selectbox(
+        "Feature",
+        options=[None, *pool_feature_options],
+        format_func=lambda value: "All feature configurations" if value is None else value,
     )
     visible_parts = part_pool.copy()
     if placement_filter == "Not placed":
@@ -514,14 +511,12 @@ else:
     if part_search:
         searchable = visible_parts[["part_number", "description"]].fillna("").astype(str).agg(" ".join, axis=1)
         visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
-    if selected_pool_model is not None:
+    if selected_pool_feature is not None:
         visible_parts = visible_parts[
-            visible_parts["model_applicability"].apply(
-                lambda value: matches_filter_value(
-                    value,
-                    selected_pool_model,
-                    universal_values=["All", "All models", ""],
-                )
+            visible_parts.apply(
+                lambda row: row["feature_applicability"] == "All models"
+                or selected_pool_feature in feature_labels_by_part.get(str(row["id"]), []),
+                axis=1,
             )
         ]
 
@@ -530,7 +525,7 @@ else:
     pool_signature = (
         placement_filter,
         part_search.strip().casefold(),
-        selected_pool_model,
+        selected_pool_feature,
         tuple(visible_parts["id"].astype(str)),
     )
     if st.session_state.get(pool_signature_key) != pool_signature:
@@ -540,7 +535,7 @@ else:
     visible_parts = visible_parts.copy()
     visible_parts["place"] = False
     visible_parts["edit_part"] = ":material/edit: Edit part"
-    visible_parts["models_familiar"] = visible_parts["model_applicability"].apply(familiar_models)
+    visible_parts["models_familiar"] = visible_parts["feature_applicability"]
 
     def open_pool_part() -> None:
         click = st.session_state.get("fishbone_pool_edit_part")
@@ -584,7 +579,7 @@ else:
                 help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
             ),
             "model_applicability": None,
-            "models_familiar": st.column_config.TextColumn("Models", width="medium"),
+            "models_familiar": st.column_config.TextColumn("Feature applicability", width="medium"),
             "fishbone_section": st.column_config.TextColumn("Fishbone uses", width="large"),
         },
     )
@@ -694,15 +689,15 @@ if assignments.empty:
 else:
     full_assignment_editor = assignments.copy()
     full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_name_by_id)
-    full_assignment_editor["model_applicability"] = full_assignment_editor["model_applicability"].apply(
-        familiar_models
+    full_assignment_editor["model_applicability"] = full_assignment_editor.apply(
+        lambda row: feature_applicability(row["part_id"], row["model_applicability"]), axis=1
     )
     assignment_editor = filter_table(
         full_assignment_editor,
         key="fishbone_assignment_filters",
         dropdown_columns=["section", "revision", "model_applicability"],
         search_columns=["section", "part_number", "description", "use_description", "revision", "model_applicability", "notes"],
-        labels={"section": "Assembly section", "model_applicability": "Models"},
+        labels={"section": "Assembly section", "model_applicability": "Feature applicability"},
         reset_widget_keys=["fishbone_assignment_editor"],
         multi_value_columns=["model_applicability"],
         universal_values={"model_applicability": ["All", "All models", ""]},
@@ -806,7 +801,7 @@ else:
                 help="What this occurrence does or where it is installed.",
             ),
             "quantity": st.column_config.NumberColumn("Qty", min_value=0, step=1, format="%d"),
-            "model_applicability": st.column_config.TextColumn("Models", width="medium"),
+            "model_applicability": st.column_config.TextColumn("Feature applicability", width="medium"),
             "notes": st.column_config.TextColumn("IE notes", width="large"),
             "updated_at": None,
         },

@@ -33,3 +33,17 @@ The app creates `data/paag.db` on first run and seeds a small sample project. Up
 - Export a multi-sheet Excel workbook with a flat `Lucid Data Link` sheet
 
 The preferred PITS workbook uses `ID Number` as the immutable source key. Re-importing an unchanged ID leaves the IE-authored MBOM untouched; changed source content creates a revision and enters the PITS updates reconciliation view. Model definitions come from the `models` tab, while part-to-model applicability remains an IE decision. Legacy Level 1–11 PITS files remain supported as an intentionally conservative fallback. Multi-user authentication, a full audit trail for IE edits, threaded comments, packaging/routing plans, PFMEA, control plans, and work instructions are intentionally left for later increments.
+# Editable table standard
+
+New editable tables and tabs should use the shared helpers in `utils/table_ui.py` and follow this interaction pattern:
+
+- Put the section title, orange unsaved-changes warning, Undo, and blue **Save & refresh** button on one line at the top of the section.
+- Support direct cell editing and direct row creation where the underlying data allows it.
+- Add a **Select** checkbox column for bulk actions. Selection alone is transient and does not count as an unsaved data change.
+- Provide bulk editing for the table's meaningful shared fields and bulk deletion for persisted selected rows.
+- Keep a clear individual-row delete action when users may need to remove one row quickly.
+- Keep keyword and relevant dropdown filters above the table.
+- Validate bulk changes before writing and refresh the editor after a successful save or deletion.
+- Confirm bulk deletion, support selecting all filtered rows from Streamlit's native upper-left table selector, and export the filtered table to Excel.
+- Use consistent Details/Edit actions, required-field validation, editor attribution, automatic timestamps, and table history.
+- Workflow status values are table-specific rather than a global Draft/In review/Approved standard.
