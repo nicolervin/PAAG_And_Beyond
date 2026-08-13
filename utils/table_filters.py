@@ -120,3 +120,20 @@ def merge_filtered_edits(
     visible_ids = set(filtered_dataframe[id_column].dropna().astype(str))
     hidden = full_dataframe[~full_dataframe[id_column].fillna("").astype(str).isin(visible_ids)].copy()
     return pd.concat([hidden, edited_dataframe], ignore_index=True, sort=False)
+
+
+def has_unsaved_table_changes(key: str) -> bool:
+    """Return whether a data editor currently contains pending cell or row changes."""
+    state = st.session_state.get(key, {}) or {}
+    return bool(state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"))
+
+
+def request_table_editor_reset(key: str) -> None:
+    """Clear a saved editor safely at the start of its next Streamlit rerun."""
+    st.session_state[f"_reset_table_editor_{key}"] = True
+
+
+def apply_pending_table_editor_reset(key: str) -> None:
+    """Apply a deferred reset before the keyed editor is instantiated."""
+    if st.session_state.pop(f"_reset_table_editor_{key}", False):
+        st.session_state.pop(key, None)

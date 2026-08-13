@@ -2,7 +2,14 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import get_project, project_models, project_table, replace_work_elements
-from utils.table_filters import filter_table, merge_filtered_edits, split_filter_values
+from utils.table_filters import (
+    apply_pending_table_editor_reset,
+    filter_table,
+    has_unsaved_table_changes,
+    merge_filtered_edits,
+    request_table_editor_reset,
+    split_filter_values,
+)
 
 
 project_id = st.session_state.get("project_id")
@@ -10,6 +17,7 @@ st.title("Process plan")
 st.caption("Build the ordered work sequence and draft Yamazumi timing. Add or delete rows directly in the table, then save.")
 if not project_id:
     st.stop()
+apply_pending_table_editor_reset("process_editor")
 
 project = get_project(project_id)
 elements = project_table("work_elements", project_id, "sequence")
@@ -71,7 +79,9 @@ edited = st.data_editor(
     },
 )
 
-with st.container(horizontal=True, horizontal_alignment="right"):
+with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
+    if has_unsaved_table_changes("process_editor"):
+        st.markdown(":orange[:material/warning: **Unsaved changes**]")
     if st.button("Save process plan", type="primary", icon=":material/save:"):
         combined_elements = merge_filtered_edits(elements, visible_elements, edited)
         combined_elements["model_applicability"] = combined_elements["model_applicability"].apply(
@@ -81,6 +91,7 @@ with st.container(horizontal=True, horizontal_alignment="right"):
             )
         )
         replace_work_elements(project_id, combined_elements)
+        request_table_editor_reset("process_editor")
         st.toast("Process plan saved", icon=":material/check_circle:")
         st.rerun()
 

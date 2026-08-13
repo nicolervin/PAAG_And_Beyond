@@ -109,6 +109,20 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL, display_name TEXT DEFAULT '', description TEXT DEFAULT '',
                 active INTEGER DEFAULT 1, notes TEXT DEFAULT '', UNIQUE(project_id, model_number)
             );
+            CREATE TABLE IF NOT EXISTS complexity_features (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                category TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
+                allowed_values TEXT NOT NULL DEFAULT '[]', description TEXT DEFAULT '',
+                sequence INTEGER NOT NULL DEFAULT 10, active INTEGER DEFAULT 1,
+                updated_at TEXT NOT NULL, UNIQUE(project_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS model_feature_values (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                model_id TEXT NOT NULL REFERENCES project_models(id) ON DELETE CASCADE,
+                feature_id TEXT NOT NULL REFERENCES complexity_features(id) ON DELETE CASCADE,
+                value TEXT DEFAULT '', updated_at TEXT NOT NULL,
+                PRIMARY KEY(model_id, feature_id)
+            );
             CREATE TABLE IF NOT EXISTS assembly_sections (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
@@ -676,6 +690,285 @@ def project_models(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query("SELECT * FROM project_models WHERE project_id = ? ORDER BY model_number", (project_id,)))
 
 
+def complexity_features(project_id: str) -> pd.DataFrame:
+    rows = query(
+        "SELECT * FROM complexity_features WHERE project_id=? ORDER BY sequence, category, name",
+        (project_id,),
+    )
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame["allowed_choices"] = frame["allowed_values"].apply(
+            lambda value: ", ".join(json.loads(value or "[]"))
+        )
+    return frame
+
+
+def complexity_tree(project_id: str) -> pd.DataFrame:
+    models = project_models(project_id)
+    if models.empty:
+        return pd.DataFrame(columns=["model_id", "common_name", "official_model_number"])
+    result = models[["id", "display_name", "model_number"]].rename(columns={
+        "id": "model_id", "display_name": "common_name", "model_number": "official_model_number",
+    })
+    values = query(
+        "SELECT model_id, feature_id, value FROM model_feature_values WHERE project_id=?",
+        (project_id,),
+    )
+    value_map = {(str(row["model_id"]), str(row["feature_id"])): row["value"] for row in values}
+    for feature in complexity_features(project_id).to_dict("records"):
+        feature_id = str(feature["id"])
+        result[feature_id] = result["model_id"].astype(str).map(
+            lambda model_id: value_map.get((model_id, feature_id)) or None
+        )
+    return result
+
+
+def complexity_planning_snapshot(project_id: str) -> dict:
+    with connection() as conn:
+        return {
+            "features": [dict(row) for row in conn.execute(
+                "SELECT * FROM complexity_features WHERE project_id=?", (project_id,)
+            ).fetchall()],
+            "values": [dict(row) for row in conn.execute(
+                "SELECT * FROM model_feature_values WHERE project_id=?", (project_id,)
+            ).fetchall()],
+        }
+
+
+def restore_complexity_planning_snapshot(project_id: str, snapshot: dict) -> None:
+    with connection() as conn:
+        conn.execute("DELETE FROM model_feature_values WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM complexity_features WHERE project_id=?", (project_id,))
+        _insert_snapshot_rows(conn, "complexity_features", snapshot.get("features", []))
+        _insert_snapshot_rows(conn, "model_feature_values", snapshot.get("values", []))
+
+
+def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
+    required = {"id", "category", "name", "allowed_choices", "description", "active"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The feature definitions table is missing required columns.")
+
+    def clean(value) -> str:
+        return "" if value is None or pd.isna(value) else str(value).strip()
+
+    records = []
+    names: list[str] = []
+    for index, row in edited.reset_index(drop=True).iterrows():
+        name = clean(row.get("name"))
+        category = clean(row.get("category"))
+        if not name and not category and not clean(row.get("allowed_choices")):
+            continue
+        if not category or not name:
+            raise ValueError("Every feature needs both a category and a feature name.")
+        choices = list(dict.fromkeys(
+            choice.strip() for choice in clean(row.get("allowed_choices")).split(",") if choice.strip()
+        ))
+        if not choices:
+            raise ValueError(f"Add at least one allowed choice for {name}.")
+        names.append(name)
+        records.append({
+            "id": clean(row.get("id")) or str(uuid4()), "category": category, "name": name,
+            "allowed_values": json.dumps(choices), "description": clean(row.get("description")),
+            "active": 1 if bool(row.get("active")) else 0, "sequence": (index + 1) * 10,
+        })
+    if len({name.casefold() for name in names}) != len(names):
+        raise ValueError("Feature names must be unique within this project.")
+
+    timestamp = now_iso()
+    with connection() as conn:
+        existing_ids = {row[0] for row in conn.execute(
+            "SELECT id FROM complexity_features WHERE project_id=?", (project_id,)
+        )}
+        retained_ids = {record["id"] for record in records}
+        for feature_id in existing_ids - retained_ids:
+            conn.execute("DELETE FROM complexity_features WHERE id=? AND project_id=?", (feature_id, project_id))
+        for record in records:
+            conn.execute(
+                """INSERT INTO complexity_features
+                   (id, project_id, category, name, allowed_values, description, sequence, active, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET category=excluded.category, name=excluded.name,
+                   allowed_values=excluded.allowed_values, description=excluded.description,
+                   sequence=excluded.sequence, active=excluded.active, updated_at=excluded.updated_at""",
+                (record["id"], project_id, record["category"], record["name"], record["allowed_values"],
+                 record["description"], record["sequence"], record["active"], timestamp),
+            )
+            choices = json.loads(record["allowed_values"])
+            placeholders = ", ".join("?" for _ in choices)
+            conn.execute(
+                f"""DELETE FROM model_feature_values WHERE project_id=? AND feature_id=?
+                    AND value NOT IN ({placeholders})""",
+                (project_id, record["id"], *choices),
+            )
+    return len(records)
+
+
+def update_complexity_tree(project_id: str, edited: pd.DataFrame) -> int:
+    if "model_id" not in edited.columns:
+        raise ValueError("The complexity tree is missing model identifiers.")
+    features = complexity_features(project_id)
+    active_features = features.loc[features["active"].fillna(1).astype(bool)] if not features.empty else features
+    allowed_by_id = {
+        str(row["id"]): json.loads(row["allowed_values"] or "[]")
+        for _, row in active_features.iterrows()
+    }
+    valid_models = set(project_models(project_id)["id"].astype(str))
+    timestamp = now_iso()
+    saved = 0
+    with connection() as conn:
+        for _, row in edited.iterrows():
+            model_id = str(row["model_id"])
+            if model_id not in valid_models:
+                continue
+            for feature_id, choices in allowed_by_id.items():
+                value = "" if pd.isna(row.get(feature_id)) else str(row.get(feature_id) or "").strip()
+                if value and value not in choices:
+                    raise ValueError("Choose only values defined in Feature definitions.")
+                if value:
+                    conn.execute(
+                        """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(model_id, feature_id) DO UPDATE SET value=excluded.value,
+                           updated_at=excluded.updated_at""",
+                        (project_id, model_id, feature_id, value, timestamp),
+                    )
+                    saved += 1
+                else:
+                    conn.execute(
+                        "DELETE FROM model_feature_values WHERE project_id=? AND model_id=? AND feature_id=?",
+                        (project_id, model_id, feature_id),
+                    )
+    return saved
+
+
+def model_planning_snapshot(project_id: str) -> dict:
+    """Capture model definitions and every project field affected by model renames."""
+    with connection() as conn:
+        return {
+            "models": [dict(row) for row in conn.execute(
+                "SELECT * FROM project_models WHERE project_id=?", (project_id,)
+            ).fetchall()],
+            "parts": [dict(row) for row in conn.execute(
+                "SELECT id, model_applicability, updated_at FROM parts WHERE project_id=?", (project_id,)
+            ).fetchall()],
+            "work_elements": [dict(row) for row in conn.execute(
+                "SELECT id, model_applicability, updated_at FROM work_elements WHERE project_id=?", (project_id,)
+            ).fetchall()],
+            "fishbone_nodes": [dict(row) for row in conn.execute(
+                "SELECT id, applicable_models, updated_at FROM fishbone_nodes WHERE project_id=?", (project_id,)
+            ).fetchall()],
+        }
+
+
+def _insert_snapshot_rows(conn: sqlite3.Connection, table: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+    columns = list(rows[0])
+    placeholders = ", ".join("?" for _ in columns)
+    conn.executemany(
+        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+        [tuple(row.get(column) for column in columns) for row in rows],
+    )
+
+
+def restore_model_planning_snapshot(project_id: str, snapshot: dict) -> None:
+    """Restore the last model edit along with propagated model applicability values."""
+    with connection() as conn:
+        conn.execute("DELETE FROM project_models WHERE project_id=?", (project_id,))
+        _insert_snapshot_rows(conn, "project_models", snapshot.get("models", []))
+        for table, value_column in (
+            ("parts", "model_applicability"),
+            ("work_elements", "model_applicability"),
+            ("fishbone_nodes", "applicable_models"),
+        ):
+            for row in snapshot.get(table, []):
+                conn.execute(
+                    f"UPDATE {table} SET {value_column}=?, updated_at=? WHERE id=? AND project_id=?",
+                    (row.get(value_column), row.get("updated_at"), row.get("id"), project_id),
+                )
+
+
+def fishbone_plan_snapshot(project_id: str) -> dict:
+    """Capture the framework and its part uses as one referentially consistent unit."""
+    with connection() as conn:
+        return {
+            "sections": [dict(row) for row in conn.execute(
+                "SELECT * FROM assembly_sections WHERE project_id=?", (project_id,)
+            ).fetchall()],
+            "assignments": [dict(row) for row in conn.execute(
+                "SELECT * FROM fishbone_part_assignments WHERE project_id=?", (project_id,)
+            ).fetchall()],
+        }
+
+
+def fishbone_assignment_snapshot(project_id: str) -> list[dict]:
+    """Capture assigned part uses without changing the assembly framework."""
+    with connection() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM fishbone_part_assignments WHERE project_id=?", (project_id,)
+        ).fetchall()]
+
+
+def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
+    """Restore framework rows and assignments, including parent relationships."""
+    sections = snapshot.get("sections", [])
+    assignments = snapshot.get("assignments", [])
+    with connection() as conn:
+        conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
+        # Insert parents and children with empty parent IDs first, then reconnect them.
+        section_rows = [{**row, "parent_id": None} for row in sections]
+        _insert_snapshot_rows(conn, "assembly_sections", section_rows)
+        for row in sections:
+            if row.get("parent_id"):
+                conn.execute(
+                    "UPDATE assembly_sections SET parent_id=? WHERE id=? AND project_id=?",
+                    (row["parent_id"], row["id"], project_id),
+                )
+        _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
+
+
+def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) -> None:
+    """Restore the last set of fishbone part uses."""
+    with connection() as conn:
+        conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
+        _insert_snapshot_rows(conn, "fishbone_part_assignments", snapshot)
+
+
+def delete_project_model(project_id: str, model_id: str) -> str:
+    """Delete an unreferenced model definition and return its common display label."""
+    with connection() as conn:
+        model = conn.execute(
+            "SELECT model_number, display_name FROM project_models WHERE id=? AND project_id=?",
+            (model_id, project_id),
+        ).fetchone()
+        if not model:
+            raise ValueError("That model no longer exists.")
+        model_number = str(model["model_number"])
+        reference_count = 0
+        for table in ("parts", "work_elements"):
+            reference_count += conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE project_id=? AND instr(model_applicability, ?) > 0",
+                (project_id, model_number),
+            ).fetchone()[0]
+        for row in conn.execute(
+            "SELECT applicable_models FROM fishbone_nodes WHERE project_id=?",
+            (project_id,),
+        ).fetchall():
+            try:
+                assigned = json.loads(row["applicable_models"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                assigned = []
+            reference_count += sum(str(value) == model_number for value in assigned)
+        if reference_count:
+            raise ValueError(
+                "This model is still assigned elsewhere. Remove those assignments first, "
+                "or turn off Use in planning instead of deleting it."
+            )
+        conn.execute("DELETE FROM project_models WHERE id=? AND project_id=?", (model_id, project_id))
+        return str(model["display_name"] or model_number)
+
+
 def add_project_model(project_id: str, model_number: str, display_name: str, description: str) -> str:
     model_number = model_number.strip()
     if not model_number:
@@ -702,30 +995,125 @@ def add_project_model(project_id: str, model_number: str, display_name: str, des
 
 
 def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
-    required = {"id", "display_name", "description", "active", "notes"}
+    required = {"id", "model_number", "display_name", "eau", "description", "active", "notes"}
     if not required.issubset(edited.columns):
         raise ValueError("The editable model table is missing required columns.")
 
     def clean_text(value) -> str:
         return "" if value is None or pd.isna(value) else str(value).strip()
 
+    def clean_eau(value) -> int | None:
+        if value is None or pd.isna(value) or str(value).strip() == "":
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("EAU must be a non-negative whole number.") from exc
+        if numeric < 0 or not numeric.is_integer():
+            raise ValueError("EAU must be a non-negative whole number.")
+        return int(numeric)
+
+    model_numbers = edited["model_number"].apply(clean_text)
+    if model_numbers.eq("").any():
+        raise ValueError("Every model needs an official model number.")
+    if model_numbers.str.casefold().duplicated().any():
+        raise ValueError("Official model numbers must be unique.")
+
     timestamp = now_iso()
     with connection() as conn:
-        for _, row in edited.iterrows():
-            conn.execute(
-                """UPDATE project_models
-                   SET display_name=?, description=?, active=?, notes=?, updated_at=?
-                   WHERE id=? AND project_id=?""",
-                (
+        existing_rows = conn.execute(
+            "SELECT id, model_number FROM project_models WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+        existing_by_id = {str(row["id"]): str(row["model_number"]) for row in existing_rows}
+        proposed_by_id = {
+            str(row["id"]): clean_text(row.get("model_number"))
+            for _, row in edited.iterrows()
+            if row.get("id") is not None and not pd.isna(row.get("id")) and str(row.get("id")).strip()
+        }
+        final_numbers = [proposed_by_id.get(model_id, number) for model_id, number in existing_by_id.items()]
+        if len({number.casefold() for number in final_numbers}) != len(final_numbers):
+            raise ValueError("Official model numbers must be unique.")
+        renamed = {
+            existing_by_id[model_id]: new_number
+            for model_id, new_number in proposed_by_id.items()
+            if model_id in existing_by_id and existing_by_id[model_id] != new_number
+        }
+        try:
+            # Temporary values allow two official model numbers to be swapped safely.
+            for model_id in proposed_by_id:
+                if model_id in existing_by_id and existing_by_id[model_id] != proposed_by_id[model_id]:
+                    conn.execute(
+                        "UPDATE project_models SET model_number=? WHERE id=? AND project_id=?",
+                        (f"__renaming__{uuid4()}", model_id, project_id),
+                    )
+            for _, row in edited.iterrows():
+                model_id = (
+                    str(row["id"])
+                    if row.get("id") is not None and not pd.isna(row.get("id")) and str(row.get("id")).strip()
+                    else str(uuid4())
+                )
+                values = (
+                    clean_text(row.get("model_number")),
                     clean_text(row.get("display_name")),
+                    clean_eau(row.get("eau")),
                     clean_text(row.get("description")),
                     1 if bool(row.get("active")) else 0,
                     clean_text(row.get("notes")),
                     timestamp,
-                    str(row["id"]),
-                    project_id,
-                ),
-            )
+                )
+                if model_id in existing_by_id:
+                    conn.execute(
+                        """UPDATE project_models
+                           SET model_number=?, display_name=?, eau=?, description=?, active=?, notes=?, updated_at=?
+                           WHERE id=? AND project_id=?""",
+                        (*values, model_id, project_id),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO project_models
+                           (id, project_id, model_number, source_payload, updated_at,
+                            display_name, eau, description, active, notes)
+                           VALUES (?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)""",
+                        (
+                            model_id, project_id, values[0], values[6], values[1],
+                            values[2], values[3], values[4], values[5],
+                        ),
+                    )
+            if renamed:
+                def rename_csv(value) -> str:
+                    tokens = [token.strip() for token in str(value or "").split(",") if token.strip()]
+                    return ", ".join(renamed.get(token, token) for token in tokens)
+
+                for table in ("parts", "work_elements"):
+                    reference_rows = conn.execute(
+                        f"SELECT id, model_applicability FROM {table} WHERE project_id=?",
+                        (project_id,),
+                    ).fetchall()
+                    for reference in reference_rows:
+                        updated = rename_csv(reference["model_applicability"])
+                        if updated != str(reference["model_applicability"] or ""):
+                            conn.execute(
+                                f"UPDATE {table} SET model_applicability=?, updated_at=? WHERE id=?",
+                                (updated, timestamp, reference["id"]),
+                            )
+                node_rows = conn.execute(
+                    "SELECT id, applicable_models FROM fishbone_nodes WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+                for node in node_rows:
+                    try:
+                        assigned = json.loads(node["applicable_models"] or "[]")
+                    except (TypeError, json.JSONDecodeError):
+                        assigned = []
+                    updated = [renamed.get(str(model), str(model)) for model in assigned]
+                    if updated != assigned:
+                        conn.execute(
+                            "UPDATE fishbone_nodes SET applicable_models=?, updated_at=? WHERE id=?",
+                            (json.dumps(updated), timestamp, node["id"]),
+                        )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Official model numbers must be unique.") from exc
     return len(edited)
 
 

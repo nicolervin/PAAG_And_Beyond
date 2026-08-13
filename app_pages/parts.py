@@ -4,7 +4,12 @@ import streamlit as st
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.store import add_part_image, part_images, project_models, project_table, set_part_image, update_part_rows, upsert_part
-from utils.table_filters import filter_table
+from utils.table_filters import (
+    apply_pending_table_editor_reset,
+    filter_table,
+    has_unsaved_table_changes,
+    request_table_editor_reset,
+)
 
 
 project_id = st.session_state.get("project_id")
@@ -12,6 +17,7 @@ st.title("Part catalog")
 st.caption("Connect official part numbers to CAD screenshots, quantities, revisions, and model applicability.")
 if not project_id:
     st.stop()
+apply_pending_table_editor_reset("parts_catalog_editor_v2")
 
 parts = project_table("parts", project_id, "part_number")
 models = project_models(project_id)
@@ -33,7 +39,26 @@ def split_model_applicability(value) -> list[str]:
     text = "" if value is None else str(value).strip()
     if not text or text.lower() == "all":
         return ["All models"]
-    return [model.strip() for model in text.split(",") if model.strip()]
+    if text in model_labels:
+        return [text]
+
+    # Official model identifiers can contain commas. Parse against the complete
+    # set of defined identifiers before falling back to legacy comma splitting.
+    candidates = sorted(model_labels, key=len, reverse=True)
+
+    def parse_remaining(remaining: str) -> list[str] | None:
+        for model_number in candidates:
+            if remaining == model_number:
+                return [model_number]
+            prefix = f"{model_number}, "
+            if remaining.startswith(prefix):
+                parsed_tail = parse_remaining(remaining[len(prefix):])
+                if parsed_tail is not None:
+                    return [model_number, *parsed_tail]
+        return None
+
+    parsed = parse_remaining(text)
+    return parsed if parsed is not None else [text]
 
 
 def readable_model_applicability(value) -> str:
@@ -111,7 +136,12 @@ if parts.empty:
     st.info("No parts yet. Add one above or import a BOM draft from Import & export.")
     st.stop()
 
-st.subheader("All parts")
+parts_have_unsaved_changes = has_unsaved_table_changes("parts_catalog_editor_v2")
+parts_title, parts_warning, parts_action = st.columns([4, 0.8, 1], vertical_alignment="center")
+parts_title.subheader("All parts")
+if parts_have_unsaved_changes:
+    parts_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
+save_part_table = parts_action.button("Save part table", type="primary", icon=":material/save:")
 st.caption("Edit catalog fields directly, then save. Select View details on a row to open its photos and full information below.")
 editable_columns = ["id", "part_number", "description", "quantity", "revision", "model_applicability", "notes", "source", "updated_at"]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
@@ -136,7 +166,7 @@ parts_for_editing = filter_table(
     dropdown_columns=["source", "revision", "model_applicability"],
     search_columns=["part_number", "description", "model_applicability", "notes", "source"],
     labels={"model_applicability": "Model"},
-    reset_widget_keys=["parts_catalog_editor"],
+    reset_widget_keys=["parts_catalog_editor_v2"],
     multi_value_columns=["model_applicability"],
     universal_values={"model_applicability": ["All", "All models", ""]},
 )
@@ -152,7 +182,7 @@ def open_part_details() -> None:
 
 edited_parts = st.data_editor(
     parts_for_editing,
-    key="parts_catalog_editor",
+    key="parts_catalog_editor_v2",
     hide_index=True,
     num_rows="fixed",
     height=430,
@@ -182,18 +212,18 @@ edited_parts = st.data_editor(
         "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
     },
 )
-with st.container(horizontal=True, horizontal_alignment="right"):
-    if st.button("Save part table", type="primary", icon=":material/save:"):
-        try:
-            parts_to_save = edited_parts.drop(columns=["view_details"]).copy()
-            parts_to_save["model_applicability"] = parts_to_save["model_applicability"].apply(
-                lambda assigned: [model_number_by_label.get(label, label) for label in assigned]
-            )
-            count = update_part_rows(project_id, parts_to_save)
-            st.toast(f"Saved {count} parts", icon=":material/check_circle:")
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
+if save_part_table:
+    try:
+        parts_to_save = edited_parts.drop(columns=["view_details"]).copy()
+        parts_to_save["model_applicability"] = parts_to_save["model_applicability"].apply(
+            lambda assigned: [model_number_by_label.get(label, label) for label in assigned]
+        )
+        count = update_part_rows(project_id, parts_to_save)
+        request_table_editor_reset("parts_catalog_editor_v2")
+        st.toast(f"Saved {count} parts", icon=":material/check_circle:")
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
 
 valid_part_ids = set(parts["id"].astype(str))
 if st.session_state.get(selected_part_key) not in valid_part_ids:
