@@ -41,6 +41,7 @@ pages = {
         st.Page("app_pages/fishbone.py", title="Parts to fishbone", icon=":material/device_hub:"),
     ],
     "Process planning": [
+        st.Page("app_pages/yamazumi.py", title="Yamazumi & balancing", icon=":material/view_column:"),
         st.Page("app_pages/process.py", title="Process plan", icon=":material/account_tree:"),
         st.Page("app_pages/requirements.py", title="Requirements", icon=":material/fact_check:"),
     ],

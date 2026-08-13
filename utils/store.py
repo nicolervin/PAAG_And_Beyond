@@ -149,6 +149,38 @@ def init_db() -> None:
                 table_name TEXT NOT NULL, action TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0,
                 editor_name TEXT DEFAULT '', details TEXT DEFAULT '{}', created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS yamazumi_areas (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
+                name TEXT NOT NULL, takt_override_s REAL, updated_at TEXT NOT NULL,
+                UNIQUE(project_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS yamazumi_pitches (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                area_id TEXT NOT NULL REFERENCES yamazumi_areas(id) ON DELETE CASCADE,
+                pitch_number TEXT NOT NULL, pitch_name TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'Active',
+                sequence INTEGER NOT NULL DEFAULT 10, model_variants TEXT NOT NULL DEFAULT '["Base"]',
+                pitch_type TEXT NOT NULL DEFAULT 'Pitch',
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, area_id, pitch_number)
+            );
+            CREATE TABLE IF NOT EXISTS yamazumi_elements (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                area_id TEXT NOT NULL REFERENCES yamazumi_areas(id) ON DELETE CASCADE,
+                pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+                model_variant TEXT NOT NULL DEFAULT 'Base', work_type TEXT DEFAULT 'Cycle',
+                description TEXT NOT NULL, time_s REAL NOT NULL DEFAULT 0,
+                work_region TEXT DEFAULT 'None', flags TEXT DEFAULT '[]', sequence INTEGER NOT NULL DEFAULT 10,
+                source TEXT DEFAULT 'Manual', process_element_id TEXT,
+                process_sync_status TEXT NOT NULL DEFAULT 'Needs IE review', updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS yamazumi_work_regions (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                area_id TEXT NOT NULL REFERENCES yamazumi_areas(id) ON DELETE CASCADE,
+                name TEXT NOT NULL, color TEXT NOT NULL DEFAULT '#3dcc4a',
+                sequence INTEGER NOT NULL DEFAULT 10, updated_at TEXT NOT NULL,
+                UNIQUE(project_id, area_id, name)
+            );
             """
         )
         assignment_columns = {
@@ -203,6 +235,23 @@ def init_db() -> None:
         }.items():
             if column not in model_columns:
                 conn.execute(f"ALTER TABLE project_models ADD COLUMN {column} {definition}")
+        pitch_columns = {row[1] for row in conn.execute("PRAGMA table_info(yamazumi_pitches)").fetchall()}
+        if "model_variants" not in pitch_columns:
+            conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN model_variants TEXT NOT NULL DEFAULT '[\"Base\"]'")
+            existing_pitches = conn.execute("SELECT id FROM yamazumi_pitches").fetchall()
+            for pitch in existing_pitches:
+                used = [
+                    row[0] for row in conn.execute(
+                        "SELECT DISTINCT model_variant FROM yamazumi_elements WHERE pitch_id=? ORDER BY model_variant",
+                        (pitch["id"],),
+                    ).fetchall() if str(row[0] or "").strip()
+                ]
+                conn.execute(
+                    "UPDATE yamazumi_pitches SET model_variants=? WHERE id=?",
+                    (json.dumps(used or ["Base"]), pitch["id"]),
+                )
+        if "pitch_type" not in pitch_columns:
+            conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN pitch_type TEXT NOT NULL DEFAULT 'Pitch'")
         if conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
             timestamp = now_iso()
             project_id = str(uuid4())
@@ -291,6 +340,816 @@ def audit_history(project_id: str, table_name: str | None = None, limit: int = 1
             (project_id, int(limit)),
         )
     return pd.DataFrame(rows)
+
+
+def yamazumi_areas(project_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT a.*, s.name AS section_name
+           FROM yamazumi_areas a LEFT JOIN assembly_sections s ON s.id=a.section_id
+           WHERE a.project_id=? ORDER BY a.name""",
+        (project_id,),
+    ))
+
+
+def yamazumi_pitches(project_id: str, area_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT * FROM yamazumi_pitches WHERE project_id=? AND area_id=?
+           ORDER BY sequence, pitch_number""",
+        (project_id, area_id),
+    ))
+
+
+def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT e.*, p.pitch_number, p.pitch_name, p.status AS pitch_status
+           FROM yamazumi_elements e LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
+           WHERE e.project_id=? AND e.area_id=?
+           ORDER BY COALESCE(p.sequence, 999999), e.model_variant, e.sequence, e.description""",
+        (project_id, area_id),
+    ))
+
+
+def yamazumi_work_regions(project_id: str, area_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT * FROM yamazumi_work_regions
+           WHERE project_id=? AND area_id=? ORDER BY sequence, name""",
+        (project_id, area_id),
+    ))
+
+
+def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[dict]) -> int:
+    """Replace area-specific work-region names and colors."""
+    import re
+
+    cleaned: list[dict] = []
+    seen: set[str] = set()
+    for index, record in enumerate(records, start=1):
+        name = str(record.get("name") or "").strip()
+        if not name:
+            continue
+        if name.casefold() == "none":
+            raise ValueError("None is reserved for elements without a work-region highlight.")
+        if name.casefold() in seen:
+            raise ValueError("Work-region names must be unique.")
+        seen.add(name.casefold())
+        color = str(record.get("color") or "").strip().lower()
+        if not re.fullmatch(r"#[0-9a-f]{6}", color):
+            raise ValueError(f"Choose a valid color for {name}.")
+        cleaned.append({
+            "id": str(record.get("id") or "").strip() or str(uuid4()),
+            "name": name,
+            "color": color,
+            "sequence": index * 10,
+        })
+    timestamp = now_iso()
+    with connection() as conn:
+        valid_area = conn.execute(
+            "SELECT 1 FROM yamazumi_areas WHERE id=? AND project_id=?", (area_id, project_id)
+        ).fetchone()
+        if not valid_area:
+            raise ValueError("That Yamazumi area no longer exists.")
+        existing = {
+            str(row["id"]): str(row["name"])
+            for row in conn.execute(
+                "SELECT id, name FROM yamazumi_work_regions WHERE project_id=? AND area_id=?",
+                (project_id, area_id),
+            ).fetchall()
+        }
+        kept = {record["id"] for record in cleaned}
+        removed_names = [name for region_id, name in existing.items() if region_id not in kept]
+        if removed_names:
+            placeholders = ",".join("?" for _ in removed_names)
+            conn.execute(
+                f"""UPDATE yamazumi_elements
+                    SET work_region='None', process_sync_status='Needs IE review', updated_at=?
+                    WHERE project_id=? AND area_id=? AND work_region IN ({placeholders})""",
+                (timestamp, project_id, area_id, *removed_names),
+            )
+        for record in cleaned:
+            old_name = existing.get(record["id"])
+            if old_name and old_name != record["name"]:
+                conn.execute(
+                    """UPDATE yamazumi_elements SET work_region=?, updated_at=?
+                       WHERE project_id=? AND area_id=? AND work_region=?""",
+                    (record["name"], timestamp, project_id, area_id, old_name),
+                )
+        for record in cleaned:
+            conn.execute(
+                """INSERT INTO yamazumi_work_regions
+                   (id, project_id, area_id, name, color, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color,
+                   sequence=excluded.sequence, updated_at=excluded.updated_at""",
+                (record["id"], project_id, area_id, record["name"], record["color"], record["sequence"], timestamp),
+            )
+        removed_ids = set(existing) - kept
+        if removed_ids:
+            placeholders = ",".join("?" for _ in removed_ids)
+            conn.execute(f"DELETE FROM yamazumi_work_regions WHERE id IN ({placeholders})", tuple(removed_ids))
+    return len(cleaned)
+
+
+def rename_yamazumi_variants(project_id: str, label_mapping: dict[str, str]) -> int:
+    """Normalize saved Yamazumi labels after a display-label convention changes."""
+    mapping = {str(old): str(new) for old, new in label_mapping.items() if str(old) != str(new)}
+    if not mapping:
+        return 0
+    changed = 0
+    timestamp = now_iso()
+    with connection() as conn:
+        elements = conn.execute(
+            "SELECT id, model_variant FROM yamazumi_elements WHERE project_id=?", (project_id,)
+        ).fetchall()
+        for element in elements:
+            new_label = mapping.get(str(element["model_variant"]))
+            if new_label:
+                conn.execute(
+                    "UPDATE yamazumi_elements SET model_variant=?, updated_at=? WHERE id=?",
+                    (new_label, timestamp, element["id"]),
+                )
+                changed += 1
+        pitches = conn.execute(
+            "SELECT id, model_variants FROM yamazumi_pitches WHERE project_id=?", (project_id,)
+        ).fetchall()
+        for pitch in pitches:
+            variants = json.loads(pitch["model_variants"] or "[]")
+            normalized = list(dict.fromkeys(mapping.get(str(value), str(value)) for value in variants))
+            if normalized != variants:
+                conn.execute(
+                    "UPDATE yamazumi_pitches SET model_variants=?, updated_at=? WHERE id=?",
+                    (json.dumps(normalized), timestamp, pitch["id"]),
+                )
+                changed += 1
+    return changed
+
+
+def clear_yamazumi_data(project_id: str, area_id: str | None = None) -> dict[str, int]:
+    """Delete Yamazumi-only areas, pitches, and work without changing Fishbone or Process Plan."""
+    with connection() as conn:
+        if area_id:
+            area = conn.execute(
+                "SELECT id FROM yamazumi_areas WHERE id=? AND project_id=?",
+                (area_id, project_id),
+            ).fetchone()
+            if not area:
+                raise ValueError("That Yamazumi area no longer exists.")
+            counts = {
+                "areas": 1,
+                "pitches": conn.execute(
+                    "SELECT COUNT(*) FROM yamazumi_pitches WHERE project_id=? AND area_id=?",
+                    (project_id, area_id),
+                ).fetchone()[0],
+                "elements": conn.execute(
+                    "SELECT COUNT(*) FROM yamazumi_elements WHERE project_id=? AND area_id=?",
+                    (project_id, area_id),
+                ).fetchone()[0],
+            }
+            conn.execute("DELETE FROM yamazumi_areas WHERE id=? AND project_id=?", (area_id, project_id))
+        else:
+            counts = {
+                "areas": conn.execute(
+                    "SELECT COUNT(*) FROM yamazumi_areas WHERE project_id=?", (project_id,)
+                ).fetchone()[0],
+                "pitches": conn.execute(
+                    "SELECT COUNT(*) FROM yamazumi_pitches WHERE project_id=?", (project_id,)
+                ).fetchone()[0],
+                "elements": conn.execute(
+                    "SELECT COUNT(*) FROM yamazumi_elements WHERE project_id=?", (project_id,)
+                ).fetchone()[0],
+            }
+            conn.execute("DELETE FROM yamazumi_areas WHERE project_id=?", (project_id,))
+    return counts
+
+
+def upsert_yamazumi_area(
+    project_id: str, name: str, section_id: str | None = None, takt_override_s: float | None = None
+) -> str:
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("Yamazumi area name is required.")
+    timestamp = now_iso()
+    existing = query("SELECT id FROM yamazumi_areas WHERE project_id=? AND name=?", (project_id, name))
+    if existing:
+        area_id = str(existing[0]["id"])
+        execute(
+            """UPDATE yamazumi_areas SET section_id=COALESCE(?, section_id),
+               takt_override_s=COALESCE(?, takt_override_s), updated_at=? WHERE id=?""",
+            (section_id, takt_override_s, timestamp, area_id),
+        )
+        return area_id
+    area_id = str(uuid4())
+    execute(
+        "INSERT INTO yamazumi_areas VALUES (?, ?, ?, ?, ?, ?)",
+        (area_id, project_id, section_id, name, takt_override_s, timestamp),
+    )
+    return area_id
+
+
+def update_yamazumi_area(project_id: str, area_id: str, section_id: str | None, takt_override_s) -> None:
+    takt = None if takt_override_s is None or pd.isna(takt_override_s) or str(takt_override_s).strip() == "" else float(takt_override_s)
+    if takt is not None and takt <= 0:
+        raise ValueError("Takt override must be greater than zero.")
+    execute(
+        "UPDATE yamazumi_areas SET section_id=?, takt_override_s=?, updated_at=? WHERE id=? AND project_id=?",
+        (section_id or None, takt, now_iso(), area_id, project_id),
+    )
+
+
+def add_yamazumi_pitch(
+    project_id: str,
+    area_id: str,
+    pitch_number: str,
+    pitch_name: str = "",
+    status: str = "Active",
+    model_variants: list[str] | None = None,
+    pitch_type: str = "Pitch",
+) -> str:
+    """Add one physical pitch address to a Yamazumi area."""
+    pitch_number = str(pitch_number or "").strip()
+    if not pitch_number:
+        raise ValueError("Pitch address is required.")
+    status = str(status or "Active").title()
+    if status not in {"Active", "Blocked", "Open"}:
+        raise ValueError("Pitch status must be Active, Blocked, or Open.")
+    pitch_type = str(pitch_type or "Pitch").strip().title()
+    if pitch_type not in {"Pitch", "Waterspider", "Subassembly", "Kitter", "Repacker"}:
+        raise ValueError("Choose a valid pitch type.")
+    timestamp = now_iso()
+    variants = list(dict.fromkeys(str(value).strip() for value in (model_variants or ["Base"]) if str(value).strip()))
+    if not variants:
+        raise ValueError("Choose at least one model variant for the pitch.")
+    pitch_id = str(uuid4())
+    try:
+        with connection() as conn:
+            valid_area = conn.execute(
+                "SELECT 1 FROM yamazumi_areas WHERE id=? AND project_id=?", (area_id, project_id)
+            ).fetchone()
+            if not valid_area:
+                raise ValueError("That Yamazumi area no longer exists.")
+            sequence = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 10 FROM yamazumi_pitches WHERE project_id=? AND area_id=?",
+                (project_id, area_id),
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                (id, project_id, area_id, pitch_number, pitch_name, status, sequence, model_variants, pitch_type, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (pitch_id, project_id, area_id, pitch_number, str(pitch_name or "").strip(), status, sequence, json.dumps(variants), pitch_type, timestamp),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"Pitch address {pitch_number} already exists in this Yamazumi area.") from exc
+    return pitch_id
+
+
+def add_yamazumi_element(
+    project_id: str,
+    area_id: str,
+    pitch_id: str | None,
+    values: dict,
+) -> str:
+    """Add one Yamazumi work element from the balancing board."""
+    description = str(values.get("description") or "").strip()
+    if not description:
+        raise ValueError("Work description is required.")
+    try:
+        time_s = float(values.get("time_s") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Work-element time must be a number.") from exc
+    if time_s < 0:
+        raise ValueError("Work-element time cannot be negative.")
+    pitch_id = str(pitch_id or "").strip() or None
+    selected_variant = str(values.get("model_variant") or "Base").strip()
+    work_type = str(values.get("work_type") or "Cycle").strip().title()
+    if work_type not in {"Cycle", "Periodic", "Fluctuation"}:
+        raise ValueError("Work type must be Cycle, Periodic, or Fluctuation.")
+    if pitch_id:
+        active_pitch = query(
+            """SELECT id, model_variants FROM yamazumi_pitches
+               WHERE id=? AND project_id=? AND area_id=? AND status='Active'""",
+            (pitch_id, project_id, area_id),
+        )
+        if not active_pitch:
+            raise ValueError("Work can only be added to an Active pitch.")
+        if selected_variant not in json.loads(active_pitch[0]["model_variants"] or "[]"):
+            raise ValueError("Choose a model variant enabled for the destination pitch.")
+    flags = [flag for flag in values.get("flags", []) if flag in {"CTQ", "Safety"}]
+    element_id = str(uuid4())
+    timestamp = now_iso()
+    with connection() as conn:
+        sequence = conn.execute(
+            """SELECT COALESCE(MAX(sequence), 0) + 10 FROM yamazumi_elements
+               WHERE project_id=? AND area_id=? AND pitch_id IS ?""",
+            (project_id, area_id, pitch_id),
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO yamazumi_elements
+               (id, project_id, area_id, pitch_id, model_variant, work_type, description,
+                time_s, work_region, flags, sequence, source, process_sync_status, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Interactive board', 'Needs IE review', ?)""",
+            (
+                element_id, project_id, area_id, pitch_id,
+                selected_variant,
+                work_type, description, time_s,
+                str(values.get("work_region") or "None").strip(), json.dumps(flags), sequence, timestamp,
+            ),
+        )
+    return element_id
+
+
+def update_yamazumi_pitch(project_id: str, area_id: str, pitch_id: str, values: dict) -> None:
+    """Update one pitch from the interactive board without replacing the area table."""
+    pitch_number = str(values.get("pitch_number") or "").strip()
+    if not pitch_number:
+        raise ValueError("Pitch address is required.")
+    status = str(values.get("status") or "Active").title()
+    if status not in {"Active", "Blocked", "Open"}:
+        raise ValueError("Pitch status must be Active, Blocked, or Open.")
+    pitch_type = str(values.get("pitch_type") or "Pitch").strip().title()
+    if pitch_type not in {"Pitch", "Waterspider", "Subassembly", "Kitter", "Repacker"}:
+        raise ValueError("Choose a valid pitch type.")
+    variants = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (values.get("model_variants") or [])
+            if str(value).strip()
+        )
+    )
+    if not variants:
+        raise ValueError("Choose at least one model variant for the pitch.")
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
+            (pitch_id, project_id, area_id),
+        ).fetchone()
+        if not existing:
+            raise ValueError("That pitch no longer exists.")
+        assigned = conn.execute(
+            "SELECT model_variant FROM yamazumi_elements WHERE pitch_id=?", (pitch_id,)
+        ).fetchall()
+        if status != "Active" and assigned:
+            raise ValueError("Move work out of this pitch before changing it to Open or Blocked.")
+        missing_used = {str(row[0]) for row in assigned} - set(variants)
+        if missing_used:
+            raise ValueError(
+                "This pitch still contains work for: "
+                + ", ".join(sorted(missing_used))
+                + ". Move or retag that work first."
+            )
+        try:
+            conn.execute(
+                """UPDATE yamazumi_pitches
+                   SET pitch_number=?, pitch_name=?, status=?, model_variants=?, pitch_type=?, updated_at=?
+                   WHERE id=? AND project_id=? AND area_id=?""",
+                (
+                    pitch_number,
+                    str(values.get("pitch_name") or "").strip(),
+                    status,
+                    json.dumps(variants),
+                    pitch_type,
+                    now_iso(),
+                    pitch_id,
+                    project_id,
+                    area_id,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"Pitch address {pitch_number} already exists in this Yamazumi area.") from exc
+
+
+def update_yamazumi_element(project_id: str, area_id: str, element_id: str, values: dict) -> None:
+    """Update one work element from an interactive pitch card."""
+    description = str(values.get("description") or "").strip()
+    if not description:
+        raise ValueError("Work description is required.")
+    try:
+        time_s = float(values.get("time_s") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Work-element time must be a number.") from exc
+    if time_s < 0:
+        raise ValueError("Work-element time cannot be negative.")
+    pitch_id = str(values.get("pitch_id") or "").strip() or None
+    model_variant = str(values.get("model_variant") or "Base").strip()
+    work_type = str(values.get("work_type") or "Cycle").strip().title()
+    if work_type not in {"Cycle", "Periodic", "Fluctuation"}:
+        raise ValueError("Work type must be Cycle, Periodic, or Fluctuation.")
+    flags = [flag for flag in values.get("flags", []) if flag in {"CTQ", "Safety"}]
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM yamazumi_elements WHERE id=? AND project_id=? AND area_id=?",
+            (element_id, project_id, area_id),
+        ).fetchone()
+        if not existing:
+            raise ValueError("That work element no longer exists.")
+        if pitch_id:
+            destination = conn.execute(
+                """SELECT model_variants FROM yamazumi_pitches
+                   WHERE id=? AND project_id=? AND area_id=? AND status='Active'""",
+                (pitch_id, project_id, area_id),
+            ).fetchone()
+            if not destination:
+                raise ValueError("Work can only be assigned to an Active pitch.")
+            if model_variant not in json.loads(destination[0] or "[]"):
+                raise ValueError("Choose a model variant enabled for the destination pitch.")
+        conn.execute(
+            """UPDATE yamazumi_elements
+               SET pitch_id=?, model_variant=?, work_type=?, description=?, time_s=?,
+                   work_region=?, flags=?, process_sync_status='Needs IE review', updated_at=?
+               WHERE id=? AND project_id=? AND area_id=?""",
+            (
+                pitch_id,
+                model_variant,
+                work_type,
+                description,
+                time_s,
+                str(values.get("work_region") or "None").strip(),
+                json.dumps(flags),
+                now_iso(),
+                element_id,
+                project_id,
+                area_id,
+            ),
+        )
+
+
+def delete_yamazumi_element(project_id: str, area_id: str, element_id: str) -> None:
+    """Delete one Yamazumi work element from the selected area."""
+    with connection() as conn:
+        deleted = conn.execute(
+            "DELETE FROM yamazumi_elements WHERE id=? AND project_id=? AND area_id=?",
+            (element_id, project_id, area_id),
+        ).rowcount
+        if not deleted:
+            raise ValueError("That work element no longer exists.")
+
+
+def delete_yamazumi_pitch(project_id: str, area_id: str, pitch_id: str) -> int:
+    """Delete one pitch and return its work elements to the unassigned pool."""
+    timestamp = now_iso()
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
+            (pitch_id, project_id, area_id),
+        ).fetchone()
+        if not existing:
+            raise ValueError("That pitch no longer exists.")
+        moved = conn.execute(
+            "SELECT COUNT(*) FROM yamazumi_elements WHERE pitch_id=?", (pitch_id,)
+        ).fetchone()[0]
+        conn.execute(
+            """UPDATE yamazumi_elements
+               SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
+               WHERE pitch_id=?""",
+            (timestamp, pitch_id),
+        )
+        conn.execute(
+            "DELETE FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
+            (pitch_id, project_id, area_id),
+        )
+    return int(moved)
+
+
+def replace_yamazumi_pitches(project_id: str, area_id: str, edited: pd.DataFrame) -> int:
+    required = {"id", "pitch_number", "pitch_name", "status", "sequence", "model_variants", "pitch_type"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The pitch table is missing required columns.")
+    records = edited.to_dict("records")
+    numbers = [str(row.get("pitch_number") or "").strip() for row in records]
+    if any(not number for number in numbers):
+        raise ValueError("Every pitch needs an address/number.")
+    if len({number.casefold() for number in numbers}) != len(numbers):
+        raise ValueError("Pitch addresses must be unique within a Yamazumi area.")
+    allowed = {"Active", "Blocked", "Open"}
+    timestamp = now_iso()
+    with connection() as conn:
+        existing = {row[0] for row in conn.execute(
+            "SELECT id FROM yamazumi_pitches WHERE project_id=? AND area_id=?", (project_id, area_id)
+        )}
+        kept: set[str] = set()
+        for index, row in enumerate(records, start=1):
+            pitch_id = str(row.get("id") or "").strip() or str(uuid4())
+            status = str(row.get("status") or "Active").title()
+            if status not in allowed:
+                raise ValueError("Pitch status must be Active, Blocked, or Open.")
+            pitch_type = str(row.get("pitch_type") or "Pitch").strip().title()
+            if pitch_type not in {"Pitch", "Waterspider", "Subassembly", "Kitter", "Repacker"}:
+                raise ValueError("Choose a valid pitch type for every pitch.")
+            if status != "Active":
+                assigned_count = conn.execute(
+                    "SELECT COUNT(*) FROM yamazumi_elements WHERE pitch_id=?", (pitch_id,)
+                ).fetchone()[0]
+                if assigned_count:
+                    raise ValueError(
+                        f"Move work out of pitch {numbers[index - 1]} before changing it to {status}."
+                    )
+            raw_variants = row.get("model_variants") or []
+            variants = raw_variants if isinstance(raw_variants, list) else json.loads(str(raw_variants) or "[]")
+            variants = list(dict.fromkeys(str(value).strip() for value in variants if str(value).strip()))
+            if not variants:
+                raise ValueError(f"Choose at least one model variant for pitch {numbers[index - 1]}.")
+            used_variants = {
+                str(used[0]) for used in conn.execute(
+                    "SELECT DISTINCT model_variant FROM yamazumi_elements WHERE pitch_id=?", (pitch_id,)
+                ).fetchall()
+            }
+            missing_used = used_variants - set(variants)
+            if missing_used:
+                raise ValueError(
+                    f"Pitch {numbers[index - 1]} still contains work for: {', '.join(sorted(missing_used))}. Move or retag that work first."
+                )
+            kept.add(pitch_id)
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, status, sequence, model_variants, pitch_type, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET pitch_number=excluded.pitch_number,
+                   pitch_name=excluded.pitch_name, status=excluded.status,
+                   sequence=excluded.sequence, model_variants=excluded.model_variants,
+                   pitch_type=excluded.pitch_type,
+                   updated_at=excluded.updated_at""",
+                (pitch_id, project_id, area_id, numbers[index - 1], str(row.get("pitch_name") or "").strip(),
+                 status, int(row.get("sequence") or index * 10), json.dumps(variants), pitch_type, timestamp),
+            )
+        removed = existing - kept
+        if removed:
+            placeholders = ",".join("?" for _ in removed)
+            conn.execute(f"UPDATE yamazumi_elements SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=? WHERE pitch_id IN ({placeholders})", (timestamp, *removed))
+            conn.execute(f"DELETE FROM yamazumi_pitches WHERE id IN ({placeholders})", tuple(removed))
+    return len(records)
+
+
+def generate_yamazumi_pitch_range(
+    project_id: str,
+    area_id: str,
+    first_address: str,
+    last_address: str,
+    number_mode: str = "All numbers",
+    status: str = "Active",
+    model_variants: list[str] | None = None,
+    pitch_type: str = "Pitch",
+) -> int:
+    """Generate physical pitch addresses between matching numeric-suffix endpoints."""
+    import re
+
+    first = str(first_address or "").strip()
+    last = str(last_address or "").strip()
+    first_match = re.match(r"^(.*?)(\d+)$", first)
+    last_match = re.match(r"^(.*?)(\d+)$", last)
+    if not first_match or not last_match:
+        raise ValueError("First and last pitch addresses must end in a number.")
+    if first_match.group(1) != last_match.group(1):
+        raise ValueError("First and last pitch addresses must use the same prefix.")
+    start, end = int(first_match.group(2)), int(last_match.group(2))
+    if end < start:
+        raise ValueError("The last pitch number must be greater than or equal to the first.")
+    if number_mode not in {"All numbers", "Odd only", "Even only"}:
+        raise ValueError("Choose All numbers, Odd only, or Even only.")
+    status = str(status or "Active").title()
+    if status not in {"Active", "Blocked", "Open"}:
+        raise ValueError("Pitch status must be Active, Blocked, or Open.")
+    pitch_type = str(pitch_type or "Pitch").strip().title()
+    if pitch_type not in {"Pitch", "Waterspider", "Subassembly", "Kitter", "Repacker"}:
+        raise ValueError("Choose a valid pitch type.")
+    prefix = first_match.group(1)
+    width = max(len(first_match.group(2)), len(last_match.group(2)))
+    values = list(range(start, end + 1))
+    if number_mode == "Odd only":
+        values = [value for value in values if value % 2 == 1]
+    elif number_mode == "Even only":
+        values = [value for value in values if value % 2 == 0]
+    if not values:
+        raise ValueError("That range contains no pitch numbers for the selected numbering option.")
+    timestamp = now_iso()
+    variants = list(dict.fromkeys(str(value).strip() for value in (model_variants or ["Base"]) if str(value).strip()))
+    if not variants:
+        raise ValueError("Choose at least one model variant for the generated pitches.")
+    with connection() as conn:
+        next_sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM yamazumi_pitches WHERE project_id=? AND area_id=?",
+            (project_id, area_id),
+        ).fetchone()[0]
+        created = 0
+        for offset, value in enumerate(values, start=1):
+            address = f"{prefix}{value:0{width}d}"
+            exists = conn.execute(
+                "SELECT 1 FROM yamazumi_pitches WHERE project_id=? AND area_id=? AND pitch_number=?",
+                (project_id, area_id, address),
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, status, sequence, model_variants, pitch_type, updated_at)
+                   VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?)""",
+                (str(uuid4()), project_id, area_id, address, status, next_sequence + offset * 10, json.dumps(variants), pitch_type, timestamp),
+            )
+            created += 1
+    return created
+
+
+def replace_yamazumi_elements(project_id: str, area_id: str, edited: pd.DataFrame) -> int:
+    required = {"id", "pitch_id", "model_variant", "work_type", "description", "time_s", "work_region", "flags", "sequence"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The Yamazumi work-element table is missing required columns.")
+    records = edited.to_dict("records")
+    timestamp = now_iso()
+    valid_pitches = {
+        str(row["id"]) for row in query(
+            "SELECT id FROM yamazumi_pitches WHERE project_id=? AND area_id=? AND status='Active'",
+            (project_id, area_id),
+        )
+    }
+    with connection() as conn:
+        existing = {row[0] for row in conn.execute("SELECT id FROM yamazumi_elements WHERE project_id=? AND area_id=?", (project_id, area_id))}
+        kept: set[str] = set()
+        for index, row in enumerate(records, start=1):
+            description = str(row.get("description") or "").strip()
+            if not description:
+                raise ValueError("Every Yamazumi work element needs a description.")
+            time_s = float(row.get("time_s") or 0)
+            if time_s < 0:
+                raise ValueError("Work-element time cannot be negative.")
+            element_id = str(row.get("id") or "").strip() or str(uuid4())
+            pitch_id = str(row.get("pitch_id") or "").strip() or None
+            if pitch_id and pitch_id not in valid_pitches:
+                raise ValueError("Choose an Active pitch from the selected Yamazumi area.")
+            model_variant = str(row.get("model_variant") or "Base").strip()
+            work_type = str(row.get("work_type") or "Cycle").strip().title()
+            if work_type not in {"Cycle", "Periodic", "Fluctuation"}:
+                raise ValueError("Work type must be Cycle, Periodic, or Fluctuation.")
+            if pitch_id:
+                pitch_variants_row = conn.execute(
+                    "SELECT model_variants FROM yamazumi_pitches WHERE id=?", (pitch_id,)
+                ).fetchone()
+                pitch_variants = json.loads(pitch_variants_row[0] or "[]")
+                if model_variant not in pitch_variants:
+                    raise ValueError("Each work element's model variant must be enabled for its pitch.")
+            raw_flags = row.get("flags") or []
+            flags = raw_flags if isinstance(raw_flags, list) else [item.strip() for item in str(raw_flags).split(",") if item.strip()]
+            kept.add(element_id)
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, work_type, description,
+                    time_s, work_region, flags, sequence, source, process_element_id,
+                    process_sync_status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET pitch_id=excluded.pitch_id,
+                    model_variant=excluded.model_variant, work_type=excluded.work_type,
+                    description=excluded.description, time_s=excluded.time_s,
+                    work_region=excluded.work_region, flags=excluded.flags,
+                    sequence=excluded.sequence, process_sync_status='Needs IE review',
+                    updated_at=excluded.updated_at""",
+                (element_id, project_id, area_id, pitch_id, model_variant,
+                 work_type, description, time_s,
+                 str(row.get("work_region") or "None").strip(), json.dumps(flags),
+                 int(row.get("sequence") or index * 10), str(row.get("source") or "Manual"),
+                 row.get("process_element_id"), str(row.get("process_sync_status") or "Needs IE review"), timestamp),
+            )
+        removed = existing - kept
+        if removed:
+            placeholders = ",".join("?" for _ in removed)
+            conn.execute(f"DELETE FROM yamazumi_elements WHERE id IN ({placeholders})", tuple(removed))
+    return len(records)
+
+
+def move_yamazumi_element(project_id: str, element_id: str, pitch_id: str | None) -> None:
+    if pitch_id:
+        valid = query(
+            "SELECT id, model_variants FROM yamazumi_pitches WHERE id=? AND project_id=? AND status='Active'",
+            (pitch_id, project_id),
+        )
+        if not valid:
+            raise ValueError("Work can only be moved into an Active pitch.")
+        element = query("SELECT model_variant FROM yamazumi_elements WHERE id=? AND project_id=?", (element_id, project_id))
+        if not element or element[0]["model_variant"] not in json.loads(valid[0]["model_variants"] or "[]"):
+            raise ValueError("Enable this work element's model variant on the destination pitch before moving it.")
+    execute(
+        """UPDATE yamazumi_elements SET pitch_id=?, process_sync_status='Needs IE review', updated_at=?
+           WHERE id=? AND project_id=?""",
+        (pitch_id or None, now_iso(), element_id, project_id),
+    )
+
+
+def import_yamazumi_rows(project_id: str, rows: pd.DataFrame, section_ids_by_name: dict[str, str]) -> tuple[int, int, int]:
+    required = {"Sub-Line", "Pitch_number", "Pitch_status", "Pitch_name", "Pitch_Takt_time", "Model_variant", "Work_Type", "Work_Description", "Work_Time_to_complete", "Work_region"}
+    missing = required - set(rows.columns)
+    if missing:
+        raise ValueError(f"The Yamazumi file is missing: {', '.join(sorted(missing))}.")
+    timestamp = now_iso()
+    area_ids: dict[str, str] = {}
+    pitch_ids: dict[tuple[str, str], str] = {}
+    elements_added = 0
+    for index, row in rows.iterrows():
+        area_name = str(row.get("Sub-Line") or "").strip()
+        pitch_number = str(row.get("Pitch_number") or "").strip()
+        description = str(row.get("Work_Description") or "").strip()
+        if not area_name or not pitch_number or not description:
+            continue
+        takt_raw = row.get("Pitch_Takt_time")
+        takt = None if pd.isna(takt_raw) or str(takt_raw).strip() == "" else float(takt_raw)
+        area_id = area_ids.setdefault(area_name, upsert_yamazumi_area(project_id, area_name, section_ids_by_name.get(area_name), takt))
+        pitch_key = (area_id, pitch_number)
+        if pitch_key not in pitch_ids:
+            existing_pitch = query("SELECT id FROM yamazumi_pitches WHERE project_id=? AND area_id=? AND pitch_number=?", (project_id, area_id, pitch_number))
+            pitch_id = str(existing_pitch[0]["id"]) if existing_pitch else str(uuid4())
+            pitch_ids[pitch_key] = pitch_id
+            status = str(row.get("Pitch_status") or "Active").strip().title()
+            if status not in {"Active", "Blocked", "Open"}:
+                status = "Active"
+            execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, status, sequence, model_variants, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)
+                   ON CONFLICT(id) DO UPDATE SET pitch_name=excluded.pitch_name,
+                   status=excluded.status, updated_at=excluded.updated_at""",
+                (pitch_id, project_id, area_id, pitch_number, str(row.get("Pitch_name") or "").strip(), status, len(pitch_ids) * 10, timestamp),
+            )
+        flags_text = str(row.get("Pitch_Flags") or "")
+        flags = [flag for flag in ("CTQ", "Safety") if flag.casefold() in flags_text.casefold()]
+        import_pitch_id = pitch_ids[pitch_key]
+        import_pitch = query("SELECT status FROM yamazumi_pitches WHERE id=?", (import_pitch_id,))
+        assigned_pitch_id = import_pitch_id if import_pitch and import_pitch[0]["status"] == "Active" else None
+        execute(
+            """INSERT INTO yamazumi_elements
+               (id, project_id, area_id, pitch_id, model_variant, work_type, description,
+                time_s, work_region, flags, sequence, source, process_sync_status, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Excel import', 'Needs IE review', ?)""",
+            (str(uuid4()), project_id, area_id, assigned_pitch_id, str(row.get("Model_variant") or "Base").strip().title(),
+             str(row.get("Work_Type") or "Cycle").strip().title(), description,
+             float(row.get("Work_Time_to_complete") or 0), str(row.get("Work_region") or "None").strip(),
+             json.dumps(flags), (index + 1) * 10, timestamp),
+        )
+        imported_variant = str(row.get("Model_variant") or "Base").strip().title()
+        current_pitch = query("SELECT model_variants FROM yamazumi_pitches WHERE id=?", (import_pitch_id,))[0]
+        selected_variants = json.loads(current_pitch["model_variants"] or "[]")
+        if imported_variant not in selected_variants:
+            selected_variants.append(imported_variant)
+            execute("UPDATE yamazumi_pitches SET model_variants=? WHERE id=?", (json.dumps(selected_variants), import_pitch_id))
+        elements_added += 1
+    return len(area_ids), len(pitch_ids), elements_added
+
+
+def reconcile_yamazumi_to_process(project_id: str, element_ids: list[str]) -> int:
+    """Accept Yamazumi station/time changes while retaining IE-authored process details."""
+    if not element_ids:
+        return 0
+    placeholders = ",".join("?" for _ in element_ids)
+    timestamp = now_iso()
+    with connection() as conn:
+        rows = conn.execute(
+            f"""SELECT e.*, p.pitch_number, a.name AS area_name
+                FROM yamazumi_elements e
+                LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
+                JOIN yamazumi_areas a ON a.id=e.area_id
+                WHERE e.project_id=? AND e.id IN ({placeholders})""",
+            (project_id, *element_ids),
+        ).fetchall()
+        for row in rows:
+            station = str(row["pitch_number"] or "Unassigned")
+            process_id = str(row["process_element_id"] or "").strip()
+            if process_id:
+                exists = conn.execute(
+                    "SELECT 1 FROM work_elements WHERE id=? AND project_id=?", (process_id, project_id)
+                ).fetchone()
+            else:
+                exists = None
+            if exists:
+                conn.execute(
+                    """UPDATE work_elements SET station=?, cycle_time_s=?, model_applicability=?, updated_at=?
+                       WHERE id=? AND project_id=?""",
+                    (
+                        station, float(row["time_s"] or 0),
+                        "All" if str(row["model_variant"]).casefold() == "base" else str(row["model_variant"]),
+                        timestamp, process_id, project_id,
+                    ),
+                )
+            else:
+                process_id = str(uuid4())
+                next_sequence = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 10 FROM work_elements WHERE project_id=?",
+                    (project_id,),
+                ).fetchone()[0]
+                conn.execute(
+                    """INSERT INTO work_elements
+                       (id, project_id, sequence, station, operation, description, cycle_time_s,
+                        part_number, tool, torque, quality_requirement, ergo_requirement, location,
+                        conveyor_height_mm, platform_height_mm, pit_depth_mm,
+                        model_applicability, status, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, '', ?, NULL, NULL, NULL, ?, 'Draft', ?)""",
+                    (
+                        process_id, project_id, next_sequence, station, str(row["description"]),
+                        f"Yamazumi area: {row['area_name']}", float(row["time_s"] or 0),
+                        "CTQ" if "CTQ" in json.loads(row["flags"] or "[]") else "",
+                        station,
+                        "All" if str(row["model_variant"]).casefold() == "base" else str(row["model_variant"]),
+                        timestamp,
+                    ),
+                )
+            conn.execute(
+                """UPDATE yamazumi_elements SET process_element_id=?, process_sync_status='Synced', updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (process_id, timestamp, row["id"], project_id),
+            )
+    return len(rows)
 
 
 def project_table(table: str, project_id: str, order_by: str = "updated_at DESC") -> pd.DataFrame:

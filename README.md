@@ -28,6 +28,7 @@ The app creates `data/paag.db` on first run and seeds a small sample project. Up
 - Build a station-independent assembly fishbone from confirmed MBOM content before balancing work into physical pitches
 - Work through one continuous IE workspace: selectable PITS list, live fishbone visual, then editable MBOM order
 - Build an ordered, editable work-element plan and draft Yamazumi station view
+- Build Yamazumi drafts by Fishbone spine, manage active/open/blocked pitch addresses, compare side-by-side model variants, and drag work between odd north-side and even south-side pitches
 - Capture tools, torques, quality, ergonomics, locations, conveyor/platform heights, and pit depths
 - Track questions, concerns, decisions, assumptions, owners, and status
 - Export a multi-sheet Excel workbook with a flat `Lucid Data Link` sheet
