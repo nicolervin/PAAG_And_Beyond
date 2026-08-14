@@ -65,14 +65,17 @@ _CSS = """
 _JS = r"""
 export default function(component) {
   const { parentElement, data, setTriggerValue } = component
+  const escapeHtml = value => String(value ?? '').replace(
+    /[&<>"']/g,
+    character => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[character]
+  )
   const north = parentElement.querySelector('#north')
   const south = parentElement.querySelector('#south')
   const legend = parentElement.querySelector('#legend')
   const addPitch = parentElement.querySelector('#add-pitch')
   if (!north || !south || !legend || !addPitch) return
   addPitch.onclick = () => setTriggerValue('add_pitch', { requested: true })
-  const colors = data.colors || {}
-  legend.innerHTML = Object.entries(colors).map(([name,color]) => `<span><i class="swatch" style="background:${color}"></i>${name}</span>`).join('')
+  legend.innerHTML = `<span><i class="swatch" style="background:#35c84a"></i>Cycle</span>`
     + `<span><i class="swatch" style="background:#ffd54f"></i>Periodic</span>`
     + `<span><i class="swatch" style="background:#ef5350"></i>Fluctuation</span>`
   north.innerHTML = ''; south.innerHTML = ''
@@ -108,15 +111,11 @@ export default function(component) {
       const stack = block.querySelector('.stack')
       for (const item of displayItems) {
         const el = document.createElement('div')
-        const regionColor = item.work_region && item.work_region !== 'None'
-          ? colors[item.work_region]
-          : null
-        const color = regionColor
-          || (item.work_type === 'Periodic'
-            ? '#ffd54f'
-            : item.work_type === 'Fluctuation'
-              ? '#ef5350'
-              : '#35c84a')
+        const color = item.work_type === 'Periodic'
+          ? '#ffd54f'
+          : item.work_type === 'Fluctuation'
+            ? '#ef5350'
+            : '#35c84a'
         const takt = Math.max(Number(data.takt || 1), 1)
         el.className = 'element'
         el.draggable = true
@@ -125,7 +124,13 @@ export default function(component) {
         const elementHeight = Math.max(34, Number(item.time_s || 0) / takt * 155)
         el.style.height = `${elementHeight}px`
         el.style.flex = `0 0 ${elementHeight}px`
-        const flags = (item.flags || []).map(f => f === 'Safety' ? '⚠ Safety' : '◆ CTQ').join(' ')
+        const rawFlags = item.flags || []
+        const flags = rawFlags.length > 2
+          ? '2+ Flags'
+          : rawFlags.map(flag => flag === 'Safety'
+              ? '⚠ Safety'
+              : `◆ ${escapeHtml(flag)}`
+            ).join(' ')
         el.innerHTML = `<strong>${Number(item.time_s || 0).toFixed(1)}s</strong><span class="element-description">${item.description}</span>${flags ? `<span class="flags">${flags}</span>` : ''}<button type="button" class="edit-element" title="Edit work element">Edit</button>`
         el.title = `${item.description} · ${Number(item.time_s || 0).toFixed(1)}s · ${item.work_region || 'None'}`
         el.ondragstart = event => event.dataTransfer.setData('text/plain', item.id)
@@ -191,7 +196,7 @@ export default function(component) {
 """
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v12",
+    "paag_yamazumi_drag_board_v14",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -203,7 +208,6 @@ def yamazumi_board(
     elements: list[dict],
     variants: list[str],
     takt: float,
-    colors: dict[str, str],
     *,
     key: str,
     on_move: Callable[[], None],
@@ -214,7 +218,7 @@ def yamazumi_board(
 ):
     return _YAMAZUMI_BOARD(
         key=key,
-        data={"pitches": pitches, "elements": elements, "variants": variants, "takt": takt, "colors": colors},
+        data={"pitches": pitches, "elements": elements, "variants": variants, "takt": takt},
         on_move_change=on_move,
         on_add_pitch_change=on_add_pitch,
         on_add_element_change=on_add_element,

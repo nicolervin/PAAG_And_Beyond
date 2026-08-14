@@ -191,9 +191,18 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS yamazumi_work_regions (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 area_id TEXT NOT NULL REFERENCES yamazumi_areas(id) ON DELETE CASCADE,
-                name TEXT NOT NULL, color TEXT NOT NULL DEFAULT '#3dcc4a',
+                name TEXT NOT NULL, description TEXT DEFAULT '', active INTEGER NOT NULL DEFAULT 1,
+                color TEXT NOT NULL DEFAULT '#3dcc4a',
                 sequence INTEGER NOT NULL DEFAULT 10, updated_at TEXT NOT NULL,
                 UNIQUE(project_id, area_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS yamazumi_flag_definitions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                name TEXT NOT NULL COLLATE NOCASE, description TEXT DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1, system_flag INTEGER NOT NULL DEFAULT 0,
+                sequence INTEGER NOT NULL DEFAULT 10, updated_at TEXT NOT NULL,
+                UNIQUE(project_id, name)
             );
             CREATE TABLE IF NOT EXISTS manufacturing_assemblies (
                 id TEXT PRIMARY KEY,
@@ -325,6 +334,15 @@ def init_db() -> None:
                 )
         if "pitch_type" not in pitch_columns:
             conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN pitch_type TEXT NOT NULL DEFAULT 'Pitch'")
+        work_region_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(yamazumi_work_regions)").fetchall()
+        }
+        for column, definition in {
+            "description": "TEXT DEFAULT ''",
+            "active": "INTEGER NOT NULL DEFAULT 1",
+        }.items():
+            if column not in work_region_columns:
+                conn.execute(f"ALTER TABLE yamazumi_work_regions ADD COLUMN {column} {definition}")
         if conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
             timestamp = now_iso()
             project_id = str(uuid4())
@@ -1388,7 +1406,7 @@ def yamazumi_work_regions(project_id: str, area_id: str) -> pd.DataFrame:
 
 
 def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[dict]) -> int:
-    """Replace area-specific work-region names and colors."""
+    """Replace area-specific work-region definitions."""
     import re
 
     cleaned: list[dict] = []
@@ -1402,14 +1420,29 @@ def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[d
         if name.casefold() in seen:
             raise ValueError("Work-region names must be unique.")
         seen.add(name.casefold())
-        color = str(record.get("color") or "").strip().lower()
+        raw_color = record.get("color")
+        color = (
+            "#35c84a"
+            if raw_color is None or pd.isna(raw_color) or not str(raw_color).strip()
+            else str(raw_color).strip().lower()
+        )
         if not re.fullmatch(r"#[0-9a-f]{6}", color):
             raise ValueError(f"Choose a valid color for {name}.")
         cleaned.append({
             "id": str(record.get("id") or "").strip() or str(uuid4()),
             "name": name,
+            "description": str(record.get("description") or "").strip(),
+            "active": int(
+                True
+                if record.get("active") is None or pd.isna(record.get("active"))
+                else bool(record.get("active"))
+            ),
             "color": color,
-            "sequence": index * 10,
+            "sequence": (
+                index * 10
+                if record.get("sequence") is None or pd.isna(record.get("sequence"))
+                else int(record.get("sequence"))
+            ),
         })
     timestamp = now_iso()
     with connection() as conn:
@@ -1446,17 +1479,217 @@ def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[d
         for record in cleaned:
             conn.execute(
                 """INSERT INTO yamazumi_work_regions
-                   (id, project_id, area_id, name, color, sequence, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color,
-                   sequence=excluded.sequence, updated_at=excluded.updated_at""",
-                (record["id"], project_id, area_id, record["name"], record["color"], record["sequence"], timestamp),
+                   (id, project_id, area_id, name, description, active, color, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                   description=excluded.description, active=excluded.active,
+                   color=excluded.color, sequence=excluded.sequence, updated_at=excluded.updated_at""",
+                (
+                    record["id"], project_id, area_id, record["name"], record["description"],
+                    record["active"], record["color"], record["sequence"], timestamp,
+                ),
             )
         removed_ids = set(existing) - kept
         if removed_ids:
             placeholders = ",".join("?" for _ in removed_ids)
             conn.execute(f"DELETE FROM yamazumi_work_regions WHERE id IN ({placeholders})", tuple(removed_ids))
     return len(cleaned)
+
+
+SYSTEM_YAMAZUMI_FLAGS = {
+    "CTQ": "Critical-to-quality work or verification.",
+    "Safety": "Work with a safety-related requirement or risk.",
+}
+
+
+def _ensure_system_yamazumi_flags(conn: sqlite3.Connection, project_id: str) -> None:
+    timestamp = now_iso()
+    for sequence, (name, description) in enumerate(SYSTEM_YAMAZUMI_FLAGS.items(), start=1):
+        conn.execute(
+            """INSERT INTO yamazumi_flag_definitions
+               (id, project_id, name, description, active, system_flag, sequence, updated_at)
+               VALUES (?, ?, ?, ?, 1, 1, ?, ?)
+               ON CONFLICT(project_id, name) DO UPDATE SET
+                description=excluded.description, active=1, system_flag=1,
+                sequence=excluded.sequence, updated_at=excluded.updated_at
+               WHERE yamazumi_flag_definitions.description IS NOT excluded.description
+                  OR yamazumi_flag_definitions.active <> 1
+                  OR yamazumi_flag_definitions.system_flag <> 1
+                  OR yamazumi_flag_definitions.sequence <> excluded.sequence""",
+            (str(uuid4()), project_id, name, description, sequence * 10, timestamp),
+        )
+
+
+def yamazumi_flag_definitions(project_id: str) -> pd.DataFrame:
+    with connection() as conn:
+        _ensure_system_yamazumi_flags(conn, project_id)
+        rows = conn.execute(
+            """SELECT * FROM yamazumi_flag_definitions
+               WHERE project_id=? ORDER BY sequence, name""",
+            (project_id,),
+        ).fetchall()
+        return pd.DataFrame([dict(row) for row in rows])
+
+
+def active_yamazumi_flags(project_id: str) -> list[str]:
+    definitions = yamazumi_flag_definitions(project_id)
+    if definitions.empty:
+        return list(SYSTEM_YAMAZUMI_FLAGS)
+    return definitions.loc[
+        definitions["active"].fillna(1).astype(bool), "name"
+    ].astype(str).tolist()
+
+
+def yamazumi_flag_names(project_id: str, include_inactive: bool = True) -> list[str]:
+    definitions = yamazumi_flag_definitions(project_id)
+    if definitions.empty:
+        return list(SYSTEM_YAMAZUMI_FLAGS)
+    if not include_inactive:
+        definitions = definitions.loc[definitions["active"].fillna(1).astype(bool)]
+    return definitions["name"].astype(str).tolist()
+
+
+def _rewrite_yamazumi_element_flags(
+    conn: sqlite3.Connection,
+    project_id: str,
+    renamed: dict[str, str] | None = None,
+    removed: set[str] | None = None,
+) -> None:
+    renamed = renamed or {}
+    removed = removed or set()
+    if not renamed and not removed:
+        return
+    timestamp = now_iso()
+    for row in conn.execute(
+        "SELECT id, flags FROM yamazumi_elements WHERE project_id=?", (project_id,)
+    ).fetchall():
+        try:
+            current = json.loads(row["flags"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            current = []
+        normalized = list(dict.fromkeys(
+            renamed.get(str(flag), str(flag))
+            for flag in current
+            if str(flag) not in removed
+        ))
+        if normalized != current:
+            conn.execute(
+                """UPDATE yamazumi_elements
+                   SET flags=?, process_sync_status='Needs IE review', updated_at=? WHERE id=?""",
+                (json.dumps(normalized), timestamp, row["id"]),
+            )
+
+
+def replace_yamazumi_flag_definitions(project_id: str, edited: pd.DataFrame) -> int:
+    required = {"id", "name", "description", "active", "system_flag", "sequence"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The flag-definition table is missing required columns.")
+    records: list[dict] = []
+    seen_names: set[str] = set()
+    for index, row in enumerate(edited.to_dict("records"), start=1):
+        name = "" if row.get("name") is None or pd.isna(row.get("name")) else str(row["name"]).strip()
+        if not name:
+            raise ValueError("Every flag definition needs a name.")
+        if name.casefold() in seen_names:
+            raise ValueError("Flag names must be unique within the project.")
+        seen_names.add(name.casefold())
+        records.append({
+            "id": (
+                str(row.get("id")).strip()
+                if row.get("id") is not None and not pd.isna(row.get("id")) and str(row.get("id")).strip()
+                else str(uuid4())
+            ),
+            "name": name,
+            "description": (
+                "" if row.get("description") is None or pd.isna(row.get("description"))
+                else str(row["description"]).strip()
+            ),
+            "active": int(True if pd.isna(row.get("active")) else bool(row.get("active"))),
+            "system_flag": int(bool(row.get("system_flag", False))),
+            "sequence": int(row.get("sequence") or index * 10),
+        })
+
+    timestamp = now_iso()
+    try:
+        with connection() as conn:
+            _ensure_system_yamazumi_flags(conn, project_id)
+            existing_rows = conn.execute(
+                "SELECT * FROM yamazumi_flag_definitions WHERE project_id=?", (project_id,)
+            ).fetchall()
+            existing = {str(row["id"]): dict(row) for row in existing_rows}
+            system_ids = {
+                flag_id for flag_id, row in existing.items() if bool(row["system_flag"])
+            }
+            kept_ids = {record["id"] for record in records}
+            if not system_ids.issubset(kept_ids):
+                raise ValueError("CTQ and Safety are permanent system flags and cannot be deleted.")
+            renamed: dict[str, str] = {}
+            for record in records:
+                previous = existing.get(record["id"])
+                if previous and bool(previous["system_flag"]):
+                    record["name"] = str(previous["name"])
+                    record["description"] = str(previous["description"] or "")
+                    record["active"] = 1
+                    record["system_flag"] = 1
+                else:
+                    record["system_flag"] = 0
+                if previous and str(previous["name"]) != record["name"]:
+                    renamed[str(previous["name"])] = record["name"]
+            removed_ids = set(existing) - kept_ids
+            removed_names = {
+                str(existing[flag_id]["name"])
+                for flag_id in removed_ids
+                if not bool(existing[flag_id]["system_flag"])
+            }
+            _rewrite_yamazumi_element_flags(conn, project_id, renamed, removed_names)
+            for record in records:
+                conn.execute(
+                    """INSERT INTO yamazumi_flag_definitions
+                       (id, project_id, name, description, active, system_flag, sequence, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                        description=excluded.description, active=excluded.active,
+                        system_flag=excluded.system_flag, sequence=excluded.sequence,
+                        updated_at=excluded.updated_at""",
+                    (
+                        record["id"], project_id, record["name"], record["description"],
+                        record["active"], record["system_flag"], record["sequence"], timestamp,
+                    ),
+                )
+            if removed_ids:
+                placeholders = ",".join("?" for _ in removed_ids)
+                conn.execute(
+                    f"""DELETE FROM yamazumi_flag_definitions
+                        WHERE project_id=? AND id IN ({placeholders}) AND system_flag=0""",
+                    (project_id, *removed_ids),
+                )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("Flag names must be unique within the project.") from exc
+    return len(records)
+
+
+def delete_yamazumi_flag_definitions(project_id: str, flag_ids: list[str]) -> int:
+    selected_ids = list(dict.fromkeys(str(flag_id) for flag_id in flag_ids if str(flag_id)))
+    if not selected_ids:
+        return 0
+    with connection() as conn:
+        _ensure_system_yamazumi_flags(conn, project_id)
+        placeholders = ",".join("?" for _ in selected_ids)
+        rows = conn.execute(
+            f"""SELECT id, name, system_flag FROM yamazumi_flag_definitions
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *selected_ids),
+        ).fetchall()
+        if any(bool(row["system_flag"]) for row in rows):
+            raise ValueError("CTQ and Safety are permanent system flags and cannot be deleted.")
+        removed_names = {str(row["name"]) for row in rows}
+        _rewrite_yamazumi_element_flags(conn, project_id, removed=removed_names)
+        conn.execute(
+            f"""DELETE FROM yamazumi_flag_definitions
+                WHERE project_id=? AND id IN ({placeholders}) AND system_flag=0""",
+            (project_id, *selected_ids),
+        )
+        return len(rows)
 
 
 def rename_yamazumi_variants(project_id: str, scenario_id: str, label_mapping: dict[str, str]) -> int:
@@ -1657,7 +1890,10 @@ def add_yamazumi_element(
             raise ValueError("Work can only be added to an Active pitch.")
         if selected_variant not in json.loads(active_pitch[0]["model_variants"] or "[]"):
             raise ValueError("Choose a model variant enabled for the destination pitch.")
-    flags = [flag for flag in values.get("flags", []) if flag in {"CTQ", "Safety"}]
+    allowed_flags = set(active_yamazumi_flags(project_id))
+    flags = list(dict.fromkeys(
+        str(flag) for flag in values.get("flags", []) if str(flag) in allowed_flags
+    ))
     element_id = str(uuid4())
     timestamp = now_iso()
     with connection() as conn:
@@ -1757,7 +1993,10 @@ def update_yamazumi_element(project_id: str, area_id: str, element_id: str, valu
     work_type = str(values.get("work_type") or "Cycle").strip().title()
     if work_type not in {"Cycle", "Periodic", "Fluctuation"}:
         raise ValueError("Work type must be Cycle, Periodic, or Fluctuation.")
-    flags = [flag for flag in values.get("flags", []) if flag in {"CTQ", "Safety"}]
+    allowed_flags = set(yamazumi_flag_names(project_id))
+    flags = list(dict.fromkeys(
+        str(flag) for flag in values.get("flags", []) if str(flag) in allowed_flags
+    ))
     with connection() as conn:
         existing = conn.execute(
             "SELECT 1 FROM yamazumi_elements WHERE id=? AND project_id=? AND area_id=?",
@@ -1977,6 +2216,7 @@ def replace_yamazumi_elements(project_id: str, area_id: str, edited: pd.DataFram
         raise ValueError("The Yamazumi work-element table is missing required columns.")
     records = edited.to_dict("records")
     timestamp = now_iso()
+    allowed_flags = set(yamazumi_flag_names(project_id))
     valid_pitches = {
         str(row["id"]) for row in query(
             "SELECT id FROM yamazumi_pitches WHERE project_id=? AND area_id=? AND status='Active'",
@@ -2010,6 +2250,13 @@ def replace_yamazumi_elements(project_id: str, area_id: str, edited: pd.DataFram
                     raise ValueError("Each work element's model variant must be enabled for its pitch.")
             raw_flags = row.get("flags") or []
             flags = raw_flags if isinstance(raw_flags, list) else [item.strip() for item in str(raw_flags).split(",") if item.strip()]
+            invalid_flags = {str(flag) for flag in flags} - allowed_flags
+            if invalid_flags:
+                raise ValueError(
+                    "Define or reactivate these Yamazumi flags before saving: "
+                    + ", ".join(sorted(invalid_flags))
+                )
+            flags = list(dict.fromkeys(str(flag) for flag in flags))
             kept.add(element_id)
             conn.execute(
                 """INSERT INTO yamazumi_elements
@@ -2068,6 +2315,9 @@ def import_yamazumi_rows(
     area_ids: dict[str, str] = {}
     pitch_ids: dict[tuple[str, str], str] = {}
     elements_added = 0
+    flag_names_by_casefold = {
+        flag.casefold(): flag for flag in active_yamazumi_flags(project_id)
+    }
     for index, row in rows.iterrows():
         area_name = str(row.get("Sub-Line") or "").strip()
         pitch_number = str(row.get("Pitch_number") or "").strip()
@@ -2099,7 +2349,10 @@ def import_yamazumi_rows(
                 (pitch_id, project_id, area_id, pitch_number, str(row.get("Pitch_name") or "").strip(), status, len(pitch_ids) * 10, timestamp),
             )
         flags_text = str(row.get("Pitch_Flags") or "")
-        flags = [flag for flag in ("CTQ", "Safety") if flag.casefold() in flags_text.casefold()]
+        flags = [
+            flag for normalized, flag in flag_names_by_casefold.items()
+            if normalized in flags_text.casefold()
+        ]
         import_pitch_id = pitch_ids[pitch_key]
         import_pitch = query("SELECT status FROM yamazumi_pitches WHERE id=?", (import_pitch_id,))
         assigned_pitch_id = import_pitch_id if import_pitch and import_pitch[0]["status"] == "Active" else None
