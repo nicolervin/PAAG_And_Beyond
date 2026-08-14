@@ -11,11 +11,19 @@ from utils.excel_io import (
     read_bom,
     suggest_mapping,
 )
-from utils.store import get_project, import_fishbone_nodes, import_pits_id_snapshot, project_models, upsert_part
+from utils.store import (
+    get_planning_scenario,
+    get_project,
+    import_fishbone_nodes,
+    import_pits_id_snapshot,
+    project_models,
+    upsert_part,
+)
 from utils.table_filters import filter_table, split_filter_values
 
 
 project_id = st.session_state.get("project_id")
+scenario_id = st.session_state.get("scenario_id")
 st.title("Import and export")
 st.caption("Start from a draft BOM and publish a stable, tabular snapshot for Excel or Lucid data linking.")
 if not project_id:
@@ -128,7 +136,9 @@ with export_col.container(border=True):
     st.write("The workbook contains project, confirmed parts, Manufacturing BOM review, work elements, and concerns sheets, plus a flattened **Lucid Data Link** sheet.")
     st.caption("This is a snapshot export. A later release can add a controlled sync and Lucid-specific identifier strategy.")
     project = get_project(project_id)
-    workbook = export_workbook(project_id)
+    workbook = export_workbook(project_id, scenario_id)
+    scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
     safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in project["name"])
-    st.download_button("Download Excel workbook", workbook, file_name=f"{safe_name}_rev_{project['revision']}.xlsx",
+    revision_label = scenario["revision_label"] if scenario else project["revision"]
+    st.download_button("Download Excel workbook", workbook, file_name=f"{safe_name}_rev_{revision_label}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", icon=":material/download:")

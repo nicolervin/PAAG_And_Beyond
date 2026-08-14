@@ -17,6 +17,9 @@ The app creates `data/paag.db` on first run and seeds a small sample project. Up
 ## Current scope
 
 - Create and revise NPI projects
+- Branch Yamazumi and Process Plan work into named planning scenarios with numeric or alphabetic revision labels
+- Use **Save as scenario** to preserve the current balance, process rows, and lineage before changing takt or workstation assignments
+- Switch scenarios globally without mixing their work elements, Yamazumi areas, or exported planning snapshots
 - Maintain a part catalog with CAD screenshots and BOM provenance
 - Paste Windows screenshots directly from the clipboard without saving an intermediate image file
 - Import draft BOMs from Excel or CSV with column mapping
@@ -27,7 +30,9 @@ The app creates `data/paag.db` on first run and seeds a small sample project. Up
 - Develop an editable Manufacturing BOM, explicitly confirming or excluding every rough PITS candidate
 - Build a station-independent assembly fishbone from confirmed MBOM content before balancing work into physical pitches
 - Work through one continuous IE workspace: selectable PITS list, live fishbone visual, then editable MBOM order
-- Build an ordered, editable work-element plan and draft Yamazumi station view
+- Pair fishbone parts to Yamazumi work elements section by section in Process Planning, including controlled part alternatives
+- Build an ordered, editable process plan by pitch and record the exact step that completes each made assembly
+- Treat purchased assemblies as ordinary part-catalog items rather than separate manufacturing-assembly records
 - Build Yamazumi drafts by Fishbone spine, manage active/open/blocked pitch addresses, compare side-by-side model variants, and drag work between odd north-side and even south-side pitches
 - Capture tools, torques, quality, ergonomics, locations, conveyor/platform heights, and pit depths
 - Track questions, concerns, decisions, assumptions, owners, and status

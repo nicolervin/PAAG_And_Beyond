@@ -42,9 +42,21 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, program TEXT DEFAULT '',
+                product_line TEXT DEFAULT '',
                 owner TEXT DEFAULT '', revision TEXT DEFAULT 'A', status TEXT DEFAULT 'Draft',
                 takt_time_s REAL DEFAULT 60, notes TEXT DEFAULT '',
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS planning_scenarios (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                name TEXT NOT NULL, revision_label TEXT NOT NULL,
+                revision_sequence INTEGER NOT NULL DEFAULT 1,
+                parent_scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'Working', takt_time_s REAL NOT NULL DEFAULT 60,
+                change_summary TEXT DEFAULT '', created_by TEXT DEFAULT '',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(project_id, name), UNIQUE(project_id, revision_label)
             );
             CREATE TABLE IF NOT EXISTS parts (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -55,6 +67,7 @@ def init_db() -> None:
             );
             CREATE TABLE IF NOT EXISTS work_elements (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                 sequence INTEGER NOT NULL, station TEXT DEFAULT '', operation TEXT NOT NULL,
                 description TEXT DEFAULT '', cycle_time_s REAL DEFAULT 0,
                 part_number TEXT DEFAULT '', tool TEXT DEFAULT '', torque TEXT DEFAULT '',
@@ -151,9 +164,10 @@ def init_db() -> None:
             );
             CREATE TABLE IF NOT EXISTS yamazumi_areas (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                 section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
                 name TEXT NOT NULL, takt_override_s REAL, updated_at TEXT NOT NULL,
-                UNIQUE(project_id, name)
+                UNIQUE(project_id, scenario_id, name)
             );
             CREATE TABLE IF NOT EXISTS yamazumi_pitches (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -181,8 +195,67 @@ def init_db() -> None:
                 sequence INTEGER NOT NULL DEFAULT 10, updated_at TEXT NOT NULL,
                 UNIQUE(project_id, area_id, name)
             );
+            CREATE TABLE IF NOT EXISTS manufacturing_assemblies (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                assembly_number TEXT NOT NULL, name TEXT NOT NULL,
+                pits_reference TEXT DEFAULT '', planning_reason TEXT NOT NULL DEFAULT 'Other',
+                parent_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE SET NULL,
+                active INTEGER NOT NULL DEFAULT 1, notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
+                UNIQUE(project_id, assembly_number)
+            );
+            CREATE TABLE IF NOT EXISTS assembly_scenario_policies (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                assembly_id TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE,
+                sourcing_decision TEXT NOT NULL DEFAULT 'Undecided', supplier TEXT DEFAULT '',
+                build_area TEXT DEFAULT '', buffer_policy TEXT NOT NULL DEFAULT 'None',
+                storage_location TEXT DEFAULT '', minimum_quantity REAL,
+                target_quantity REAL, maximum_quantity REAL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(scenario_id, assembly_id)
+            );
+            CREATE TABLE IF NOT EXISTS work_element_material_groups (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                yamazumi_element_id TEXT NOT NULL REFERENCES yamazumi_elements(id) ON DELETE CASCADE,
+                target_assembly_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE SET NULL,
+                name TEXT NOT NULL, selection_rule TEXT NOT NULL DEFAULT 'Choose one',
+                quantity REAL NOT NULL DEFAULT 1, notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
+                UNIQUE(yamazumi_element_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS work_element_material_options (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL REFERENCES work_element_material_groups(id) ON DELETE CASCADE,
+                part_id TEXT REFERENCES parts(id) ON DELETE CASCADE,
+                assembly_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE,
+                updated_at TEXT NOT NULL,
+                CHECK ((part_id IS NOT NULL AND assembly_id IS NULL)
+                    OR (part_id IS NULL AND assembly_id IS NOT NULL)),
+                UNIQUE(group_id, part_id), UNIQUE(group_id, assembly_id)
+            );
+            CREATE TABLE IF NOT EXISTS process_part_groups (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE CASCADE,
+                section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
+                name TEXT NOT NULL, selection_rule TEXT NOT NULL DEFAULT 'Use all',
+                quantity REAL NOT NULL DEFAULT 1, notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
+                UNIQUE(work_element_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS process_part_options (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL REFERENCES process_part_groups(id) ON DELETE CASCADE,
+                part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                updated_at TEXT NOT NULL,
+                UNIQUE(group_id, part_id)
+            );
             """
         )
+        project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+        if "product_line" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
         assignment_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(fishbone_part_assignments)").fetchall()
         }
@@ -256,8 +329,15 @@ def init_db() -> None:
             timestamp = now_iso()
             project_id = str(uuid4())
             conn.execute(
-                "INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (project_id, "Sample NPI launch", "Next-generation assembly", "Industrial engineering", "A", "Draft", 60, "Replace this sample or create a new project.", timestamp, timestamp),
+                """INSERT INTO projects
+                   (id, name, program, product_line, owner, revision, status,
+                    takt_time_s, notes, created_at, updated_at)
+                   VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    project_id, "Sample NPI launch", "Next-generation assembly",
+                    "Industrial engineering", "A", "Draft", 60,
+                    "Replace this sample or create a new project.", timestamp, timestamp,
+                ),
             )
             sample_parts = [
                 ("PN-100100", "Main housing", 1, "A"),
@@ -284,6 +364,97 @@ def init_db() -> None:
                     (str(uuid4()), project_id, *row, timestamp),
                 )
 
+        # Every project gets one durable planning scenario. Existing databases are
+        # migrated in place, preserving their current Yamazumi and Process Plan as
+        # the initial scenario instead of treating the project's revision text as history.
+        timestamp = now_iso()
+        for project in conn.execute("SELECT * FROM projects").fetchall():
+            if not conn.execute(
+                "SELECT 1 FROM planning_scenarios WHERE project_id=? LIMIT 1", (project["id"],)
+            ).fetchone():
+                conn.execute(
+                    """INSERT INTO planning_scenarios
+                       (id, project_id, name, revision_label, revision_sequence, status,
+                        takt_time_s, change_summary, created_by, created_at, updated_at)
+                       VALUES (?, ?, 'Current plan', ?, 1, 'Working', ?,
+                               'Migrated from the original project plan', ?, ?, ?)""",
+                    (
+                        str(uuid4()), project["id"], str(project["revision"] or "A"),
+                        float(project["takt_time_s"] or 60), str(project["owner"] or ""),
+                        timestamp, timestamp,
+                    ),
+                )
+
+        work_columns = {row[1] for row in conn.execute("PRAGMA table_info(work_elements)").fetchall()}
+        if "scenario_id" not in work_columns:
+            conn.execute(
+                "ALTER TABLE work_elements ADD COLUMN scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE"
+            )
+        if "output_assembly_number" not in work_columns:
+            conn.execute("ALTER TABLE work_elements ADD COLUMN output_assembly_number TEXT DEFAULT ''")
+        if "output_assembly_name" not in work_columns:
+            conn.execute("ALTER TABLE work_elements ADD COLUMN output_assembly_name TEXT DEFAULT ''")
+        conn.execute(
+            """UPDATE work_elements
+               SET scenario_id=(SELECT id FROM planning_scenarios s
+                                WHERE s.project_id=work_elements.project_id
+                                ORDER BY revision_sequence, created_at LIMIT 1)
+               WHERE scenario_id IS NULL OR scenario_id=''"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_work_elements_scenario ON work_elements(project_id, scenario_id, sequence)"
+        )
+
+        area_columns = {row[1] for row in conn.execute("PRAGMA table_info(yamazumi_areas)").fetchall()}
+        if "scenario_id" not in area_columns:
+            # The original UNIQUE(project_id, name) prevents two scenarios from
+            # carrying the same balancing areas, so rebuild this one parent table.
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.executescript(
+                """
+                CREATE TABLE yamazumi_areas_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
+                    name TEXT NOT NULL, takt_override_s REAL, updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, scenario_id, name)
+                );
+                INSERT INTO yamazumi_areas_new
+                    (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                SELECT a.id, a.project_id,
+                       (SELECT s.id FROM planning_scenarios s
+                        WHERE s.project_id=a.project_id
+                        ORDER BY s.revision_sequence, s.created_at LIMIT 1),
+                       a.section_id, a.name, a.takt_override_s, a.updated_at
+                FROM yamazumi_areas a;
+                DROP TABLE yamazumi_areas;
+                ALTER TABLE yamazumi_areas_new RENAME TO yamazumi_areas;
+                """
+            )
+            conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_yamazumi_areas_scenario ON yamazumi_areas(project_id, scenario_id, name)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assembly_policy_scenario ON assembly_scenario_policies(project_id, scenario_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_material_groups_element ON work_element_material_groups(project_id, scenario_id, yamazumi_element_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_process_part_groups_element ON process_part_groups(project_id, scenario_id, work_element_id)"
+        )
+        material_group_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(work_element_material_groups)").fetchall()
+        }
+        if "target_assembly_id" not in material_group_columns:
+            conn.execute(
+                """ALTER TABLE work_element_material_groups
+                   ADD COLUMN target_assembly_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE SET NULL"""
+            )
+
 
 def query(sql: str, params: tuple = ()) -> list[dict]:
     with connection() as conn:
@@ -302,6 +473,302 @@ def projects() -> list[dict]:
 def get_project(project_id: str) -> dict | None:
     rows = query("SELECT * FROM projects WHERE id = ?", (project_id,))
     return rows[0] if rows else None
+
+
+def planning_scenarios(project_id: str, include_archived: bool = False) -> list[dict]:
+    archived_clause = "" if include_archived else "AND s.status <> 'Archived'"
+    return query(
+        f"""SELECT s.*, parent.name AS parent_name, parent.revision_label AS parent_revision_label
+            FROM planning_scenarios s
+            LEFT JOIN planning_scenarios parent ON parent.id=s.parent_scenario_id
+            WHERE s.project_id=? {archived_clause}
+            ORDER BY s.revision_sequence DESC, s.created_at DESC""",
+        (project_id,),
+    )
+
+
+def get_planning_scenario(project_id: str, scenario_id: str) -> dict | None:
+    rows = query(
+        "SELECT * FROM planning_scenarios WHERE id=? AND project_id=?",
+        (scenario_id, project_id),
+    )
+    return rows[0] if rows else None
+
+
+def next_scenario_revision_label(project_id: str, current_label: str) -> str:
+    """Suggest the next numeric or alphabetic label without using labels as identifiers."""
+    label = str(current_label or "").strip()
+    if label.isdigit():
+        candidate = str(int(label) + 1)
+    elif label.isalpha():
+        number = 0
+        for char in label.upper():
+            number = number * 26 + (ord(char) - ord("A") + 1)
+        number += 1
+        letters: list[str] = []
+        while number:
+            number, remainder = divmod(number - 1, 26)
+            letters.append(chr(ord("A") + remainder))
+        candidate = "".join(reversed(letters))
+    else:
+        candidate = f"{label or 'Rev'}-2"
+    used = {str(row["revision_label"]).casefold() for row in planning_scenarios(project_id, True)}
+    base, suffix = candidate, 2
+    while candidate.casefold() in used:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def update_planning_scenario(project_id: str, scenario_id: str, values: dict) -> None:
+    name = str(values.get("name") or "").strip()
+    revision_label = str(values.get("revision_label") or "").strip()
+    status = str(values.get("status") or "Working").strip().title()
+    if not name or not revision_label:
+        raise ValueError("Scenario name and revision label are required.")
+    if status not in {"Working", "Frozen", "Released", "Archived"}:
+        raise ValueError("Choose a valid scenario status.")
+    try:
+        takt = float(values.get("takt_time_s"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Scenario takt time must be a number.") from exc
+    if takt <= 0:
+        raise ValueError("Scenario takt time must be greater than zero.")
+    try:
+        execute(
+            """UPDATE planning_scenarios
+               SET name=?, revision_label=?, status=?, takt_time_s=?, change_summary=?, updated_at=?
+               WHERE id=? AND project_id=?""",
+            (
+                name, revision_label, status, takt,
+                str(values.get("change_summary") or "").strip(), now_iso(), scenario_id, project_id,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("Scenario names and revision labels must be unique within this project.") from exc
+
+
+def clone_planning_scenario(
+    project_id: str,
+    source_scenario_id: str,
+    name: str,
+    revision_label: str,
+    takt_time_s: float,
+    change_summary: str = "",
+    created_by: str = "",
+) -> str:
+    """Clone a complete balancing branch and preserve its internal lineage links."""
+    name = str(name or "").strip()
+    revision_label = str(revision_label or "").strip()
+    if not name or not revision_label:
+        raise ValueError("Scenario name and revision label are required.")
+    try:
+        takt = float(takt_time_s)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Scenario takt time must be a number.") from exc
+    if takt <= 0:
+        raise ValueError("Scenario takt time must be greater than zero.")
+
+    new_scenario_id = str(uuid4())
+    timestamp = now_iso()
+    try:
+        with connection() as conn:
+            source = conn.execute(
+                "SELECT * FROM planning_scenarios WHERE id=? AND project_id=?",
+                (source_scenario_id, project_id),
+            ).fetchone()
+            if not source:
+                raise ValueError("The source scenario no longer exists.")
+            sequence = conn.execute(
+                "SELECT COALESCE(MAX(revision_sequence), 0) + 1 FROM planning_scenarios WHERE project_id=?",
+                (project_id,),
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO planning_scenarios
+                   (id, project_id, name, revision_label, revision_sequence, parent_scenario_id,
+                    status, takt_time_s, change_summary, created_by, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'Working', ?, ?, ?, ?, ?)""",
+                (
+                    new_scenario_id, project_id, name, revision_label, sequence,
+                    source_scenario_id, takt, str(change_summary or "").strip(),
+                    str(created_by or "").strip(), timestamp, timestamp,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO assembly_scenario_policies
+                   (project_id, scenario_id, assembly_id, sourcing_decision, supplier,
+                    build_area, buffer_policy, storage_location, minimum_quantity,
+                    target_quantity, maximum_quantity, updated_at)
+                   SELECT project_id, ?, assembly_id, sourcing_decision, supplier,
+                          build_area, buffer_policy, storage_location, minimum_quantity,
+                          target_quantity, maximum_quantity, ?
+                   FROM assembly_scenario_policies
+                   WHERE project_id=? AND scenario_id=?""",
+                (new_scenario_id, timestamp, project_id, source_scenario_id),
+            )
+
+            process_id_map: dict[str, str] = {}
+            for source_row in conn.execute(
+                "SELECT * FROM work_elements WHERE project_id=? AND scenario_id=? ORDER BY sequence",
+                (project_id, source_scenario_id),
+            ).fetchall():
+                row = dict(source_row)
+                old_id, new_id = str(row["id"]), str(uuid4())
+                process_id_map[old_id] = new_id
+                row.update(id=new_id, scenario_id=new_scenario_id, updated_at=timestamp)
+                columns = list(row)
+                conn.execute(
+                    f"INSERT INTO work_elements ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    tuple(row[column] for column in columns),
+                )
+
+            for source_group in conn.execute(
+                """SELECT * FROM process_part_groups
+                   WHERE project_id=? AND scenario_id=? ORDER BY name""",
+                (project_id, source_scenario_id),
+            ).fetchall():
+                group = dict(source_group)
+                old_group_id = str(group["id"])
+                new_work_element_id = process_id_map.get(str(group["work_element_id"]))
+                if not new_work_element_id:
+                    continue
+                new_group_id = str(uuid4())
+                group.update(
+                    id=new_group_id,
+                    scenario_id=new_scenario_id,
+                    work_element_id=new_work_element_id,
+                    updated_at=timestamp,
+                )
+                columns = list(group)
+                conn.execute(
+                    f"INSERT INTO process_part_groups ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    tuple(group[column] for column in columns),
+                )
+                for source_option in conn.execute(
+                    "SELECT * FROM process_part_options WHERE group_id=?", (old_group_id,)
+                ).fetchall():
+                    option = dict(source_option)
+                    option.update(id=str(uuid4()), group_id=new_group_id, updated_at=timestamp)
+                    option_columns = list(option)
+                    conn.execute(
+                        f"INSERT INTO process_part_options ({', '.join(option_columns)}) VALUES ({', '.join('?' for _ in option_columns)})",
+                        tuple(option[column] for column in option_columns),
+                    )
+
+            area_id_map: dict[str, str] = {}
+            for source_row in conn.execute(
+                "SELECT * FROM yamazumi_areas WHERE project_id=? AND scenario_id=? ORDER BY name",
+                (project_id, source_scenario_id),
+            ).fetchall():
+                row = dict(source_row)
+                old_id, new_id = str(row["id"]), str(uuid4())
+                area_id_map[old_id] = new_id
+                row.update(id=new_id, scenario_id=new_scenario_id, updated_at=timestamp)
+                columns = list(row)
+                conn.execute(
+                    f"INSERT INTO yamazumi_areas ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    tuple(row[column] for column in columns),
+                )
+
+            pitch_id_map: dict[str, str] = {}
+            yamazumi_element_id_map: dict[str, str] = {}
+            for old_area_id, new_area_id in area_id_map.items():
+                for source_row in conn.execute(
+                    "SELECT * FROM yamazumi_pitches WHERE project_id=? AND area_id=? ORDER BY sequence",
+                    (project_id, old_area_id),
+                ).fetchall():
+                    row = dict(source_row)
+                    old_id, new_id = str(row["id"]), str(uuid4())
+                    pitch_id_map[old_id] = new_id
+                    row.update(id=new_id, area_id=new_area_id, updated_at=timestamp)
+                    columns = list(row)
+                    conn.execute(
+                        f"INSERT INTO yamazumi_pitches ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                        tuple(row[column] for column in columns),
+                    )
+                for source_row in conn.execute(
+                    "SELECT * FROM yamazumi_work_regions WHERE project_id=? AND area_id=? ORDER BY sequence",
+                    (project_id, old_area_id),
+                ).fetchall():
+                    row = dict(source_row)
+                    row.update(id=str(uuid4()), area_id=new_area_id, updated_at=timestamp)
+                    columns = list(row)
+                    conn.execute(
+                        f"INSERT INTO yamazumi_work_regions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                        tuple(row[column] for column in columns),
+                    )
+                for source_row in conn.execute(
+                    "SELECT * FROM yamazumi_elements WHERE project_id=? AND area_id=? ORDER BY sequence",
+                    (project_id, old_area_id),
+                ).fetchall():
+                    row = dict(source_row)
+                    old_element_id = str(row["id"])
+                    new_element_id = str(uuid4())
+                    yamazumi_element_id_map[old_element_id] = new_element_id
+                    old_process_id = str(row.get("process_element_id") or "")
+                    row.update(
+                        id=new_element_id,
+                        area_id=new_area_id,
+                        pitch_id=pitch_id_map.get(str(row.get("pitch_id") or "")),
+                        process_element_id=process_id_map.get(old_process_id),
+                        updated_at=timestamp,
+                    )
+                    columns = list(row)
+                    conn.execute(
+                        f"INSERT INTO yamazumi_elements ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                        tuple(row[column] for column in columns),
+                    )
+
+            for source_group in conn.execute(
+                """SELECT * FROM work_element_material_groups
+                   WHERE project_id=? AND scenario_id=? ORDER BY name""",
+                (project_id, source_scenario_id),
+            ).fetchall():
+                group = dict(source_group)
+                old_group_id = str(group["id"])
+                new_element_id = yamazumi_element_id_map.get(str(group["yamazumi_element_id"]))
+                if not new_element_id:
+                    continue
+                new_group_id = str(uuid4())
+                group.update(
+                    id=new_group_id,
+                    scenario_id=new_scenario_id,
+                    yamazumi_element_id=new_element_id,
+                    updated_at=timestamp,
+                )
+                columns = list(group)
+                conn.execute(
+                    f"INSERT INTO work_element_material_groups ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    tuple(group[column] for column in columns),
+                )
+                for source_option in conn.execute(
+                    "SELECT * FROM work_element_material_options WHERE group_id=?",
+                    (old_group_id,),
+                ).fetchall():
+                    option = dict(source_option)
+                    option.update(id=str(uuid4()), group_id=new_group_id, updated_at=timestamp)
+                    option_columns = list(option)
+                    conn.execute(
+                        f"INSERT INTO work_element_material_options ({', '.join(option_columns)}) VALUES ({', '.join('?' for _ in option_columns)})",
+                        tuple(option[column] for column in option_columns),
+                    )
+
+            conn.execute(
+                "UPDATE projects SET updated_at=? WHERE id=?", (timestamp, project_id)
+            )
+            conn.execute(
+                """INSERT INTO audit_log
+                   (id, project_id, table_name, action, row_count, editor_name, details, created_at)
+                   VALUES (?, ?, 'Planning scenarios', 'Save as scenario', 1, ?, ?, ?)""",
+                (
+                    str(uuid4()), project_id, str(created_by or "").strip(),
+                    json.dumps({"source_scenario_id": source_scenario_id, "new_scenario_id": new_scenario_id}),
+                    timestamp,
+                ),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("Scenario names and revision labels must be unique within this project.") from exc
+    return new_scenario_id
 
 
 def record_audit_event(
@@ -342,12 +809,555 @@ def audit_history(project_id: str, table_name: str | None = None, limit: int = 1
     return pd.DataFrame(rows)
 
 
-def yamazumi_areas(project_id: str) -> pd.DataFrame:
+ASSEMBLY_PLANNING_REASONS = {
+    "Purchased complete", "Separate build process", "Inventory buffer",
+    "Independent test or traceability", "Other",
+}
+ASSEMBLY_SOURCING_DECISIONS = {"Undecided", "Make", "Buy"}
+ASSEMBLY_BUFFER_POLICIES = {"None", "WIP buffer", "Safety stock"}
+MATERIAL_SELECTION_RULES = {"Choose one", "Use all", "Optional"}
+
+
+def manufacturing_assemblies(project_id: str, scenario_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT a.*, parent.assembly_number AS parent_assembly_number,
+                  parent.name AS parent_name,
+                  COALESCE(policy.sourcing_decision, 'Undecided') AS sourcing_decision,
+                  COALESCE(policy.supplier, '') AS supplier,
+                  COALESCE(policy.build_area, '') AS build_area,
+                  COALESCE(policy.buffer_policy, 'None') AS buffer_policy,
+                  COALESCE(policy.storage_location, '') AS storage_location,
+                  policy.minimum_quantity, policy.target_quantity, policy.maximum_quantity
+           FROM manufacturing_assemblies a
+           LEFT JOIN manufacturing_assemblies parent ON parent.id=a.parent_id
+           LEFT JOIN assembly_scenario_policies policy
+             ON policy.assembly_id=a.id AND policy.scenario_id=?
+           WHERE a.project_id=?
+           ORDER BY a.assembly_number""",
+        (scenario_id, project_id),
+    ))
+
+
+def _optional_nonnegative_number(value, label: str) -> float | None:
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a number.") from exc
+    if number < 0:
+        raise ValueError(f"{label} cannot be negative.")
+    return number
+
+
+def _assembly_text(value) -> str:
+    """Normalize nullable values coming from pandas-backed table editors."""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def replace_manufacturing_assemblies(
+    project_id: str, scenario_id: str, edited: pd.DataFrame
+) -> int:
+    required = {
+        "id", "assembly_number", "name", "pits_reference", "planning_reason",
+        "parent_id", "active", "notes", "sourcing_decision", "supplier",
+        "build_area", "buffer_policy", "storage_location", "minimum_quantity",
+        "target_quantity", "maximum_quantity",
+    }
+    if not required.issubset(edited.columns):
+        raise ValueError("The manufacturing-assembly table is missing required columns.")
+    if not get_planning_scenario(project_id, scenario_id):
+        raise ValueError("The active planning scenario no longer exists.")
+
+    timestamp = now_iso()
+    records: list[dict] = []
+    seen_numbers: set[str] = set()
+    for row in edited.to_dict("records"):
+        assembly_number = _assembly_text(row.get("assembly_number"))
+        name = _assembly_text(row.get("name"))
+        if not assembly_number or not name:
+            raise ValueError("Every manufacturing assembly needs an assembly number and name.")
+        normalized_number = assembly_number.casefold()
+        if normalized_number in seen_numbers:
+            raise ValueError("Manufacturing assembly numbers must be unique within the project.")
+        seen_numbers.add(normalized_number)
+        planning_reason = _assembly_text(row.get("planning_reason")) or "Other"
+        sourcing = (_assembly_text(row.get("sourcing_decision")) or "Undecided").title()
+        buffer_policy = _assembly_text(row.get("buffer_policy")) or "None"
+        if planning_reason not in ASSEMBLY_PLANNING_REASONS:
+            raise ValueError(f"Choose a valid planning reason for {assembly_number}.")
+        if sourcing not in ASSEMBLY_SOURCING_DECISIONS:
+            raise ValueError(f"Choose Make, Buy, or Undecided for {assembly_number}.")
+        if buffer_policy not in ASSEMBLY_BUFFER_POLICIES:
+            raise ValueError(f"Choose a valid buffer policy for {assembly_number}.")
+        minimum = _optional_nonnegative_number(row.get("minimum_quantity"), "Minimum quantity")
+        target = _optional_nonnegative_number(row.get("target_quantity"), "Target quantity")
+        maximum = _optional_nonnegative_number(row.get("maximum_quantity"), "Maximum quantity")
+        ordered = [value for value in (minimum, target, maximum) if value is not None]
+        if ordered != sorted(ordered):
+            raise ValueError(
+                f"Minimum, target, and maximum quantities must increase in that order for {assembly_number}."
+            )
+        records.append({
+            "id": _assembly_text(row.get("id")) or str(uuid4()),
+            "assembly_number": assembly_number,
+            "name": name,
+            "pits_reference": _assembly_text(row.get("pits_reference")),
+            "planning_reason": planning_reason,
+            "parent_id": _assembly_text(row.get("parent_id")) or None,
+            "active": int(True if pd.isna(row.get("active")) else bool(row.get("active"))),
+            "notes": _assembly_text(row.get("notes")),
+            "sourcing_decision": sourcing,
+            "supplier": _assembly_text(row.get("supplier")),
+            "build_area": _assembly_text(row.get("build_area")),
+            "buffer_policy": buffer_policy,
+            "storage_location": _assembly_text(row.get("storage_location")),
+            "minimum_quantity": minimum,
+            "target_quantity": target,
+            "maximum_quantity": maximum,
+        })
+
+    ids = {record["id"] for record in records}
+    parent_by_id = {record["id"]: record["parent_id"] for record in records}
+    for assembly_id, parent_id in parent_by_id.items():
+        if parent_id and parent_id not in ids:
+            raise ValueError("Every parent assembly must exist in the saved table.")
+        if parent_id == assembly_id:
+            raise ValueError("An assembly cannot be its own parent.")
+        visited: set[str] = set()
+        cursor = assembly_id
+        while cursor:
+            if cursor in visited:
+                raise ValueError("Assembly parent relationships cannot contain a cycle.")
+            visited.add(cursor)
+            cursor = parent_by_id.get(cursor)
+
+    try:
+        with connection() as conn:
+            existing = {
+                str(row[0]) for row in conn.execute(
+                    "SELECT id FROM manufacturing_assemblies WHERE project_id=?", (project_id,)
+                ).fetchall()
+            }
+            kept = {record["id"] for record in records}
+            for record in records:
+                conn.execute(
+                    """INSERT INTO manufacturing_assemblies
+                       (id, project_id, assembly_number, name, pits_reference, planning_reason,
+                        parent_id, active, notes, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET assembly_number=excluded.assembly_number,
+                        name=excluded.name, pits_reference=excluded.pits_reference,
+                        planning_reason=excluded.planning_reason, parent_id=NULL,
+                        active=excluded.active, notes=excluded.notes, updated_at=excluded.updated_at""",
+                    (
+                        record["id"], project_id, record["assembly_number"], record["name"],
+                        record["pits_reference"], record["planning_reason"], record["active"],
+                        record["notes"], timestamp,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO assembly_scenario_policies
+                       (project_id, scenario_id, assembly_id, sourcing_decision, supplier,
+                        build_area, buffer_policy, storage_location, minimum_quantity,
+                        target_quantity, maximum_quantity, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(scenario_id, assembly_id) DO UPDATE SET
+                        sourcing_decision=excluded.sourcing_decision, supplier=excluded.supplier,
+                        build_area=excluded.build_area, buffer_policy=excluded.buffer_policy,
+                        storage_location=excluded.storage_location,
+                        minimum_quantity=excluded.minimum_quantity,
+                        target_quantity=excluded.target_quantity,
+                        maximum_quantity=excluded.maximum_quantity,
+                        updated_at=excluded.updated_at""",
+                    (
+                        project_id, scenario_id, record["id"], record["sourcing_decision"],
+                        record["supplier"], record["build_area"], record["buffer_policy"],
+                        record["storage_location"], record["minimum_quantity"],
+                        record["target_quantity"], record["maximum_quantity"], timestamp,
+                    ),
+                )
+            for record in records:
+                conn.execute(
+                    "UPDATE manufacturing_assemblies SET parent_id=? WHERE id=? AND project_id=?",
+                    (record["parent_id"], record["id"], project_id),
+                )
+            removed = existing - kept
+            if removed:
+                placeholders = ",".join("?" for _ in removed)
+                conn.execute(
+                    f"DELETE FROM manufacturing_assemblies WHERE project_id=? AND id IN ({placeholders})",
+                    (project_id, *removed),
+                )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("Manufacturing assembly numbers must be unique within the project.") from exc
+    return len(records)
+
+
+def bulk_update_assembly_policy(
+    project_id: str,
+    scenario_id: str,
+    assembly_ids: list[str],
+    sourcing_decision: str | None = None,
+    buffer_policy: str | None = None,
+) -> int:
+    if not assembly_ids:
+        return 0
+    if sourcing_decision and sourcing_decision not in ASSEMBLY_SOURCING_DECISIONS:
+        raise ValueError("Choose Make, Buy, or Undecided.")
+    if buffer_policy and buffer_policy not in ASSEMBLY_BUFFER_POLICIES:
+        raise ValueError("Choose a valid buffer policy.")
+    if not sourcing_decision and not buffer_policy:
+        raise ValueError("Choose a sourcing decision or buffer policy to apply.")
+    timestamp = now_iso()
+    with connection() as conn:
+        valid_ids = {
+            str(row[0]) for row in conn.execute(
+                f"""SELECT id FROM manufacturing_assemblies
+                    WHERE project_id=? AND id IN ({','.join('?' for _ in assembly_ids)})""",
+                (project_id, *assembly_ids),
+            ).fetchall()
+        }
+        for assembly_id in valid_ids:
+            conn.execute(
+                """INSERT INTO assembly_scenario_policies
+                   (project_id, scenario_id, assembly_id, sourcing_decision, buffer_policy, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(scenario_id, assembly_id) DO UPDATE SET
+                    sourcing_decision=COALESCE(?, sourcing_decision),
+                    buffer_policy=COALESCE(?, buffer_policy), updated_at=?""",
+                (
+                    project_id, scenario_id, assembly_id,
+                    sourcing_decision or "Undecided", buffer_policy or "None", timestamp,
+                    sourcing_decision, buffer_policy, timestamp,
+                ),
+            )
+    return len(valid_ids)
+
+
+def delete_manufacturing_assembly(project_id: str, assembly_id: str) -> str:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT assembly_number, name FROM manufacturing_assemblies WHERE id=? AND project_id=?",
+            (assembly_id, project_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("That manufacturing assembly no longer exists.")
+        conn.execute(
+            "DELETE FROM manufacturing_assemblies WHERE id=? AND project_id=?",
+            (assembly_id, project_id),
+        )
+        return f"{row['assembly_number']} — {row['name']}"
+
+
+def work_element_material_groups(
+    project_id: str, scenario_id: str, yamazumi_element_id: str
+) -> list[dict]:
+    groups = query(
+        """SELECT group_row.*, target.assembly_number AS target_assembly_number,
+                  target.name AS target_assembly_name
+           FROM work_element_material_groups group_row
+           LEFT JOIN manufacturing_assemblies target ON target.id=group_row.target_assembly_id
+           WHERE group_row.project_id=? AND group_row.scenario_id=?
+             AND group_row.yamazumi_element_id=?
+           ORDER BY group_row.name""",
+        (project_id, scenario_id, yamazumi_element_id),
+    )
+    for group in groups:
+        options = query(
+            """SELECT option.id, option.part_id, option.assembly_id,
+                      part.part_number, part.description AS part_description,
+                      assembly.assembly_number, assembly.name AS assembly_name
+               FROM work_element_material_options option
+               LEFT JOIN parts part ON part.id=option.part_id
+               LEFT JOIN manufacturing_assemblies assembly ON assembly.id=option.assembly_id
+               WHERE option.group_id=? ORDER BY part.part_number, assembly.assembly_number""",
+            (group["id"],),
+        )
+        group["options"] = options
+        group["option_tokens"] = [
+            f"part:{option['part_id']}" if option.get("part_id") else f"assembly:{option['assembly_id']}"
+            for option in options
+        ]
+    return groups
+
+
+def save_work_element_material_group(
+    project_id: str,
+    scenario_id: str,
+    yamazumi_element_id: str,
+    group_id: str | None,
+    target_assembly_id: str | None,
+    name: str,
+    selection_rule: str,
+    quantity: float,
+    option_tokens: list[str],
+    notes: str = "",
+) -> str:
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("Material requirement name is required.")
+    if selection_rule not in MATERIAL_SELECTION_RULES:
+        raise ValueError("Choose a valid material selection rule.")
+    try:
+        quantity = float(quantity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Material quantity must be a number.") from exc
+    if quantity <= 0:
+        raise ValueError("Material quantity must be greater than zero.")
+    tokens = list(dict.fromkeys(str(token) for token in option_tokens if str(token)))
+    if not tokens:
+        raise ValueError("Choose at least one part or manufacturing assembly.")
+    group_id = str(group_id or "").strip() or str(uuid4())
+    timestamp = now_iso()
+    try:
+        with connection() as conn:
+            valid_element = conn.execute(
+                """SELECT 1 FROM yamazumi_elements element
+                   JOIN yamazumi_areas area ON area.id=element.area_id
+                   WHERE element.id=? AND element.project_id=? AND area.scenario_id=?""",
+                (yamazumi_element_id, project_id, scenario_id),
+            ).fetchone()
+            if not valid_element:
+                raise ValueError("That Yamazumi work element no longer exists in this scenario.")
+            target_assembly_id = str(target_assembly_id or "").strip() or None
+            if target_assembly_id and not conn.execute(
+                """SELECT 1 FROM manufacturing_assemblies
+                   WHERE id=? AND project_id=? AND active=1""",
+                (target_assembly_id, project_id),
+            ).fetchone():
+                raise ValueError("The selected target assembly no longer exists or is inactive.")
+            conn.execute(
+                """INSERT INTO work_element_material_groups
+                   (id, project_id, scenario_id, yamazumi_element_id, target_assembly_id, name,
+                    selection_rule, quantity, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                    target_assembly_id=excluded.target_assembly_id,
+                    selection_rule=excluded.selection_rule, quantity=excluded.quantity,
+                    notes=excluded.notes, updated_at=excluded.updated_at""",
+                (
+                    group_id, project_id, scenario_id, yamazumi_element_id,
+                    target_assembly_id, name,
+                    selection_rule, quantity, str(notes or "").strip(), timestamp,
+                ),
+            )
+            conn.execute("DELETE FROM work_element_material_options WHERE group_id=?", (group_id,))
+            for token in tokens:
+                kind, separator, item_id = token.partition(":")
+                if not separator or kind not in {"part", "assembly"} or not item_id:
+                    raise ValueError("A selected material option is invalid.")
+                table = "parts" if kind == "part" else "manufacturing_assemblies"
+                if not conn.execute(
+                    f"SELECT 1 FROM {table} WHERE id=? AND project_id=?", (item_id, project_id)
+                ).fetchone():
+                    raise ValueError("A selected material option no longer exists in this project.")
+                conn.execute(
+                    """INSERT INTO work_element_material_options
+                       (id, group_id, part_id, assembly_id, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid4()), group_id, item_id if kind == "part" else None,
+                        item_id if kind == "assembly" else None, timestamp,
+                    ),
+                )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("Material requirement names must be unique within a work element.") from exc
+    return group_id
+
+
+def delete_work_element_material_group(
+    project_id: str, scenario_id: str, group_id: str
+) -> bool:
+    with connection() as conn:
+        cursor = conn.execute(
+            """DELETE FROM work_element_material_groups
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (group_id, project_id, scenario_id),
+        )
+        return bool(cursor.rowcount)
+
+
+def material_consumption_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
+    rows = query(
+        """SELECT group_row.id AS group_id, element.id AS process_element_id,
+                  group_row.section_id, section.name AS section_name,
+                  group_row.name AS requirement,
+                  group_row.selection_rule, group_row.quantity,
+                  part.part_number, part.description AS part_description,
+                  group_row.notes
+           FROM process_part_groups group_row
+           JOIN work_elements element ON element.id=group_row.work_element_id
+           LEFT JOIN assembly_sections section ON section.id=group_row.section_id
+           LEFT JOIN process_part_options option ON option.group_id=group_row.id
+           LEFT JOIN parts part ON part.id=option.part_id
+           WHERE group_row.project_id=? AND group_row.scenario_id=?
+           ORDER BY element.sequence, group_row.name, part.part_number""",
+        (project_id, scenario_id),
+    )
+    return pd.DataFrame(rows)
+
+
+def yamazumi_elements_for_section(
+    project_id: str, scenario_id: str, section_id: str
+) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT element.id, element.process_element_id, element.description,
+                  element.time_s, element.model_variant, element.work_type,
+                  element.process_sync_status, area.id AS area_id, area.name AS area_name,
+                  pitch.pitch_number, pitch.pitch_name,
+                  COUNT(DISTINCT group_row.id) AS material_group_count
+           FROM yamazumi_elements element
+           JOIN yamazumi_areas area ON area.id=element.area_id
+           LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
+           LEFT JOIN process_part_groups group_row
+             ON group_row.work_element_id=element.process_element_id
+            AND group_row.scenario_id=area.scenario_id
+           WHERE element.project_id=? AND area.scenario_id=? AND area.section_id=?
+           GROUP BY element.id
+           ORDER BY area.name, pitch.sequence, element.sequence""",
+        (project_id, scenario_id, section_id),
+    ))
+
+
+def process_element_id_for_yamazumi(
+    project_id: str, scenario_id: str, yamazumi_element_id: str
+) -> str | None:
+    rows = query(
+        """SELECT element.process_element_id
+           FROM yamazumi_elements element
+           JOIN yamazumi_areas area ON area.id=element.area_id
+           WHERE element.id=? AND element.project_id=? AND area.scenario_id=?""",
+        (yamazumi_element_id, project_id, scenario_id),
+    )
+    if not rows:
+        return None
+    return str(rows[0].get("process_element_id") or "").strip() or None
+
+
+def process_part_groups(
+    project_id: str, scenario_id: str, work_element_id: str | None = None
+) -> list[dict]:
+    element_clause = " AND group_row.work_element_id=?" if work_element_id else ""
+    params = (project_id, scenario_id, work_element_id) if work_element_id else (project_id, scenario_id)
+    groups = query(
+        f"""SELECT group_row.*, section.name AS section_name,
+                   element.operation, element.station
+            FROM process_part_groups group_row
+            JOIN work_elements element ON element.id=group_row.work_element_id
+            LEFT JOIN assembly_sections section ON section.id=group_row.section_id
+            WHERE group_row.project_id=? AND group_row.scenario_id=?{element_clause}
+            ORDER BY element.sequence, group_row.name""",
+        params,
+    )
+    for group in groups:
+        options = query(
+            """SELECT option.id, option.part_id, part.part_number,
+                      part.description AS part_description, part.model_applicability
+               FROM process_part_options option
+               JOIN parts part ON part.id=option.part_id
+               WHERE option.group_id=? ORDER BY part.part_number""",
+            (group["id"],),
+        )
+        group["options"] = options
+        group["part_ids"] = [str(option["part_id"]) for option in options]
+    return groups
+
+
+def save_process_part_group(
+    project_id: str,
+    scenario_id: str,
+    work_element_id: str,
+    section_id: str,
+    group_id: str | None,
+    name: str,
+    selection_rule: str,
+    quantity: float,
+    part_ids: list[str],
+    notes: str = "",
+) -> str:
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("Part requirement name is required.")
+    if selection_rule not in MATERIAL_SELECTION_RULES:
+        raise ValueError("Choose a valid part-selection rule.")
+    quantity = _optional_nonnegative_number(quantity, "Part quantity")
+    if quantity is None or quantity <= 0:
+        raise ValueError("Part quantity must be greater than zero.")
+    selected_part_ids = list(dict.fromkeys(str(part_id) for part_id in part_ids if str(part_id)))
+    if not selected_part_ids:
+        raise ValueError("Select at least one fishbone part.")
+    group_id = str(group_id or "").strip() or str(uuid4())
+    timestamp = now_iso()
+    try:
+        with connection() as conn:
+            if not conn.execute(
+                """SELECT 1 FROM work_elements
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (work_element_id, project_id, scenario_id),
+            ).fetchone():
+                raise ValueError("That process-plan work element no longer exists.")
+            if not conn.execute(
+                "SELECT 1 FROM assembly_sections WHERE id=? AND project_id=? AND active=1",
+                (section_id, project_id),
+            ).fetchone():
+                raise ValueError("Choose an active fishbone section.")
+            placeholders = ",".join("?" for _ in selected_part_ids)
+            available = {
+                str(row[0]) for row in conn.execute(
+                    f"""SELECT DISTINCT part_id FROM fishbone_part_assignments
+                        WHERE project_id=? AND section_id=? AND part_id IN ({placeholders})""",
+                    (project_id, section_id, *selected_part_ids),
+                ).fetchall()
+            }
+            if available != set(selected_part_ids):
+                raise ValueError("Every selected part must be available in the active fishbone section.")
+            conn.execute(
+                """INSERT INTO process_part_groups
+                   (id, project_id, scenario_id, work_element_id, section_id, name,
+                    selection_rule, quantity, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET section_id=excluded.section_id,
+                    name=excluded.name, selection_rule=excluded.selection_rule,
+                    quantity=excluded.quantity, notes=excluded.notes,
+                    updated_at=excluded.updated_at""",
+                (
+                    group_id, project_id, scenario_id, work_element_id, section_id,
+                    name, selection_rule, quantity, str(notes or "").strip(), timestamp,
+                ),
+            )
+            conn.execute("DELETE FROM process_part_options WHERE group_id=?", (group_id,))
+            for part_id in selected_part_ids:
+                conn.execute(
+                    """INSERT INTO process_part_options
+                       (id, group_id, part_id, updated_at) VALUES (?, ?, ?, ?)""",
+                    (str(uuid4()), group_id, part_id, timestamp),
+                )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("Part requirement names must be unique within a process step.") from exc
+    return group_id
+
+
+def delete_process_part_group(
+    project_id: str, scenario_id: str, group_id: str
+) -> bool:
+    with connection() as conn:
+        cursor = conn.execute(
+            """DELETE FROM process_part_groups
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (group_id, project_id, scenario_id),
+        )
+        return bool(cursor.rowcount)
+
+
+def yamazumi_areas(project_id: str, scenario_id: str) -> pd.DataFrame:
     return pd.DataFrame(query(
         """SELECT a.*, s.name AS section_name
            FROM yamazumi_areas a LEFT JOIN assembly_sections s ON s.id=a.section_id
-           WHERE a.project_id=? ORDER BY a.name""",
-        (project_id,),
+           WHERE a.project_id=? AND a.scenario_id=? ORDER BY a.name""",
+        (project_id, scenario_id),
     ))
 
 
@@ -449,7 +1459,7 @@ def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[d
     return len(cleaned)
 
 
-def rename_yamazumi_variants(project_id: str, label_mapping: dict[str, str]) -> int:
+def rename_yamazumi_variants(project_id: str, scenario_id: str, label_mapping: dict[str, str]) -> int:
     """Normalize saved Yamazumi labels after a display-label convention changes."""
     mapping = {str(old): str(new) for old, new in label_mapping.items() if str(old) != str(new)}
     if not mapping:
@@ -458,7 +1468,9 @@ def rename_yamazumi_variants(project_id: str, label_mapping: dict[str, str]) -> 
     timestamp = now_iso()
     with connection() as conn:
         elements = conn.execute(
-            "SELECT id, model_variant FROM yamazumi_elements WHERE project_id=?", (project_id,)
+            """SELECT e.id, e.model_variant FROM yamazumi_elements e
+               JOIN yamazumi_areas a ON a.id=e.area_id
+               WHERE e.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
         ).fetchall()
         for element in elements:
             new_label = mapping.get(str(element["model_variant"]))
@@ -469,7 +1481,9 @@ def rename_yamazumi_variants(project_id: str, label_mapping: dict[str, str]) -> 
                 )
                 changed += 1
         pitches = conn.execute(
-            "SELECT id, model_variants FROM yamazumi_pitches WHERE project_id=?", (project_id,)
+            """SELECT p.id, p.model_variants FROM yamazumi_pitches p
+               JOIN yamazumi_areas a ON a.id=p.area_id
+               WHERE p.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
         ).fetchall()
         for pitch in pitches:
             variants = json.loads(pitch["model_variants"] or "[]")
@@ -483,13 +1497,13 @@ def rename_yamazumi_variants(project_id: str, label_mapping: dict[str, str]) -> 
     return changed
 
 
-def clear_yamazumi_data(project_id: str, area_id: str | None = None) -> dict[str, int]:
+def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None = None) -> dict[str, int]:
     """Delete Yamazumi-only areas, pitches, and work without changing Fishbone or Process Plan."""
     with connection() as conn:
         if area_id:
             area = conn.execute(
-                "SELECT id FROM yamazumi_areas WHERE id=? AND project_id=?",
-                (area_id, project_id),
+                "SELECT id FROM yamazumi_areas WHERE id=? AND project_id=? AND scenario_id=?",
+                (area_id, project_id, scenario_id),
             ).fetchone()
             if not area:
                 raise ValueError("That Yamazumi area no longer exists.")
@@ -508,27 +1522,36 @@ def clear_yamazumi_data(project_id: str, area_id: str | None = None) -> dict[str
         else:
             counts = {
                 "areas": conn.execute(
-                    "SELECT COUNT(*) FROM yamazumi_areas WHERE project_id=?", (project_id,)
+                    "SELECT COUNT(*) FROM yamazumi_areas WHERE project_id=? AND scenario_id=?", (project_id, scenario_id)
                 ).fetchone()[0],
                 "pitches": conn.execute(
-                    "SELECT COUNT(*) FROM yamazumi_pitches WHERE project_id=?", (project_id,)
+                    """SELECT COUNT(*) FROM yamazumi_pitches p JOIN yamazumi_areas a ON a.id=p.area_id
+                       WHERE p.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
                 ).fetchone()[0],
                 "elements": conn.execute(
-                    "SELECT COUNT(*) FROM yamazumi_elements WHERE project_id=?", (project_id,)
+                    """SELECT COUNT(*) FROM yamazumi_elements e JOIN yamazumi_areas a ON a.id=e.area_id
+                       WHERE e.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
                 ).fetchone()[0],
             }
-            conn.execute("DELETE FROM yamazumi_areas WHERE project_id=?", (project_id,))
+            conn.execute(
+                "DELETE FROM yamazumi_areas WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            )
     return counts
 
 
 def upsert_yamazumi_area(
-    project_id: str, name: str, section_id: str | None = None, takt_override_s: float | None = None
+    project_id: str, scenario_id: str, name: str,
+    section_id: str | None = None, takt_override_s: float | None = None
 ) -> str:
     name = str(name or "").strip()
     if not name:
         raise ValueError("Yamazumi area name is required.")
     timestamp = now_iso()
-    existing = query("SELECT id FROM yamazumi_areas WHERE project_id=? AND name=?", (project_id, name))
+    existing = query(
+        "SELECT id FROM yamazumi_areas WHERE project_id=? AND scenario_id=? AND name=?",
+        (project_id, scenario_id, name),
+    )
     if existing:
         area_id = str(existing[0]["id"])
         execute(
@@ -539,8 +1562,10 @@ def upsert_yamazumi_area(
         return area_id
     area_id = str(uuid4())
     execute(
-        "INSERT INTO yamazumi_areas VALUES (?, ?, ?, ?, ?, ?)",
-        (area_id, project_id, section_id, name, takt_override_s, timestamp),
+        """INSERT INTO yamazumi_areas
+           (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (area_id, project_id, scenario_id, section_id, name, takt_override_s, timestamp),
     )
     return area_id
 
@@ -1029,7 +2054,12 @@ def move_yamazumi_element(project_id: str, element_id: str, pitch_id: str | None
     )
 
 
-def import_yamazumi_rows(project_id: str, rows: pd.DataFrame, section_ids_by_name: dict[str, str]) -> tuple[int, int, int]:
+def import_yamazumi_rows(
+    project_id: str,
+    scenario_id: str,
+    rows: pd.DataFrame,
+    section_ids_by_name: dict[str, str],
+) -> tuple[int, int, int]:
     required = {"Sub-Line", "Pitch_number", "Pitch_status", "Pitch_name", "Pitch_Takt_time", "Model_variant", "Work_Type", "Work_Description", "Work_Time_to_complete", "Work_region"}
     missing = required - set(rows.columns)
     if missing:
@@ -1046,7 +2076,12 @@ def import_yamazumi_rows(project_id: str, rows: pd.DataFrame, section_ids_by_nam
             continue
         takt_raw = row.get("Pitch_Takt_time")
         takt = None if pd.isna(takt_raw) or str(takt_raw).strip() == "" else float(takt_raw)
-        area_id = area_ids.setdefault(area_name, upsert_yamazumi_area(project_id, area_name, section_ids_by_name.get(area_name), takt))
+        area_id = area_ids.setdefault(
+            area_name,
+            upsert_yamazumi_area(
+                project_id, scenario_id, area_name, section_ids_by_name.get(area_name), takt
+            ),
+        )
         pitch_key = (area_id, pitch_number)
         if pitch_key not in pitch_ids:
             existing_pitch = query("SELECT id FROM yamazumi_pitches WHERE project_id=? AND area_id=? AND pitch_number=?", (project_id, area_id, pitch_number))
@@ -1088,7 +2123,7 @@ def import_yamazumi_rows(project_id: str, rows: pd.DataFrame, section_ids_by_nam
     return len(area_ids), len(pitch_ids), elements_added
 
 
-def reconcile_yamazumi_to_process(project_id: str, element_ids: list[str]) -> int:
+def reconcile_yamazumi_to_process(project_id: str, scenario_id: str, element_ids: list[str]) -> int:
     """Accept Yamazumi station/time changes while retaining IE-authored process details."""
     if not element_ids:
         return 0
@@ -1100,44 +2135,47 @@ def reconcile_yamazumi_to_process(project_id: str, element_ids: list[str]) -> in
                 FROM yamazumi_elements e
                 LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
                 JOIN yamazumi_areas a ON a.id=e.area_id
-                WHERE e.project_id=? AND e.id IN ({placeholders})""",
-            (project_id, *element_ids),
+                WHERE e.project_id=? AND a.scenario_id=? AND e.id IN ({placeholders})""",
+            (project_id, scenario_id, *element_ids),
         ).fetchall()
         for row in rows:
             station = str(row["pitch_number"] or "Unassigned")
             process_id = str(row["process_element_id"] or "").strip()
             if process_id:
                 exists = conn.execute(
-                    "SELECT 1 FROM work_elements WHERE id=? AND project_id=?", (process_id, project_id)
+                    "SELECT 1 FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+                    (process_id, project_id, scenario_id),
                 ).fetchone()
             else:
                 exists = None
             if exists:
                 conn.execute(
                     """UPDATE work_elements SET station=?, cycle_time_s=?, model_applicability=?, updated_at=?
-                       WHERE id=? AND project_id=?""",
+                       WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
                         station, float(row["time_s"] or 0),
                         "All" if str(row["model_variant"]).casefold() == "base" else str(row["model_variant"]),
-                        timestamp, process_id, project_id,
+                        timestamp, process_id, project_id, scenario_id,
                     ),
                 )
             else:
                 process_id = str(uuid4())
                 next_sequence = conn.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) + 10 FROM work_elements WHERE project_id=?",
-                    (project_id,),
+                    """SELECT COALESCE(MAX(sequence), 0) + 10 FROM work_elements
+                       WHERE project_id=? AND scenario_id=?""",
+                    (project_id, scenario_id),
                 ).fetchone()[0]
                 conn.execute(
                     """INSERT INTO work_elements
-                       (id, project_id, sequence, station, operation, description, cycle_time_s,
+                       (id, project_id, scenario_id, sequence, station, operation, description, cycle_time_s,
                         part_number, tool, torque, quality_requirement, ergo_requirement, location,
                         conveyor_height_mm, platform_height_mm, pit_depth_mm,
                         model_applicability, status, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, '', ?, NULL, NULL, NULL, ?, 'Draft', ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', '', ?, '', ?, NULL, NULL, NULL, ?, 'Draft', ?)""",
                     (
-                        process_id, project_id, next_sequence, station, str(row["description"]),
-                        f"Yamazumi area: {row['area_name']}", float(row["time_s"] or 0),
+                        process_id, project_id, scenario_id, next_sequence, station,
+                        str(row["description"]), f"Yamazumi area: {row['area_name']}",
+                        float(row["time_s"] or 0),
                         "CTQ" if "CTQ" in json.loads(row["flags"] or "[]") else "",
                         station,
                         "All" if str(row["model_variant"]).casefold() == "base" else str(row["model_variant"]),
@@ -1152,24 +2190,49 @@ def reconcile_yamazumi_to_process(project_id: str, element_ids: list[str]) -> in
     return len(rows)
 
 
-def project_table(table: str, project_id: str, order_by: str = "updated_at DESC") -> pd.DataFrame:
+def project_table(
+    table: str,
+    project_id: str,
+    order_by: str = "updated_at DESC",
+    scenario_id: str | None = None,
+) -> pd.DataFrame:
     allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
     if table not in allowed:
         raise ValueError("Unsupported table")
+    if table == "work_elements" and scenario_id:
+        return pd.DataFrame(query(
+            f"SELECT * FROM {table} WHERE project_id=? AND scenario_id=? ORDER BY {order_by}",
+            (project_id, scenario_id),
+        ))
     return pd.DataFrame(query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,)))
 
 
-def create_project(name: str, program: str, owner: str, takt_time_s: float) -> str:
+def create_project(
+    name: str,
+    program: str,
+    owner: str,
+    takt_time_s: float,
+    product_line: str = "",
+) -> str:
     project_id, timestamp = str(uuid4()), now_iso()
     execute(
-        "INSERT INTO projects VALUES (?, ?, ?, ?, 'A', 'Draft', ?, '', ?, ?)",
-        (project_id, name.strip(), program.strip(), owner.strip(), takt_time_s, timestamp, timestamp),
+        """INSERT INTO projects
+           (id, name, program, product_line, owner, revision, status,
+            takt_time_s, notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'A', 'Draft', ?, '', ?, ?)""",
+        (
+            project_id, name.strip(), program.strip(), product_line.strip(),
+            owner.strip(), takt_time_s, timestamp, timestamp,
+        ),
     )
     return project_id
 
 
 def update_project(project_id: str, values: dict) -> None:
-    fields = ["name", "program", "owner", "revision", "status", "takt_time_s", "notes"]
+    fields = [
+        "name", "program", "product_line", "owner", "revision", "status",
+        "takt_time_s", "notes",
+    ]
     execute(
         f"UPDATE projects SET {', '.join(f'{field} = ?' for field in fields)}, updated_at = ? WHERE id = ?",
         tuple(values.get(field, "") for field in fields) + (now_iso(), project_id),
@@ -2386,24 +3449,65 @@ def sync_confirmed_mbom_parts(project_id: str) -> int:
     return len(confirmed)
 
 
-def replace_work_elements(project_id: str, edited: pd.DataFrame) -> None:
+def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFrame) -> None:
     fields = ["sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
               "quality_requirement", "ergo_requirement", "location", "conveyor_height_mm", "platform_height_mm",
-              "pit_depth_mm", "model_applicability", "status"]
+              "pit_depth_mm", "model_applicability", "status", "output_assembly_number",
+              "output_assembly_name"]
+    records: list[tuple[str, list]] = []
+    assembly_numbers: set[str] = set()
+    for _, row in edited.iterrows():
+        if not str(row.get("operation", "")).strip():
+            continue
+        element_id = (
+            str(row.get("id"))
+            if row.get("id") is not None and not pd.isna(row.get("id")) and str(row.get("id")).strip()
+            else str(uuid4())
+        )
+        values = []
+        for field in fields:
+            value = row.get(field, "")
+            if value is None or pd.isna(value):
+                value = None if field.endswith("_mm") else (0 if field in {"sequence", "cycle_time_s"} else "")
+            values.append(value)
+        output_number = str(values[fields.index("output_assembly_number")] or "").strip()
+        if output_number:
+            normalized = output_number.casefold()
+            if normalized in assembly_numbers:
+                raise ValueError("Each made-assembly output number can be completed only once in a scenario.")
+            assembly_numbers.add(normalized)
+        records.append((element_id, values))
+
     with connection() as conn:
-        conn.execute("DELETE FROM work_elements WHERE project_id = ?", (project_id,))
-        for idx, row in edited.iterrows():
-            if not str(row.get("operation", "")).strip():
-                continue
-            values = []
-            for field in fields:
-                value = row.get(field, "")
-                if pd.isna(value):
-                    value = None if field.endswith("_mm") else (0 if field in {"sequence", "cycle_time_s"} else "")
-                values.append(value)
+        existing_ids = {
+            str(row[0]) for row in conn.execute(
+                "SELECT id FROM work_elements WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
+        saved_ids = {element_id for element_id, _ in records}
+        assignments = ", ".join(f"{field}=excluded.{field}" for field in fields)
+        for element_id, values in records:
             conn.execute(
-                f"INSERT INTO work_elements (id, project_id, {', '.join(fields)}, updated_at) VALUES ({', '.join(['?'] * (len(fields) + 3))})",
-                (str(row.get("id")) if row.get("id") and not pd.isna(row.get("id")) else str(uuid4()), project_id, *values, now_iso()),
+                f"""INSERT INTO work_elements
+                    (id, project_id, scenario_id, {', '.join(fields)}, updated_at)
+                    VALUES ({', '.join(['?'] * (len(fields) + 4))})
+                    ON CONFLICT(id) DO UPDATE SET {assignments}, updated_at=excluded.updated_at""",
+                (element_id, project_id, scenario_id, *values, now_iso()),
+            )
+        removed = existing_ids - saved_ids
+        if removed:
+            placeholders = ",".join("?" for _ in removed)
+            conn.execute(
+                f"""UPDATE yamazumi_elements
+                    SET process_element_id=NULL, process_sync_status='Needs IE review', updated_at=?
+                    WHERE project_id=? AND process_element_id IN ({placeholders})""",
+                (now_iso(), project_id, *removed),
+            )
+            conn.execute(
+                f"""DELETE FROM work_elements WHERE project_id=? AND scenario_id=?
+                    AND id IN ({placeholders})""",
+                (project_id, scenario_id, *removed),
             )
 
 

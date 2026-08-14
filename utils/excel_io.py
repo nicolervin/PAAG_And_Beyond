@@ -9,7 +9,9 @@ import pandas as pd
 from utils.store import (
     assembly_sections,
     fishbone_part_assignments,
+    get_planning_scenario,
     get_project,
+    material_consumption_for_scenario,
     pits_records,
     pits_revisions,
     project_models,
@@ -200,10 +202,11 @@ def mapped_bom(df: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFrame
     return result
 
 
-def export_workbook(project_id: str) -> bytes:
+def export_workbook(project_id: str, scenario_id: str | None = None) -> bytes:
     project = get_project(project_id)
+    scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
     parts = project_table("parts", project_id, "part_number")
-    elements = project_table("work_elements", project_id, "sequence")
+    elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
     concerns = project_table("concerns", project_id, "created_at")
     fishbone = project_table("fishbone_nodes", project_id, "sequence")
     framework_sections = assembly_sections(project_id)
@@ -211,19 +214,31 @@ def export_workbook(project_id: str) -> bytes:
     source_records = pits_records(project_id)
     source_revisions = pits_revisions(project_id)
     models = project_models(project_id)
+    material_consumption = (
+        material_consumption_for_scenario(project_id, scenario_id)
+        if scenario_id else pd.DataFrame()
+    )
     confirmed_fishbone = fishbone[fishbone["review_status"] == "Confirmed"] if "review_status" in fishbone.columns else fishbone.copy()
     summary = pd.DataFrame([project]).drop(columns=["id"], errors="ignore")
+    scenario_summary = pd.DataFrame([scenario]).drop(
+        columns=["id", "project_id", "parent_scenario_id"], errors="ignore"
+    ) if scenario else pd.DataFrame()
     lucid_columns = [
         "sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
         "quality_requirement", "ergo_requirement", "location", "conveyor_height_mm", "platform_height_mm",
-        "pit_depth_mm", "model_applicability", "status",
+        "pit_depth_mm", "model_applicability", "status", "output_assembly_number",
+        "output_assembly_name",
     ]
     lucid = elements.reindex(columns=lucid_columns)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="Project", index=False)
+        if not scenario_summary.empty:
+            scenario_summary.to_excel(writer, sheet_name="Planning Scenario", index=False)
         parts.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="Parts", index=False)
-        elements.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="Work Elements", index=False)
+        elements.drop(columns=["project_id", "scenario_id"], errors="ignore").to_excel(
+            writer, sheet_name="Work Elements", index=False
+        )
         concerns.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="Concerns", index=False)
         fishbone.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="MBOM Review", index=False)
         confirmed_fishbone.drop(columns=["project_id"], errors="ignore").to_excel(
@@ -238,6 +253,10 @@ def export_workbook(project_id: str) -> bytes:
         source_records.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="PITS Current", index=False)
         source_revisions.to_excel(writer, sheet_name="PITS Revision History", index=False)
         models.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="Models", index=False)
+        if not material_consumption.empty:
+            material_consumption.drop(
+                columns=["group_id", "process_element_id", "section_id"], errors="ignore"
+            ).to_excel(writer, sheet_name="Material Consumption", index=False)
         lucid.to_excel(writer, sheet_name="Lucid Data Link", index=False)
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
