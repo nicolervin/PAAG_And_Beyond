@@ -1398,11 +1398,28 @@ def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
 
 
 def yamazumi_work_regions(project_id: str, area_id: str) -> pd.DataFrame:
-    return pd.DataFrame(query(
+    rows = pd.DataFrame(query(
         """SELECT * FROM yamazumi_work_regions
            WHERE project_id=? AND area_id=? ORDER BY sequence, name""",
         (project_id, area_id),
     ))
+    if rows.empty:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "area_id": pd.Series(dtype="string"),
+            "name": pd.Series(dtype="string"),
+            "description": pd.Series(dtype="string"),
+            "active": pd.Series(dtype="bool"),
+            "color": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="int64"),
+            "updated_at": pd.Series(dtype="string"),
+        })
+    if "name" in rows.columns:
+        rows["name"] = rows["name"].map(lambda value: "" if pd.isna(value) else str(value))
+    if "description" in rows.columns:
+        rows["description"] = rows["description"].map(lambda value: "" if pd.isna(value) else str(value))
+    return rows
 
 
 def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[dict]) -> int:
@@ -1528,7 +1545,14 @@ def yamazumi_flag_definitions(project_id: str) -> pd.DataFrame:
                WHERE project_id=? ORDER BY sequence, name""",
             (project_id,),
         ).fetchall()
-        return pd.DataFrame([dict(row) for row in rows])
+        definitions = pd.DataFrame([dict(row) for row in rows])
+        if definitions.empty:
+            return definitions
+        if "name" in definitions.columns:
+            definitions["name"] = definitions["name"].map(lambda value: "" if pd.isna(value) else str(value))
+        if "description" in definitions.columns:
+            definitions["description"] = definitions["description"].map(lambda value: "" if pd.isna(value) else str(value))
+        return definitions
 
 
 def active_yamazumi_flags(project_id: str) -> list[str]:

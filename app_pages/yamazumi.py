@@ -391,6 +391,10 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
     region_rows = region_definitions.reindex(
         columns=["id", "name", "description", "active", "color", "sequence", "updated_at"]
     )
+    # Empty columns created by reindex default to float64. Streamlit then rejects
+    # TextColumn configuration before the first work region can be added.
+    region_rows["name"] = region_rows["name"].astype("string").fillna("")
+    region_rows["description"] = region_rows["description"].astype("string").fillna("")
     region_rows["active"] = region_rows["active"].fillna(1).astype(bool)
 
     region_header = editable_table_header(
@@ -599,6 +603,8 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
     flag_editor_key = f"yamazumi_flag_editor_{project_id}"
     apply_pending_table_editor_reset(flag_editor_key)
     flag_rows = flag_definitions.copy()
+    flag_rows["name"] = flag_rows["name"].astype("string").fillna("")
+    flag_rows["description"] = flag_rows["description"].astype("string").fillna("")
     flag_rows["active"] = flag_rows["active"].fillna(1).astype(bool)
     flag_rows["system_flag"] = flag_rows["system_flag"].fillna(0).astype(bool)
 
