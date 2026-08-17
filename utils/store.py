@@ -1379,22 +1379,94 @@ def yamazumi_areas(project_id: str, scenario_id: str) -> pd.DataFrame:
     ))
 
 
+def yamazumi_area_link_status(project_id: str, scenario_id: str) -> dict[str, int | bool]:
+    """Report main-spine gaps and any existing one-to-one link conflicts."""
+    sections = query(
+        """SELECT id, name FROM assembly_sections
+           WHERE project_id=? AND active=1 AND section_type='Main spine'
+           ORDER BY sequence, name""",
+        (project_id,),
+    )
+    areas = query(
+        """SELECT id, name, section_id FROM yamazumi_areas
+           WHERE project_id=? AND scenario_id=? ORDER BY name, id""",
+        (project_id, scenario_id),
+    )
+    link_counts: dict[str, int] = {}
+    for area in areas:
+        section_id = str(area.get("section_id") or "").strip()
+        if section_id:
+            link_counts[section_id] = link_counts.get(section_id, 0) + 1
+    missing = sum(1 for section in sections if link_counts.get(str(section["id"]), 0) == 0)
+    conflicting = sum(max(0, count - 1) for count in link_counts.values())
+    main_section_by_name = {str(section["name"]).casefold(): str(section["id"]) for section in sections}
+    mislinked = sum(
+        1
+        for area in areas
+        if str(area["name"]).casefold() in main_section_by_name
+        and str(area.get("section_id") or "") != main_section_by_name[str(area["name"]).casefold()]
+    )
+    return {
+        "main_spines": len(sections),
+        "missing": missing,
+        "mislinked": mislinked,
+        "conflicting": conflicting,
+        "needs_sync": bool(missing or mislinked or conflicting),
+    }
+
+
 def yamazumi_pitches(project_id: str, area_id: str) -> pd.DataFrame:
-    return pd.DataFrame(query(
+    rows = pd.DataFrame(query(
         """SELECT * FROM yamazumi_pitches WHERE project_id=? AND area_id=?
            ORDER BY sequence, pitch_number""",
         (project_id, area_id),
     ))
+    if rows.empty:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "area_id": pd.Series(dtype="string"),
+            "pitch_number": pd.Series(dtype="string"),
+            "pitch_name": pd.Series(dtype="string"),
+            "status": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="Int64"),
+            "model_variants": pd.Series(dtype="string"),
+            "pitch_type": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+        })
+    return rows
 
 
 def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
-    return pd.DataFrame(query(
+    rows = pd.DataFrame(query(
         """SELECT e.*, p.pitch_number, p.pitch_name, p.status AS pitch_status
            FROM yamazumi_elements e LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
            WHERE e.project_id=? AND e.area_id=?
            ORDER BY COALESCE(p.sequence, 999999), e.model_variant, e.sequence, e.description""",
         (project_id, area_id),
     ))
+    if rows.empty:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "area_id": pd.Series(dtype="string"),
+            "pitch_id": pd.Series(dtype="string"),
+            "model_variant": pd.Series(dtype="string"),
+            "work_type": pd.Series(dtype="string"),
+            "description": pd.Series(dtype="string"),
+            "time_s": pd.Series(dtype="Float64"),
+            "work_region": pd.Series(dtype="string"),
+            "flags": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="Int64"),
+            "source": pd.Series(dtype="string"),
+            "process_element_id": pd.Series(dtype="string"),
+            "process_sync_status": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+            "pitch_number": pd.Series(dtype="string"),
+            "pitch_name": pd.Series(dtype="string"),
+            "pitch_status": pd.Series(dtype="string"),
+        })
+    return rows
 
 
 def yamazumi_work_regions(project_id: str, area_id: str) -> pd.DataFrame:
@@ -1805,36 +1877,205 @@ def upsert_yamazumi_area(
     if not name:
         raise ValueError("Yamazumi area name is required.")
     timestamp = now_iso()
-    existing = query(
-        "SELECT id FROM yamazumi_areas WHERE project_id=? AND scenario_id=? AND name=?",
-        (project_id, scenario_id, name),
-    )
-    if existing:
-        area_id = str(existing[0]["id"])
-        execute(
-            """UPDATE yamazumi_areas SET section_id=COALESCE(?, section_id),
-               takt_override_s=COALESCE(?, takt_override_s), updated_at=? WHERE id=?""",
-            (section_id, takt_override_s, timestamp, area_id),
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT id, section_id FROM yamazumi_areas WHERE project_id=? AND scenario_id=? AND name=?",
+            (project_id, scenario_id, name),
+        ).fetchone()
+        area_id = str(existing["id"]) if existing else str(uuid4())
+        normalized_section_id = str(section_id or "").strip() or None
+        existing_section_id = (
+            str(existing["section_id"] or "").strip() or None if existing else None
         )
-        return area_id
-    area_id = str(uuid4())
-    execute(
-        """INSERT INTO yamazumi_areas
-           (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (area_id, project_id, scenario_id, section_id, name, takt_override_s, timestamp),
-    )
+        if existing_section_id and normalized_section_id and normalized_section_id != existing_section_id:
+            raise ValueError(
+                "This Yamazumi area is already linked from the Fishbone and cannot be relinked automatically."
+            )
+        if normalized_section_id:
+            _validate_yamazumi_area_link(
+                conn, project_id, scenario_id, normalized_section_id, area_id
+            )
+        if existing:
+            conn.execute(
+                """UPDATE yamazumi_areas SET section_id=COALESCE(?, section_id),
+                   takt_override_s=COALESCE(?, takt_override_s), updated_at=? WHERE id=?""",
+                (normalized_section_id, takt_override_s, timestamp, area_id),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO yamazumi_areas
+                   (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (area_id, project_id, scenario_id, normalized_section_id, name, takt_override_s, timestamp),
+            )
     return area_id
+
+
+def _validate_yamazumi_area_link(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    section_id: str,
+    area_id: str,
+) -> None:
+    section = conn.execute(
+        "SELECT name FROM assembly_sections WHERE id=? AND project_id=?",
+        (section_id, project_id),
+    ).fetchone()
+    if not section:
+        raise ValueError("Choose a Fishbone section from this project.")
+    conflict = conn.execute(
+        """SELECT name FROM yamazumi_areas
+           WHERE project_id=? AND scenario_id=? AND section_id=? AND id<>?""",
+        (project_id, scenario_id, section_id, area_id),
+    ).fetchone()
+    if conflict:
+        raise ValueError(
+            f"Fishbone section {section['name']} is already linked to Yamazumi area {conflict['name']}."
+        )
+
+
+def sync_yamazumi_areas_from_fishbone(project_id: str, scenario_id: str) -> dict[str, int]:
+    """Create and repair one linked area per active main-spine section."""
+    timestamp = now_iso()
+    summary = {"created": 0, "relinked": 0, "conflicts_cleared": 0}
+    with connection() as conn:
+        sections = conn.execute(
+            """SELECT id, name FROM assembly_sections
+               WHERE project_id=? AND active=1 AND section_type='Main spine'
+               ORDER BY sequence, name""",
+            (project_id,),
+        ).fetchall()
+        if not sections:
+            return summary
+
+        # Restart after every change. Re-reading the links prevents a repair
+        # from hiding a newly missing section until the next button click.
+        area_count = conn.execute(
+            "SELECT COUNT(*) FROM yamazumi_areas WHERE project_id=? AND scenario_id=?",
+            (project_id, scenario_id),
+        ).fetchone()[0]
+        max_changes = max(10, (len(sections) + int(area_count)) * 3)
+        for _ in range(max_changes):
+            changed = False
+
+            duplicate = conn.execute(
+                """SELECT section_id FROM yamazumi_areas
+                   WHERE project_id=? AND scenario_id=? AND section_id IS NOT NULL
+                   GROUP BY section_id HAVING COUNT(*) > 1 LIMIT 1""",
+                (project_id, scenario_id),
+            ).fetchone()
+            if duplicate:
+                section = conn.execute(
+                    "SELECT name FROM assembly_sections WHERE id=? AND project_id=?",
+                    (duplicate["section_id"], project_id),
+                ).fetchone()
+                linked = conn.execute(
+                    """SELECT id, name FROM yamazumi_areas
+                       WHERE project_id=? AND scenario_id=? AND section_id=?
+                       ORDER BY name, id""",
+                    (project_id, scenario_id, duplicate["section_id"]),
+                ).fetchall()
+                preferred = next(
+                    (
+                        row for row in linked
+                        if section and str(row["name"]).casefold() == str(section["name"]).casefold()
+                    ),
+                    linked[0],
+                )
+                for row in linked:
+                    if row["id"] == preferred["id"]:
+                        continue
+                    conn.execute(
+                        "UPDATE yamazumi_areas SET section_id=NULL, updated_at=? WHERE id=?",
+                        (timestamp, row["id"]),
+                    )
+                    summary["conflicts_cleared"] += 1
+                changed = True
+
+            if changed:
+                continue
+
+            for section in sections:
+                matching_area = conn.execute(
+                    """SELECT id, name, section_id FROM yamazumi_areas
+                       WHERE project_id=? AND scenario_id=? AND name=? COLLATE NOCASE
+                       ORDER BY id LIMIT 1""",
+                    (project_id, scenario_id, section["name"]),
+                ).fetchone()
+                if matching_area and str(matching_area["section_id"] or "") != str(section["id"]):
+                    current_target = conn.execute(
+                        """SELECT id FROM yamazumi_areas
+                           WHERE project_id=? AND scenario_id=? AND section_id=? AND id<>?""",
+                        (project_id, scenario_id, section["id"], matching_area["id"]),
+                    ).fetchone()
+                    if current_target:
+                        conn.execute(
+                            "UPDATE yamazumi_areas SET section_id=NULL, updated_at=? WHERE id=?",
+                            (timestamp, current_target["id"]),
+                        )
+                        summary["conflicts_cleared"] += 1
+                    conn.execute(
+                        "UPDATE yamazumi_areas SET section_id=?, updated_at=? WHERE id=?",
+                        (section["id"], timestamp, matching_area["id"]),
+                    )
+                    summary["relinked"] += 1
+                    changed = True
+                    break
+
+            if changed:
+                continue
+
+            for section in sections:
+                linked = conn.execute(
+                    """SELECT id FROM yamazumi_areas
+                       WHERE project_id=? AND scenario_id=? AND section_id=?""",
+                    (project_id, scenario_id, section["id"]),
+                ).fetchone()
+                if linked:
+                    continue
+                conn.execute(
+                    """INSERT INTO yamazumi_areas
+                       (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                       VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+                    (str(uuid4()), project_id, scenario_id, section["id"], section["name"], timestamp),
+                )
+                summary["created"] += 1
+                changed = True
+                break
+
+            if not changed:
+                return summary
+        raise ValueError("Fishbone-to-Yamazumi links could not be repaired safely.")
 
 
 def update_yamazumi_area(project_id: str, area_id: str, section_id: str | None, takt_override_s) -> None:
     takt = None if takt_override_s is None or pd.isna(takt_override_s) or str(takt_override_s).strip() == "" else float(takt_override_s)
     if takt is not None and takt <= 0:
         raise ValueError("Takt override must be greater than zero.")
-    execute(
-        "UPDATE yamazumi_areas SET section_id=?, takt_override_s=?, updated_at=? WHERE id=? AND project_id=?",
-        (section_id or None, takt, now_iso(), area_id, project_id),
-    )
+    normalized_section_id = str(section_id or "").strip() or None
+    with connection() as conn:
+        area = conn.execute(
+            """SELECT scenario_id, section_id FROM yamazumi_areas
+               WHERE id=? AND project_id=?""",
+            (area_id, project_id),
+        ).fetchone()
+        if not area:
+            raise ValueError("That Yamazumi area no longer exists.")
+        existing_section_id = str(area["section_id"] or "").strip() or None
+        if existing_section_id and normalized_section_id != existing_section_id:
+            raise ValueError(
+                "This Yamazumi area is already linked from the Fishbone and cannot be relinked manually."
+            )
+        if normalized_section_id:
+            _validate_yamazumi_area_link(
+                conn, project_id, str(area["scenario_id"]), normalized_section_id, area_id
+            )
+        conn.execute(
+            """UPDATE yamazumi_areas SET section_id=?, takt_override_s=?, updated_at=?
+               WHERE id=? AND project_id=?""",
+            (normalized_section_id, takt, now_iso(), area_id, project_id),
+        )
 
 
 def add_yamazumi_pitch(

@@ -28,7 +28,8 @@ from utils.store import (
     update_yamazumi_area,
     update_yamazumi_element,
     update_yamazumi_pitch,
-    upsert_yamazumi_area,
+    sync_yamazumi_areas_from_fishbone,
+    yamazumi_area_link_status,
     yamazumi_areas,
     yamazumi_elements,
     yamazumi_flag_definitions,
@@ -117,11 +118,7 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
     if st.button("Save as scenario", type="primary", icon=":material/content_copy:"):
         save_as_scenario_dialog()
 
-pitch_editor_key = f"yamazumi_pitch_editor_{scenario_id}"
-element_editor_key = f"yamazumi_element_editor_{scenario_id}"
 area_selector_key = f"yamazumi_area_{scenario_id}"
-apply_pending_table_editor_reset(pitch_editor_key)
-apply_pending_table_editor_reset(element_editor_key)
 sections = assembly_sections(project_id)
 features = complexity_features(project_id)
 flag_definitions = yamazumi_flag_definitions(project_id)
@@ -146,6 +143,10 @@ for _, feature in active_features.iterrows():
 defined_variant_options = list(dict.fromkeys(defined_variant_options))
 rename_yamazumi_variants(project_id, scenario_id, stored_variant_labels)
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
+main_spine_sections = (
+    active_sections.loc[active_sections["section_type"] == "Main spine"].copy()
+    if not active_sections.empty else active_sections
+)
 section_name_by_id = dict(zip(active_sections["id"].astype(str), active_sections["name"].astype(str))) if not active_sections.empty else {}
 section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
 
@@ -173,34 +174,52 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
             st.error(str(exc))
 
 areas = yamazumi_areas(project_id, scenario_id)
-if active_sections.empty and areas.empty:
-    st.info("Build Fishbone sections first, or import a Yamazumi workbook to create unlinked balancing areas.")
+if main_spine_sections.empty and areas.empty:
+    st.info("Build an active main-spine Fishbone section first, or import a Yamazumi workbook to create an unlinked balancing area.")
     st.stop()
 
-if not active_sections.empty:
-    existing_section_ids = set(areas["section_id"].dropna().astype(str)) if not areas.empty else set()
-    missing_sections = active_sections.loc[~active_sections["id"].astype(str).isin(existing_section_ids)]
-    if not missing_sections.empty and st.button(
+if not main_spine_sections.empty:
+    link_status = yamazumi_area_link_status(project_id, scenario_id)
+    if link_status["needs_sync"] and st.button(
         "Create Yamazumi areas from Fishbone",
         icon=":material/account_tree:",
-        help="Creates one balancing area for each Fishbone section that does not have one yet.",
+        help="Creates or repairs one linked balancing area for each active main-spine Fishbone section.",
     ):
-        for _, section in missing_sections.iterrows():
-            upsert_yamazumi_area(
-                project_id, scenario_id, str(section["name"]), str(section["id"])
+        try:
+            summary = sync_yamazumi_areas_from_fishbone(project_id, scenario_id)
+            st.toast(
+                f"Fishbone areas synchronized: {summary['created']} created, "
+                f"{summary['relinked']} relinked, and {summary['conflicts_cleared']} conflicts cleared",
+                icon=":material/check_circle:",
             )
-        st.toast(f"Created {len(missing_sections)} Yamazumi areas", icon=":material/check_circle:")
-        st.rerun()
+            record_audit_event(
+                project_id,
+                "Yamazumi",
+                "Synchronize Fishbone areas",
+                summary["created"] + summary["relinked"] + summary["conflicts_cleared"],
+                st.session_state.get("current_editor", ""),
+                summary,
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 areas = yamazumi_areas(project_id, scenario_id)
 if areas.empty:
     st.info("Create an area from the Fishbone or import a workbook to begin.")
     st.stop()
 
-area_labels = {
-    str(row["id"]): f"{row['name']}" + (f" · Fishbone: {row['section_name']}" if str(row.get("section_name") or "").strip() else " · Unlinked")
-    for _, row in areas.iterrows()
-}
+area_labels = {}
+for _, row in areas.iterrows():
+    section_name_value = row.get("section_name")
+    section_name = (
+        "" if section_name_value is None or pd.isna(section_name_value)
+        else str(section_name_value).strip()
+    )
+    area_labels[str(row["id"])] = (
+        f"{row['name']} · Fishbone: {section_name}" if section_name
+        else f"{row['name']} · Unlinked"
+    )
 area_id = st.selectbox(
     "Balancing area / Fishbone spine",
     options=list(area_labels),
@@ -208,6 +227,10 @@ area_id = st.selectbox(
     key=area_selector_key,
 )
 area = areas.loc[areas["id"].astype(str) == str(area_id)].iloc[0].to_dict()
+pitch_editor_key = f"yamazumi_pitch_editor_{scenario_id}_{area_id}"
+element_editor_key = f"yamazumi_element_editor_{scenario_id}_{area_id}"
+apply_pending_table_editor_reset(pitch_editor_key)
+apply_pending_table_editor_reset(element_editor_key)
 
 reset_actions = st.container(horizontal=True, horizontal_alignment="right")
 request_clear_area = reset_actions.button(
@@ -281,12 +304,36 @@ if st.session_state.get("yamazumi_reset_scope") in {"area", "all"}:
     confirm_yamazumi_reset()
 
 area_controls = st.container(horizontal=True, vertical_alignment="bottom")
-linked_section = area_controls.selectbox(
-    "Linked Fishbone section",
-    options=[None, *section_name_by_id],
-    index=([None, *section_name_by_id].index(str(area["section_id"])) if str(area.get("section_id") or "") in section_name_by_id else 0),
-    format_func=lambda value: "Unlinked" if value is None else section_name_by_id[value],
+section_id_value = area.get("section_id")
+current_section_id = (
+    None if section_id_value is None or pd.isna(section_id_value)
+    else str(section_id_value).strip() or None
 )
+if current_section_id:
+    linked_section = current_section_id
+    area_controls.text_input(
+        "Linked Fishbone section",
+        value=str(area.get("section_name") or section_name_by_id.get(current_section_id, "Linked section")),
+        disabled=True,
+        help="This link is fixed because the area is already matched to the Fishbone.",
+        key=f"linked_fishbone_read_only_{area_id}",
+    )
+else:
+    linked_elsewhere = {
+        str(value) for value in areas["section_id"].dropna().astype(str).tolist()
+        if str(value).strip()
+    }
+    available_sections = [
+        section_id for section_id in section_name_by_id
+        if section_id not in linked_elsewhere
+    ]
+    linked_section = area_controls.selectbox(
+        "Linked Fishbone section",
+        options=[None, *available_sections],
+        format_func=lambda value: "Unlinked" if value is None else section_name_by_id[value],
+        help="Manual matching is available only for imported areas that could not be matched by name.",
+        key=f"linked_fishbone_for_import_{area_id}",
+    )
 default_takt = float(scenario.get("takt_time_s") or 0)
 takt_time = area_controls.number_input(
     "Yamazumi takt time (seconds)",
@@ -296,9 +343,12 @@ takt_time = area_controls.number_input(
     help="Enter an area-specific takt or use the active planning scenario's target takt.",
 )
 if area_controls.button("Save area settings", type="primary", icon=":material/save:"):
-    update_yamazumi_area(project_id, area_id, linked_section, takt_time or None)
-    record_audit_event(project_id, "Yamazumi", "Area settings", 1, st.session_state.get("current_editor", ""))
-    st.rerun()
+    try:
+        update_yamazumi_area(project_id, area_id, linked_section, takt_time or None)
+        record_audit_event(project_id, "Yamazumi", "Area settings", 1, st.session_state.get("current_editor", ""))
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
 takt = float(takt_time or default_takt)
 
 pitches = yamazumi_pitches(project_id, area_id)
@@ -1199,7 +1249,20 @@ if pitch_actions.undo:
     st.session_state.pop(pitch_editor_key, None)
     st.rerun()
 pitch_columns = ["id", "pitch_number", "pitch_name", "pitch_type", "status", "model_variants", "sequence", "updated_at"]
-pitch_rows = pitches.reindex(columns=pitch_columns).copy() if not pitches.empty else pd.DataFrame(columns=pitch_columns)
+if pitches.empty:
+    pitch_rows = pd.DataFrame({
+        "id": pd.Series(dtype="string"),
+        "pitch_number": pd.Series(dtype="string"),
+        "pitch_name": pd.Series(dtype="string"),
+        "pitch_type": pd.Series(dtype="string"),
+        "status": pd.Series(dtype="string"),
+        # MultiselectColumn values are lists, so this column deliberately uses object dtype.
+        "model_variants": pd.Series(dtype="object"),
+        "sequence": pd.Series(dtype="Int64"),
+        "updated_at": pd.Series(dtype="string"),
+    })
+else:
+    pitch_rows = pitches.reindex(columns=pitch_columns).copy()
 visible_pitches = filter_table(
     pitch_rows,
     key=f"yamazumi_pitch_filters_{area_id}",
@@ -1282,10 +1345,29 @@ element_columns = [
     "id", "pitch_id", "model_variant", "work_type", "description", "time_s", "work_region",
     "flags", "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
 ]
-element_rows = elements.reindex(columns=element_columns).copy() if not elements.empty else pd.DataFrame(columns=element_columns)
-element_rows["pitch"] = element_rows["pitch_id"].apply(
-    lambda value: pitch_label_by_id.get(str(value), "Unassigned") if value is not None and not pd.isna(value) else "Unassigned"
-)
+if elements.empty:
+    element_rows = pd.DataFrame({
+        "id": pd.Series(dtype="string"),
+        "pitch_id": pd.Series(dtype="string"),
+        "model_variant": pd.Series(dtype="string"),
+        "work_type": pd.Series(dtype="string"),
+        "description": pd.Series(dtype="string"),
+        "time_s": pd.Series(dtype="Float64"),
+        "work_region": pd.Series(dtype="string"),
+        # MultiselectColumn values are lists, so this column deliberately uses object dtype.
+        "flags": pd.Series(dtype="object"),
+        "sequence": pd.Series(dtype="Int64"),
+        "source": pd.Series(dtype="string"),
+        "process_element_id": pd.Series(dtype="string"),
+        "process_sync_status": pd.Series(dtype="string"),
+        "updated_at": pd.Series(dtype="string"),
+    })
+    element_rows["pitch"] = pd.Series(dtype="string")
+else:
+    element_rows = elements.reindex(columns=element_columns).copy()
+    element_rows["pitch"] = element_rows["pitch_id"].apply(
+        lambda value: pitch_label_by_id.get(str(value), "Unassigned") if value is not None and not pd.isna(value) else "Unassigned"
+    )
 visible_elements = filter_table(
     element_rows,
     key="yamazumi_element_filters",
