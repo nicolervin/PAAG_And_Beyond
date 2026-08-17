@@ -1,4 +1,5 @@
 import json
+import math
 
 import pandas as pd
 import streamlit as st
@@ -32,8 +33,10 @@ from utils.store import (
     yamazumi_area_link_status,
     yamazumi_areas,
     yamazumi_elements,
+    yamazumi_elements_for_scenario,
     yamazumi_flag_definitions,
     yamazumi_pitches,
+    yamazumi_pitches_for_scenario,
     yamazumi_work_regions,
 )
 from utils.table_filters import (
@@ -60,6 +63,10 @@ ELEMENT_VARIANT_HELP = (
     "This list contains only model variants enabled for the selected pitch. "
     "If the variant you need is missing, close this window, choose Edit pitch on the balancing board, "
     "add the variant under Model variants shown on this pitch, and save the pitch first."
+)
+ADD_ELEMENT_VARIANT_HELP = (
+    "Choose any available model variant. If it is not already shown on the destination pitch, "
+    "adding the element will also add that variant stack to the pitch."
 )
 st.title("Yamazumi & workstation balancing")
 st.caption(
@@ -143,10 +150,7 @@ for _, feature in active_features.iterrows():
 defined_variant_options = list(dict.fromkeys(defined_variant_options))
 rename_yamazumi_variants(project_id, scenario_id, stored_variant_labels)
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
-main_spine_sections = (
-    active_sections.loc[active_sections["section_type"] == "Main spine"].copy()
-    if not active_sections.empty else active_sections
-)
+fishbone_sections = active_sections
 section_name_by_id = dict(zip(active_sections["id"].astype(str), active_sections["name"].astype(str))) if not active_sections.empty else {}
 section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
 
@@ -174,16 +178,16 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
             st.error(str(exc))
 
 areas = yamazumi_areas(project_id, scenario_id)
-if main_spine_sections.empty and areas.empty:
-    st.info("Build an active main-spine Fishbone section first, or import a Yamazumi workbook to create an unlinked balancing area.")
+if fishbone_sections.empty and areas.empty:
+    st.info("Build an active Fishbone section first, or import a Yamazumi workbook to create an unlinked balancing area.")
     st.stop()
 
-if not main_spine_sections.empty:
+if not fishbone_sections.empty:
     link_status = yamazumi_area_link_status(project_id, scenario_id)
     if link_status["needs_sync"] and st.button(
         "Create Yamazumi areas from Fishbone",
         icon=":material/account_tree:",
-        help="Creates or repairs one linked balancing area for each active main-spine Fishbone section.",
+        help="Creates or repairs one linked balancing area for every active Fishbone section, including subassemblies with no assigned parts.",
     ):
         try:
             summary = sync_yamazumi_areas_from_fishbone(project_id, scenario_id)
@@ -335,10 +339,20 @@ else:
         key=f"linked_fishbone_for_import_{area_id}",
     )
 default_takt = float(scenario.get("takt_time_s") or 0)
+if not math.isfinite(default_takt):
+    default_takt = 0.0
+area_takt_value = area.get("takt_override_s")
+area_takt = (
+    default_takt
+    if area_takt_value is None or pd.isna(area_takt_value)
+    else float(area_takt_value)
+)
+if not math.isfinite(area_takt):
+    area_takt = default_takt
 takt_time = area_controls.number_input(
     "Yamazumi takt time (seconds)",
     min_value=0.0,
-    value=float(area.get("takt_override_s") or default_takt),
+    value=area_takt,
     step=0.1,
     help="Enter an area-specific takt or use the active planning scenario's target takt.",
 )
@@ -350,6 +364,8 @@ if area_controls.button("Save area settings", type="primary", icon=":material/sa
     except ValueError as exc:
         st.error(str(exc))
 takt = float(takt_time or default_takt)
+if not math.isfinite(takt):
+    takt = default_takt
 
 pitches = yamazumi_pitches(project_id, area_id)
 if not pitches.empty:
@@ -973,15 +989,23 @@ def add_element_dialog() -> None:
     description = st.text_area("Work description", placeholder="Describe one measurable element of work")
     time_s = st.number_input("Time to complete (seconds)", min_value=0.0, value=0.0, step=0.1)
     row = st.container(horizontal=True, vertical_alignment="bottom")
-    target_variants = pitch_variants_by_id.get(str(target_pitch_id), variant_options) if target_pitch_id else variant_options
     model_variant = row.selectbox(
         "Model variant",
-        options=target_variants,
+        options=variant_options,
         index=0,
-        help=ELEMENT_VARIANT_HELP,
+        help=ADD_ELEMENT_VARIANT_HELP,
     )
     work_type = row.selectbox("Work type", WORK_TYPES, index=0)
     work_region = row.selectbox("Work region", work_region_options, index=0)
+    target_variants = pitch_variants_by_id.get(str(target_pitch_id), [])
+    variant_added_to_pitch = bool(
+        target_pitch_id and model_variant not in target_variants
+    )
+    if variant_added_to_pitch:
+        st.caption(
+            f"{model_variant} will also be added to pitch "
+            f"{target.get('pitch_number') or ''} as a new Yamazumi stack."
+        )
     flags = st.multiselect("Flags", active_flag_options)
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_interactive_element"):
@@ -1005,11 +1029,21 @@ def add_element_dialog() -> None:
             record_audit_event(
                 project_id, "Yamazumi elements", "Add from interactive board", 1,
                 st.session_state.get("current_editor", ""),
-                {"pitch": target.get("pitch_number"), "description": description},
+                {
+                    "pitch": target.get("pitch_number"),
+                    "description": description,
+                    "model_variant": model_variant,
+                    "variant_added_to_pitch": variant_added_to_pitch,
+                },
             )
             st.session_state.pop(f"yamazumi_add_element_target_{project_id}_{area_id}", None)
+            if variant_added_to_pitch:
+                request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
-            st.toast("Added Yamazumi work element", icon=":material/check_circle:")
+            message = "Added Yamazumi work element"
+            if variant_added_to_pitch:
+                message += f" and enabled {model_variant} on the pitch"
+            st.toast(message, icon=":material/check_circle:")
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
@@ -1238,20 +1272,77 @@ elif edit_element_target := st.session_state.pop(edit_element_dialog_key, None):
     # argument during interaction, while page navigation cannot replay it.
     edit_element_dialog(str(edit_element_target))
 
-pitch_actions = editable_table_header(
-    "Pitch addresses",
-    editor_key=pitch_editor_key,
-    key_prefix="yamazumi_pitches",
-    save_label="Save & refresh",
-    native_row_selection=True,
+ALL_YAMAZUMI_AREAS = "__all_yamazumi_areas__"
+yamazumi_area_ids = list(area_labels)
+
+
+def normalize_table_area_filter(key: str) -> list[str]:
+    """Keep existing selections while migrating the old current/all dropdown state."""
+    if key not in st.session_state:
+        st.session_state[key] = [str(area_id)]
+    stored = st.session_state.get(key)
+    if stored == ALL_YAMAZUMI_AREAS or stored is None:
+        normalized = []
+    elif isinstance(stored, (list, tuple, set)):
+        normalized = [str(value) for value in stored if str(value) in yamazumi_area_ids]
+    else:
+        normalized = [str(stored)] if str(stored) in yamazumi_area_ids else []
+    if not isinstance(stored, list) or stored != normalized:
+        st.session_state[key] = normalized
+    return normalized
+
+
+pitch_table_area_key = f"yamazumi_pitch_table_area_{scenario_id}"
+selected_pitch_area_ids = normalize_table_area_filter(pitch_table_area_key)
+effective_pitch_area_ids = selected_pitch_area_ids or yamazumi_area_ids
+pitch_combined_view = set(effective_pitch_area_ids) != {str(area_id)}
+if pitch_combined_view:
+    st.subheader("Pitch addresses")
+else:
+    pitch_actions = editable_table_header(
+        "Pitch addresses",
+        editor_key=pitch_editor_key,
+        key_prefix="yamazumi_pitches",
+        save_label="Save & refresh",
+        native_row_selection=True,
+    )
+    if pitch_actions.undo:
+        st.session_state.pop(pitch_editor_key, None)
+        st.rerun()
+selected_pitch_area_ids = st.multiselect(
+    "Areas shown in pitch-address table",
+    options=yamazumi_area_ids,
+    format_func=lambda value: area_labels.get(value, value),
+    placeholder="All Yamazumi areas",
+    key=pitch_table_area_key,
 )
-if pitch_actions.undo:
-    st.session_state.pop(pitch_editor_key, None)
-    st.rerun()
-pitch_columns = ["id", "pitch_number", "pitch_name", "pitch_type", "status", "model_variants", "sequence", "updated_at"]
-if pitches.empty:
+effective_pitch_area_ids = selected_pitch_area_ids or yamazumi_area_ids
+pitch_combined_view = set(effective_pitch_area_ids) != {str(area_id)}
+if pitch_combined_view:
+    pitch_table_source = yamazumi_pitches_for_scenario(project_id, scenario_id)
+    pitch_table_source = pitch_table_source.loc[
+        pitch_table_source["area_id"].astype(str).isin(effective_pitch_area_ids)
+    ].copy()
+    if not pitch_table_source.empty:
+        pitch_table_source["model_variants"] = pitch_table_source["model_variants"].apply(
+            lambda value: [
+                stored_variant_labels.get(item, item)
+                for item in json.loads(value or '["Base"]')
+            ]
+        )
+    scope_caption = "every Yamazumi area" if not selected_pitch_area_ids else "the selected Yamazumi areas"
+    st.caption(f"Showing {scope_caption} in this scenario. Combined views are read-only.")
+else:
+    pitch_table_source = pitches.copy()
+    pitch_table_source["area_name"] = str(area["name"])
+pitch_columns = [
+    "id", "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
+    "model_variants", "sequence", "updated_at",
+]
+if pitch_table_source.empty:
     pitch_rows = pd.DataFrame({
         "id": pd.Series(dtype="string"),
+        "area_name": pd.Series(dtype="string"),
         "pitch_number": pd.Series(dtype="string"),
         "pitch_name": pd.Series(dtype="string"),
         "pitch_type": pd.Series(dtype="string"),
@@ -1262,57 +1353,82 @@ if pitches.empty:
         "updated_at": pd.Series(dtype="string"),
     })
 else:
-    pitch_rows = pitches.reindex(columns=pitch_columns).copy()
+    pitch_rows = pitch_table_source.reindex(columns=pitch_columns).copy()
+pitch_filter_scope = "combined" if pitch_combined_view else str(area_id)
 visible_pitches = filter_table(
     pitch_rows,
-    key=f"yamazumi_pitch_filters_{area_id}",
-    dropdown_columns=["pitch_type", "status", "model_variants"],
-    search_columns=["pitch_number", "pitch_name", "pitch_type", "status", "model_variants"],
+    key=f"yamazumi_pitch_filters_{scenario_id}_{pitch_filter_scope}",
+    dropdown_columns=["area_name", "pitch_type", "status", "model_variants"],
+    search_columns=["area_name", "pitch_number", "pitch_name", "pitch_type", "status", "model_variants"],
     labels={
+        "area_name": "Yamazumi area",
         "pitch_type": "Pitch type",
         "status": "Status",
         "model_variants": "Model variant",
     },
     multi_value_columns=["model_variants"],
-    reset_widget_keys=[pitch_editor_key],
+    reset_widget_keys=[] if pitch_combined_view else [pitch_editor_key],
 )
-edited_pitches = st.data_editor(
-    visible_pitches,
-    key=pitch_editor_key,
-    hide_index=True,
-    num_rows="dynamic",
-    height=280,
-    disabled=["id", "updated_at"],
-    column_order=["pitch_number", "pitch_name", "pitch_type", "status", "model_variants", "sequence"],
-    column_config={
-        "id": None,
-        "pitch_number": st.column_config.TextColumn("Pitch address", required=True, help="Use the physical line address/nomenclature."),
-        "pitch_name": st.column_config.TextColumn("Pitch name"),
-        "pitch_type": st.column_config.SelectboxColumn("Pitch type", options=PITCH_TYPES, required=True, default="Pitch"),
-        "status": st.column_config.SelectboxColumn("Status", options=["Active", "Blocked", "Open"], required=True, default="Active"),
-        "model_variants": st.column_config.MultiselectColumn(
-            "Model variants",
-            options=variant_options,
-            required=True,
-            default=["Base"],
-            help="Only these variants appear as stacks on this pitch.",
-        ),
-        "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
-        "updated_at": None,
-    },
-)
+pitch_column_order = [
+    "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
+    "model_variants", "sequence",
+]
+pitch_column_config = {
+    "id": None,
+    "area_name": st.column_config.TextColumn("Yamazumi area"),
+    "pitch_number": st.column_config.TextColumn("Pitch address", required=True, help="Use the physical line address/nomenclature."),
+    "pitch_name": st.column_config.TextColumn("Pitch name"),
+    "pitch_type": st.column_config.SelectboxColumn("Pitch type", options=PITCH_TYPES, required=True, default="Pitch"),
+    "status": st.column_config.SelectboxColumn("Status", options=["Active", "Blocked", "Open"], required=True, default="Active"),
+    "model_variants": st.column_config.MultiselectColumn(
+        "Model variants",
+        options=variant_options,
+        required=True,
+        default=["Base"],
+        help="Only these variants appear as stacks on this pitch.",
+    ),
+    "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
+    "updated_at": None,
+}
+if pitch_combined_view:
+    pitch_read_only_config = {
+        **pitch_column_config,
+        "model_variants": st.column_config.ListColumn("Model variants"),
+    }
+    st.dataframe(
+        visible_pitches,
+        hide_index=True,
+        height=280,
+        column_order=pitch_column_order,
+        column_config=pitch_read_only_config,
+    )
+    edited_pitches = visible_pitches
+else:
+    edited_pitches = st.data_editor(
+        visible_pitches,
+        key=pitch_editor_key,
+        hide_index=True,
+        num_rows="dynamic",
+        height=280,
+        disabled=["id", "area_name", "updated_at"],
+        column_order=pitch_column_order,
+        column_config=pitch_column_config,
+    )
 st.download_button(
     "Export filtered pitches",
     data=dataframe_to_excel(
         visible_pitches.drop(columns=["id", "updated_at"], errors="ignore"),
         "Pitch addresses",
     ),
-    file_name="yamazumi_pitch_addresses_filtered.xlsx",
+    file_name=(
+        "yamazumi_pitch_addresses_multiple_areas_filtered.xlsx"
+        if pitch_combined_view else "yamazumi_pitch_addresses_filtered.xlsx"
+    ),
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     icon=":material/download:",
-    key=f"export_yamazumi_pitches_{area_id}",
+    key=f"export_yamazumi_pitches_{scenario_id}_{pitch_filter_scope}",
 )
-if pitch_actions.save_and_refresh:
+if not pitch_combined_view and pitch_actions.save_and_refresh:
     if (st.session_state.get(pitch_editor_key, {}) or {}).get("deleted_rows"):
         st.warning("Selected pitches are not deleted during Save. A confirmed bulk-delete workflow will be added after work reassignment rules are finalized.")
     else:
@@ -1329,25 +1445,59 @@ if pitch_actions.save_and_refresh:
             st.error(str(exc))
 
 st.divider()
-element_actions = editable_table_header(
-    "Yamazumi work elements",
-    editor_key=element_editor_key,
-    key_prefix="yamazumi_elements",
-    save_label="Save & refresh",
-    native_row_selection=True,
+element_table_area_key = f"yamazumi_element_table_area_{scenario_id}"
+selected_element_area_ids = normalize_table_area_filter(element_table_area_key)
+effective_element_area_ids = selected_element_area_ids or yamazumi_area_ids
+element_combined_view = set(effective_element_area_ids) != {str(area_id)}
+if element_combined_view:
+    st.subheader("Yamazumi work elements")
+else:
+    element_actions = editable_table_header(
+        "Yamazumi work elements",
+        editor_key=element_editor_key,
+        key_prefix="yamazumi_elements",
+        save_label="Save & refresh",
+        native_row_selection=True,
+    )
+    if element_actions.undo:
+        st.session_state.pop(element_editor_key, None)
+        st.rerun()
+selected_element_area_ids = st.multiselect(
+    "Areas shown in work-elements table",
+    options=yamazumi_area_ids,
+    format_func=lambda value: area_labels.get(value, value),
+    placeholder="All Yamazumi areas",
+    key=element_table_area_key,
 )
-if element_actions.undo:
-    st.session_state.pop(element_editor_key, None)
-    st.rerun()
+effective_element_area_ids = selected_element_area_ids or yamazumi_area_ids
+element_combined_view = set(effective_element_area_ids) != {str(area_id)}
+if element_combined_view:
+    element_table_source = yamazumi_elements_for_scenario(project_id, scenario_id)
+    element_table_source = element_table_source.loc[
+        element_table_source["area_id"].astype(str).isin(effective_element_area_ids)
+    ].copy()
+    if not element_table_source.empty:
+        element_table_source["flags"] = element_table_source["flags"].apply(
+            lambda value: json.loads(value or "[]") if isinstance(value, str) else (value or [])
+        )
+        element_table_source["model_variant"] = element_table_source["model_variant"].apply(
+            lambda value: stored_variant_labels.get(str(value), str(value))
+        )
+    scope_caption = "every Yamazumi area" if not selected_element_area_ids else "the selected Yamazumi areas"
+    st.caption(f"Showing {scope_caption} in this scenario. Combined views are read-only.")
+else:
+    element_table_source = elements.copy()
+    element_table_source["area_name"] = str(area["name"])
 active_pitches = pitches.loc[pitches["status"] == "Active"].copy() if not pitches.empty else pitches
 pitch_label_by_id = dict(zip(active_pitches["id"].astype(str), active_pitches["pitch_number"].astype(str))) if not active_pitches.empty else {}
 element_columns = [
-    "id", "pitch_id", "model_variant", "work_type", "description", "time_s", "work_region",
+    "id", "area_name", "pitch_id", "model_variant", "work_type", "description", "time_s", "work_region",
     "flags", "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
 ]
-if elements.empty:
+if element_table_source.empty:
     element_rows = pd.DataFrame({
         "id": pd.Series(dtype="string"),
+        "area_name": pd.Series(dtype="string"),
         "pitch_id": pd.Series(dtype="string"),
         "model_variant": pd.Series(dtype="string"),
         "work_type": pd.Series(dtype="string"),
@@ -1364,68 +1514,112 @@ if elements.empty:
     })
     element_rows["pitch"] = pd.Series(dtype="string")
 else:
-    element_rows = elements.reindex(columns=element_columns).copy()
-    element_rows["pitch"] = element_rows["pitch_id"].apply(
-        lambda value: pitch_label_by_id.get(str(value), "Unassigned") if value is not None and not pd.isna(value) else "Unassigned"
-    )
+    element_rows = element_table_source.reindex(columns=element_columns).copy()
+    if element_combined_view:
+        element_rows["pitch"] = element_table_source["pitch_number"].fillna("Unassigned").astype("string")
+    else:
+        element_rows["pitch"] = element_rows["pitch_id"].apply(
+            lambda value: pitch_label_by_id.get(str(value), "Unassigned") if value is not None and not pd.isna(value) else "Unassigned"
+        )
+element_filter_scope = "combined" if element_combined_view else str(area_id)
 visible_elements = filter_table(
     element_rows,
-    key="yamazumi_element_filters",
-    dropdown_columns=["pitch", "model_variant", "work_type", "work_region", "flags"],
-    search_columns=["description", "pitch", "model_variant", "work_region", "flags"],
-    labels={"flags": "Flag"},
+    key=f"yamazumi_element_filters_{scenario_id}_{element_filter_scope}",
+    dropdown_columns=["area_name", "pitch", "model_variant", "work_type", "work_region", "flags"],
+    search_columns=["area_name", "description", "pitch", "model_variant", "work_region", "flags"],
+    labels={"area_name": "Yamazumi area", "flags": "Flag"},
     multi_value_columns=["flags"],
-    reset_widget_keys=[element_editor_key],
+    reset_widget_keys=[] if element_combined_view else [element_editor_key],
 )
 pitch_options = ["Unassigned", *pitch_label_by_id.values()]
 variant_options_by_pitch_label = {
     pitch_label_by_id[pitch_id]: pitch_variants_by_id.get(pitch_id, ["Base"])
     for pitch_id in pitch_label_by_id
 }
-edited_elements = st.data_editor(
-    visible_elements,
-    key=element_editor_key,
-    hide_index=True,
-    num_rows="dynamic",
-    height=420,
-    disabled=["id", "source", "process_element_id", "process_sync_status", "updated_at"],
-    column_order=["pitch", "model_variant", "work_type", "description", "time_s", "work_region", "flags", "sequence"],
-    column_config={
-        "id": None,
-        "pitch_id": None,
-        "pitch": st.column_config.SelectboxColumn("Pitch", options=pitch_options, required=True, default="Unassigned"),
-        "model_variant": st.column_config.SelectboxColumn(
-            "Model variant",
-            options=variant_options,
-            required=True,
-            default="Base",
-            help="Base applies to all models. Other choices show Feature = Allowed choice from Model Definitions; imported legacy values remain available.",
+element_column_order = [
+    "area_name", "pitch", "model_variant", "work_type", "description", "time_s",
+    "work_region", "flags", "sequence",
+]
+element_column_config = {
+    "id": None,
+    "area_name": st.column_config.TextColumn("Yamazumi area"),
+    "pitch_id": None,
+    "pitch": st.column_config.SelectboxColumn("Pitch", options=pitch_options, required=True, default="Unassigned"),
+    "model_variant": st.column_config.SelectboxColumn(
+        "Model variant",
+        options=variant_options,
+        required=True,
+        default="Base",
+        help="Base applies to all models. Other choices show Feature = Allowed choice from Model Definitions; imported legacy values remain available.",
+    ),
+    "work_type": st.column_config.SelectboxColumn("Work type", options=WORK_TYPES, required=True, default="Cycle"),
+    "description": st.column_config.TextColumn("Work description", required=True, width="large"),
+    "time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f", required=True),
+    "work_region": st.column_config.SelectboxColumn(
+        "Work region", options=work_region_options, required=True, default="None"
+    ),
+    "flags": st.column_config.MultiselectColumn(
+        "Flags",
+        options=list(dict.fromkeys([
+            *active_flag_options,
+            *[
+                str(flag)
+                for stored_flags in element_table_source.get("flags", pd.Series(dtype=object))
+                for flag in (stored_flags or [])
+            ],
+        ])),
+    ),
+    "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
+    "source": None,
+    "process_element_id": None,
+    "process_sync_status": None,
+    "updated_at": None,
+}
+if element_combined_view:
+    element_read_only_config = {
+        **element_column_config,
+        "pitch": st.column_config.TextColumn("Pitch"),
+        "model_variant": st.column_config.TextColumn("Model variant"),
+        "work_region": st.column_config.TextColumn("Work region"),
+        "flags": st.column_config.ListColumn("Flags"),
+    }
+    st.dataframe(
+        visible_elements,
+        hide_index=True,
+        height=420,
+        column_order=element_column_order,
+        column_config=element_read_only_config,
+    )
+    edited_elements = visible_elements
+else:
+    edited_elements = st.data_editor(
+        visible_elements,
+        key=element_editor_key,
+        hide_index=True,
+        num_rows="dynamic",
+        height=420,
+        disabled=["id", "area_name", "source", "process_element_id", "process_sync_status", "updated_at"],
+        column_order=element_column_order,
+        column_config=element_column_config,
+    )
+st.download_button(
+    "Export filtered work elements",
+    data=dataframe_to_excel(
+        visible_elements.drop(
+            columns=["id", "pitch_id", "process_element_id", "updated_at"],
+            errors="ignore",
         ),
-        "work_type": st.column_config.SelectboxColumn("Work type", options=WORK_TYPES, required=True, default="Cycle"),
-        "description": st.column_config.TextColumn("Work description", required=True, width="large"),
-        "time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f", required=True),
-        "work_region": st.column_config.SelectboxColumn(
-            "Work region", options=work_region_options, required=True, default="None"
-        ),
-        "flags": st.column_config.MultiselectColumn(
-            "Flags",
-            options=list(dict.fromkeys([
-                *active_flag_options,
-                *[
-                    str(flag)
-                    for stored_flags in elements.get("flags", pd.Series(dtype=object))
-                    for flag in (stored_flags or [])
-                ],
-            ])),
-        ),
-        "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
-        "source": None,
-        "process_element_id": None,
-        "process_sync_status": None,
-        "updated_at": None,
-    },
+        "Yamazumi work elements",
+    ),
+    file_name=(
+        "yamazumi_work_elements_multiple_areas_filtered.xlsx"
+        if element_combined_view else "yamazumi_work_elements_filtered.xlsx"
+    ),
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    icon=":material/download:",
+    key=f"export_yamazumi_elements_{scenario_id}_{element_filter_scope}",
 )
-if element_actions.save_and_refresh:
+if not element_combined_view and element_actions.save_and_refresh:
     if (st.session_state.get(element_editor_key, {}) or {}).get("deleted_rows"):
         st.warning("Selected work elements are not deleted during Save. Use the forthcoming confirmed bulk-delete action.")
     else:

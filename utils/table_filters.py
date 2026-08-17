@@ -31,7 +31,7 @@ def filter_table(
         placeholder="Search this table",
         icon=":material/search:",
     )
-    selected: dict[str, object] = {}
+    selected: dict[str, list[object]] = {}
     for column in valid_dropdowns:
         if column in multi_value_columns:
             values = list(
@@ -46,11 +46,23 @@ def filter_table(
         else:
             values = dataframe[column].dropna().unique().tolist()
         values = sorted(values, key=lambda value: str(value).casefold())
-        selected[column] = controls.selectbox(
+        widget_key = f"{key}_{column}"
+        stored_selection = st.session_state.get(widget_key, [])
+        current_selection = stored_selection
+        if current_selection is None:
+            current_selection = []
+        elif not isinstance(current_selection, (list, tuple, set)):
+            current_selection = [current_selection]
+        normalized_selection = [
+            value for value in current_selection if value in values
+        ]
+        if not isinstance(stored_selection, list) or stored_selection != normalized_selection:
+            st.session_state[widget_key] = normalized_selection
+        selected[column] = controls.multiselect(
             labels.get(column, column.replace("_", " ").capitalize()),
-            options=[None, *values],
-            format_func=lambda value: "All" if value is None else str(value),
-            key=f"{key}_{column}",
+            options=values,
+            placeholder="All",
+            key=widget_key,
         )
 
     visible = dataframe.copy()
@@ -58,20 +70,23 @@ def filter_table(
         columns = [column for column in (search_columns or visible.columns) if column in visible.columns]
         searchable = visible[columns].fillna("").astype(str).agg(" ".join, axis=1)
         visible = visible[searchable.str.contains(keyword.strip(), case=False, regex=False)]
-    for column, value in selected.items():
-        if value is not None:
+    for column, values in selected.items():
+        if values:
             if column in multi_value_columns:
                 visible = visible[
                     visible[column].apply(
-                        lambda cell: matches_filter_value(
-                            cell,
-                            value,
-                            universal_values=universal_values.get(column, ()),
+                        lambda cell: any(
+                            matches_filter_value(
+                                cell,
+                                value,
+                                universal_values=universal_values.get(column, ()),
+                            )
+                            for value in values
                         )
                     )
                 ]
             else:
-                visible = visible[visible[column] == value]
+                visible = visible[visible[column].isin(values)]
     row_identity = (
         tuple(visible["id"].fillna("").astype(str))
         if "id" in visible.columns

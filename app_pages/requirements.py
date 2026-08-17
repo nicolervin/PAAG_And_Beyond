@@ -21,9 +21,14 @@ if elements.empty:
     st.info("Add process steps to begin capturing requirements.")
     st.stop()
 
-station_options = ["All"] + sorted(value for value in elements["station"].dropna().unique().tolist() if value)
-station = st.selectbox("Station", station_options, key=f"requirements_station_{scenario_id}")
-filtered = elements if station == "All" else elements[elements["station"] == station]
+station_options = sorted(value for value in elements["station"].dropna().unique().tolist() if value)
+stations = st.multiselect(
+    "Stations",
+    station_options,
+    placeholder="All stations",
+    key=f"requirements_stations_{scenario_id}",
+)
+filtered = elements if not stations else elements[elements["station"].isin(stations)]
 
 for _, step in filtered.iterrows():
     with st.container(border=True):

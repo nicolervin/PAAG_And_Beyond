@@ -38,13 +38,20 @@ model_names = {
 }
 subsystems = sorted(value for value in confirmed["subsystem"].dropna().unique().tolist() if value)
 filters = st.container(horizontal=True)
-selected_subsystem = filters.selectbox("Subsystem", ["All"] + subsystems)
-selected_model = filters.selectbox(
-    "Model",
-    ["All models"] + model_options,
-    format_func=lambda value: "All models" if value == "All models" else model_names.get(str(value), "Familiar name not defined"),
+selected_subsystems = filters.multiselect(
+    "Subsystems",
+    subsystems,
+    placeholder="All subsystems",
+    key="assembly_sequence_subsystems",
 )
-visible = confirmed if selected_subsystem == "All" else confirmed[confirmed["subsystem"] == selected_subsystem]
+selected_models = filters.multiselect(
+    "Models",
+    model_options,
+    format_func=lambda value: model_names.get(str(value), "Familiar name not defined"),
+    placeholder="All models",
+    key="assembly_sequence_models",
+)
+visible = confirmed if not selected_subsystems else confirmed[confirmed["subsystem"].isin(selected_subsystems)]
 
 
 def assigned_models(value):
@@ -55,8 +62,13 @@ def assigned_models(value):
         return []
 
 
-if selected_model != "All models":
-    visible = visible[visible["applicable_models"].apply(lambda value: not assigned_models(value) or selected_model in assigned_models(value))]
+if selected_models:
+    visible = visible[
+        visible["applicable_models"].apply(
+            lambda value: not assigned_models(value)
+            or bool(set(selected_models) & set(assigned_models(value)))
+        )
+    ]
 
 visible = visible.sort_values("sequence").copy()
 visible["depth"] = pd.to_numeric(visible["depth"], errors="coerce").fillna(1).astype(int)

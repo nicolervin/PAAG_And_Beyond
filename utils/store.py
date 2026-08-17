@@ -1380,10 +1380,10 @@ def yamazumi_areas(project_id: str, scenario_id: str) -> pd.DataFrame:
 
 
 def yamazumi_area_link_status(project_id: str, scenario_id: str) -> dict[str, int | bool]:
-    """Report main-spine gaps and any existing one-to-one link conflicts."""
+    """Report active Fishbone-section gaps and existing one-to-one link conflicts."""
     sections = query(
-        """SELECT id, name FROM assembly_sections
-           WHERE project_id=? AND active=1 AND section_type='Main spine'
+        """SELECT id, name, section_type FROM assembly_sections
+           WHERE project_id=? AND active=1
            ORDER BY sequence, name""",
         (project_id,),
     )
@@ -1399,15 +1399,15 @@ def yamazumi_area_link_status(project_id: str, scenario_id: str) -> dict[str, in
             link_counts[section_id] = link_counts.get(section_id, 0) + 1
     missing = sum(1 for section in sections if link_counts.get(str(section["id"]), 0) == 0)
     conflicting = sum(max(0, count - 1) for count in link_counts.values())
-    main_section_by_name = {str(section["name"]).casefold(): str(section["id"]) for section in sections}
+    section_by_name = {str(section["name"]).casefold(): str(section["id"]) for section in sections}
     mislinked = sum(
         1
         for area in areas
-        if str(area["name"]).casefold() in main_section_by_name
-        and str(area.get("section_id") or "") != main_section_by_name[str(area["name"]).casefold()]
+        if str(area["name"]).casefold() in section_by_name
+        and str(area.get("section_id") or "") != section_by_name[str(area["name"]).casefold()]
     )
     return {
-        "main_spines": len(sections),
+        "active_sections": len(sections),
         "missing": missing,
         "mislinked": mislinked,
         "conflicting": conflicting,
@@ -1465,6 +1465,71 @@ def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
             "pitch_number": pd.Series(dtype="string"),
             "pitch_name": pd.Series(dtype="string"),
             "pitch_status": pd.Series(dtype="string"),
+        })
+    return rows
+
+
+def yamazumi_pitches_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Load pitch addresses across every Yamazumi area in one scenario."""
+    rows = pd.DataFrame(query(
+        """SELECT p.*, a.name AS area_name
+           FROM yamazumi_pitches p
+           JOIN yamazumi_areas a ON a.id=p.area_id
+           WHERE p.project_id=? AND a.scenario_id=?
+           ORDER BY a.name, p.sequence, p.pitch_number""",
+        (project_id, scenario_id),
+    ))
+    if rows.empty:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "area_id": pd.Series(dtype="string"),
+            "pitch_number": pd.Series(dtype="string"),
+            "pitch_name": pd.Series(dtype="string"),
+            "status": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="Int64"),
+            "model_variants": pd.Series(dtype="string"),
+            "pitch_type": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+            "area_name": pd.Series(dtype="string"),
+        })
+    return rows
+
+
+def yamazumi_elements_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Load work elements across every Yamazumi area in one scenario."""
+    rows = pd.DataFrame(query(
+        """SELECT e.*, p.pitch_number, p.pitch_name, p.status AS pitch_status,
+                  a.name AS area_name
+           FROM yamazumi_elements e
+           JOIN yamazumi_areas a ON a.id=e.area_id
+           LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
+           WHERE e.project_id=? AND a.scenario_id=?
+           ORDER BY a.name, COALESCE(p.sequence, 999999),
+                    e.model_variant, e.sequence, e.description""",
+        (project_id, scenario_id),
+    ))
+    if rows.empty:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "area_id": pd.Series(dtype="string"),
+            "pitch_id": pd.Series(dtype="string"),
+            "model_variant": pd.Series(dtype="string"),
+            "work_type": pd.Series(dtype="string"),
+            "description": pd.Series(dtype="string"),
+            "time_s": pd.Series(dtype="Float64"),
+            "work_region": pd.Series(dtype="string"),
+            "flags": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="Int64"),
+            "source": pd.Series(dtype="string"),
+            "process_element_id": pd.Series(dtype="string"),
+            "process_sync_status": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+            "pitch_number": pd.Series(dtype="string"),
+            "pitch_name": pd.Series(dtype="string"),
+            "pitch_status": pd.Series(dtype="string"),
+            "area_name": pd.Series(dtype="string"),
         })
     return rows
 
@@ -1936,13 +2001,13 @@ def _validate_yamazumi_area_link(
 
 
 def sync_yamazumi_areas_from_fishbone(project_id: str, scenario_id: str) -> dict[str, int]:
-    """Create and repair one linked area per active main-spine section."""
+    """Create and repair one linked area per active Fishbone section."""
     timestamp = now_iso()
     summary = {"created": 0, "relinked": 0, "conflicts_cleared": 0}
     with connection() as conn:
         sections = conn.execute(
             """SELECT id, name FROM assembly_sections
-               WHERE project_id=? AND active=1 AND section_type='Main spine'
+               WHERE project_id=? AND active=1
                ORDER BY sequence, name""",
             (project_id,),
         ).fetchall()
@@ -2145,16 +2210,6 @@ def add_yamazumi_element(
     work_type = str(values.get("work_type") or "Cycle").strip().title()
     if work_type not in {"Cycle", "Periodic", "Fluctuation"}:
         raise ValueError("Work type must be Cycle, Periodic, or Fluctuation.")
-    if pitch_id:
-        active_pitch = query(
-            """SELECT id, model_variants FROM yamazumi_pitches
-               WHERE id=? AND project_id=? AND area_id=? AND status='Active'""",
-            (pitch_id, project_id, area_id),
-        )
-        if not active_pitch:
-            raise ValueError("Work can only be added to an Active pitch.")
-        if selected_variant not in json.loads(active_pitch[0]["model_variants"] or "[]"):
-            raise ValueError("Choose a model variant enabled for the destination pitch.")
     allowed_flags = set(active_yamazumi_flags(project_id))
     flags = list(dict.fromkeys(
         str(flag) for flag in values.get("flags", []) if str(flag) in allowed_flags
@@ -2162,6 +2217,26 @@ def add_yamazumi_element(
     element_id = str(uuid4())
     timestamp = now_iso()
     with connection() as conn:
+        if pitch_id:
+            active_pitch = conn.execute(
+                """SELECT id, model_variants FROM yamazumi_pitches
+                   WHERE id=? AND project_id=? AND area_id=? AND status='Active'""",
+                (pitch_id, project_id, area_id),
+            ).fetchone()
+            if not active_pitch:
+                raise ValueError("Work can only be added to an Active pitch.")
+            pitch_variants = list(dict.fromkeys(
+                str(value).strip()
+                for value in json.loads(active_pitch["model_variants"] or "[]")
+                if str(value).strip()
+            ))
+            if selected_variant not in pitch_variants:
+                pitch_variants.append(selected_variant)
+                conn.execute(
+                    """UPDATE yamazumi_pitches SET model_variants=?, updated_at=?
+                       WHERE id=? AND project_id=? AND area_id=?""",
+                    (json.dumps(pitch_variants), timestamp, pitch_id, project_id, area_id),
+                )
         sequence = conn.execute(
             """SELECT COALESCE(MAX(sequence), 0) + 10 FROM yamazumi_elements
                WHERE project_id=? AND area_id=? AND pitch_id IS ?""",

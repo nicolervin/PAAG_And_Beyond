@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import streamlit as st
@@ -216,9 +217,12 @@ def yamazumi_board(
     on_edit_pitch: Callable[[], None],
     on_edit_element: Callable[[], None],
 ):
+    safe_takt = float(takt)
+    if not math.isfinite(safe_takt):
+        safe_takt = 0.0
     return _YAMAZUMI_BOARD(
         key=key,
-        data={"pitches": pitches, "elements": elements, "variants": variants, "takt": takt},
+        data={"pitches": pitches, "elements": elements, "variants": variants, "takt": safe_takt},
         on_move_change=on_move,
         on_add_pitch_change=on_add_pitch,
         on_add_element_change=on_add_element,

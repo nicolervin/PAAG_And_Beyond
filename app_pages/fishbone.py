@@ -374,12 +374,12 @@ else:
         )
         with fishbone_visual_slot.container():
             visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
-            selected_visual_feature = visual_controls.selectbox(
-                    "View fishbone for feature",
-                    options=[None, *visual_feature_options],
-                    format_func=lambda value: "All feature configurations · complete fishbone" if value is None else value,
-                    key=f"fishbone_visual_feature_{project_id}",
-                    help="A feature view includes parts tagged to that choice plus parts tagged All models.",
+            selected_visual_features = visual_controls.multiselect(
+                    "View fishbone for features",
+                    options=visual_feature_options,
+                    placeholder="All feature configurations · complete fishbone",
+                    key=f"fishbone_visual_features_{project_id}",
+                    help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
                 )
             if visual_controls.button(
                 "Edit parts & photos",
@@ -405,7 +405,11 @@ else:
                 if section_id not in coordinates:
                     continue
                 applicability_label = feature_applicability(part_id, assignment["model_applicability"])
-                if selected_visual_feature is not None and applicability_label != "All models" and selected_visual_feature not in feature_labels_by_part.get(part_id, []):
+                if (
+                    selected_visual_features
+                    and applicability_label != "All models"
+                    and not set(selected_visual_features) & set(feature_labels_by_part.get(part_id, []))
+                ):
                     continue
                 visual_parts.append({
                     "id": str(assignment["id"]),
@@ -483,39 +487,42 @@ else:
         part_pool["id"].astype(str).isin(pending_use_ids), "fishbone_section"
     ] = "Ready for another use"
     pool_controls = st.container(horizontal=True)
-    placement_filter_key = f"fishbone_placement_filter_{project_id}"
-    placement_filter = pool_controls.segmented_control(
+    placement_filter_key = f"fishbone_placement_filters_{project_id}"
+    placement_filters = pool_controls.multiselect(
         "Show",
-        ["Not placed", "Ready for another use", "Placed", "All"],
-        default="Not placed",
+        ["Not placed", "Ready for another use", "Placed"],
+        default=["Not placed"],
+        placeholder="All placement states",
         key=placement_filter_key,
     )
     part_search = pool_controls.text_input("Search parts", placeholder="Part number or description")
     pool_feature_options = sorted(
         {label for labels in feature_labels_by_part.values() for label in labels}, key=str.casefold
     )
-    selected_pool_feature = pool_controls.selectbox(
-        "Feature",
-        options=[None, *pool_feature_options],
-        format_func=lambda value: "All feature configurations" if value is None else value,
+    selected_pool_features = pool_controls.multiselect(
+        "Features",
+        options=pool_feature_options,
+        placeholder="All feature configurations",
+        key=f"fishbone_pool_features_{project_id}",
     )
     visible_parts = part_pool.copy()
-    if placement_filter == "Not placed":
-        visible_parts = visible_parts[visible_parts["fishbone_section"] == "Not placed"]
-    elif placement_filter == "Ready for another use":
-        visible_parts = visible_parts[visible_parts["fishbone_section"] == "Ready for another use"]
-    elif placement_filter == "Placed":
-        visible_parts = visible_parts[
-            ~visible_parts["fishbone_section"].isin(["Not placed", "Ready for another use"])
-        ]
+    if placement_filters:
+        placement_state = visible_parts["fishbone_section"].where(
+            visible_parts["fishbone_section"].isin(["Not placed", "Ready for another use"]),
+            "Placed",
+        )
+        visible_parts = visible_parts[placement_state.isin(placement_filters)]
     if part_search:
         searchable = visible_parts[["part_number", "description"]].fillna("").astype(str).agg(" ".join, axis=1)
         visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
-    if selected_pool_feature is not None:
+    if selected_pool_features:
         visible_parts = visible_parts[
             visible_parts.apply(
                 lambda row: row["feature_applicability"] == "All models"
-                or selected_pool_feature in feature_labels_by_part.get(str(row["id"]), []),
+                or bool(
+                    set(selected_pool_features)
+                    & set(feature_labels_by_part.get(str(row["id"]), []))
+                ),
                 axis=1,
             )
         ]
@@ -523,9 +530,9 @@ else:
     pool_key = pool_editor_key
     pool_signature_key = f"parts_fishbone_pool_signature_{project_id}"
     pool_signature = (
-        placement_filter,
+        tuple(placement_filters),
         part_search.strip().casefold(),
-        selected_pool_feature,
+        tuple(selected_pool_features),
         tuple(visible_parts["id"].astype(str)),
     )
     if st.session_state.get(pool_signature_key) != pool_signature:
@@ -544,9 +551,9 @@ else:
         row = visible_parts.iloc[click["row"]]
         st.session_state[f"parts_selected_id_{project_id}"] = str(row["id"])
         st.session_state["part_catalog_filters_keyword"] = str(row["part_number"])
-        st.session_state["part_catalog_filters_source"] = None
-        st.session_state["part_catalog_filters_revision"] = None
-        st.session_state["part_catalog_filters_model_applicability"] = None
+        st.session_state["part_catalog_filters_source"] = []
+        st.session_state["part_catalog_filters_revision"] = []
+        st.session_state["part_catalog_filters_model_applicability"] = []
         st.session_state[f"fishbone_open_pool_part_{project_id}"] = True
 
     edited_pool = st.data_editor(
@@ -714,9 +721,9 @@ else:
         part_number = str(assignment_editor.iloc[click["row"]]["part_number"])
         st.session_state[f"parts_selected_id_{project_id}"] = part_id
         st.session_state["part_catalog_filters_keyword"] = part_number
-        st.session_state["part_catalog_filters_source"] = None
-        st.session_state["part_catalog_filters_revision"] = None
-        st.session_state["part_catalog_filters_model_applicability"] = None
+        st.session_state["part_catalog_filters_source"] = []
+        st.session_state["part_catalog_filters_revision"] = []
+        st.session_state["part_catalog_filters_model_applicability"] = []
         # Navigation triggers a rerun, so defer it until the callback has finished.
         st.session_state[f"fishbone_open_part_{project_id}"] = True
 
@@ -729,7 +736,7 @@ else:
         staged_ids.add(str(row["part_id"]))
         st.session_state[assignment_undo_key] = current_assignment_undo
         st.session_state[f"fishbone_pending_additional_uses_{project_id}"] = sorted(staged_ids)
-        st.session_state[f"fishbone_placement_filter_{project_id}"] = "Ready for another use"
+        st.session_state[f"fishbone_placement_filters_{project_id}"] = ["Ready for another use"]
         st.toast("Part returned to Section 2 and is ready to place again.", icon=":material/arrow_upward:")
 
     def delete_assigned_part_use() -> None:
