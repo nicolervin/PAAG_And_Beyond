@@ -20,6 +20,7 @@ from utils.store import (
     import_yamazumi_rows,
     move_yamazumi_element,
     next_scenario_revision_label,
+    parse_yamazumi_model_variants,
     record_audit_event,
     rename_yamazumi_variants,
     replace_yamazumi_elements,
@@ -60,13 +61,12 @@ scenario_id = st.session_state.get("scenario_id")
 WORK_TYPES = ["Cycle", "Periodic", "Fluctuation"]
 PITCH_TYPES = ["Pitch", "Waterspider", "Subassembly", "Kitter", "Repacker"]
 ELEMENT_VARIANT_HELP = (
-    "This list contains only model variants enabled for the selected pitch. "
-    "If the variant you need is missing, close this window, choose Edit pitch on the balancing board, "
-    "add the variant under Model variants shown on this pitch, and save the pitch first."
+    "Choose every model stack where this same work element applies. The destination pitch must "
+    "show all selected variants."
 )
 ADD_ELEMENT_VARIANT_HELP = (
-    "Choose any available model variant. If it is not already shown on the destination pitch, "
-    "adding the element will also add that variant stack to the pitch."
+    "Choose every model stack where this same work element applies. Missing stacks are added "
+    "automatically to the destination pitch."
 )
 st.title("Yamazumi & workstation balancing")
 st.caption(
@@ -377,8 +377,17 @@ if not elements.empty:
     elements["flags"] = elements["flags"].apply(
         lambda value: json.loads(value or "[]") if isinstance(value, str) else (value or [])
     )
-    elements["model_variant"] = elements["model_variant"].apply(
-        lambda value: stored_variant_labels.get(str(value), str(value))
+    elements["model_variants"] = elements.apply(
+        lambda row: [
+            stored_variant_labels.get(item, item)
+            for item in parse_yamazumi_model_variants(
+                row.get("model_variants"), str(row.get("model_variant") or "Base")
+            )
+        ],
+        axis=1,
+    )
+    elements["model_variant"] = elements["model_variants"].apply(
+        lambda values: values[0] if values else "Base"
     )
 
 region_definitions = yamazumi_work_regions(project_id, area_id)
@@ -400,7 +409,8 @@ legacy_work_regions = sorted(
 work_region_options = ["None", *sorted(defined_work_regions), *legacy_work_regions]
 legacy_variant_options = [
     value
-    for value in elements.get("model_variant", pd.Series(dtype=str)).dropna().astype(str).tolist()
+    for values in elements.get("model_variants", pd.Series(dtype=object))
+    for value in (values or [])
     if value not in defined_variant_options
 ]
 variant_options = list(dict.fromkeys([*defined_variant_options, *legacy_variant_options]))
@@ -903,11 +913,16 @@ def handle_yamazumi_move() -> None:
         move = state.get("move")
     if not move:
         return
-    move_yamazumi_element(project_id, str(move.get("element_id")), move.get("pitch_id"))
+    enabled_variants = move_yamazumi_element(
+        project_id, str(move.get("element_id")), move.get("pitch_id")
+    )
+    details = {**move, "variants_added_to_pitch": enabled_variants}
     record_audit_event(
         project_id, "Yamazumi", "Move work element", 1,
-        st.session_state.get("current_editor", ""), move,
+        st.session_state.get("current_editor", ""), details,
     )
+    if enabled_variants:
+        request_table_editor_reset(pitch_editor_key)
 
 
 def handle_add_pitch_request() -> None:
@@ -989,21 +1004,22 @@ def add_element_dialog() -> None:
     description = st.text_area("Work description", placeholder="Describe one measurable element of work")
     time_s = st.number_input("Time to complete (seconds)", min_value=0.0, value=0.0, step=0.1)
     row = st.container(horizontal=True, vertical_alignment="bottom")
-    model_variant = row.selectbox(
-        "Model variant",
-        options=variant_options,
-        index=0,
-        help=ADD_ELEMENT_VARIANT_HELP,
-    )
     work_type = row.selectbox("Work type", WORK_TYPES, index=0)
     work_region = row.selectbox("Work region", work_region_options, index=0)
-    target_variants = pitch_variants_by_id.get(str(target_pitch_id), [])
-    variant_added_to_pitch = bool(
-        target_pitch_id and model_variant not in target_variants
+    model_variants = st.multiselect(
+        "Model variants",
+        options=variant_options,
+        default=["Base"],
+        help=ADD_ELEMENT_VARIANT_HELP,
     )
-    if variant_added_to_pitch:
+    target_variants = pitch_variants_by_id.get(str(target_pitch_id), [])
+    variants_added_to_pitch = [
+        variant for variant in model_variants
+        if target_pitch_id and variant not in target_variants
+    ]
+    if variants_added_to_pitch:
         st.caption(
-            f"{model_variant} will also be added to pitch "
+            f"{', '.join(variants_added_to_pitch)} will also be added to pitch "
             f"{target.get('pitch_number') or ''} as a new Yamazumi stack."
         )
     flags = st.multiselect("Flags", active_flag_options)
@@ -1020,7 +1036,7 @@ def add_element_dialog() -> None:
                 {
                     "description": description,
                     "time_s": time_s,
-                    "model_variant": model_variant,
+                    "model_variants": model_variants,
                     "work_type": work_type,
                     "work_region": work_region,
                     "flags": flags,
@@ -1032,17 +1048,17 @@ def add_element_dialog() -> None:
                 {
                     "pitch": target.get("pitch_number"),
                     "description": description,
-                    "model_variant": model_variant,
-                    "variant_added_to_pitch": variant_added_to_pitch,
+                    "model_variants": model_variants,
+                    "variants_added_to_pitch": variants_added_to_pitch,
                 },
             )
             st.session_state.pop(f"yamazumi_add_element_target_{project_id}_{area_id}", None)
-            if variant_added_to_pitch:
+            if variants_added_to_pitch:
                 request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
             message = "Added Yamazumi work element"
-            if variant_added_to_pitch:
-                message += f" and enabled {model_variant} on the pitch"
+            if variants_added_to_pitch:
+                message += f" and enabled {', '.join(variants_added_to_pitch)} on the pitch"
             st.toast(message, icon=":material/check_circle:")
             st.rerun()
         except ValueError as exc:
@@ -1168,13 +1184,11 @@ def edit_element_dialog(element_id: str) -> None:
         time_s = st.number_input(
             "Time to complete (seconds)", min_value=0.0, value=float(current.get("time_s") or 0), step=0.1
         )
-        available_variants = pitch_variants_by_id.get(str(selected_pitch_id), variant_options) if selected_pitch_id else variant_options
-        current_variant = str(current.get("model_variant") or "Base")
-        if current_variant not in available_variants:
-            current_variant = available_variants[0]
+        current_variants = list(current.get("model_variants") or ["Base"])
+        available_variants = list(dict.fromkeys([*variant_options, *current_variants]))
         row = st.container(horizontal=True, vertical_alignment="bottom")
-        model_variant = row.selectbox(
-            "Model variant", available_variants, index=available_variants.index(current_variant),
+        model_variants = row.multiselect(
+            "Model variants", available_variants, default=current_variants,
             help=ELEMENT_VARIANT_HELP,
         )
         current_work_type = str(current.get("work_type") or "Cycle").title()
@@ -1201,7 +1215,7 @@ def edit_element_dialog(element_id: str) -> None:
             update_yamazumi_element(
                 project_id, area_id, str(element_id),
                 {
-                    "pitch_id": selected_pitch_id, "model_variant": model_variant, "work_type": work_type,
+                    "pitch_id": selected_pitch_id, "model_variants": model_variants, "work_type": work_type,
                     "description": description, "time_s": time_s, "work_region": work_region, "flags": flags,
                 },
             )
@@ -1480,8 +1494,14 @@ if element_combined_view:
         element_table_source["flags"] = element_table_source["flags"].apply(
             lambda value: json.loads(value or "[]") if isinstance(value, str) else (value or [])
         )
-        element_table_source["model_variant"] = element_table_source["model_variant"].apply(
-            lambda value: stored_variant_labels.get(str(value), str(value))
+        element_table_source["model_variants"] = element_table_source.apply(
+            lambda row: [
+                stored_variant_labels.get(item, item)
+                for item in parse_yamazumi_model_variants(
+                    row.get("model_variants"), str(row.get("model_variant") or "Base")
+                )
+            ],
+            axis=1,
         )
     scope_caption = "every Yamazumi area" if not selected_element_area_ids else "the selected Yamazumi areas"
     st.caption(f"Showing {scope_caption} in this scenario. Combined views are read-only.")
@@ -1491,7 +1511,7 @@ else:
 active_pitches = pitches.loc[pitches["status"] == "Active"].copy() if not pitches.empty else pitches
 pitch_label_by_id = dict(zip(active_pitches["id"].astype(str), active_pitches["pitch_number"].astype(str))) if not active_pitches.empty else {}
 element_columns = [
-    "id", "area_name", "pitch_id", "model_variant", "work_type", "description", "time_s", "work_region",
+    "id", "area_name", "pitch_id", "model_variants", "work_type", "description", "time_s", "work_region",
     "flags", "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
 ]
 if element_table_source.empty:
@@ -1499,7 +1519,8 @@ if element_table_source.empty:
         "id": pd.Series(dtype="string"),
         "area_name": pd.Series(dtype="string"),
         "pitch_id": pd.Series(dtype="string"),
-        "model_variant": pd.Series(dtype="string"),
+        # MultiselectColumn values are lists, so this column deliberately uses object dtype.
+        "model_variants": pd.Series(dtype="object"),
         "work_type": pd.Series(dtype="string"),
         "description": pd.Series(dtype="string"),
         "time_s": pd.Series(dtype="Float64"),
@@ -1525,10 +1546,10 @@ element_filter_scope = "combined" if element_combined_view else str(area_id)
 visible_elements = filter_table(
     element_rows,
     key=f"yamazumi_element_filters_{scenario_id}_{element_filter_scope}",
-    dropdown_columns=["area_name", "pitch", "model_variant", "work_type", "work_region", "flags"],
-    search_columns=["area_name", "description", "pitch", "model_variant", "work_region", "flags"],
-    labels={"area_name": "Yamazumi area", "flags": "Flag"},
-    multi_value_columns=["flags"],
+    dropdown_columns=["area_name", "pitch", "model_variants", "work_type", "work_region", "flags"],
+    search_columns=["area_name", "description", "pitch", "model_variants", "work_region", "flags"],
+    labels={"area_name": "Yamazumi area", "model_variants": "Model variant", "flags": "Flag"},
+    multi_value_columns=["model_variants", "flags"],
     reset_widget_keys=[] if element_combined_view else [element_editor_key],
 )
 pitch_options = ["Unassigned", *pitch_label_by_id.values()]
@@ -1537,7 +1558,7 @@ variant_options_by_pitch_label = {
     for pitch_id in pitch_label_by_id
 }
 element_column_order = [
-    "area_name", "pitch", "model_variant", "work_type", "description", "time_s",
+    "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
     "work_region", "flags", "sequence",
 ]
 element_column_config = {
@@ -1545,12 +1566,12 @@ element_column_config = {
     "area_name": st.column_config.TextColumn("Yamazumi area"),
     "pitch_id": None,
     "pitch": st.column_config.SelectboxColumn("Pitch", options=pitch_options, required=True, default="Unassigned"),
-    "model_variant": st.column_config.SelectboxColumn(
-        "Model variant",
+    "model_variants": st.column_config.MultiselectColumn(
+        "Model variants",
         options=variant_options,
         required=True,
-        default="Base",
-        help="Base applies to all models. Other choices show Feature = Allowed choice from Model Definitions; imported legacy values remain available.",
+        default=["Base"],
+        help="Choose every model stack where this same work element applies.",
     ),
     "work_type": st.column_config.SelectboxColumn("Work type", options=WORK_TYPES, required=True, default="Cycle"),
     "description": st.column_config.TextColumn("Work description", required=True, width="large"),
@@ -1579,7 +1600,7 @@ if element_combined_view:
     element_read_only_config = {
         **element_column_config,
         "pitch": st.column_config.TextColumn("Pitch"),
-        "model_variant": st.column_config.TextColumn("Model variant"),
+        "model_variants": st.column_config.ListColumn("Model variants"),
         "work_region": st.column_config.TextColumn("Work region"),
         "flags": st.column_config.ListColumn("Flags"),
     }
@@ -1624,7 +1645,7 @@ if not element_combined_view and element_actions.save_and_refresh:
         st.warning("Selected work elements are not deleted during Save. Use the forthcoming confirmed bulk-delete action.")
     else:
         try:
-            errors = required_field_errors(edited_elements, {"model_variant": "Model variant", "description": "Work description", "work_region": "Work region"})
+            errors = required_field_errors(edited_elements, {"model_variants": "Model variants", "description": "Work description", "work_region": "Work region"})
             if errors:
                 raise ValueError(" ".join(errors))
             pitch_id_by_label = {label: pitch_id for pitch_id, label in pitch_label_by_id.items()}
@@ -1633,12 +1654,14 @@ if not element_combined_view and element_actions.save_and_refresh:
             invalid_variant_rows = to_save.apply(
                 lambda row: (
                     row["pitch"] != "Unassigned"
-                    and row["model_variant"] not in variant_options_by_pitch_label.get(row["pitch"], [])
+                    and not set(row["model_variants"] or []).issubset(
+                        set(variant_options_by_pitch_label.get(row["pitch"], []))
+                    )
                 ),
                 axis=1,
             )
             if invalid_variant_rows.any():
-                raise ValueError("A work element uses a model variant that is not enabled for its selected pitch.")
+                raise ValueError("A work element uses model variants that are not enabled for its selected pitch.")
             to_save = to_save.drop(columns=["pitch"], errors="ignore")
             count = replace_yamazumi_elements(project_id, area_id, to_save)
             record_audit_event(project_id, "Yamazumi elements", "Save & refresh", count, st.session_state.get("current_editor", ""))

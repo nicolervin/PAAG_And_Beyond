@@ -84,8 +84,17 @@ export default function(component) {
   for (const element of (data.elements || [])) {
     const pitch = element.pitch_id || '__unassigned__'
     grouped[pitch] ||= {}
-    grouped[pitch][element.model_variant || 'Base'] ||= []
-    grouped[pitch][element.model_variant || 'Base'].push(element)
+    let elementVariants = element.model_variants
+    if (typeof elementVariants === 'string') {
+      try { elementVariants = JSON.parse(elementVariants) } catch { elementVariants = [elementVariants] }
+    }
+    if (!Array.isArray(elementVariants) || !elementVariants.length) {
+      elementVariants = [element.model_variant || 'Base']
+    }
+    for (const variant of [...new Set(elementVariants)]) {
+      grouped[pitch][variant] ||= []
+      grouped[pitch][variant].push(element)
+    }
   }
   const makePitch = (pitch, side = 'neutral') => {
     const card = document.createElement('div')
@@ -197,7 +206,7 @@ export default function(component) {
 """
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v14",
+    "paag_yamazumi_drag_board_v15",
     html=_HTML,
     css=_CSS,
     js=_JS,

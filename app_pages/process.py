@@ -7,6 +7,7 @@ from utils.store import (
     delete_process_part_group,
     fishbone_part_assignments,
     get_planning_scenario,
+    parse_yamazumi_model_variants,
     process_element_id_for_yamazumi,
     process_part_groups,
     project_models,
@@ -80,6 +81,13 @@ else:
     ).strip().casefold()
 
     yamazumi_rows = yamazumi_elements_for_section(project_id, scenario_id, section_id)
+    if not yamazumi_rows.empty:
+        yamazumi_rows["model_variants"] = yamazumi_rows.apply(
+            lambda row: parse_yamazumi_model_variants(
+                row.get("model_variants"), str(row.get("model_variant") or "Base")
+            ),
+            axis=1,
+        )
     available_parts = fishbone_part_assignments(project_id)
     if not available_parts.empty:
         available_parts = available_parts.loc[
@@ -88,7 +96,7 @@ else:
 
     if pairing_search and not yamazumi_rows.empty:
         yam_mask = pd.Series(False, index=yamazumi_rows.index)
-        for column in ["description", "area_name", "pitch_number", "pitch_name", "model_variant"]:
+        for column in ["description", "area_name", "pitch_number", "pitch_name", "model_variants"]:
             yam_mask |= yamazumi_rows[column].fillna("").astype(str).str.casefold().str.contains(
                 pairing_search, regex=False
             )
@@ -116,14 +124,14 @@ else:
                 on_select="rerun",
                 selection_mode="single-row",
                 column_order=[
-                    "pitch_number", "description", "time_s", "model_variant",
+                    "pitch_number", "description", "time_s", "model_variants",
                     "material_group_count", "process_sync_status",
                 ],
                 column_config={
                     "pitch_number": st.column_config.TextColumn("Pitch", pinned=True),
                     "description": st.column_config.TextColumn("Work element", width="large"),
                     "time_s": st.column_config.NumberColumn("Time (s)", format="%.1f"),
-                    "model_variant": "Model",
+                    "model_variants": st.column_config.ListColumn("Models"),
                     "material_group_count": st.column_config.NumberColumn("Part groups"),
                     "process_sync_status": "Plan status",
                 },
