@@ -37,10 +37,10 @@ from utils.table_ui import (
 
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
-st.title("Process planning")
+st.title("Process at a Glance")
 st.caption(
     "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
-    "process plan by pitch. A purchased assembly is handled as one catalog part."
+    "Process at a Glance by pitch. A purchased assembly is handled as one catalog part."
 )
 if not project_id or not scenario_id:
     st.stop()
@@ -200,7 +200,7 @@ else:
                 disabled=selected_parts.empty,
             )
         add_without_parts = st.button(
-            "Add selected work to process plan without parts",
+            "Add selected work to Process at a Glance without parts",
             icon=":material/playlist_add:",
             key=f"add_work_only_{scenario_id}_{selected_yamazumi_id}",
         )
@@ -213,7 +213,9 @@ else:
                     project_id, scenario_id, selected_yamazumi_id
                 )
                 if not selected_process_id:
-                    raise ValueError("The work element could not be added to the process plan.")
+                    raise ValueError(
+                        "The work element could not be added to Process at a Glance."
+                    )
                 save_process_part_group(
                     project_id,
                     scenario_id,
@@ -253,7 +255,10 @@ else:
                 st.session_state.get("current_editor", ""),
                 {"scenario_id": scenario_id, "work_element": selected_description},
             )
-            st.toast("Work element added to the process plan", icon=":material/check_circle:")
+            st.toast(
+                "Work element added to Process at a Glance",
+                icon=":material/check_circle:",
+            )
             st.rerun()
 
         if selected_process_id:
@@ -335,14 +340,14 @@ elements["model_applicability"] = elements["model_applicability"].apply(
 )
 
 header_actions = editable_table_header(
-    "Process plan by pitch",
+    "Process at a Glance by pitch",
     editor_key=process_editor_key,
     key_prefix=f"process_plan_{scenario_id}",
     native_row_selection=True,
 )
 st.caption(
     "Enter an output assembly number on the exact step where a new made assembly becomes complete. "
-    "That milestone belongs to this scenario's process plan."
+    "That milestone belongs to this scenario's Process at a Glance."
 )
 
 visible_elements = filter_table(
@@ -423,7 +428,7 @@ edited = st.data_editor(
 )
 
 st.download_button(
-    "Export filtered process plan",
+    "Export filtered Process at a Glance",
     data=dataframe_to_excel(
         visible_elements.drop(columns=["id", "details", "delete_step"], errors="ignore"),
         "Process plan",
@@ -489,7 +494,7 @@ if request_bulk_delete:
     st.session_state[f"process_pending_delete_{scenario_id}"] = selected["id"].astype(str).tolist()
 
 
-@st.dialog("Delete process-plan steps?")
+@st.dialog("Delete Process at a Glance steps?")
 def confirm_process_delete() -> None:
     pending_key = f"process_pending_delete_{scenario_id}"
     pending_ids = st.session_state.get(pending_key, [])
@@ -556,7 +561,7 @@ if header_actions.save_and_refresh:
             {"scenario_id": scenario_id},
         )
         request_table_editor_reset(process_editor_key)
-        st.toast("Process plan saved", icon=":material/check_circle:")
+        st.toast("Process at a Glance saved", icon=":material/check_circle:")
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
@@ -599,17 +604,22 @@ if not edited.empty:
         stations, x="station", y="cycle_time_s", x_label="Pitch", y_label="Cycle time (s)"
     )
 
-with st.expander("Process-planning history", icon=":material/history:"):
+with st.expander("Process at a Glance history", icon=":material/history:"):
     history = audit_history(project_id, "Process plan", limit=50)
     pairing_history = audit_history(project_id, "Process part pairings", limit=50)
     combined_history = pd.concat([history, pairing_history], ignore_index=True)
     if combined_history.empty:
-        st.caption("No standardized process-planning changes have been recorded yet.")
+        st.caption("No standardized Process at a Glance changes have been recorded yet.")
     else:
+        display_history = combined_history.sort_values("created_at", ascending=False).drop(
+            columns=["details"], errors="ignore"
+        )
+        if "table_name" in display_history.columns:
+            display_history["table_name"] = display_history["table_name"].replace(
+                {"Process plan": "Process at a Glance"}
+            )
         st.dataframe(
-            combined_history.sort_values("created_at", ascending=False).drop(
-                columns=["details"], errors="ignore"
-            ),
+            display_history,
             hide_index=True,
             column_config={
                 "action": "Action",
