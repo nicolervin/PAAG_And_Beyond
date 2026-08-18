@@ -16,6 +16,7 @@ from utils.store import (
     record_audit_event,
     replace_work_elements,
     save_process_part_group,
+    update_process_step_details,
     yamazumi_elements_for_section,
 )
 from utils.table_filters import (
@@ -300,7 +301,6 @@ st.divider()
 process_editor_key = f"process_editor_{scenario_id}"
 apply_pending_table_editor_reset(process_editor_key)
 elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
-parts = project_table("parts", project_id, "part_number")
 models = project_models(project_id)
 model_labels = {
     str(row["model_number"]): (str(row["display_name"]).strip() or "Familiar name not defined")
@@ -314,8 +314,43 @@ columns = [
     "conveyor_height_mm", "platform_height_mm", "pit_depth_mm",
     "model_applicability", "status", "details", "delete_step",
 ]
+compact_columns = [
+    "sequence",
+    "station",
+    "operation",
+    "cycle_time_s",
+    "model_applicability",
+    "status",
+    "details",
+    "delete_step",
+]
 if elements.empty:
-    elements = pd.DataFrame(columns=columns)
+    elements = pd.DataFrame(
+        {
+            "id": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="int64"),
+            "station": pd.Series(dtype="string"),
+            "operation": pd.Series(dtype="string"),
+            "description": pd.Series(dtype="string"),
+            "cycle_time_s": pd.Series(dtype="float64"),
+            "assigned_parts": pd.Series(dtype="string"),
+            "part_number": pd.Series(dtype="string"),
+            "output_assembly_number": pd.Series(dtype="string"),
+            "output_assembly_name": pd.Series(dtype="string"),
+            "tool": pd.Series(dtype="string"),
+            "torque": pd.Series(dtype="string"),
+            "quality_requirement": pd.Series(dtype="string"),
+            "ergo_requirement": pd.Series(dtype="string"),
+            "location": pd.Series(dtype="string"),
+            "conveyor_height_mm": pd.Series(dtype="float64"),
+            "platform_height_mm": pd.Series(dtype="float64"),
+            "pit_depth_mm": pd.Series(dtype="float64"),
+            "model_applicability": pd.Series(dtype="object"),
+            "status": pd.Series(dtype="string"),
+            "details": pd.Series(dtype="string"),
+            "delete_step": pd.Series(dtype="string"),
+        }
+    )
 else:
     elements = elements.copy()
     pairing_summary: dict[str, list[str]] = {}
@@ -365,9 +400,21 @@ visible_elements = filter_table(
 
 
 def open_process_details() -> None:
+    blocked_key = f"process_details_blocked_{scenario_id}"
+    if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+        st.session_state[blocked_key] = (
+            "Save or undo table edits before opening step details."
+        )
+        return
+    if not native_selected_rows(visible_elements, editor_key=process_editor_key).empty:
+        st.session_state[blocked_key] = (
+            "Clear selected rows before opening step details."
+        )
+        return
     click = st.session_state.get(f"process_details_action_{scenario_id}") or {}
     position = click.get("row")
     if position is not None and 0 <= int(position) < len(visible_elements):
+        st.session_state.pop(blocked_key, None)
         st.session_state[f"selected_process_step_{scenario_id}"] = str(
             visible_elements.iloc[int(position)]["id"]
         )
@@ -379,6 +426,7 @@ def request_individual_process_delete() -> None:
     if position is not None and 0 <= int(position) < len(visible_elements):
         element_id = str(visible_elements.iloc[int(position)]["id"] or "").strip()
         if element_id:
+            st.session_state.pop(f"selected_process_step_{scenario_id}", None)
             st.session_state[f"process_pending_delete_{scenario_id}"] = [element_id]
 
 
@@ -388,8 +436,8 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="dynamic",
     height=470,
-    disabled=["id", "assigned_parts"],
-    column_order=[column for column in columns if column not in {"id", "part_number"}],
+    disabled=["id"],
+    column_order=compact_columns,
     column_config={
         "id": None,
         "part_number": None,
@@ -405,19 +453,7 @@ edited = st.data_editor(
         "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10, pinned=True),
         "station": st.column_config.TextColumn("Pitch", pinned=True),
         "operation": st.column_config.TextColumn("Operation", required=True, pinned=True),
-        "description": st.column_config.TextColumn("Step description", width="large"),
         "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
-        "assigned_parts": st.column_config.TextColumn(
-            "Paired fishbone parts", width="large",
-            help="Managed in the section pairing workspace above.",
-        ),
-        "output_assembly_number": st.column_config.TextColumn(
-            "New assembly number", help="Leave blank unless this step completes a made assembly."
-        ),
-        "output_assembly_name": st.column_config.TextColumn("New assembly name"),
-        "conveyor_height_mm": st.column_config.NumberColumn("Conveyor (mm)", min_value=0.0),
-        "platform_height_mm": st.column_config.NumberColumn("Platform (mm)", min_value=0.0),
-        "pit_depth_mm": st.column_config.NumberColumn("Pit depth (mm)", min_value=0.0),
         "model_applicability": st.column_config.MultiselectColumn(
             "Models", options=["All models", *model_labels.values()]
         ),
@@ -426,6 +462,10 @@ edited = st.data_editor(
         ),
     },
 )
+
+details_blocked = st.session_state.pop(f"process_details_blocked_{scenario_id}", None)
+if details_blocked:
+    st.warning(details_blocked)
 
 st.download_button(
     "Export filtered Process at a Glance",
@@ -491,6 +531,7 @@ if apply_bulk:
         st.rerun()
 
 if request_bulk_delete:
+    st.session_state.pop(f"selected_process_step_{scenario_id}", None)
     st.session_state[f"process_pending_delete_{scenario_id}"] = selected["id"].astype(str).tolist()
 
 
@@ -566,28 +607,198 @@ if header_actions.save_and_refresh:
     except ValueError as exc:
         st.error(str(exc))
 
-selected_step_id = st.session_state.get(f"selected_process_step_{scenario_id}")
-selected_step = elements.loc[elements["id"].astype(str) == str(selected_step_id)] if selected_step_id else elements.iloc[0:0]
-if not selected_step.empty:
-    step = selected_step.iloc[0]
-    with st.container(border=True):
-        details_heading = st.container(horizontal=True, vertical_alignment="center")
-        details_heading.subheader(f"Process-step details · {step['operation']}")
-        if details_heading.button(
-            "Close", icon=":material/close:", key=f"close_process_details_{scenario_id}"
-        ):
-            st.session_state.pop(f"selected_process_step_{scenario_id}", None)
+def close_process_details() -> None:
+    st.session_state.pop(f"selected_process_step_{scenario_id}", None)
+
+
+@st.dialog(
+    "Edit process-step details",
+    width="large",
+    dismissible=False,
+    icon=":material/edit_note:",
+)
+def edit_process_step_details(element_id: str) -> None:
+    selected_step = elements.loc[elements["id"].astype(str) == str(element_id)]
+    if selected_step.empty:
+        st.error("The selected process step no longer exists.")
+        if st.button("Close", icon=":material/close:"):
+            close_process_details()
             st.rerun()
-        st.write(step.get("description") or "No detailed description.")
-        st.caption(
-            f"Pitch: {step.get('station') or 'Unassigned'} · Time: {float(step.get('cycle_time_s') or 0):.1f} s"
+        return
+
+    step = selected_step.iloc[0]
+    widget_prefix = f"process_details_{scenario_id}_{element_id}"
+
+    def text_value(field: str) -> str:
+        value = step.get(field)
+        return "" if value is None or pd.isna(value) else str(value)
+
+    def number_value(field: str) -> float | None:
+        value = step.get(field)
+        return None if value is None or pd.isna(value) else float(value)
+
+    st.subheader(str(step.get("operation") or "Unnamed process step"))
+    st.caption(
+        f"Pitch: {step.get('station') or 'Unassigned'} · "
+        f"Time: {float(step.get('cycle_time_s') or 0):.1f} s"
+    )
+
+    (
+        step_tab,
+        tool_tab,
+        requirements_tab,
+        location_tab,
+        parts_tab,
+        future_tab,
+    ) = st.tabs(
+        [
+            "Step details",
+            "Tool and torque",
+            "Quality and ergonomics",
+            "Location and heights",
+            "Parts and models",
+            "Future equipment and sub-touches",
+        ]
+    )
+
+    with step_tab:
+        description = st.text_area(
+            "Step description",
+            value=text_value("description"),
+            key=f"{widget_prefix}_description",
         )
-        if step.get("assigned_parts"):
-            st.write(f"Paired parts: {step['assigned_parts']}")
-        if step.get("output_assembly_number"):
-            st.success(
-                f"Creates assembly {step['output_assembly_number']} · {step.get('output_assembly_name') or ''}"
+        output_assembly_number = st.text_input(
+            "New assembly number",
+            value=text_value("output_assembly_number"),
+            help="Leave blank unless this exact step completes a new made assembly.",
+            key=f"{widget_prefix}_output_assembly_number",
+        )
+        output_assembly_name = st.text_input(
+            "New assembly name",
+            value=text_value("output_assembly_name"),
+            key=f"{widget_prefix}_output_assembly_name",
+        )
+
+    with tool_tab:
+        tool = st.text_area(
+            "Tool requirement",
+            value=text_value("tool"),
+            key=f"{widget_prefix}_tool",
+        )
+        torque = st.text_area(
+            "Torque requirement",
+            value=text_value("torque"),
+            key=f"{widget_prefix}_torque",
+        )
+
+    with requirements_tab:
+        quality_requirement = st.text_area(
+            "Quality requirement",
+            value=text_value("quality_requirement"),
+            key=f"{widget_prefix}_quality_requirement",
+        )
+        ergo_requirement = st.text_area(
+            "Ergonomic requirement",
+            value=text_value("ergo_requirement"),
+            key=f"{widget_prefix}_ergo_requirement",
+        )
+
+    with location_tab:
+        location = st.text_input(
+            "Location",
+            value=text_value("location"),
+            key=f"{widget_prefix}_location",
+        )
+        dimension_columns = st.columns(3)
+        conveyor_height_mm = dimension_columns[0].number_input(
+            "Conveyor height (mm)",
+            min_value=0.0,
+            value=number_value("conveyor_height_mm"),
+            key=f"{widget_prefix}_conveyor_height_mm",
+        )
+        platform_height_mm = dimension_columns[1].number_input(
+            "Platform height (mm)",
+            min_value=0.0,
+            value=number_value("platform_height_mm"),
+            key=f"{widget_prefix}_platform_height_mm",
+        )
+        pit_depth_mm = dimension_columns[2].number_input(
+            "Pit depth (mm)",
+            min_value=0.0,
+            value=number_value("pit_depth_mm"),
+            key=f"{widget_prefix}_pit_depth_mm",
+        )
+
+    with parts_tab:
+        st.markdown("**Paired fishbone parts**")
+        st.write(step.get("assigned_parts") or "No fishbone parts are paired to this step.")
+        st.caption("Part pairings are managed in the pairing workspace above the table.")
+        st.markdown("**Model applicability**")
+        assigned_models = step.get("model_applicability") or ["All models"]
+        if not isinstance(assigned_models, list):
+            assigned_models = [str(assigned_models)]
+        st.write(", ".join(str(model) for model in assigned_models))
+        st.caption("Edit model applicability directly in the compact table.")
+
+    with future_tab:
+        st.info("Coming in a future phase.")
+
+    actions = st.container(horizontal=True, horizontal_alignment="right")
+    if actions.button(
+        "Cancel",
+        icon=":material/close:",
+        key=f"{widget_prefix}_cancel",
+    ):
+        close_process_details()
+        st.rerun()
+    if actions.button(
+        "Save details",
+        type="primary",
+        icon=":material/save:",
+        key=f"{widget_prefix}_save",
+    ):
+        try:
+            updated_at = update_process_step_details(
+                project_id,
+                scenario_id,
+                element_id,
+                {
+                    "description": description,
+                    "output_assembly_number": output_assembly_number,
+                    "output_assembly_name": output_assembly_name,
+                    "tool": tool,
+                    "torque": torque,
+                    "quality_requirement": quality_requirement,
+                    "ergo_requirement": ergo_requirement,
+                    "location": location,
+                    "conveyor_height_mm": conveyor_height_mm,
+                    "platform_height_mm": platform_height_mm,
+                    "pit_depth_mm": pit_depth_mm,
+                },
             )
+            record_audit_event(
+                project_id,
+                "Process plan",
+                "Edit details",
+                1,
+                st.session_state.get("current_editor", ""),
+                {
+                    "scenario_id": scenario_id,
+                    "work_element_id": element_id,
+                    "updated_at": updated_at,
+                },
+            )
+            close_process_details()
+            request_table_editor_reset(process_editor_key)
+            st.toast("Process-step details saved", icon=":material/check_circle:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+selected_step_id = st.session_state.get(f"selected_process_step_{scenario_id}")
+if selected_step_id and not st.session_state.get(f"process_pending_delete_{scenario_id}"):
+    edit_process_step_details(str(selected_step_id))
 
 if not edited.empty:
     clean_times = pd.to_numeric(edited["cycle_time_s"], errors="coerce").fillna(0)

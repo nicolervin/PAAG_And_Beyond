@@ -4187,6 +4187,68 @@ def sync_confirmed_mbom_parts(project_id: str) -> int:
     return len(confirmed)
 
 
+def update_process_step_details(
+    project_id: str, scenario_id: str, element_id: str, values: dict
+) -> str:
+    """Update the detail-dialog fields for one scenario-owned process step."""
+    text_fields = [
+        "description",
+        "output_assembly_number",
+        "output_assembly_name",
+        "tool",
+        "torque",
+        "quality_requirement",
+        "ergo_requirement",
+        "location",
+    ]
+    numeric_fields = {
+        "conveyor_height_mm": "Conveyor height",
+        "platform_height_mm": "Platform height",
+        "pit_depth_mm": "Pit depth",
+    }
+    cleaned = {
+        field: "" if values.get(field) is None or pd.isna(values.get(field))
+        else str(values.get(field)).strip()
+        for field in text_fields
+    }
+    cleaned.update(
+        {
+            field: _optional_nonnegative_number(values.get(field), label)
+            for field, label in numeric_fields.items()
+        }
+    )
+    timestamp = now_iso()
+    with connection() as conn:
+        existing = conn.execute(
+            """SELECT id FROM work_elements
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (element_id, project_id, scenario_id),
+        ).fetchone()
+        if not existing:
+            raise ValueError("The selected process step no longer exists in this scenario.")
+
+        output_number = cleaned["output_assembly_number"]
+        if output_number:
+            duplicate = conn.execute(
+                """SELECT id FROM work_elements
+                   WHERE project_id=? AND scenario_id=? AND id<>?
+                     AND LOWER(TRIM(output_assembly_number))=LOWER(?)""",
+                (project_id, scenario_id, element_id, output_number),
+            ).fetchone()
+            if duplicate:
+                raise ValueError(
+                    "Each made-assembly output number can be completed only once in a scenario."
+                )
+
+        assignments = ", ".join(f"{field}=?" for field in cleaned)
+        conn.execute(
+            f"""UPDATE work_elements SET {assignments}, updated_at=?
+                WHERE id=? AND project_id=? AND scenario_id=?""",
+            (*cleaned.values(), timestamp, element_id, project_id, scenario_id),
+        )
+    return timestamp
+
+
 def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFrame) -> None:
     fields = ["sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
               "quality_requirement", "ergo_requirement", "location", "conveyor_height_mm", "platform_height_mm",

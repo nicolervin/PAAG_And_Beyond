@@ -35,6 +35,8 @@
 - Fields shown in the dialog are edited only there, not duplicated in the main table.
 - Follows existing editable-table and dialog/state-reset conventions in AGENTS.md (unsaved-edit detection, editor reset after save, audit history).
 
+**Status: Complete.**
+
 ---
 
 ## Phase 2 — Equipment / Resource catalog
