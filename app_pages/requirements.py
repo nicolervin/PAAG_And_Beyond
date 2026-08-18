@@ -1,6 +1,7 @@
 import streamlit as st
 
 from utils.store import get_planning_scenario, material_consumption_for_scenario, project_table
+from utils.units import millimeters_to_inches
 
 
 project_id = st.session_state.get("project_id")
@@ -29,6 +30,13 @@ stations = st.multiselect(
     key=f"requirements_stations_{scenario_id}",
 )
 filtered = elements if not stations else elements[elements["station"].isin(stations)]
+
+
+def inch_label(value: object) -> str:
+    inches = millimeters_to_inches(value)
+    if inches is None:
+        return "—"
+    return f'{inches:.2f}'.rstrip("0").rstrip(".") + " in"
 
 for _, step in filtered.iterrows():
     with st.container(border=True):
@@ -66,4 +74,10 @@ for _, step in filtered.iterrows():
                     f"{requirement['requirement']} · {requirement['selection_rule']} · "
                     f"Qty {float(requirement['quantity']):g}: {', '.join(options)}{section_text}"
                 )
-        st.markdown(f"**Location:** {step['location'] or '—'} · **Conveyor:** {step['conveyor_height_mm'] or '—'} mm · **Platform:** {step['platform_height_mm'] or '—'} mm · **Pit:** {step['pit_depth_mm'] or '—'} mm")
+        orientation = str(step.get("unit_orientation") or "").strip() or "—"
+        st.markdown(
+            f"**Location:** {step['location'] or '—'} · **Unit orientation:** {orientation} · "
+            f"**Conveyor height:** {inch_label(step['conveyor_height_mm'])} · "
+            f"**Platform height:** {inch_label(step['platform_height_mm'])} · "
+            f"**Pit depth:** {inch_label(step['pit_depth_mm'])}"
+        )

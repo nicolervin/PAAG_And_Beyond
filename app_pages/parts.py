@@ -11,8 +11,10 @@ from utils.store import (
     audit_history,
     complexity_features,
     delete_project_part,
+    get_planning_scenario,
     part_feature_rules,
     part_images,
+    part_scenario_activity,
     project_models,
     project_table,
     record_audit_event,
@@ -27,20 +29,31 @@ from utils.table_filters import (
 )
 from utils.table_ui import (
     dataframe_to_excel,
+    drop_untouched_new_rows,
     editable_table_header,
     native_selected_rows,
     required_field_errors,
     standard_details_column_config,
+    sortable_editor_rows,
     table_has_unsaved_changes,
 )
 
 
 project_id = st.session_state.get("project_id")
-parts_editor_key = "parts_catalog_editor_v6"
-st.title("Part catalog")
-st.caption("Connect official part numbers to CAD screenshots, quantities, revisions, and model applicability.")
-if not project_id:
+scenario_id = st.session_state.get("scenario_id")
+parts_editor_key = f"parts_catalog_editor_v7_{scenario_id}"
+st.title("Parts Catalog")
+st.caption(
+    "Connect official part numbers to CAD screenshots, revisions, model applicability, and the "
+    "parts active in this planning scenario."
+)
+if not project_id or not scenario_id:
     st.stop()
+scenario = get_planning_scenario(project_id, scenario_id)
+if not scenario:
+    st.error("The active planning scenario no longer exists.")
+    st.stop()
+st.caption(f"Active scenario: Rev {scenario['revision_label']} · {scenario['name']}")
 apply_pending_table_editor_reset(parts_editor_key)
 
 parts = project_table("parts", project_id, "part_number")
@@ -48,6 +61,7 @@ models = project_models(project_id)
 features = complexity_features(project_id)
 active_features = features.loc[features["active"].fillna(1).astype(bool)].copy() if not features.empty else features
 rules = part_feature_rules(project_id)
+activity_by_part = part_scenario_activity(project_id, scenario_id)
 if models.empty:
     active_model_numbers = []
     model_labels = {}
@@ -130,6 +144,9 @@ if parts_actions.undo:
 st.caption("Edit catalog fields directly, then save. Select View details on a row to open its photos and full information below.")
 editable_columns = ["id", "part_number", "description", "quantity", "revision", "model_applicability", "notes", "source", "image_path", "updated_at"]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
+parts_for_editing["active"] = parts_for_editing["id"].apply(
+    lambda part_id: activity_by_part.get(str(part_id), True)
+).astype(bool)
 parts_for_editing["feature_applicability"] = parts_for_editing.apply(
     lambda row: (
         rules_by_part.get(str(row["id"]), [])
@@ -144,20 +161,19 @@ parts_for_editing["view_details"] = ":material/visibility: View details"
 parts_for_editing["photo_status"] = parts_for_editing["image_path"].apply(
     lambda value: "✅ Added" if str(value or "").strip() else "❌ Missing"
 )
-parts_for_editing["photo_action"] = parts_for_editing["image_path"].apply(
-    lambda value: ":material/add_a_photo: Photo" if not str(value or "").strip() else ":material/image: Photo"
-) if "image_path" in parts_for_editing.columns else ":material/add_a_photo: Photo"
-parts_for_editing["delete_part"] = ":material/delete: Delete part"
 parts_for_editing = filter_table(
     parts_for_editing,
     key="part_catalog_filters",
-    dropdown_columns=["source", "revision", "photo_status", "applicability_status"],
+    dropdown_columns=["active", "source", "revision", "photo_status", "applicability_status"],
     search_columns=["part_number", "description", "photo_status", "applicability_status", "notes", "source"],
-    labels={"photo_status": "Photo status", "applicability_status": "Feature applicability"},
+    labels={
+        "active": "Active in scenario",
+        "photo_status": "Photo status",
+        "applicability_status": "Feature applicability",
+    },
     reset_widget_keys=[parts_editor_key],
 )
 selected_part_key = f"parts_selected_id_{project_id}"
-photo_part_key = f"parts_photo_id_{project_id}"
 
 
 def open_part_details() -> None:
@@ -166,67 +182,41 @@ def open_part_details() -> None:
         st.session_state[selected_part_key] = str(parts_for_editing.iloc[click["row"]]["id"])
 
 
-def open_part_photo() -> None:
-    click = st.session_state.get("parts_photo_action")
-    if click and 0 <= click["row"] < len(parts_for_editing):
-        part_id = parts_for_editing.iloc[click["row"]]["id"]
-        if part_id is not None and not pd.isna(part_id):
-            st.session_state[photo_part_key] = str(part_id)
-
-
-def delete_part_row() -> None:
-    click = st.session_state.get("parts_delete_part")
-    if not click or not 0 <= click["row"] < len(parts_for_editing):
-        return
-    if table_has_unsaved_changes(parts_editor_key, native_row_selection=True):
-        st.toast("Save or undo the other table edits before deleting a part.", icon=":material/warning:")
-        return
-    row = parts_for_editing.iloc[click["row"]]
-    part_id = row.get("id")
-    if part_id is None or pd.isna(part_id):
-        return
-    label = delete_project_part(project_id, str(part_id))
-    if st.session_state.get(selected_part_key) == str(part_id):
-        st.session_state.pop(selected_part_key, None)
-    if st.session_state.get(photo_part_key) == str(part_id):
-        st.session_state.pop(photo_part_key, None)
-    request_table_editor_reset(parts_editor_key)
-    st.toast(f"Deleted part {label} and its fishbone uses", icon=":material/delete:")
-
-
-edited_parts = st.data_editor(
+parts_editor_rows = sortable_editor_rows(
     parts_for_editing,
+    defaults={
+        "active": True,
+        "revision": "0",
+        "feature_applicability": ["All models"],
+    },
+)
+edited_parts = st.data_editor(
+    parts_editor_rows,
     key=parts_editor_key,
     hide_index=True,
-    num_rows="dynamic",
+    num_rows="delete",
     height=430,
     disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at"],
-    column_order=["view_details", "delete_part", "photo_action", "photo_status", "part_number", "description", "revision", "feature_applicability", "applicability_status", "notes", "source", "updated_at"],
+    column_order=["view_details", "active", "photo_status", "part_number", "description", "revision", "feature_applicability", "applicability_status", "notes", "source", "updated_at"],
     column_config={
         "id": None,
         "view_details": standard_details_column_config(on_click=open_part_details, key="parts_view_details"),
-        "photo_action": st.column_config.ButtonColumn(
-            "Photo",
-            type="tertiary",
-            on_click=open_part_photo,
-            key="parts_photo_action",
-            help="Open upload and direct-paste controls for this part.",
+        "active": st.column_config.CheckboxColumn(
+            "Active",
+            default=True,
+            help=(
+                "Turn off to keep this catalog record but hide it from downstream views in "
+                "the active planning scenario."
+            ),
         ),
         "photo_status": st.column_config.TextColumn(
             "Photo status",
             help="A green check means a primary CAD image is attached; a red X means it is missing.",
         ),
-        "delete_part": st.column_config.ButtonColumn(
-            "Delete part",
-            type="tertiary",
-            on_click=delete_part_row,
-            key="parts_delete_part",
-            help="Delete this catalog part, its photos, and all of its fishbone uses.",
-        ),
         "part_number": st.column_config.TextColumn("Part number", required=True),
-        "description": st.column_config.TextColumn("Description", width="large"),
+        "description": st.column_config.TextColumn("Part Name", width="large"),
         "quantity": None,
-        "revision": st.column_config.TextColumn("Revision"),
+        "revision": st.column_config.TextColumn("Revision", default="0"),
         "model_applicability": None,
         "image_path": None,
         "feature_applicability": st.column_config.MultiselectColumn(
@@ -242,10 +232,13 @@ edited_parts = st.data_editor(
         "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
     },
 )
-st.caption("Add a part in the blank row, then save. After it is saved, use its Photo cell to upload a file or paste a screenshot.")
+st.caption(
+    "Add a part in the blank row, then save. Use View details to manage its Primary CAD image "
+    "and additional views."
+)
 
 export_columns = [
-    "part_number", "description", "revision", "feature_applicability",
+    "active", "part_number", "description", "revision", "feature_applicability",
     "photo_status", "notes", "source", "updated_at",
 ]
 st.download_button(
@@ -274,6 +267,7 @@ request_delete_bulk_parts = bulk_controls.button(
     f"Delete selected ({len(selected_saved_parts)})",
     icon=":material/delete:",
     disabled=selected_saved_parts.empty,
+    key="destructive_request_parts_bulk_delete",
 )
 
 if apply_bulk_applicability:
@@ -320,7 +314,12 @@ def confirm_bulk_part_delete() -> None:
     if actions.button("Cancel", key="cancel_bulk_part_delete"):
         st.session_state.pop("parts_pending_bulk_delete", None)
         st.rerun()
-    if actions.button("Delete parts", type="primary", icon=":material/delete:", key="confirm_bulk_part_delete"):
+    if actions.button(
+        "Delete parts",
+        type="primary",
+        icon=":material/delete:",
+        key="destructive_confirm_bulk_part_delete",
+    ):
         deleted_labels = [
             delete_project_part(project_id, str(part_id))
             for part_id in pending_ids
@@ -328,8 +327,6 @@ def confirm_bulk_part_delete() -> None:
         deleted_ids = set(pending_ids)
         if st.session_state.get(selected_part_key) in deleted_ids:
             st.session_state.pop(selected_part_key, None)
-        if st.session_state.get(photo_part_key) in deleted_ids:
-            st.session_state.pop(photo_part_key, None)
         record_audit_event(
             project_id, "Parts", "Bulk delete", len(deleted_labels),
             st.session_state.get("current_editor", ""), {"part_numbers": deleted_labels},
@@ -343,59 +340,13 @@ def confirm_bulk_part_delete() -> None:
 if st.session_state.get("parts_pending_bulk_delete"):
     confirm_bulk_part_delete()
 
-photo_part_id = st.session_state.get(photo_part_key)
-photo_rows = parts.loc[parts["id"].astype(str) == str(photo_part_id)] if photo_part_id else parts.iloc[0:0]
-if not photo_rows.empty:
-    photo_part = photo_rows.iloc[0].to_dict()
-    with st.container(border=True):
-        photo_title, photo_close = st.columns([5, 0.7], vertical_alignment="center")
-        photo_title.subheader(f"Primary CAD image · {photo_part['part_number']}")
-        if photo_close.button("Close", icon=":material/close:", key="close_table_photo_editor"):
-            st.session_state.pop(photo_part_key, None)
-            st.rerun()
-        photo_path = Path(photo_part["image_path"]) if photo_part.get("image_path") else None
-        if photo_path and photo_path.exists():
-            st.image(str(photo_path), caption=photo_part["part_number"], width=240)
-        uploaded_from_table = st.file_uploader(
-            "Upload the primary CAD image",
-            type=["png", "jpg", "jpeg", "webp"],
-            key=f"table_photo_upload_{photo_part_id}",
-        )
-        if uploaded_from_table and st.button(
-            "Save uploaded image", type="primary", icon=":material/upload:", key=f"save_table_upload_{photo_part_id}"
-        ):
-            set_part_image(str(photo_part_id), uploaded_from_table)
-            st.toast("Primary CAD image saved", icon=":material/check_circle:")
-            st.rerun()
-        st.caption("Press Win+Shift+S, select a region, then paste it below—no intermediate file needed.")
-        table_clipboard_key = f"clipboard_table_part_{photo_part_id}"
-        table_pending_key = f"pending_table_part_{photo_part_id}"
-        table_pasted = clipboard_image(key=table_clipboard_key)
-        table_payload = getattr(table_pasted, "image", None)
-        if table_payload:
-            try:
-                st.session_state[table_pending_key] = decode_clipboard_image(table_payload)
-            except ValueError as exc:
-                st.error(str(exc))
-        table_pending = st.session_state.get(table_pending_key)
-        if table_pending:
-            st.image(table_pending["bytes"], caption="Pasted screenshot preview", width=240)
-            table_photo_actions = st.container(horizontal=True)
-            if table_photo_actions.button(
-                "Save pasted screenshot", type="primary", icon=":material/save:", key=f"save_table_paste_{photo_part_id}"
-            ):
-                set_part_image(str(photo_part_id), as_uploaded_file(table_pending))
-                st.session_state.pop(table_pending_key, None)
-                st.toast("Primary CAD image saved", icon=":material/check_circle:")
-                st.rerun()
-            if table_photo_actions.button("Discard", icon=":material/delete:", key=f"discard_table_paste_{photo_part_id}"):
-                st.session_state.pop(table_pending_key, None)
-                st.rerun()
-
 if save_part_table:
     try:
         if not selected_saved_parts.empty:
             raise ValueError("Clear the selected rows before saving table edits. Selection is reserved for bulk actions.")
+        edited_parts = drop_untouched_new_rows(
+            edited_parts, identifying_columns=["part_number"]
+        )
         validation_errors = required_field_errors(edited_parts, {"part_number": "Part number"})
         if validation_errors:
             raise ValueError(" ".join(validation_errors))
@@ -408,7 +359,7 @@ if save_part_table:
         if missing_rule.any():
             raise ValueError("Every part needs All models or at least one feature choice.")
         parts_to_save = edited_parts.drop(
-            columns=["view_details", "photo_status", "photo_action", "delete_part", "feature_applicability", "applicability_status"]
+            columns=["view_details", "active", "photo_status", "feature_applicability", "applicability_status"]
         ).copy()
         new_row_mask = parts_to_save["id"].isna() | parts_to_save["id"].astype(str).str.strip().eq("")
         parts_to_save.loc[new_row_mask, "id"] = [str(uuid4()) for _ in range(int(new_row_mask.sum()))]
@@ -417,7 +368,19 @@ if save_part_table:
         parts_to_save.loc[new_row_mask, "quantity"] = 1
         parts_to_save.loc[new_row_mask, "model_applicability"] = "All"
         parts_to_save.loc[new_row_mask, "source"] = "Manual"
-        count = update_part_rows(project_id, parts_to_save)
+        count = update_part_rows(
+            project_id,
+            parts_to_save,
+            scenario_id=scenario_id,
+            activity_by_part={
+                str(row["id"]): (
+                    True
+                    if row.get("active") is None or pd.isna(row.get("active"))
+                    else bool(row.get("active"))
+                )
+                for _, row in edited_parts.iterrows()
+            },
+        )
         update_part_feature_rules(
             project_id,
             {
@@ -430,8 +393,12 @@ if save_part_table:
             },
         )
         record_audit_event(
-            project_id, "Parts", "Save & refresh", count,
+            project_id,
+            "Parts",
+            "Save & refresh",
+            count,
             st.session_state.get("current_editor", ""),
+            {"scenario_id": scenario_id},
         )
         request_table_editor_reset(parts_editor_key)
         st.toast(f"Saved {count} parts", icon=":material/check_circle:")
@@ -439,31 +406,40 @@ if save_part_table:
     except ValueError as exc:
         st.error(str(exc))
 
-with st.expander("Parts history", icon=":material/history:"):
-    history = audit_history(project_id, "Parts", limit=50)
-    if history.empty:
-        st.caption("No standardized Parts-table changes have been recorded yet.")
-    else:
-        st.dataframe(
-            history.drop(columns=["details"], errors="ignore"),
-            hide_index=True,
-            column_config={
-                "action": "Action",
-                "row_count": "Rows",
-                "editor_name": "Editor",
-                "created_at": st.column_config.DatetimeColumn("When", format="MMM DD, YYYY HH:mm"),
-            },
-        )
+def render_parts_history() -> None:
+    """Render Parts history at the bottom of the current page state."""
+    with st.expander("Parts history", icon=":material/history:"):
+        history = audit_history(project_id, "Parts", limit=50)
+        if history.empty:
+            st.caption("No standardized Parts-table changes have been recorded yet.")
+        else:
+            st.dataframe(
+                history.drop(columns=["details"], errors="ignore"),
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
 
 if parts.empty:
     st.info("Add the first part in the blank row above, then select Save part table.")
+    render_parts_history()
     st.stop()
 
 valid_part_ids = set(parts["id"].astype(str))
 if st.session_state.get(selected_part_key) not in valid_part_ids:
     st.session_state[selected_part_key] = str(parts.iloc[0]["id"])
 part = parts.loc[parts["id"].astype(str) == st.session_state[selected_part_key]].iloc[0].to_dict()
-st.subheader(f"Part details · {part['part_number']}")
+part_name = str(part.get("description") or "").strip()
+part_details_title = f"Part Details · {part['part_number']}"
+if part_name:
+    part_details_title += f" {part_name}"
+st.subheader(part_details_title)
 image_col, details_col = st.columns([2, 3])
 with image_col.container(border=True):
     st.subheader("Primary CAD image")
@@ -478,28 +454,34 @@ with image_col.container(border=True):
         st.toast("Image attached", icon=":material/check_circle:")
         st.rerun()
 
-    st.caption("Or press Win+Shift+S, select a region, and paste it here—no intermediate file needed.")
+    st.caption(
+        "Or press Win+Shift+S, select a region, and paste it here. "
+        "It saves immediately as the Primary CAD image."
+    )
     primary_clipboard_key = f"clipboard_primary_{part['id']}"
     primary_pending_key = f"pending_primary_{part['id']}"
+    st.session_state.pop(primary_pending_key, None)
     pasted = clipboard_image(key=primary_clipboard_key)
     pasted_payload = getattr(pasted, "image", None)
     if pasted_payload:
         try:
-            st.session_state[primary_pending_key] = decode_clipboard_image(pasted_payload)
-        except ValueError as exc:
+            primary_image = decode_clipboard_image(pasted_payload)
+            set_part_image(part["id"], as_uploaded_file(primary_image))
+            record_audit_event(
+                project_id,
+                "Parts",
+                "Paste Primary CAD image",
+                1,
+                st.session_state.get("current_editor", ""),
+                {"part_id": str(part["id"])},
+            )
+            st.toast(
+                "Screenshot saved as the Primary CAD image",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+        except (OSError, ValueError) as exc:
             st.error(str(exc))
-    pending_primary = st.session_state.get(primary_pending_key)
-    if pending_primary:
-        st.image(pending_primary["bytes"], caption="Pasted screenshot preview")
-        with st.container(horizontal=True):
-            if st.button("Save pasted screenshot", type="primary", icon=":material/save:", key=f"save_pasted_{part['id']}"):
-                set_part_image(part["id"], as_uploaded_file(pending_primary))
-                del st.session_state[primary_pending_key]
-                st.toast("Screenshot saved as the primary CAD image", icon=":material/check_circle:")
-                st.rerun()
-            if st.button("Discard", icon=":material/delete:", key=f"discard_pasted_{part['id']}"):
-                del st.session_state[primary_pending_key]
-                st.rerun()
 
     st.subheader("Additional views")
     images = part_images(part["id"])
@@ -521,10 +503,12 @@ with image_col.container(border=True):
 
 with details_col.container(border=True):
     st.subheader(part["part_number"])
-    st.write(part["description"] or "No description")
+    st.write(part["description"] or "No part name")
     detail_cols = st.columns(2)
     detail_cols[0].metric("Revision", part["revision"] or "—")
     detail_cols[1].metric("Source", part["source"])
     st.markdown(f"**Feature applicability:** {readable_feature_applicability(part['id'], part['model_applicability'])}")
     if part["notes"]:
         st.write(part["notes"])
+
+render_parts_history()

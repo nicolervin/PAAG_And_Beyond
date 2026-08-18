@@ -14,6 +14,8 @@
 
 **Status: Complete.**
 
+**Interim section behavior:** The detail dialog can copy unit orientation and conveyor height to every existing Process at a Glance step tied to the same Fishbone section in the active scenario. This is a one-time fill, not the persistent section-level inheritance planned for Phase 3.
+
 ---
 
 ## Phase 1 — Data-entry UI redesign
@@ -24,9 +26,8 @@
 
 **Dialog tabs:**
 - Step details
-- Tool and torque
-- Quality and ergonomics
-- Location and heights
+- Tool
+- Unit orientation and heights
 - Parts and models
 - Future equipment and sub-touches (placeholder until Phases 2 and 4 are built)
 
@@ -72,17 +73,17 @@
 
 ## Phase 3 — Section-level physical line dimensions
 
-**Goal:** Move conveyor height/width, platform height, and pit depth from per-step entry to per-Fishbone-main-spine-section entry, since these are physically consistent across a section in most cases.
+**Goal:** Move conveyor geometry from per-step entry to per-Fishbone-main-spine-section entry, since it is physically consistent across a section in most cases. Platform height and pit depth belong in a future ergonomics workflow rather than this line-setup phase.
 
 **Data model:**
-- One record per Fishbone main-spine section, per scenario, holding: conveyor height (mm), conveyor width (mm), platform height (mm), pit depth (mm), product orientation.
+- One record per Fishbone main-spine section, per scenario, holding: conveyor height (in), conveyor width (in), conveyor length (ft), and unit orientation.
 - Process at a Glance steps display these values (inherited from their section) rather than requiring re-entry per step.
 
 **Open design question to resolve at build time:** Should a step be allowed to override an inherited section value for an exceptional case? Recommendation: yes, allow an optional per-step override field that defaults to blank/inherited. Confirm with Nicole before implementing if this needs revisiting.
 
 **UI requirements:**
 - Add a section-level "Line setup" or "Equipment & layout" panel/tab where these values are entered once per section.
-- Existing per-step conveyor/platform/pit columns in Process at a Glance become read-only display (showing inherited value) unless overridden.
+- Existing per-step conveyor-height values in Process at a Glance become read-only display (showing the inherited inch value) unless overridden.
 
 ---
 
@@ -188,9 +189,10 @@
 ## Deferred / pending separate decision (not part of this roadmap's build order)
 
 **Torque and quality-owned requirement fields:**
-- Decision made: torque (and likely other quality-owned specs) should move out of IE-owned Process at a Glance entry.
-- They belong to Quality Engineers, entered via a Requirements section that will need to become editable (currently read-only), feeding the future PFMEA/control plan module.
-- Status: pending confirmation from Nicole's conversation with the quality engineer. Do not build this move until confirmed. When ready, this becomes its own phase, kept separate from this roadmap until confirmed.
+- Torque, quality, and ergonomics entry has been removed from the IE-owned Process at a Glance detail dialog. Existing saved values are preserved and remain visible in the read-only Requirements view.
+- Torque and other quality-owned specifications belong with Quality Engineers in a future editable Requirements workflow that can feed PFMEA/control-plan work.
+- Platform height and pit depth belong in a future ergonomics workflow. Existing saved values are preserved until that workflow is designed.
+- Status: the Process at a Glance removal is complete; ownership and editing design for the future Requirements and ergonomics workflows remains a separate phase.
 
 ---
 

@@ -7,14 +7,21 @@ from utils.store import (
     complexity_features,
     complexity_planning_snapshot,
     complexity_tree,
-    delete_project_model,
+    delete_project_models,
     model_planning_snapshot,
     project_models,
+    record_audit_event,
     restore_model_planning_snapshot,
     restore_complexity_planning_snapshot,
     update_complexity_features,
     update_complexity_tree,
     update_project_model_rows,
+)
+from utils.table_ui import (
+    drop_untouched_new_rows,
+    native_selected_rows,
+    sortable_editor_rows,
+    table_has_unsaved_changes,
 )
 from utils.table_filters import (
     apply_pending_table_editor_reset,
@@ -52,7 +59,9 @@ summary[0].metric("Defined models", len(models))
 summary[1].metric("Active for planning", active_count)
 summary[2].metric("Imported from PITS", int(models["source_payload"].fillna("{}").ne("{}").sum()))
 
-has_unsaved_changes = has_unsaved_table_changes("model_definitions_editor_v2")
+has_unsaved_changes = table_has_unsaved_changes(
+    "model_definitions_editor_v2", native_row_selection=True
+)
 planning_title, planning_warning, planning_undo, planning_action = st.columns(
     [4, 0.8, 0.7, 1], vertical_alignment="center"
 )
@@ -97,7 +106,6 @@ for column in definition_columns:
         models[column] = pd.NA
 
 models_for_editing = models.reindex(columns=definition_columns)
-models_for_editing["delete_row"] = ":material/delete: Delete row"
 visible_models = filter_table(
     models_for_editing,
     key="model_definition_filters",
@@ -108,31 +116,16 @@ visible_models = filter_table(
 )
 
 
-def delete_model_row() -> None:
-    click = st.session_state.get("model_definition_delete_row")
-    if not click or not 0 <= click["row"] < len(visible_models):
-        return
-    if has_unsaved_table_changes("model_definitions_editor_v2"):
-        st.toast("Save the other model changes before deleting a row.", icon=":material/warning:")
-        return
-    row = visible_models.iloc[click["row"]]
-    try:
-        label = delete_project_model(project_id, str(row["id"]))
-        st.session_state[model_undo_key] = current_model_snapshot
-        st.toast(f"Deleted model: {label}", icon=":material/delete:")
-    except ValueError as exc:
-        st.toast(str(exc), icon=":material/warning:")
-
-
+models_editor_rows = sortable_editor_rows(visible_models, defaults={"active": True})
 edited_models = st.data_editor(
-    visible_models,
+    models_editor_rows,
     key="model_definitions_editor_v2",
     hide_index=True,
-    num_rows="dynamic",
+    num_rows="delete",
     height=500,
     disabled=["id", "updated_at"],
     column_order=[
-        "active", "display_name", "model_number", "eau", "description", "delete_row",
+        "active", "display_name", "model_number", "eau", "description",
     ],
     column_config={
         "id": None,
@@ -153,19 +146,78 @@ edited_models = st.data_editor(
         "description": st.column_config.TextColumn("Description", width="large"),
         "notes": None,
         "updated_at": None,
-        "delete_row": st.column_config.ButtonColumn(
-            "Delete row",
-            type="tertiary",
-            on_click=delete_model_row,
-            key="model_definition_delete_row",
-            help="Delete this model if it is not assigned to Parts, Process Plan, or MBOM data.",
-        ),
     },
 )
 
+selected_models = native_selected_rows(
+    visible_models, editor_key="model_definitions_editor_v2"
+)
+model_bulk_actions = st.container(horizontal=True, horizontal_alignment="right")
+request_model_delete = model_bulk_actions.button(
+    f"Delete selected ({len(selected_models)})",
+    icon=":material/delete:",
+    disabled=selected_models.empty,
+    key="destructive_request_model_bulk_delete",
+)
+if request_model_delete:
+    if table_has_unsaved_changes(
+        "model_definitions_editor_v2", native_row_selection=True
+    ):
+        st.warning("Save or undo other model edits before deleting selected models.")
+    else:
+        st.session_state[f"models_pending_delete_{project_id}"] = (
+            selected_models["id"].astype(str).tolist()
+        )
+
+
+@st.dialog("Delete selected models?")
+def confirm_model_delete() -> None:
+    pending_key = f"models_pending_delete_{project_id}"
+    pending_ids = st.session_state.get(pending_key, [])
+    st.warning(
+        f"Delete {len(pending_ids)} selected model definition(s)? Models still assigned elsewhere "
+        "will block the entire deletion."
+    )
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key="cancel_model_bulk_delete"):
+        st.session_state.pop(pending_key, None)
+        st.rerun()
+    if actions.button(
+        "Delete models",
+        type="primary",
+        icon=":material/delete:",
+        key="destructive_confirm_model_bulk_delete",
+    ):
+        try:
+            labels = delete_project_models(project_id, pending_ids)
+            st.session_state[model_undo_key] = current_model_snapshot
+            record_audit_event(
+                project_id,
+                "Model definitions",
+                "Bulk delete",
+                len(labels),
+                st.session_state.get("current_editor", ""),
+                {"models": labels},
+            )
+            st.session_state.pop(pending_key, None)
+            request_table_editor_reset("model_definitions_editor_v2")
+            st.toast(f"Deleted {len(labels)} selected models", icon=":material/delete:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+if st.session_state.get(f"models_pending_delete_{project_id}"):
+    confirm_model_delete()
+
 if save_requested:
     try:
-        count = update_project_model_rows(project_id, edited_models.drop(columns=["delete_row"], errors="ignore"))
+        if not selected_models.empty:
+            raise ValueError("Clear selected rows before saving model edits.")
+        edited_models = drop_untouched_new_rows(
+            edited_models, identifying_columns=["model_number"]
+        )
+        count = update_project_model_rows(project_id, edited_models)
         st.session_state[model_undo_key] = current_model_snapshot
         request_table_editor_reset("model_definitions_editor_v2")
         st.toast(f"Saved {count} model definitions", icon=":material/check_circle:")
@@ -231,11 +283,12 @@ if features.empty:
 else:
     feature_rows = features.reindex(columns=feature_columns)
 
+feature_editor_rows = sortable_editor_rows(feature_rows, defaults={"active": True})
 edited_features = st.data_editor(
-    feature_rows,
+    feature_editor_rows,
     key=feature_editor_key,
     hide_index=True,
-    num_rows="dynamic",
+    num_rows="delete",
     height=320,
     disabled=["id"],
     column_order=["active", "category", "name", "allowed_choices", "description"],
@@ -256,6 +309,10 @@ edited_features = st.data_editor(
 )
 if save_features:
     try:
+        edited_features = drop_untouched_new_rows(
+            edited_features,
+            identifying_columns=["category", "name", "allowed_choices"],
+        )
         count = update_complexity_features(project_id, edited_features)
         st.session_state[feature_undo_key] = current_complexity_snapshot
         st.session_state.pop("complexity_tree_editor", None)

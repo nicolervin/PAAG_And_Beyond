@@ -125,9 +125,9 @@ The page also creates a one-way Excel snapshot. Its sheets cover the project, ac
 
 Maintains source model numbers and the names/descriptions familiar to the IE team. Models can be activated or hidden from planning choices. The page also defines manufacturing-relevant features and allowed choices, then maps each official model to one choice for every active feature.
 
-#### Parts
+#### Parts Catalog
 
-Maintains one catalog record per official part number. It records description, revision, provenance/source, notes, and feature-based model applicability. It supports a primary CAD image, additional image views, file upload, and direct Windows screenshot paste. New parts are created in the blank table row; persisted parts then receive photos and detailed actions.
+Maintains one catalog record per official part number. It records description, revision, provenance/source, notes, and feature-based model applicability. A scenario-specific Active checkbox controls whether a catalog part appears in downstream Fishbone, Process at a Glance, Requirements, and scenario-export views without deleting the master record or its saved links. It supports a primary CAD image, additional image views, file upload, and direct Windows screenshot paste from Part Details. New parts are created in the blank table row and default to active in each scenario until explicitly turned off there.
 
 #### Parts to fishbone
 
@@ -135,7 +135,7 @@ Builds the assembly framework before workstation balancing. Main-spine sections 
 
 ### Process planning
 
-#### Yamazumi & balancing
+#### Yamazumi
 
 Creates or imports balancing areas, pitch addresses, and work elements inside the active planning scenario. Users can:
 
@@ -235,7 +235,8 @@ Use `utils/table_ui.py` and `utils/table_filters.py` for every new editable tabl
 
 - Put the section title, orange unsaved-changes indicator, Undo control, and blue **Save & refresh** button on one line at the top. Use `editable_table_header()` unless there is a documented reason it cannot fit.
 - Support direct cell editing and direct row creation whenever the data model permits it.
-- Use Streamlit's native selected/deleted-row state through `num_rows="dynamic"` or `num_rows="delete"`. The unlabeled square in the upper-left must select all currently visible rows, matching Order assigned parts.
+- Use Streamlit's native selected/deleted-row state through `num_rows="delete"` for editable tables or fixed-row selection for read-only tables. The unlabeled square in the upper-left must select all currently visible rows, matching Order assigned parts.
+- Keep native Sort ascending and Sort descending available in every standard table column menu. For editable tables that need a new-record row, use `sortable_editor_rows()` with `num_rows="delete"`; Streamlit disables sorting for `num_rows="dynamic"` and `num_rows="add"`.
 - Do not add a named `CheckboxColumn` or a separate Select all control to simulate selection.
 - Read selected persisted rows with `native_selected_rows()`. Treat selection as transient UI state, not an unsaved business-data edit. Use `table_has_unsaved_changes(..., native_row_selection=True)` where selection must be excluded from change detection.
 - Prevent a normal save while persisted rows remain selected; selection is reserved for bulk actions.
@@ -244,13 +245,14 @@ Use `utils/table_ui.py` and `utils/table_filters.py` for every new editable tabl
 - Do not change existing column sizing unless the user specifically asks for it.
 - Mark required fields in `st.column_config` and validate them again with `required_field_errors()` or store-layer validation before writing.
 - Validate the complete bulk operation before making any write. Do not partially apply a bulk change when one selected record is invalid.
-- Provide bulk editing for meaningful shared fields and bulk deletion for persisted selected rows.
-- Require a confirmation dialog before bulk deletion. State what related data will also be removed or unassigned.
-- Keep a convenient individual-row Delete action where appropriate. Use a `ButtonColumn` callback and block it when unrelated unsaved edits would make the target ambiguous.
+- Provide bulk editing for meaningful shared fields and a separate **Delete selected** trash action for persisted selected rows.
+- Never put a per-row Delete action or Delete `ButtonColumn` inside a table. Deletion must require native row selection, the separate trash action, and a confirmation dialog so it cannot happen in one click.
+- Require a confirmation dialog before selected-row deletion. State what related data will also be removed or unassigned.
+- Give every destructive action a widget key beginning with `destructive_`. The entrypoint uses that stable key prefix to render destructive and delete buttons red without styling Cancel actions.
 - Use the shared Details/Edit button configuration for consistent row actions.
 - Include an Excel export of the currently filtered table using `dataframe_to_excel()`.
 - After a successful save, bulk edit, or delete: write the data, record history, request an editor reset, show a toast, and rerun.
-- Record standardized saves, bulk edits, and bulk deletions with `record_audit_event()`. Include the timestamp supplied by the store layer and `st.session_state.get("current_editor", "")`. Expose a nearby history expander or toggle using `audit_history()`.
+- Record standardized saves, bulk edits, and bulk deletions with `record_audit_event()`. Include the timestamp supplied by the store layer and `st.session_state.get("current_editor", "")`. Expose history with `audit_history()` in an expander at the bottom of the page; when a page has multiple history categories, group them into tabs within that bottom expander.
 - Do not impose Draft/In review/Approved statuses as a universal standard. Status options are specific to the business table.
 
 A typical save flow is:

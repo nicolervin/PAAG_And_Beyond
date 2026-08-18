@@ -9,6 +9,7 @@ from utils.table_filters import (
     merge_filtered_edits,
     request_table_editor_reset,
 )
+from utils.table_ui import drop_untouched_new_rows, sortable_editor_rows
 
 
 project_id = st.session_state.get("project_id")
@@ -32,8 +33,16 @@ visible_concerns = filter_table(
     search_columns=["subject", "detail", "owner", "related_part", "related_station"],
     reset_widget_keys=["concerns_editor"],
 )
+concerns_for_editing = sortable_editor_rows(
+    visible_concerns,
+    defaults={
+        "category": "Question",
+        "priority": "Medium",
+        "status": "Open",
+    },
+)
 edited = st.data_editor(
-    visible_concerns, key="concerns_editor", num_rows="dynamic", hide_index=True, height=430,
+    concerns_for_editing, key="concerns_editor", num_rows="delete", hide_index=True, height=430,
     disabled=["id", "created_at"], column_order=[column for column in columns if column != "id"],
     column_config={
         "id": None,
@@ -49,6 +58,7 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
     if has_unsaved_table_changes("concerns_editor"):
         st.markdown(":orange[:material/warning: **Unsaved changes**]")
     if st.button("Save concerns", type="primary", icon=":material/save:"):
+        edited = drop_untouched_new_rows(edited, identifying_columns=["subject"])
         combined_concerns = merge_filtered_edits(concerns, visible_concerns, edited)
         replace_concerns(project_id, combined_concerns)
         request_table_editor_reset("concerns_editor")

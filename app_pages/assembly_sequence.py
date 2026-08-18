@@ -88,7 +88,7 @@ with st.container(border=True):
                 alt.Tooltip("sequence:Q", title="Order"),
                 alt.Tooltip("depth:O", title="Depth"),
                 alt.Tooltip("part_number:N", title="Part number"),
-                alt.Tooltip("node:N", title="Description"),
+                alt.Tooltip("node:N", title="Part Name"),
                 alt.Tooltip("branch_name:N", title="Branch"),
                 alt.Tooltip("subsystem:N", title="Subsystem"),
             ],

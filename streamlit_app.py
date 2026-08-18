@@ -4,6 +4,25 @@ from utils.store import get_planning_scenario, get_project, init_db, planning_sc
 
 
 st.set_page_config(page_title="Process at a Glance", page_icon=":material/precision_manufacturing:", layout="wide")
+st.html(
+    """
+    <style>
+    div[class*="st-key-destructive_"] button {
+        background-color: #c62828 !important;
+        border-color: #c62828 !important;
+        color: #ffffff !important;
+    }
+    div[class*="st-key-destructive_"] button:hover {
+        background-color: #a71919 !important;
+        border-color: #a71919 !important;
+        color: #ffffff !important;
+    }
+    div[class*="st-key-destructive_"] button:disabled {
+        opacity: 0.45;
+    }
+    </style>
+    """
+)
 init_db()
 
 all_projects = projects()
@@ -18,11 +37,11 @@ pages = {
     "Product structure": [
         st.Page("app_pages/exchange.py", title="Import PITS & export", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
-        st.Page("app_pages/parts.py", title="Parts", icon=":material/category:"),
+        st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
         st.Page("app_pages/fishbone.py", title="Parts to fishbone", icon=":material/device_hub:"),
     ],
     "Process planning": [
-        st.Page("app_pages/yamazumi.py", title="Yamazumi & balancing", icon=":material/view_column:"),
+        st.Page("app_pages/yamazumi.py", title="Yamazumi", icon=":material/view_column:"),
         st.Page(
             "app_pages/process.py",
             title="Process at a Glance",

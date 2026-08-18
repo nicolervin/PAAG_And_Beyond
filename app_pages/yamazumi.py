@@ -48,9 +48,11 @@ from utils.table_filters import (
 )
 from utils.table_ui import (
     dataframe_to_excel,
+    drop_untouched_new_rows,
     editable_table_header,
     native_selected_rows,
     required_field_errors,
+    sortable_editor_rows,
     table_has_unsaved_changes,
 )
 from utils.yamazumi_board import yamazumi_board
@@ -68,7 +70,7 @@ ADD_ELEMENT_VARIANT_HELP = (
     "Choose every model stack where this same work element applies. Missing stacks are added "
     "automatically to the destination pitch."
 )
-st.title("Yamazumi & workstation balancing")
+st.title("Yamazumi")
 st.caption(
     "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating the Process Plan."
 )
@@ -81,6 +83,7 @@ if not scenario:
     st.stop()
 
 suggested_revision = next_scenario_revision_label(project_id, scenario["revision_label"])
+has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
 
 
 @st.dialog("Save as planning scenario")
@@ -124,6 +127,22 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
     )
     if st.button("Save as scenario", type="primary", icon=":material/content_copy:"):
         save_as_scenario_dialog()
+    request_clear_area = st.button(
+        "Clear this Yamazumi Section",
+        type="primary",
+        icon=":material/delete_sweep:",
+        help="Remove the selected Yamazumi section's pitches, work elements, and settings only.",
+        disabled=not has_yamazumi_areas,
+        key="destructive_request_clear_yamazumi_section",
+    )
+    request_clear_all = st.button(
+        "Clear all Yamazumi data",
+        type="primary",
+        icon=":material/delete_forever:",
+        help="Remove every Yamazumi area, pitch, work element, and Yamazumi setting in this scenario.",
+        disabled=not has_yamazumi_areas,
+        key="destructive_request_clear_all_yamazumi_data",
+    )
 
 area_selector_key = f"yamazumi_area_{scenario_id}"
 sections = assembly_sections(project_id)
@@ -236,17 +255,6 @@ element_editor_key = f"yamazumi_element_editor_{scenario_id}_{area_id}"
 apply_pending_table_editor_reset(pitch_editor_key)
 apply_pending_table_editor_reset(element_editor_key)
 
-reset_actions = st.container(horizontal=True, horizontal_alignment="right")
-request_clear_area = reset_actions.button(
-    "Clear this area",
-    icon=":material/delete_sweep:",
-    help="Remove this area's Yamazumi pitches, work elements, and settings only.",
-)
-request_clear_all = reset_actions.button(
-    "Clear all Yamazumi data",
-    icon=":material/delete_forever:",
-    help="Remove every Yamazumi area, pitch, work element, and Yamazumi setting in this scenario.",
-)
 if request_clear_area:
     st.session_state["yamazumi_reset_scope"] = "area"
 if request_clear_all:
@@ -279,7 +287,7 @@ def confirm_yamazumi_reset() -> None:
         type="primary",
         icon=":material/delete_forever:",
         disabled=confirmation.strip() != "CLEAR",
-        key="confirm_yamazumi_reset",
+        key="destructive_confirm_yamazumi_reset",
     ):
         counts = clear_yamazumi_data(
             project_id, scenario_id, area_id if scope == "area" else None
@@ -487,11 +495,12 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         labels={"active": "Active"},
         reset_widget_keys=[region_editor_key],
     )
+    region_editor_rows = sortable_editor_rows(visible_regions, defaults={"active": True})
     edited_regions = st.data_editor(
-        visible_regions,
+        region_editor_rows,
         key=region_editor_key,
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="delete",
         height=300,
         disabled=["id", "color", "sequence", "updated_at"],
         column_order=["name", "description", "active"],
@@ -531,7 +540,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         f"Delete selected ({len(selected_regions)})",
         icon=":material/delete:",
         disabled=selected_regions.empty,
-        key=f"request_yamazumi_region_delete_{area_id}",
+        key=f"destructive_request_yamazumi_region_delete_{area_id}",
     )
     region_bulk.download_button(
         "Export filtered",
@@ -599,7 +608,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
             "Delete regions",
             type="primary",
             icon=":material/delete:",
-            key=f"confirm_yamazumi_region_delete_{area_id}",
+            key=f"destructive_confirm_yamazumi_region_delete_{area_id}",
         ):
             kept_regions = region_rows.loc[
                 ~region_rows["id"].astype(str).isin(set(pending_ids))
@@ -631,6 +640,9 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         try:
             if not selected_regions.empty:
                 raise ValueError("Clear selected rows before saving work-region edits.")
+            edited_regions = drop_untouched_new_rows(
+                edited_regions, identifying_columns=["name"]
+            )
             errors = required_field_errors(
                 edited_regions, {"name": "Work region name"}
             )
@@ -652,24 +664,6 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
-
-    if st.toggle("Show work-region history", key=f"show_yamazumi_region_history_{area_id}"):
-        region_history = audit_history(project_id, "Yamazumi work regions", limit=50)
-        if region_history.empty:
-            st.caption("No standardized work-region changes have been recorded yet.")
-        else:
-            st.dataframe(
-                region_history.drop(columns=["details"], errors="ignore"),
-                hide_index=True,
-                column_config={
-                    "action": "Action",
-                    "row_count": "Rows",
-                    "editor_name": "Editor",
-                    "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
-                    ),
-                },
-            )
 
 with setup_columns[2].expander("Define element flags", icon=":material/label:"):
     st.caption(
@@ -699,11 +693,12 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         reset_widget_keys=[flag_editor_key],
     )
 
+    flag_editor_rows = sortable_editor_rows(visible_flags, defaults={"active": True})
     edited_flags = st.data_editor(
-        visible_flags,
+        flag_editor_rows,
         key=flag_editor_key,
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="delete",
         height=300,
         disabled=["id", "system_flag", "sequence", "updated_at"],
         column_order=["name", "description", "active"],
@@ -743,7 +738,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         f"Delete selected ({len(custom_selected_flags)})",
         icon=":material/delete:",
         disabled=custom_selected_flags.empty,
-        key=f"request_yamazumi_flag_delete_{project_id}",
+        key=f"destructive_request_yamazumi_flag_delete_{project_id}",
     )
     flag_bulk.download_button(
         "Export filtered",
@@ -805,7 +800,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
             "Delete flags",
             type="primary",
             icon=":material/delete:",
-            key=f"confirm_yamazumi_flag_delete_{project_id}",
+            key=f"destructive_confirm_yamazumi_flag_delete_{project_id}",
         ):
             try:
                 count = delete_yamazumi_flag_definitions(project_id, pending_ids)
@@ -834,6 +829,9 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         try:
             if not selected_flags.empty:
                 raise ValueError("Clear selected rows before saving flag edits.")
+            edited_flags = drop_untouched_new_rows(
+                edited_flags, identifying_columns=["name"]
+            )
             errors = required_field_errors(edited_flags, {"name": "Flag name"})
             if errors:
                 raise ValueError(" ".join(errors))
@@ -852,24 +850,6 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
-
-    if st.toggle("Show flag-definition history", key=f"show_yamazumi_flag_history_{project_id}"):
-        flag_history = audit_history(project_id, "Yamazumi flag definitions", limit=50)
-        if flag_history.empty:
-            st.caption("No standardized flag-definition changes have been recorded yet.")
-        else:
-            st.dataframe(
-                flag_history.drop(columns=["details"], errors="ignore"),
-                hide_index=True,
-                column_config={
-                    "action": "Action",
-                    "row_count": "Rows",
-                    "editor_name": "Editor",
-                    "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
-                    ),
-                },
-            )
 
 times = pd.to_numeric(elements.get("time_s", pd.Series(dtype=float)), errors="coerce").fillna(0)
 total_work = float(times.sum())
@@ -1135,7 +1115,7 @@ def edit_pitch_dialog() -> None:
     )
     if st.button(
         "Delete pitch", icon=":material/delete:", disabled=not delete_confirmed,
-        key=f"delete_pitch_{pitch_id}",
+        key=f"destructive_delete_pitch_{pitch_id}",
     ):
         try:
             moved = delete_yamazumi_pitch(project_id, area_id, str(pitch_id))
@@ -1239,7 +1219,7 @@ def edit_element_dialog(element_id: str) -> None:
     )
     if st.button(
         "Delete element", icon=":material/delete:", disabled=not delete_confirmed,
-        key=f"delete_element_{element_id}",
+        key=f"destructive_delete_element_{element_id}",
     ):
         try:
             delete_yamazumi_element(project_id, area_id, str(element_id))
@@ -1307,7 +1287,19 @@ def normalize_table_area_filter(key: str) -> list[str]:
 
 
 pitch_table_area_key = f"yamazumi_pitch_table_area_{scenario_id}"
+pitch_table_manual_area_key = f"yamazumi_pitch_table_area_manual_{scenario_id}"
+
+
+def mark_pitch_table_area_manual() -> None:
+    """Stop automatic board-area syncing after the user chooses table areas."""
+    st.session_state[pitch_table_manual_area_key] = True
+
+
 selected_pitch_area_ids = normalize_table_area_filter(pitch_table_area_key)
+if not st.session_state.get(pitch_table_manual_area_key, False):
+    selected_pitch_area_ids = [str(area_id)]
+    if st.session_state.get(pitch_table_area_key) != selected_pitch_area_ids:
+        st.session_state[pitch_table_area_key] = selected_pitch_area_ids
 effective_pitch_area_ids = selected_pitch_area_ids or yamazumi_area_ids
 pitch_combined_view = set(effective_pitch_area_ids) != {str(area_id)}
 if pitch_combined_view:
@@ -1329,6 +1321,8 @@ selected_pitch_area_ids = st.multiselect(
     format_func=lambda value: area_labels.get(value, value),
     placeholder="All Yamazumi areas",
     key=pitch_table_area_key,
+    on_change=mark_pitch_table_area_manual,
+    persist_state="session",
 )
 effective_pitch_area_ids = selected_pitch_area_ids or yamazumi_area_ids
 pitch_combined_view = set(effective_pitch_area_ids) != {str(area_id)}
@@ -1418,11 +1412,19 @@ if pitch_combined_view:
     )
     edited_pitches = visible_pitches
 else:
-    edited_pitches = st.data_editor(
+    pitch_editor_rows = sortable_editor_rows(
         visible_pitches,
+        defaults={
+            "pitch_type": "Pitch",
+            "status": "Active",
+            "model_variants": ["Base"],
+        },
+    )
+    edited_pitches = st.data_editor(
+        pitch_editor_rows,
         key=pitch_editor_key,
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="delete",
         height=280,
         disabled=["id", "area_name", "updated_at"],
         column_order=pitch_column_order,
@@ -1447,6 +1449,9 @@ if not pitch_combined_view and pitch_actions.save_and_refresh:
         st.warning("Selected pitches are not deleted during Save. A confirmed bulk-delete workflow will be added after work reassignment rules are finalized.")
     else:
         try:
+            edited_pitches = drop_untouched_new_rows(
+                edited_pitches, identifying_columns=["pitch_number"]
+            )
             errors = required_field_errors(edited_pitches, {"pitch_number": "Pitch address", "status": "Status"})
             if errors:
                 raise ValueError(" ".join(errors))
@@ -1613,11 +1618,21 @@ if element_combined_view:
     )
     edited_elements = visible_elements
 else:
-    edited_elements = st.data_editor(
+    element_editor_rows = sortable_editor_rows(
         visible_elements,
+        defaults={
+            "pitch": "Unassigned",
+            "model_variants": ["Base"],
+            "work_type": "Cycle",
+            "work_region": "None",
+            "flags": [],
+        },
+    )
+    edited_elements = st.data_editor(
+        element_editor_rows,
         key=element_editor_key,
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="delete",
         height=420,
         disabled=["id", "area_name", "source", "process_element_id", "process_sync_status", "updated_at"],
         column_order=element_column_order,
@@ -1645,6 +1660,9 @@ if not element_combined_view and element_actions.save_and_refresh:
         st.warning("Selected work elements are not deleted during Save. Use the forthcoming confirmed bulk-delete action.")
     else:
         try:
+            edited_elements = drop_untouched_new_rows(
+                edited_elements, identifying_columns=["description"]
+            )
             errors = required_field_errors(edited_elements, {"model_variants": "Model variants", "description": "Work description", "work_region": "Work region"})
             if errors:
                 raise ValueError(" ".join(errors))
@@ -1669,3 +1687,46 @@ if not element_combined_view and element_actions.save_and_refresh:
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
+
+with st.expander("Yamazumi history", icon=":material/history:"):
+    region_history_tab, flag_history_tab = st.tabs(
+        ["Work regions", "Element flags"]
+    )
+    with region_history_tab:
+        region_history = audit_history(
+            project_id, "Yamazumi work regions", limit=50
+        )
+        if region_history.empty:
+            st.caption("No standardized work-region changes have been recorded yet.")
+        else:
+            st.dataframe(
+                region_history.drop(columns=["details"], errors="ignore"),
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with flag_history_tab:
+        flag_history = audit_history(
+            project_id, "Yamazumi flag definitions", limit=50
+        )
+        if flag_history.empty:
+            st.caption("No standardized flag-definition changes have been recorded yet.")
+        else:
+            st.dataframe(
+                flag_history.drop(columns=["details"], errors="ignore"),
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )

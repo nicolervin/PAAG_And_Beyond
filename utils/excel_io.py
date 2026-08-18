@@ -7,6 +7,7 @@ from datetime import date, datetime
 import pandas as pd
 
 from utils.store import (
+    active_part_ids,
     assembly_sections,
     fishbone_part_assignments,
     get_planning_scenario,
@@ -17,6 +18,7 @@ from utils.store import (
     project_models,
     project_table,
 )
+from utils.units import imperialize_work_element_dimensions
 
 
 ALIASES = {
@@ -192,12 +194,21 @@ def mapped_bom(df: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFrame
     result = pd.DataFrame()
     for target in ALIASES:
         source = mapping.get(target)
-        result[target] = df[source] if source else (1 if target == "quantity" else "")
+        if source:
+            result[target] = df[source]
+        elif target == "quantity":
+            result[target] = 1
+        elif target == "revision":
+            result[target] = "0"
+        else:
+            result[target] = ""
     result["part_number"] = result["part_number"].fillna("").astype(str).str.strip()
     result = result[result["part_number"] != ""]
     result["description"] = result["description"].fillna("").astype(str)
     result["quantity"] = pd.to_numeric(result["quantity"], errors="coerce").fillna(1)
-    result["revision"] = result["revision"].fillna("").astype(str)
+    result["revision"] = (
+        result["revision"].fillna("0").astype(str).str.strip().replace("", "0")
+    )
     result["model_applicability"] = result["model_applicability"].fillna("All").replace("", "All").astype(str)
     return result
 
@@ -206,11 +217,14 @@ def export_workbook(project_id: str, scenario_id: str | None = None) -> bytes:
     project = get_project(project_id)
     scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
     parts = project_table("parts", project_id, "part_number")
+    if scenario_id and not parts.empty:
+        scenario_active_ids = active_part_ids(project_id, scenario_id)
+        parts = parts.loc[parts["id"].astype(str).isin(scenario_active_ids)].copy()
     elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
     concerns = project_table("concerns", project_id, "created_at")
     fishbone = project_table("fishbone_nodes", project_id, "sequence")
     framework_sections = assembly_sections(project_id)
-    framework_parts = fishbone_part_assignments(project_id)
+    framework_parts = fishbone_part_assignments(project_id, scenario_id)
     source_records = pits_records(project_id)
     source_revisions = pits_revisions(project_id)
     models = project_models(project_id)
@@ -223,20 +237,21 @@ def export_workbook(project_id: str, scenario_id: str | None = None) -> bytes:
     scenario_summary = pd.DataFrame([scenario]).drop(
         columns=["id", "project_id", "parent_scenario_id"], errors="ignore"
     ) if scenario else pd.DataFrame()
+    export_elements = imperialize_work_element_dimensions(elements)
     lucid_columns = [
         "sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
-        "quality_requirement", "ergo_requirement", "location", "conveyor_height_mm", "platform_height_mm",
-        "pit_depth_mm", "model_applicability", "status", "output_assembly_number",
+        "quality_requirement", "ergo_requirement", "location", "unit_orientation", "conveyor_height_in",
+        "platform_height_in", "pit_depth_in", "model_applicability", "status", "output_assembly_number",
         "output_assembly_name",
     ]
-    lucid = elements.reindex(columns=lucid_columns)
+    lucid = export_elements.reindex(columns=lucid_columns)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="Project", index=False)
         if not scenario_summary.empty:
             scenario_summary.to_excel(writer, sheet_name="Planning Scenario", index=False)
         parts.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="Parts", index=False)
-        elements.drop(columns=["project_id", "scenario_id"], errors="ignore").to_excel(
+        export_elements.drop(columns=["project_id", "scenario_id"], errors="ignore").to_excel(
             writer, sheet_name="Work Elements", index=False
         )
         concerns.drop(columns=["project_id"], errors="ignore").to_excel(writer, sheet_name="Concerns", index=False)

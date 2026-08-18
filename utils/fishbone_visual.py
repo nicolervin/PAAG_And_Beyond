@@ -262,7 +262,7 @@ export default function(component) {
 
       const showTooltip = (event) => {
         tooltipNumber.textContent = part.part_number
-        tooltipName.textContent = part.description || "No description"
+        tooltipName.textContent = part.description || "No part name"
         const use = part.use_description ? `Use: ${part.use_description} · ` : ""
         tooltipMeta.textContent = `${use}${part.section_name} · Qty ${part.quantity} · ${part.models || "All models"}`
         tooltipImage.hidden = !part.image

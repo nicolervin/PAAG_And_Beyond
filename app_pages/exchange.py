@@ -57,7 +57,7 @@ with import_col.container(border=True):
                     search_columns=["pits_id", "part_number", "description", "comments", "subsystem"],
                 )
                 st.dataframe(preview_table.head(50), hide_index=True, height=360,
-                             column_config={"pits_id": st.column_config.TextColumn("PITS ID", pinned=True), "part_number": st.column_config.TextColumn("Part number", pinned=True)})
+                             column_config={"pits_id": st.column_config.TextColumn("PITS ID", pinned=True), "part_number": st.column_config.TextColumn("Part number", pinned=True), "description": st.column_config.TextColumn("Part Name")})
                 with st.expander("Models in this workbook", icon=":material/precision_manufacturing:"):
                     model_preview = [{key: value for key, value in model.items() if key != "source_payload"} for model in models]
                     model_preview_table = filter_table(
@@ -91,7 +91,7 @@ with import_col.container(border=True):
                     search_columns=["part_number", "description", "level_evidence", "comments"],
                 )
                 st.dataframe(parsed_preview.head(50), hide_index=True,
-                             column_config={"depth": st.column_config.NumberColumn("Proposed depth"), "level_evidence": st.column_config.TextColumn("Uninterpreted Level values", width="large")})
+                             column_config={"depth": st.column_config.NumberColumn("Proposed depth"), "description": st.column_config.TextColumn("Part Name"), "level_evidence": st.column_config.TextColumn("Uninterpreted Level values", width="large")})
                 replace_existing = st.toggle("Replace the current fishbone", value=True, help="Turn this off to append another PITS section or model family.")
                 if st.button("Send PITS candidates to MBOM review", type="primary", icon=":material/upload:"):
                     count = import_fishbone_nodes(project_id, parsed, replace=replace_existing)
@@ -101,7 +101,7 @@ with import_col.container(border=True):
             options = [None] + raw.columns.tolist()
             st.caption(f"{len(raw):,} rows found. Confirm the column mapping before importing.")
             mapping = {}
-            for target, label in [("part_number", "Part number"), ("description", "Description"), ("quantity", "Quantity"), ("revision", "Revision"), ("model_applicability", "Model applicability")]:
+            for target, label in [("part_number", "Part number"), ("description", "Part Name"), ("quantity", "Quantity"), ("revision", "Revision"), ("model_applicability", "Model applicability")]:
                 suggested = suggestions[target]
                 mapping[target] = st.selectbox(label, options, index=options.index(suggested) if suggested in options else 0, key=f"map_{target}")
             preview = mapped_bom(raw, mapping)
@@ -120,7 +120,11 @@ with import_col.container(border=True):
                 multi_value_columns=["model_applicability"],
                 universal_values={"model_applicability": ["All", "All models", ""]},
             )
-            st.dataframe(mapped_preview.head(20), hide_index=True)
+            st.dataframe(
+                mapped_preview.head(20),
+                hide_index=True,
+                column_config={"description": st.column_config.TextColumn("Part Name")},
+            )
             if st.button("Import parts", type="primary", icon=":material/upload:"):
                 if not mapping["part_number"]:
                     st.error("Choose a part-number column.")

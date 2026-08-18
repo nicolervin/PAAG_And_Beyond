@@ -13,6 +13,7 @@ from utils.store import (
     parse_yamazumi_model_variants,
     process_element_id_for_yamazumi,
     process_part_groups,
+    process_section_for_step,
     project_models,
     project_table,
     reconcile_yamazumi_to_process,
@@ -21,6 +22,7 @@ from utils.store import (
     save_process_part_group,
     search_parts_and_fishbone,
     update_process_step_details,
+    yamazumi_context_for_process,
     yamazumi_elements_for_section,
 )
 from utils.table_filters import (
@@ -37,6 +39,11 @@ from utils.table_ui import (
     required_field_errors,
     standard_details_column_config,
     table_has_unsaved_changes,
+)
+from utils.units import (
+    imperialize_work_element_dimensions,
+    inches_to_millimeters,
+    millimeters_to_inches,
 )
 
 
@@ -88,6 +95,7 @@ else:
     ).strip().casefold()
 
     yamazumi_rows = yamazumi_elements_for_section(project_id, scenario_id, section_id)
+    section_has_yamazumi_work = not yamazumi_rows.empty
     if not yamazumi_rows.empty:
         yamazumi_rows["model_variants"] = yamazumi_rows.apply(
             lambda row: parse_yamazumi_model_variants(
@@ -95,11 +103,33 @@ else:
             ),
             axis=1,
         )
-    available_parts = fishbone_part_assignments(project_id)
+        reflected_in_process = (
+            yamazumi_rows["process_element_id"].fillna("").astype(str).str.strip().ne("")
+            & yamazumi_rows["process_sync_status"].fillna("").astype(str).eq("Synced")
+        )
+        yamazumi_rows = yamazumi_rows.loc[~reflected_in_process].copy()
+    section_has_available_yamazumi_work = not yamazumi_rows.empty
+
+    scenario_part_groups = process_part_groups(
+        project_id, scenario_id, active_only=True
+    )
+    paired_part_ids = {
+        str(part_id)
+        for group in scenario_part_groups
+        if str(group.get("section_id") or "") == str(section_id)
+        for part_id in group.get("part_ids", [])
+    }
+    available_parts = fishbone_part_assignments(project_id, scenario_id)
     if not available_parts.empty:
         available_parts = available_parts.loc[
             available_parts["section_id"].astype(str) == section_id
         ].copy()
+    section_has_fishbone_parts = not available_parts.empty
+    if paired_part_ids and not available_parts.empty:
+        available_parts = available_parts.loc[
+            ~available_parts["part_id"].astype(str).isin(paired_part_ids)
+        ].copy()
+    section_has_available_fishbone_parts = not available_parts.empty
 
     if pairing_search and not yamazumi_rows.empty:
         yam_mask = pd.Series(False, index=yamazumi_rows.index)
@@ -121,7 +151,12 @@ else:
         st.markdown("#### Yamazumi work elements")
         st.caption("Select the work element that consumes the parts.")
         if yamazumi_rows.empty:
-            st.info("No Yamazumi work is linked to this fishbone section.")
+            if pairing_search and section_has_available_yamazumi_work:
+                st.info("No available Yamazumi work matches this filter.")
+            elif section_has_yamazumi_work:
+                st.info("All synced Yamazumi work in this section is already reflected below.")
+            else:
+                st.info("No Yamazumi work is linked to this fishbone section.")
             selected_yamazumi = yamazumi_rows
         else:
             work_event = st.dataframe(
@@ -165,7 +200,12 @@ else:
                 st.session_state[missing_part_dialog_key] = True
                 st.session_state.pop(f"selected_process_step_{scenario_id}", None)
         if available_parts.empty:
-            st.info("No catalog parts are placed in this fishbone section.")
+            if pairing_search and section_has_available_fishbone_parts:
+                st.info("No available fishbone parts match this filter.")
+            elif section_has_fishbone_parts:
+                st.info("All fishbone parts in this section are already paired below.")
+            else:
+                st.info("No catalog parts are placed in this fishbone section.")
             selected_parts = available_parts
         else:
             part_event = st.dataframe(
@@ -180,7 +220,7 @@ else:
                 ],
                 column_config={
                     "part_number": st.column_config.TextColumn("Part number", pinned=True),
-                    "description": st.column_config.TextColumn("Description", width="large"),
+                    "description": st.column_config.TextColumn("Part Name", width="large"),
                     "quantity": st.column_config.NumberColumn("Fishbone qty."),
                     "use_description": st.column_config.TextColumn("Use", width="medium"),
                     "model_applicability": "Models",
@@ -210,13 +250,15 @@ else:
         with find_tab:
             search_text = st.text_input(
                 "Search by part number or name",
-                placeholder="Enter all or part of a number or description",
+                placeholder="Enter all or part of a part number or part name",
                 key=f"process_missing_part_search_{scenario_id}_{current_section_id}",
             ).strip()
             if len(search_text) < 2:
                 st.info("Enter at least two characters to search the Parts catalog and all fishbone sections.")
             else:
-                matches = search_parts_and_fishbone(project_id, search_text)
+                matches = search_parts_and_fishbone(
+                    project_id, search_text, scenario_id
+                )
                 if matches.empty:
                     st.warning("No similar catalog parts were found. Use Add new part if this is new.")
                 else:
@@ -249,7 +291,7 @@ else:
                         hide_index=True,
                         column_config={
                             "part_number": st.column_config.TextColumn("Part number", pinned=True),
-                            "description": st.column_config.TextColumn("Description", width="large"),
+                            "description": st.column_config.TextColumn("Part Name", width="large"),
                             "revision": "Revision",
                             "fishbone_locations": st.column_config.TextColumn(
                                 "Fishbone locations", width="large"
@@ -278,16 +320,16 @@ else:
                     ]
                     if not current_placements.empty:
                         st.success("This part is already available in the current fishbone section.")
-                        action_options = ["Add another use here"]
+                        action_options = ["Add another use"]
                     elif not other_placements.empty:
                         st.warning(
                             "This part is placed in another fishbone section. Move that occurrence "
                             "if it was misplaced, or add another use if both placements are intentional."
                         )
-                        action_options = ["Move an existing use here", "Add another use here"]
+                        action_options = ["Move an existing use", "Add another use"]
                     else:
                         st.info("This catalog part has not been placed on the fishbone yet.")
-                        action_options = ["Place in current section"]
+                        action_options = ["Place in selected section"]
 
                     placement_action = st.segmented_control(
                         "Action",
@@ -295,8 +337,15 @@ else:
                         default=action_options[0],
                         key=f"process_missing_part_action_{scenario_id}_{current_section_id}",
                     )
+                    target_section_id = st.selectbox(
+                        "Use / installation location",
+                        section_ids,
+                        index=section_ids.index(current_section_id),
+                        format_func=lambda value: section_labels.get(value, value),
+                        key=f"process_missing_part_target_section_{scenario_id}_{current_section_id}",
+                    )
                     selected_assignment_id = None
-                    if placement_action == "Move an existing use here":
+                    if placement_action == "Move an existing use":
                         assignment_labels = {
                             str(row["assignment_id"]): (
                                 f"{row.get('section_name') or 'Unknown section'} — "
@@ -320,10 +369,6 @@ else:
                             step=1,
                             key=f"process_missing_part_quantity_{scenario_id}_{current_section_id}",
                         )
-                        placement_use = placement_row.text_input(
-                            "Use / installation location",
-                            key=f"process_missing_part_use_{scenario_id}_{current_section_id}",
-                        )
 
                     if st.button(
                         placement_action,
@@ -332,17 +377,17 @@ else:
                         key=f"process_missing_part_apply_{scenario_id}_{current_section_id}",
                     ):
                         try:
-                            if placement_action == "Move an existing use here":
+                            if placement_action == "Move an existing use":
                                 updated_at = move_fishbone_part_assignment(
-                                    project_id, str(selected_assignment_id), current_section_id
+                                    project_id, str(selected_assignment_id), target_section_id
                                 )
                                 audit_action = "Move part use"
                             else:
                                 count = assign_parts_to_section(
                                     project_id,
                                     [str(selected_part_id)],
-                                    current_section_id,
-                                    str(placement_use or ""),
+                                    target_section_id,
+                                    "",
                                     allow_additional_use=not placements.empty,
                                     quantities_by_part={str(selected_part_id): int(placement_quantity)},
                                 )
@@ -358,13 +403,14 @@ else:
                                 st.session_state.get("current_editor", ""),
                                 {
                                     "part_id": str(selected_part_id),
-                                    "section_id": current_section_id,
+                                    "section_id": target_section_id,
                                     "updated_at": updated_at,
                                 },
                             )
                             close_missing_part_dialog()
                             st.toast(
-                                f"{labels_by_part[str(selected_part_id)]} is now in {current_section_name}",
+                                f"{labels_by_part[str(selected_part_id)]} is now in "
+                                f"{section_labels.get(target_section_id, target_section_id)}",
                                 icon=":material/check_circle:",
                             )
                             st.rerun()
@@ -381,11 +427,12 @@ else:
                 key=f"process_new_part_number_{scenario_id}_{current_section_id}",
             )
             new_description = st.text_input(
-                "Part description",
+                "Part Name",
                 key=f"process_new_part_description_{scenario_id}_{current_section_id}",
             )
             new_revision = st.text_input(
                 "Revision",
+                value="0",
                 key=f"process_new_part_revision_{scenario_id}_{current_section_id}",
             )
             new_placement = st.container(horizontal=True, vertical_alignment="bottom")
@@ -396,9 +443,12 @@ else:
                 step=1,
                 key=f"process_new_part_quantity_{scenario_id}_{current_section_id}",
             )
-            new_use_description = new_placement.text_input(
+            new_target_section_id = new_placement.selectbox(
                 "Use / installation location",
-                key=f"process_new_part_use_{scenario_id}_{current_section_id}",
+                section_ids,
+                index=section_ids.index(current_section_id),
+                format_func=lambda value: section_labels.get(value, value),
+                key=f"process_new_part_target_section_{scenario_id}_{current_section_id}",
             )
             new_notes = st.text_area(
                 "Part notes",
@@ -418,7 +468,7 @@ else:
                         hide_index=True,
                         column_config={
                             "part_number": "Part number",
-                            "description": st.column_config.TextColumn("Description", width="large"),
+                            "description": st.column_config.TextColumn("Part Name", width="large"),
                             "revision": "Revision",
                             "section_name": "Fishbone section",
                         },
@@ -433,7 +483,7 @@ else:
                 try:
                     part_id, assignment_id, updated_at = create_part_and_assign_to_section(
                         project_id,
-                        current_section_id,
+                        new_target_section_id,
                         {
                             "part_number": new_part_number,
                             "description": new_description,
@@ -442,7 +492,7 @@ else:
                             "notes": new_notes,
                         },
                         int(new_quantity),
-                        new_use_description,
+                        "",
                     )
                     editor_name = st.session_state.get("current_editor", "")
                     record_audit_event(
@@ -462,13 +512,14 @@ else:
                         {
                             "part_id": part_id,
                             "assignment_id": assignment_id,
-                            "section_id": current_section_id,
+                            "section_id": new_target_section_id,
                             "updated_at": updated_at,
                         },
                     )
                     close_missing_part_dialog()
                     st.toast(
-                        f"Added {new_part_number.strip()} to Parts and {current_section_name}",
+                        f"Added {new_part_number.strip()} to Parts and "
+                        f"{section_labels.get(new_target_section_id, new_target_section_id)}",
                         icon=":material/check_circle:",
                     )
                     st.rerun()
@@ -506,6 +557,11 @@ else:
             group_name = form_row.text_input(
                 "Part requirement",
                 placeholder="Example: Control panel color",
+                help=(
+                    "Names this group of paired parts. It distinguishes alternatives or optional "
+                    "groups, such as a control panel color; for a single Use all group, use a short "
+                    "installation label."
+                ),
             )
             selection_rule = form_row.selectbox(
                 "Selection rule", ["Use all", "Choose one", "Optional"]
@@ -528,6 +584,10 @@ else:
         )
         if pair_parts:
             try:
+                if not str(group_name or "").strip():
+                    raise ValueError("Part requirement name is required.")
+                if selected_parts.empty:
+                    raise ValueError("Select at least one fishbone part.")
                 reconcile_yamazumi_to_process(
                     project_id, scenario_id, [selected_yamazumi_id]
                 )
@@ -585,7 +645,7 @@ else:
 
         if selected_process_id:
             saved_groups = process_part_groups(
-                project_id, scenario_id, selected_process_id
+                project_id, scenario_id, selected_process_id, active_only=True
             )
             if saved_groups:
                 st.markdown("##### Existing part pairings")
@@ -603,7 +663,7 @@ else:
                     if pairing_row.button(
                         "Remove",
                         icon=":material/link_off:",
-                        key=f"remove_process_pairing_{scenario_id}_{group['id']}",
+                        key=f"destructive_remove_process_pairing_{scenario_id}_{group['id']}",
                     ):
                         delete_process_part_group(project_id, scenario_id, str(group["id"]))
                         record_audit_event(
@@ -628,21 +688,22 @@ model_labels = {
 }
 model_numbers_by_label = {label: number for number, label in model_labels.items()}
 columns = [
-    "id", "sequence", "station", "operation", "description", "cycle_time_s",
+    "id", "sequence", "station", "pitch_name", "work_element", "operation", "description", "cycle_time_s",
     "assigned_parts", "part_number", "output_assembly_number", "output_assembly_name",
-    "tool", "torque", "quality_requirement", "ergo_requirement", "location",
+    "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
     "conveyor_height_mm", "platform_height_mm", "pit_depth_mm",
-    "model_applicability", "status", "details", "delete_step",
+    "model_applicability", "status", "details",
 ]
 compact_columns = [
-    "sequence",
     "station",
-    "operation",
-    "cycle_time_s",
+    "pitch_name",
+    "work_element",
+    "assigned_parts",
     "model_applicability",
-    "status",
+    "cycle_time_s",
     "details",
-    "delete_step",
+    "status",
+    "sequence",
 ]
 if elements.empty:
     elements = pd.DataFrame(
@@ -650,6 +711,8 @@ if elements.empty:
             "id": pd.Series(dtype="string"),
             "sequence": pd.Series(dtype="int64"),
             "station": pd.Series(dtype="string"),
+            "pitch_name": pd.Series(dtype="string"),
+            "work_element": pd.Series(dtype="string"),
             "operation": pd.Series(dtype="string"),
             "description": pd.Series(dtype="string"),
             "cycle_time_s": pd.Series(dtype="float64"),
@@ -662,19 +725,19 @@ if elements.empty:
             "quality_requirement": pd.Series(dtype="string"),
             "ergo_requirement": pd.Series(dtype="string"),
             "location": pd.Series(dtype="string"),
+            "unit_orientation": pd.Series(dtype="string"),
             "conveyor_height_mm": pd.Series(dtype="float64"),
             "platform_height_mm": pd.Series(dtype="float64"),
             "pit_depth_mm": pd.Series(dtype="float64"),
             "model_applicability": pd.Series(dtype="object"),
             "status": pd.Series(dtype="string"),
             "details": pd.Series(dtype="string"),
-            "delete_step": pd.Series(dtype="string"),
         }
     )
 else:
     elements = elements.copy()
     pairing_summary: dict[str, list[str]] = {}
-    for group in process_part_groups(project_id, scenario_id):
+    for group in process_part_groups(project_id, scenario_id, active_only=True):
         option_numbers = [str(option["part_number"]) for option in group["options"]]
         suffix = " / ".join(option_numbers) if group["selection_rule"] == "Choose one" else ", ".join(option_numbers)
         pairing_summary.setdefault(str(group["work_element_id"]), []).append(
@@ -683,8 +746,26 @@ else:
     elements["assigned_parts"] = elements["id"].astype(str).map(
         lambda element_id: " | ".join(pairing_summary.get(element_id, []))
     )
+    yamazumi_context = yamazumi_context_for_process(project_id, scenario_id)
+    if yamazumi_context.empty:
+        elements["pitch_name"] = ""
+        elements["work_element"] = elements["operation"].fillna("").astype(str)
+    else:
+        yamazumi_context = yamazumi_context.drop_duplicates(
+            subset=["process_element_id"], keep="first"
+        ).set_index("process_element_id")
+        process_ids = elements["id"].astype(str)
+        elements["pitch_name"] = process_ids.map(
+            yamazumi_context["pitch_name"].fillna("").astype(str)
+        ).fillna("")
+        yamazumi_descriptions = process_ids.map(
+            yamazumi_context["yamazumi_description"].fillna("").astype(str)
+        ).fillna("")
+        elements["work_element"] = yamazumi_descriptions.where(
+            yamazumi_descriptions.str.strip().ne(""),
+            elements["operation"].fillna("").astype(str),
+        )
     elements["details"] = ":material/info: Details"
-    elements["delete_step"] = ":material/delete: Delete"
     elements = elements.reindex(columns=columns)
 
 elements["model_applicability"] = elements["model_applicability"].apply(
@@ -710,7 +791,7 @@ visible_elements = filter_table(
     key=f"process_filters_{scenario_id}",
     dropdown_columns=["station", "status", "model_applicability"],
     search_columns=[
-        "operation", "description", "station", "assigned_parts", "output_assembly_number",
+        "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
         "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
     ],
     reset_widget_keys=[process_editor_key],
@@ -740,23 +821,13 @@ def open_process_details() -> None:
         )
 
 
-def request_individual_process_delete() -> None:
-    click = st.session_state.get(f"process_delete_action_{scenario_id}") or {}
-    position = click.get("row")
-    if position is not None and 0 <= int(position) < len(visible_elements):
-        element_id = str(visible_elements.iloc[int(position)]["id"] or "").strip()
-        if element_id:
-            st.session_state.pop(f"selected_process_step_{scenario_id}", None)
-            st.session_state[f"process_pending_delete_{scenario_id}"] = [element_id]
-
-
 edited = st.data_editor(
     visible_elements,
     key=process_editor_key,
     hide_index=True,
-    num_rows="dynamic",
+    num_rows="delete",
     height=470,
-    disabled=["id"],
+    disabled=["id", "pitch_name", "work_element", "assigned_parts"],
     column_order=compact_columns,
     column_config={
         "id": None,
@@ -764,15 +835,15 @@ edited = st.data_editor(
         "details": standard_details_column_config(
             on_click=open_process_details, key=f"process_details_action_{scenario_id}"
         ),
-        "delete_step": st.column_config.ButtonColumn(
-            "Delete",
-            type="tertiary",
-            on_click=request_individual_process_delete,
-            key=f"process_delete_action_{scenario_id}",
-        ),
-        "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10, pinned=True),
+        "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
         "station": st.column_config.TextColumn("Pitch", pinned=True),
-        "operation": st.column_config.TextColumn("Operation", required=True, pinned=True),
+        "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),
+        "work_element": st.column_config.TextColumn(
+            "Work Element", required=True, pinned=True, width="large"
+        ),
+        "assigned_parts": st.column_config.TextColumn(
+            "Paired Fishbone Parts", width="large"
+        ),
         "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
         "model_applicability": st.column_config.MultiselectColumn(
             "Models", options=["All models", *model_labels.values()]
@@ -790,7 +861,9 @@ if details_blocked:
 st.download_button(
     "Export filtered Process at a Glance",
     data=dataframe_to_excel(
-        visible_elements.drop(columns=["id", "details", "delete_step"], errors="ignore"),
+        imperialize_work_element_dimensions(
+            visible_elements.drop(columns=["id", "details"], errors="ignore")
+        ),
         "Process plan",
     ),
     file_name="process_plan_filtered.xlsx",
@@ -817,6 +890,7 @@ request_bulk_delete = bulk.button(
     f"Delete selected ({len(selected)})",
     icon=":material/delete:",
     disabled=selected.empty,
+    key=f"destructive_request_process_delete_{scenario_id}",
 )
 
 if apply_bulk:
@@ -868,7 +942,7 @@ def confirm_process_delete() -> None:
         st.rerun()
     if actions.button(
         "Delete steps", type="primary", icon=":material/delete:",
-        key=f"confirm_process_delete_{scenario_id}",
+        key=f"destructive_confirm_process_delete_{scenario_id}",
     ):
         retained = elements.loc[~elements["id"].astype(str).isin(set(pending_ids))].copy()
         retained["model_applicability"] = retained["model_applicability"].apply(
@@ -905,7 +979,7 @@ if header_actions.save_and_refresh:
     try:
         if not selected.empty:
             raise ValueError("Clear selected rows before saving table edits.")
-        errors = required_field_errors(edited, {"operation": "Operation"})
+        errors = required_field_errors(edited, {"work_element": "Work Element"})
         if errors:
             raise ValueError(" ".join(errors))
         combined_elements = merge_filtered_edits(elements, visible_elements, edited)
@@ -951,6 +1025,7 @@ def edit_process_step_details(element_id: str) -> None:
 
     step = selected_step.iloc[0]
     widget_prefix = f"process_details_{scenario_id}_{element_id}"
+    linked_section = process_section_for_step(project_id, scenario_id, element_id)
 
     def text_value(field: str) -> str:
         value = step.get(field)
@@ -960,25 +1035,17 @@ def edit_process_step_details(element_id: str) -> None:
         value = step.get(field)
         return None if value is None or pd.isna(value) else float(value)
 
-    st.subheader(str(step.get("operation") or "Unnamed process step"))
+    st.subheader(str(step.get("work_element") or step.get("operation") or "Unnamed process step"))
     st.caption(
         f"Pitch: {step.get('station') or 'Unassigned'} · "
         f"Time: {float(step.get('cycle_time_s') or 0):.1f} s"
     )
 
-    (
-        step_tab,
-        tool_tab,
-        requirements_tab,
-        location_tab,
-        parts_tab,
-        future_tab,
-    ) = st.tabs(
+    step_tab, tool_tab, location_tab, parts_tab, future_tab = st.tabs(
         [
             "Step details",
-            "Tool and torque",
-            "Quality and ergonomics",
-            "Location and heights",
+            "Tool",
+            "Unit orientation and heights",
             "Parts and models",
             "Future equipment and sub-touches",
         ]
@@ -1008,23 +1075,6 @@ def edit_process_step_details(element_id: str) -> None:
             value=text_value("tool"),
             key=f"{widget_prefix}_tool",
         )
-        torque = st.text_area(
-            "Torque requirement",
-            value=text_value("torque"),
-            key=f"{widget_prefix}_torque",
-        )
-
-    with requirements_tab:
-        quality_requirement = st.text_area(
-            "Quality requirement",
-            value=text_value("quality_requirement"),
-            key=f"{widget_prefix}_quality_requirement",
-        )
-        ergo_requirement = st.text_area(
-            "Ergonomic requirement",
-            value=text_value("ergo_requirement"),
-            key=f"{widget_prefix}_ergo_requirement",
-        )
 
     with location_tab:
         location = st.text_input(
@@ -1032,30 +1082,79 @@ def edit_process_step_details(element_id: str) -> None:
             value=text_value("location"),
             key=f"{widget_prefix}_location",
         )
-        dimension_columns = st.columns(3)
-        conveyor_height_mm = dimension_columns[0].number_input(
-            "Conveyor height (mm)",
-            min_value=0.0,
-            value=number_value("conveyor_height_mm"),
-            key=f"{widget_prefix}_conveyor_height_mm",
+        unit_orientation = st.text_input(
+            "Unit orientation",
+            value=text_value("unit_orientation"),
+            placeholder="Example: Front toward operator",
+            key=f"{widget_prefix}_unit_orientation",
         )
-        platform_height_mm = dimension_columns[1].number_input(
-            "Platform height (mm)",
+        conveyor_height_in = st.number_input(
+            "Conveyor height (in)",
             min_value=0.0,
-            value=number_value("platform_height_mm"),
-            key=f"{widget_prefix}_platform_height_mm",
+            value=millimeters_to_inches(number_value("conveyor_height_mm")),
+            step=0.1,
+            format="%.2f",
+            key=f"{widget_prefix}_conveyor_height_in",
         )
-        pit_depth_mm = dimension_columns[2].number_input(
-            "Pit depth (mm)",
-            min_value=0.0,
-            value=number_value("pit_depth_mm"),
-            key=f"{widget_prefix}_pit_depth_mm",
+        apply_geometry_to_section = st.checkbox(
+            "Apply this orientation and conveyor height to every Process step in this Fishbone section",
+            value=False,
+            disabled=linked_section is None,
+            help=(
+                "On Save, this copies both values to existing Process at a Glance steps tied to "
+                "the same Fishbone section in this planning scenario."
+            ),
+            key=f"{widget_prefix}_apply_geometry_to_section",
         )
+        if linked_section:
+            st.caption(f"Fishbone section: {linked_section['name']}")
+        else:
+            st.caption(
+                "This step is not tied to exactly one Fishbone section, so section-wide fill is unavailable."
+            )
 
     with parts_tab:
         st.markdown("**Paired fishbone parts**")
         st.write(step.get("assigned_parts") or "No fishbone parts are paired to this step.")
-        st.caption("Part pairings are managed in the pairing workspace above the table.")
+        saved_step_groups = process_part_groups(
+            project_id, scenario_id, element_id, active_only=True
+        )
+        if saved_step_groups:
+            st.caption("Remove an incorrect pairing here. Its parts will return to the available-parts table.")
+            for group in saved_step_groups:
+                group_parts = ", ".join(
+                    str(option["part_number"]) for option in group["options"]
+                )
+                group_row = st.container(
+                    horizontal=True, vertical_alignment="center", border=True
+                )
+                group_row.write(
+                    f"**{group['name']}** · {group['selection_rule']} · "
+                    f"Qty {float(group['quantity']):g} · {group_parts}"
+                )
+                if group_row.button(
+                    "Remove pairing",
+                    icon=":material/link_off:",
+                    key=f"destructive_{widget_prefix}_remove_pairing_{group['id']}",
+                ):
+                    delete_process_part_group(
+                        project_id, scenario_id, str(group["id"])
+                    )
+                    record_audit_event(
+                        project_id,
+                        "Process part pairings",
+                        "Remove pairing",
+                        1,
+                        st.session_state.get("current_editor", ""),
+                        {
+                            "scenario_id": scenario_id,
+                            "work_element_id": element_id,
+                            "requirement": group["name"],
+                        },
+                    )
+                    request_table_editor_reset(process_editor_key)
+                    st.toast("Pairing removed; its parts are available again.", icon=":material/check_circle:")
+                    st.rerun()
         st.markdown("**Model applicability**")
         assigned_models = step.get("model_applicability") or ["All models"]
         if not isinstance(assigned_models, list):
@@ -1081,7 +1180,7 @@ def edit_process_step_details(element_id: str) -> None:
         key=f"{widget_prefix}_save",
     ):
         try:
-            updated_at = update_process_step_details(
+            updated_at, affected_count, affected_section_id = update_process_step_details(
                 project_id,
                 scenario_id,
                 element_id,
@@ -1090,30 +1189,34 @@ def edit_process_step_details(element_id: str) -> None:
                     "output_assembly_number": output_assembly_number,
                     "output_assembly_name": output_assembly_name,
                     "tool": tool,
-                    "torque": torque,
-                    "quality_requirement": quality_requirement,
-                    "ergo_requirement": ergo_requirement,
                     "location": location,
-                    "conveyor_height_mm": conveyor_height_mm,
-                    "platform_height_mm": platform_height_mm,
-                    "pit_depth_mm": pit_depth_mm,
+                    "unit_orientation": unit_orientation,
+                    "conveyor_height_mm": inches_to_millimeters(conveyor_height_in),
                 },
+                apply_geometry_to_section=apply_geometry_to_section,
             )
             record_audit_event(
                 project_id,
                 "Process plan",
                 "Edit details",
-                1,
+                affected_count,
                 st.session_state.get("current_editor", ""),
                 {
                     "scenario_id": scenario_id,
                     "work_element_id": element_id,
+                    "section_id": affected_section_id,
+                    "applied_section_wide": apply_geometry_to_section,
                     "updated_at": updated_at,
                 },
             )
             close_process_details()
             request_table_editor_reset(process_editor_key)
-            st.toast("Process-step details saved", icon=":material/check_circle:")
+            toast_message = (
+                f"Details saved and geometry applied to {affected_count} section steps"
+                if apply_geometry_to_section
+                else "Process-step details saved"
+            )
+            st.toast(toast_message, icon=":material/check_circle:")
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))

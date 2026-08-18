@@ -86,9 +86,17 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS parts (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_number TEXT NOT NULL, description TEXT DEFAULT '', quantity REAL DEFAULT 1,
-                revision TEXT DEFAULT '', source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
+                revision TEXT DEFAULT '0', source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
                 model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
+            );
+            CREATE TABLE IF NOT EXISTS part_scenario_activity (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                active INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(scenario_id, part_id)
             );
             CREATE TABLE IF NOT EXISTS work_elements (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -97,7 +105,8 @@ def init_db() -> None:
                 description TEXT DEFAULT '', cycle_time_s REAL DEFAULT 0,
                 part_number TEXT DEFAULT '', tool TEXT DEFAULT '', torque TEXT DEFAULT '',
                 quality_requirement TEXT DEFAULT '', ergo_requirement TEXT DEFAULT '',
-                location TEXT DEFAULT '', conveyor_height_mm REAL, platform_height_mm REAL,
+                location TEXT DEFAULT '', unit_orientation TEXT DEFAULT '',
+                conveyor_height_mm REAL, platform_height_mm REAL,
                 pit_depth_mm REAL, model_applicability TEXT DEFAULT 'All', status TEXT DEFAULT 'Draft',
                 updated_at TEXT NOT NULL
             );
@@ -401,7 +410,7 @@ def init_db() -> None:
             sample_parts = [
                 ("PN-100100", "Main housing", 1, "A"),
                 ("PN-100220", "Support bracket", 1, "B"),
-                ("HW-M8-025", "M8 fastener", 4, ""),
+                ("HW-M8-025", "M8 fastener", 4, "0"),
             ]
             for pn, desc, qty, rev in sample_parts:
                 conn.execute(
@@ -453,6 +462,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE work_elements ADD COLUMN output_assembly_number TEXT DEFAULT ''")
         if "output_assembly_name" not in work_columns:
             conn.execute("ALTER TABLE work_elements ADD COLUMN output_assembly_name TEXT DEFAULT ''")
+        if "unit_orientation" not in work_columns:
+            conn.execute("ALTER TABLE work_elements ADD COLUMN unit_orientation TEXT DEFAULT ''")
         conn.execute(
             """UPDATE work_elements
                SET scenario_id=(SELECT id FROM planning_scenarios s
@@ -652,6 +663,14 @@ def clone_planning_scenario(
                     source_scenario_id, takt, str(change_summary or "").strip(),
                     str(created_by or "").strip(), timestamp, timestamp,
                 ),
+            )
+            conn.execute(
+                """INSERT INTO part_scenario_activity
+                   (project_id, scenario_id, part_id, active, updated_at)
+                   SELECT project_id, ?, part_id, active, ?
+                   FROM part_scenario_activity
+                   WHERE project_id=? AND scenario_id=?""",
+                (new_scenario_id, timestamp, project_id, source_scenario_id),
             )
             conn.execute(
                 """INSERT INTO assembly_scenario_policies
@@ -1252,7 +1271,12 @@ def material_consumption_for_scenario(project_id: str, scenario_id: str) -> pd.D
            LEFT JOIN assembly_sections section ON section.id=group_row.section_id
            LEFT JOIN process_part_options option ON option.group_id=group_row.id
            LEFT JOIN parts part ON part.id=option.part_id
+           LEFT JOIN part_scenario_activity activity
+             ON activity.project_id=group_row.project_id
+            AND activity.scenario_id=group_row.scenario_id
+            AND activity.part_id=option.part_id
            WHERE group_row.project_id=? AND group_row.scenario_id=?
+             AND (option.part_id IS NULL OR COALESCE(activity.active, 1)=1)
            ORDER BY element.sequence, group_row.name, part.part_number""",
         (project_id, scenario_id),
     )
@@ -1281,6 +1305,25 @@ def yamazumi_elements_for_section(
     ))
 
 
+def yamazumi_context_for_process(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Return Yamazumi source labels linked to Process at a Glance rows."""
+    rows = query(
+        """SELECT element.process_element_id, element.id AS yamazumi_element_id,
+                  element.description AS yamazumi_description,
+                  element.time_s AS yamazumi_time_s,
+                  pitch.pitch_number, pitch.pitch_name
+           FROM yamazumi_elements element
+           JOIN yamazumi_areas area ON area.id=element.area_id
+           LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
+           WHERE element.project_id=? AND area.scenario_id=?
+             AND element.process_element_id IS NOT NULL
+             AND TRIM(element.process_element_id) <> ''
+           ORDER BY area.name, pitch.sequence, element.sequence""",
+        (project_id, scenario_id),
+    )
+    return pd.DataFrame(rows)
+
+
 def process_element_id_for_yamazumi(
     project_id: str, scenario_id: str, yamazumi_element_id: str
 ) -> str | None:
@@ -1297,7 +1340,11 @@ def process_element_id_for_yamazumi(
 
 
 def process_part_groups(
-    project_id: str, scenario_id: str, work_element_id: str | None = None
+    project_id: str,
+    scenario_id: str,
+    work_element_id: str | None = None,
+    *,
+    active_only: bool = False,
 ) -> list[dict]:
     element_clause = " AND group_row.work_element_id=?" if work_element_id else ""
     params = (project_id, scenario_id, work_element_id) if work_element_id else (project_id, scenario_id)
@@ -1312,17 +1359,28 @@ def process_part_groups(
         params,
     )
     for group in groups:
+        activity_join = """
+            LEFT JOIN part_scenario_activity activity
+              ON activity.project_id=? AND activity.scenario_id=?
+             AND activity.part_id=option.part_id
+        """ if active_only else ""
+        activity_clause = " AND COALESCE(activity.active, 1)=1" if active_only else ""
+        option_params = (
+            (project_id, scenario_id, group["id"])
+            if active_only else (group["id"],)
+        )
         options = query(
-            """SELECT option.id, option.part_id, part.part_number,
+            f"""SELECT option.id, option.part_id, part.part_number,
                       part.description AS part_description, part.model_applicability
                FROM process_part_options option
                JOIN parts part ON part.id=option.part_id
-               WHERE option.group_id=? ORDER BY part.part_number""",
-            (group["id"],),
+               {activity_join}
+               WHERE option.group_id=?{activity_clause} ORDER BY part.part_number""",
+            option_params,
         )
         group["options"] = options
         group["part_ids"] = [str(option["part_id"]) for option in options]
-    return groups
+    return [group for group in groups if group["options"]] if active_only else groups
 
 
 def save_process_part_group(
@@ -1403,11 +1461,31 @@ def delete_process_part_group(
     project_id: str, scenario_id: str, group_id: str
 ) -> bool:
     with connection() as conn:
+        group_row = conn.execute(
+            """SELECT work_element_id FROM process_part_groups
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (group_id, project_id, scenario_id),
+        ).fetchone()
+        if not group_row:
+            return False
+        work_element_id = str(group_row["work_element_id"])
         cursor = conn.execute(
             """DELETE FROM process_part_groups
                WHERE id=? AND project_id=? AND scenario_id=?""",
             (group_id, project_id, scenario_id),
         )
+        remaining = conn.execute(
+            """SELECT 1 FROM process_part_groups
+               WHERE project_id=? AND scenario_id=? AND work_element_id=? LIMIT 1""",
+            (project_id, scenario_id, work_element_id),
+        ).fetchone()
+        if cursor.rowcount and not remaining:
+            conn.execute(
+                """UPDATE yamazumi_elements
+                   SET process_sync_status='Needs IE review', updated_at=?
+                   WHERE project_id=? AND process_element_id=?""",
+                (now_iso(), project_id, work_element_id),
+            )
         return bool(cursor.rowcount)
 
 
@@ -2945,6 +3023,80 @@ def project_table(
     return pd.DataFrame(query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,)))
 
 
+def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]:
+    """Return explicit per-scenario part activity; missing rows default to active."""
+    rows = query(
+        """SELECT activity.part_id, activity.active
+           FROM part_scenario_activity activity
+           JOIN planning_scenarios scenario ON scenario.id=activity.scenario_id
+           JOIN parts part ON part.id=activity.part_id
+           WHERE activity.project_id=? AND activity.scenario_id=?
+             AND scenario.project_id=? AND part.project_id=?""",
+        (project_id, scenario_id, project_id, project_id),
+    )
+    return {str(row["part_id"]): bool(row["active"]) for row in rows}
+
+
+def active_part_ids(project_id: str, scenario_id: str) -> set[str]:
+    """Return project part IDs active in a scenario, defaulting new/unmapped parts to active."""
+    rows = query(
+        """SELECT part.id
+           FROM parts part
+           JOIN planning_scenarios scenario
+             ON scenario.id=? AND scenario.project_id=part.project_id
+           LEFT JOIN part_scenario_activity activity
+             ON activity.project_id=part.project_id
+            AND activity.scenario_id=scenario.id AND activity.part_id=part.id
+           WHERE part.project_id=? AND COALESCE(activity.active, 1)=1""",
+        (scenario_id, project_id),
+    )
+    return {str(row["id"]) for row in rows}
+
+
+def update_part_scenario_activity(
+    project_id: str, scenario_id: str, activity_by_part: dict[str, bool]
+) -> str:
+    """Persist scenario-specific Active flags for project parts atomically."""
+    normalized_activity = {
+        str(part_id): bool(active) for part_id, active in activity_by_part.items()
+    }
+    selected_ids = list(normalized_activity)
+    timestamp = now_iso()
+    with connection() as conn:
+        scenario = conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone()
+        if not scenario:
+            raise ValueError("The active planning scenario no longer exists.")
+        if selected_ids:
+            placeholders = ",".join("?" for _ in selected_ids)
+            valid_ids = {
+                str(row[0]) for row in conn.execute(
+                    f"SELECT id FROM parts WHERE project_id=? AND id IN ({placeholders})",
+                    (project_id, *selected_ids),
+                ).fetchall()
+            }
+            if valid_ids != set(selected_ids):
+                raise ValueError("One or more parts no longer belong to this project.")
+        for part_id in selected_ids:
+            conn.execute(
+                """INSERT INTO part_scenario_activity
+                   (project_id, scenario_id, part_id, active, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(scenario_id, part_id) DO UPDATE SET
+                     active=excluded.active, updated_at=excluded.updated_at""",
+                (
+                    project_id,
+                    scenario_id,
+                    part_id,
+                    1 if normalized_activity[part_id] else 0,
+                    timestamp,
+                ),
+            )
+    return timestamp
+
+
 def create_project(
     name: str,
     program: str,
@@ -2999,7 +3151,7 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
            quantity=excluded.quantity, revision=excluded.revision, source=excluded.source,
            model_applicability=excluded.model_applicability, notes=excluded.notes, updated_at=excluded.updated_at""",
         (part_id, project_id, values["part_number"].strip(), values.get("description", "").strip(),
-         quantity, values.get("revision", "").strip(), values.get("source", "Manual"),
+         quantity, str(values.get("revision") or "0").strip() or "0", values.get("source", "Manual"),
          values.get("image_path", ""), normalize_model_applicability(values.get("model_applicability", "All")),
          values.get("notes", "").strip(), timestamp),
     )
@@ -3007,7 +3159,13 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
     return rows[0]["id"]
 
 
-def update_part_rows(project_id: str, edited: pd.DataFrame) -> int:
+def update_part_rows(
+    project_id: str,
+    edited: pd.DataFrame,
+    *,
+    scenario_id: str | None = None,
+    activity_by_part: dict[str, bool] | None = None,
+) -> int:
     required = {"id", "part_number", "description", "quantity", "revision", "model_applicability", "notes"}
     if not required.issubset(edited.columns):
         raise ValueError("The editable parts table is missing required columns.")
@@ -3022,6 +3180,11 @@ def update_part_rows(project_id: str, edited: pd.DataFrame) -> int:
 
     timestamp = now_iso()
     with connection() as conn:
+        if scenario_id and not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
         existing_ids = {
             str(existing[0]) for existing in conn.execute(
                 "SELECT id FROM parts WHERE project_id=?", (project_id,)
@@ -3035,9 +3198,12 @@ def update_part_rows(project_id: str, edited: pd.DataFrame) -> int:
             )
             quantity = row.get("quantity")
             quantity = None if quantity is None or pd.isna(quantity) else float(quantity)
+            revision = clean_text(row.get("revision"))
+            if part_id not in existing_ids and not revision:
+                revision = "0"
             values = (
                 str(row["part_number"]).strip(), clean_text(row.get("description")), quantity,
-                clean_text(row.get("revision")), normalize_model_applicability(row.get("model_applicability")),
+                revision, normalize_model_applicability(row.get("model_applicability")),
                 clean_text(row.get("notes")), timestamp,
             )
             if part_id in existing_ids:
@@ -3054,6 +3220,23 @@ def update_part_rows(project_id: str, edited: pd.DataFrame) -> int:
                        VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)""",
                     (part_id, project_id, values[0], values[1], values[2], values[3],
                      clean_text(row.get("source")) or "Manual", values[4], values[5], values[6]),
+                )
+        if scenario_id and activity_by_part is not None:
+            normalized_activity = {
+                str(part_id): bool(active)
+                for part_id, active in activity_by_part.items()
+            }
+            saved_ids = set(edited["id"].fillna("").astype(str))
+            if set(normalized_activity) != saved_ids:
+                raise ValueError("Part activity must be supplied for every saved row.")
+            for part_id, active in normalized_activity.items():
+                conn.execute(
+                    """INSERT INTO part_scenario_activity
+                       (project_id, scenario_id, part_id, active, updated_at)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(scenario_id, part_id) DO UPDATE SET
+                         active=excluded.active, updated_at=excluded.updated_at""",
+                    (project_id, scenario_id, part_id, 1 if active else 0, timestamp),
                 )
     return len(edited)
 
@@ -3252,21 +3435,34 @@ def update_assembly_section_rows(
     return len(records)
 
 
-def fishbone_part_assignments(project_id: str) -> pd.DataFrame:
+def fishbone_part_assignments(
+    project_id: str, scenario_id: str | None = None
+) -> pd.DataFrame:
+    activity_join = """
+        LEFT JOIN part_scenario_activity activity
+          ON activity.project_id=a.project_id AND activity.part_id=a.part_id
+         AND activity.scenario_id=?
+    """ if scenario_id else ""
+    activity_clause = " AND COALESCE(activity.active, 1)=1" if scenario_id else ""
+    params = (scenario_id, project_id) if scenario_id else (project_id,)
     return pd.DataFrame(query(
-        """SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
+        f"""SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
                   a.use_description, a.notes,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
                   s.name AS section_name
            FROM fishbone_part_assignments a
            JOIN parts p ON p.id = a.part_id
            JOIN assembly_sections s ON s.id = a.section_id
-           WHERE a.project_id = ? ORDER BY s.sequence, a.sequence, p.part_number""",
-        (project_id,),
+           {activity_join}
+           WHERE a.project_id = ?{activity_clause}
+           ORDER BY s.sequence, a.sequence, p.part_number""",
+        params,
     ))
 
 
-def search_parts_and_fishbone(project_id: str, search_text: str) -> pd.DataFrame:
+def search_parts_and_fishbone(
+    project_id: str, search_text: str, scenario_id: str | None = None
+) -> pd.DataFrame:
     """Find catalog parts by number, description, or fishbone-use text across all sections."""
     columns = [
         "part_id",
@@ -3286,7 +3482,7 @@ def search_parts_and_fishbone(project_id: str, search_text: str) -> pd.DataFrame
         return pd.DataFrame({column: pd.Series(dtype="string") for column in columns})
 
     token_clauses: list[str] = []
-    params: list = [project_id]
+    params: list = [scenario_id, project_id] if scenario_id else [project_id]
     for token in tokens:
         pattern = f"%{token}%"
         token_clauses.append(
@@ -3296,6 +3492,12 @@ def search_parts_and_fishbone(project_id: str, search_text: str) -> pd.DataFrame
         )
         params.extend([pattern, pattern, pattern, pattern])
     params.append(100)
+    activity_join = """
+            LEFT JOIN part_scenario_activity activity
+              ON activity.project_id=p.project_id AND activity.part_id=p.id
+             AND activity.scenario_id=?
+    """ if scenario_id else ""
+    activity_clause = " AND COALESCE(activity.active, 1)=1" if scenario_id else ""
     rows = query(
         f"""SELECT p.id AS part_id, p.part_number, p.description, p.revision,
                    p.model_applicability, a.id AS assignment_id, a.section_id,
@@ -3305,7 +3507,8 @@ def search_parts_and_fishbone(project_id: str, search_text: str) -> pd.DataFrame
             LEFT JOIN fishbone_part_assignments a
               ON a.part_id=p.id AND a.project_id=p.project_id
             LEFT JOIN assembly_sections s ON s.id=a.section_id
-            WHERE p.project_id=? AND ({' OR '.join(token_clauses)})
+            {activity_join}
+            WHERE p.project_id=? AND ({' OR '.join(token_clauses)}){activity_clause}
             ORDER BY p.part_number, s.sequence, a.sequence
             LIMIT ?""",
         tuple(params),
@@ -3324,12 +3527,12 @@ def create_part_and_assign_to_section(
     """Create one catalog part and its first fishbone use in one transaction."""
     part_number = str(values.get("part_number") or "").strip()
     description = str(values.get("description") or "").strip()
-    revision = str(values.get("revision") or "").strip()
+    revision = str(values.get("revision") or "0").strip() or "0"
     catalog_notes = str(values.get("notes") or "").strip()
     if not part_number:
         raise ValueError("Part number is required.")
     if not description:
-        raise ValueError("Part description is required.")
+        raise ValueError("Part Name is required.")
     try:
         numeric_quantity = float(placement_quantity)
     except (TypeError, ValueError) as exc:
@@ -3517,14 +3720,33 @@ def assign_parts_to_section(
     return count
 
 
+def delete_fishbone_part_assignments(project_id: str, assignment_ids: list[str]) -> int:
+    """Delete selected fishbone uses atomically, leaving master Parts records untouched."""
+    selected_ids = list(
+        dict.fromkeys(str(assignment_id) for assignment_id in assignment_ids if str(assignment_id))
+    )
+    if not selected_ids:
+        return 0
+    placeholders = ",".join("?" for _ in selected_ids)
+    with connection() as conn:
+        found = conn.execute(
+            f"""SELECT COUNT(*) FROM fishbone_part_assignments
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *selected_ids),
+        ).fetchone()[0]
+        if found != len(selected_ids):
+            raise ValueError("One or more selected fishbone uses no longer exist.")
+        cursor = conn.execute(
+            f"""DELETE FROM fishbone_part_assignments
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *selected_ids),
+        )
+        return int(cursor.rowcount)
+
+
 def delete_fishbone_part_assignment(project_id: str, assignment_id: str) -> bool:
     """Delete one fishbone use while leaving its master Parts record untouched."""
-    with connection() as conn:
-        cursor = conn.execute(
-            "DELETE FROM fishbone_part_assignments WHERE id=? AND project_id=?",
-            (assignment_id, project_id),
-        )
-        return cursor.rowcount > 0
+    return delete_fishbone_part_assignments(project_id, [assignment_id]) == 1
 
 
 def replace_fishbone_part_assignments(
@@ -4025,38 +4247,58 @@ def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) 
         _insert_snapshot_rows(conn, "fishbone_part_assignments", snapshot)
 
 
-def delete_project_model(project_id: str, model_id: str) -> str:
-    """Delete an unreferenced model definition and return its common display label."""
+def delete_project_models(project_id: str, model_ids: list[str]) -> list[str]:
+    """Delete selected unreferenced models only after validating the complete selection."""
+    selected_ids = list(dict.fromkeys(str(model_id) for model_id in model_ids if str(model_id)))
+    if not selected_ids:
+        return []
+    placeholders = ",".join("?" for _ in selected_ids)
     with connection() as conn:
-        model = conn.execute(
-            "SELECT model_number, display_name FROM project_models WHERE id=? AND project_id=?",
-            (model_id, project_id),
-        ).fetchone()
-        if not model:
-            raise ValueError("That model no longer exists.")
-        model_number = str(model["model_number"])
-        reference_count = 0
-        for table in ("parts", "work_elements"):
-            reference_count += conn.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE project_id=? AND instr(model_applicability, ?) > 0",
-                (project_id, model_number),
-            ).fetchone()[0]
-        for row in conn.execute(
-            "SELECT applicable_models FROM fishbone_nodes WHERE project_id=?",
-            (project_id,),
-        ).fetchall():
-            try:
-                assigned = json.loads(row["applicable_models"] or "[]")
-            except (TypeError, json.JSONDecodeError):
-                assigned = []
-            reference_count += sum(str(value) == model_number for value in assigned)
-        if reference_count:
+        models = conn.execute(
+            f"""SELECT id, model_number, display_name FROM project_models
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *selected_ids),
+        ).fetchall()
+        if len(models) != len(selected_ids):
+            raise ValueError("One or more selected models no longer exist.")
+        blocked: list[str] = []
+        labels: list[str] = []
+        for model in models:
+            model_number = str(model["model_number"])
+            label = str(model["display_name"] or model_number)
+            labels.append(label)
+            reference_count = 0
+            for table in ("parts", "work_elements"):
+                reference_count += conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE project_id=? AND instr(model_applicability, ?) > 0",
+                    (project_id, model_number),
+                ).fetchone()[0]
+            for row in conn.execute(
+                "SELECT applicable_models FROM fishbone_nodes WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                try:
+                    assigned = json.loads(row["applicable_models"] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    assigned = []
+                reference_count += sum(str(value) == model_number for value in assigned)
+            if reference_count:
+                blocked.append(label)
+        if blocked:
             raise ValueError(
-                "This model is still assigned elsewhere. Remove those assignments first, "
-                "or turn off Use in planning instead of deleting it."
+                f"These models are still assigned elsewhere: {', '.join(sorted(blocked))}. "
+                "Remove those assignments first, or turn off Use in planning instead."
             )
-        conn.execute("DELETE FROM project_models WHERE id=? AND project_id=?", (model_id, project_id))
-        return str(model["display_name"] or model_number)
+        conn.execute(
+            f"DELETE FROM project_models WHERE project_id=? AND id IN ({placeholders})",
+            (project_id, *selected_ids),
+        )
+        return labels
+
+
+def delete_project_model(project_id: str, model_id: str) -> str:
+    """Delete one unreferenced model definition."""
+    return delete_project_models(project_id, [model_id])[0]
 
 
 def add_project_model(project_id: str, model_number: str, display_name: str, description: str) -> str:
@@ -4380,24 +4622,57 @@ def sync_confirmed_mbom_parts(project_id: str) -> int:
     return len(confirmed)
 
 
+def process_section_for_step(
+    project_id: str, scenario_id: str, element_id: str
+) -> dict | None:
+    """Return the one Fishbone section linked to a Process step, if unambiguous."""
+    rows = query(
+        """SELECT DISTINCT section.id, section.name
+           FROM assembly_sections section
+           JOIN (
+               SELECT area.section_id
+               FROM yamazumi_elements yamazumi
+               JOIN yamazumi_areas area ON area.id=yamazumi.area_id
+               WHERE yamazumi.project_id=? AND area.scenario_id=?
+                 AND yamazumi.process_element_id=? AND area.section_id IS NOT NULL
+               UNION
+               SELECT group_row.section_id
+               FROM process_part_groups group_row
+               WHERE group_row.project_id=? AND group_row.scenario_id=?
+                 AND group_row.work_element_id=? AND group_row.section_id IS NOT NULL
+           ) linked ON linked.section_id=section.id
+           WHERE section.project_id=?""",
+        (
+            project_id,
+            scenario_id,
+            element_id,
+            project_id,
+            scenario_id,
+            element_id,
+            project_id,
+        ),
+    )
+    return rows[0] if len(rows) == 1 else None
+
+
 def update_process_step_details(
-    project_id: str, scenario_id: str, element_id: str, values: dict
-) -> str:
-    """Update the detail-dialog fields for one scenario-owned process step."""
+    project_id: str,
+    scenario_id: str,
+    element_id: str,
+    values: dict,
+    apply_geometry_to_section: bool = False,
+) -> tuple[str, int, str | None]:
+    """Update one Process step and optionally copy its geometry across its section."""
     text_fields = [
         "description",
         "output_assembly_number",
         "output_assembly_name",
         "tool",
-        "torque",
-        "quality_requirement",
-        "ergo_requirement",
         "location",
+        "unit_orientation",
     ]
     numeric_fields = {
         "conveyor_height_mm": "Conveyor height",
-        "platform_height_mm": "Platform height",
-        "pit_depth_mm": "Pit depth",
     }
     cleaned = {
         field: "" if values.get(field) is None or pd.isna(values.get(field))
@@ -4420,6 +4695,69 @@ def update_process_step_details(
         if not existing:
             raise ValueError("The selected process step no longer exists in this scenario.")
 
+        section_id = None
+        affected_ids = [element_id]
+        if apply_geometry_to_section:
+            linked_sections = conn.execute(
+                """SELECT DISTINCT section_id FROM (
+                       SELECT area.section_id
+                       FROM yamazumi_elements yamazumi
+                       JOIN yamazumi_areas area ON area.id=yamazumi.area_id
+                       WHERE yamazumi.project_id=? AND area.scenario_id=?
+                         AND yamazumi.process_element_id=? AND area.section_id IS NOT NULL
+                       UNION
+                       SELECT group_row.section_id
+                       FROM process_part_groups group_row
+                       WHERE group_row.project_id=? AND group_row.scenario_id=?
+                         AND group_row.work_element_id=? AND group_row.section_id IS NOT NULL
+                   )""",
+                (
+                    project_id,
+                    scenario_id,
+                    element_id,
+                    project_id,
+                    scenario_id,
+                    element_id,
+                ),
+            ).fetchall()
+            if len(linked_sections) != 1:
+                raise ValueError(
+                    "This process step is not tied to exactly one Fishbone section, so its "
+                    "orientation and conveyor height cannot be applied section-wide."
+                )
+            section_id = str(linked_sections[0]["section_id"])
+            affected_ids = [
+                str(row["element_id"])
+                for row in conn.execute(
+                    """SELECT DISTINCT element_id FROM (
+                           SELECT yamazumi.process_element_id AS element_id
+                           FROM yamazumi_elements yamazumi
+                           JOIN yamazumi_areas area ON area.id=yamazumi.area_id
+                           JOIN work_elements work ON work.id=yamazumi.process_element_id
+                           WHERE yamazumi.project_id=? AND area.scenario_id=?
+                             AND area.section_id=? AND work.scenario_id=?
+                           UNION
+                           SELECT group_row.work_element_id AS element_id
+                           FROM process_part_groups group_row
+                           JOIN work_elements work ON work.id=group_row.work_element_id
+                           WHERE group_row.project_id=? AND group_row.scenario_id=?
+                             AND group_row.section_id=? AND work.scenario_id=?
+                       ) WHERE element_id IS NOT NULL""",
+                    (
+                        project_id,
+                        scenario_id,
+                        section_id,
+                        scenario_id,
+                        project_id,
+                        scenario_id,
+                        section_id,
+                        scenario_id,
+                    ),
+                ).fetchall()
+            ]
+            if element_id not in affected_ids:
+                affected_ids.append(element_id)
+
         output_number = cleaned["output_assembly_number"]
         if output_number:
             duplicate = conn.execute(
@@ -4439,12 +4777,27 @@ def update_process_step_details(
                 WHERE id=? AND project_id=? AND scenario_id=?""",
             (*cleaned.values(), timestamp, element_id, project_id, scenario_id),
         )
-    return timestamp
+        if apply_geometry_to_section:
+            placeholders = ",".join("?" for _ in affected_ids)
+            conn.execute(
+                f"""UPDATE work_elements
+                    SET unit_orientation=?, conveyor_height_mm=?, updated_at=?
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+                (
+                    cleaned["unit_orientation"],
+                    cleaned["conveyor_height_mm"],
+                    timestamp,
+                    project_id,
+                    scenario_id,
+                    *affected_ids,
+                ),
+            )
+    return timestamp, len(affected_ids), section_id
 
 
 def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFrame) -> None:
     fields = ["sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
-              "quality_requirement", "ergo_requirement", "location", "conveyor_height_mm", "platform_height_mm",
+              "quality_requirement", "ergo_requirement", "location", "unit_orientation", "conveyor_height_mm", "platform_height_mm",
               "pit_depth_mm", "model_applicability", "status", "output_assembly_number",
               "output_assembly_name"]
     records: list[tuple[str, list]] = []

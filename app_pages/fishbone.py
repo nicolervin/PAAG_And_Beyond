@@ -2,16 +2,18 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import (
+    active_part_ids,
     add_assembly_section,
     assembly_sections,
     assign_parts_to_section,
-    delete_fishbone_part_assignment,
+    delete_fishbone_part_assignments,
     fishbone_assignment_snapshot,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
     part_feature_rules,
     project_models,
     project_table,
+    record_audit_event,
     reorder_assembly_section,
     replace_fishbone_part_assignments,
     restore_fishbone_assignment_snapshot,
@@ -29,24 +31,39 @@ from utils.table_filters import (
     split_filter_values,
 )
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
+from utils.table_ui import native_selected_rows, table_has_unsaved_changes
 
 
 project_id = st.session_state.get("project_id")
+scenario_id = st.session_state.get("scenario_id")
 st.title("Parts to assembly fishbone")
 st.caption("Build the assembly framework first, then place approved Parts-table content into its sections and subassemblies.")
-if not project_id:
+if not project_id or not scenario_id:
     st.stop()
-pool_editor_key = f"parts_fishbone_pool_v2_{project_id}"
+pool_editor_key = f"parts_fishbone_pool_v3_{project_id}_{scenario_id}"
+assignment_editor_key = f"fishbone_assignment_editor_{scenario_id}"
 for editor_key in (
     "assembly_framework_editor",
-    "fishbone_assignment_editor",
+    assignment_editor_key,
     pool_editor_key,
 ):
     apply_pending_table_editor_reset(editor_key)
 
+scenario_active_part_ids = active_part_ids(project_id, scenario_id)
 parts = project_table("parts", project_id, "part_number")
+if not parts.empty:
+    parts = parts.loc[parts["id"].astype(str).isin(scenario_active_part_ids)].copy()
 sections = assembly_sections(project_id)
-assignments = fishbone_part_assignments(project_id)
+all_assignments = fishbone_part_assignments(project_id)
+if all_assignments.empty:
+    assignments = all_assignments.copy()
+    inactive_assignments = all_assignments.copy()
+else:
+    assignment_is_active = all_assignments["part_id"].astype(str).isin(
+        scenario_active_part_ids
+    )
+    assignments = all_assignments.loc[assignment_is_active].copy()
+    inactive_assignments = all_assignments.loc[~assignment_is_active].copy()
 models = project_models(project_id)
 feature_rules = part_feature_rules(project_id)
 feature_labels_by_part: dict[str, list[str]] = {}
@@ -103,206 +120,211 @@ metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_par
 st.subheader("Fishbone framework")
 fishbone_visual_slot = st.empty()
 
-section_1_title, section_1_warning, section_1_undo, section_1_action = st.columns(
-    [4, 0.8, 0.7, 1], vertical_alignment="center"
-)
-section_1_title.header("1 · Build the assembly framework")
-framework_has_unsaved = has_unsaved_table_changes("assembly_framework_editor")
-if framework_has_unsaved:
-    section_1_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
-undo_framework = section_1_undo.button(
-    "Undo",
-    icon=":material/undo:",
-    disabled=framework_undo_key not in st.session_state and not framework_has_unsaved,
-    help=(
-        "Discard the current unsaved framework edits."
-        if framework_has_unsaved
-        else "Undo the last saved framework change in this browser session."
-    ),
-    key="undo_assembly_framework",
-)
-refresh_framework = section_1_action.button(
-    "Refresh assembly framework",
-    type="primary",
-    icon=":material/refresh:",
-    key="refresh_assembly_framework_top",
-)
-if undo_framework:
+with st.expander(
+    "1 · Build the assembly framework",
+    icon=":material/account_tree:",
+    expanded=True,
+):
+    _, section_1_warning, section_1_undo, section_1_action = st.columns(
+        [4, 0.8, 0.7, 1], vertical_alignment="center"
+    )
+    framework_has_unsaved = has_unsaved_table_changes("assembly_framework_editor")
     if framework_has_unsaved:
-        st.session_state.pop("assembly_framework_editor", None)
-        st.toast("Discarded the unsaved framework edits", icon=":material/undo:")
+        section_1_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
+    undo_framework = section_1_undo.button(
+        "Undo",
+        icon=":material/undo:",
+        disabled=framework_undo_key not in st.session_state and not framework_has_unsaved,
+        help=(
+            "Discard the current unsaved framework edits."
+            if framework_has_unsaved
+            else "Undo the last saved framework change in this browser session."
+        ),
+        key="undo_assembly_framework",
+    )
+    refresh_framework = section_1_action.button(
+        "Refresh assembly framework",
+        type="primary",
+        icon=":material/refresh:",
+        key="refresh_assembly_framework_top",
+    )
+    if undo_framework:
+        if framework_has_unsaved:
+            st.session_state.pop("assembly_framework_editor", None)
+            st.toast("Discarded the unsaved framework edits", icon=":material/undo:")
+        else:
+            restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
+            st.session_state.pop(assignment_undo_key, None)
+            st.session_state.pop("assembly_framework_editor", None)
+            st.session_state.pop(assignment_editor_key, None)
+            st.toast("Undid the last assembly framework change", icon=":material/undo:")
+        st.rerun()
+    st.caption("Main-spine sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent section or subassembly.")
+
+    active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
+    section_name_by_id = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
+    parent_options = active_sections["id"].astype(str).tolist() if not active_sections.empty else []
+
+    with st.container(border=True):
+        st.subheader("Add a section or subassembly")
+        section_form_version_key = f"section_form_version_{project_id}"
+        st.session_state.setdefault(section_form_version_key, 0)
+        with st.form(f"add_assembly_section_{st.session_state[section_form_version_key]}"):
+            section_row = st.columns([2, 1, 2])
+            section_name = section_row[0].text_input("Name", placeholder="Wheel Subassembly")
+            section_type = section_row[1].selectbox("Type", ["Main spine", "Subassembly"])
+            parent_id = section_row[2].selectbox(
+                "Parent assembly",
+                options=[None, *parent_options],
+                format_func=lambda value: "Product / main assembly" if value is None else section_name_by_id.get(value, value),
+                help="Required for a subassembly. Main-spine sections attach directly to the product.",
+            )
+            section_description = st.text_area("Framework description", placeholder="What is assembled in this section?")
+            if st.form_submit_button("Add to framework", type="primary", icon=":material/account_tree:"):
+                try:
+                    add_assembly_section(project_id, section_name, section_type, parent_id, section_description)
+                    st.session_state[framework_undo_key] = current_plan_snapshot
+                    st.session_state[section_form_version_key] += 1
+                    st.toast("Framework item added", icon=":material/check_circle:")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    if sections.empty:
+        st.info("Add at least one main-spine section to begin the assembly framework.")
     else:
-        restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
-        st.session_state.pop(assignment_undo_key, None)
-        st.session_state.pop("assembly_framework_editor", None)
-        st.session_state.pop("fishbone_assignment_editor", None)
-        st.toast("Undid the last assembly framework change", icon=":material/undo:")
-    st.rerun()
-st.caption("Main-spine sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent section or subassembly.")
+        framework_records = {str(row["id"]): row.to_dict() for _, row in sections.iterrows()}
+        framework_children: dict[str, list[str]] = {}
+        for section_id, row in framework_records.items():
+            parent_id = normalized_parent_id(row.get("parent_id"))
+            framework_children.setdefault(parent_id, []).append(section_id)
+        for child_ids in framework_children.values():
+            child_ids.sort(key=lambda child_id: (int(framework_records[child_id]["sequence"]), framework_records[child_id]["name"]))
 
-active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
-section_name_by_id = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
-parent_options = active_sections["id"].astype(str).tolist() if not active_sections.empty else []
+        framework_order: list[str] = []
+        framework_depth: dict[str, int] = {}
 
-with st.expander("Add a section or subassembly", icon=":material/add:", expanded=sections.empty):
-    section_form_version_key = f"section_form_version_{project_id}"
-    st.session_state.setdefault(section_form_version_key, 0)
-    with st.form(f"add_assembly_section_{st.session_state[section_form_version_key]}"):
-        section_row = st.columns([2, 1, 2])
-        section_name = section_row[0].text_input("Name", placeholder="Wheel Subassembly")
-        section_type = section_row[1].selectbox("Type", ["Main spine", "Subassembly"])
-        parent_id = section_row[2].selectbox(
-            "Parent assembly",
-            options=[None, *parent_options],
-            format_func=lambda value: "Product / main assembly" if value is None else section_name_by_id.get(value, value),
-            help="Required for a subassembly. Main-spine sections attach directly to the product.",
+        def add_framework_branch(section_id: str, depth: int) -> None:
+            if section_id in framework_depth:
+                return
+            framework_depth[section_id] = depth
+            framework_order.append(section_id)
+            for child_id in framework_children.get(section_id, []):
+                add_framework_branch(child_id, depth + 1)
+
+        root_ids = [
+            section_id for section_id, row in framework_records.items()
+            if not normalized_parent_id(row.get("parent_id")) or row["section_type"] == "Main spine"
+        ]
+        root_ids.sort(key=lambda section_id: (int(framework_records[section_id]["sequence"]), framework_records[section_id]["name"]))
+        for root_id in root_ids:
+            add_framework_branch(root_id, 0)
+        for section_id in framework_records:
+            add_framework_branch(section_id, 0)
+
+        framework = sections.set_index(sections["id"].astype(str), drop=False).loc[framework_order].reset_index(drop=True)
+        framework["hierarchy"] = framework.apply(
+            lambda row: (
+                f"🟦  {row['name']}"
+                if framework_depth[str(row["id"])] == 0
+                else f"{' ' * framework_depth[str(row['id'])]}└─ 🟧  {row['name']}"
+            ),
+            axis=1,
         )
-        section_description = st.text_area("Framework description", placeholder="What is assembled in this section?")
-        if st.form_submit_button("Add to framework", type="primary", icon=":material/account_tree:"):
+        framework["parent_assembly"] = framework["parent_id"].apply(
+            lambda value: (
+                "Product / main assembly"
+                if not normalized_parent_id(value)
+                else section_name_by_id.get(normalized_parent_id(value), normalized_parent_id(value))
+            )
+        )
+        framework["order_actions"] = [[
+            ":material/first_page: Move to start",
+            ":material/arrow_upward: Move earlier",
+            ":material/arrow_downward: Move later",
+            ":material/last_page: Move to end",
+        ]] * len(framework)
+        full_framework = framework.copy()
+        framework = filter_table(
+            full_framework,
+            key="assembly_framework_filters",
+            dropdown_columns=["section_type", "parent_assembly", "active"],
+            search_columns=["hierarchy", "name", "parent_assembly", "description"],
+            labels={"section_type": "Framework type", "parent_assembly": "Parent assembly", "active": "Use status"},
+            reset_widget_keys=["assembly_framework_editor"],
+        )
+
+        def handle_framework_order() -> None:
+            click = st.session_state.get("framework_order_action")
+            if not click or not 0 <= click["row"] < len(framework):
+                return
+            label = click["label"]
+            action = next(
+                (candidate for candidate in ["Move to start", "Move earlier", "Move later", "Move to end"] if candidate in label),
+                None,
+            )
+            if action:
+                section_id = str(framework.iloc[click["row"]]["id"])
+                moved = reorder_assembly_section(project_id, section_id, action)
+                if moved:
+                    st.session_state[framework_undo_key] = current_plan_snapshot
+                    st.toast(f"{framework.iloc[click['row']]['name']}: {action.lower()}", icon=":material/swap_vert:")
+
+        framework_editor = st.data_editor(
+            framework,
+            key="assembly_framework_editor",
+            hide_index=True,
+            num_rows="fixed",
+            height=300,
+            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at"],
+            column_order=["hierarchy", "active", "sequence", "order_actions", "name", "section_type", "parent_assembly", "description"],
+            column_config={
+                "id": None,
+                "project_id": None,
+                "parent_id": None,
+                "hierarchy": st.column_config.TextColumn(
+                    "Assembly hierarchy",
+                    pinned=True,
+                    width="large",
+                    help="Blue rows are main-spine sections. Orange indented rows are subassemblies grouped under their parent.",
+                ),
+                "active": st.column_config.CheckboxColumn("Use", help="Inactive framework items remain in history but are hidden from new part placement."),
+                "sequence": st.column_config.NumberColumn("Order", format="%d", pinned=True, help="Managed automatically by the move actions."),
+                "order_actions": st.column_config.ButtonColumn(
+                    "Move",
+                    pinned=True,
+                    type="secondary",
+                    on_click=handle_framework_order,
+                    key="framework_order_action",
+                ),
+                "name": st.column_config.TextColumn("Section / subassembly", required=True, pinned=True, width="large"),
+                "section_type": st.column_config.SelectboxColumn("Type", options=["Main spine", "Subassembly"], required=True),
+                "parent_assembly": st.column_config.SelectboxColumn(
+                    "Parent assembly",
+                    options=["Product / main assembly", *sections["name"].astype(str).tolist()],
+                    required=True,
+                    width="large",
+                ),
+                "description": st.column_config.TextColumn("Framework description", width="large"),
+                "created_at": None,
+                "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
+            },
+        )
+        st.caption("🟦 Main-spine section · 🟧 Subassembly · indentation shows the parent-child relationship.")
+        id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
+        framework_to_save = merge_filtered_edits(full_framework, framework, framework_editor)
+        framework_to_save["parent_id"] = framework_to_save["parent_assembly"].apply(
+            lambda name: None if name == "Product / main assembly" else id_by_name.get(name)
+        )
+        if refresh_framework:
             try:
-                add_assembly_section(project_id, section_name, section_type, parent_id, section_description)
+                count = update_assembly_section_rows(project_id, framework_to_save)
                 st.session_state[framework_undo_key] = current_plan_snapshot
-                st.session_state[section_form_version_key] += 1
-                st.toast("Framework item added", icon=":material/check_circle:")
+                request_table_editor_reset("assembly_framework_editor")
+                st.toast(f"Saved {count} framework items", icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
-
-if sections.empty:
-    st.info("Add at least one main-spine section to begin the assembly framework.")
-else:
-    framework_records = {str(row["id"]): row.to_dict() for _, row in sections.iterrows()}
-    framework_children: dict[str, list[str]] = {}
-    for section_id, row in framework_records.items():
-        parent_id = normalized_parent_id(row.get("parent_id"))
-        framework_children.setdefault(parent_id, []).append(section_id)
-    for child_ids in framework_children.values():
-        child_ids.sort(key=lambda child_id: (int(framework_records[child_id]["sequence"]), framework_records[child_id]["name"]))
-
-    framework_order: list[str] = []
-    framework_depth: dict[str, int] = {}
-
-    def add_framework_branch(section_id: str, depth: int) -> None:
-        if section_id in framework_depth:
-            return
-        framework_depth[section_id] = depth
-        framework_order.append(section_id)
-        for child_id in framework_children.get(section_id, []):
-            add_framework_branch(child_id, depth + 1)
-
-    root_ids = [
-        section_id for section_id, row in framework_records.items()
-        if not normalized_parent_id(row.get("parent_id")) or row["section_type"] == "Main spine"
-    ]
-    root_ids.sort(key=lambda section_id: (int(framework_records[section_id]["sequence"]), framework_records[section_id]["name"]))
-    for root_id in root_ids:
-        add_framework_branch(root_id, 0)
-    for section_id in framework_records:
-        add_framework_branch(section_id, 0)
-
-    framework = sections.set_index(sections["id"].astype(str), drop=False).loc[framework_order].reset_index(drop=True)
-    framework["hierarchy"] = framework.apply(
-        lambda row: (
-            f"🟦  {row['name']}"
-            if framework_depth[str(row["id"])] == 0
-            else f"{' ' * framework_depth[str(row['id'])]}└─ 🟧  {row['name']}"
-        ),
-        axis=1,
-    )
-    framework["parent_assembly"] = framework["parent_id"].apply(
-        lambda value: (
-            "Product / main assembly"
-            if not normalized_parent_id(value)
-            else section_name_by_id.get(normalized_parent_id(value), normalized_parent_id(value))
-        )
-    )
-    framework["order_actions"] = [[
-        ":material/first_page: Move to start",
-        ":material/arrow_upward: Move earlier",
-        ":material/arrow_downward: Move later",
-        ":material/last_page: Move to end",
-    ]] * len(framework)
-    full_framework = framework.copy()
-    framework = filter_table(
-        full_framework,
-        key="assembly_framework_filters",
-        dropdown_columns=["section_type", "parent_assembly", "active"],
-        search_columns=["hierarchy", "name", "parent_assembly", "description"],
-        labels={"section_type": "Framework type", "parent_assembly": "Parent assembly", "active": "Use status"},
-        reset_widget_keys=["assembly_framework_editor"],
-    )
-
-    def handle_framework_order() -> None:
-        click = st.session_state.get("framework_order_action")
-        if not click or not 0 <= click["row"] < len(framework):
-            return
-        label = click["label"]
-        action = next(
-            (candidate for candidate in ["Move to start", "Move earlier", "Move later", "Move to end"] if candidate in label),
-            None,
-        )
-        if action:
-            section_id = str(framework.iloc[click["row"]]["id"])
-            moved = reorder_assembly_section(project_id, section_id, action)
-            if moved:
-                st.session_state[framework_undo_key] = current_plan_snapshot
-                st.toast(f"{framework.iloc[click['row']]['name']}: {action.lower()}", icon=":material/swap_vert:")
-
-    framework_editor = st.data_editor(
-        framework,
-        key="assembly_framework_editor",
-        hide_index=True,
-        num_rows="fixed",
-        height=300,
-        disabled=["id", "hierarchy", "sequence", "created_at", "updated_at"],
-        column_order=["hierarchy", "active", "sequence", "order_actions", "name", "section_type", "parent_assembly", "description"],
-        column_config={
-            "id": None,
-            "project_id": None,
-            "parent_id": None,
-            "hierarchy": st.column_config.TextColumn(
-                "Assembly hierarchy",
-                pinned=True,
-                width="large",
-                help="Blue rows are main-spine sections. Orange indented rows are subassemblies grouped under their parent.",
-            ),
-            "active": st.column_config.CheckboxColumn("Use", help="Inactive framework items remain in history but are hidden from new part placement."),
-            "sequence": st.column_config.NumberColumn("Order", format="%d", pinned=True, help="Managed automatically by the move actions."),
-            "order_actions": st.column_config.ButtonColumn(
-                "Move",
-                pinned=True,
-                type="secondary",
-                on_click=handle_framework_order,
-                key="framework_order_action",
-            ),
-            "name": st.column_config.TextColumn("Section / subassembly", required=True, pinned=True, width="large"),
-            "section_type": st.column_config.SelectboxColumn("Type", options=["Main spine", "Subassembly"], required=True),
-            "parent_assembly": st.column_config.SelectboxColumn(
-                "Parent assembly",
-                options=["Product / main assembly", *sections["name"].astype(str).tolist()],
-                required=True,
-                width="large",
-            ),
-            "description": st.column_config.TextColumn("Framework description", width="large"),
-            "created_at": None,
-            "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
-        },
-    )
-    st.caption("🟦 Main-spine section · 🟧 Subassembly · indentation shows the parent-child relationship.")
-    id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
-    framework_to_save = merge_filtered_edits(full_framework, framework, framework_editor)
-    framework_to_save["parent_id"] = framework_to_save["parent_assembly"].apply(
-        lambda name: None if name == "Product / main assembly" else id_by_name.get(name)
-    )
-    if refresh_framework:
-        try:
-            count = update_assembly_section_rows(project_id, framework_to_save)
-            st.session_state[framework_undo_key] = current_plan_snapshot
-            request_table_editor_reset("assembly_framework_editor")
-            st.toast(f"Saved {count} framework items", icon=":material/check_circle:")
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
 
 if sections.empty:
     fishbone_visual_slot.caption("The visual framework will appear after the first section is added.")
@@ -458,7 +480,7 @@ if undo_placement:
         restore_fishbone_assignment_snapshot(project_id, undo_state["assignments"])
         st.session_state[pending_use_key] = undo_state.get("pending_use_ids", [])
         st.session_state.pop(pool_editor_key, None)
-        st.session_state.pop("fishbone_assignment_editor", None)
+        st.session_state.pop(assignment_editor_key, None)
         st.toast("Undid the last part placement change", icon=":material/undo:")
     st.rerun()
 if parts.empty:
@@ -495,7 +517,7 @@ else:
         placeholder="All placement states",
         key=placement_filter_key,
     )
-    part_search = pool_controls.text_input("Search parts", placeholder="Part number or description")
+    part_search = pool_controls.text_input("Search parts", placeholder="Part number or part name")
     pool_feature_options = sorted(
         {label for labels in feature_labels_by_part.values() for label in labels}, key=str.casefold
     )
@@ -580,7 +602,7 @@ else:
                 help="Open this exact catalog part on the Parts page to edit its models, details, and photos.",
             ),
             "part_number": st.column_config.TextColumn("Part number", pinned=True),
-            "description": st.column_config.TextColumn("Description", width="large"),
+            "description": st.column_config.TextColumn("Part Name", width="large"),
             "quantity": st.column_config.NumberColumn(
                 "Qty for this use", min_value=0, step=1, format="%d",
                 help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
@@ -660,7 +682,9 @@ section_3_title, section_3_warning, section_3_undo, section_3_action = st.column
     [4, 0.8, 0.7, 1], vertical_alignment="center"
 )
 section_3_title.header("3 · Order assigned parts")
-assignments_have_unsaved = has_unsaved_table_changes("fishbone_assignment_editor")
+assignments_have_unsaved = table_has_unsaved_changes(
+    assignment_editor_key, native_row_selection=True
+)
 if assignments_have_unsaved:
     section_3_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
 undo_assigned_parts = section_3_undo.button(
@@ -682,15 +706,16 @@ refresh_part_placement = section_3_action.button(
 )
 if undo_assigned_parts:
     if assignments_have_unsaved:
-        st.session_state.pop("fishbone_assignment_editor", None)
+        st.session_state.pop(assignment_editor_key, None)
         st.toast("Discarded the unsaved assigned-parts edits", icon=":material/undo:")
     else:
         undo_state = st.session_state.pop(assignment_undo_key)
         restore_fishbone_assignment_snapshot(project_id, undo_state["assignments"])
         st.session_state[pending_use_key] = undo_state.get("pending_use_ids", [])
-        st.session_state.pop("fishbone_assignment_editor", None)
+        st.session_state.pop(assignment_editor_key, None)
         st.toast("Undid the last assigned-parts change", icon=":material/undo:")
     st.rerun()
+selected_assignment_rows = assignments.iloc[0:0].copy()
 if assignments.empty:
     st.caption("Assigned parts will appear here for ordering within each framework section.")
 else:
@@ -705,13 +730,12 @@ else:
         dropdown_columns=["section", "revision", "model_applicability"],
         search_columns=["section", "part_number", "description", "use_description", "revision", "model_applicability", "notes"],
         labels={"section": "Assembly section", "model_applicability": "Feature applicability"},
-        reset_widget_keys=["fishbone_assignment_editor"],
+        reset_widget_keys=[assignment_editor_key],
         multi_value_columns=["model_applicability"],
         universal_values={"model_applicability": ["All", "All models", ""]},
     )
     assignment_editor["edit_part"] = ":material/edit: Edit part"
     assignment_editor["add_use"] = ":material/content_copy: Add use"
-    assignment_editor["delete_use"] = ":material/delete: Delete use"
 
     def open_assigned_part() -> None:
         click = st.session_state.get("fishbone_assignment_edit_part")
@@ -739,27 +763,15 @@ else:
         st.session_state[f"fishbone_placement_filters_{project_id}"] = ["Ready for another use"]
         st.toast("Part returned to Section 2 and is ready to place again.", icon=":material/arrow_upward:")
 
-    def delete_assigned_part_use() -> None:
-        click = st.session_state.get("fishbone_assignment_delete_use")
-        if not click or not 0 <= click["row"] < len(assignment_editor):
-            return
-        row = assignment_editor.iloc[click["row"]]
-        if delete_fishbone_part_assignment(project_id, str(row["id"])):
-            st.session_state[assignment_undo_key] = current_assignment_undo
-            st.toast(
-                f"Deleted this use of {row['part_number']}. The master part remains in Parts.",
-                icon=":material/delete:",
-            )
-
     edited_assignments = st.data_editor(
         assignment_editor,
-        key="fishbone_assignment_editor",
+        key=assignment_editor_key,
         hide_index=True,
         num_rows="delete",
         height=430,
         disabled=["id", "part_id", "part_number", "description", "revision", "model_applicability", "updated_at"],
         column_order=[
-            "edit_part", "add_use", "delete_use", "section", "part_number", "description",
+            "edit_part", "add_use", "section", "part_number", "description",
             "quantity", "model_applicability", "revision", "use_description", "notes", "sequence",
         ],
         column_config={
@@ -784,14 +796,6 @@ else:
                 key="fishbone_assignment_add_use",
                 help="Return this catalog part to Section 2 so its additional use can be placed deliberately.",
             ),
-            "delete_use": st.column_config.ButtonColumn(
-                "Delete use",
-                pinned=True,
-                type="tertiary",
-                on_click=delete_assigned_part_use,
-                key="fishbone_assignment_delete_use",
-                help="Delete only this fishbone occurrence. The master catalog part and its other uses remain.",
-            ),
             "section": st.column_config.SelectboxColumn(
                 "Assembly section",
                 options=active_sections["name"].astype(str).tolist(),
@@ -801,7 +805,7 @@ else:
             ),
             "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d"),
             "part_number": st.column_config.TextColumn("Part number", pinned=True),
-            "description": st.column_config.TextColumn("Description", width="medium", pinned=True),
+            "description": st.column_config.TextColumn("Part Name", width="medium", pinned=True),
             "use_description": st.column_config.TextColumn(
                 "Use / installation location",
                 width="large",
@@ -815,23 +819,88 @@ else:
     )
     if st.session_state.pop(f"fishbone_open_part_{project_id}", False):
         st.switch_page("app_pages/parts.py")
+    selected_assignment_rows = native_selected_rows(
+        assignment_editor, editor_key=assignment_editor_key
+    )
+    assignment_actions = st.container(horizontal=True, horizontal_alignment="right")
+    request_assignment_delete = assignment_actions.button(
+        f"Delete selected ({len(selected_assignment_rows)})",
+        icon=":material/delete:",
+        disabled=selected_assignment_rows.empty,
+        key=f"destructive_request_fishbone_assignment_delete_{project_id}",
+    )
+    if request_assignment_delete:
+        if table_has_unsaved_changes(
+            assignment_editor_key, native_row_selection=True
+        ):
+            st.warning("Save or undo other assigned-part edits before deleting selected uses.")
+        else:
+            st.session_state[f"fishbone_assignments_pending_delete_{project_id}"] = (
+                selected_assignment_rows["id"].astype(str).tolist()
+            )
+
+    @st.dialog("Delete selected fishbone uses?")
+    def confirm_assignment_delete() -> None:
+        pending_key = f"fishbone_assignments_pending_delete_{project_id}"
+        pending_ids = st.session_state.get(pending_key, [])
+        st.warning(
+            f"Delete {len(pending_ids)} selected Fishbone use(s)? Master Parts records and other "
+            "uses will remain."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_fishbone_assignment_delete_{project_id}"):
+            st.session_state.pop(pending_key, None)
+            st.rerun()
+        if actions.button(
+            "Delete uses",
+            type="primary",
+            icon=":material/delete:",
+            key=f"destructive_confirm_fishbone_assignment_delete_{project_id}",
+        ):
+            try:
+                count = delete_fishbone_part_assignments(project_id, pending_ids)
+                st.session_state[assignment_undo_key] = current_assignment_undo
+                record_audit_event(
+                    project_id,
+                    "Fishbone part assignments",
+                    "Bulk delete",
+                    count,
+                    st.session_state.get("current_editor", ""),
+                    {"assignment_ids": pending_ids},
+                )
+                st.session_state.pop(pending_key, None)
+                request_table_editor_reset(assignment_editor_key)
+                st.toast(f"Deleted {count} selected Fishbone uses", icon=":material/delete:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    if st.session_state.get(f"fishbone_assignments_pending_delete_{project_id}"):
+        confirm_assignment_delete()
+
     st.caption(
         "Each row is one use of a catalog part. Edit its location, Qty, section, or order, then select Save all changes & refresh above the fishbone. "
-        "Another use stages the part in Section 2 instead of creating a duplicate here. Deleting a row removes only that occurrence; the master part remains in Parts."
+        "Another use stages the part in Section 2 instead of creating a duplicate here. Select rows and use Delete selected to remove occurrences; master Parts records remain."
     )
     assignments_to_save = merge_filtered_edits(
         full_assignment_editor, assignment_editor, edited_assignments
     )
     assignments_to_save = assignments_to_save.drop(
-        columns=["edit_part", "add_use", "delete_use"], errors="ignore"
+        columns=["edit_part", "add_use"], errors="ignore"
     )
     section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
     assignments_to_save["section_id"] = assignments_to_save["section"].map(section_id_by_name)
+    if not inactive_assignments.empty:
+        assignments_to_save = pd.concat(
+            [assignments_to_save, inactive_assignments], ignore_index=True, sort=False
+        )
     if refresh_part_placement:
         try:
+            if not selected_assignment_rows.empty:
+                raise ValueError("Clear selected rows before saving assigned-part edits.")
             count = replace_fishbone_part_assignments(project_id, assignments_to_save)
             st.session_state[assignment_undo_key] = current_assignment_undo
-            request_table_editor_reset("fishbone_assignment_editor")
+            request_table_editor_reset(assignment_editor_key)
             st.toast(f"Saved {count} fishbone part assignments", icon=":material/check_circle:")
             st.rerun()
         except ValueError as exc:
@@ -839,6 +908,8 @@ else:
 
 if st.session_state.pop(f"fishbone_save_all_{project_id}", False):
     try:
+        if not selected_assignment_rows.empty:
+            raise ValueError("Clear selected assigned-part rows before saving the Fishbone plan.")
         framework_count, assignment_count = save_fishbone_plan(
             project_id,
             framework_to_save if not sections.empty else None,
@@ -847,7 +918,7 @@ if st.session_state.pop(f"fishbone_save_all_{project_id}", False):
         st.session_state[framework_undo_key] = current_plan_snapshot
         st.session_state[assignment_undo_key] = current_assignment_undo
         request_table_editor_reset("assembly_framework_editor")
-        request_table_editor_reset("fishbone_assignment_editor")
+        request_table_editor_reset(assignment_editor_key)
         st.session_state[f"fishbone_refresh_version_{project_id}"] = (
             st.session_state.get(f"fishbone_refresh_version_{project_id}", 0) + 1
         )

@@ -11,6 +11,76 @@ import streamlit as st
 DEFAULT_SELECTION_COLUMN = "selected"
 
 
+def sortable_editor_rows(
+    dataframe: pd.DataFrame,
+    *,
+    defaults: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    """Append one editable new-record row without disabling column sorting.
+
+    Streamlit disables its native column sorting when ``num_rows`` is
+    ``"dynamic"`` or ``"add"``. Standard editors therefore use
+    ``num_rows="delete"`` and receive one explicit blank row from this helper.
+    """
+    defaults = defaults or {}
+    blank: dict[str, object] = {}
+    for column in dataframe.columns:
+        if column in defaults:
+            blank[column] = defaults[column]
+            continue
+        dtype = dataframe[column].dtype
+        if pd.api.types.is_bool_dtype(dtype):
+            blank[column] = False
+        elif pd.api.types.is_datetime64_any_dtype(dtype):
+            blank[column] = pd.NaT
+        elif pd.api.types.is_numeric_dtype(dtype):
+            blank[column] = None
+        elif isinstance(dtype, pd.StringDtype):
+            blank[column] = ""
+        else:
+            blank[column] = None
+    return pd.concat(
+        [dataframe, pd.DataFrame([blank], columns=dataframe.columns)],
+        ignore_index=True,
+        sort=False,
+    )
+
+
+def drop_untouched_new_rows(
+    dataframe: pd.DataFrame,
+    *,
+    identifying_columns: Iterable[str],
+    id_column: str = "id",
+) -> pd.DataFrame:
+    """Remove the untouched blank row supplied by :func:`sortable_editor_rows`."""
+
+    def is_blank(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) == 0
+        try:
+            if bool(pd.isna(value)):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return str(value).strip() == ""
+
+    identifying_columns = [
+        column for column in identifying_columns if column in dataframe.columns
+    ]
+    if not identifying_columns:
+        return dataframe.copy()
+    if id_column in dataframe.columns:
+        new_record = dataframe[id_column].apply(is_blank)
+    else:
+        new_record = pd.Series(True, index=dataframe.index)
+    untouched = new_record.copy()
+    for column in identifying_columns:
+        untouched &= dataframe[column].apply(is_blank)
+    return dataframe.loc[~untouched].copy()
+
+
 @dataclass(frozen=True)
 class TableHeaderActions:
     """Actions returned by the standard editable-table section header."""

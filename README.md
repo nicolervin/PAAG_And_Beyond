@@ -20,7 +20,7 @@ The app creates `data/paag.db` on first run and seeds a small sample project. Up
 - Branch Yamazumi and Process Plan work into named planning scenarios with numeric or alphabetic revision labels
 - Use **Save as scenario** to preserve the current balance, process rows, and lineage before changing takt or workstation assignments
 - Switch scenarios globally without mixing their work elements, Yamazumi areas, or exported planning snapshots
-- Maintain a part catalog with CAD screenshots and BOM provenance
+- Maintain a part catalog with CAD screenshots, BOM provenance, and scenario-specific Active flags for downstream planning views
 - Paste Windows screenshots directly from the clipboard without saving an intermediate image file
 - Import draft BOMs from Excel or CSV with column mapping
 - Detect PITS-style Level 1–11 sheets and send their repeated occurrences to an IE review queue without treating them as approved MBOM content
@@ -34,7 +34,7 @@ The app creates `data/paag.db` on first run and seeds a small sample project. Up
 - Build an ordered, editable process plan by pitch and record the exact step that completes each made assembly
 - Treat purchased assemblies as ordinary part-catalog items rather than separate manufacturing-assembly records
 - Build Yamazumi drafts by Fishbone spine, manage active/open/blocked pitch addresses, compare side-by-side model variants, and drag work between odd north-side and even south-side pitches
-- Capture tools, torques, quality, ergonomics, locations, conveyor/platform heights, and pit depths
+- Capture process tools, locations, unit orientation, and conveyor height using imperial display units
 - Track questions, concerns, decisions, assumptions, owners, and status
 - Export a multi-sheet Excel workbook with a flat `Lucid Data Link` sheet
 
@@ -45,9 +45,9 @@ New editable tables and tabs should use the shared helpers in `utils/table_ui.py
 
 - Put the section title, orange unsaved-changes warning, Undo, and blue **Save & refresh** button on one line at the top of the section.
 - Support direct cell editing and direct row creation where the underlying data allows it.
-- Add a **Select** checkbox column for bulk actions. Selection alone is transient and does not count as an unsaved data change.
+- Use Streamlit's native row selection for bulk actions. Selection alone is transient and does not count as an unsaved data change.
 - Provide bulk editing for the table's meaningful shared fields and bulk deletion for persisted selected rows.
-- Keep a clear individual-row delete action when users may need to remove one row quickly.
+- Do not put per-row Delete actions in tables. Delete through selected rows, a separate trash button, and a confirmation dialog.
 - Keep keyword and relevant dropdown filters above the table.
 - Validate bulk changes before writing and refresh the editor after a successful save or deletion.
 - Confirm bulk deletion, support selecting all filtered rows from Streamlit's native upper-left table selector, and export the filtered table to Excel.
