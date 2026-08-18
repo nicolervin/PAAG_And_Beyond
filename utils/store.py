@@ -3266,6 +3266,199 @@ def fishbone_part_assignments(project_id: str) -> pd.DataFrame:
     ))
 
 
+def search_parts_and_fishbone(project_id: str, search_text: str) -> pd.DataFrame:
+    """Find catalog parts by number, description, or fishbone-use text across all sections."""
+    columns = [
+        "part_id",
+        "part_number",
+        "description",
+        "revision",
+        "model_applicability",
+        "assignment_id",
+        "section_id",
+        "section_name",
+        "quantity",
+        "use_description",
+        "assignment_notes",
+    ]
+    tokens = list(dict.fromkeys(str(search_text or "").casefold().split()))
+    if not tokens:
+        return pd.DataFrame({column: pd.Series(dtype="string") for column in columns})
+
+    token_clauses: list[str] = []
+    params: list = [project_id]
+    for token in tokens:
+        pattern = f"%{token}%"
+        token_clauses.append(
+            """(LOWER(p.part_number) LIKE ? OR LOWER(p.description) LIKE ?
+                 OR LOWER(COALESCE(a.use_description, '')) LIKE ?
+                 OR LOWER(COALESCE(s.name, '')) LIKE ?)"""
+        )
+        params.extend([pattern, pattern, pattern, pattern])
+    params.append(100)
+    rows = query(
+        f"""SELECT p.id AS part_id, p.part_number, p.description, p.revision,
+                   p.model_applicability, a.id AS assignment_id, a.section_id,
+                   s.name AS section_name, a.quantity, a.use_description,
+                   a.notes AS assignment_notes
+            FROM parts p
+            LEFT JOIN fishbone_part_assignments a
+              ON a.part_id=p.id AND a.project_id=p.project_id
+            LEFT JOIN assembly_sections s ON s.id=a.section_id
+            WHERE p.project_id=? AND ({' OR '.join(token_clauses)})
+            ORDER BY p.part_number, s.sequence, a.sequence
+            LIMIT ?""",
+        tuple(params),
+    )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def create_part_and_assign_to_section(
+    project_id: str,
+    section_id: str,
+    values: dict,
+    placement_quantity: int,
+    use_description: str = "",
+    placement_notes: str = "",
+) -> tuple[str, str, str]:
+    """Create one catalog part and its first fishbone use in one transaction."""
+    part_number = str(values.get("part_number") or "").strip()
+    description = str(values.get("description") or "").strip()
+    revision = str(values.get("revision") or "").strip()
+    catalog_notes = str(values.get("notes") or "").strip()
+    if not part_number:
+        raise ValueError("Part number is required.")
+    if not description:
+        raise ValueError("Part description is required.")
+    try:
+        numeric_quantity = float(placement_quantity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Fishbone quantity must be a whole number.") from exc
+    if not numeric_quantity.is_integer() or numeric_quantity < 1:
+        raise ValueError("Fishbone quantity must be a positive whole number.")
+    quantity = int(numeric_quantity)
+
+    part_id = str(uuid4())
+    assignment_id = str(uuid4())
+    timestamp = now_iso()
+    try:
+        with connection() as conn:
+            section = conn.execute(
+                "SELECT id FROM assembly_sections WHERE id=? AND project_id=? AND active=1",
+                (section_id, project_id),
+            ).fetchone()
+            if not section:
+                raise ValueError("Choose an active fishbone section.")
+            duplicate = conn.execute(
+                """SELECT part_number FROM parts
+                   WHERE project_id=? AND LOWER(TRIM(part_number))=LOWER(?)""",
+                (project_id, part_number),
+            ).fetchone()
+            if duplicate:
+                raise ValueError(
+                    f"Part {duplicate['part_number']} already exists. Use Find existing instead."
+                )
+            conn.execute(
+                """INSERT INTO parts
+                   (id, project_id, part_number, description, quantity, revision, source,
+                    image_path, model_applicability, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'Manual', '', ?, ?, ?)""",
+                (
+                    part_id,
+                    project_id,
+                    part_number,
+                    description,
+                    quantity,
+                    revision,
+                    normalize_model_applicability(values.get("model_applicability", "All")),
+                    catalog_notes,
+                    timestamp,
+                ),
+            )
+            next_sequence = conn.execute(
+                """SELECT COALESCE(MAX(sequence), 0) + 10
+                   FROM fishbone_part_assignments WHERE project_id=? AND section_id=?""",
+                (project_id, section_id),
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, part_id, section_id, sequence, quantity,
+                    use_description, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    assignment_id,
+                    project_id,
+                    part_id,
+                    section_id,
+                    next_sequence,
+                    quantity,
+                    str(use_description or "").strip(),
+                    str(placement_notes or "").strip(),
+                    timestamp,
+                ),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("That part number already exists in this project.") from exc
+    return part_id, assignment_id, timestamp
+
+
+def move_fishbone_part_assignment(
+    project_id: str, assignment_id: str, section_id: str
+) -> str:
+    """Move one existing fishbone occurrence to the end of another active section."""
+    timestamp = now_iso()
+    with connection() as conn:
+        assignment = conn.execute(
+            """SELECT section_id, part_id FROM fishbone_part_assignments
+               WHERE id=? AND project_id=?""",
+            (assignment_id, project_id),
+        ).fetchone()
+        if not assignment:
+            raise ValueError("The selected fishbone use no longer exists.")
+        section = conn.execute(
+            "SELECT id FROM assembly_sections WHERE id=? AND project_id=? AND active=1",
+            (section_id, project_id),
+        ).fetchone()
+        if not section:
+            raise ValueError("Choose an active fishbone section.")
+        if str(assignment["section_id"]) == str(section_id):
+            raise ValueError("That fishbone use is already in the selected section.")
+        another_source_use = conn.execute(
+            """SELECT 1 FROM fishbone_part_assignments
+               WHERE project_id=? AND section_id=? AND part_id=? AND id<>? LIMIT 1""",
+            (
+                project_id,
+                assignment["section_id"],
+                assignment["part_id"],
+                assignment_id,
+            ),
+        ).fetchone()
+        paired_in_source = conn.execute(
+            """SELECT 1 FROM process_part_groups group_row
+               JOIN process_part_options option_row ON option_row.group_id=group_row.id
+               WHERE group_row.project_id=? AND group_row.section_id=?
+                 AND option_row.part_id=? LIMIT 1""",
+            (project_id, assignment["section_id"], assignment["part_id"]),
+        ).fetchone()
+        if paired_in_source and not another_source_use:
+            raise ValueError(
+                "This fishbone use is already paired to Process at a Glance work in its current "
+                "section. Remove or update that pairing before moving it."
+            )
+        next_sequence = conn.execute(
+            """SELECT COALESCE(MAX(sequence), 0) + 10
+               FROM fishbone_part_assignments WHERE project_id=? AND section_id=?""",
+            (project_id, section_id),
+        ).fetchone()[0]
+        conn.execute(
+            """UPDATE fishbone_part_assignments
+               SET section_id=?, sequence=?, updated_at=?
+               WHERE id=? AND project_id=?""",
+            (section_id, next_sequence, timestamp, assignment_id, project_id),
+        )
+    return timestamp
+
+
 def assign_parts_to_section(
     project_id: str,
     part_ids: list[str],

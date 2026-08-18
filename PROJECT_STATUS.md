@@ -1,6 +1,6 @@
 # Project status
 
-_Reviewed August 17, 2026_
+_Reviewed August 18, 2026_
 
 ## What this project is
 
@@ -17,7 +17,7 @@ The app is still a prototype. It runs on one computer, stores its records and up
 - **Parts** — Maintains the part catalog, feature-based model applicability, revision, notes, and source. Parts can have a main CAD image plus extra views; Windows screenshots can be pasted directly. The main table supports filtering, editing, adding rows, selected-row actions, deletion confirmation, Excel export, and a limited history view.
 - **Parts to fishbone** — Builds the product's assembly framework, including main sections and nested subassemblies. Engineers can place approved catalog parts into that framework, record quantities and uses, order them, and view the result as an interactive fishbone with images and feature filtering.
 - **Yamazumi & workstation balancing** — Creates/imports pitch addresses and work elements, defines work regions and flags, compares model variants, and lets engineers drag work between north- and south-side pitches. It also supports named planning scenarios and scenario-specific takt times.
-- **Process at a Glance** — Brings selected Yamazumi work into an ordered plan and pairs fishbone parts with the work that consumes them. Its compact table handles sequence, pitch, operation, time, model coverage, and status; a tabbed per-step dialog captures description, completed assemblies, tools, torque, quality, ergonomics, location, heights, and pit depth. It also includes filtering, bulk edits/deletes, Excel export, a simple workload chart, and history.
+- **Process at a Glance** — Brings selected Yamazumi work into an ordered plan and pairs fishbone parts with the work that consumes them. Its compact table handles sequence, pitch, operation, time, model coverage, and status; a tabbed per-step dialog captures description, completed assemblies, tools, torque, quality, ergonomics, location, heights, and pit depth. The pairing workspace can search for similar catalog parts across every fishbone section, move or add an existing use, or create a minimally complete catalog part and fishbone placement without leaving the page. It also includes filtering, bulk edits/deletes, Excel export, a simple workload chart, and history.
 - **Requirements** — Presents the process-plan details as a read-only requirements review, grouped by work element and filterable by pitch.
 
 ## What is working now

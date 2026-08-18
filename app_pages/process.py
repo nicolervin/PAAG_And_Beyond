@@ -2,11 +2,14 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import (
+    assign_parts_to_section,
     assembly_sections,
     audit_history,
+    create_part_and_assign_to_section,
     delete_process_part_group,
     fishbone_part_assignments,
     get_planning_scenario,
+    move_fishbone_part_assignment,
     parse_yamazumi_model_variants,
     process_element_id_for_yamazumi,
     process_part_groups,
@@ -16,6 +19,7 @@ from utils.store import (
     record_audit_event,
     replace_work_elements,
     save_process_part_group,
+    search_parts_and_fishbone,
     update_process_step_details,
     yamazumi_elements_for_section,
 )
@@ -38,6 +42,8 @@ from utils.table_ui import (
 
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
+process_editor_key = f"process_editor_{scenario_id}"
+missing_part_dialog_key = f"process_missing_part_dialog_{scenario_id}"
 st.title("Process at a Glance")
 st.caption(
     "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
@@ -142,6 +148,22 @@ else:
     with part_column.container(border=True, height="stretch"):
         st.markdown("#### Available fishbone parts")
         st.caption("Select one or more catalog parts from this section.")
+        st.caption(
+            "Don't see your part? Check whether it is in another fishbone section, "
+            "or add it to the Parts catalog and this section without leaving the page."
+        )
+        find_or_add_part = st.button(
+            "Find or add a missing part",
+            icon=":material/search:",
+            type="tertiary",
+            key=f"process_find_or_add_part_{scenario_id}_{section_id}",
+        )
+        if find_or_add_part:
+            if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+                st.warning("Save or undo Process at a Glance table edits first.")
+            else:
+                st.session_state[missing_part_dialog_key] = True
+                st.session_state.pop(f"selected_process_step_{scenario_id}", None)
         if available_parts.empty:
             st.info("No catalog parts are placed in this fishbone section.")
             selected_parts = available_parts
@@ -165,6 +187,305 @@ else:
                 },
             )
             selected_parts = available_parts.iloc[part_event.selection.rows]
+
+
+    def close_missing_part_dialog() -> None:
+        st.session_state.pop(missing_part_dialog_key, None)
+
+
+    @st.dialog(
+        "Find or add a fishbone part",
+        width="large",
+        dismissible=False,
+        icon=":material/search:",
+    )
+    def missing_part_dialog(current_section_id: str) -> None:
+        current_section_name = section_labels.get(current_section_id, current_section_id)
+        st.caption(
+            f"Current fishbone section: {current_section_name}. Search the whole project before "
+            "creating a new catalog record."
+        )
+        find_tab, add_tab = st.tabs(["Find existing", "Add new part"])
+
+        with find_tab:
+            search_text = st.text_input(
+                "Search by part number or name",
+                placeholder="Enter all or part of a number or description",
+                key=f"process_missing_part_search_{scenario_id}_{current_section_id}",
+            ).strip()
+            if len(search_text) < 2:
+                st.info("Enter at least two characters to search the Parts catalog and all fishbone sections.")
+            else:
+                matches = search_parts_and_fishbone(project_id, search_text)
+                if matches.empty:
+                    st.warning("No similar catalog parts were found. Use Add new part if this is new.")
+                else:
+                    summary_rows: list[dict] = []
+                    for part_id, part_matches in matches.groupby("part_id", sort=False):
+                        placed = part_matches.loc[part_matches["assignment_id"].notna()]
+                        placements = []
+                        for _, placement in placed.iterrows():
+                            use_text = str(placement.get("use_description") or "").strip()
+                            placement_text = (
+                                f"{placement.get('section_name') or 'Unknown section'} "
+                                f"(qty {int(placement.get('quantity') or 0)})"
+                            )
+                            if use_text:
+                                placement_text += f" — {use_text}"
+                            placements.append(placement_text)
+                        first = part_matches.iloc[0]
+                        summary_rows.append(
+                            {
+                                "part_id": str(part_id),
+                                "part_number": str(first.get("part_number") or ""),
+                                "description": str(first.get("description") or ""),
+                                "revision": str(first.get("revision") or ""),
+                                "fishbone_locations": " | ".join(placements) or "Not placed",
+                            }
+                        )
+                    result_summary = pd.DataFrame(summary_rows)
+                    st.dataframe(
+                        result_summary.drop(columns=["part_id"]),
+                        hide_index=True,
+                        column_config={
+                            "part_number": st.column_config.TextColumn("Part number", pinned=True),
+                            "description": st.column_config.TextColumn("Description", width="large"),
+                            "revision": "Revision",
+                            "fishbone_locations": st.column_config.TextColumn(
+                                "Fishbone locations", width="large"
+                            ),
+                        },
+                    )
+                    labels_by_part = {
+                        row["part_id"]: f"{row['part_number']} — {row['description']}"
+                        for row in summary_rows
+                    }
+                    selected_part_id = st.selectbox(
+                        "Part to review or place",
+                        list(labels_by_part),
+                        format_func=lambda value: labels_by_part.get(value, value),
+                        key=f"process_missing_part_match_{scenario_id}_{current_section_id}",
+                    )
+                    selected_matches = matches.loc[
+                        matches["part_id"].astype(str) == str(selected_part_id)
+                    ].copy()
+                    placements = selected_matches.loc[selected_matches["assignment_id"].notna()].copy()
+                    current_placements = placements.loc[
+                        placements["section_id"].astype(str) == str(current_section_id)
+                    ]
+                    other_placements = placements.loc[
+                        placements["section_id"].astype(str) != str(current_section_id)
+                    ]
+                    if not current_placements.empty:
+                        st.success("This part is already available in the current fishbone section.")
+                        action_options = ["Add another use here"]
+                    elif not other_placements.empty:
+                        st.warning(
+                            "This part is placed in another fishbone section. Move that occurrence "
+                            "if it was misplaced, or add another use if both placements are intentional."
+                        )
+                        action_options = ["Move an existing use here", "Add another use here"]
+                    else:
+                        st.info("This catalog part has not been placed on the fishbone yet.")
+                        action_options = ["Place in current section"]
+
+                    placement_action = st.segmented_control(
+                        "Action",
+                        action_options,
+                        default=action_options[0],
+                        key=f"process_missing_part_action_{scenario_id}_{current_section_id}",
+                    )
+                    selected_assignment_id = None
+                    if placement_action == "Move an existing use here":
+                        assignment_labels = {
+                            str(row["assignment_id"]): (
+                                f"{row.get('section_name') or 'Unknown section'} — "
+                                f"qty {int(row.get('quantity') or 0)} — "
+                                f"{row.get('use_description') or 'No use description'}"
+                            )
+                            for _, row in other_placements.iterrows()
+                        }
+                        selected_assignment_id = st.selectbox(
+                            "Fishbone use to move",
+                            list(assignment_labels),
+                            format_func=lambda value: assignment_labels.get(value, value),
+                            key=f"process_missing_part_assignment_{scenario_id}_{current_section_id}",
+                        )
+                    else:
+                        placement_row = st.container(horizontal=True, vertical_alignment="bottom")
+                        placement_quantity = placement_row.number_input(
+                            "Fishbone quantity",
+                            min_value=1,
+                            value=1,
+                            step=1,
+                            key=f"process_missing_part_quantity_{scenario_id}_{current_section_id}",
+                        )
+                        placement_use = placement_row.text_input(
+                            "Use / installation location",
+                            key=f"process_missing_part_use_{scenario_id}_{current_section_id}",
+                        )
+
+                    if st.button(
+                        placement_action,
+                        type="primary",
+                        icon=":material/account_tree:",
+                        key=f"process_missing_part_apply_{scenario_id}_{current_section_id}",
+                    ):
+                        try:
+                            if placement_action == "Move an existing use here":
+                                updated_at = move_fishbone_part_assignment(
+                                    project_id, str(selected_assignment_id), current_section_id
+                                )
+                                audit_action = "Move part use"
+                            else:
+                                count = assign_parts_to_section(
+                                    project_id,
+                                    [str(selected_part_id)],
+                                    current_section_id,
+                                    str(placement_use or ""),
+                                    allow_additional_use=not placements.empty,
+                                    quantities_by_part={str(selected_part_id): int(placement_quantity)},
+                                )
+                                if count != 1:
+                                    raise ValueError("The part could not be placed in this section.")
+                                updated_at = None
+                                audit_action = "Place part"
+                            record_audit_event(
+                                project_id,
+                                "Fishbone part assignments",
+                                audit_action,
+                                1,
+                                st.session_state.get("current_editor", ""),
+                                {
+                                    "part_id": str(selected_part_id),
+                                    "section_id": current_section_id,
+                                    "updated_at": updated_at,
+                                },
+                            )
+                            close_missing_part_dialog()
+                            st.toast(
+                                f"{labels_by_part[str(selected_part_id)]} is now in {current_section_name}",
+                                icon=":material/check_circle:",
+                            )
+                            st.rerun()
+                        except ValueError as exc:
+                            st.error(str(exc))
+
+        with add_tab:
+            st.caption(
+                "This creates a project Parts-catalog record and its first fishbone use together. "
+                "Images and advanced applicability can be added later on the Parts page."
+            )
+            new_part_number = st.text_input(
+                "Part number",
+                key=f"process_new_part_number_{scenario_id}_{current_section_id}",
+            )
+            new_description = st.text_input(
+                "Part description",
+                key=f"process_new_part_description_{scenario_id}_{current_section_id}",
+            )
+            new_revision = st.text_input(
+                "Revision",
+                key=f"process_new_part_revision_{scenario_id}_{current_section_id}",
+            )
+            new_placement = st.container(horizontal=True, vertical_alignment="bottom")
+            new_quantity = new_placement.number_input(
+                "Fishbone quantity",
+                min_value=1,
+                value=1,
+                step=1,
+                key=f"process_new_part_quantity_{scenario_id}_{current_section_id}",
+            )
+            new_use_description = new_placement.text_input(
+                "Use / installation location",
+                key=f"process_new_part_use_{scenario_id}_{current_section_id}",
+            )
+            new_notes = st.text_area(
+                "Part notes",
+                key=f"process_new_part_notes_{scenario_id}_{current_section_id}",
+            )
+
+            suggestion_text = new_part_number.strip() or new_description.strip()
+            if len(suggestion_text) >= 2:
+                suggestions = search_parts_and_fishbone(project_id, suggestion_text)
+                if not suggestions.empty:
+                    suggestion_summary = suggestions[
+                        ["part_id", "part_number", "description", "revision", "section_name"]
+                    ].drop_duplicates()
+                    st.warning("Possible existing matches were found. Review them before creating a duplicate.")
+                    st.dataframe(
+                        suggestion_summary.drop(columns=["part_id"]),
+                        hide_index=True,
+                        column_config={
+                            "part_number": "Part number",
+                            "description": st.column_config.TextColumn("Description", width="large"),
+                            "revision": "Revision",
+                            "section_name": "Fishbone section",
+                        },
+                    )
+
+            if st.button(
+                "Add part and place it",
+                type="primary",
+                icon=":material/add_circle:",
+                key=f"process_create_missing_part_{scenario_id}_{current_section_id}",
+            ):
+                try:
+                    part_id, assignment_id, updated_at = create_part_and_assign_to_section(
+                        project_id,
+                        current_section_id,
+                        {
+                            "part_number": new_part_number,
+                            "description": new_description,
+                            "revision": new_revision,
+                            "model_applicability": "All",
+                            "notes": new_notes,
+                        },
+                        int(new_quantity),
+                        new_use_description,
+                    )
+                    editor_name = st.session_state.get("current_editor", "")
+                    record_audit_event(
+                        project_id,
+                        "Parts",
+                        "Create from Process at a Glance",
+                        1,
+                        editor_name,
+                        {"part_id": part_id, "updated_at": updated_at},
+                    )
+                    record_audit_event(
+                        project_id,
+                        "Fishbone part assignments",
+                        "Place new part",
+                        1,
+                        editor_name,
+                        {
+                            "part_id": part_id,
+                            "assignment_id": assignment_id,
+                            "section_id": current_section_id,
+                            "updated_at": updated_at,
+                        },
+                    )
+                    close_missing_part_dialog()
+                    st.toast(
+                        f"Added {new_part_number.strip()} to Parts and {current_section_name}",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        if st.button(
+            "Cancel",
+            icon=":material/close:",
+            key=f"process_missing_part_cancel_{scenario_id}_{current_section_id}",
+        ):
+            close_missing_part_dialog()
+            st.rerun()
+
+
+    if st.session_state.get(missing_part_dialog_key):
+        missing_part_dialog(section_id)
 
     selected_yamazumi_id = (
         str(selected_yamazumi.iloc[0]["id"]) if len(selected_yamazumi) == 1 else None
@@ -298,7 +619,6 @@ else:
         st.caption("Select one Yamazumi work element to pair parts or add it to the plan.")
 
 st.divider()
-process_editor_key = f"process_editor_{scenario_id}"
 apply_pending_table_editor_reset(process_editor_key)
 elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
 models = project_models(project_id)
@@ -571,7 +891,10 @@ def confirm_process_delete() -> None:
         st.rerun()
 
 
-if st.session_state.get(f"process_pending_delete_{scenario_id}"):
+if (
+    st.session_state.get(f"process_pending_delete_{scenario_id}")
+    and not st.session_state.get(missing_part_dialog_key)
+):
     confirm_process_delete()
 
 if header_actions.undo:
@@ -797,7 +1120,11 @@ def edit_process_step_details(element_id: str) -> None:
 
 
 selected_step_id = st.session_state.get(f"selected_process_step_{scenario_id}")
-if selected_step_id and not st.session_state.get(f"process_pending_delete_{scenario_id}"):
+if (
+    selected_step_id
+    and not st.session_state.get(f"process_pending_delete_{scenario_id}")
+    and not st.session_state.get(missing_part_dialog_key)
+):
     edit_process_step_details(str(selected_step_id))
 
 if not edited.empty:
