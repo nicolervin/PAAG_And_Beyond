@@ -1,5 +1,7 @@
 # Process at a Glance developer guide
 
+Read `DATA_DICTIONARY.md` and this file in full before creating any new table, field, or screen.
+
 This file is the fast onboarding guide and working agreement for developers and AI assistants changing this repository. Read it before editing the app. `README.md` gives a shorter product summary, while `PROJECT_STATUS.md` records the latest known working and incomplete areas.
 
 ## What this application is
@@ -306,6 +308,19 @@ A typical save flow is:
 - For Excel changes, generate a workbook in memory and open it with openpyxl to confirm the expected sheets.
 - Clipboard, upload, drag-and-drop, full-screen fishbone, and other browser-only behavior require a manual browser check because `AppTest` cannot fully exercise them.
 - Preserve unrelated working-tree changes. Do not reset, overwrite, or reformat files outside the requested scope.
+
+## Dormant and future tables — status and rules
+
+The schema contains tables that are implemented but not exposed in any active screen. They fall into three different statuses — treat each differently:
+
+1. **NOT YET DESIGNED — `manufacturing_assemblies`, `assembly_scenario_policies`**
+   These support future make/buy, supplier, and buffer/storage policy tracking for assemblies. The design is not finalized. Do not build screens, features, or duplicate logic against these tables without a scoping discussion with the project owner first.
+
+2. **LOCKED — `work_element_material_groups`, `work_element_material_options`**
+   These are frozen as-is with no active plan to revisit. Do not modify, extend, or build new features against these tables. They are carried forward during scenario cloning only.
+
+3. **BLOCKED / TBD — `fishbone_nodes` and related PITS revision tables (MBOM review stage)**
+   This supports a Manufacturing BOM confirmation/review step with no active screen today. This is intentionally on hold until the PITS spreadsheet import is migrated to a better format. Do not build an MBOM review screen or duplicate this logic until that migration is complete and the project owner confirms it's ready to revisit.
 
 ## Known incomplete or intentionally deferred areas
 
