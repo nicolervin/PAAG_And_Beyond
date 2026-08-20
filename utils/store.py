@@ -106,8 +106,8 @@ def init_db() -> None:
                 part_number TEXT DEFAULT '', tool TEXT DEFAULT '', torque TEXT DEFAULT '',
                 quality_requirement TEXT DEFAULT '', ergo_requirement TEXT DEFAULT '',
                 location TEXT DEFAULT '', unit_orientation TEXT DEFAULT '',
-                conveyor_height_mm REAL, platform_height_mm REAL,
-                pit_depth_mm REAL, model_applicability TEXT DEFAULT 'All', status TEXT DEFAULT 'Draft',
+                conveyor_height_in REAL, platform_height_in REAL,
+                pit_depth_in REAL, model_applicability TEXT DEFAULT 'All', status TEXT DEFAULT 'Draft',
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS concerns (
@@ -393,6 +393,24 @@ def init_db() -> None:
         }.items():
             if column not in work_region_columns:
                 conn.execute(f"ALTER TABLE yamazumi_work_regions ADD COLUMN {column} {definition}")
+        work_dimension_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(work_elements)").fetchall()
+        }
+        for old_column, new_column in {
+            "conveyor_height_mm": "conveyor_height_in",
+            "platform_height_mm": "platform_height_in",
+            "pit_depth_mm": "pit_depth_in",
+        }.items():
+            if old_column in work_dimension_columns and new_column not in work_dimension_columns:
+                conn.execute(
+                    f"ALTER TABLE work_elements RENAME COLUMN {old_column} TO {new_column}"
+                )
+                conn.execute(
+                    f"UPDATE work_elements SET {new_column}={new_column} / 25.4 "
+                    f"WHERE {new_column} IS NOT NULL"
+                )
+                work_dimension_columns.remove(old_column)
+                work_dimension_columns.add(new_column)
         if conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
             timestamp = now_iso()
             project_id = str(uuid4())
@@ -418,16 +436,16 @@ def init_db() -> None:
                     (str(uuid4()), project_id, pn, desc, qty, rev, timestamp),
                 )
             sample_steps = [
-                (10, "ST-010", "Load housing", "Place housing in locating fixture", 18.0, "PN-100100", "", "", "Confirm seated on all locators", "Two-hand lift review", "Main line / Zone 1", 950, 0, 0),
-                (20, "ST-010", "Install bracket", "Locate bracket and hand-start four fasteners", 24.0, "PN-100220", "Nutrunner", "32 N·m ± 3", "Torque trace required", "Keep work below shoulder", "Main line / Zone 1", 950, 100, 0),
-                (30, "ST-010", "Verify assembly", "Visual and torque-complete confirmation", 8.0, "HW-M8-025", "Scanner", "", "All four results pass", "", "Main line / Zone 1", 950, 100, 0),
+                (10, "ST-010", "Load housing", "Place housing in locating fixture", 18.0, "PN-100100", "", "", "Confirm seated on all locators", "Two-hand lift review", "Main line / Zone 1", 37.4, 0, 0),
+                (20, "ST-010", "Install bracket", "Locate bracket and hand-start four fasteners", 24.0, "PN-100220", "Nutrunner", "32 N·m ± 3", "Torque trace required", "Keep work below shoulder", "Main line / Zone 1", 37.4, 3.94, 0),
+                (30, "ST-010", "Verify assembly", "Visual and torque-complete confirmation", 8.0, "HW-M8-025", "Scanner", "", "All four results pass", "", "Main line / Zone 1", 37.4, 3.94, 0),
             ]
             for row in sample_steps:
                 conn.execute(
                     """INSERT INTO work_elements
                     (id, project_id, sequence, station, operation, description, cycle_time_s,
                      part_number, tool, torque, quality_requirement, ergo_requirement, location,
-                     conveyor_height_mm, platform_height_mm, pit_depth_mm, model_applicability, status, updated_at)
+                     conveyor_height_in, platform_height_in, pit_depth_in, model_applicability, status, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'All', 'Draft', ?)""",
                     (str(uuid4()), project_id, *row, timestamp),
                 )
@@ -2985,7 +3003,7 @@ def reconcile_yamazumi_to_process(project_id: str, scenario_id: str, element_ids
                     """INSERT INTO work_elements
                        (id, project_id, scenario_id, sequence, station, operation, description, cycle_time_s,
                         part_number, tool, torque, quality_requirement, ergo_requirement, location,
-                        conveyor_height_mm, platform_height_mm, pit_depth_mm,
+                        conveyor_height_in, platform_height_in, pit_depth_in,
                         model_applicability, status, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', '', ?, '', ?, NULL, NULL, NULL, ?, 'Draft', ?)""",
                     (
@@ -4672,7 +4690,7 @@ def update_process_step_details(
         "unit_orientation",
     ]
     numeric_fields = {
-        "conveyor_height_mm": "Conveyor height",
+        "conveyor_height_in": "Conveyor height",
     }
     cleaned = {
         field: "" if values.get(field) is None or pd.isna(values.get(field))
@@ -4781,11 +4799,11 @@ def update_process_step_details(
             placeholders = ",".join("?" for _ in affected_ids)
             conn.execute(
                 f"""UPDATE work_elements
-                    SET unit_orientation=?, conveyor_height_mm=?, updated_at=?
+                    SET unit_orientation=?, conveyor_height_in=?, updated_at=?
                     WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
                 (
                     cleaned["unit_orientation"],
-                    cleaned["conveyor_height_mm"],
+                    cleaned["conveyor_height_in"],
                     timestamp,
                     project_id,
                     scenario_id,
@@ -4797,8 +4815,8 @@ def update_process_step_details(
 
 def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFrame) -> None:
     fields = ["sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
-              "quality_requirement", "ergo_requirement", "location", "unit_orientation", "conveyor_height_mm", "platform_height_mm",
-              "pit_depth_mm", "model_applicability", "status", "output_assembly_number",
+              "quality_requirement", "ergo_requirement", "location", "unit_orientation", "conveyor_height_in", "platform_height_in",
+              "pit_depth_in", "model_applicability", "status", "output_assembly_number",
               "output_assembly_name"]
     records: list[tuple[str, list]] = []
     assembly_numbers: set[str] = set()
@@ -4814,7 +4832,7 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
         for field in fields:
             value = row.get(field, "")
             if value is None or pd.isna(value):
-                value = None if field.endswith("_mm") else (0 if field in {"sequence", "cycle_time_s"} else "")
+                value = None if field.endswith("_in") else (0 if field in {"sequence", "cycle_time_s"} else "")
             values.append(value)
         output_number = str(values[fields.index("output_assembly_number")] or "").strip()
         if output_number:

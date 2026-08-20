@@ -36,7 +36,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `pits_record_revisions`
 
-- **Purpose:** Preserves each imported source payload revision for a PITS record so upstream changes can be reviewed without silently replacing IE decisions.
+- **Purpose:** Preserves each imported source payload revision for a PITS record so upstream changes can be reviewed without silently replacing collaborator decisions.
 - **Key relationships:** Belongs to `pits_records`; deleting the parent PITS record deletes its revisions.
 - **Scope:** Project-wide source history through its parent record.
 
@@ -48,7 +48,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `project_models`
 
-- **Purpose:** Stores official model numbers, imported PITS model attributes, estimated annual usage, source payload, and IE-friendly display names and descriptions.
+- **Purpose:** Stores official model numbers, imported PITS model attributes, estimated annual usage, source payload, and team-friendly display names and descriptions.
 - **Key relationships:** Belongs to `projects`. Parent of `model_feature_values`. Referenced indirectly when displaying or interpreting part and process model applicability.
 - **Scope:** Project-wide.
 
@@ -132,8 +132,8 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `work_elements`
 
-- **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, location, unit orientation, and geometry or requirement fields retained by the current schema.
-- **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. The schema still contains legacy metric-named geometry fields and requirement fields that are not all editable in the current Process dialog.
+- **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, location, unit orientation, and geometry or requirement fields. Conveyor height, platform height, and pit depth are stored directly in inches as `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. Some requirement fields are retained by the schema but are not editable in the current Process dialog.
 - **Scope:** Scenario-specific.
 
 ### `process_part_groups`
@@ -193,7 +193,7 @@ The following tables are implemented in the schema and data layer but are not cu
 
 ## Hidden review stage
 
-`pits_records`, `pits_record_revisions`, and `fishbone_nodes` support a Manufacturing BOM confirmation stage between imported Product Architecture evidence and the approved Parts Catalog. New or changed PITS records preserve their source revisions and create or flag `fishbone_nodes` review candidates. Confirmed candidates can then be synchronized into `parts` without allowing an upstream import to silently overwrite IE-reviewed planning decisions.
+`pits_records`, `pits_record_revisions`, and `fishbone_nodes` support a Manufacturing BOM confirmation stage between imported Product Architecture evidence and the approved Parts Catalog. New or changed PITS records preserve their source revisions and create or flag `fishbone_nodes` review candidates. Confirmed candidates can then be synchronized into `parts` without allowing an upstream import to silently overwrite collaborator-reviewed planning decisions.
 
 The database and data-access functions for this review stage exist, but none of the nine active navigation screens currently exposes the complete review and confirmation workflow. New UI work must not duplicate, bypass, or create a competing MBOM review path without first checking with the project owner and determining whether the existing hidden workflow should be restored or replaced.
 
@@ -204,7 +204,7 @@ PITS / BOM evidence
     ├── PITS records + source revision history
     ├── Model definitions
     └── MBOM-review candidates (fishbone_nodes)
-                    ↓ IE confirmation/synchronization
+                    ↓ Collaborator confirmation/synchronization
 Parts Catalog ── feature applicability ── model/feature architecture
       ↓
 Fishbone sections + placed part occurrences

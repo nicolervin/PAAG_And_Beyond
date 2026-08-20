@@ -1,9 +1,7 @@
+import pandas as pd
 import streamlit as st
 
 from utils.store import get_planning_scenario, material_consumption_for_scenario, project_table
-from utils.units import millimeters_to_inches
-
-
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 st.title("Requirements view")
@@ -33,10 +31,9 @@ filtered = elements if not stations else elements[elements["station"].isin(stati
 
 
 def inch_label(value: object) -> str:
-    inches = millimeters_to_inches(value)
-    if inches is None:
+    if value is None or pd.isna(value):
         return "—"
-    return f'{inches:.2f}'.rstrip("0").rstrip(".") + " in"
+    return f'{float(value):.2f}'.rstrip("0").rstrip(".") + " in"
 
 for _, step in filtered.iterrows():
     with st.container(border=True):
@@ -77,7 +74,7 @@ for _, step in filtered.iterrows():
         orientation = str(step.get("unit_orientation") or "").strip() or "—"
         st.markdown(
             f"**Location:** {step['location'] or '—'} · **Unit orientation:** {orientation} · "
-            f"**Conveyor height:** {inch_label(step['conveyor_height_mm'])} · "
-            f"**Platform height:** {inch_label(step['platform_height_mm'])} · "
-            f"**Pit depth:** {inch_label(step['pit_depth_mm'])}"
+            f"**Conveyor height:** {inch_label(step['conveyor_height_in'])} · "
+            f"**Platform height:** {inch_label(step['platform_height_in'])} · "
+            f"**Pit depth:** {inch_label(step['pit_depth_in'])}"
         )

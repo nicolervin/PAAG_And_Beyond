@@ -18,9 +18,6 @@ from utils.store import (
     project_models,
     project_table,
 )
-from utils.units import imperialize_work_element_dimensions
-
-
 ALIASES = {
     "part_number": {"partnumber", "partno", "partnum", "pn", "material", "materialnumber", "itemnumber"},
     "description": {"description", "partdescription", "materialdescription", "name"},
@@ -237,7 +234,7 @@ def export_workbook(project_id: str, scenario_id: str | None = None) -> bytes:
     scenario_summary = pd.DataFrame([scenario]).drop(
         columns=["id", "project_id", "parent_scenario_id"], errors="ignore"
     ) if scenario else pd.DataFrame()
-    export_elements = imperialize_work_element_dimensions(elements)
+    export_elements = elements.copy()
     lucid_columns = [
         "sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
         "quality_requirement", "ergo_requirement", "location", "unit_orientation", "conveyor_height_in",

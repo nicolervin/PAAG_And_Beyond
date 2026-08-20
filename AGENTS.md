@@ -2,6 +2,20 @@
 
 Read `DATA_DICTIONARY.md` and this file in full before creating any new table, field, or screen.
 
+## Collaborator Roles
+
+This project is built and maintained by multiple functional roles, not exclusively industrial engineers. Known roles contributing to this codebase include: Industrial Engineer (IE), Advanced Quality Engineer (AQE), Ergonomist, Materials Planner, and Advanced Manufacturing Engineer. More roles will be added over time as the team grows.
+
+Rule 1 — General task language: wherever existing documentation, code comments, or UI labels say "IE" or "industrial engineer" in a way that describes a general task any contributor could perform (e.g., "any IE may add help text," "the IE enters this field"), treat this as shorthand for "collaborator" or "contributor," not as a restriction to the IE role specifically.
+
+Rule 2 — Role-specific ownership stays explicit: wherever a rule is genuinely role-specific — meaning only one function should own or edit that data (for example, torque and quality specs are owned by Quality/AQE in the Requirements section, not by the IE in Process at a Glance) — that ownership must remain explicit and must NOT be generalized to "any collaborator."
+
+Rule 3 — Adding a new role is lightweight: adding a new role name to this list (granting someone general access to use Codex on this repo) requires no special process — simply add the role name and a one-line description here.
+
+Rule 4 — Assigning data ownership is NOT lightweight: if a new or existing role is proposed to own, author, or exclusively control a specific data type, table, or module (similar to AQE owning torque/quality specs), this is a critical-thread-level decision and must go through the same owner-approval process as other critical-thread changes — it cannot be assumed or self-assigned by a contributor.
+
+When in doubt about whether a rule is general or role-specific, or whether a role change is roster-only versus a data-ownership change, stop and ask the project owner before assuming.
+
 This file is the fast onboarding guide and working agreement for developers and AI assistants changing this repository. Read it before editing the app. `README.md` gives a shorter product summary, while `PROJECT_STATUS.md` records the latest known working and incomplete areas.
 
 ## What this application is
@@ -20,7 +34,7 @@ It brings information that would otherwise be spread across several spreadsheets
 - questions, concerns, decisions, and assumptions; and
 - an Excel snapshot for review or Lucid data linking.
 
-The application is currently a local prototype, not a production multi-user service. Its main users are industrial engineers, with manufacturing, lean, quality, ergonomics, design, and other cross-functional contributors supplying or reviewing information.
+The application is currently a local prototype, not a production multi-user service. Its users include industrial engineers, advanced quality engineers, ergonomists, materials planners, advanced manufacturing engineers, and other cross-functional collaborators, all of whom may contribute directly to the project record.
 
 ## Technology and how the app runs
 
@@ -117,7 +131,7 @@ Tracks cross-functional questions, concerns, decisions, and assumptions with sub
 
 Supports three import routes:
 
-1. The preferred PITS workbook with `part_tracker` and `models` sheets. `ID Number` is treated as the stable source key. Reimporting an unchanged ID does not overwrite IE decisions; changed source content creates a source revision and a reconciliation item.
+1. The preferred PITS workbook with `part_tracker` and `models` sheets. `ID Number` is treated as the stable source key. Reimporting an unchanged ID does not overwrite collaborator decisions; changed source content creates a source revision and a reconciliation item.
 2. Legacy PITS sheets with repeated Level 1–11 columns. These rows are conservative review candidates; the Level values are not guessed to be quantities, sequences, or model codes.
 3. Ordinary Excel, CSV, TSV, or text BOM data with user-confirmed column mapping.
 
@@ -125,7 +139,7 @@ The page also creates a one-way Excel snapshot. Its sheets cover the project, ac
 
 #### Model definitions
 
-Maintains source model numbers and the names/descriptions familiar to the IE team. Models can be activated or hidden from planning choices. The page also defines manufacturing-relevant features and allowed choices, then maps each official model to one choice for every active feature.
+Maintains source model numbers and the names/descriptions familiar to the project team. Models can be activated or hidden from planning choices. The page also defines manufacturing-relevant features and allowed choices, then maps each official model to one choice for every active feature.
 
 #### Parts Catalog
 
@@ -162,11 +176,11 @@ Provides a read-only, pitch-filtered review of the requirements already entered 
 ## Glossary
 
 - **NPI** — New product introduction: the work required to prepare a product and its manufacturing process for production.
-- **IE** — Industrial engineer. The primary user and decision owner in this prototype.
+- **IE** — Industrial engineer. One of the functional roles contributing to this prototype.
 - **BOM** — Bill of material: a list of parts or assemblies required for a product.
 - **MBOM** — Manufacturing bill of material: the manufacturing-reviewed product structure. Imported PITS candidates are not automatically accepted as approved MBOM content.
 - **PITS** — The upstream product-information/workbook format used by this project. The preferred format has a stable `ID Number` in `part_tracker` and model definitions in `models`. Older Level 1–11 files are also recognized but intentionally interpreted conservatively.
-- **PITS record/revision** — The latest imported source row for a stable PITS ID and its saved earlier source versions. Source revisions preserve what changed without silently rewriting IE-authored planning decisions.
+- **PITS record/revision** — The latest imported source row for a stable PITS ID and its saved earlier source versions. Source revisions preserve what changed without silently rewriting collaborator-authored planning decisions.
 - **Part catalog** — The project's approved list of part numbers, descriptions, revisions, images, provenance, and applicability rules.
 - **Fishbone** — A station-independent view of assembly order. Its main spine is the product flow; fins/branches represent subassemblies and placed part uses. Build this before assigning physical work locations.
 - **Framework section** — A named assembly stage on the fishbone. A Main spine section is part of the main product flow. A Subassembly attaches to a parent.
@@ -191,6 +205,20 @@ Provides a read-only, pitch-filtered review of the requirements already entered 
 - **Output assembly milestone** — The exact process step at which a new made assembly becomes complete. Purchased assemblies remain ordinary catalog parts.
 - **Current editor** — The name entered in the sidebar for the browser session. Standardized table history records it; this is attribution, not authentication.
 - **Lucid Data Link** — A flat worksheet intended for linking the exported snapshot into Lucid. It is not a live two-way connection.
+
+## New Module Proposal Gate
+
+If a request describes building a new page, module, table, or feature that does not already exist in `DATA_DICTIONARY.md`, do NOT begin writing implementation code yet. Instead, ask the requester the following questions and wait for answers:
+
+1. What existing entity/entities does this new module connect to (e.g., a specific Part, Process step, Fishbone section, Model, or Scenario)?
+2. What is the exact relationship/foreign key that will link this new data back to the existing critical thread (Product Architecture → Parts → Fishbone → Yamazumi → Process at a Glance)?
+3. Is this new module project-wide or scenario-specific, per the scope rules in `DATA_DICTIONARY.md`?
+4. Does this require a new database table, or can it be added to an existing one? If new, what fields, and why can't an existing table serve this purpose?
+5. Which of the standards in `DESIGN_SYSTEM.md` apply to this new module's tables and UI (deletion, save action, audit logging, history display, scenario boundary badges, help text)?
+
+Once answered, create or update a section in `DATA_DICTIONARY.md` called "Proposed modules — pending owner review" with the module name, the answers above, who proposed it, and the date. Then you may proceed with implementation in the requester's branch.
+
+Do not skip this gate even if the requester seems confident or in a hurry. If the requester cannot answer questions 1-3, stop and tell them to bring the proposal to the project owner before continuing.
 
 ## Coding and design conventions
 
@@ -285,7 +313,7 @@ A typical save flow is:
 
 ### Import/export behavior
 
-- Treat PITS as source evidence, not automatic approval. Changed source records must enter reconciliation without silently overwriting IE-authored MBOM/fishbone decisions.
+- Treat PITS as source evidence, not automatic approval. Changed source records must enter reconciliation without silently overwriting collaborator-authored MBOM/fishbone decisions.
 - Preserve the stable PITS ID and revision history for the preferred workbook format.
 - Keep legacy Level 1–11 parsing conservative. Do not infer business meaning that the source does not state.
 - Preview and validate imports before applying them. Ordinary BOM imports require an explicit part-number mapping.
@@ -337,7 +365,7 @@ The schema contains tables that are implemented but not exposed in any active sc
 
 - User accounts, sign-in, roles, and permissions
 - Safe simultaneous editing by multiple people
-- A complete, immutable audit trail for every IE change
+- A complete, immutable audit trail for every collaborator change
 - Threaded comments and notifications
 - Packaging and routing plans
 - PFMEA
@@ -352,4 +380,4 @@ The schema contains tables that are implemented but not exposed in any active sc
 - The repository does not contain a maintained set of representative ordinary BOM, current PITS, and legacy PITS fixtures.
 - The three custom browser components do not have automated browser tests.
 
-When implementing deferred work, preserve the current rule that imported source data informs planning but does not silently replace an industrial engineer's reviewed decisions.
+When implementing deferred work, preserve the current rule that imported source data informs planning but does not silently replace a collaborator's reviewed decisions.

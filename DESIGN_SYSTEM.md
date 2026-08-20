@@ -80,11 +80,38 @@ Confirmed examples of this intentional pattern from the naming audit include:
 
 Do not "fix" these pairs by renaming the database identifier to match the friendly label, or vice versa. When building new features, follow this same pattern for any new stable identifier that needs a human-friendly label.
 
+This standard is locked.
+
 This is a documentation-only standard. Do not modify code as part of documenting it.
+
+## Imperial Units Standard
+
+At this stage of the project, all linear dimensional measurements (e.g., height, width, depth, length, distance) are stored AND displayed in imperial units (inches), with no internal metric conversion layer. This replaces the prior pattern of storing values in millimeters and converting to inches for display, which was removed when `work_elements.conveyor_height_mm`, `platform_height_mm`, and `pit_depth_mm` were renamed to `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
+
+This standard does not apply to non-dimensional measurements such as time, torque, weight, temperature, or pressure. Those measurements retain their own appropriate units and are unaffected by this standard.
+
+Rule: any new linear dimensional field added to this app must store and display in inches by default. Do not introduce a metric storage column unless explicitly approved by the project owner.
+
+This standard is locked. It may be revisited in the future if the project requires metric-native data sources or equipment specs; until then, it remains imperial-only.
+
+## Help Text (Hover) Standard
+
+Any field, column header, section, or control that a collaborator judges as potentially confusing may include an optional help icon (a "?" symbol) placed immediately to the right of its label. This is discretionary — not every field requires one — and any contributor may add one wherever they see fit, without requiring special approval beyond the normal weekly branch review process.
+
+The help icon must use the same hover/tooltip display mechanism as the Scenario Boundary Indicator badges (see above), so all hover help in the app looks and behaves identically regardless of where it appears.
+
+Content rules for help text:
+
+- One to three sentences maximum
+- Plain, non-technical language — avoid engineering jargon and internal database terminology
+- Explain what the field/control means and, if relevant, why it matters or how it's used downstream
+- Do not restate the field's label; add real explanatory value
 
 ## Canonical Terminology Glossary
 
 Before adding any new label, caption, dialog, or button text, check this glossary first. If a new UI label describes a concept already listed here, use the canonical label exactly as written below.
+
+This glossary is active, locked policy, not merely informational, and must be checked before adding new UI labels.
 
 | Concept | Canonical label | Applies to |
 | --- | --- | --- |
@@ -113,4 +140,4 @@ The following terms remain contextual exceptions rather than globally unified la
 - Compact scenario summaries may use **Rev** even though the editable field label is **Scenario revision**.
 - **Active** must not replace a genuinely different status such as **Draft**, **Open**, **Blocked**, or **Released**.
 
-This is a documentation-only glossary. Do not modify screen code as part of documenting it.
+This update is documentation-only and does not modify screen code. The glossary itself remains active, locked, and binding policy for all future UI work.

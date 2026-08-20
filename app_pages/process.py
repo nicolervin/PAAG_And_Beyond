@@ -41,13 +41,6 @@ from utils.table_ui import (
     standard_details_column_config,
     table_has_unsaved_changes,
 )
-from utils.units import (
-    imperialize_work_element_dimensions,
-    inches_to_millimeters,
-    millimeters_to_inches,
-)
-
-
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 process_editor_key = f"process_editor_{scenario_id}"
@@ -692,7 +685,7 @@ columns = [
     "id", "sequence", "station", "pitch_name", "work_element", "operation", "description", "cycle_time_s",
     "assigned_parts", "part_number", "output_assembly_number", "output_assembly_name",
     "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
-    "conveyor_height_mm", "platform_height_mm", "pit_depth_mm",
+    "conveyor_height_in", "platform_height_in", "pit_depth_in",
     "model_applicability", "status", "details",
 ]
 compact_columns = [
@@ -727,9 +720,9 @@ if elements.empty:
             "ergo_requirement": pd.Series(dtype="string"),
             "location": pd.Series(dtype="string"),
             "unit_orientation": pd.Series(dtype="string"),
-            "conveyor_height_mm": pd.Series(dtype="float64"),
-            "platform_height_mm": pd.Series(dtype="float64"),
-            "pit_depth_mm": pd.Series(dtype="float64"),
+            "conveyor_height_in": pd.Series(dtype="float64"),
+            "platform_height_in": pd.Series(dtype="float64"),
+            "pit_depth_in": pd.Series(dtype="float64"),
             "model_applicability": pd.Series(dtype="object"),
             "status": pd.Series(dtype="string"),
             "details": pd.Series(dtype="string"),
@@ -862,9 +855,7 @@ if details_blocked:
 st.download_button(
     "Export filtered Process at a Glance",
     data=dataframe_to_excel(
-        imperialize_work_element_dimensions(
-            visible_elements.drop(columns=["id", "details"], errors="ignore")
-        ),
+        visible_elements.drop(columns=["id", "details"], errors="ignore"),
         "Process plan",
     ),
     file_name="process_plan_filtered.xlsx",
@@ -1092,7 +1083,7 @@ def edit_process_step_details(element_id: str) -> None:
         conveyor_height_in = st.number_input(
             "Conveyor height (in)",
             min_value=0.0,
-            value=millimeters_to_inches(number_value("conveyor_height_mm")),
+            value=number_value("conveyor_height_in"),
             step=0.1,
             format="%.2f",
             key=f"{widget_prefix}_conveyor_height_in",
@@ -1192,7 +1183,7 @@ def edit_process_step_details(element_id: str) -> None:
                     "tool": tool,
                     "location": location,
                     "unit_orientation": unit_orientation,
-                    "conveyor_height_mm": inches_to_millimeters(conveyor_height_in),
+                    "conveyor_height_in": conveyor_height_in,
                 },
                 apply_geometry_to_section=apply_geometry_to_section,
             )
