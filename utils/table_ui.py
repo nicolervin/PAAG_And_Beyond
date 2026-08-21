@@ -11,6 +11,13 @@ import streamlit as st
 DEFAULT_SELECTION_COLUMN = "selected"
 
 
+def selectable_dataframe(data, *, key: str, **kwargs):
+    """Render a read-only table with native multi-row selection and select-all."""
+    kwargs.setdefault("on_select", "rerun")
+    kwargs.setdefault("selection_mode", "multi-row")
+    return st.dataframe(data, key=key, **kwargs)
+
+
 def sortable_editor_rows(
     dataframe: pd.DataFrame,
     *,
@@ -160,6 +167,20 @@ def standard_details_column_config(*, on_click, key: str):
     return st.column_config.ButtonColumn(
         "Details", type="tertiary", on_click=on_click, key=key,
         help="Open this row's full information and editing controls.",
+    )
+
+
+def selected_rows_action_bar(
+    *,
+    parent=None,
+):
+    """Return an uncluttered, right-aligned row for selected-table actions."""
+    host = parent if parent is not None else st
+    return host.container(
+        horizontal=True,
+        vertical_alignment="center",
+        horizontal_alignment="right",
+        gap=None,
     )
 
 

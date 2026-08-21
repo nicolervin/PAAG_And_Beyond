@@ -33,6 +33,8 @@ from utils.table_ui import (
     editable_table_header,
     native_selected_rows,
     required_field_errors,
+    selectable_dataframe,
+    selected_rows_action_bar,
     standard_details_column_config,
     sortable_editor_rows,
     table_has_unsaved_changes,
@@ -190,6 +192,7 @@ parts_editor_rows = sortable_editor_rows(
         "feature_applicability": ["All models"],
     },
 )
+parts_action_slot = st.empty()
 edited_parts = st.data_editor(
     parts_editor_rows,
     key=parts_editor_key,
@@ -250,7 +253,9 @@ st.download_button(
 )
 
 selected_saved_parts = native_selected_rows(parts_for_editing, editor_key=parts_editor_key)
-bulk_controls = st.container(horizontal=True, vertical_alignment="bottom")
+bulk_controls = selected_rows_action_bar(
+    parent=parts_action_slot,
+)
 bulk_applicability = bulk_controls.multiselect(
     "Feature applicability for selected parts",
     options=feature_options,
@@ -263,12 +268,7 @@ apply_bulk_applicability = bulk_controls.button(
     icon=":material/checklist:",
     disabled=selected_saved_parts.empty,
 )
-request_delete_bulk_parts = bulk_controls.button(
-    f"Delete selected ({len(selected_saved_parts)})",
-    icon=":material/delete:",
-    disabled=selected_saved_parts.empty,
-    key="destructive_request_parts_bulk_delete",
-)
+request_delete_bulk_parts = False
 
 if apply_bulk_applicability:
     if table_has_unsaved_changes(parts_editor_key, native_row_selection=True):
@@ -337,8 +337,7 @@ def confirm_bulk_part_delete() -> None:
         st.rerun()
 
 
-if st.session_state.get("parts_pending_bulk_delete"):
-    confirm_bulk_part_delete()
+st.session_state.pop("parts_pending_bulk_delete", None)
 
 if save_part_table:
     try:
@@ -413,8 +412,9 @@ def render_parts_history() -> None:
         if history.empty:
             st.caption("No standardized Parts-table changes have been recorded yet.")
         else:
-            st.dataframe(
+            selectable_dataframe(
                 history.drop(columns=["details"], errors="ignore"),
+                key=f"parts_history_table_{project_id}",
                 hide_index=True,
                 column_config={
                     "action": "Action",

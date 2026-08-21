@@ -20,6 +20,7 @@ from utils.store import (
     upsert_part,
 )
 from utils.table_filters import filter_table, split_filter_values
+from utils.table_ui import selectable_dataframe
 
 
 project_id = st.session_state.get("project_id")
@@ -56,7 +57,7 @@ with import_col.container(border=True):
                     dropdown_columns=["status", "subsystem", "design_maturity", "workstation"],
                     search_columns=["pits_id", "part_number", "description", "comments", "subsystem"],
                 )
-                st.dataframe(preview_table.head(50), hide_index=True, height=360,
+                selectable_dataframe(preview_table.head(50), key="pits_import_preview_table", hide_index=True, height=360,
                              column_config={"pits_id": st.column_config.TextColumn("PITS ID", pinned=True), "part_number": st.column_config.TextColumn("Part number", pinned=True), "description": st.column_config.TextColumn("Part Name")})
                 with st.expander("Models in this workbook", icon=":material/precision_manufacturing:"):
                     model_preview = [{key: value for key, value in model.items() if key != "source_payload"} for model in models]
@@ -66,7 +67,7 @@ with import_col.container(border=True):
                         dropdown_columns=["platform_size", "package_type", "base_model"],
                         search_columns=["model_number", "appearance", "sku_upc"],
                     )
-                    st.dataframe(model_preview_table, hide_index=True)
+                    selectable_dataframe(model_preview_table, key="pits_model_preview_table", hide_index=True)
                 if st.button("Import PITS snapshot", type="primary", icon=":material/upload:"):
                     summary = import_pits_id_snapshot(project_id, records, models)
                     st.success(
@@ -90,7 +91,7 @@ with import_col.container(border=True):
                     dropdown_columns=["depth", "subsystem", "model_feature"],
                     search_columns=["part_number", "description", "level_evidence", "comments"],
                 )
-                st.dataframe(parsed_preview.head(50), hide_index=True,
+                selectable_dataframe(parsed_preview.head(50), key="legacy_pits_preview_table", hide_index=True,
                              column_config={"depth": st.column_config.NumberColumn("Proposed depth"), "description": st.column_config.TextColumn("Part Name"), "level_evidence": st.column_config.TextColumn("Uninterpreted Level values", width="large")})
                 replace_existing = st.toggle("Replace the current fishbone", value=True, help="Turn this off to append another PITS section or model family.")
                 if st.button("Send PITS candidates to MBOM review", type="primary", icon=":material/upload:"):
@@ -120,8 +121,9 @@ with import_col.container(border=True):
                 multi_value_columns=["model_applicability"],
                 universal_values={"model_applicability": ["All", "All models", ""]},
             )
-            st.dataframe(
+            selectable_dataframe(
                 mapped_preview.head(20),
+                key="mapped_bom_preview_table",
                 hide_index=True,
                 column_config={"description": st.column_config.TextColumn("Part Name")},
             )

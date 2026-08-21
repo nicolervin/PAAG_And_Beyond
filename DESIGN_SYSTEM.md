@@ -6,15 +6,25 @@ This file defines locked interaction and interface standards for Process at a Gl
 
 Every editable table in this app must follow this exact deletion pattern, with no exceptions:
 
-1. A multi-select column on the far left (checkboxes) is the only mechanism for marking rows for deletion. Do not add a per-row trash icon or any single-click delete affordance.
-2. When one or more rows are selected, display a bulk-action menu in the upper-right area of the table (trash can icon for delete; reserve room for future bulk actions like bulk edit).
-3. Clicking the trash icon opens a confirmation dialog. The dialog must state what will be deleted and name any related/dependent data that will also be affected or unassigned.
-4. The confirmation dialog's Delete button is a simple click — do not require typing a confirmation word (for example, `CLEAR`) under any circumstance.
+1. Do not display a trash-can icon, Delete button, per-row delete control, or other deletion affordance inside or beside an editable table.
+2. Native row selection may be used for non-destructive bulk actions such as bulk editing, but it must not expose or imply a table-deletion action.
+3. A new table-deletion workflow may be added only after explicit project-owner approval and must be designed as a separate, confirmed workflow rather than an incidental table control.
+4. Any approved destructive workflow must state what will be deleted and what related data will be affected or unassigned. Its final confirmation button is the red destructive action and must not require typing a confirmation word.
 5. This standard applies to every table in the app without exception, including low-stakes tables like Questions and concerns.
 
 This standard is **locked** and replaces prior inconsistent patterns, including Yamazumi's typed-`CLEAR` dialogs, Process at a Glance's single-click **Remove pairing** action, and delete-on-save behavior in Questions and concerns and Feature definitions.
 
 Retrofitting existing screens to this standard is a separate future task and is not part of this documentation update. Do not modify screen code as part of documenting this standard.
+
+## Universal Table Row Selection Standard
+
+Every data table in this app must show Streamlit's native row-selection checkboxes on the far left. The unlabeled checkbox in the upper-left corner must select or clear all rows currently visible in the table with one click.
+
+Selection is a transient, non-destructive table action. It must not be stored as a data edit, trigger a write by itself, or expose a native trash-can or row-deletion control. Filters define which rows are currently visible and therefore which rows the upper-left checkbox selects.
+
+Use the shared table conventions in `utils/table_ui.py`: read-only tables use `selectable_dataframe()` and editable tables use native editor selection with `num_rows="delete"`, while the native deletion toolbar is hidden. Do not add a named checkbox column or a separate **Select all** control to imitate this behavior. Where a business workflow can act on only one row, the screen may require exactly one selected row before enabling that action, but the native selectors and upper-left select-all control must remain available.
+
+This standard is **locked** and applies to every existing and future data table, including Questions and concerns, Fishbone assembly hierarchy tables, previews, and History tables.
 
 ## Universal Save Action Standard
 
@@ -28,7 +38,7 @@ Retrofitting existing screens to this standard is a separate future task. Do not
 
 ## Deferred decisions
 
-Multi-step Undo/Redo (spreadsheet-style, multiple sequential steps backward/forward through edits): considered and intentionally deferred. A feasibility review found it technically possible but high-risk in Streamlit, requiring a new shared edit-history subsystem across all tables. The core problem it was meant to solve — protection against accidental data loss — is instead addressed by the Universal Deletion Standard (multi-select, red delete action, confirmation dialog) already documented above. Revisit multi-step Undo/Redo only as a deliberate future project, not as an incidental addition to any single-screen task.
+Multi-step Undo/Redo (spreadsheet-style, multiple sequential steps backward/forward through edits): considered and intentionally deferred. A feasibility review found it technically possible but high-risk in Streamlit, requiring a new shared edit-history subsystem across all tables. The core problem it was meant to solve — protection against accidental data loss — is instead addressed in part by the Universal Deletion Standard, which removes deletion affordances from editable tables unless a separate workflow is explicitly approved. Revisit multi-step Undo/Redo only as a deliberate future project, not as an incidental addition to any single-screen task.
 
 This is a documentation-only decision. Do not modify screen code as part of documenting it.
 
@@ -93,6 +103,32 @@ This standard does not apply to non-dimensional measurements such as time, torqu
 Rule: any new linear dimensional field added to this app must store and display in inches by default. Do not introduce a metric storage column unless explicitly approved by the project owner.
 
 This standard is locked. It may be revisited in the future if the project requires metric-native data sources or equipment specs; until then, it remains imperial-only.
+
+## Scenario Boundary Indicator Standard
+
+Every screen must display a small, consistently placed badge next to the page title indicating the scope of the data shown, using exactly one of these three states:
+
+1. **Project-wide** — Data here is shared across every planning scenario in the project. Changes affect all scenarios.
+2. **Scenario: [active scenario name]** — Data here belongs only to the currently active planning scenario. Changes do not affect other scenarios.
+3. **Project-wide (scenario-aware)** — The underlying data is shared across all scenarios, but some fields or visibility on this screen change depending on which scenario is currently active.
+
+Assign each active screen its correct badge state based on the scope definitions in `DATA_DICTIONARY.md`:
+
+- **Project-wide:** Overview project-identity fields, Questions and concerns, Import PITS and export, Model definitions, and Fishbone framework/structure.
+- **Scenario: [active scenario name]:** Overview active-scenario fields, Yamazumi, Process at a Glance, and Requirements.
+- **Project-wide (scenario-aware):** Parts Catalog, where the catalog is project-wide but Active status is scenario-specific; and Parts to fishbone, where the structure is project-wide but visible and active parts depend on the scenario.
+
+Because Overview contains both project-wide identity fields and scenario-specific active-scenario fields, display the applicable badge next to each corresponding section heading as well as maintaining the standard page-title placement, so neither scope is presented ambiguously.
+
+Every badge state must include hover/tooltip text explaining its meaning:
+
+1. **Project-wide** badge tooltip: "Changes on this page affect every planning scenario in this project."
+2. **Scenario: [active scenario name]** badge tooltip: "Changes on this page only affect the [scenario name] scenario. Other scenarios are not affected."
+3. **Project-wide (scenario-aware)** badge tooltip: Write this specifically for each screen where it appears, clearly explaining exactly which data is shared across all scenarios and which part is scenario-dependent. Do not use one generic sentence for this badge state across multiple screens.
+
+For Parts Catalog specifically, use: "The parts catalog itself is shared across every scenario. Whether a part is marked Active applies only to the currently selected scenario."
+
+The badge must use consistent colors, wording, and placement on every screen with no exceptions. This standard is locked. Retrofitting this badge onto every existing screen is a separate future task.
 
 ## Help Text (Hover) Standard
 

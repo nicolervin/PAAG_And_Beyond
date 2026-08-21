@@ -1475,36 +1475,61 @@ def save_process_part_group(
     return group_id
 
 
+def delete_process_part_groups(
+    project_id: str, scenario_id: str, group_ids: list[str]
+) -> int:
+    """Delete validated process-part groups together and reopen their source parts."""
+    normalized_ids = list(
+        dict.fromkeys(
+            str(group_id).strip()
+            for group_id in group_ids
+            if str(group_id).strip()
+        )
+    )
+    if not normalized_ids:
+        return 0
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    with connection() as conn:
+        group_rows = conn.execute(
+            f"""SELECT id, work_element_id FROM process_part_groups
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *normalized_ids),
+        ).fetchall()
+        found_ids = {str(row["id"]) for row in group_rows}
+        missing_ids = [group_id for group_id in normalized_ids if group_id not in found_ids]
+        if missing_ids:
+            raise ValueError(
+                "One or more selected part pairings no longer exist. Refresh and try again."
+            )
+        affected_work_element_ids = {
+            str(row["work_element_id"]) for row in group_rows
+        }
+        cursor = conn.execute(
+            f"""DELETE FROM process_part_groups
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *normalized_ids),
+        )
+        timestamp = now_iso()
+        for work_element_id in affected_work_element_ids:
+            remaining = conn.execute(
+                """SELECT 1 FROM process_part_groups
+                   WHERE project_id=? AND scenario_id=? AND work_element_id=? LIMIT 1""",
+                (project_id, scenario_id, work_element_id),
+            ).fetchone()
+            if not remaining:
+                conn.execute(
+                    """UPDATE yamazumi_elements
+                       SET process_sync_status='Needs IE review', updated_at=?
+                       WHERE project_id=? AND process_element_id=?""",
+                    (timestamp, project_id, work_element_id),
+                )
+        return int(cursor.rowcount)
+
+
 def delete_process_part_group(
     project_id: str, scenario_id: str, group_id: str
 ) -> bool:
-    with connection() as conn:
-        group_row = conn.execute(
-            """SELECT work_element_id FROM process_part_groups
-               WHERE id=? AND project_id=? AND scenario_id=?""",
-            (group_id, project_id, scenario_id),
-        ).fetchone()
-        if not group_row:
-            return False
-        work_element_id = str(group_row["work_element_id"])
-        cursor = conn.execute(
-            """DELETE FROM process_part_groups
-               WHERE id=? AND project_id=? AND scenario_id=?""",
-            (group_id, project_id, scenario_id),
-        )
-        remaining = conn.execute(
-            """SELECT 1 FROM process_part_groups
-               WHERE project_id=? AND scenario_id=? AND work_element_id=? LIMIT 1""",
-            (project_id, scenario_id, work_element_id),
-        ).fetchone()
-        if cursor.rowcount and not remaining:
-            conn.execute(
-                """UPDATE yamazumi_elements
-                   SET process_sync_status='Needs IE review', updated_at=?
-                   WHERE project_id=? AND process_element_id=?""",
-                (now_iso(), project_id, work_element_id),
-            )
-        return bool(cursor.rowcount)
+    return bool(delete_process_part_groups(project_id, scenario_id, [group_id]))
 
 
 def yamazumi_areas(project_id: str, scenario_id: str) -> pd.DataFrame:
@@ -3891,6 +3916,54 @@ def complexity_features(project_id: str) -> pd.DataFrame:
             lambda value: ", ".join(json.loads(value or "[]"))
         )
     return frame
+
+
+def complexity_feature_delete_impacts(
+    project_id: str, feature_ids: list[str]
+) -> pd.DataFrame:
+    """Return dependency counts used to explain a proposed feature deletion."""
+    normalized_ids = list(
+        dict.fromkeys(
+            str(feature_id).strip()
+            for feature_id in feature_ids
+            if str(feature_id).strip()
+        )
+    )
+    columns = [
+        "id", "category", "name", "model_value_count", "part_rule_count",
+        "affected_part_count",
+    ]
+    if not normalized_ids:
+        return pd.DataFrame(
+            {
+                "id": pd.Series(dtype="string"),
+                "category": pd.Series(dtype="string"),
+                "name": pd.Series(dtype="string"),
+                "model_value_count": pd.Series(dtype="int64"),
+                "part_rule_count": pd.Series(dtype="int64"),
+                "affected_part_count": pd.Series(dtype="int64"),
+            }
+        )
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    return pd.DataFrame(
+        query(
+            f"""SELECT f.id, f.category, f.name,
+                       (SELECT COUNT(*) FROM model_feature_values value
+                        WHERE value.project_id=f.project_id AND value.feature_id=f.id)
+                           AS model_value_count,
+                       (SELECT COUNT(*) FROM part_feature_rules rule
+                        WHERE rule.project_id=f.project_id AND rule.feature_id=f.id)
+                           AS part_rule_count,
+                       (SELECT COUNT(DISTINCT rule.part_id) FROM part_feature_rules rule
+                        WHERE rule.project_id=f.project_id AND rule.feature_id=f.id)
+                           AS affected_part_count
+                FROM complexity_features f
+                WHERE f.project_id=? AND f.id IN ({placeholders})
+                ORDER BY f.sequence, f.category, f.name""",
+            (project_id, *normalized_ids),
+        ),
+        columns=columns,
+    )
 
 
 def complexity_tree(project_id: str) -> pd.DataFrame:

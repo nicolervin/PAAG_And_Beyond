@@ -7,7 +7,7 @@ from utils.store import (
     assembly_sections,
     audit_history,
     create_part_and_assign_to_section,
-    delete_process_part_group,
+    delete_process_part_groups,
     fishbone_part_assignments,
     get_planning_scenario,
     move_fishbone_part_assignment,
@@ -38,6 +38,8 @@ from utils.table_ui import (
     editable_table_header,
     native_selected_rows,
     required_field_errors,
+    selectable_dataframe,
+    selected_rows_action_bar,
     standard_details_column_config,
     table_has_unsaved_changes,
 )
@@ -45,6 +47,9 @@ project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 process_editor_key = f"process_editor_{scenario_id}"
 missing_part_dialog_key = f"process_missing_part_dialog_{scenario_id}"
+pairing_delete_key = f"process_pairings_pending_remove_{scenario_id}"
+detail_pairing_delete_key = f"process_detail_pairing_pending_remove_{scenario_id}"
+detail_restore_key = f"process_detail_restore_{scenario_id}"
 st.title("Process at a Glance")
 st.caption(
     "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
@@ -153,12 +158,12 @@ else:
                 st.info("No Yamazumi work is linked to this fishbone section.")
             selected_yamazumi = yamazumi_rows
         else:
-            work_event = st.dataframe(
+            work_event = selectable_dataframe(
                 yamazumi_rows,
                 key=f"process_yamazumi_source_{scenario_id}_{section_id}",
                 hide_index=True,
                 on_select="rerun",
-                selection_mode="single-row",
+                selection_mode="multi-row",
                 column_order=[
                     "pitch_number", "description", "time_s", "model_variants",
                     "material_group_count", "process_sync_status",
@@ -202,7 +207,7 @@ else:
                 st.info("No catalog parts are placed in this fishbone section.")
             selected_parts = available_parts
         else:
-            part_event = st.dataframe(
+            part_event = selectable_dataframe(
                 available_parts,
                 key=f"process_part_source_{scenario_id}_{section_id}",
                 hide_index=True,
@@ -280,8 +285,9 @@ else:
                             }
                         )
                     result_summary = pd.DataFrame(summary_rows)
-                    st.dataframe(
+                    selectable_dataframe(
                         result_summary.drop(columns=["part_id"]),
+                        key=f"process_existing_part_matches_{scenario_id}_{current_section_id}",
                         hide_index=True,
                         column_config={
                             "part_number": st.column_config.TextColumn("Part number", pinned=True),
@@ -457,8 +463,9 @@ else:
                         ["part_id", "part_number", "description", "revision", "section_name"]
                     ].drop_duplicates()
                     st.warning("Possible existing matches were found. Review them before creating a duplicate.")
-                    st.dataframe(
+                    selectable_dataframe(
                         suggestion_summary.drop(columns=["part_id"]),
+                        key=f"process_new_part_matches_{scenario_id}_{current_section_id}",
                         hide_index=True,
                         column_config={
                             "part_number": "Part number",
@@ -643,32 +650,73 @@ else:
             )
             if saved_groups:
                 st.markdown("##### Existing part pairings")
-                for group in saved_groups:
-                    labels = ", ".join(
-                        str(option["part_number"]) for option in group["options"]
-                    )
-                    pairing_row = st.container(
-                        horizontal=True, vertical_alignment="center", border=True
-                    )
-                    pairing_row.write(
-                        f"**{group['name']}** · {group['selection_rule']} · "
-                        f"Qty {float(group['quantity']):g} · {labels}"
-                    )
-                    if pairing_row.button(
-                        "Remove",
-                        icon=":material/link_off:",
-                        key=f"destructive_remove_process_pairing_{scenario_id}_{group['id']}",
-                    ):
-                        delete_process_part_group(project_id, scenario_id, str(group["id"]))
-                        record_audit_event(
-                            project_id,
-                            "Process part pairings",
-                            "Remove pairing",
-                            1,
-                            st.session_state.get("current_editor", ""),
-                            {"scenario_id": scenario_id, "requirement": group["name"]},
-                        )
-                        st.rerun()
+                pairing_editor_key = (
+                    f"existing_process_pairings_{scenario_id}_{selected_process_id}"
+                )
+                apply_pending_table_editor_reset(pairing_editor_key)
+                pairing_rows = pd.DataFrame(
+                    [
+                        {
+                            "id": str(group["id"]),
+                            "requirement": str(group["name"]),
+                            "selection_rule": str(group["selection_rule"]),
+                            "quantity": float(group["quantity"]),
+                            "parts": ", ".join(
+                                str(option["part_number"])
+                                for option in group["options"]
+                            ),
+                        }
+                        for group in saved_groups
+                    ]
+                )
+                st.data_editor(
+                    pairing_rows,
+                    key=pairing_editor_key,
+                    hide_index=True,
+                    num_rows="delete",
+                    disabled=list(pairing_rows.columns),
+                    column_order=[
+                        "requirement", "selection_rule", "quantity", "parts"
+                    ],
+                    column_config={
+                        "id": None,
+                        "requirement": st.column_config.TextColumn("Part requirement"),
+                        "selection_rule": st.column_config.TextColumn("Selection rule"),
+                        "quantity": st.column_config.NumberColumn(
+                            "Quantity", format="%.2f"
+                        ),
+                        "parts": st.column_config.TextColumn(
+                            "Paired Fishbone Parts", width="large"
+                        ),
+                    },
+                )
+                selected_pairings = native_selected_rows(
+                    pairing_rows, editor_key=pairing_editor_key
+                )
+                request_pairing_delete = False
+                if request_pairing_delete:
+                    selected_ids = set(selected_pairings["id"].astype(str))
+                    selected_group_rows = [
+                        group
+                        for group in saved_groups
+                        if str(group["id"]) in selected_ids
+                    ]
+                    st.session_state[pairing_delete_key] = {
+                        "editor_key": pairing_editor_key,
+                        "work_element_id": selected_process_id,
+                        "work_element": selected_description,
+                        "groups": [
+                            {
+                                "id": str(group["id"]),
+                                "requirement": str(group["name"]),
+                                "parts": [
+                                    str(option["part_number"])
+                                    for option in group["options"]
+                                ],
+                            }
+                            for group in selected_group_rows
+                        ],
+                    }
     else:
         st.caption("Select one Yamazumi work element to pair parts or add it to the plan.")
 
@@ -815,6 +863,7 @@ def open_process_details() -> None:
         )
 
 
+process_action_slot = st.empty()
 edited = st.data_editor(
     visible_elements,
     key=process_editor_key,
@@ -864,7 +913,60 @@ st.download_button(
 )
 
 selected = native_selected_rows(visible_elements, editor_key=process_editor_key)
-bulk = st.container(horizontal=True, vertical_alignment="bottom")
+
+
+def current_process_editor_rows() -> pd.DataFrame:
+    """Capture cell edits without treating native row selection as deletion."""
+    state = st.session_state.get(process_editor_key, {}) or {}
+    draft = visible_elements.copy()
+    for raw_position, changes in (state.get("edited_rows") or {}).items():
+        position = int(raw_position)
+        if not 0 <= position < len(draft):
+            continue
+        for column, value in (changes or {}).items():
+            if column in draft.columns:
+                draft.at[draft.index[position], column] = value
+    return draft
+
+
+def save_unsaved_process_table_edits(*, paired_removal: bool) -> int:
+    """Persist unrelated compact-table edits before a confirmed pairing removal."""
+    if not table_has_unsaved_changes(
+        process_editor_key, native_row_selection=True
+    ):
+        return 0
+    draft = current_process_editor_rows()
+    errors = required_field_errors(draft, {"work_element": "Work Element"})
+    if errors:
+        raise ValueError(" ".join(errors))
+    combined = merge_filtered_edits(elements, visible_elements, draft)
+    combined["model_applicability"] = combined["model_applicability"].apply(
+        lambda assigned: ", ".join(
+            "All" if label == "All models" else model_numbers_by_label.get(label, label)
+            for label in (assigned or ["All models"])
+        )
+    )
+    replace_work_elements(project_id, scenario_id, combined)
+    changed_count = len(
+        (st.session_state.get(process_editor_key, {}) or {}).get("edited_rows") or {}
+    )
+    record_audit_event(
+        project_id,
+        "Process plan",
+        "Save & refresh",
+        changed_count,
+        st.session_state.get("current_editor", ""),
+        {
+            "scenario_id": scenario_id,
+            "saved_with_pairing_removal": paired_removal,
+        },
+    )
+    return changed_count
+
+
+bulk = selected_rows_action_bar(
+    parent=process_action_slot,
+)
 bulk_station = bulk.text_input("Pitch for selected", key=f"process_bulk_pitch_{scenario_id}")
 bulk_status = bulk.selectbox(
     "Status for selected",
@@ -878,12 +980,7 @@ apply_bulk = bulk.button(
     icon=":material/checklist:",
     disabled=selected.empty,
 )
-request_bulk_delete = bulk.button(
-    f"Delete selected ({len(selected)})",
-    icon=":material/delete:",
-    disabled=selected.empty,
-    key=f"destructive_request_process_delete_{scenario_id}",
-)
+request_bulk_delete = False
 
 if apply_bulk:
     if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
@@ -957,11 +1054,7 @@ def confirm_process_delete() -> None:
         st.rerun()
 
 
-if (
-    st.session_state.get(f"process_pending_delete_{scenario_id}")
-    and not st.session_state.get(missing_part_dialog_key)
-):
-    confirm_process_delete()
+st.session_state.pop(f"process_pending_delete_{scenario_id}", None)
 
 if header_actions.undo:
     request_table_editor_reset(process_editor_key)
@@ -996,6 +1089,76 @@ if header_actions.save_and_refresh:
     except ValueError as exc:
         st.error(str(exc))
 
+
+@st.dialog("Remove selected part pairings?")
+def confirm_pairing_bulk_removal() -> None:
+    pending = st.session_state.get(pairing_delete_key, {})
+    groups = pending.get("groups", [])
+    st.warning(
+        f"Remove {len(groups)} selected part pairing(s)? The parts listed below will be "
+        "unpaired from this work element."
+    )
+    for group in groups:
+        parts = ", ".join(group.get("parts", [])) or "No active parts"
+        st.write(f"- {group['requirement']}: {parts}")
+    st.info(
+        "The parts are not deleted. They will return to the available-parts table for "
+        "their Fishbone section."
+    )
+    has_other_edits = table_has_unsaved_changes(
+        process_editor_key, native_row_selection=True
+    )
+    if has_other_edits:
+        st.info(
+            "Other unsaved Process at a Glance table edits will be saved at the same "
+            "time so they are not lost."
+        )
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key=f"cancel_pairing_bulk_remove_{scenario_id}"):
+        st.session_state.pop(pairing_delete_key, None)
+        st.rerun()
+    if actions.button(
+        "Remove pairings",
+        type="primary",
+        icon=":material/link_off:",
+        key=f"destructive_confirm_pairing_bulk_remove_{scenario_id}",
+    ):
+        try:
+            save_unsaved_process_table_edits(paired_removal=True)
+            group_ids = [str(group["id"]) for group in groups]
+            removed_count = delete_process_part_groups(
+                project_id, scenario_id, group_ids
+            )
+            record_audit_event(
+                project_id,
+                "Process part pairings",
+                "Remove pairing",
+                removed_count,
+                st.session_state.get("current_editor", ""),
+                {
+                    "scenario_id": scenario_id,
+                    "work_element_id": pending.get("work_element_id"),
+                    "work_element": pending.get("work_element"),
+                    "pairings": groups,
+                },
+            )
+            st.session_state.pop(pairing_delete_key, None)
+            request_table_editor_reset(process_editor_key)
+            pairing_editor_key = str(pending.get("editor_key") or "")
+            if pairing_editor_key:
+                request_table_editor_reset(pairing_editor_key)
+            st.toast(
+                f"Removed {removed_count} pairing(s); their parts are available again.",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+st.session_state.pop(pairing_delete_key, None)
+
+
 def close_process_details() -> None:
     st.session_state.pop(f"selected_process_step_{scenario_id}", None)
 
@@ -1018,12 +1181,24 @@ def edit_process_step_details(element_id: str) -> None:
     step = selected_step.iloc[0]
     widget_prefix = f"process_details_{scenario_id}_{element_id}"
     linked_section = process_section_for_step(project_id, scenario_id, element_id)
+    restored_state = st.session_state.pop(detail_restore_key, {})
+    restored_draft = (
+        restored_state.get("draft", {})
+        if str(restored_state.get("work_element_id") or "") == str(element_id)
+        else {}
+    )
 
     def text_value(field: str) -> str:
+        if field in restored_draft:
+            value = restored_draft.get(field)
+            return "" if value is None or pd.isna(value) else str(value)
         value = step.get(field)
         return "" if value is None or pd.isna(value) else str(value)
 
     def number_value(field: str) -> float | None:
+        if field in restored_draft:
+            value = restored_draft.get(field)
+            return None if value is None or pd.isna(value) else float(value)
         value = step.get(field)
         return None if value is None or pd.isna(value) else float(value)
 
@@ -1090,7 +1265,7 @@ def edit_process_step_details(element_id: str) -> None:
         )
         apply_geometry_to_section = st.checkbox(
             "Apply this orientation and conveyor height to every Process step in this Fishbone section",
-            value=False,
+            value=bool(restored_state.get("apply_geometry_to_section", False)),
             disabled=linked_section is None,
             help=(
                 "On Save, this copies both values to existing Process at a Glance steps tied to "
@@ -1129,23 +1304,40 @@ def edit_process_step_details(element_id: str) -> None:
                     icon=":material/link_off:",
                     key=f"destructive_{widget_prefix}_remove_pairing_{group['id']}",
                 ):
-                    delete_process_part_group(
-                        project_id, scenario_id, str(group["id"])
+                    detail_draft = {
+                        "description": description,
+                        "output_assembly_number": output_assembly_number,
+                        "output_assembly_name": output_assembly_name,
+                        "tool": tool,
+                        "location": location,
+                        "unit_orientation": unit_orientation,
+                        "conveyor_height_in": conveyor_height_in,
+                    }
+                    details_changed = apply_geometry_to_section or any(
+                        (
+                            number_value(field) != detail_draft[field]
+                            if field == "conveyor_height_in"
+                            else text_value(field) != str(detail_draft[field] or "")
+                        )
+                        for field in detail_draft
                     )
-                    record_audit_event(
-                        project_id,
-                        "Process part pairings",
-                        "Remove pairing",
-                        1,
-                        st.session_state.get("current_editor", ""),
-                        {
-                            "scenario_id": scenario_id,
-                            "work_element_id": element_id,
-                            "requirement": group["name"],
-                        },
-                    )
-                    request_table_editor_reset(process_editor_key)
-                    st.toast("Pairing removed; its parts are available again.", icon=":material/check_circle:")
+                    st.session_state[detail_pairing_delete_key] = {
+                        "group_id": str(group["id"]),
+                        "requirement": str(group["name"]),
+                        "parts": [
+                            str(option["part_number"])
+                            for option in group["options"]
+                        ],
+                        "work_element_id": element_id,
+                        "work_element": str(
+                            step.get("work_element")
+                            or step.get("operation")
+                            or "Unnamed process step"
+                        ),
+                        "draft": detail_draft,
+                        "apply_geometry_to_section": apply_geometry_to_section,
+                        "details_changed": details_changed,
+                    }
                     st.rerun()
         st.markdown("**Model applicability**")
         assigned_models = step.get("model_applicability") or ["All models"]
@@ -1214,10 +1406,121 @@ def edit_process_step_details(element_id: str) -> None:
             st.error(str(exc))
 
 
+@st.dialog(
+    "Remove process pairing?",
+    dismissible=False,
+    icon=":material/link_off:",
+)
+def confirm_detail_pairing_removal() -> None:
+    pending = st.session_state.get(detail_pairing_delete_key, {})
+    parts = ", ".join(pending.get("parts", [])) or "No active parts"
+    st.warning(
+        f"Remove the part requirement '{pending.get('requirement', '')}' from "
+        f"{pending.get('work_element', 'this process step')}?"
+    )
+    st.write(f"Parts to unpair: {parts}")
+    st.info(
+        "The parts are not deleted. They will return to the available-parts table for "
+        "their Fishbone section."
+    )
+    if pending.get("details_changed"):
+        st.info(
+            "Other unsaved step-detail edits will be saved at the same time so they are "
+            "not lost."
+        )
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key=f"cancel_detail_pairing_remove_{scenario_id}"):
+        st.session_state[detail_restore_key] = {
+            "work_element_id": pending.get("work_element_id"),
+            "draft": pending.get("draft", {}),
+            "apply_geometry_to_section": pending.get(
+                "apply_geometry_to_section", False
+            ),
+        }
+        st.session_state.pop(detail_pairing_delete_key, None)
+        st.rerun()
+    if actions.button(
+        "Remove pairing",
+        type="primary",
+        icon=":material/link_off:",
+        key=f"destructive_confirm_detail_pairing_remove_{scenario_id}",
+    ):
+        try:
+            element_id = str(pending.get("work_element_id") or "")
+            if pending.get("details_changed"):
+                updated_at, affected_count, affected_section_id = (
+                    update_process_step_details(
+                        project_id,
+                        scenario_id,
+                        element_id,
+                        pending.get("draft", {}),
+                        apply_geometry_to_section=bool(
+                            pending.get("apply_geometry_to_section")
+                        ),
+                    )
+                )
+                record_audit_event(
+                    project_id,
+                    "Process plan",
+                    "Edit details",
+                    affected_count,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "scenario_id": scenario_id,
+                        "work_element_id": element_id,
+                        "section_id": affected_section_id,
+                        "applied_section_wide": bool(
+                            pending.get("apply_geometry_to_section")
+                        ),
+                        "updated_at": updated_at,
+                        "saved_with_pairing_removal": True,
+                    },
+                )
+            removed_count = delete_process_part_groups(
+                project_id, scenario_id, [str(pending.get("group_id") or "")]
+            )
+            record_audit_event(
+                project_id,
+                "Process part pairings",
+                "Remove pairing",
+                removed_count,
+                st.session_state.get("current_editor", ""),
+                {
+                    "scenario_id": scenario_id,
+                    "work_element_id": element_id,
+                    "work_element": pending.get("work_element"),
+                    "pairings": [
+                        {
+                            "id": pending.get("group_id"),
+                            "requirement": pending.get("requirement"),
+                            "parts": pending.get("parts", []),
+                        }
+                    ],
+                },
+            )
+            st.session_state.pop(detail_pairing_delete_key, None)
+            close_process_details()
+            request_table_editor_reset(process_editor_key)
+            st.toast(
+                "Pairing removed; its parts are available again.",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
 selected_step_id = st.session_state.get(f"selected_process_step_{scenario_id}")
 if (
+    st.session_state.get(detail_pairing_delete_key)
+    and not st.session_state.get(f"process_pending_delete_{scenario_id}")
+    and not st.session_state.get(missing_part_dialog_key)
+):
+    confirm_detail_pairing_removal()
+elif (
     selected_step_id
     and not st.session_state.get(f"process_pending_delete_{scenario_id}")
+    and not st.session_state.get(pairing_delete_key)
     and not st.session_state.get(missing_part_dialog_key)
 ):
     edit_process_step_details(str(selected_step_id))
@@ -1251,8 +1554,9 @@ with st.expander("Process at a Glance history", icon=":material/history:"):
             display_history["table_name"] = display_history["table_name"].replace(
                 {"Process plan": "Process at a Glance"}
             )
-        st.dataframe(
+        selectable_dataframe(
             display_history,
+            key=f"process_history_table_{project_id}_{scenario_id}",
             hide_index=True,
             column_config={
                 "action": "Action",

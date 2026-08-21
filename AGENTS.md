@@ -265,7 +265,9 @@ Use `utils/table_ui.py` and `utils/table_filters.py` for every new editable tabl
 
 - Put the section title, orange unsaved-changes indicator, Undo control, and blue **Save & refresh** button on one line at the top. Use `editable_table_header()` unless there is a documented reason it cannot fit.
 - Support direct cell editing and direct row creation whenever the data model permits it.
-- Use Streamlit's native selected/deleted-row state through `num_rows="delete"` for editable tables or fixed-row selection for read-only tables. The unlabeled square in the upper-left must select all currently visible rows, matching Order assigned parts.
+- Every data table must show native row-selection checkboxes on the far left, and the unlabeled upper-left checkbox must select or clear all currently visible rows in one click.
+- Use Streamlit's native selected/deleted-row state through `num_rows="delete"` for editable tables. Use `selectable_dataframe()` for read-only tables so they receive native multi-row selection consistently.
+- Keep selection non-destructive. The native editor deletion toolbar is hidden; selection must not write data or expose a trash-can or row-deletion action.
 - Keep native Sort ascending and Sort descending available in every standard table column menu. For editable tables that need a new-record row, use `sortable_editor_rows()` with `num_rows="delete"`; Streamlit disables sorting for `num_rows="dynamic"` and `num_rows="add"`.
 - Do not add a named `CheckboxColumn` or a separate Select all control to simulate selection.
 - Read selected persisted rows with `native_selected_rows()`. Treat selection as transient UI state, not an unsaved business-data edit. Use `table_has_unsaved_changes(..., native_row_selection=True)` where selection must be excluded from change detection.
@@ -275,10 +277,10 @@ Use `utils/table_ui.py` and `utils/table_filters.py` for every new editable tabl
 - Do not change existing column sizing unless the user specifically asks for it.
 - Mark required fields in `st.column_config` and validate them again with `required_field_errors()` or store-layer validation before writing.
 - Validate the complete bulk operation before making any write. Do not partially apply a bulk change when one selected record is invalid.
-- Provide bulk editing for meaningful shared fields and a separate **Delete selected** trash action for persisted selected rows.
-- Never put a per-row Delete action or Delete `ButtonColumn` inside a table. Deletion must require native row selection, the separate trash action, and a confirmation dialog so it cannot happen in one click.
-- Require a confirmation dialog before selected-row deletion. State what related data will also be removed or unassigned.
-- Give every destructive action a widget key beginning with `destructive_`. The entrypoint uses that stable key prefix to render destructive and delete buttons red without styling Cancel actions.
+- Provide bulk editing for meaningful shared fields, but do not add any trash-can icon, Delete button, or deletion affordance inside or beside a table.
+- Never put a per-row Delete action or Delete `ButtonColumn` inside a table. Native row selection may support non-destructive bulk actions, but table deletion is not exposed in the standard editable-table pattern.
+- Do not add a new table-deletion workflow without explicit project-owner approval. Any approved deletion workflow must be separate from the table, require confirmation, and state what related data will also be removed or unassigned.
+- Give every approved destructive confirmation or standalone destructive action a widget key beginning with `destructive_`. The entrypoint uses that stable key prefix to render those buttons red without styling Cancel actions.
 - Use the shared Details/Edit button configuration for consistent row actions.
 - Include an Excel export of the currently filtered table using `dataframe_to_excel()`.
 - After a successful save, bulk edit, or delete: write the data, record history, request an editor reset, show a toast, and rerun.

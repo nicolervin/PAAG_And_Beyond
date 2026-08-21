@@ -31,7 +31,10 @@ from utils.table_filters import (
     split_filter_values,
 )
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
-from utils.table_ui import native_selected_rows, table_has_unsaved_changes
+from utils.table_ui import (
+    native_selected_rows,
+    table_has_unsaved_changes,
+)
 
 
 project_id = st.session_state.get("project_id")
@@ -128,7 +131,9 @@ with st.expander(
     _, section_1_warning, section_1_undo, section_1_action = st.columns(
         [4, 0.8, 0.7, 1], vertical_alignment="center"
     )
-    framework_has_unsaved = has_unsaved_table_changes("assembly_framework_editor")
+    framework_has_unsaved = table_has_unsaved_changes(
+        "assembly_framework_editor", native_row_selection=True
+    )
     if framework_has_unsaved:
         section_1_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
     undo_framework = section_1_undo.button(
@@ -274,7 +279,7 @@ with st.expander(
             framework,
             key="assembly_framework_editor",
             hide_index=True,
-            num_rows="fixed",
+            num_rows="delete",
             height=300,
             disabled=["id", "hierarchy", "sequence", "created_at", "updated_at"],
             column_order=["hierarchy", "active", "sequence", "order_actions", "name", "section_type", "parent_assembly", "description"],
@@ -310,6 +315,9 @@ with st.expander(
                 "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
             },
         )
+        selected_framework_rows = native_selected_rows(
+            framework, editor_key="assembly_framework_editor"
+        )
         st.caption("🟦 Main-spine section · 🟧 Subassembly · indentation shows the parent-child relationship.")
         id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
         framework_to_save = merge_filtered_edits(full_framework, framework, framework_editor)
@@ -318,6 +326,8 @@ with st.expander(
         )
         if refresh_framework:
             try:
+                if not selected_framework_rows.empty:
+                    raise ValueError("Clear selected rows before saving the assembly framework.")
                 count = update_assembly_section_rows(project_id, framework_to_save)
                 st.session_state[framework_undo_key] = current_plan_snapshot
                 request_table_editor_reset("assembly_framework_editor")
@@ -583,7 +593,7 @@ else:
         key=pool_key,
         hide_index=True,
         height=330,
-        num_rows="fixed",
+        num_rows="delete",
         disabled=["id", "part_number", "description", "revision", "model_applicability", "models_familiar", "fishbone_section"],
         column_order=["place", "edit_part", "part_number", "description", "quantity", "revision", "models_familiar", "fishbone_section"],
         column_config={
@@ -822,13 +832,7 @@ else:
     selected_assignment_rows = native_selected_rows(
         assignment_editor, editor_key=assignment_editor_key
     )
-    assignment_actions = st.container(horizontal=True, horizontal_alignment="right")
-    request_assignment_delete = assignment_actions.button(
-        f"Delete selected ({len(selected_assignment_rows)})",
-        icon=":material/delete:",
-        disabled=selected_assignment_rows.empty,
-        key=f"destructive_request_fishbone_assignment_delete_{project_id}",
-    )
+    request_assignment_delete = False
     if request_assignment_delete:
         if table_has_unsaved_changes(
             assignment_editor_key, native_row_selection=True
@@ -875,12 +879,11 @@ else:
             except ValueError as exc:
                 st.error(str(exc))
 
-    if st.session_state.get(f"fishbone_assignments_pending_delete_{project_id}"):
-        confirm_assignment_delete()
+    st.session_state.pop(f"fishbone_assignments_pending_delete_{project_id}", None)
 
     st.caption(
         "Each row is one use of a catalog part. Edit its location, Qty, section, or order, then select Save all changes & refresh above the fishbone. "
-        "Another use stages the part in Section 2 instead of creating a duplicate here. Select rows and use Delete selected to remove occurrences; master Parts records remain."
+        "Another use stages the part in Section 2 instead of creating a duplicate here."
     )
     assignments_to_save = merge_filtered_edits(
         full_assignment_editor, assignment_editor, edited_assignments
@@ -908,6 +911,8 @@ else:
 
 if st.session_state.pop(f"fishbone_save_all_{project_id}", False):
     try:
+        if not sections.empty and not selected_framework_rows.empty:
+            raise ValueError("Clear selected framework rows before saving the Fishbone plan.")
         if not selected_assignment_rows.empty:
             raise ValueError("Clear selected assigned-part rows before saving the Fishbone plan.")
         framework_count, assignment_count = save_fishbone_plan(

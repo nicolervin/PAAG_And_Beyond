@@ -20,6 +20,9 @@ st.html(
     div[class*="st-key-destructive_"] button:disabled {
         opacity: 0.45;
     }
+    div[data-testid="stDataFrame"] button[aria-label="Delete row(s)"] {
+        display: none !important;
+    }
     </style>
     """
 )

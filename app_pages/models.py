@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import (
+    complexity_feature_delete_impacts,
     complexity_features,
     complexity_planning_snapshot,
     complexity_tree,
@@ -19,6 +20,7 @@ from utils.store import (
 )
 from utils.table_ui import (
     drop_untouched_new_rows,
+    editable_table_header,
     native_selected_rows,
     sortable_editor_rows,
     table_has_unsaved_changes,
@@ -152,13 +154,7 @@ edited_models = st.data_editor(
 selected_models = native_selected_rows(
     visible_models, editor_key="model_definitions_editor_v2"
 )
-model_bulk_actions = st.container(horizontal=True, horizontal_alignment="right")
-request_model_delete = model_bulk_actions.button(
-    f"Delete selected ({len(selected_models)})",
-    icon=":material/delete:",
-    disabled=selected_models.empty,
-    key="destructive_request_model_bulk_delete",
-)
+request_model_delete = False
 if request_model_delete:
     if table_has_unsaved_changes(
         "model_definitions_editor_v2", native_row_selection=True
@@ -207,8 +203,7 @@ def confirm_model_delete() -> None:
             st.error(str(exc))
 
 
-if st.session_state.get(f"models_pending_delete_{project_id}"):
-    confirm_model_delete()
+st.session_state.pop(f"models_pending_delete_{project_id}", None)
 
 if save_requested:
     try:
@@ -231,37 +226,25 @@ features = complexity_features(project_id)
 current_complexity_snapshot = complexity_planning_snapshot(project_id)
 feature_undo_key = f"complexity_features_undo_{project_id}"
 feature_editor_key = "complexity_feature_editor"
-feature_has_unsaved = has_unsaved_table_changes(feature_editor_key)
-
-feature_title, feature_warning, feature_undo, feature_save = st.columns(
-    [4, 0.8, 0.7, 1], vertical_alignment="center"
+feature_has_unsaved = table_has_unsaved_changes(
+    feature_editor_key,
+    native_row_selection=True,
 )
-feature_title.subheader("Feature definitions")
-if feature_has_unsaved:
-    feature_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
-undo_features = feature_undo.button(
-    "Undo",
-    icon=":material/undo:",
-    disabled=feature_undo_key not in st.session_state and not feature_has_unsaved,
-    help=(
-        "Discard the current unsaved feature edits."
-        if feature_has_unsaved
-        else "Undo the last saved feature-definition change."
-    ),
-    key="undo_complexity_features",
+feature_actions = editable_table_header(
+    "Feature definitions",
+    editor_key=feature_editor_key,
+    key_prefix="complexity_features",
+    save_label="Save & refresh",
+    undo_available=feature_undo_key in st.session_state,
+    native_row_selection=True,
 )
-save_features = feature_save.button(
-    "Save features",
-    type="primary",
-    icon=":material/save:",
-)
-if undo_features:
+if feature_actions.undo:
     if feature_has_unsaved:
-        st.session_state.pop(feature_editor_key, None)
+        request_table_editor_reset(feature_editor_key)
         st.toast("Discarded the unsaved feature edits", icon=":material/undo:")
     else:
         restore_complexity_planning_snapshot(project_id, st.session_state.pop(feature_undo_key))
-        st.session_state.pop(feature_editor_key, None)
+        request_table_editor_reset(feature_editor_key)
         st.session_state.pop("complexity_tree_editor", None)
         st.toast("Undid the last feature-definition change", icon=":material/undo:")
     st.rerun()
@@ -307,14 +290,200 @@ edited_features = st.data_editor(
         "description": st.column_config.TextColumn("Description"),
     },
 )
-if save_features:
+
+
+def clean_feature_text(value: object) -> str:
+    """Normalize nullable feature fields for confirmation and audit text."""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def feature_summary(row: pd.Series | dict) -> str:
+    """Return a short feature label that remains identifiable in history."""
+    feature_id = clean_feature_text(row.get("id"))
+    category = clean_feature_text(row.get("category")) or "Uncategorized"
+    name = clean_feature_text(row.get("name")) or "Unnamed feature"
+    return f"{category} · {name} (ID: {feature_id})"
+
+
+def pending_feature_edit_summaries(
+    excluded_ids: set[str] | None = None,
+) -> list[str]:
+    """Describe unsaved feature edits while ignoring native row selection."""
+    excluded_ids = excluded_ids or set()
+    state = st.session_state.get(feature_editor_key, {}) or {}
+    summaries: list[str] = []
+    for raw_position, changes in (state.get("edited_rows") or {}).items():
+        position = int(raw_position)
+        if not 0 <= position < len(feature_editor_rows):
+            continue
+        row = feature_editor_rows.iloc[position].to_dict()
+        row.update(changes or {})
+        feature_id = clean_feature_text(row.get("id"))
+        if feature_id and feature_id in excluded_ids:
+            continue
+        summaries.append(feature_summary(row))
+    for row in state.get("added_rows") or []:
+        summaries.append(feature_summary(row))
+    return list(dict.fromkeys(summaries))
+
+
+def current_feature_editor_rows() -> pd.DataFrame:
+    """Capture the feature draft before a confirmation-dialog rerun."""
+    state = st.session_state.get(feature_editor_key, {}) or {}
+    draft = feature_editor_rows.copy()
+    for raw_position, changes in (state.get("edited_rows") or {}).items():
+        position = int(raw_position)
+        if not 0 <= position < len(draft):
+            continue
+        for column, value in (changes or {}).items():
+            if column in draft.columns:
+                draft.at[draft.index[position], column] = value
+    selected_positions = {
+        int(position)
+        for position in state.get("deleted_rows") or []
+        if 0 <= int(position) < len(draft)
+    }
+    if selected_positions:
+        draft = draft.iloc[
+            [position for position in range(len(draft)) if position not in selected_positions]
+        ].copy()
+    added_rows = state.get("added_rows") or []
+    if added_rows:
+        draft = pd.concat(
+            [draft, pd.DataFrame(added_rows, columns=draft.columns)],
+            ignore_index=True,
+            sort=False,
+        )
+    return draft.reset_index(drop=True)
+
+
+selected_features = native_selected_rows(
+    feature_rows,
+    editor_key=feature_editor_key,
+)
+request_feature_delete = False
+feature_pending_delete_key = f"features_pending_delete_{project_id}"
+if request_feature_delete:
+    selected_ids = selected_features["id"].astype(str).tolist()
+    impacts = complexity_feature_delete_impacts(project_id, selected_ids)
+    impact_by_id = {
+        str(row["id"]): row.to_dict()
+        for _, row in impacts.iterrows()
+    }
+    pending_features = []
+    for _, feature in selected_features.iterrows():
+        feature_id = str(feature["id"])
+        impact = impact_by_id.get(feature_id, {})
+        pending_features.append(
+            {
+                "id": feature_id,
+                "summary": feature_summary(feature),
+                "model_value_count": int(impact.get("model_value_count") or 0),
+                "part_rule_count": int(impact.get("part_rule_count") or 0),
+                "affected_part_count": int(impact.get("affected_part_count") or 0),
+            }
+        )
+    pending_ids = {item["id"] for item in pending_features}
+    st.session_state[feature_pending_delete_key] = {
+        "features": pending_features,
+        "draft_rows": current_feature_editor_rows().to_dict("records"),
+        "other_edits": pending_feature_edit_summaries(pending_ids),
+        "snapshot": current_complexity_snapshot,
+    }
+
+
+@st.dialog("Delete selected features?")
+def confirm_feature_delete() -> None:
+    pending_state = st.session_state.get(feature_pending_delete_key, {})
+    pending = pending_state.get("features", [])
+    st.warning(
+        f"Delete {len(pending)} selected feature(s)? Their Complexity tree assignments and "
+        "part applicability rules will also be deleted. Affected parts will require applicability review."
+    )
+    for item in pending:
+        st.write(
+            f"- {item['summary']} — {item['model_value_count']} assigned Complexity tree "
+            f"value(s), {item['part_rule_count']} part rule(s) across "
+            f"{item['affected_part_count']} part(s)"
+        )
+    other_edits = pending_state.get("other_edits", [])
+    if other_edits:
+        st.info(
+            "Other unsaved feature edits will be saved at the same time so they are not lost."
+        )
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key="cancel_feature_bulk_delete"):
+        st.session_state.pop(feature_pending_delete_key, None)
+        st.rerun()
+    if actions.button(
+        "Delete",
+        type="primary",
+        icon=":material/delete:",
+        key="destructive_confirm_feature_bulk_delete",
+    ):
+        try:
+            draft_rows = pd.DataFrame(
+                pending_state.get("draft_rows", []),
+                columns=feature_columns,
+            )
+            remaining_features = drop_untouched_new_rows(
+                draft_rows,
+                identifying_columns=["category", "name", "allowed_choices"],
+            )
+            update_complexity_features(project_id, remaining_features)
+            st.session_state[feature_undo_key] = pending_state.get(
+                "snapshot", current_complexity_snapshot
+            )
+            editor_name = st.session_state.get("current_editor", "")
+            record_audit_event(
+                project_id,
+                "Feature definitions",
+                "Bulk delete",
+                len(pending),
+                editor_name,
+                {"features": pending},
+            )
+            if other_edits:
+                record_audit_event(
+                    project_id,
+                    "Feature definitions",
+                    "Save & refresh",
+                    len(other_edits),
+                    editor_name,
+                    {"features": other_edits, "saved_with_bulk_delete": True},
+                )
+            st.session_state.pop(feature_pending_delete_key, None)
+            st.session_state.pop("complexity_tree_editor", None)
+            request_table_editor_reset(feature_editor_key)
+            st.toast(f"Deleted {len(pending)} selected features", icon=":material/delete:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+st.session_state.pop(feature_pending_delete_key, None)
+
+if feature_actions.save_and_refresh:
     try:
+        if not selected_features.empty:
+            raise ValueError("Clear selected rows before saving feature edits.")
         edited_features = drop_untouched_new_rows(
             edited_features,
             identifying_columns=["category", "name", "allowed_choices"],
         )
+        changed_features = pending_feature_edit_summaries()
         count = update_complexity_features(project_id, edited_features)
         st.session_state[feature_undo_key] = current_complexity_snapshot
+        record_audit_event(
+            project_id,
+            "Feature definitions",
+            "Save & refresh",
+            len(changed_features),
+            st.session_state.get("current_editor", ""),
+            {"features": changed_features},
+        )
         st.session_state.pop("complexity_tree_editor", None)
         request_table_editor_reset(feature_editor_key)
         st.toast(f"Saved {count} feature definitions", icon=":material/check_circle:")
@@ -326,7 +495,9 @@ if save_features:
 st.divider()
 tree_undo_key = f"complexity_tree_undo_{project_id}"
 tree_editor_key = "complexity_tree_editor"
-tree_has_unsaved = has_unsaved_table_changes(tree_editor_key)
+tree_has_unsaved = table_has_unsaved_changes(
+    tree_editor_key, native_row_selection=True
+)
 tree_title, tree_warning, tree_undo, tree_save = st.columns(
     [4, 0.8, 0.7, 1], vertical_alignment="center"
 )
@@ -392,14 +563,17 @@ else:
         tree,
         key=tree_editor_key,
         hide_index=True,
-        num_rows="fixed",
+        num_rows="delete",
         height=420,
         disabled=["model_id", "common_name", "official_model_number"],
         column_order=["common_name", "official_model_number", *active_feature_ids],
         column_config=tree_config,
     )
+    selected_tree_rows = native_selected_rows(tree, editor_key=tree_editor_key)
     if save_tree:
         try:
+            if not selected_tree_rows.empty:
+                raise ValueError("Clear selected rows before saving complexity-tree edits.")
             count = update_complexity_tree(project_id, edited_tree)
             st.session_state[tree_undo_key] = current_complexity_snapshot
             request_table_editor_reset(tree_editor_key)
