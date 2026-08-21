@@ -23,7 +23,7 @@ The app is still a prototype. It runs on one computer, stores its records and up
 ## What is working now
 
 - The main app opens, finds the current projects and scenarios, and renders the Overview screen without an error.
-- All nine navigated screens rendered successfully in automated smoke checks against the current local data: Overview, Questions and concerns, Import and export, Model definitions, Parts Catalog, Parts to fishbone, Yamazumi, Process at a Glance, and Requirements. The Process at a Glance detail dialog also passed isolated open, save, and cancel checks.
+- All 14 navigated screens have rendered successfully in automated smoke checks: Overview, Questions and concerns, Import and export, Model definitions, Parts Catalog, Parts to fishbone, Yamazumi, Process at a Glance, Requirements, and the five non-persistent Functional Reviews shells. The Process at a Glance detail dialog also passed isolated open, save, and cancel checks.
 - All Python files pass a syntax/import compilation check with the installed packages.
 - The current project data file is populated, rather than being only an empty demonstration. Across the file it currently contains 2 projects, 2 planning scenarios, 17 model records, 20 parts, 172 current PITS records with 172 saved source revisions, 808 PITS/MBOM review rows, 6 fishbone sections, 9 placed part uses, 3 process-plan work elements, and 2 pitch addresses.
 - Excel snapshot generation works against the current data. The test workbook was produced successfully with 13 sheets covering the project, scenario, parts, work, concerns, MBOM review, fishbone, PITS history, models, and Lucid data link.

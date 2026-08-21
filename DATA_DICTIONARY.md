@@ -148,6 +148,20 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Key relationships:** Belongs to `process_part_groups` and references `parts`. It records the catalog part, not a specific `fishbone_part_assignments` occurrence.
 - **Scope:** Scenario-specific through the parent process part group.
 
+## Proposed modules — pending owner review
+
+### Functional Reviews
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** August 21, 2026
+- **Purpose:** Add project-wide navigation shells for Equipment, Ergonomics, Quality, Materials, and Safety functional reviews.
+- **Potential connections:** Future review records may connect to Parts, Fishbone sections, Yamazumi records, Process at a Glance steps, planning scenarios, or other approved critical-thread entities.
+- **Relationship to the critical thread:** Exact relationships and foreign keys are intentionally not defined in this shell phase. The project owner approved navigation-only, non-persistent shells before those relationships are designed. No persisted review fields may be added until each relationship is approved.
+- **Scope:** The Functional Reviews navigation group and its five shell pages are project-wide. Future review content may be project-wide or scenario-specific, but every persisted record type must receive one explicit scope before implementation.
+- **Storage:** No database table or field is added in this phase. Each shell contains only browser-session description state and an empty, schema-free table. Existing tables cannot be selected or ruled out until the review fields and relationships are defined.
+- **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply, including table row selection, deletion safety, Save & refresh, audit logging for persisted changes, History placement, Scenario Boundary badges, help text, canonical terminology, stable identifiers, and imperial units where relevant.
+- **Approval status:** Nicole Ervin approved this shell-only exception. The data model, ownership, relationships, and persisted fields remain pending owner review.
+
 ## Known naming debt — approved for future correction, not yet changed
 
 The following items are genuine naming debt rather than intentional stable-identifier/friendly-display-name pairs or ordinary copy variation. They are approved future corrections, but no schema, stored value, query, page, or export change is being made now.
@@ -195,7 +209,7 @@ The following tables are implemented in the schema and data layer but are not cu
 
 `pits_records`, `pits_record_revisions`, and `fishbone_nodes` support a Manufacturing BOM confirmation stage between imported Product Architecture evidence and the approved Parts Catalog. New or changed PITS records preserve their source revisions and create or flag `fishbone_nodes` review candidates. Confirmed candidates can then be synchronized into `parts` without allowing an upstream import to silently overwrite collaborator-reviewed planning decisions.
 
-The database and data-access functions for this review stage exist, but none of the nine active navigation screens currently exposes the complete review and confirmation workflow. New UI work must not duplicate, bypass, or create a competing MBOM review path without first checking with the project owner and determining whether the existing hidden workflow should be restored or replaced.
+The database and data-access functions for this review stage exist, but none of the active navigation screens currently exposes the complete review and confirmation workflow. New UI work must not duplicate, bypass, or create a competing MBOM review path without first checking with the project owner and determining whether the existing hidden workflow should be restored or replaced.
 
 ## Critical thread — do not break
 

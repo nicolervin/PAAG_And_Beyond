@@ -98,6 +98,11 @@ SQLite foreign-key checks are enabled and the database uses write-ahead logging.
 - `app_pages/yamazumi.py` — Planning-scenario branching, Yamazumi import/reset, assembly areas, pitch generation, work regions, flags, model variants, the interactive balancing board, and editable pitch/work-element tables.
 - `app_pages/process.py` — Pairs fishbone parts to Yamazumi work, reconciles selected work into the process plan, captures process requirements, supports bulk actions and export, and shows a simple workload-by-pitch chart.
 - `app_pages/requirements.py` — Read-only review of tooling, torque, quality, ergonomics, material, location, and geometry requirements by process step.
+- `app_pages/functional_equipment.py` — Non-persistent Equipment functional-review shell.
+- `app_pages/functional_ergonomics.py` — Non-persistent Ergonomics functional-review shell.
+- `app_pages/functional_quality.py` — Non-persistent Quality functional-review shell.
+- `app_pages/functional_materials.py` — Non-persistent Materials functional-review shell.
+- `app_pages/functional_safety.py` — Non-persistent Safety functional-review shell.
 - `app_pages/assembly_sequence.py` — Older assembly-fishbone page retained in the repository but not linked from the current navigation. Treat it as legacy code; do not add features to it unless the user explicitly asks to revive it.
 
 ### Shared utility files
@@ -109,6 +114,7 @@ SQLite foreign-key checks are enabled and the database uses write-ahead logging.
 - `utils/yamazumi_board.py` — Components v2 Yamazumi board. It displays odd pitch addresses on the north/top side, even addresses on the south/bottom side, variant stacks, timed work blocks, flags, and drag/edit/add events.
 - `utils/fishbone_visual.py` — Components v2 interactive assembly fishbone with pan, zoom, full-screen view, part cards, thumbnails, and hover details.
 - `utils/clipboard_image.py` — Components v2 clipboard capture plus server-side image validation and conversion into an upload-like object.
+- `utils/functional_review_ui.py` — Shared non-persistent page shell for the five Functional Reviews pages.
 - `utils/__init__.py` — Marks `utils` as a Python package.
 
 ## Navigation and screens
@@ -172,6 +178,30 @@ Starts from Yamazumi work rather than creating unrelated duplicate work. The upp
 #### Requirements
 
 Provides a read-only, pitch-filtered review of the requirements already entered in Process plan. Process plan remains the source for edits.
+
+### Functional Reviews
+
+#### Equipment
+
+Project-wide, non-persistent shell for future equipment review content.
+
+#### Ergonomics
+
+Project-wide, non-persistent shell for future ergonomics review content.
+
+#### Quality
+
+Project-wide, non-persistent shell for future quality review content.
+
+#### Materials
+
+Project-wide, non-persistent shell for future materials review content.
+
+#### Safety
+
+Project-wide, non-persistent shell for future safety review content.
+
+The five Functional Reviews pages intentionally contain no database fields or critical-thread links yet. Their future relationships, ownership, scope, and storage must pass the New Module Proposal Gate before persisted content is added.
 
 ## Glossary
 

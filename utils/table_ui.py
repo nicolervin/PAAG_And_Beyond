@@ -192,9 +192,15 @@ def editable_table_header(
     save_label: str = "Save & refresh",
     undo_available: bool = False,
     native_row_selection: bool = False,
+    additional_unsaved_changes: bool = False,
 ) -> TableHeaderActions:
     """Render the standard title, dirty warning, undo, and primary save control."""
-    unsaved = table_has_unsaved_changes(editor_key, native_row_selection=native_row_selection)
+    unsaved = (
+        table_has_unsaved_changes(
+            editor_key, native_row_selection=native_row_selection
+        )
+        or additional_unsaved_changes
+    )
     title_col, warning_col, undo_col, action_col = st.columns(
         [4, 0.9, 0.7, 1.15], vertical_alignment="center"
     )

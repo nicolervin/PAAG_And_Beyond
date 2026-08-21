@@ -52,6 +52,33 @@ pages = {
         ),
         st.Page("app_pages/requirements.py", title="Requirements", icon=":material/fact_check:"),
     ],
+    "Functional Reviews": [
+        st.Page(
+            "app_pages/functional_equipment.py",
+            title="Equipment",
+            icon=":material/precision_manufacturing:",
+        ),
+        st.Page(
+            "app_pages/functional_ergonomics.py",
+            title="Ergonomics",
+            icon=":material/accessibility_new:",
+        ),
+        st.Page(
+            "app_pages/functional_quality.py",
+            title="Quality",
+            icon=":material/verified:",
+        ),
+        st.Page(
+            "app_pages/functional_materials.py",
+            title="Materials",
+            icon=":material/inventory_2:",
+        ),
+        st.Page(
+            "app_pages/functional_safety.py",
+            title="Safety",
+            icon=":material/health_and_safety:",
+        ),
+    ],
 }
 navigation = st.navigation(pages, position="hidden")
 
