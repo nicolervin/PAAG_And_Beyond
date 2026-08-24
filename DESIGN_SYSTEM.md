@@ -36,6 +36,12 @@ This standard is **locked** and replaces all screen-specific save button labels 
 
 Retrofitting existing screens to this standard is a separate future task. Do not modify screen code as part of documenting this standard.
 
+## Universal Row Creation Standard
+
+Editable tables that permit new records must allow contributors to type or paste one or many spreadsheet rows directly into Streamlit's native blank entry row. Do not expose a separate **Add row** button. Use `direct_entry_editor_rows(..., editor_key=...)` immediately before `st.data_editor(..., num_rows="dynamic")`.
+
+Because Streamlit disables native header sorting when an editor permits row creation, the shared helper supplies external **Sort rows by** and **Descending** controls. Apply sorting before editing; once the editor contains draft changes, pasted rows, or native row selections, the sort controls must remain locked until the contributor saves, undoes, or clears the selection. Approved new-row defaults belong in `st.column_config`. Saving or undoing must clear the editor draft while retaining the chosen saved-row sort. Apply this standard to every existing and future editable table that permits row creation.
+
 ## Deferred decisions
 
 Multi-step Undo/Redo (spreadsheet-style, multiple sequential steps backward/forward through edits): considered and intentionally deferred. A feasibility review found it technically possible but high-risk in Streamlit, requiring a new shared edit-history subsystem across all tables. The core problem it was meant to solve — protection against accidental data loss — is instead addressed in part by the Universal Deletion Standard, which removes deletion affordances from editable tables unless a separate workflow is explicitly approved. Revisit multi-step Undo/Redo only as a deliberate future project, not as an incidental addition to any single-screen task.
@@ -63,7 +69,7 @@ This is a documentation-only standard. Do not modify screen code as part of docu
 
 Every screen or tab in this app must display a **History** section at the bottom of the page showing that screen's own `audit_log` entries in a consistent, shared layout. Reuse the existing history-display pattern implemented on Parts Catalog and Process at a Glance.
 
-This standard pairs directly with the Universal Audit Trail Standard: if a screen logs events, it must also display them. No screen is exempt, including currently history-less screens such as Overview, Questions and concerns, Model definitions, Parts to fishbone, and Requirements.
+This standard pairs directly with the Universal Audit Trail Standard: if a screen logs events, it must also display them. No screen is exempt, including currently history-less screens such as Overview, Questions and concerns, Model definitions, Parts to fishbone, and Pin Map.
 
 The History section must show, at minimum:
 
@@ -109,26 +115,30 @@ This standard is locked. It may be revisited in the future if the project requir
 Every screen must display a small, consistently placed badge next to the page title indicating the scope of the data shown, using exactly one of these three states:
 
 1. **Project-wide** — Data here is shared across every planning scenario in the project. Changes affect all scenarios.
-2. **Scenario: [active scenario name]** — Data here belongs only to the currently active planning scenario. Changes do not affect other scenarios.
-3. **Project-wide (scenario-aware)** — The underlying data is shared across all scenarios, but some fields or visibility on this screen change depending on which scenario is currently active.
+2. **Scenario-specific** — Data here belongs only to the currently active planning scenario. Changes do not affect other scenarios.
+3. **Scenario-aware** — The underlying data is shared across all scenarios, but some fields or visibility on this screen change depending on which scenario is currently active.
 
 Assign each active screen its correct badge state based on the scope definitions in `DATA_DICTIONARY.md`:
 
 - **Project-wide:** Overview project-identity fields, Questions and concerns, Import PITS and export, Model definitions, and Fishbone framework/structure.
-- **Scenario: [active scenario name]:** Overview active-scenario fields, Yamazumi, Process at a Glance, and Requirements.
-- **Project-wide (scenario-aware):** Parts Catalog, where the catalog is project-wide but Active status is scenario-specific; and Parts to fishbone, where the structure is project-wide but visible and active parts depend on the scenario.
+- **Scenario-specific:** Overview active-scenario fields, Yamazumi, Process at a Glance, and Pin Map.
+- **Scenario-aware:** Parts Catalog, where the catalog is project-wide but Active status is scenario-specific; and Parts to fishbone, where the structure is project-wide but visible and active parts depend on the scenario.
 
 Because Overview contains both project-wide identity fields and scenario-specific active-scenario fields, display the applicable badge next to each corresponding section heading as well as maintaining the standard page-title placement, so neither scope is presented ambiguously.
 
 Every badge state must include hover/tooltip text explaining its meaning:
 
 1. **Project-wide** badge tooltip: "Changes on this page affect every planning scenario in this project."
-2. **Scenario: [active scenario name]** badge tooltip: "Changes on this page only affect the [scenario name] scenario. Other scenarios are not affected."
-3. **Project-wide (scenario-aware)** badge tooltip: Write this specifically for each screen where it appears, clearly explaining exactly which data is shared across all scenarios and which part is scenario-dependent. Do not use one generic sentence for this badge state across multiple screens.
+2. **Scenario-specific** badge tooltip: "Changes on this page only affect the [scenario name] scenario. Other scenarios are not affected."
+3. **Scenario-aware** badge tooltip: Write this specifically for each screen where it appears, clearly explaining exactly which data is shared across all scenarios and which part is scenario-dependent. Do not use one generic sentence for this badge state across multiple screens.
 
 For Parts Catalog specifically, use: "The parts catalog itself is shared across every scenario. Whether a part is marked Active applies only to the currently selected scenario."
 
-The badge must use consistent colors, wording, and placement on every screen with no exceptions. This standard is locked. Retrofitting this badge onto every existing screen is a separate future task.
+The badge must use consistent colors, wording, and placement on every screen with no exceptions. This standard is locked. Use the shared helpers in `utils/scope_ui.py` for every page title and for Overview's two scoped section headings.
+
+Every **Scenario-specific** and **Scenario-aware** page title must also show the active scenario's revision and name in a dropdown beside the badge. The badge itself stays concise and does not repeat the active scenario name or revision. Changing that dropdown changes the browser session's single active scenario, synchronizes the sidebar selector, and controls the scenario data shown on every subsequent page until the contributor changes it again. When no valid scenario has been selected, default to the newest non-archived scenario returned by the standard scenario ordering.
+
+Every scenario-specific page title must also place a blue **Save as scenario** button immediately beside that scenario dropdown. The shared page-title helper owns this control so new scenario-specific screens receive it automatically. It creates a complete branch from the scenario shown in the adjacent dropdown, makes the new branch the browser session's active scenario, and exposes it immediately in Overview's Planning scenarios table. Scenario-aware and project-wide pages do not receive this button.
 
 ## Help Text (Hover) Standard
 
@@ -154,7 +164,7 @@ This glossary is active, locked policy, not merely informational, and must be ch
 | Questions page | **Questions and concerns** | Navigation and page title |
 | Import/export page | **Import PITS and export** | Navigation and page title |
 | Fishbone page | **Parts to fishbone** | Navigation and page title |
-| Requirements page | **Requirements** | Navigation and page title |
+| Pin Map page | **Pin Map** | Navigation and page title |
 | Parts master | **Parts Catalog** | Page title, captions, help text, dialogs, and cross-page references |
 | Fishbone framework | **Fishbone framework** | Section headings and explanatory copy |
 | Fishbone section | **Fishbone section** | Filters, selectors, table columns, captions, and help text |

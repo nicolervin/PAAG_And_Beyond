@@ -18,39 +18,87 @@ def selectable_dataframe(data, *, key: str, **kwargs):
     return st.dataframe(data, key=key, **kwargs)
 
 
-def sortable_editor_rows(
+def direct_entry_editor_rows(
     dataframe: pd.DataFrame,
     *,
-    defaults: dict[str, object] | None = None,
+    editor_key: str,
+    sort_columns: Iterable[str] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> pd.DataFrame:
-    """Append one editable new-record row without disabling column sorting.
+    """Sort saved rows before a direct-entry, multi-row-paste editor renders.
 
-    Streamlit disables its native column sorting when ``num_rows`` is
-    ``"dynamic"`` or ``"add"``. Standard editors therefore use
-    ``num_rows="delete"`` and receive one explicit blank row from this helper.
+    Streamlit disables native header sorting when an editor permits row
+    creation. These external controls preserve sorting without inserting an
+    extra Add row step. Controls lock while the editor has draft changes or
+    native row selections so row positions cannot shift underneath the draft.
     """
-    defaults = defaults or {}
-    blank: dict[str, object] = {}
-    for column in dataframe.columns:
-        if column in defaults:
-            blank[column] = defaults[column]
+    labels = labels or {}
+    requested_columns = list(sort_columns or dataframe.columns)
+    candidates: list[str] = []
+    for column in requested_columns:
+        if column not in dataframe.columns:
             continue
-        dtype = dataframe[column].dtype
-        if pd.api.types.is_bool_dtype(dtype):
-            blank[column] = False
-        elif pd.api.types.is_datetime64_any_dtype(dtype):
-            blank[column] = pd.NaT
-        elif pd.api.types.is_numeric_dtype(dtype):
-            blank[column] = None
-        elif isinstance(dtype, pd.StringDtype):
-            blank[column] = ""
-        else:
-            blank[column] = None
-    return pd.concat(
-        [dataframe, pd.DataFrame([blank], columns=dataframe.columns)],
-        ignore_index=True,
-        sort=False,
+        candidates.append(column)
+    if not candidates:
+        return dataframe.copy()
+
+    sort_key = f"{editor_key}_external_sort_column"
+    direction_key = f"{editor_key}_external_sort_direction"
+    valid_options = ["", *candidates]
+    if st.session_state.get(sort_key) not in valid_options:
+        st.session_state[sort_key] = ""
+    if not isinstance(st.session_state.get(direction_key), bool):
+        st.session_state[direction_key] = False
+    editor_state = st.session_state.get(editor_key, {}) or {}
+    controls_locked = bool(
+        editor_state.get("edited_rows")
+        or editor_state.get("added_rows")
+        or editor_state.get("deleted_rows")
     )
+    controls = st.container(horizontal=True, vertical_alignment="bottom")
+    sort_column = controls.selectbox(
+        "Sort rows by",
+        options=valid_options,
+        format_func=lambda column: (
+            "Saved order"
+            if not column
+            else labels.get(column, column.replace("_", " ").capitalize())
+        ),
+        key=sort_key,
+        disabled=controls_locked,
+        help="Choose the saved-row order before editing or pasting new rows.",
+        width=240,
+    )
+    descending = controls.toggle(
+        "Descending",
+        key=direction_key,
+        disabled=controls_locked or not sort_column,
+        help="Turn on to reverse the selected sort order.",
+    )
+    if controls_locked:
+        controls.caption("Save, undo, or clear selected rows before changing the sort.")
+    if not sort_column:
+        return dataframe.copy()
+    sort_values = dataframe[sort_column]
+    if any(
+        isinstance(value, (list, tuple, set, dict))
+        for value in sort_values.dropna().tolist()
+    ):
+        comparable = sort_values.map(
+            lambda value: " | ".join(str(item) for item in value)
+            if isinstance(value, (list, tuple, set))
+            else ("" if value is None else str(value))
+        )
+        positions = comparable.sort_values(
+            ascending=not bool(descending), na_position="last", kind="stable"
+        ).index
+        return dataframe.loc[positions].reset_index(drop=True)
+    return dataframe.sort_values(
+        by=sort_column,
+        ascending=not bool(descending),
+        na_position="last",
+        kind="stable",
+    ).reset_index(drop=True)
 
 
 def drop_untouched_new_rows(
@@ -59,7 +107,7 @@ def drop_untouched_new_rows(
     identifying_columns: Iterable[str],
     id_column: str = "id",
 ) -> pd.DataFrame:
-    """Remove the untouched blank row supplied by :func:`sortable_editor_rows`."""
+    """Remove any untouched new-record rows returned by a dynamic editor."""
 
     def is_blank(value: object) -> bool:
         if value is None:

@@ -22,6 +22,7 @@ from utils.store import (
     update_part_feature_rules,
     update_part_rows,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -36,7 +37,7 @@ from utils.table_ui import (
     selectable_dataframe,
     selected_rows_action_bar,
     standard_details_column_config,
-    sortable_editor_rows,
+    direct_entry_editor_rows,
     table_has_unsaved_changes,
 )
 
@@ -44,7 +45,14 @@ from utils.table_ui import (
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 parts_editor_key = f"parts_catalog_editor_v7_{scenario_id}"
-st.title("Parts Catalog")
+page_title_with_scope(
+    "Parts Catalog",
+    scope="scenario-aware",
+    help_text=(
+        "The parts catalog itself is shared across every scenario. Whether a part is marked "
+        "Active applies only to the currently selected scenario."
+    ),
+)
 st.caption(
     "Connect official part numbers to CAD screenshots, revisions, model applicability, and the "
     "parts active in this planning scenario."
@@ -140,7 +148,7 @@ parts_actions = editable_table_header(
 )
 save_part_table = parts_actions.save_and_refresh
 if parts_actions.undo:
-    st.session_state.pop(parts_editor_key, None)
+    request_table_editor_reset(parts_editor_key)
     st.toast("Discarded the unsaved part-table edits", icon=":material/undo:")
     st.rerun()
 st.caption("Edit catalog fields directly, then save. Select View details on a row to open its photos and full information below.")
@@ -181,15 +189,20 @@ selected_part_key = f"parts_selected_id_{project_id}"
 def open_part_details() -> None:
     click = st.session_state.get("parts_view_details")
     if click and 0 <= click["row"] < len(parts_for_editing):
-        st.session_state[selected_part_key] = str(parts_for_editing.iloc[click["row"]]["id"])
+        st.session_state[selected_part_key] = str(parts_editor_rows.iloc[click["row"]]["id"])
 
 
-parts_editor_rows = sortable_editor_rows(
+parts_editor_rows = direct_entry_editor_rows(
     parts_for_editing,
-    defaults={
-        "active": True,
-        "revision": "0",
-        "feature_applicability": ["All models"],
+    editor_key=parts_editor_key,
+    sort_columns=[
+        "active", "photo_status", "part_number", "description", "revision",
+        "feature_applicability", "applicability_status", "notes", "source", "updated_at",
+    ],
+    labels={
+        "photo_status": "Photo status", "part_number": "Part number",
+        "description": "Part name", "feature_applicability": "Feature applicability",
+        "applicability_status": "Applicability status", "updated_at": "Updated",
     },
 )
 parts_action_slot = st.empty()
@@ -197,7 +210,7 @@ edited_parts = st.data_editor(
     parts_editor_rows,
     key=parts_editor_key,
     hide_index=True,
-    num_rows="delete",
+    num_rows="dynamic",
     height=430,
     disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at"],
     column_order=["view_details", "active", "photo_status", "part_number", "description", "revision", "feature_applicability", "applicability_status", "notes", "source", "updated_at"],
@@ -236,7 +249,7 @@ edited_parts = st.data_editor(
     },
 )
 st.caption(
-    "Add a part in the blank row, then save. Use View details to manage its Primary CAD image "
+    "Type or paste new parts directly into the blank entry row, then save. Use View details to manage its Primary CAD image "
     "and additional views."
 )
 
@@ -252,7 +265,7 @@ st.download_button(
     icon=":material/download:",
 )
 
-selected_saved_parts = native_selected_rows(parts_for_editing, editor_key=parts_editor_key)
+selected_saved_parts = native_selected_rows(parts_editor_rows, editor_key=parts_editor_key)
 bulk_controls = selected_rows_action_bar(
     parent=parts_action_slot,
 )
@@ -427,7 +440,7 @@ def render_parts_history() -> None:
             )
 
 if parts.empty:
-    st.info("Add the first part in the blank row above, then select Save part table.")
+    st.info("Type or paste the first part into the blank entry row, then select Save & refresh.")
     render_parts_history()
     st.stop()
 

@@ -34,6 +34,7 @@ The app creates `data/paag.db` on first run and seeds a small sample project. Up
 - Build an ordered, editable process plan by pitch and record the exact step that completes each made assembly
 - Treat purchased assemblies as ordinary part-catalog items rather than separate manufacturing-assembly records
 - Build Yamazumi drafts by Fishbone spine, manage active/open/blocked pitch addresses, compare side-by-side model variants, and drag work between odd north-side and even south-side pitches
+- Review each scenario in a Pin Map that places linked Process at a Glance work above its Yamazumi workstation or pitch
 - Capture process tools, locations, unit orientation, and conveyor height using imperial display units
 - Track questions, concerns, decisions, assumptions, owners, and status
 - Export a multi-sheet Excel workbook with a flat `Lucid Data Link` sheet

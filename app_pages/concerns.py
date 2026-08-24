@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import project_table, record_audit_event, replace_concerns
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -12,14 +13,14 @@ from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_header,
     native_selected_rows,
-    sortable_editor_rows,
+    direct_entry_editor_rows,
 )
 
 
 project_id = st.session_state.get("project_id")
 editor_key = "concerns_editor"
 pending_delete_key = f"concerns_pending_delete_{project_id}"
-st.title("Questions and concerns")
+page_title_with_scope("Questions and concerns", scope="project")
 st.caption("Keep unresolved assumptions and cross-functional decisions visible as the process changes.")
 if not project_id:
     st.stop()
@@ -63,24 +64,32 @@ visible_concerns = filter_table(
     search_columns=["subject", "detail", "owner", "related_part", "related_station"],
     reset_widget_keys=[editor_key],
 )
-concerns_for_editing = sortable_editor_rows(
+concerns_for_editing = direct_entry_editor_rows(
     visible_concerns,
-    defaults={
-        "category": "Question",
-        "priority": "Medium",
-        "status": "Open",
-    },
+    editor_key=editor_key,
+    sort_columns=[
+        "category", "subject", "priority", "status", "owner",
+        "related_part", "related_station", "created_at",
+    ],
 )
 edited = st.data_editor(
-    concerns_for_editing, key=editor_key, num_rows="delete", hide_index=True, height=430,
+    concerns_for_editing, key=editor_key, num_rows="dynamic", hide_index=True, height=430,
     disabled=["id", "created_at"], column_order=[column for column in columns if column != "id"],
     column_config={
         "id": None,
-        "category": st.column_config.SelectboxColumn(options=["Question", "Concern", "Decision", "Assumption"]),
+        "category": st.column_config.SelectboxColumn(
+            options=["Question", "Concern", "Decision", "Assumption"],
+            default="Question",
+        ),
         "subject": st.column_config.TextColumn(required=True, pinned=True),
         "detail": st.column_config.TextColumn(width="large"),
-        "priority": st.column_config.SelectboxColumn(options=["Low", "Medium", "High", "Critical"]),
-        "status": st.column_config.SelectboxColumn(options=["Open", "Investigating", "Waiting", "Resolved", "Closed"]),
+        "priority": st.column_config.SelectboxColumn(
+            options=["Low", "Medium", "High", "Critical"], default="Medium"
+        ),
+        "status": st.column_config.SelectboxColumn(
+            options=["Open", "Investigating", "Waiting", "Resolved", "Closed"],
+            default="Open",
+        ),
         "created_at": st.column_config.DatetimeColumn("Created", format="MMM DD, YYYY HH:mm"),
     },
 )
@@ -154,7 +163,7 @@ def current_editor_rows() -> pd.DataFrame:
 
 
 selected_concerns = native_selected_rows(
-    visible_concerns,
+    concerns_for_editing,
     editor_key=editor_key,
 )
 request_delete = False

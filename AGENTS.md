@@ -8,7 +8,7 @@ This project is built and maintained by multiple functional roles, not exclusive
 
 Rule 1 — General task language: wherever existing documentation, code comments, or UI labels say "IE" or "industrial engineer" in a way that describes a general task any contributor could perform (e.g., "any IE may add help text," "the IE enters this field"), treat this as shorthand for "collaborator" or "contributor," not as a restriction to the IE role specifically.
 
-Rule 2 — Role-specific ownership stays explicit: wherever a rule is genuinely role-specific — meaning only one function should own or edit that data (for example, torque and quality specs are owned by Quality/AQE in the Requirements section, not by the IE in Process at a Glance) — that ownership must remain explicit and must NOT be generalized to "any collaborator."
+Rule 2 — Role-specific ownership stays explicit: wherever a rule is genuinely role-specific — meaning only one function should own or edit that data (for example, torque and quality specs are owned by Quality/AQE in the future Quality functional review, not by the IE in Process at a Glance) — that ownership must remain explicit and must NOT be generalized to "any collaborator."
 
 Rule 3 — Adding a new role is lightweight: adding a new role name to this list (granting someone general access to use Codex on this repo) requires no special process — simply add the role name and a one-line description here.
 
@@ -97,7 +97,7 @@ SQLite foreign-key checks are enabled and the database uses write-ahead logging.
 - `app_pages/fishbone.py` — Assembly framework, nested subassemblies, catalog-part placement, occurrence ordering, and the interactive fishbone visualization.
 - `app_pages/yamazumi.py` — Planning-scenario branching, Yamazumi import/reset, assembly areas, pitch generation, work regions, flags, model variants, the interactive balancing board, and editable pitch/work-element tables.
 - `app_pages/process.py` — Pairs fishbone parts to Yamazumi work, reconciles selected work into the process plan, captures process requirements, supports bulk actions and export, and shows a simple workload-by-pitch chart.
-- `app_pages/requirements.py` — Read-only review of tooling, torque, quality, ergonomics, material, location, and geometry requirements by process step.
+- `app_pages/pin_map.py` — Scenario-specific, read-only line visualization with explicitly linked Process at a Glance work above each Yamazumi workstation or pitch.
 - `app_pages/functional_equipment.py` — Non-persistent Equipment functional-review shell.
 - `app_pages/functional_ergonomics.py` — Non-persistent Ergonomics functional-review shell.
 - `app_pages/functional_quality.py` — Non-persistent Quality functional-review shell.
@@ -111,6 +111,7 @@ SQLite foreign-key checks are enabled and the database uses write-ahead logging.
 - `utils/excel_io.py` — Reads ordinary BOM files, recognizes and parses current and legacy PITS formats, suggests column mappings, and builds the multi-sheet Excel export.
 - `utils/table_ui.py` — Shared editable-table header, unsaved-change detection, native selected-row interpretation, required-field checks, details-button configuration, and filtered-table Excel export.
 - `utils/table_filters.py` — Keyword/dropdown filters, multi-value filtering, merging filtered edits back into the full table, and reliable editor-reset helpers.
+- `utils/scope_ui.py` — Shared Scenario Boundary page-title and Overview section-heading badges, including locked labels, hover text, and the cross-page active-scenario selector.
 - `utils/yamazumi_board.py` — Components v2 Yamazumi board. It displays odd pitch addresses on the north/top side, even addresses on the south/bottom side, variant stacks, timed work blocks, flags, and drag/edit/add events.
 - `utils/fishbone_visual.py` — Components v2 interactive assembly fishbone with pan, zoom, full-screen view, part cards, thumbnails, and hover details.
 - `utils/clipboard_image.py` — Components v2 clipboard capture plus server-side image validation and conversion into an upload-like object.
@@ -149,7 +150,7 @@ Maintains source model numbers and the names/descriptions familiar to the projec
 
 #### Parts Catalog
 
-Maintains one catalog record per official part number. It records description, revision, provenance/source, notes, and feature-based model applicability. A scenario-specific Active checkbox controls whether a catalog part appears in downstream Fishbone, Process at a Glance, Requirements, and scenario-export views without deleting the master record or its saved links. It supports a primary CAD image, additional image views, file upload, and direct Windows screenshot paste from Part Details. New parts are created in the blank table row and default to active in each scenario until explicitly turned off there.
+Maintains one catalog record per official part number. It records description, revision, provenance/source, notes, and feature-based model applicability. A scenario-specific Active checkbox controls whether a catalog part appears in downstream Fishbone, Process at a Glance, Pin Map-linked work, and scenario-export views without deleting the master record or its saved links. It supports a primary CAD image, additional image views, file upload, and direct Windows screenshot paste from Part Details. New parts are typed or pasted directly into the table's blank entry row and default to active in each scenario until explicitly turned off there.
 
 #### Parts to fishbone
 
@@ -175,9 +176,9 @@ Creates or imports balancing areas, pitch addresses, and work elements inside th
 
 Starts from Yamazumi work rather than creating unrelated duplicate work. The upper workspace selects a fishbone section, one Yamazumi work element, and one or more part uses, then records whether all parts are used, one alternative is chosen, or the parts are optional. The main table orders the work by pitch and captures time, output-assembly milestones, tools, torque, quality, ergonomics, location, conveyor/platform height, pit depth, model applicability, and status.
 
-#### Requirements
+#### Pin Map
 
-Provides a read-only, pitch-filtered review of the requirements already entered in Process plan. Process plan remains the source for edits.
+Provides a scenario-specific, read-only visual of the production line. Each Yamazumi workstation or pitch displays explicitly reconciled Process at a Glance work above it. The view derives from existing scenario, pitch, Yamazumi-element, and Process records and does not persist separate layout data.
 
 ### Functional Reviews
 
@@ -191,7 +192,7 @@ Project-wide, non-persistent shell for future ergonomics review content.
 
 #### Quality
 
-Project-wide, non-persistent shell for future quality review content.
+Project-wide, non-persistent shell and approved future home for requirements review content. The former Requirements page implementation was intentionally removed so the Quality/AQE workflow can be designed against the current rule book and design standards.
 
 #### Materials
 
@@ -264,6 +265,7 @@ Do not skip this gate even if the requester seems confident or in a hurry. If th
 - Use `st.rerun()` after a successful write when the displayed data must be reloaded. Use a scoped rerun only where an existing fragment/dialog pattern requires it.
 - Prefer native Streamlit elements. Use Components v2 only for interactions native Streamlit cannot provide, as with clipboard capture and the two interactive visuals.
 - Use Material Symbols (`:material/...:`), sentence-case labels, native bordered containers, and the project theme. Do not add general CSS styling unless a custom component truly needs its own encapsulated styles.
+- Render every active page title with `page_title_with_scope()` from `utils/scope_ui.py`. Scenario-specific and scenario-aware page titles receive the shared active-scenario dropdown automatically. Overview must also use `section_heading_with_scope()` for its project-wide and active-scenario sections.
 - Use `width="stretch"` or `width="content"`; do not introduce deprecated `use_container_width`.
 
 ### Data access and database changes
@@ -294,11 +296,11 @@ Do not skip this gate even if the requester seems confident or in a hurry. If th
 Use `utils/table_ui.py` and `utils/table_filters.py` for every new editable table or tab. Match this interaction pattern:
 
 - Put the section title, orange unsaved-changes indicator, Undo control, and blue **Save & refresh** button on one line at the top. Use `editable_table_header()` unless there is a documented reason it cannot fit.
-- Support direct cell editing and direct row creation whenever the data model permits it.
+- Support direct cell editing and direct spreadsheet-style multi-row paste whenever the data model permits row creation. Row-creating editors use Streamlit's native blank entry row; do not add a separate **Add row** button.
 - Every data table must show native row-selection checkboxes on the far left, and the unlabeled upper-left checkbox must select or clear all currently visible rows in one click.
 - Use Streamlit's native selected/deleted-row state through `num_rows="delete"` for editable tables. Use `selectable_dataframe()` for read-only tables so they receive native multi-row selection consistently.
 - Keep selection non-destructive. The native editor deletion toolbar is hidden; selection must not write data or expose a trash-can or row-deletion action.
-- Keep native Sort ascending and Sort descending available in every standard table column menu. For editable tables that need a new-record row, use `sortable_editor_rows()` with `num_rows="delete"`; Streamlit disables sorting for `num_rows="dynamic"` and `num_rows="add"`.
+- Keep native Sort ascending and Sort descending available in read-only tables and editable tables that do not create rows. Streamlit disables native header sorting when `num_rows="dynamic"`, so row-creating editors must use `direct_entry_editor_rows(..., editor_key=...)` immediately before `st.data_editor(..., num_rows="dynamic")`. The helper provides external **Sort rows by** and **Descending** controls and locks them while the editor contains draft edits, pasted rows, or native row selections. Contributors must save, undo, or clear selections before changing sort order.
 - Do not add a named `CheckboxColumn` or a separate Select all control to simulate selection.
 - Read selected persisted rows with `native_selected_rows()`. Treat selection as transient UI state, not an unsaved business-data edit. Use `table_has_unsaved_changes(..., native_row_selection=True)` where selection must be excluded from change detection.
 - Prevent a normal save while persisted rows remain selected; selection is reserved for bulk actions.

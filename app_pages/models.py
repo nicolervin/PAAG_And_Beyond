@@ -18,11 +18,12 @@ from utils.store import (
     update_complexity_tree,
     update_project_model_rows,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_header,
     native_selected_rows,
-    sortable_editor_rows,
+    direct_entry_editor_rows,
     table_has_unsaved_changes,
 )
 from utils.table_filters import (
@@ -34,7 +35,7 @@ from utils.table_filters import (
 
 
 project_id = st.session_state.get("project_id")
-st.title("Model definitions")
+page_title_with_scope("Model definitions", scope="project")
 st.caption("Translate official model numbers into the names and descriptions the IE and lean team use during planning.")
 if not project_id:
     st.stop()
@@ -90,15 +91,15 @@ save_requested = planning_action.button(
 )
 if undo_requested:
     if has_unsaved_changes:
-        st.session_state.pop("model_definitions_editor_v2", None)
+        request_table_editor_reset("model_definitions_editor_v2")
         st.toast("Discarded the unsaved model table edits", icon=":material/undo:")
     else:
         restore_model_planning_snapshot(project_id, st.session_state.pop(model_undo_key))
-        st.session_state.pop("model_definitions_editor_v2", None)
+        request_table_editor_reset("model_definitions_editor_v2")
         st.toast("Undid the last saved model change", icon=":material/undo:")
     st.rerun()
 st.caption("Model number stays tied to the official source. Edit the team-facing definition and turn off models that should not appear on the Parts page.")
-st.caption("Add a model by entering it in the blank row at the bottom of the table, then save.")
+st.caption("Type or paste new model rows directly into the blank entry row, then save.")
 definition_columns = [
     "id", "model_number", "display_name", "eau", "description", "active", "notes",
     "updated_at",
@@ -118,12 +119,17 @@ visible_models = filter_table(
 )
 
 
-models_editor_rows = sortable_editor_rows(visible_models, defaults={"active": True})
+models_editor_rows = direct_entry_editor_rows(
+    visible_models,
+    editor_key="model_definitions_editor_v2",
+    sort_columns=["active", "display_name", "model_number", "eau", "description"],
+    labels={"display_name": "Common name", "model_number": "Official model number", "eau": "EAU"},
+)
 edited_models = st.data_editor(
     models_editor_rows,
     key="model_definitions_editor_v2",
     hide_index=True,
-    num_rows="delete",
+    num_rows="dynamic",
     height=500,
     disabled=["id", "updated_at"],
     column_order=[
@@ -152,7 +158,7 @@ edited_models = st.data_editor(
 )
 
 selected_models = native_selected_rows(
-    visible_models, editor_key="model_definitions_editor_v2"
+    models_editor_rows, editor_key="model_definitions_editor_v2"
 )
 request_model_delete = False
 if request_model_delete:
@@ -266,12 +272,17 @@ if features.empty:
 else:
     feature_rows = features.reindex(columns=feature_columns)
 
-feature_editor_rows = sortable_editor_rows(feature_rows, defaults={"active": True})
+feature_editor_rows = direct_entry_editor_rows(
+    feature_rows,
+    editor_key=feature_editor_key,
+    sort_columns=["active", "category", "name", "allowed_choices", "description"],
+    labels={"active": "Use", "name": "Feature"},
+)
 edited_features = st.data_editor(
     feature_editor_rows,
     key=feature_editor_key,
     hide_index=True,
-    num_rows="delete",
+    num_rows="dynamic",
     height=320,
     disabled=["id"],
     column_order=["active", "category", "name", "allowed_choices", "description"],
@@ -360,7 +371,7 @@ def current_feature_editor_rows() -> pd.DataFrame:
 
 
 selected_features = native_selected_rows(
-    feature_rows,
+    feature_editor_rows,
     editor_key=feature_editor_key,
 )
 request_feature_delete = False

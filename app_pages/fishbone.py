@@ -21,6 +21,7 @@ from utils.store import (
     save_fishbone_plan,
     update_assembly_section_rows,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -39,7 +40,14 @@ from utils.table_ui import (
 
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
-st.title("Parts to assembly fishbone")
+page_title_with_scope(
+    "Parts to assembly fishbone",
+    scope="scenario-aware",
+    help_text=(
+        "The fishbone structure is shared across every scenario. Which parts are visible and "
+        "available on this page depends on the currently selected scenario."
+    ),
+)
 st.caption("Build the assembly framework first, then place approved Parts-table content into its sections and subassemblies.")
 if not project_id or not scenario_id:
     st.stop()

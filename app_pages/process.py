@@ -26,6 +26,7 @@ from utils.store import (
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -50,11 +51,6 @@ missing_part_dialog_key = f"process_missing_part_dialog_{scenario_id}"
 pairing_delete_key = f"process_pairings_pending_remove_{scenario_id}"
 detail_pairing_delete_key = f"process_detail_pairing_pending_remove_{scenario_id}"
 detail_restore_key = f"process_detail_restore_{scenario_id}"
-st.title("Process at a Glance")
-st.caption(
-    "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
-    "Process at a Glance by pitch. A purchased assembly is handled as one catalog part."
-)
 if not project_id or not scenario_id:
     st.stop()
 
@@ -62,6 +58,13 @@ scenario = get_planning_scenario(project_id, scenario_id)
 if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
+page_title_with_scope(
+    "Process at a Glance", scope="scenario", scenario_name=scenario["name"]
+)
+st.caption(
+    "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
+    "Process at a Glance by pitch. A purchased assembly is handled as one catalog part."
+)
 st.caption(f"Rev {scenario['revision_label']} · {scenario['name']} · {scenario['status']}")
 
 sections = assembly_sections(project_id)

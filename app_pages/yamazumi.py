@@ -10,14 +10,12 @@ from utils.store import (
     assembly_sections,
     audit_history,
     clear_yamazumi_data,
-    clone_planning_scenario,
     complexity_features,
     delete_yamazumi_flag_definitions,
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
     move_yamazumi_element,
-    next_scenario_revision_label,
     parse_yamazumi_model_variants,
     record_audit_event,
     rename_yamazumi_variants,
@@ -38,6 +36,7 @@ from utils.store import (
     yamazumi_pitches_for_scenario,
     yamazumi_work_regions,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -52,7 +51,7 @@ from utils.table_ui import (
     required_field_errors,
     selectable_dataframe,
     selected_rows_action_bar,
-    sortable_editor_rows,
+    direct_entry_editor_rows,
     table_has_unsaved_changes,
 )
 from utils.yamazumi_board import yamazumi_board
@@ -70,10 +69,6 @@ ADD_ELEMENT_VARIANT_HELP = (
     "Choose every model stack where this same work element applies. Missing stacks are added "
     "automatically to the destination pitch."
 )
-st.title("Yamazumi")
-st.caption(
-    "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating the Process Plan."
-)
 if not project_id or not scenario_id:
     st.stop()
 
@@ -82,42 +77,14 @@ if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
 
-suggested_revision = next_scenario_revision_label(project_id, scenario["revision_label"])
+page_title_with_scope(
+    "Yamazumi", scope="scenario", scenario_name=scenario["name"]
+)
+st.caption(
+    "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating the Process Plan."
+)
+
 has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
-
-
-@st.dialog("Save as planning scenario")
-def save_as_scenario_dialog() -> None:
-    st.caption(
-        f"Copy Rev {scenario['revision_label']} · {scenario['name']}. The source scenario will remain unchanged."
-    )
-    with st.form(f"save_as_scenario_{scenario_id}"):
-        name = st.text_input("New scenario name", value=f"{scenario['name']} · Rev {suggested_revision}")
-        revision_label = st.text_input("Revision label", value=suggested_revision)
-        takt_time = st.number_input(
-            "Target takt time (seconds)", min_value=0.1, value=float(scenario["takt_time_s"]), step=0.1
-        )
-        change_summary = st.text_area(
-            "What is changing?",
-            placeholder="Example: Higher demand; rebalance the same work across six stations.",
-        )
-        if st.form_submit_button("Create scenario", type="primary", icon=":material/content_copy:"):
-            try:
-                new_scenario_id = clone_planning_scenario(
-                    project_id,
-                    scenario_id,
-                    name,
-                    revision_label,
-                    takt_time,
-                    change_summary,
-                    st.session_state.get("current_editor", ""),
-                )
-                st.session_state.scenario_id = new_scenario_id
-                st.session_state.pop("global_scenario", None)
-                st.toast("Scenario created; the new branch is now active", icon=":material/check_circle:")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
 
 
 with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
@@ -125,8 +92,6 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
         f"Rev {scenario['revision_label']} · {scenario['name']} · "
         f"{float(scenario['takt_time_s']):.1f} s takt"
     )
-    if st.button("Save as scenario", type="primary", icon=":material/content_copy:"):
-        save_as_scenario_dialog()
     request_clear_area = st.button(
         "Clear this Yamazumi Section",
         type="primary",
@@ -497,13 +462,18 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         labels={"active": "Active"},
         reset_widget_keys=[region_editor_key],
     )
-    region_editor_rows = sortable_editor_rows(visible_regions, defaults={"active": True})
+    region_editor_rows = direct_entry_editor_rows(
+        visible_regions,
+        editor_key=region_editor_key,
+        sort_columns=["name", "description", "active"],
+        labels={"name": "Work region name"},
+    )
     region_action_slot = st.empty()
     edited_regions = st.data_editor(
         region_editor_rows,
         key=region_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=300,
         disabled=["id", "color", "sequence", "updated_at"],
         column_order=["name", "description", "active"],
@@ -521,7 +491,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
     )
 
     selected_regions = native_selected_rows(
-        visible_regions, editor_key=region_editor_key
+        region_editor_rows, editor_key=region_editor_key
     )
     region_bulk = selected_rows_action_bar(
         parent=region_action_slot,
@@ -692,13 +662,18 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         reset_widget_keys=[flag_editor_key],
     )
 
-    flag_editor_rows = sortable_editor_rows(visible_flags, defaults={"active": True})
+    flag_editor_rows = direct_entry_editor_rows(
+        visible_flags,
+        editor_key=flag_editor_key,
+        sort_columns=["name", "description", "active", "system_flag"],
+        labels={"name": "Flag name", "system_flag": "System flag"},
+    )
     flag_action_slot = st.empty()
     edited_flags = st.data_editor(
         flag_editor_rows,
         key=flag_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=300,
         disabled=["id", "system_flag", "sequence", "updated_at"],
         column_order=["name", "description", "active"],
@@ -716,7 +691,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         },
     )
 
-    selected_flags = native_selected_rows(visible_flags, editor_key=flag_editor_key)
+    selected_flags = native_selected_rows(flag_editor_rows, editor_key=flag_editor_key)
     custom_selected_flags = selected_flags.loc[
         ~selected_flags["system_flag"].fillna(False).astype(bool)
     ] if not selected_flags.empty else selected_flags
@@ -1286,7 +1261,7 @@ else:
         native_row_selection=True,
     )
     if pitch_actions.undo:
-        st.session_state.pop(pitch_editor_key, None)
+        request_table_editor_reset(pitch_editor_key)
         st.rerun()
 selected_pitch_area_ids = st.multiselect(
     "Areas shown in pitch-address table",
@@ -1386,26 +1361,31 @@ if pitch_combined_view:
     )
     edited_pitches = visible_pitches
 else:
-    pitch_editor_rows = sortable_editor_rows(
+    pitch_editor_rows = direct_entry_editor_rows(
         visible_pitches,
-        defaults={
-            "pitch_type": "Pitch",
-            "status": "Active",
-            "model_variants": ["Base"],
+        editor_key=pitch_editor_key,
+        sort_columns=[
+            "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
+            "model_variants", "sequence"
+        ],
+        labels={
+            "area_name": "Yamazumi area", "pitch_number": "Pitch address",
+            "pitch_name": "Pitch name", "pitch_type": "Pitch type",
+            "model_variants": "Model variants", "sequence": "Order",
         },
     )
     edited_pitches = st.data_editor(
         pitch_editor_rows,
         key=pitch_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=280,
         disabled=["id", "area_name", "updated_at"],
         column_order=pitch_column_order,
         column_config=pitch_column_config,
     )
     selected_pitches = native_selected_rows(
-        visible_pitches, editor_key=pitch_editor_key
+        pitch_editor_rows, editor_key=pitch_editor_key
     )
     request_pitch_delete = False
     if request_pitch_delete:
@@ -1481,7 +1461,7 @@ else:
         native_row_selection=True,
     )
     if element_actions.undo:
-        st.session_state.pop(element_editor_key, None)
+        request_table_editor_reset(element_editor_key)
         st.rerun()
 selected_element_area_ids = st.multiselect(
     "Areas shown in work-elements table",
@@ -1621,28 +1601,31 @@ if element_combined_view:
     )
     edited_elements = visible_elements
 else:
-    element_editor_rows = sortable_editor_rows(
+    element_editor_rows = direct_entry_editor_rows(
         visible_elements,
-        defaults={
-            "pitch": "Unassigned",
-            "model_variants": ["Base"],
-            "work_type": "Cycle",
-            "work_region": "None",
-            "flags": [],
+        editor_key=element_editor_key,
+        sort_columns=[
+            "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
+            "work_region", "flags", "sequence",
+        ],
+        labels={
+            "area_name": "Yamazumi area", "model_variants": "Model variants",
+            "work_type": "Work type", "description": "Work description",
+            "time_s": "Time (s)", "work_region": "Work region", "sequence": "Order",
         },
     )
     edited_elements = st.data_editor(
         element_editor_rows,
         key=element_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=420,
         disabled=["id", "area_name", "source", "process_element_id", "process_sync_status", "updated_at"],
         column_order=element_column_order,
         column_config=element_column_config,
     )
     selected_elements = native_selected_rows(
-        visible_elements, editor_key=element_editor_key
+        element_editor_rows, editor_key=element_editor_key
     )
     request_element_delete = False
     if request_element_delete:
