@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import project_table, record_audit_event, replace_concerns
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -10,16 +11,17 @@ from utils.table_filters import (
 )
 from utils.table_ui import (
     drop_untouched_new_rows,
-    editable_table_header,
+    editable_table_footer,
+    editable_table_heading,
     native_selected_rows,
-    sortable_editor_rows,
+    direct_entry_editor_rows,
 )
 
 
 project_id = st.session_state.get("project_id")
 editor_key = "concerns_editor"
 pending_delete_key = f"concerns_pending_delete_{project_id}"
-st.title("Questions and concerns")
+page_title_with_scope("Questions and concerns", scope="project")
 st.caption("Keep unresolved assumptions and cross-functional decisions visible as the process changes.")
 if not project_id:
     st.stop()
@@ -45,16 +47,7 @@ if concerns.empty:
 else:
     concerns = concerns.reindex(columns=columns)
 
-header_actions = editable_table_header(
-    "Questions and concerns",
-    editor_key=editor_key,
-    key_prefix="concerns",
-    save_label="Save & refresh",
-    native_row_selection=True,
-)
-if header_actions.undo:
-    request_table_editor_reset(editor_key)
-    st.rerun()
+editable_table_heading("Questions and concerns")
 
 visible_concerns = filter_table(
     concerns,
@@ -63,27 +56,43 @@ visible_concerns = filter_table(
     search_columns=["subject", "detail", "owner", "related_part", "related_station"],
     reset_widget_keys=[editor_key],
 )
-concerns_for_editing = sortable_editor_rows(
+concerns_for_editing = direct_entry_editor_rows(
     visible_concerns,
-    defaults={
-        "category": "Question",
-        "priority": "Medium",
-        "status": "Open",
-    },
+    editor_key=editor_key,
+    sort_columns=[
+        "category", "subject", "priority", "status", "owner",
+        "related_part", "related_station", "created_at",
+    ],
 )
 edited = st.data_editor(
-    concerns_for_editing, key=editor_key, num_rows="delete", hide_index=True, height=430,
+    concerns_for_editing, key=editor_key, num_rows="dynamic", hide_index=True, height=430,
     disabled=["id", "created_at"], column_order=[column for column in columns if column != "id"],
     column_config={
         "id": None,
-        "category": st.column_config.SelectboxColumn(options=["Question", "Concern", "Decision", "Assumption"]),
+        "category": st.column_config.SelectboxColumn(
+            options=["Question", "Concern", "Decision", "Assumption"],
+            default="Question",
+        ),
         "subject": st.column_config.TextColumn(required=True, pinned=True),
         "detail": st.column_config.TextColumn(width="large"),
-        "priority": st.column_config.SelectboxColumn(options=["Low", "Medium", "High", "Critical"]),
-        "status": st.column_config.SelectboxColumn(options=["Open", "Investigating", "Waiting", "Resolved", "Closed"]),
+        "priority": st.column_config.SelectboxColumn(
+            options=["Low", "Medium", "High", "Critical"], default="Medium"
+        ),
+        "status": st.column_config.SelectboxColumn(
+            options=["Open", "Investigating", "Waiting", "Resolved", "Closed"],
+            default="Open",
+        ),
         "created_at": st.column_config.DatetimeColumn("Created", format="MMM DD, YYYY HH:mm"),
     },
 )
+footer_actions = editable_table_footer(
+    editor_key=editor_key,
+    key_prefix="concerns",
+    native_row_selection=True,
+)
+if footer_actions.undo:
+    request_table_editor_reset(editor_key)
+    st.rerun()
 
 
 def clean_text(value: object) -> str:
@@ -154,10 +163,10 @@ def current_editor_rows() -> pd.DataFrame:
 
 
 selected_concerns = native_selected_rows(
-    visible_concerns,
+    concerns_for_editing,
     editor_key=editor_key,
 )
-request_delete = False
+request_delete = not selected_concerns.empty
 if request_delete:
     pending_concerns = [
         {
@@ -192,6 +201,7 @@ def confirm_concern_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_concerns_bulk_delete"):
         st.session_state.pop(pending_delete_key, None)
+        request_table_editor_reset(editor_key)
         st.rerun()
     if actions.button(
         "Delete",
@@ -232,7 +242,7 @@ def confirm_concern_delete() -> None:
             record_audit_event(
                 project_id,
                 "Questions and concerns",
-                "Save & refresh",
+                "Save & Refresh",
                 len(other_edits),
                 editor_name,
                 {"concerns": other_edits, "saved_with_bulk_delete": True},
@@ -243,9 +253,10 @@ def confirm_concern_delete() -> None:
         st.rerun()
 
 
-st.session_state.pop(pending_delete_key, None)
+if st.session_state.get(pending_delete_key):
+    confirm_concern_delete()
 
-if header_actions.save_and_refresh:
+if footer_actions.save_and_refresh:
     if not selected_concerns.empty:
         st.warning("Clear selected rows before saving concern edits.")
     else:
@@ -256,7 +267,7 @@ if header_actions.save_and_refresh:
         record_audit_event(
             project_id,
             "Questions and concerns",
-            "Save & refresh",
+            "Save & Refresh",
             len(changed_concerns),
             st.session_state.get("current_editor", ""),
             {"concerns": changed_concerns},

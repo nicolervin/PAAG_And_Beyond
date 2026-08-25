@@ -10,14 +10,12 @@ from utils.store import (
     assembly_sections,
     audit_history,
     clear_yamazumi_data,
-    clone_planning_scenario,
     complexity_features,
     delete_yamazumi_flag_definitions,
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
     move_yamazumi_element,
-    next_scenario_revision_label,
     parse_yamazumi_model_variants,
     record_audit_event,
     rename_yamazumi_variants,
@@ -38,6 +36,7 @@ from utils.store import (
     yamazumi_pitches_for_scenario,
     yamazumi_work_regions,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -47,12 +46,13 @@ from utils.table_filters import (
 from utils.table_ui import (
     dataframe_to_excel,
     drop_untouched_new_rows,
-    editable_table_header,
+    editable_table_footer,
+    editable_table_heading,
     native_selected_rows,
     required_field_errors,
     selectable_dataframe,
     selected_rows_action_bar,
-    sortable_editor_rows,
+    direct_entry_editor_rows,
     table_has_unsaved_changes,
 )
 from utils.yamazumi_board import yamazumi_board
@@ -70,10 +70,6 @@ ADD_ELEMENT_VARIANT_HELP = (
     "Choose every model stack where this same work element applies. Missing stacks are added "
     "automatically to the destination pitch."
 )
-st.title("Yamazumi")
-st.caption(
-    "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating the Process Plan."
-)
 if not project_id or not scenario_id:
     st.stop()
 
@@ -82,42 +78,14 @@ if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
 
-suggested_revision = next_scenario_revision_label(project_id, scenario["revision_label"])
+page_title_with_scope(
+    "Yamazumi", scope="scenario", scenario_name=scenario["name"]
+)
+st.caption(
+    "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating the Process Plan."
+)
+
 has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
-
-
-@st.dialog("Save as planning scenario")
-def save_as_scenario_dialog() -> None:
-    st.caption(
-        f"Copy Rev {scenario['revision_label']} · {scenario['name']}. The source scenario will remain unchanged."
-    )
-    with st.form(f"save_as_scenario_{scenario_id}"):
-        name = st.text_input("New scenario name", value=f"{scenario['name']} · Rev {suggested_revision}")
-        revision_label = st.text_input("Revision label", value=suggested_revision)
-        takt_time = st.number_input(
-            "Target takt time (seconds)", min_value=0.1, value=float(scenario["takt_time_s"]), step=0.1
-        )
-        change_summary = st.text_area(
-            "What is changing?",
-            placeholder="Example: Higher demand; rebalance the same work across six stations.",
-        )
-        if st.form_submit_button("Create scenario", type="primary", icon=":material/content_copy:"):
-            try:
-                new_scenario_id = clone_planning_scenario(
-                    project_id,
-                    scenario_id,
-                    name,
-                    revision_label,
-                    takt_time,
-                    change_summary,
-                    st.session_state.get("current_editor", ""),
-                )
-                st.session_state.scenario_id = new_scenario_id
-                st.session_state.pop("global_scenario", None)
-                st.toast("Scenario created; the new branch is now active", icon=":material/check_circle:")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
 
 
 with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
@@ -125,8 +93,6 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
         f"Rev {scenario['revision_label']} · {scenario['name']} · "
         f"{float(scenario['takt_time_s']):.1f} s takt"
     )
-    if st.button("Save as scenario", type="primary", icon=":material/content_copy:"):
-        save_as_scenario_dialog()
     request_clear_area = st.button(
         "Clear this Yamazumi Section",
         type="primary",
@@ -483,12 +449,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
     region_rows["description"] = region_rows["description"].astype("string").fillna("")
     region_rows["active"] = region_rows["active"].fillna(1).astype(bool)
 
-    region_header = editable_table_header(
-        "Work regions",
-        editor_key=region_editor_key,
-        key_prefix=f"yamazumi_regions_{area_id}",
-        native_row_selection=True,
-    )
+    editable_table_heading("Work regions")
     visible_regions = filter_table(
         region_rows,
         key=f"yamazumi_region_filters_{area_id}",
@@ -497,13 +458,18 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         labels={"active": "Active"},
         reset_widget_keys=[region_editor_key],
     )
-    region_editor_rows = sortable_editor_rows(visible_regions, defaults={"active": True})
+    region_editor_rows = direct_entry_editor_rows(
+        visible_regions,
+        editor_key=region_editor_key,
+        sort_columns=["name", "description", "active"],
+        labels={"name": "Work region name"},
+    )
     region_action_slot = st.empty()
     edited_regions = st.data_editor(
         region_editor_rows,
         key=region_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=300,
         disabled=["id", "color", "sequence", "updated_at"],
         column_order=["name", "description", "active"],
@@ -519,9 +485,14 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
             "updated_at": None,
         },
     )
+    region_actions = editable_table_footer(
+        editor_key=region_editor_key,
+        key_prefix=f"yamazumi_regions_{area_id}",
+        native_row_selection=True,
+    )
 
     selected_regions = native_selected_rows(
-        visible_regions, editor_key=region_editor_key
+        region_editor_rows, editor_key=region_editor_key
     )
     region_bulk = selected_rows_action_bar(
         parent=region_action_slot,
@@ -541,7 +512,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         disabled=selected_regions.empty,
         key=f"apply_yamazumi_region_bulk_{area_id}",
     )
-    request_region_delete = False
+    request_region_delete = not selected_regions.empty
     region_bulk.download_button(
         "Export filtered",
         data=dataframe_to_excel(
@@ -603,6 +574,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         actions = st.container(horizontal=True)
         if actions.button("Cancel", key=f"cancel_yamazumi_region_delete_{area_id}"):
             st.session_state.pop(pending_key, None)
+            request_table_editor_reset(region_editor_key)
             st.rerun()
         if actions.button(
             "Delete regions",
@@ -629,13 +601,14 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
             st.toast(f"Deleted {len(pending_ids)} work regions", icon=":material/delete:")
             st.rerun()
 
-    st.session_state.pop(f"yamazumi_regions_pending_delete_{area_id}", None)
+    if st.session_state.get(f"yamazumi_regions_pending_delete_{area_id}"):
+        confirm_region_delete()
 
-    if region_header.undo:
+    if region_actions.undo:
         request_table_editor_reset(region_editor_key)
         st.rerun()
 
-    if region_header.save_and_refresh:
+    if region_actions.save_and_refresh:
         try:
             if not selected_regions.empty:
                 raise ValueError("Clear selected rows before saving work-region edits.")
@@ -654,7 +627,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
                 project_id, area_id, region_records_from(combined_regions)
             )
             record_audit_event(
-                project_id, "Yamazumi work regions", "Save & refresh", count,
+                project_id, "Yamazumi work regions", "Save & Refresh", count,
                 st.session_state.get("current_editor", ""),
             )
             request_table_editor_reset(region_editor_key)
@@ -677,12 +650,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
     flag_rows["active"] = flag_rows["active"].fillna(1).astype(bool)
     flag_rows["system_flag"] = flag_rows["system_flag"].fillna(0).astype(bool)
 
-    flag_header = editable_table_header(
-        "Flag definitions",
-        editor_key=flag_editor_key,
-        key_prefix=f"yamazumi_flags_{project_id}",
-        native_row_selection=True,
-    )
+    editable_table_heading("Flag definitions")
     visible_flags = filter_table(
         flag_rows,
         key=f"yamazumi_flag_filters_{project_id}",
@@ -692,13 +660,18 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         reset_widget_keys=[flag_editor_key],
     )
 
-    flag_editor_rows = sortable_editor_rows(visible_flags, defaults={"active": True})
+    flag_editor_rows = direct_entry_editor_rows(
+        visible_flags,
+        editor_key=flag_editor_key,
+        sort_columns=["name", "description", "active", "system_flag"],
+        labels={"name": "Flag name", "system_flag": "System flag"},
+    )
     flag_action_slot = st.empty()
     edited_flags = st.data_editor(
         flag_editor_rows,
         key=flag_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=300,
         disabled=["id", "system_flag", "sequence", "updated_at"],
         column_order=["name", "description", "active"],
@@ -715,8 +688,13 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
             "updated_at": None,
         },
     )
+    flag_actions = editable_table_footer(
+        editor_key=flag_editor_key,
+        key_prefix=f"yamazumi_flags_{project_id}",
+        native_row_selection=True,
+    )
 
-    selected_flags = native_selected_rows(visible_flags, editor_key=flag_editor_key)
+    selected_flags = native_selected_rows(flag_editor_rows, editor_key=flag_editor_key)
     custom_selected_flags = selected_flags.loc[
         ~selected_flags["system_flag"].fillna(False).astype(bool)
     ] if not selected_flags.empty else selected_flags
@@ -736,7 +714,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         disabled=custom_selected_flags.empty,
         key=f"apply_yamazumi_flag_bulk_{project_id}",
     )
-    request_flag_bulk_delete = False
+    request_flag_bulk_delete = not selected_flags.empty
     flag_bulk.download_button(
         "Export filtered",
         data=dataframe_to_excel(
@@ -774,7 +752,11 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
             st.rerun()
 
     if request_flag_bulk_delete:
-        if table_has_unsaved_changes(flag_editor_key, native_row_selection=True):
+        if len(custom_selected_flags) != len(selected_flags):
+            request_table_editor_reset(flag_editor_key)
+            st.toast("CTQ and Safety are permanent system flags and cannot be deleted.")
+            st.rerun()
+        elif table_has_unsaved_changes(flag_editor_key, native_row_selection=True):
             st.warning("Save or undo other flag edits before deleting selected flags.")
         else:
             st.session_state[f"yamazumi_flags_pending_delete_{project_id}"] = (
@@ -792,6 +774,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         actions = st.container(horizontal=True)
         if actions.button("Cancel", key=f"cancel_yamazumi_flag_delete_{project_id}"):
             st.session_state.pop(pending_key, None)
+            request_table_editor_reset(flag_editor_key)
             st.rerun()
         if actions.button(
             "Delete flags",
@@ -815,13 +798,14 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
             except ValueError as exc:
                 st.error(str(exc))
 
-    st.session_state.pop(f"yamazumi_flags_pending_delete_{project_id}", None)
+    if st.session_state.get(f"yamazumi_flags_pending_delete_{project_id}"):
+        confirm_flag_delete()
 
-    if flag_header.undo:
+    if flag_actions.undo:
         request_table_editor_reset(flag_editor_key)
         st.rerun()
 
-    if flag_header.save_and_refresh:
+    if flag_actions.save_and_refresh:
         try:
             if not selected_flags.empty:
                 raise ValueError("Clear selected rows before saving flag edits.")
@@ -836,7 +820,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
             record_audit_event(
                 project_id,
                 "Yamazumi flag definitions",
-                "Save & refresh",
+                "Save & Refresh",
                 count,
                 st.session_state.get("current_editor", ""),
             )
@@ -1278,16 +1262,7 @@ pitch_combined_view = set(effective_pitch_area_ids) != {str(area_id)}
 if pitch_combined_view:
     st.subheader("Pitch addresses")
 else:
-    pitch_actions = editable_table_header(
-        "Pitch addresses",
-        editor_key=pitch_editor_key,
-        key_prefix="yamazumi_pitches",
-        save_label="Save & refresh",
-        native_row_selection=True,
-    )
-    if pitch_actions.undo:
-        st.session_state.pop(pitch_editor_key, None)
-        st.rerun()
+    editable_table_heading("Pitch addresses")
 selected_pitch_area_ids = st.multiselect(
     "Areas shown in pitch-address table",
     options=yamazumi_area_ids,
@@ -1386,28 +1361,41 @@ if pitch_combined_view:
     )
     edited_pitches = visible_pitches
 else:
-    pitch_editor_rows = sortable_editor_rows(
+    pitch_editor_rows = direct_entry_editor_rows(
         visible_pitches,
-        defaults={
-            "pitch_type": "Pitch",
-            "status": "Active",
-            "model_variants": ["Base"],
+        editor_key=pitch_editor_key,
+        sort_columns=[
+            "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
+            "model_variants", "sequence"
+        ],
+        labels={
+            "area_name": "Yamazumi area", "pitch_number": "Pitch address",
+            "pitch_name": "Pitch name", "pitch_type": "Pitch type",
+            "model_variants": "Model variants", "sequence": "Order",
         },
     )
     edited_pitches = st.data_editor(
         pitch_editor_rows,
         key=pitch_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=280,
         disabled=["id", "area_name", "updated_at"],
         column_order=pitch_column_order,
         column_config=pitch_column_config,
     )
-    selected_pitches = native_selected_rows(
-        visible_pitches, editor_key=pitch_editor_key
+    pitch_actions = editable_table_footer(
+        editor_key=pitch_editor_key,
+        key_prefix="yamazumi_pitches",
+        native_row_selection=True,
     )
-    request_pitch_delete = False
+    if pitch_actions.undo:
+        request_table_editor_reset(pitch_editor_key)
+        st.rerun()
+    selected_pitches = native_selected_rows(
+        pitch_editor_rows, editor_key=pitch_editor_key
+    )
+    request_pitch_delete = not selected_pitches.empty
     if request_pitch_delete:
         selected_pitch_ids = set(selected_pitches["id"].astype(str))
         close_other_yamazumi_dialogs("")
@@ -1459,7 +1447,7 @@ if not pitch_combined_view and pitch_actions.save_and_refresh:
             raise ValueError(" ".join(errors))
         to_save = merge_filtered_edits(pitch_rows, visible_pitches, edited_pitches)
         count = replace_yamazumi_pitches(project_id, area_id, to_save)
-        record_audit_event(project_id, "Yamazumi pitches", "Save & refresh", count, st.session_state.get("current_editor", ""))
+        record_audit_event(project_id, "Yamazumi pitches", "Save & Refresh", count, st.session_state.get("current_editor", ""))
         request_table_editor_reset(pitch_editor_key)
         st.rerun()
     except ValueError as exc:
@@ -1473,16 +1461,7 @@ element_combined_view = set(effective_element_area_ids) != {str(area_id)}
 if element_combined_view:
     st.subheader("Yamazumi work elements")
 else:
-    element_actions = editable_table_header(
-        "Yamazumi work elements",
-        editor_key=element_editor_key,
-        key_prefix="yamazumi_elements",
-        save_label="Save & refresh",
-        native_row_selection=True,
-    )
-    if element_actions.undo:
-        st.session_state.pop(element_editor_key, None)
-        st.rerun()
+    editable_table_heading("Yamazumi work elements")
 selected_element_area_ids = st.multiselect(
     "Areas shown in work-elements table",
     options=yamazumi_area_ids,
@@ -1621,30 +1600,41 @@ if element_combined_view:
     )
     edited_elements = visible_elements
 else:
-    element_editor_rows = sortable_editor_rows(
+    element_editor_rows = direct_entry_editor_rows(
         visible_elements,
-        defaults={
-            "pitch": "Unassigned",
-            "model_variants": ["Base"],
-            "work_type": "Cycle",
-            "work_region": "None",
-            "flags": [],
+        editor_key=element_editor_key,
+        sort_columns=[
+            "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
+            "work_region", "flags", "sequence",
+        ],
+        labels={
+            "area_name": "Yamazumi area", "model_variants": "Model variants",
+            "work_type": "Work type", "description": "Work description",
+            "time_s": "Time (s)", "work_region": "Work region", "sequence": "Order",
         },
     )
     edited_elements = st.data_editor(
         element_editor_rows,
         key=element_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="dynamic",
         height=420,
         disabled=["id", "area_name", "source", "process_element_id", "process_sync_status", "updated_at"],
         column_order=element_column_order,
         column_config=element_column_config,
     )
-    selected_elements = native_selected_rows(
-        visible_elements, editor_key=element_editor_key
+    element_actions = editable_table_footer(
+        editor_key=element_editor_key,
+        key_prefix="yamazumi_elements",
+        native_row_selection=True,
     )
-    request_element_delete = False
+    if element_actions.undo:
+        request_table_editor_reset(element_editor_key)
+        st.rerun()
+    selected_elements = native_selected_rows(
+        element_editor_rows, editor_key=element_editor_key
+    )
+    request_element_delete = not selected_elements.empty
     if request_element_delete:
         close_other_yamazumi_dialogs("")
         st.session_state.pop(pitch_delete_key, None)
@@ -1730,7 +1720,7 @@ if not element_combined_view and element_actions.save_and_refresh:
             raise ValueError("A work element uses model variants that are not enabled for its selected pitch.")
         to_save = to_save.drop(columns=["pitch"], errors="ignore")
         count = replace_yamazumi_elements(project_id, area_id, to_save)
-        record_audit_event(project_id, "Yamazumi elements", "Save & refresh", count, st.session_state.get("current_editor", ""))
+        record_audit_event(project_id, "Yamazumi elements", "Save & Refresh", count, st.session_state.get("current_editor", ""))
         request_table_editor_reset(element_editor_key)
         st.rerun()
     except ValueError as exc:
@@ -1851,6 +1841,7 @@ def confirm_pitch_bulk_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_pitch_bulk_delete_{scenario_id}_{area_id}"):
         st.session_state.pop(pitch_delete_key, None)
+        request_table_editor_reset(pitch_editor_key)
         st.rerun()
     if actions.button(
         "Delete pitches",
@@ -1868,7 +1859,7 @@ def confirm_pitch_bulk_delete() -> None:
                 record_audit_event(
                     project_id,
                     "Yamazumi elements",
-                    "Save & refresh",
+                    "Save & Refresh",
                     int(pending.get("element_edit_count") or 0),
                     editor_name,
                     {"area_id": area_id, "saved_with_pitch_delete": True},
@@ -1882,7 +1873,7 @@ def confirm_pitch_bulk_delete() -> None:
                 record_audit_event(
                     project_id,
                     "Yamazumi pitches",
-                    "Save & refresh",
+                    "Save & Refresh",
                     int(pending.get("pitch_edit_count") or 0),
                     editor_name,
                     {"area_id": area_id, "saved_with_bulk_delete": True},
@@ -1942,6 +1933,7 @@ def confirm_element_bulk_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_element_bulk_delete_{scenario_id}_{area_id}"):
         st.session_state.pop(element_delete_key, None)
+        request_table_editor_reset(element_editor_key)
         st.rerun()
     if actions.button(
         "Delete work elements",
@@ -1960,7 +1952,7 @@ def confirm_element_bulk_delete() -> None:
                 record_audit_event(
                     project_id,
                     "Yamazumi elements",
-                    "Save & refresh",
+                    "Save & Refresh",
                     int(pending.get("element_edit_count") or 0),
                     editor_name,
                     {"area_id": area_id, "saved_with_bulk_delete": True},
@@ -1973,7 +1965,7 @@ def confirm_element_bulk_delete() -> None:
                 record_audit_event(
                     project_id,
                     "Yamazumi pitches",
-                    "Save & refresh",
+                    "Save & Refresh",
                     int(pending.get("pitch_edit_count") or 0),
                     editor_name,
                     {"area_id": area_id, "saved_with_element_delete": True},
@@ -1998,8 +1990,10 @@ def confirm_element_bulk_delete() -> None:
             st.error(str(exc))
 
 
-st.session_state.pop(pitch_delete_key, None)
-st.session_state.pop(element_delete_key, None)
+if st.session_state.get(pitch_delete_key):
+    confirm_pitch_bulk_delete()
+elif st.session_state.get(element_delete_key):
+    confirm_element_bulk_delete()
 
 
 with st.expander("Yamazumi history", icon=":material/history:"):

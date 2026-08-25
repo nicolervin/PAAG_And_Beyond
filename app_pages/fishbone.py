@@ -18,9 +18,9 @@ from utils.store import (
     replace_fishbone_part_assignments,
     restore_fishbone_assignment_snapshot,
     restore_fishbone_plan_snapshot,
-    save_fishbone_plan,
     update_assembly_section_rows,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -32,6 +32,7 @@ from utils.table_filters import (
 )
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
+    editable_table_footer,
     native_selected_rows,
     table_has_unsaved_changes,
 )
@@ -39,7 +40,14 @@ from utils.table_ui import (
 
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
-st.title("Parts to assembly fishbone")
+page_title_with_scope(
+    "Parts to assembly fishbone",
+    scope="scenario-aware",
+    help_text=(
+        "The fishbone structure is shared across every scenario. Which parts are visible and "
+        "available on this page depends on the currently selected scenario."
+    ),
+)
 st.caption("Build the assembly framework first, then place approved Parts-table content into its sections and subassemblies.")
 if not project_id or not scenario_id:
     st.stop()
@@ -128,42 +136,10 @@ with st.expander(
     icon=":material/account_tree:",
     expanded=True,
 ):
-    _, section_1_warning, section_1_undo, section_1_action = st.columns(
-        [4, 0.8, 0.7, 1], vertical_alignment="center"
-    )
     framework_has_unsaved = table_has_unsaved_changes(
         "assembly_framework_editor", native_row_selection=True
     )
-    if framework_has_unsaved:
-        section_1_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
-    undo_framework = section_1_undo.button(
-        "Undo",
-        icon=":material/undo:",
-        disabled=framework_undo_key not in st.session_state and not framework_has_unsaved,
-        help=(
-            "Discard the current unsaved framework edits."
-            if framework_has_unsaved
-            else "Undo the last saved framework change in this browser session."
-        ),
-        key="undo_assembly_framework",
-    )
-    refresh_framework = section_1_action.button(
-        "Refresh assembly framework",
-        type="primary",
-        icon=":material/refresh:",
-        key="refresh_assembly_framework_top",
-    )
-    if undo_framework:
-        if framework_has_unsaved:
-            st.session_state.pop("assembly_framework_editor", None)
-            st.toast("Discarded the unsaved framework edits", icon=":material/undo:")
-        else:
-            restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
-            st.session_state.pop(assignment_undo_key, None)
-            st.session_state.pop("assembly_framework_editor", None)
-            st.session_state.pop(assignment_editor_key, None)
-            st.toast("Undid the last assembly framework change", icon=":material/undo:")
-        st.rerun()
+    refresh_framework = False
     st.caption("Main-spine sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent section or subassembly.")
 
     active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
@@ -315,6 +291,24 @@ with st.expander(
                 "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
             },
         )
+        framework_actions = editable_table_footer(
+            editor_key="assembly_framework_editor",
+            key_prefix="assembly_framework",
+            undo_available=framework_undo_key in st.session_state,
+            native_row_selection=True,
+        )
+        refresh_framework = framework_actions.save_and_refresh
+        if framework_actions.undo:
+            if framework_has_unsaved:
+                st.session_state.pop("assembly_framework_editor", None)
+                st.toast("Discarded the unsaved framework edits", icon=":material/undo:")
+            else:
+                restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
+                st.session_state.pop(assignment_undo_key, None)
+                st.session_state.pop("assembly_framework_editor", None)
+                st.session_state.pop(assignment_editor_key, None)
+                st.toast("Undid the last assembly framework change", icon=":material/undo:")
+            st.rerun()
         selected_framework_rows = native_selected_rows(
             framework, editor_key="assembly_framework_editor"
         )
@@ -422,14 +416,6 @@ else:
                 st.switch_page("app_pages/parts.py")
             fishbone_refresh_key = f"fishbone_refresh_version_{project_id}"
             st.session_state.setdefault(fishbone_refresh_key, 0)
-            if visual_controls.button(
-                "Save all changes & refresh",
-                icon=":material/refresh:",
-                type="primary",
-                key="fishbone_refresh_visual",
-                help="Save edits in Sections 1 and 3, then rebuild the fishbone. Section 2 selections are preserved.",
-            ):
-                st.session_state[f"fishbone_save_all_{project_id}"] = True
             visual_parts = []
             for _, assignment in assignments.iterrows():
                 part_id = str(assignment["part_id"])
@@ -688,43 +674,11 @@ else:
         "Place selected parts automatically handles both first-time parts and additional uses staged from Section 3."
     )
 
-section_3_title, section_3_warning, section_3_undo, section_3_action = st.columns(
-    [4, 0.8, 0.7, 1], vertical_alignment="center"
-)
-section_3_title.header("3 · Order assigned parts")
+st.header("3 · Order assigned parts")
 assignments_have_unsaved = table_has_unsaved_changes(
     assignment_editor_key, native_row_selection=True
 )
-if assignments_have_unsaved:
-    section_3_warning.markdown(":orange[:material/warning: **Unsaved changes**]")
-undo_assigned_parts = section_3_undo.button(
-    "Undo",
-    icon=":material/undo:",
-    disabled=assignment_undo_key not in st.session_state and not assignments_have_unsaved,
-    help=(
-        "Discard the current unsaved assigned-parts edits."
-        if assignments_have_unsaved
-        else "Undo the last saved assigned-parts change."
-    ),
-    key="undo_assigned_parts",
-)
-refresh_part_placement = section_3_action.button(
-    "Refresh part placement and order",
-    type="primary",
-    icon=":material/refresh:",
-    key="refresh_part_placement_top",
-)
-if undo_assigned_parts:
-    if assignments_have_unsaved:
-        st.session_state.pop(assignment_editor_key, None)
-        st.toast("Discarded the unsaved assigned-parts edits", icon=":material/undo:")
-    else:
-        undo_state = st.session_state.pop(assignment_undo_key)
-        restore_fishbone_assignment_snapshot(project_id, undo_state["assignments"])
-        st.session_state[pending_use_key] = undo_state.get("pending_use_ids", [])
-        st.session_state.pop(assignment_editor_key, None)
-        st.toast("Undid the last assigned-parts change", icon=":material/undo:")
-    st.rerun()
+refresh_part_placement = False
 selected_assignment_rows = assignments.iloc[0:0].copy()
 if assignments.empty:
     st.caption("Assigned parts will appear here for ordering within each framework section.")
@@ -827,12 +781,30 @@ else:
             "updated_at": None,
         },
     )
+    assignment_actions = editable_table_footer(
+        editor_key=assignment_editor_key,
+        key_prefix="fishbone_assignments",
+        undo_available=assignment_undo_key in st.session_state,
+        native_row_selection=True,
+    )
+    refresh_part_placement = assignment_actions.save_and_refresh
+    if assignment_actions.undo:
+        if assignments_have_unsaved:
+            st.session_state.pop(assignment_editor_key, None)
+            st.toast("Discarded the unsaved assigned-parts edits", icon=":material/undo:")
+        else:
+            undo_state = st.session_state.pop(assignment_undo_key)
+            restore_fishbone_assignment_snapshot(project_id, undo_state["assignments"])
+            st.session_state[pending_use_key] = undo_state.get("pending_use_ids", [])
+            st.session_state.pop(assignment_editor_key, None)
+            st.toast("Undid the last assigned-parts change", icon=":material/undo:")
+        st.rerun()
     if st.session_state.pop(f"fishbone_open_part_{project_id}", False):
         st.switch_page("app_pages/parts.py")
     selected_assignment_rows = native_selected_rows(
         assignment_editor, editor_key=assignment_editor_key
     )
-    request_assignment_delete = False
+    request_assignment_delete = not selected_assignment_rows.empty
     if request_assignment_delete:
         if table_has_unsaved_changes(
             assignment_editor_key, native_row_selection=True
@@ -854,6 +826,7 @@ else:
         actions = st.container(horizontal=True)
         if actions.button("Cancel", key=f"cancel_fishbone_assignment_delete_{project_id}"):
             st.session_state.pop(pending_key, None)
+            request_table_editor_reset(assignment_editor_key)
             st.rerun()
         if actions.button(
             "Delete uses",
@@ -879,10 +852,11 @@ else:
             except ValueError as exc:
                 st.error(str(exc))
 
-    st.session_state.pop(f"fishbone_assignments_pending_delete_{project_id}", None)
+    if st.session_state.get(f"fishbone_assignments_pending_delete_{project_id}"):
+        confirm_assignment_delete()
 
     st.caption(
-        "Each row is one use of a catalog part. Edit its location, Qty, section, or order, then select Save all changes & refresh above the fishbone. "
+        "Each row is one use of a catalog part. Edit its location, Qty, section, or order, then select Save & Refresh below the table. "
         "Another use stages the part in Section 2 instead of creating a duplicate here."
     )
     assignments_to_save = merge_filtered_edits(
@@ -908,29 +882,3 @@ else:
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
-
-if st.session_state.pop(f"fishbone_save_all_{project_id}", False):
-    try:
-        if not sections.empty and not selected_framework_rows.empty:
-            raise ValueError("Clear selected framework rows before saving the Fishbone plan.")
-        if not selected_assignment_rows.empty:
-            raise ValueError("Clear selected assigned-part rows before saving the Fishbone plan.")
-        framework_count, assignment_count = save_fishbone_plan(
-            project_id,
-            framework_to_save if not sections.empty else None,
-            assignments_to_save if not assignments.empty else None,
-        )
-        st.session_state[framework_undo_key] = current_plan_snapshot
-        st.session_state[assignment_undo_key] = current_assignment_undo
-        request_table_editor_reset("assembly_framework_editor")
-        request_table_editor_reset(assignment_editor_key)
-        st.session_state[f"fishbone_refresh_version_{project_id}"] = (
-            st.session_state.get(f"fishbone_refresh_version_{project_id}", 0) + 1
-        )
-        st.toast(
-            f"Saved {framework_count} framework items and {assignment_count} part uses",
-            icon=":material/check_circle:",
-        )
-        st.rerun()
-    except ValueError as exc:
-        st.error(str(exc))

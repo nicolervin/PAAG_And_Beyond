@@ -150,6 +150,18 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ## Proposed modules — pending owner review
 
+### Pin Map
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** August 24, 2026
+- **Purpose:** Provide a scenario-specific visual representation of the production line, with linked Process at a Glance work displayed above each Yamazumi workstation or pitch.
+- **Connections:** Connects the active `planning_scenarios` record to `yamazumi_areas`, `yamazumi_pitches`, `yamazumi_elements`, and `work_elements`.
+- **Relationship to the critical thread:** A pitch is linked through `yamazumi_elements.pitch_id`; explicitly reconciled Process work is linked through the existing soft link from `yamazumi_elements.process_element_id` to `work_elements.id`. Every query also validates the active project and scenario boundaries.
+- **Scope:** Scenario-specific. Switching scenarios changes the complete map and its linked work.
+- **Storage:** No new table or field is required for the initial read-only view. It derives its layout and content from existing Yamazumi and Process at a Glance records. Any future persisted coordinates, annotations, or Pin Map-only settings require a new owner-reviewed proposal.
+- **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply. The initial view includes the scenario boundary badge, explanatory help text, filters, filtered Excel export, and a bottom History section. Save, deletion, row-selection, and audit-write requirements do not activate because this view does not edit or persist data.
+- **Approval status:** Nicole Ervin approved implementation of this read-only derived view. Persisted Pin Map data remains pending owner review.
+
 ### Functional Reviews
 
 - **Proposed by:** Nicole Ervin, project owner
@@ -159,7 +171,7 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Relationship to the critical thread:** Exact relationships and foreign keys are intentionally not defined in this shell phase. The project owner approved navigation-only, non-persistent shells before those relationships are designed. No persisted review fields may be added until each relationship is approved.
 - **Scope:** The Functional Reviews navigation group and its five shell pages are project-wide. Future review content may be project-wide or scenario-specific, but every persisted record type must receive one explicit scope before implementation.
 - **Storage:** No database table or field is added in this phase. Each shell contains only browser-session description state and an empty, schema-free table. Existing tables cannot be selected or ruled out until the review fields and relationships are defined.
-- **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply, including table row selection, deletion safety, Save & refresh, audit logging for persisted changes, History placement, Scenario Boundary badges, help text, canonical terminology, stable identifiers, and imperial units where relevant.
+- **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply, including table row selection, deletion safety, Save & Refresh, audit logging for persisted changes, History placement, Scenario Boundary badges, help text, canonical terminology, stable identifiers, and imperial units where relevant.
 - **Approval status:** Nicole Ervin approved this shell-only exception. The data model, ownership, relationships, and persisted fields remain pending owner review.
 
 ## Known naming debt — approved for future correction, not yet changed
@@ -168,8 +180,8 @@ The following items are genuine naming debt rather than intentional stable-ident
 
 | Current database name or stored identifier | Display label it should eventually match | Why this is real naming debt |
 | --- | --- | --- |
-| `work_elements.station` | **Pitch** | Process at a Glance and Yamazumi use Pitch terminology for the physical work position; only legacy/internal code and the Requirements station filter retain Station. |
-| `work_elements.operation` | **Work Element** | The visible Process workflow now treats the Yamazumi-derived work element as the primary concept, while `operation` remains as the legacy persisted name and Requirements heading source. |
+| `work_elements.station` | **Pitch** | Process at a Glance, Yamazumi, and Pin Map use Pitch terminology for the physical work position; `station` remains the legacy persisted name. |
+| `work_elements.operation` | **Work Element** | The visible Process workflow and Pin Map treat the work element as the primary concept, while `operation` remains as the legacy persisted name. |
 | `parts.description` | **Part Name** | Every active workflow consistently presents this value as Part Name, with no remaining intentional alternative meaning for the catalog field. |
 | `pits_records.description` | **Part Name** | Active PITS previews present the source value as Part Name; `description` is retained legacy/source terminology rather than a deliberate friendly-name pairing. Any correction remains subject to the blocked PITS-format migration. |
 | `fishbone_nodes.description` | **Part Name** | MBOM-review candidates use the same part-name concept and are displayed as Part Name; the generic stored name is inherited naming debt. Any correction remains subject to the blocked PITS/MBOM-review migration. |
@@ -185,31 +197,33 @@ The following tables are implemented in the schema and data layer but are not cu
 
 - **Purpose:** Intended to define made or purchased manufacturing assemblies, including assembly number, name, planning reason, parent assembly, active state, and notes.
 - **Relationships and cloning:** Belongs to `projects` and may reference another manufacturing assembly as its parent. It is project-wide and is referenced by scenario policies and dormant material options. It is reused across cloned scenarios rather than copied as a new assembly record.
-- **Current status:** No active screen edits this table.
+- **Current status — NOT YET DESIGNED:** No active screen edits this table. Future make/buy, supplier, and buffer/storage behavior is not finalized. Do not build UI, features, or duplicate logic against it without a scoping discussion and explicit project-owner approval.
 
 ### `assembly_scenario_policies`
 
 - **Purpose:** Intended to hold scenario-specific make/buy, supplier, build-area, buffer, storage, and minimum/target/maximum quantity decisions for a manufacturing assembly.
 - **Relationships and cloning:** Junction between `planning_scenarios` and `manufacturing_assemblies`; policy rows are copied when a planning scenario is cloned.
-- **Current status:** No active screen edits this table.
+- **Current status — NOT YET DESIGNED:** No active screen edits this table. Future make/buy, supplier, and buffer/storage behavior is not finalized. Do not build UI, features, or duplicate logic against it without a scoping discussion and explicit project-owner approval.
 
 ### `work_element_material_groups`
 
 - **Purpose:** Intended to define a material requirement directly on a Yamazumi work element, optionally identifying a target manufacturing assembly and a part-selection rule.
 - **Relationships and cloning:** Belongs to `projects` and `planning_scenarios`, references `yamazumi_elements`, optionally references `manufacturing_assemblies`, and is parent of `work_element_material_options`. Rows are copied when a planning scenario is cloned.
-- **Current status:** No active screen edits this table. The active Process at a Glance workflow instead uses `process_part_groups`.
+- **Current status — LOCKED:** No active screen edits this table. The active Process at a Glance workflow instead uses `process_part_groups`. This table is frozen with no active plan to revisit it; do not modify, extend, or build new features against it. Continue carrying its rows forward during scenario cloning.
 
 ### `work_element_material_options`
 
 - **Purpose:** Intended to list either catalog parts or manufacturing assemblies as options under a Yamazumi-level material group.
 - **Relationships and cloning:** Belongs to `work_element_material_groups` and must reference exactly one of `parts` or `manufacturing_assemblies`. Rows are copied with their parent material groups when a planning scenario is cloned.
-- **Current status:** No active screen edits this table. The active Process at a Glance workflow instead uses `process_part_options`.
+- **Current status — LOCKED:** No active screen edits this table. The active Process at a Glance workflow instead uses `process_part_options`. This table is frozen with no active plan to revisit it; do not modify, extend, or build new features against it. Continue carrying its rows forward during scenario cloning.
 
 ## Hidden review stage
 
 `pits_records`, `pits_record_revisions`, and `fishbone_nodes` support a Manufacturing BOM confirmation stage between imported Product Architecture evidence and the approved Parts Catalog. New or changed PITS records preserve their source revisions and create or flag `fishbone_nodes` review candidates. Confirmed candidates can then be synchronized into `parts` without allowing an upstream import to silently overwrite collaborator-reviewed planning decisions.
 
-The database and data-access functions for this review stage exist, but none of the active navigation screens currently exposes the complete review and confirmation workflow. New UI work must not duplicate, bypass, or create a competing MBOM review path without first checking with the project owner and determining whether the existing hidden workflow should be restored or replaced.
+The database and data-access functions for this review stage exist, but none of the active navigation screens currently exposes the complete review and confirmation workflow.
+
+**Current status — BLOCKED / TBD:** This stage is intentionally on hold until the PITS spreadsheet import is migrated to a better format. Do not build an MBOM review screen or duplicate, bypass, replace, or extend this logic until that migration is complete and the project owner confirms the workflow is ready to revisit.
 
 ## Critical thread — do not break
 
@@ -229,5 +243,7 @@ Scenario-specific Process at a Glance steps
       ↓
 Process part groups → paired catalog parts from a fishbone section
       ↓
-Read-only Requirements view
+Scenario-specific Pin Map (derived visual view)
+      ↓
+Quality functional review (future home for requirements; persisted design pending)
 ```

@@ -1,6 +1,7 @@
 import streamlit as st
 
-from utils.store import get_planning_scenario, get_project, init_db, planning_scenarios, projects
+from utils.scope_ui import scenario_view_selector
+from utils.store import get_project, init_db, projects
 
 
 st.set_page_config(page_title="Process at a Glance", page_icon=":material/precision_manufacturing:", layout="wide")
@@ -22,6 +23,19 @@ st.html(
     }
     div[data-testid="stDataFrame"] button[aria-label="Delete row(s)"] {
         display: none !important;
+    }
+    div[class*="st-key-concerns_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-model_definitions_editor_v2"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-complexity_feature_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-parts_catalog_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-fishbone_assignment_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_region_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_flag_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_pitch_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_element_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-existing_process_pairings"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-process_editor"] button[aria-label="Delete row(s)"] {
+        display: inline-flex !important;
     }
     </style>
     """
@@ -50,7 +64,7 @@ pages = {
             title="Process at a Glance",
             icon=":material/account_tree:",
         ),
-        st.Page("app_pages/requirements.py", title="Requirements", icon=":material/fact_check:"),
+        st.Page("app_pages/pin_map.py", title="Pin Map", icon=":material/map:"),
     ],
     "Functional Reviews": [
         st.Page(
@@ -94,25 +108,17 @@ with st.sidebar:
             st.session_state.scenario_id = None
             st.session_state.pop("global_scenario", None)
         active_project = get_project(st.session_state.project_id)
-        available_scenarios = planning_scenarios(st.session_state.project_id)
-        if available_scenarios:
-            scenario_by_id = {scenario["id"]: scenario for scenario in available_scenarios}
-            if st.session_state.scenario_id not in scenario_by_id:
-                st.session_state.scenario_id = available_scenarios[0]["id"]
-            selected_scenario_id = st.selectbox(
-                "Active planning scenario",
-                list(scenario_by_id),
-                index=list(scenario_by_id).index(st.session_state.scenario_id),
-                format_func=lambda scenario_id: (
-                    f"Rev {scenario_by_id[scenario_id]['revision_label']} · "
-                    f"{scenario_by_id[scenario_id]['name']}"
-                ),
-                key="global_scenario",
-            )
-            st.session_state.scenario_id = selected_scenario_id
-            active_scenario = get_planning_scenario(st.session_state.project_id, selected_scenario_id)
+        active_scenario = scenario_view_selector(
+            st,
+            project_id=st.session_state.project_id,
+            key="global_scenario",
+            label="Active planning scenario",
+            width="stretch",
+        )
+        if active_scenario:
             st.caption(
-                f"{active_scenario['status']} · {float(active_scenario['takt_time_s']):.1f} s takt"
+                f"{active_scenario['status']} · "
+                f"{float(active_scenario['takt_time_s']):.1f} s takt"
             )
         st.divider()
         st.subheader("Application")

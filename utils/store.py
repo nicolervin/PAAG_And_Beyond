@@ -608,7 +608,13 @@ def next_scenario_revision_label(project_id: str, current_label: str) -> str:
     return candidate
 
 
-def update_planning_scenario(project_id: str, scenario_id: str, values: dict) -> None:
+def update_planning_scenario(
+    project_id: str,
+    scenario_id: str,
+    values: dict,
+    *,
+    _conn: sqlite3.Connection | None = None,
+) -> None:
     name = str(values.get("name") or "").strip()
     revision_label = str(values.get("revision_label") or "").strip()
     status = str(values.get("status") or "Working").strip().title()
@@ -623,15 +629,20 @@ def update_planning_scenario(project_id: str, scenario_id: str, values: dict) ->
     if takt <= 0:
         raise ValueError("Scenario takt time must be greater than zero.")
     try:
-        execute(
-            """UPDATE planning_scenarios
-               SET name=?, revision_label=?, status=?, takt_time_s=?, change_summary=?, updated_at=?
-               WHERE id=? AND project_id=?""",
-            (
-                name, revision_label, status, takt,
-                str(values.get("change_summary") or "").strip(), now_iso(), scenario_id, project_id,
-            ),
-        )
+        context = nullcontext(_conn) if _conn is not None else connection()
+        with context as conn:
+            cursor = conn.execute(
+                """UPDATE planning_scenarios
+                   SET name=?, revision_label=?, status=?, takt_time_s=?, change_summary=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    name, revision_label, status, takt,
+                    str(values.get("change_summary") or "").strip(), now_iso(),
+                    scenario_id, project_id,
+                ),
+            )
+            if not cursor.rowcount:
+                raise ValueError("The planning scenario no longer exists.")
     except sqlite3.IntegrityError as exc:
         raise ValueError("Scenario names and revision labels must be unique within this project.") from exc
 
@@ -644,6 +655,8 @@ def clone_planning_scenario(
     takt_time_s: float,
     change_summary: str = "",
     created_by: str = "",
+    *,
+    _conn: sqlite3.Connection | None = None,
 ) -> str:
     """Clone a complete balancing branch and preserve its internal lineage links."""
     name = str(name or "").strip()
@@ -660,7 +673,8 @@ def clone_planning_scenario(
     new_scenario_id = str(uuid4())
     timestamp = now_iso()
     try:
-        with connection() as conn:
+        context = nullcontext(_conn) if _conn is not None else connection()
+        with context as conn:
             source = conn.execute(
                 "SELECT * FROM planning_scenarios WHERE id=? AND project_id=?",
                 (source_scenario_id, project_id),
@@ -865,6 +879,92 @@ def clone_planning_scenario(
     except sqlite3.IntegrityError as exc:
         raise ValueError("Scenario names and revision labels must be unique within this project.") from exc
     return new_scenario_id
+
+
+def save_planning_scenario_rows(
+    project_id: str,
+    source_scenario_id: str,
+    records: list[dict],
+    created_by: str = "",
+) -> dict[str, object]:
+    """Save the Overview scenario table and branch new rows from one source.
+
+    Every row is validated before the first write. Existing scenario IDs update
+    metadata in place; rows without an ID use the complete scenario-cloning
+    workflow so their scenario-owned planning data is preserved.
+    """
+    existing = planning_scenarios(project_id, include_archived=True)
+    existing_ids = {str(row["id"]) for row in existing}
+    if source_scenario_id not in existing_ids:
+        raise ValueError("The source scenario no longer exists.")
+
+    cleaned: list[dict] = []
+    names: set[str] = set()
+    revisions: set[str] = set()
+    valid_statuses = {"Working", "Frozen", "Released", "Archived"}
+    for record in records:
+        scenario_id = str(record.get("id") or "").strip()
+        if scenario_id and scenario_id not in existing_ids:
+            raise ValueError("One of the planning scenarios no longer exists. Refresh and try again.")
+        name = str(record.get("name") or "").strip()
+        revision_label = str(record.get("revision_label") or "").strip()
+        status = str(record.get("status") or "Working").strip().title()
+        if not name or not revision_label:
+            raise ValueError("Scenario name and revision label are required in every row.")
+        if status not in valid_statuses:
+            raise ValueError("Choose a valid scenario status in every row.")
+        try:
+            takt = float(record.get("takt_time_s"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Scenario takt time must be a number in every row.") from exc
+        if takt <= 0:
+            raise ValueError("Scenario takt time must be greater than zero in every row.")
+        if name.casefold() in names:
+            raise ValueError("Scenario names must be unique within this project.")
+        if revision_label.casefold() in revisions:
+            raise ValueError("Scenario revision labels must be unique within this project.")
+        names.add(name.casefold())
+        revisions.add(revision_label.casefold())
+        cleaned.append(
+            {
+                "id": scenario_id,
+                "name": name,
+                "revision_label": revision_label,
+                "status": status,
+                "takt_time_s": takt,
+                "change_summary": str(record.get("change_summary") or "").strip(),
+            }
+        )
+
+    updated_count = 0
+    created_ids: list[str] = []
+    with connection() as conn:
+        for record in cleaned:
+            if record["id"]:
+                update_planning_scenario(
+                    project_id, str(record["id"]), record, _conn=conn
+                )
+                updated_count += 1
+                continue
+            new_id = clone_planning_scenario(
+                project_id,
+                source_scenario_id,
+                str(record["name"]),
+                str(record["revision_label"]),
+                float(record["takt_time_s"]),
+                str(record["change_summary"]),
+                created_by,
+                _conn=conn,
+            )
+            if record["status"] != "Working":
+                update_planning_scenario(project_id, new_id, record, _conn=conn)
+            created_ids.append(new_id)
+
+    return {
+        "updated_count": updated_count,
+        "created_ids": created_ids,
+        "saved_count": len(cleaned),
+    }
 
 
 def record_audit_event(
@@ -1696,6 +1796,73 @@ def yamazumi_elements_for_scenario(project_id: str, scenario_id: str) -> pd.Data
             "area_name": pd.Series(dtype="string"),
         })
     return rows
+
+
+def pin_map_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Load pitches and their explicitly linked Process work for one scenario."""
+    rows = pd.DataFrame(query(
+        """SELECT p.id AS pitch_id, p.area_id, a.name AS area_name,
+                  p.pitch_number, p.pitch_name, p.pitch_type,
+                  p.status AS pitch_status, p.sequence AS pitch_sequence,
+                  work.id AS process_element_id,
+                  work.sequence AS process_sequence,
+                  work.operation AS work_element,
+                  work.description AS process_description,
+                  work.cycle_time_s, work.tool, work.torque,
+                  work.quality_requirement, work.ergo_requirement,
+                  work.location, work.unit_orientation,
+                  work.model_applicability,
+                  work.status AS process_status
+           FROM yamazumi_pitches p
+           JOIN yamazumi_areas a ON a.id=p.area_id
+           LEFT JOIN yamazumi_elements yamazumi
+             ON yamazumi.pitch_id=p.id AND yamazumi.project_id=p.project_id
+           LEFT JOIN work_elements work
+             ON work.id=yamazumi.process_element_id
+            AND work.project_id=p.project_id
+            AND work.scenario_id=a.scenario_id
+           WHERE p.project_id=? AND a.scenario_id=?
+           ORDER BY a.name, p.sequence, p.pitch_number,
+                    work.sequence, work.operation""",
+        (project_id, scenario_id),
+    ))
+    if rows.empty:
+        return pd.DataFrame({
+            "pitch_id": pd.Series(dtype="string"),
+            "area_id": pd.Series(dtype="string"),
+            "area_name": pd.Series(dtype="string"),
+            "pitch_number": pd.Series(dtype="string"),
+            "pitch_name": pd.Series(dtype="string"),
+            "pitch_type": pd.Series(dtype="string"),
+            "pitch_status": pd.Series(dtype="string"),
+            "pitch_sequence": pd.Series(dtype="Int64"),
+            "process_element_id": pd.Series(dtype="string"),
+            "process_sequence": pd.Series(dtype="Int64"),
+            "work_element": pd.Series(dtype="string"),
+            "process_description": pd.Series(dtype="string"),
+            "cycle_time_s": pd.Series(dtype="Float64"),
+            "tool": pd.Series(dtype="string"),
+            "torque": pd.Series(dtype="string"),
+            "quality_requirement": pd.Series(dtype="string"),
+            "ergo_requirement": pd.Series(dtype="string"),
+            "location": pd.Series(dtype="string"),
+            "unit_orientation": pd.Series(dtype="string"),
+            "model_applicability": pd.Series(dtype="string"),
+            "process_status": pd.Series(dtype="string"),
+        })
+    rows = rows.drop_duplicates(
+        subset=["pitch_id", "process_element_id"], keep="first"
+    )
+    linked_pitch_ids = set(
+        rows.loc[rows["process_element_id"].notna(), "pitch_id"].astype(str)
+    )
+    rows = rows.loc[
+        ~(
+            rows["pitch_id"].astype(str).isin(linked_pitch_ids)
+            & rows["process_element_id"].isna()
+        )
+    ]
+    return rows.reset_index(drop=True)
 
 
 def yamazumi_work_regions(project_id: str, area_id: str) -> pd.DataFrame:

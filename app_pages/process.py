@@ -26,6 +26,7 @@ from utils.store import (
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
 )
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -35,7 +36,8 @@ from utils.table_filters import (
 )
 from utils.table_ui import (
     dataframe_to_excel,
-    editable_table_header,
+    editable_table_footer,
+    editable_table_heading,
     native_selected_rows,
     required_field_errors,
     selectable_dataframe,
@@ -50,11 +52,6 @@ missing_part_dialog_key = f"process_missing_part_dialog_{scenario_id}"
 pairing_delete_key = f"process_pairings_pending_remove_{scenario_id}"
 detail_pairing_delete_key = f"process_detail_pairing_pending_remove_{scenario_id}"
 detail_restore_key = f"process_detail_restore_{scenario_id}"
-st.title("Process at a Glance")
-st.caption(
-    "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
-    "Process at a Glance by pitch. A purchased assembly is handled as one catalog part."
-)
 if not project_id or not scenario_id:
     st.stop()
 
@@ -62,6 +59,13 @@ scenario = get_planning_scenario(project_id, scenario_id)
 if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
+page_title_with_scope(
+    "Process at a Glance", scope="scenario", scenario_name=scenario["name"]
+)
+st.caption(
+    "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
+    "Process at a Glance by pitch. A purchased assembly is handled as one catalog part."
+)
 st.caption(f"Rev {scenario['revision_label']} · {scenario['name']} · {scenario['status']}")
 
 sections = assembly_sections(project_id)
@@ -693,7 +697,7 @@ else:
                 selected_pairings = native_selected_rows(
                     pairing_rows, editor_key=pairing_editor_key
                 )
-                request_pairing_delete = False
+                request_pairing_delete = not selected_pairings.empty
                 if request_pairing_delete:
                     selected_ids = set(selected_pairings["id"].astype(str))
                     selected_group_rows = [
@@ -817,12 +821,7 @@ elements["model_applicability"] = elements["model_applicability"].apply(
     ]
 )
 
-header_actions = editable_table_header(
-    "Process at a Glance by pitch",
-    editor_key=process_editor_key,
-    key_prefix=f"process_plan_{scenario_id}",
-    native_row_selection=True,
-)
+editable_table_heading("Process at a Glance by pitch")
 st.caption(
     "Enter an output assembly number on the exact step where a new made assembly becomes complete. "
     "That milestone belongs to this scenario's Process at a Glance."
@@ -896,6 +895,11 @@ edited = st.data_editor(
         ),
     },
 )
+footer_actions = editable_table_footer(
+    editor_key=process_editor_key,
+    key_prefix=f"process_plan_{scenario_id}",
+    native_row_selection=True,
+)
 
 details_blocked = st.session_state.pop(f"process_details_blocked_{scenario_id}", None)
 if details_blocked:
@@ -953,7 +957,7 @@ def save_unsaved_process_table_edits(*, paired_removal: bool) -> int:
     record_audit_event(
         project_id,
         "Process plan",
-        "Save & refresh",
+        "Save & Refresh",
         changed_count,
         st.session_state.get("current_editor", ""),
         {
@@ -980,7 +984,7 @@ apply_bulk = bulk.button(
     icon=":material/checklist:",
     disabled=selected.empty,
 )
-request_bulk_delete = False
+request_bulk_delete = not selected.empty
 
 if apply_bulk:
     if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
@@ -1028,6 +1032,7 @@ def confirm_process_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_process_delete_{scenario_id}"):
         st.session_state.pop(pending_key, None)
+        request_table_editor_reset(process_editor_key)
         st.rerun()
     if actions.button(
         "Delete steps", type="primary", icon=":material/delete:",
@@ -1054,13 +1059,14 @@ def confirm_process_delete() -> None:
         st.rerun()
 
 
-st.session_state.pop(f"process_pending_delete_{scenario_id}", None)
+if st.session_state.get(f"process_pending_delete_{scenario_id}"):
+    confirm_process_delete()
 
-if header_actions.undo:
+if footer_actions.undo:
     request_table_editor_reset(process_editor_key)
     st.rerun()
 
-if header_actions.save_and_refresh:
+if footer_actions.save_and_refresh:
     try:
         if not selected.empty:
             raise ValueError("Clear selected rows before saving table edits.")
@@ -1078,7 +1084,7 @@ if header_actions.save_and_refresh:
         record_audit_event(
             project_id,
             "Process plan",
-            "Save & refresh",
+            "Save & Refresh",
             len(combined_elements),
             st.session_state.get("current_editor", ""),
             {"scenario_id": scenario_id},
@@ -1116,6 +1122,9 @@ def confirm_pairing_bulk_removal() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_pairing_bulk_remove_{scenario_id}"):
         st.session_state.pop(pairing_delete_key, None)
+        pairing_editor_key = str(pending.get("editor_key") or "")
+        if pairing_editor_key:
+            request_table_editor_reset(pairing_editor_key)
         st.rerun()
     if actions.button(
         "Remove pairings",
@@ -1156,7 +1165,8 @@ def confirm_pairing_bulk_removal() -> None:
             st.error(str(exc))
 
 
-st.session_state.pop(pairing_delete_key, None)
+if st.session_state.get(pairing_delete_key):
+    confirm_pairing_bulk_removal()
 
 
 def close_process_details() -> None:
