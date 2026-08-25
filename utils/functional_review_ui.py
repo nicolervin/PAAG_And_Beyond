@@ -8,7 +8,7 @@ from utils.table_filters import (
     request_table_editor_reset,
 )
 from utils.scope_ui import page_title_with_scope
-from utils.table_ui import editable_table_header
+from utils.table_ui import editable_table_footer, editable_table_heading
 
 
 def render_functional_review_shell(
@@ -47,8 +47,16 @@ def render_functional_review_shell(
         review_description != st.session_state[saved_description_key]
     )
 
-    actions = editable_table_header(
-        "Review items",
+    editable_table_heading("Review items")
+    st.data_editor(
+        pd.DataFrame(),
+        key=editor_key,
+        num_rows="delete",
+        hide_index=True,
+        height=180,
+        disabled=True,
+    )
+    actions = editable_table_footer(
         editor_key=editor_key,
         key_prefix=f"functional_review_{key_prefix}_{project_id}",
         undo_available=description_changed,
@@ -59,15 +67,6 @@ def render_functional_review_shell(
         st.session_state[reset_description_key] = True
         request_table_editor_reset(editor_key)
         st.rerun()
-
-    st.data_editor(
-        pd.DataFrame(),
-        key=editor_key,
-        num_rows="delete",
-        hide_index=True,
-        height=180,
-        disabled=True,
-    )
 
     if actions.save_and_refresh:
         st.session_state[saved_description_key] = review_description

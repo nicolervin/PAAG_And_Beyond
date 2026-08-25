@@ -138,7 +138,7 @@ def drop_untouched_new_rows(
 
 @dataclass(frozen=True)
 class TableHeaderActions:
-    """Actions returned by the standard editable-table section header."""
+    """Actions returned by the standard editable-table footer."""
 
     save_and_refresh: bool
     undo: bool
@@ -232,37 +232,41 @@ def selected_rows_action_bar(
     )
 
 
-def editable_table_header(
-    title: str,
+def editable_table_heading(title: str) -> None:
+    """Render the section heading above an editable table and its filters."""
+    st.subheader(title)
+
+
+def editable_table_footer(
     *,
     editor_key: str,
     key_prefix: str,
-    save_label: str = "Save & refresh",
     undo_available: bool = False,
     native_row_selection: bool = False,
     additional_unsaved_changes: bool = False,
 ) -> TableHeaderActions:
-    """Render the standard title, dirty warning, undo, and primary save control."""
+    """Render the standard warning and actions below an editable table."""
     unsaved = (
         table_has_unsaved_changes(
             editor_key, native_row_selection=native_row_selection
         )
         or additional_unsaved_changes
     )
-    title_col, warning_col, undo_col, action_col = st.columns(
-        [4, 0.9, 0.7, 1.15], vertical_alignment="center"
+    footer = st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        horizontal_alignment="right",
     )
-    title_col.subheader(title)
     if unsaved:
-        warning_col.markdown(":orange[:material/warning: **Unsaved changes**]")
-    undo = undo_col.button(
+        footer.markdown(":orange[:material/warning: **Unsaved changes**]")
+    undo = footer.button(
         "Undo",
         icon=":material/undo:",
         disabled=not (unsaved or undo_available),
         key=f"{key_prefix}_undo",
     )
-    save_and_refresh = action_col.button(
-        save_label,
+    save_and_refresh = footer.button(
+        "Save & Refresh",
         type="primary",
         icon=":material/save:",
         key=f"{key_prefix}_save_refresh",

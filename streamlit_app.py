@@ -24,6 +24,19 @@ st.html(
     div[data-testid="stDataFrame"] button[aria-label="Delete row(s)"] {
         display: none !important;
     }
+    div[class*="st-key-concerns_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-model_definitions_editor_v2"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-complexity_feature_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-parts_catalog_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-fishbone_assignment_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_region_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_flag_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_pitch_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-yamazumi_element_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-existing_process_pairings"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-process_editor"] button[aria-label="Delete row(s)"] {
+        display: inline-flex !important;
+    }
     </style>
     """
 )

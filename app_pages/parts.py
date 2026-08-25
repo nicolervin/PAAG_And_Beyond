@@ -31,7 +31,8 @@ from utils.table_filters import (
 from utils.table_ui import (
     dataframe_to_excel,
     drop_untouched_new_rows,
-    editable_table_header,
+    editable_table_footer,
+    editable_table_heading,
     native_selected_rows,
     required_field_errors,
     selectable_dataframe,
@@ -140,17 +141,7 @@ def readable_feature_applicability(part_id: str, legacy_value) -> str:
     return "Needs feature tagging"
 
 
-parts_actions = editable_table_header(
-    "All parts",
-    editor_key=parts_editor_key,
-    key_prefix="parts_catalog",
-    native_row_selection=True,
-)
-save_part_table = parts_actions.save_and_refresh
-if parts_actions.undo:
-    request_table_editor_reset(parts_editor_key)
-    st.toast("Discarded the unsaved part-table edits", icon=":material/undo:")
-    st.rerun()
+editable_table_heading("All parts")
 st.caption("Edit catalog fields directly, then save. Select View details on a row to open its photos and full information below.")
 editable_columns = ["id", "part_number", "description", "quantity", "revision", "model_applicability", "notes", "source", "image_path", "updated_at"]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
@@ -248,6 +239,16 @@ edited_parts = st.data_editor(
         "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
     },
 )
+parts_actions = editable_table_footer(
+    editor_key=parts_editor_key,
+    key_prefix="parts_catalog",
+    native_row_selection=True,
+)
+save_part_table = parts_actions.save_and_refresh
+if parts_actions.undo:
+    request_table_editor_reset(parts_editor_key)
+    st.toast("Discarded the unsaved part-table edits", icon=":material/undo:")
+    st.rerun()
 st.caption(
     "Type or paste new parts directly into the blank entry row, then save. Use View details to manage its Primary CAD image "
     "and additional views."
@@ -281,7 +282,7 @@ apply_bulk_applicability = bulk_controls.button(
     icon=":material/checklist:",
     disabled=selected_saved_parts.empty,
 )
-request_delete_bulk_parts = False
+request_delete_bulk_parts = not selected_saved_parts.empty
 
 if apply_bulk_applicability:
     if table_has_unsaved_changes(parts_editor_key, native_row_selection=True):
@@ -326,6 +327,7 @@ def confirm_bulk_part_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_bulk_part_delete"):
         st.session_state.pop("parts_pending_bulk_delete", None)
+        request_table_editor_reset(parts_editor_key)
         st.rerun()
     if actions.button(
         "Delete parts",
@@ -350,7 +352,8 @@ def confirm_bulk_part_delete() -> None:
         st.rerun()
 
 
-st.session_state.pop("parts_pending_bulk_delete", None)
+if st.session_state.get("parts_pending_bulk_delete"):
+    confirm_bulk_part_delete()
 
 if save_part_table:
     try:
@@ -407,7 +410,7 @@ if save_part_table:
         record_audit_event(
             project_id,
             "Parts",
-            "Save & refresh",
+            "Save & Refresh",
             count,
             st.session_state.get("current_editor", ""),
             {"scenario_id": scenario_id},
@@ -440,7 +443,7 @@ def render_parts_history() -> None:
             )
 
 if parts.empty:
-    st.info("Type or paste the first part into the blank entry row, then select Save & refresh.")
+    st.info("Type or paste the first part into the blank entry row, then select Save & Refresh.")
     render_parts_history()
     st.stop()
 

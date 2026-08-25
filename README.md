@@ -1,56 +1,158 @@
 # Process at a Glance
 
-A local Streamlit prototype for industrial engineers planning new-product-introduction assembly processes. It brings parts and CAD images, ordered work elements, draft cycle times, tooling and torque, quality and ergonomic requirements, workstation geometry, and open concerns into one evolving project record.
+Process at a Glance (PAAG) is a local Streamlit planning application for cross-functional collaborators preparing a new-product-introduction assembly process. It keeps product definitions, source evidence, parts, assembly order, work content, workstation balance, process requirements, and open questions in one evolving project record instead of separate spreadsheets.
+
+The application is a local prototype, not a production multi-user service. Industrial engineers, advanced quality engineers, ergonomists, materials planners, advanced manufacturing engineers, and other collaborators may all contribute to the project record.
+
+## Documentation map
+
+- `AGENTS.md` — Repository-wide contribution rules and required-reference routing.
+- `DATA_DICTIONARY.md` — Authoritative database entities, relationships, scope, critical thread, proposals, and dormant data structures.
+- `DESIGN_SYSTEM.md` — Locked table, interaction, audit, scope-indicator, help-text, units, and terminology standards.
+- `PROJECT_STATUS.md` — Latest known working, incomplete, deferred, legacy, and verification status.
+- `README.md` — Product overview, technology, startup, repository map, navigation, and domain glossary.
+
+When documentation conflicts, use the authority order defined in `AGENTS.md` and resolve unresolved discrepancies with the project owner.
 
 ## Run locally
 
-From this directory, using the shared virtual environment:
+From the repository root in PowerShell, using the shared virtual environment:
 
 ```powershell
 ..\.venv\Scripts\streamlit.exe run streamlit_app.py
 ```
 
-Then open `http://localhost:8501`.
+Then open `http://localhost:8501`. Streamlit normally reloads the app after a source file is saved.
 
-The app creates `data/paag.db` on first run and seeds a small sample project. Uploaded images are stored in `data/uploads/`. Both are ignored by Git.
+`streamlit_app.py` calls `init_db()` at startup. Initialization creates missing tables, applies safe in-place schema upgrades used by this prototype, installs required built-in Yamazumi flags, and seeds a sample project when appropriate.
 
-## Current scope
+## Technology and local data
 
-- Create and revise NPI projects
-- Branch Yamazumi and Process Plan work into named planning scenarios with numeric or alphabetic revision labels
-- Use **Save as scenario** to preserve the current balance, process rows, and lineage before changing takt or workstation assignments
-- Switch scenarios globally without mixing their work elements, Yamazumi areas, or exported planning snapshots
-- Maintain a part catalog with CAD screenshots, BOM provenance, and scenario-specific Active flags for downstream planning views
-- Paste Windows screenshots directly from the clipboard without saving an intermediate image file
-- Import draft BOMs from Excel or CSV with column mapping
-- Detect PITS-style Level 1–11 sheets and send their repeated occurrences to an IE review queue without treating them as approved MBOM content
-- Prefer the ID-based `part_tracker` + `models` PITS workbook: synchronize source records by stable ID Number, retain revision history, and flag changed IDs for IE reconciliation
-- Import or manually define the project model catalog, add team-familiar names and descriptions, and activate the models used for planning
-- Assign parts and MBOM occurrences to all models or a controlled multi-select of specific models
-- Develop an editable Manufacturing BOM, explicitly confirming or excluding every rough PITS candidate
-- Build a station-independent assembly fishbone from confirmed MBOM content before balancing work into physical pitches
-- Work through one continuous IE workspace: selectable PITS list, live fishbone visual, then editable MBOM order
-- Pair fishbone parts to Yamazumi work elements section by section in Process Planning, including controlled part alternatives
-- Build an ordered, editable process plan by pitch and record the exact step that completes each made assembly
-- Treat purchased assemblies as ordinary part-catalog items rather than separate manufacturing-assembly records
-- Build Yamazumi drafts by Fishbone spine, manage active/open/blocked pitch addresses, compare side-by-side model variants, and drag work between odd north-side and even south-side pitches
-- Review each scenario in a Pin Map that places linked Process at a Glance work above its Yamazumi workstation or pitch
-- Capture process tools, locations, unit orientation, and conveyor height using imperial display units
-- Track questions, concerns, decisions, assumptions, owners, and status
-- Export a multi-sheet Excel workbook with a flat `Lucid Data Link` sheet
+- **Language:** Python
+- **Application framework:** Streamlit 1.61 or newer, below 2.0
+- **Tabular data:** pandas
+- **Local storage:** SQLite in `data/paag.db`, with foreign keys enabled and write-ahead logging
+- **Excel:** openpyxl with pandas tabular conversion
+- **Images:** Pillow validation and normalization; uploaded files under `data/uploads/`
+- **Browser interactions:** Streamlit Components v2 for clipboard image paste, the interactive Fishbone, and Yamazumi drag-and-drop
+- **Theme:** `.streamlit/config.toml`, including the upload-size limit
 
-The preferred PITS workbook uses `ID Number` as the immutable source key. Re-importing an unchanged ID leaves the IE-authored MBOM untouched; changed source content creates a revision and enters the PITS updates reconciliation view. Model definitions come from the `models` tab, while part-to-model applicability remains an IE decision. Legacy Level 1–11 PITS files remain supported as an intentionally conservative fallback. Multi-user authentication, a full audit trail for IE edits, threaded comments, packaging/routing plans, PFMEA, control plans, and work instructions are intentionally left for later increments.
-# Editable table standard
+Exact package ranges are in `requirements.txt`. The shared Python virtual environment normally lives one directory above the repository at `..\.venv`.
 
-New editable tables and tabs should use the shared helpers in `utils/table_ui.py` and follow this interaction pattern:
+Database writes go through the `connection()` context manager in `utils/store.py`, which commits successful operations and always closes the connection. The database, its SQLite sidecars, uploaded files, and `.streamlit/secrets.toml` are local runtime data ignored by Git. They cannot be recovered from Git, so back up the database before intentionally destructive experiments.
 
-- Put the section title, orange unsaved-changes warning, Undo, and blue **Save & refresh** button on one line at the top of the section.
-- Support direct cell editing and direct row creation where the underlying data allows it.
-- Use Streamlit's native row selection for bulk actions. Selection alone is transient and does not count as an unsaved data change.
-- Provide bulk editing for the table's meaningful shared fields and bulk deletion for persisted selected rows.
-- Do not put per-row Delete actions in tables. Delete through selected rows, a separate trash button, and a confirmation dialog.
-- Keep keyword and relevant dropdown filters above the table.
-- Validate bulk changes before writing and refresh the editor after a successful save or deletion.
-- Confirm bulk deletion, support selecting all filtered rows from Streamlit's native upper-left table selector, and export the filtered table to Excel.
-- Use consistent Details/Edit actions, required-field validation, editor attribution, automatic timestamps, and table history.
-- Workflow status values are table-specific rather than a global Draft/In review/Approved standard.
+## Current product scope
+
+PAAG currently supports:
+
+- project definitions, planning assumptions, and named planning scenarios;
+- official models, team-friendly names, annual usage, manufacturing features, and controlled model-to-feature mappings;
+- a Parts Catalog with revision, provenance, applicability, primary and supplemental CAD images, and scenario-specific Active state;
+- ordinary BOM imports, preferred ID-based PITS imports, conservative legacy PITS imports, source revisions, and reconciliation evidence;
+- a station-independent assembly Fishbone with main-spine sections, nested subassemblies, and placed part uses;
+- Yamazumi balancing areas, pitch addresses, model variants, work regions, flags, takt comparison, and drag-and-drop work assignment;
+- an ordered Process at a Glance plan reconciled from Yamazumi work and paired to Fishbone parts;
+- process tools, locations, unit orientation, dimensional geometry, and other requirements retained by the current schema;
+- a scenario-specific, derived Pin Map of pitches and reconciled Process work;
+- questions, concerns, decisions, and assumptions; and
+- a multi-sheet Excel snapshot with a flat `Lucid Data Link` worksheet.
+
+See `PROJECT_STATUS.md` for the precise distinction between working, incomplete, and deferred behavior.
+
+## Repository map
+
+### Root
+
+- `streamlit_app.py` — Entry point, page configuration, database initialization, active project/scenario session state, navigation, sidebar, and Current editor attribution.
+- `app_pages/` — Direct Streamlit page scripts. Page bodies intentionally are not wrapped in `main()` functions.
+- `utils/` — Shared business/data access, import/export, table behavior, scope UI, image handling, and custom components.
+- `data/` — Ignored local database and uploaded runtime files; not application source.
+- `.streamlit/config.toml` — Native Streamlit theme and upload settings.
+- `requirements.txt` — Supported dependency ranges.
+
+### Active page files
+
+- `app_pages/overview.py` — Project definition, headline counts, default takt, and active-scenario metadata.
+- `app_pages/concerns.py` — Questions, concerns, decisions, and assumptions.
+- `app_pages/exchange.py` — Ordinary BOM and PITS imports, preview/mapping, and Excel snapshot export.
+- `app_pages/models.py` — Model catalog, common names, usage, manufacturing features, and the model-feature complexity tree.
+- `app_pages/parts.py` — Parts Catalog, applicability, images, filters, bulk actions, export, and history.
+- `app_pages/fishbone.py` — Assembly framework, nested subassemblies, part placement, occurrence ordering, and the interactive Fishbone.
+- `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, flags, model variants, visual board, and work tables.
+- `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, ordered process requirements, bulk actions, export, and workload chart.
+- `app_pages/pin_map.py` — Scenario-specific read-only line visualization of pitches and explicitly linked Process work.
+- `app_pages/functional_*.py` — Non-persistent Equipment, Ergonomics, Quality, Materials, and Safety review shells.
+- `app_pages/assembly_sequence.py` — Legacy, unlinked assembly-Fishbone implementation; do not extend unless explicitly revived.
+
+### Shared utility files
+
+- `utils/store.py` — Schema, initialization, validation, CRUD, scenario cloning, snapshots, history, and file storage.
+- `utils/excel_io.py` — BOM/PITS parsing, column mapping, and multi-sheet export.
+- `utils/table_ui.py` — Shared table headers, selection interpretation, change detection, required-field checks, row actions, resets, and export helpers.
+- `utils/table_filters.py` — Keyword/dropdown filters, filtered-edit merging, multi-value filters, and editor reset behavior.
+- `utils/scope_ui.py` — Scenario Boundary titles, section headings, scenario selectors, and Save as scenario controls.
+- `utils/yamazumi_board.py` — Components v2 balancing board.
+- `utils/fishbone_visual.py` — Components v2 interactive assembly Fishbone.
+- `utils/clipboard_image.py` — Components v2 clipboard capture and server-side image normalization.
+- `utils/functional_review_ui.py` — Shared shell for the five Functional Reviews pages.
+
+## Navigation and screens
+
+Navigation is defined in `streamlit_app.py`.
+
+### Project
+
+- **Overview** creates and edits the project identity and active planning scenario, and shows project-level counts and takt comparisons.
+- **Questions and concerns** tracks cross-functional questions, concerns, decisions, and assumptions with ownership, priority, status, and related context.
+
+### Product structure
+
+- **Import PITS and export** accepts ordinary BOM data, the preferred `part_tracker` plus `models` PITS format, and legacy Level 1–11 PITS data. Preferred imports use `ID Number` as the stable source key; changed source content creates a revision and reconciliation item instead of overwriting reviewed planning decisions. The page also creates the one-way Excel snapshot.
+- **Model definitions** maintains official model numbers, common names, descriptions, annual usage, manufacturing features, allowed feature choices, and model-to-feature mappings.
+- **Parts Catalog** maintains one approved record per official part number. Catalog data is project-wide while Active state is scenario-specific. The page supports primary and supplemental images, including direct Windows screenshot paste.
+- **Parts to fishbone** defines the station-independent assembly sequence through ordered main-spine sections, nested subassemblies, and one or more placed uses of approved catalog parts.
+
+### Process planning
+
+- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. It supports scenario branching, takt, work regions, flags, model-variant stacks, and visual work balancing.
+- **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, orders it by pitch, and captures detailed execution requirements and output-assembly milestones.
+- **Pin Map** derives a scenario-specific read-only line view from existing pitches, Yamazumi elements, and explicitly linked Process work. It stores no separate layout data.
+
+### Functional Reviews
+
+**Equipment**, **Ergonomics**, **Quality**, **Materials**, and **Safety** are project-wide, non-persistent shells. Quality is the approved future home for requirements-review content. Persisted relationships, ownership, scope, and storage require proposal and owner review before implementation.
+
+## Domain glossary
+
+- **NPI** — New product introduction: preparing a product and its manufacturing process for production.
+- **IE** — Industrial engineer, one of several functional roles contributing to PAAG.
+- **BOM** — Bill of material: a list of parts or assemblies required for a product.
+- **MBOM** — Manufacturing bill of material: the collaborator-reviewed manufacturing product structure. Imported candidates are not automatically approved MBOM content.
+- **PITS** — The upstream product-information workbook. The preferred format has stable `ID Number` values in `part_tracker` and definitions in `models`; older Level 1–11 formats are interpreted conservatively.
+- **PITS record/revision** — The latest imported source row for a stable PITS ID and its preserved earlier source versions.
+- **Parts Catalog** — The approved project-wide list of part numbers, names, revisions, images, provenance, and applicability.
+- **Fishbone** — The station-independent assembly-order view whose main spine represents product flow and whose branches represent subassemblies and placed parts.
+- **Fishbone section** — A named assembly stage, either on the main spine or attached as a subassembly.
+- **Fishbone use** — One placement or installation occurrence of a catalog part. The same part may have multiple uses.
+- **Yamazumi** — A workload-balancing method that stacks timed work by pitch and compares it with takt.
+- **Yamazumi area** — A balancing scope, usually connected to a Fishbone section, within one scenario.
+- **Pitch** — A physical work position or address. Odd addresses render north/top and even addresses south/bottom on the visual board.
+- **Pitch type** — Pitch, Waterspider, Subassembly, Kitter, or Repacker.
+- **Pitch status** — Active pitches accept work; Open and Blocked pitches remain visible but cannot receive work.
+- **Takt time** — Target seconds available per completed unit based on demand.
+- **Planning scenario** — A named branch of Yamazumi and Process data with its own revision, takt, and lineage.
+- **Model** — An official product/model number. A separate common name can change without replacing the stable identifier.
+- **Complexity feature** — A manufacturing-relevant product characteristic with controlled choices.
+- **Model variant** — A Yamazumi stack for Base work or a specific feature choice.
+- **Model applicability** — The rule identifying which configurations require a part or Process step.
+- **Work element** — One measurable item of work with description, time, type, region, flags, variant, and optional pitch.
+- **Cycle / Periodic / Fluctuation work** — Work performed per unit, at a planned interval, or variably according to mix or conditions.
+- **Work region** — An area-specific category grouping the nature or location of Yamazumi work.
+- **Flag** — A visible Yamazumi tag; CTQ and Safety are built-in system flags.
+- **Process at a Glance** — The ordered scenario-specific manufacturing plan enriched with parts and execution requirements.
+- **Part requirement** — A group of parts paired to a Process step using `Use all`, `Choose one`, or `Optional` selection behavior.
+- **Output assembly milestone** — The exact Process step where a new made assembly becomes complete.
+- **Current editor** — Free-text browser-session attribution recorded in standardized history; it is not authentication.
+- **Lucid Data Link** — A flat exported worksheet intended for Lucid linking, not live two-way synchronization.
+
+For exact UI labels, use the locked Canonical Terminology Glossary in `DESIGN_SYSTEM.md`.

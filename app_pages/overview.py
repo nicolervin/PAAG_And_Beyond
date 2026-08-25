@@ -4,7 +4,8 @@ import streamlit as st
 from utils.scope_ui import page_title_with_scope, section_heading_with_scope
 from utils.table_filters import apply_pending_table_editor_reset, filter_table, merge_filtered_edits, request_table_editor_reset
 from utils.table_ui import (
-    dataframe_to_excel, drop_untouched_new_rows, editable_table_header,
+    dataframe_to_excel, drop_untouched_new_rows, editable_table_footer,
+    editable_table_heading,
     native_selected_rows, required_field_errors, selectable_dataframe,
     direct_entry_editor_rows, standard_details_column_config,
 )
@@ -153,13 +154,7 @@ if scenario:
             "currently viewed scenario, including its Yamazumi and Process at a Glance data. "
             "The newest saved branch becomes the shared scenario view across pages."
         )
-        scenario_actions = editable_table_header(
-            "Scenario definitions", editor_key=scenario_editor_key,
-            key_prefix=f"overview_scenarios_{project_id}", native_row_selection=True,
-        )
-        if scenario_actions.undo:
-            request_table_editor_reset(scenario_editor_key)
-            st.rerun()
+        editable_table_heading("Scenario definitions")
 
         visible_scenarios = filter_table(
             scenario_rows, key=f"overview_scenario_filters_{project_id}",
@@ -239,6 +234,14 @@ if scenario:
                 ),
             },
         )
+        scenario_actions = editable_table_footer(
+            editor_key=scenario_editor_key,
+            key_prefix=f"overview_scenarios_{project_id}",
+            native_row_selection=True,
+        )
+        if scenario_actions.undo:
+            request_table_editor_reset(scenario_editor_key)
+            st.rerun()
         selected_scenarios = native_selected_rows(
             editor_rows, editor_key=scenario_editor_key
         )
@@ -281,7 +284,7 @@ if scenario:
                     st.session_state.get("current_editor", ""),
                 )
                 record_audit_event(
-                    project_id, "Planning scenarios", "Save & refresh",
+                    project_id, "Planning scenarios", "Save & Refresh",
                     int(result["saved_count"]),
                     st.session_state.get("current_editor", ""),
                     {

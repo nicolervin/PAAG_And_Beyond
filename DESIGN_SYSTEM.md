@@ -6,13 +6,17 @@ This file defines locked interaction and interface standards for Process at a Gl
 
 Every editable table in this app must follow this exact deletion pattern, with no exceptions:
 
-1. Do not display a trash-can icon, Delete button, per-row delete control, or other deletion affordance inside or beside an editable table.
-2. Native row selection may be used for non-destructive bulk actions such as bulk editing, but it must not expose or imply a table-deletion action.
-3. A new table-deletion workflow may be added only after explicit project-owner approval and must be designed as a separate, confirmed workflow rather than an incidental table control.
-4. Any approved destructive workflow must state what will be deleted and what related data will be affected or unassigned. Its final confirmation button is the red destructive action and must not require typing a confirmation word.
-5. This standard applies to every table in the app without exception, including low-stakes tables like Questions and concerns.
+1. On a table with an approved deletion workflow, selecting one or more rows must reveal Streamlit's native **Delete row(s)** action in the table's upper-right toolbar.
+2. Clicking the native action initiates deletion but must not persist it immediately. Open a confirmation dialog that lists or summarizes the selected records and explains related records that will be deleted, preserved, unassigned, or otherwise affected.
+3. Cancel must restore the selected rows by resetting the editor state. The final confirmed action performs the database write, records history, resets the editor, shows a toast, and reruns.
+4. Do not add a second trash-can button, separate Delete button beside the table, per-row delete control, or Delete `ButtonColumn`. The native toolbar action is the single table-level entry point.
+5. Tables without an approved, relationship-safe deletion workflow must keep the native Delete action hidden. Adding such a workflow still requires explicit project-owner approval.
+6. The final confirmation button is the red destructive action and must not require typing a confirmation word.
+7. This standard applies to every table in the app, including low-stakes tables like Questions and concerns.
 
-This standard is **locked** and replaces prior inconsistent patterns, including Yamazumi's typed-`CLEAR` dialogs, Process at a Glance's single-click **Remove pairing** action, and delete-on-save behavior in Questions and concerns and Feature definitions.
+Every approved destructive confirmation or standalone destructive action must use a stable Streamlit widget key beginning with `destructive_`. The entry point uses this prefix to render destructive actions red without styling Cancel actions.
+
+This standard is **locked** and replaces prior inconsistent patterns, including globally hiding Streamlit's native deletion action, Yamazumi's typed-`CLEAR` dialogs, Process at a Glance's single-click **Remove pairing** action, and delete-on-save behavior in Questions and concerns and Feature definitions.
 
 Retrofitting existing screens to this standard is a separate future task and is not part of this documentation update. Do not modify screen code as part of documenting this standard.
 
@@ -20,17 +24,17 @@ Retrofitting existing screens to this standard is a separate future task and is 
 
 Every data table in this app must show Streamlit's native row-selection checkboxes on the far left. The unlabeled checkbox in the upper-left corner must select or clear all rows currently visible in the table with one click.
 
-Selection is a transient, non-destructive table action. It must not be stored as a data edit, trigger a write by itself, or expose a native trash-can or row-deletion control. Filters define which rows are currently visible and therefore which rows the upper-left checkbox selects.
+Selection is transient and does not write data by itself. On tables with an approved deletion workflow, the native Delete action converts the current selection into a pending confirmed deletion. On other tables, selection remains available only for non-destructive actions and the Delete action stays hidden. Filters define which rows are currently visible and therefore which rows the upper-left checkbox selects.
 
-Use the shared table conventions in `utils/table_ui.py`: read-only tables use `selectable_dataframe()` and editable tables use native editor selection with `num_rows="delete"`, while the native deletion toolbar is hidden. Do not add a named checkbox column or a separate **Select all** control to imitate this behavior. Where a business workflow can act on only one row, the screen may require exactly one selected row before enabling that action, but the native selectors and upper-left select-all control must remain available.
+Use the shared table conventions in `utils/table_ui.py`: read-only tables use `selectable_dataframe()` and editable tables use native editor selection through `num_rows="dynamic"` or `num_rows="delete"`. Show the native Delete toolbar action only when the editor is connected to an approved confirmation workflow. Do not add a named checkbox column or a separate **Select all** control to imitate selection. Where a business workflow can act on only one row, the screen may require exactly one selected row before enabling that action, but the native selectors and upper-left select-all control must remain available.
 
 This standard is **locked** and applies to every existing and future data table, including Questions and concerns, Fishbone assembly hierarchy tables, previews, and History tables.
 
 ## Universal Save Action Standard
 
-Every editable table or screen in this app must use the exact label **Save & refresh** for its primary save action button, regardless of what is being saved. Do not use screen-specific variants such as **Save concerns**, **Save model definitions**, **Save features**, **Save complexity tree**, **Save project**, or **Save scenario details**.
+Every editable table in this app must use the exact label **Save & Refresh** for its primary save action button, regardless of what is being saved. Do not use table-specific variants such as **Save concerns**, **Save model definitions**, **Save features**, or **Save complexity tree**.
 
-The button must follow the existing shared header pattern implemented in `utils/table_ui.py`: the title, orange **Unsaved changes** indicator, **Undo**, and the blue **Save & refresh** button must appear on one line.
+Keep the section title, filters, and sorting controls above the table. Immediately below the table, use the shared footer pattern implemented in `utils/table_ui.py`: the orange **Unsaved changes** indicator, **Undo**, and the blue **Save & Refresh** button with the save icon must appear together in a right-aligned row.
 
 This standard is **locked** and replaces all screen-specific save button labels identified during the current-state audit, including those on Overview, Questions and concerns, all three Model definitions subsections, and Parts to fishbone.
 
@@ -41,6 +45,43 @@ Retrofitting existing screens to this standard is a separate future task. Do not
 Editable tables that permit new records must allow contributors to type or paste one or many spreadsheet rows directly into Streamlit's native blank entry row. Do not expose a separate **Add row** button. Use `direct_entry_editor_rows(..., editor_key=...)` immediately before `st.data_editor(..., num_rows="dynamic")`.
 
 Because Streamlit disables native header sorting when an editor permits row creation, the shared helper supplies external **Sort rows by** and **Descending** controls. Apply sorting before editing; once the editor contains draft changes, pasted rows, or native row selections, the sort controls must remain locked until the contributor saves, undoes, or clears the selection. Approved new-row defaults belong in `st.column_config`. Saving or undoing must clear the editor draft while retaining the chosen saved-row sort. Apply this standard to every existing and future editable table that permits row creation.
+
+## Shared Editable-Table Implementation Checklist
+
+Use `utils/table_ui.py` and `utils/table_filters.py` for every new or modernized data table. These helpers implement the locked standards above and must not be recreated independently in page code.
+
+- Put keyword and relevant dropdown filters above every table with `filter_table()`.
+- Put the section title above the filters with `editable_table_heading()`. Put the orange **Unsaved changes** indicator, **Undo**, and blue **Save & Refresh** action immediately below the table with `editable_table_footer()`.
+- Use `selectable_dataframe()` for read-only tables. Editable tables use Streamlit's native selection state through the shared editor pattern; never add a named `CheckboxColumn` or separate Select all control.
+- Read selected persisted rows with `native_selected_rows()`. Treat selection as transient UI state and exclude it from change detection with `table_has_unsaved_changes(..., native_row_selection=True)` where applicable.
+- Refuse a normal save while persisted rows remain selected; selection is reserved for validated bulk actions.
+- Keep native Sort ascending and Sort descending on read-only tables and editable tables that do not create rows. For `num_rows="dynamic"`, call `direct_entry_editor_rows(..., editor_key=...)` immediately before `st.data_editor()` and use its locked external sort controls.
+- When saving a filtered editor, use `merge_filtered_edits()` so rows hidden by filters are preserved. Filters affect only the visible and exported view; they must never delete or overwrite hidden records.
+- Mark required fields in `st.column_config` and validate them again with `required_field_errors()` or store-layer validation.
+- Convert multi-value database fields to lists for `MultiselectColumn`, then convert them back to their persisted representation before saving. Use `universal_values` in `filter_table()` for values such as All models that match every specific choice.
+- Keep stable identifiers separate from friendly display values. Hide internal IDs visually while retaining them for callback and write resolution; remove genuinely sensitive values before data reaches the browser.
+- Validate an entire bulk operation before writing. Never partially apply a bulk change because one selected record is invalid.
+- Provide bulk editing for meaningful shared fields, subject to the Universal Deletion Standard.
+- Use the shared Details/Edit action configuration, and do not change established column sizing unless a request specifically calls for it.
+- Export the currently filtered table with `dataframe_to_excel()`.
+- Do not impose Draft/In review/Approved as a universal status model. Status values are specific to each business table.
+
+Use this normal save sequence:
+
+1. Read the filtered editor output and native selection.
+2. Refuse a normal save if persisted rows remain selected.
+3. Validate required fields and business rules.
+4. Merge filtered edits into the complete unfiltered data.
+5. Convert display labels back to stored identifiers or codes.
+6. Call one named store-layer save function.
+7. Record the audit event with Current editor attribution and the timestamp returned by the store layer.
+8. Request an editor reset, show a success toast, and rerun.
+
+### Editor state and reset behavior
+
+Treat `st.session_state` as browser-session state, not permanent storage. Apply `apply_pending_table_editor_reset(editor_key)` before constructing an editor whose prior state may need clearing. After a successful save or approved destructive action, call `request_table_editor_reset(editor_key)` before rerunning so stale edits and selections cannot replay.
+
+Unsaved-change Undo normally clears the editor's session-state entry and reruns. A complex multi-table workflow may retain a pre-save snapshot in session state when it genuinely needs saved-state Undo; follow the existing Model definitions and Fishbone patterns. Session-state Undo remains limited to the current browser session and is not an audit or version-control mechanism.
 
 ## Deferred decisions
 
@@ -61,6 +102,8 @@ Each `audit_log` entry must follow the existing pattern used by compliant screen
 - JSON details describing what changed; and
 - a timestamp.
 
+Use `record_audit_event()` for standardized saves, approved destructive actions, and bulk edits. Include the timestamp supplied by the store layer and `st.session_state.get("current_editor", "")`. Keep action names consistent with the visible workflow, such as `Save & Refresh` or `Bulk edit`; do not create near-duplicate action labels for equivalent events.
+
 This standard is **locked**. Bringing all existing screens into compliance is a separate future retrofit task and is not part of this documentation update. Any new screen or feature built from this point forward must include audit logging from the start. Audit logging is not optional and must not be treated as an item to add later.
 
 This is a documentation-only standard. Do not modify screen code as part of documenting it.
@@ -78,6 +121,8 @@ The History section must show, at minimum:
 - when the change occurred.
 
 It must use the same visual placement and format on every screen so users always know where to look.
+
+Use `audit_history()` in a bottom expander. When a page has multiple history categories, group them into tabs inside that expander rather than scattering separate History sections through the page.
 
 This standard is **locked**. Retrofitting all existing screens to include this History section is a separate future task and is not part of this documentation update. Any new screen or feature built from this point forward must include a History section from the start.
 

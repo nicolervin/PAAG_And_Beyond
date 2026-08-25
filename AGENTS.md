@@ -1,417 +1,124 @@
 # Process at a Glance developer guide
 
-Read `DATA_DICTIONARY.md` and this file in full before creating any new table, field, or screen.
+This file contains the repository-wide working agreement for developers and AI assistants. Keep it focused on instructions that apply broadly; descriptive product material belongs in the supporting documents below.
 
-## Collaborator Roles
+## Required references and authority
 
-This project is built and maintained by multiple functional roles, not exclusively industrial engineers. Known roles contributing to this codebase include: Industrial Engineer (IE), Advanced Quality Engineer (AQE), Ergonomist, Materials Planner, and Advanced Manufacturing Engineer. More roles will be added over time as the team grows.
+Read this file before changing the application. Then read the applicable authoritative references in full before acting:
 
-Rule 1 — General task language: wherever existing documentation, code comments, or UI labels say "IE" or "industrial engineer" in a way that describes a general task any contributor could perform (e.g., "any IE may add help text," "the IE enters this field"), treat this as shorthand for "collaborator" or "contributor," not as a restriction to the IE role specifically.
+- **Database schema, persisted fields, relationships, scope, or a new screen/module:** read `DATA_DICTIONARY.md`.
+- **Tables, forms, page layout, deletion, save behavior, audit/history, scenario badges, help text, or UI terminology:** read `DESIGN_SYSTEM.md`.
+- **Incomplete, deferred, dormant, blocked, or legacy behavior:** read `PROJECT_STATUS.md` and the applicable `DATA_DICTIONARY.md` section.
+- **Product scope, navigation, repository map, technology, startup, or domain terminology:** read `README.md`.
 
-Rule 2 — Role-specific ownership stays explicit: wherever a rule is genuinely role-specific — meaning only one function should own or edit that data (for example, torque and quality specs are owned by Quality/AQE in the future Quality functional review, not by the IE in Process at a Glance) — that ownership must remain explicit and must NOT be generalized to "any collaborator."
+When a task crosses categories, read every applicable reference. `DATA_DICTIONARY.md` controls the data model and scope; `DESIGN_SYSTEM.md` controls locked UI behavior; `PROJECT_STATUS.md` records current implementation status; `README.md` is descriptive. If code or documentation conflicts with an authoritative reference, stop and resolve the discrepancy with the project owner before extending it.
 
-Rule 3 — Adding a new role is lightweight: adding a new role name to this list (granting someone general access to use Codex on this repo) requires no special process — simply add the role name and a one-line description here.
+Read `DATA_DICTIONARY.md` and `DESIGN_SYSTEM.md` in full before creating any new table, persisted field, screen, or module.
 
-Rule 4 — Assigning data ownership is NOT lightweight: if a new or existing role is proposed to own, author, or exclusively control a specific data type, table, or module (similar to AQE owning torque/quality specs), this is a critical-thread-level decision and must go through the same owner-approval process as other critical-thread changes — it cannot be assumed or self-assigned by a contributor.
+## Collaborator roles and ownership
 
-When in doubt about whether a rule is general or role-specific, or whether a role change is roster-only versus a data-ownership change, stop and ask the project owner before assuming.
+This project is maintained by multiple functions: Industrial Engineer (IE), Advanced Quality Engineer (AQE), Ergonomist, Materials Planner, Advanced Manufacturing Engineer, and other cross-functional collaborators.
 
-This file is the fast onboarding guide and working agreement for developers and AI assistants changing this repository. Read it before editing the app. `README.md` gives a shorter product summary, while `PROJECT_STATUS.md` records the latest known working and incomplete areas.
+- Treat general-task uses of "IE" or "industrial engineer" in older documentation, comments, or UI copy as "collaborator" or "contributor" when the work is not role-specific.
+- Preserve genuinely role-specific ownership. For example, future Quality/AQE ownership of torque and quality specifications must not be generalized to every collaborator.
+- Adding a role name to the contributor roster is lightweight and needs only a name plus a one-line description here.
+- Assigning a role ownership or exclusive control of a data type, table, or module is a critical-thread decision requiring project-owner approval. Never infer or self-assign it.
 
-## What this application is
+If it is unclear whether a rule is general or role-specific, or whether a change affects only the roster versus data ownership, ask the project owner.
 
-Process at a Glance (PAAG) is a local planning application for industrial engineers and lean/manufacturing teams preparing a new-product-introduction assembly process.
+## Critical product invariants
 
-It brings information that would otherwise be spread across several spreadsheets into one evolving project record. The app covers:
-
-- project and planning assumptions;
-- official models and manufacturing-relevant product options;
-- parts, revisions, source information, and CAD images;
-- imported PITS and bill-of-material data;
-- a station-independent assembly fishbone;
-- Yamazumi work content and workstation balancing;
-- an ordered process plan with tools, torque, quality, ergonomic, and workstation requirements;
-- questions, concerns, decisions, and assumptions; and
-- an Excel snapshot for review or Lucid data linking.
-
-The application is currently a local prototype, not a production multi-user service. Its users include industrial engineers, advanced quality engineers, ergonomists, materials planners, advanced manufacturing engineers, and other cross-functional collaborators, all of whom may contribute directly to the project record.
-
-## Technology and how the app runs
-
-### Main technology
-
-- **Language:** Python.
-- **Application framework:** Streamlit 1.61 or newer, but below 2.0.
-- **Table/data handling:** pandas.
-- **Local data storage:** SQLite in `data/paag.db`.
-- **Excel import/export:** openpyxl, with pandas used for tabular conversion.
-- **Images:** Pillow for validation and normalization. Uploaded images are stored under `data/uploads/` and their paths are stored in SQLite.
-- **Custom browser interactions:** Streamlit Components v2 with small inline HTML, CSS, and JavaScript components. These power clipboard image paste, the interactive fishbone, and Yamazumi drag-and-drop.
-- **Theme:** `.streamlit/config.toml` defines the app colors, corner radii, and a 50 MB upload limit.
-
-The exact package ranges are in `requirements.txt`. The shared Python virtual environment normally lives one directory above this repository at `..\.venv`.
-
-### Running the app
-
-From the repository root in PowerShell:
-
-```powershell
-..\.venv\Scripts\streamlit.exe run streamlit_app.py
-```
-
-Then open `http://localhost:8501` in a browser. Streamlit normally reloads the app when a source file is saved.
-
-`streamlit_app.py` calls `init_db()` on startup. The initialization code creates missing tables, applies small in-place schema upgrades used by this prototype, installs required built-in Yamazumi flags, and seeds a sample project when appropriate.
-
-SQLite foreign-key checks are enabled and the database uses write-ahead logging. Database writes go through the `connection()` context manager in `utils/store.py`, which commits at the end of a successful block and always closes the connection.
-
-### Local and generated data
-
-- `data/paag.db`, its SQLite sidecar files, and `data/uploads/` are local runtime data and are ignored by Git.
-- `.streamlit/secrets.toml` is ignored and must never be committed.
-- Do not assume local data can be recovered from Git. Make a copy of `data/paag.db` before experiments that intentionally remove or rewrite real planning data.
-- Temporary directories at the repository root are not application source. Do not build new features around them or commit them.
-
-## Repository structure
-
-### Root files and folders
-
-- `streamlit_app.py` — The entry point. It configures the page, initializes the database, establishes the active project and scenario in session state, defines the page navigation, renders the sidebar, and records the browser session's Current editor name.
-- `app_pages/` — Direct Streamlit page scripts. A page file renders when selected; page bodies are intentionally not wrapped in a `main()` or render function.
-- `utils/` — Shared data access, import/export, table behavior, image handling, and custom visual components. Put reusable business logic here rather than copying it between pages.
-- `data/` — Runtime SQLite database and uploaded files. It is not source code.
-- `.streamlit/config.toml` — Native Streamlit theme and upload-size settings.
-- `requirements.txt` — Python dependencies and supported version ranges.
-- `README.md` — Short product description, run command, and scope overview.
-- `PROJECT_STATUS.md` — Plain-English snapshot of working, incomplete, and deferred areas. Update it when a material status statement changes.
-- `AGENTS.md` — This onboarding and contribution guide.
-- `.gitignore` — Excludes Python caches, the local environment, secrets, the database, and uploaded images.
-
-### Page files
-
-- `app_pages/overview.py` — Project creation and definition, headline counts, default takt, and active-scenario name, revision, takt, and change summary.
-- `app_pages/concerns.py` — Editable questions, concerns, decisions, and assumptions.
-- `app_pages/exchange.py` — Ordinary BOM import, preferred ID-based PITS import, legacy Level 1–11 PITS import, previews/mapping, and Excel snapshot export.
-- `app_pages/models.py` — Official model catalog, team-friendly model definitions, estimated annual usage, feature definitions, and the model-to-feature complexity tree.
-- `app_pages/parts.py` — Part catalog, feature applicability, primary and supplemental images, direct Windows screenshot paste, filters, bulk actions, export, and history.
-- `app_pages/fishbone.py` — Assembly framework, nested subassemblies, catalog-part placement, occurrence ordering, and the interactive fishbone visualization.
-- `app_pages/yamazumi.py` — Planning-scenario branching, Yamazumi import/reset, assembly areas, pitch generation, work regions, flags, model variants, the interactive balancing board, and editable pitch/work-element tables.
-- `app_pages/process.py` — Pairs fishbone parts to Yamazumi work, reconciles selected work into the process plan, captures process requirements, supports bulk actions and export, and shows a simple workload-by-pitch chart.
-- `app_pages/pin_map.py` — Scenario-specific, read-only line visualization with explicitly linked Process at a Glance work above each Yamazumi workstation or pitch.
-- `app_pages/functional_equipment.py` — Non-persistent Equipment functional-review shell.
-- `app_pages/functional_ergonomics.py` — Non-persistent Ergonomics functional-review shell.
-- `app_pages/functional_quality.py` — Non-persistent Quality functional-review shell.
-- `app_pages/functional_materials.py` — Non-persistent Materials functional-review shell.
-- `app_pages/functional_safety.py` — Non-persistent Safety functional-review shell.
-- `app_pages/assembly_sequence.py` — Older assembly-fishbone page retained in the repository but not linked from the current navigation. Treat it as legacy code; do not add features to it unless the user explicitly asks to revive it.
-
-### Shared utility files
-
-- `utils/store.py` — SQLite schema, startup initialization, seed data, queries, validation, CRUD operations, scenario cloning, snapshots/restore operations, history recording, and file storage. This is the main business/data layer.
-- `utils/excel_io.py` — Reads ordinary BOM files, recognizes and parses current and legacy PITS formats, suggests column mappings, and builds the multi-sheet Excel export.
-- `utils/table_ui.py` — Shared editable-table header, unsaved-change detection, native selected-row interpretation, required-field checks, details-button configuration, and filtered-table Excel export.
-- `utils/table_filters.py` — Keyword/dropdown filters, multi-value filtering, merging filtered edits back into the full table, and reliable editor-reset helpers.
-- `utils/scope_ui.py` — Shared Scenario Boundary page-title and Overview section-heading badges, including locked labels, hover text, and the cross-page active-scenario selector.
-- `utils/yamazumi_board.py` — Components v2 Yamazumi board. It displays odd pitch addresses on the north/top side, even addresses on the south/bottom side, variant stacks, timed work blocks, flags, and drag/edit/add events.
-- `utils/fishbone_visual.py` — Components v2 interactive assembly fishbone with pan, zoom, full-screen view, part cards, thumbnails, and hover details.
-- `utils/clipboard_image.py` — Components v2 clipboard capture plus server-side image validation and conversion into an upload-like object.
-- `utils/functional_review_ui.py` — Shared non-persistent page shell for the five Functional Reviews pages.
-- `utils/__init__.py` — Marks `utils` as a Python package.
-
-## Navigation and screens
-
-The current navigation is defined only in `streamlit_app.py` and is grouped as follows.
-
-### Project
-
-#### Overview
-
-Creates a new NPI project and edits the active project's identity, program/product, product line, lead industrial engineer, baseline revision, status, default takt, and notes. It shows counts for parts, work elements, draft cycle time versus takt, and open concerns. It also edits the active planning scenario without changing other scenarios.
-
-#### Questions & concerns
-
-Tracks cross-functional questions, concerns, decisions, and assumptions with subject, detail, owner, priority, status, related part, related station, and creation time.
-
-### Product structure
-
-#### Import PITS & export
-
-Supports three import routes:
-
-1. The preferred PITS workbook with `part_tracker` and `models` sheets. `ID Number` is treated as the stable source key. Reimporting an unchanged ID does not overwrite collaborator decisions; changed source content creates a source revision and a reconciliation item.
-2. Legacy PITS sheets with repeated Level 1–11 columns. These rows are conservative review candidates; the Level values are not guessed to be quantities, sequences, or model codes.
-3. Ordinary Excel, CSV, TSV, or text BOM data with user-confirmed column mapping.
-
-The page also creates a one-way Excel snapshot. Its sheets cover the project, active scenario, parts, work elements, concerns, MBOM review, fishbone, PITS history, models, and a flattened `Lucid Data Link` view.
-
-#### Model definitions
-
-Maintains source model numbers and the names/descriptions familiar to the project team. Models can be activated or hidden from planning choices. The page also defines manufacturing-relevant features and allowed choices, then maps each official model to one choice for every active feature.
-
-#### Parts Catalog
-
-Maintains one catalog record per official part number. It records description, revision, provenance/source, notes, and feature-based model applicability. A scenario-specific Active checkbox controls whether a catalog part appears in downstream Fishbone, Process at a Glance, Pin Map-linked work, and scenario-export views without deleting the master record or its saved links. It supports a primary CAD image, additional image views, file upload, and direct Windows screenshot paste from Part Details. New parts are typed or pasted directly into the table's blank entry row and default to active in each scenario until explicitly turned off there.
-
-#### Parts to fishbone
-
-Builds the assembly framework before workstation balancing. Main-spine sections establish the product's assembly order; subassemblies attach to a parent section or another subassembly. Approved part-catalog entries can have one or more placed uses, each with quantity, use description, notes, section, and order. The interactive visual can be filtered by feature choice.
-
-### Process planning
-
-#### Yamazumi
-
-Creates or imports balancing areas, pitch addresses, and work elements inside the active planning scenario. Users can:
-
-- branch the current plan with Save as scenario;
-- reset selected or all Yamazumi data with confirmation;
-- create areas from fishbone sections;
-- generate ranges of odd, even, or all pitch addresses;
-- define area-specific work regions and project-wide flags;
-- enable model-variant stacks on pitches;
-- add and edit pitches or work elements;
-- drag work between active pitches on the visual board; and
-- edit the same records directly in tables.
-
-#### Process plan
-
-Starts from Yamazumi work rather than creating unrelated duplicate work. The upper workspace selects a fishbone section, one Yamazumi work element, and one or more part uses, then records whether all parts are used, one alternative is chosen, or the parts are optional. The main table orders the work by pitch and captures time, output-assembly milestones, tools, torque, quality, ergonomics, location, conveyor/platform height, pit depth, model applicability, and status.
-
-#### Pin Map
-
-Provides a scenario-specific, read-only visual of the production line. Each Yamazumi workstation or pitch displays explicitly reconciled Process at a Glance work above it. The view derives from existing scenario, pitch, Yamazumi-element, and Process records and does not persist separate layout data.
-
-### Functional Reviews
-
-#### Equipment
-
-Project-wide, non-persistent shell for future equipment review content.
-
-#### Ergonomics
-
-Project-wide, non-persistent shell for future ergonomics review content.
-
-#### Quality
-
-Project-wide, non-persistent shell and approved future home for requirements review content. The former Requirements page implementation was intentionally removed so the Quality/AQE workflow can be designed against the current rule book and design standards.
-
-#### Materials
-
-Project-wide, non-persistent shell for future materials review content.
-
-#### Safety
-
-Project-wide, non-persistent shell for future safety review content.
-
-The five Functional Reviews pages intentionally contain no database fields or critical-thread links yet. Their future relationships, ownership, scope, and storage must pass the New Module Proposal Gate before persisted content is added.
-
-## Glossary
-
-- **NPI** — New product introduction: the work required to prepare a product and its manufacturing process for production.
-- **IE** — Industrial engineer. One of the functional roles contributing to this prototype.
-- **BOM** — Bill of material: a list of parts or assemblies required for a product.
-- **MBOM** — Manufacturing bill of material: the manufacturing-reviewed product structure. Imported PITS candidates are not automatically accepted as approved MBOM content.
-- **PITS** — The upstream product-information/workbook format used by this project. The preferred format has a stable `ID Number` in `part_tracker` and model definitions in `models`. Older Level 1–11 files are also recognized but intentionally interpreted conservatively.
-- **PITS record/revision** — The latest imported source row for a stable PITS ID and its saved earlier source versions. Source revisions preserve what changed without silently rewriting collaborator-authored planning decisions.
-- **Part catalog** — The project's approved list of part numbers, descriptions, revisions, images, provenance, and applicability rules.
-- **Fishbone** — A station-independent view of assembly order. Its main spine is the product flow; fins/branches represent subassemblies and placed part uses. Build this before assigning physical work locations.
-- **Framework section** — A named assembly stage on the fishbone. A Main spine section is part of the main product flow. A Subassembly attaches to a parent.
-- **Part use/occurrence** — One placement or installation of a catalog part in the fishbone. The same catalog part can appear more than once for different uses.
-- **Yamazumi** — A visual workload-balancing method. Work elements are stacked by pitch and compared with takt time. Colors distinguish cycle, periodic, and fluctuation work.
-- **Yamazumi area** — The balancing scope, usually tied to a fishbone section, within one planning scenario.
-- **Pitch** — A physical work position/address along the line. In the visual board, addresses ending in odd numbers appear north/top and even numbers south/bottom.
-- **Pitch type** — The role of a pitch: Pitch, Waterspider, Subassembly, Kitter, or Repacker.
-- **Pitch status** — Active pitches can receive work. Open and Blocked pitches remain visible but cannot receive work until activated.
-- **Takt time** — The target number of seconds available per completed unit, based on demand. Workload is compared with takt to show whether a pitch is over or under the target.
-- **Planning scenario** — A named branch of Yamazumi and Process plan data with its own revision label, takt, and lineage. Save as scenario copies the current plan so alternatives can be explored without mixing their work records.
-- **Model** — An official product/model number imported from PITS or entered manually. A team-friendly display name can be added without replacing the official identifier.
-- **Feature / complexity feature** — A manufacturing-relevant product characteristic, such as a door or control configuration, with a controlled list of choices.
-- **Model variant** — A Yamazumi stack representing Base work or a specific feature choice. Base applies to every model; feature variants show additional or different work.
-- **Model applicability** — The rule that determines which model configurations need a part or process step. Parts use feature rules; older records may still contain legacy model-number text.
-- **Work element** — One measurable piece of work with a description, time, type, region, flags, variant, and optional pitch assignment.
-- **Cycle / Periodic / Fluctuation work** — Cycle work happens each unit; periodic work happens at a planned interval; fluctuation work varies with product mix or conditions.
-- **Work region** — An area-specific category used to group or color the nature/location of Yamazumi work.
-- **Flag** — A visible work-element tag. CTQ and Safety are system flags; projects can add custom flags. CTQ means critical to quality.
-- **Process plan** — The ordered, scenario-specific manufacturing steps by pitch, enriched with parts and detailed execution requirements.
-- **Part requirement / selection rule** — A group of parts paired to a process step. Use all means every listed part is consumed, Choose one means alternatives, and Optional means the group may not apply.
-- **Output assembly milestone** — The exact process step at which a new made assembly becomes complete. Purchased assemblies remain ordinary catalog parts.
-- **Current editor** — The name entered in the sidebar for the browser session. Standardized table history records it; this is attribution, not authentication.
-- **Lucid Data Link** — A flat worksheet intended for linking the exported snapshot into Lucid. It is not a live two-way connection.
+- PAAG is currently a local prototype, not a production multi-user service. Current editor is free-text attribution, not authentication.
+- Preserve the critical thread documented in `DATA_DICTIONARY.md`: Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> derived Pin Map. Imported evidence must never silently replace collaborator-reviewed planning decisions.
+- A planning scenario owns its Yamazumi areas and Process plan work. Never read or write scenario-owned records by project ID alone where that could mix scenarios.
+- The Parts Catalog and Fishbone structure are project-wide, with scenario-dependent downstream visibility documented in `DATA_DICTIONARY.md`.
+- The five Functional Reviews pages are approved non-persistent shells. Do not add persisted fields, relationships, ownership, or storage until the applicable proposal passes the New Module Proposal Gate.
+- `app_pages/assembly_sequence.py` is legacy and unlinked. Do not add features to it unless the requester explicitly asks to revive it.
+- Dormant and hidden tables have distinct restrictions in `DATA_DICTIONARY.md`. Do not modify or build against them without the documented approval.
 
 ## New Module Proposal Gate
 
-If a request describes building a new page, module, table, or feature that does not already exist in `DATA_DICTIONARY.md`, do NOT begin writing implementation code yet. Instead, ask the requester the following questions and wait for answers:
+If a request describes a new page, module, table, persisted field, or feature not already covered by `DATA_DICTIONARY.md`, do not begin implementation. Ask the requester and wait for answers to all five questions:
 
-1. What existing entity/entities does this new module connect to (e.g., a specific Part, Process step, Fishbone section, Model, or Scenario)?
-2. What is the exact relationship/foreign key that will link this new data back to the existing critical thread (Product Architecture → Parts → Fishbone → Yamazumi → Process at a Glance)?
-3. Is this new module project-wide or scenario-specific, per the scope rules in `DATA_DICTIONARY.md`?
-4. Does this require a new database table, or can it be added to an existing one? If new, what fields, and why can't an existing table serve this purpose?
-5. Which of the standards in `DESIGN_SYSTEM.md` apply to this new module's tables and UI (deletion, save action, audit logging, history display, scenario boundary badges, help text)?
+1. What existing entity or entities does the module connect to, such as a Part, Process step, Fishbone section, Model, or Scenario?
+2. What exact relationship or foreign key links the data to the critical thread (Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance)?
+3. Is the module project-wide or scenario-specific under the scope rules in `DATA_DICTIONARY.md`?
+4. Does it require a new table, or can an existing table serve it? If new, what fields are required and why is an existing table insufficient?
+5. Which `DESIGN_SYSTEM.md` standards apply, including deletion, save action, audit logging, history, scenario badges, and help text?
 
-Once answered, create or update a section in `DATA_DICTIONARY.md` called "Proposed modules — pending owner review" with the module name, the answers above, who proposed it, and the date. Then you may proceed with implementation in the requester's branch.
+After answers are supplied, add or update the `Proposed modules — pending owner review` section in `DATA_DICTIONARY.md` with the module name, answers, proposer, and date. Then implementation may proceed in the requester's branch. Do not skip this gate. If questions 1–3 cannot be answered, stop and direct the proposal to the project owner.
 
-Do not skip this gate even if the requester seems confident or in a hurry. If the requester cannot answer questions 1-3, stop and tell them to bring the proposal to the project owner before continuing.
-
-## Coding and design conventions
-
-### General Python and page structure
+## Python and page structure
 
 - Follow the existing Python style: `snake_case` for functions, variables, widget keys, and modules; `UPPER_SNAKE_CASE` for constants; and short descriptive helper names.
-- Use string UUIDs for persisted record IDs (`str(uuid4())`). Do not invent sequential database IDs.
+- Use string UUIDs for persisted record IDs (`str(uuid4())`); do not introduce sequential database IDs.
 - Store timestamps as UTC ISO strings using `now_iso()`.
-- Keep Streamlit page files as direct scripts. Do not add `if __name__ == "__main__"` or wrap a page in a `main()` function.
-- Keep page code focused on presentation and user interaction. Put reusable data rules, validation, transactions, and transformations in `utils/`.
-- Read `project_id` and, where relevant, `scenario_id` from `st.session_state`. Stop early when required context is missing. Confirm that the selected scenario still exists before using it.
-- Give repeated or dynamic widgets stable, descriptive keys. Include the relevant project, scenario, area, section, or record ID when the same control can exist in different scopes.
-- Use `st.rerun()` after a successful write when the displayed data must be reloaded. Use a scoped rerun only where an existing fragment/dialog pattern requires it.
-- Prefer native Streamlit elements. Use Components v2 only for interactions native Streamlit cannot provide, as with clipboard capture and the two interactive visuals.
-- Use Material Symbols (`:material/...:`), sentence-case labels, native bordered containers, and the project theme. Do not add general CSS styling unless a custom component truly needs its own encapsulated styles.
-- Render every active page title with `page_title_with_scope()` from `utils/scope_ui.py`. Scenario-specific and scenario-aware page titles receive the shared active-scenario dropdown automatically. Overview must also use `section_heading_with_scope()` for its project-wide and active-scenario sections.
+- Keep Streamlit page files as direct scripts. Do not add `if __name__ == "__main__"` or wrap a page in `main()`.
+- Keep pages focused on presentation and interaction. Put reusable business rules, validation, transactions, and transformations in `utils/`.
+- Read `project_id` and, where relevant, `scenario_id` from `st.session_state`. Stop early when required context is absent and confirm the selected scenario still exists.
+- Give repeated or dynamic widgets stable descriptive keys containing the relevant project, scenario, area, section, or record ID.
+- Use `st.rerun()` after a successful write when displayed data must reload; use scoped reruns only for an established fragment/dialog pattern.
+- Prefer native Streamlit. Use Components v2 only when native Streamlit cannot provide the interaction.
+- Use Material Symbols (`:material/...:`), sentence-case labels, native bordered containers, and the project theme. Avoid general CSS unless a custom component needs encapsulated styles.
+- Use `page_title_with_scope()` for every active page title and `section_heading_with_scope()` for Overview's project-wide and active-scenario sections.
 - Use `width="stretch"` or `width="content"`; do not introduce deprecated `use_container_width`.
 
-### Data access and database changes
+## Data access and persistence
 
-- All normal reads and writes belong in `utils/store.py`; pages should call named store functions instead of opening SQLite directly.
-- Use parameterized SQL for values. Never build SQL by inserting user-entered text into the statement.
-- Keep foreign-key behavior explicit and preserve project/scenario boundaries in every query.
-- A planning scenario owns its Yamazumi areas and Process plan work. Do not query or update scenario-specific records using project ID alone when that could mix scenarios.
-- Validate before writing. Store functions should raise `ValueError` with a user-readable message for expected validation failures; pages should catch it and show `st.error` or a warning.
-- For multi-table operations, use one `connection()` block so the change commits together.
-- This prototype currently performs schema creation and small upgrades inside `init_db()` rather than using a separate migration tool. New schema changes must be safe to run repeatedly and must preserve existing local data.
-- Return tabular results as pandas DataFrames when pages need table operations.
-- **Always give empty editable DataFrames explicit dtypes.** A cleared table must still declare text columns as `string`, booleans as `bool`, and numeric columns as appropriate. `pd.DataFrame(columns=[...])` or `reindex()` alone can infer empty columns as floats and make `st.data_editor` reject a `TextColumn`. The Yamazumi work-region loader is the reference fix for this case.
-- Uploaded files must remain under `data/uploads/`. Validate file type/size, generate safe unique filenames, and store paths rather than binary image contents in SQLite.
+- Put normal reads and writes in `utils/store.py`; pages call named store functions rather than opening SQLite directly.
+- Use parameterized SQL. Never interpolate user-entered values into SQL statements.
+- Keep foreign-key behavior explicit and enforce project and scenario boundaries in every query.
+- Validate before writing. Store functions raise user-readable `ValueError` exceptions for expected failures; pages catch and display them.
+- Use one `connection()` block for a multi-table operation so the transaction commits atomically.
+- Schema creation and safe, repeatable in-place upgrades live in `init_db()`. Preserve existing local data.
+- Return pandas DataFrames for tabular page data.
+- Give empty editable DataFrames explicit dtypes: text as `string`, booleans as `bool`, and numeric columns as appropriate. A cleared table must remain compatible with its `st.column_config`.
+- Store validated uploads beneath `data/uploads/` with safe unique filenames; persist paths, not image binaries.
 
-### Streamlit state and undo
+## Streamlit tables, state, and audit
 
-- Streamlit reruns the full active page after most interactions. Treat `st.session_state` as browser-session state, not permanent storage.
-- Apply `apply_pending_table_editor_reset(editor_key)` before constructing an editor whose prior state may need clearing.
-- After a successful save or delete, call `request_table_editor_reset(editor_key)` and rerun so stale row edits and selections do not replay.
-- Unsaved-change Undo normally clears the editor's session-state entry and reruns.
-- Some complex screens keep a pre-save snapshot in session state so the last saved change can be restored. Follow the existing model/fishbone snapshot pattern when a multi-table operation genuinely needs saved-state Undo.
-- Session-state Undo is intentionally limited to the current browser session. It is not a durable audit or version-control system.
-- Do not let a one-shot custom-component click replay on later page reruns. Consume or clear its trigger state as the Yamazumi dialogs do.
+Read and follow `DESIGN_SYSTEM.md` before changing any table or UI. Reuse `utils/table_ui.py`, `utils/table_filters.py`, and `utils/scope_ui.py`; do not recreate their behavior locally.
 
-### Editable table standard
+- Treat `st.session_state` as browser-session state, not durable storage.
+- Apply `apply_pending_table_editor_reset(editor_key)` before constructing an editor that may need clearing. After a successful write, call `request_table_editor_reset(editor_key)` and rerun so stale edits or selections do not replay.
+- Unsaved-change Undo normally clears the editor state and reruns. Use the existing model/fishbone snapshot pattern only when a multi-table operation genuinely needs saved-state Undo.
+- Consume one-shot custom-component triggers so they cannot replay on later reruns.
+- Preserve rows hidden by filters with `merge_filtered_edits()` and retain hidden internal IDs for callback/write resolution. Remove truly sensitive fields before sending data to the browser.
+- Validate a complete bulk operation before writing; never partially apply it.
+- Record every persisted change with `record_audit_event()` and Current editor attribution, then expose the relevant `audit_history()` at the bottom of the screen as required by `DESIGN_SYSTEM.md`.
+- Do not invent universal business statuses. Status values are specific to their table.
 
-Use `utils/table_ui.py` and `utils/table_filters.py` for every new editable table or tab. Match this interaction pattern:
+## Import and export
 
-- Put the section title, orange unsaved-changes indicator, Undo control, and blue **Save & refresh** button on one line at the top. Use `editable_table_header()` unless there is a documented reason it cannot fit.
-- Support direct cell editing and direct spreadsheet-style multi-row paste whenever the data model permits row creation. Row-creating editors use Streamlit's native blank entry row; do not add a separate **Add row** button.
-- Every data table must show native row-selection checkboxes on the far left, and the unlabeled upper-left checkbox must select or clear all currently visible rows in one click.
-- Use Streamlit's native selected/deleted-row state through `num_rows="delete"` for editable tables. Use `selectable_dataframe()` for read-only tables so they receive native multi-row selection consistently.
-- Keep selection non-destructive. The native editor deletion toolbar is hidden; selection must not write data or expose a trash-can or row-deletion action.
-- Keep native Sort ascending and Sort descending available in read-only tables and editable tables that do not create rows. Streamlit disables native header sorting when `num_rows="dynamic"`, so row-creating editors must use `direct_entry_editor_rows(..., editor_key=...)` immediately before `st.data_editor(..., num_rows="dynamic")`. The helper provides external **Sort rows by** and **Descending** controls and locks them while the editor contains draft edits, pasted rows, or native row selections. Contributors must save, undo, or clear selections before changing sort order.
-- Do not add a named `CheckboxColumn` or a separate Select all control to simulate selection.
-- Read selected persisted rows with `native_selected_rows()`. Treat selection as transient UI state, not an unsaved business-data edit. Use `table_has_unsaved_changes(..., native_row_selection=True)` where selection must be excluded from change detection.
-- Prevent a normal save while persisted rows remain selected; selection is reserved for bulk actions.
-- Put keyword and relevant dropdown filters above every table with `filter_table()`.
-- When saving a filtered table, use `merge_filtered_edits()` so rows hidden by the current filters are preserved.
-- Do not change existing column sizing unless the user specifically asks for it.
-- Mark required fields in `st.column_config` and validate them again with `required_field_errors()` or store-layer validation before writing.
-- Validate the complete bulk operation before making any write. Do not partially apply a bulk change when one selected record is invalid.
-- Provide bulk editing for meaningful shared fields, but do not add any trash-can icon, Delete button, or deletion affordance inside or beside a table.
-- Never put a per-row Delete action or Delete `ButtonColumn` inside a table. Native row selection may support non-destructive bulk actions, but table deletion is not exposed in the standard editable-table pattern.
-- Do not add a new table-deletion workflow without explicit project-owner approval. Any approved deletion workflow must be separate from the table, require confirmation, and state what related data will also be removed or unassigned.
-- Give every approved destructive confirmation or standalone destructive action a widget key beginning with `destructive_`. The entrypoint uses that stable key prefix to render those buttons red without styling Cancel actions.
-- Use the shared Details/Edit button configuration for consistent row actions.
-- Include an Excel export of the currently filtered table using `dataframe_to_excel()`.
-- After a successful save, bulk edit, or delete: write the data, record history, request an editor reset, show a toast, and rerun.
-- Record standardized saves, bulk edits, and bulk deletions with `record_audit_event()`. Include the timestamp supplied by the store layer and `st.session_state.get("current_editor", "")`. Expose history with `audit_history()` in an expander at the bottom of the page; when a page has multiple history categories, group them into tabs within that bottom expander.
-- Do not impose Draft/In review/Approved statuses as a universal standard. Status options are specific to the business table.
+- Treat PITS as source evidence, not automatic approval. Changed source records enter reconciliation without overwriting collaborator-authored MBOM or Fishbone decisions.
+- Preserve stable PITS IDs and revision history for the preferred workbook format.
+- Parse legacy Level 1–11 data conservatively; do not infer business meaning absent from the source.
+- Preview and validate imports before applying them. Ordinary BOM imports require explicit part-number mapping.
+- Exports use the active project and active scenario. Preserve stable flat sheet names expected by spreadsheet and Lucid consumers unless a requested change explicitly coordinates a breaking change.
 
-A typical save flow is:
+## Custom components
 
-1. Read the filtered editor output and native selection.
-2. Refuse a normal save if persisted rows remain selected.
-3. Validate required fields and business rules.
-4. Merge filtered edits into the full unfiltered DataFrame.
-5. Convert display labels back to stored identifiers or codes.
-6. Call one store-layer save function.
-7. Record the audit event with Current editor.
-8. Request the editor reset, show a success toast, and rerun.
-
-### Filtering and display values
-
-- Keep stored identifiers stable and separate from friendly labels. For example, store official model numbers but display team-friendly names when helpful.
-- Convert multi-value database fields into lists before giving them to `MultiselectColumn`, then convert them back to the stored representation before saving.
-- Use the `universal_values` option in `filter_table()` for values such as All models that should match every specific choice.
-- Filters must affect the visible/exported view only. They must not delete or overwrite filtered-out records on save.
-- Hide internal IDs in the UI but retain them in the DataFrame used to resolve callbacks and writes. Remember that hiding a column is visual only; remove truly sensitive fields before sending data to the browser.
-
-### History and attribution
-
-- `audit_log` is the standardized lightweight history store. It records table/workflow name, action, row count, Current editor, optional JSON details, and timestamp.
-- Keep action names consistent, such as `Save & refresh`, `Bulk edit`, `Bulk delete`, `Delete`, `Pair parts`, or `Remove pairing`.
-- Current editor is free text scoped to the browser session. Never describe it as authenticated identity.
-- Audit coverage is still incomplete. When modernizing an older editable table, add standardized history rather than inventing a second history mechanism.
-
-### Import/export behavior
-
-- Treat PITS as source evidence, not automatic approval. Changed source records must enter reconciliation without silently overwriting collaborator-authored MBOM/fishbone decisions.
-- Preserve the stable PITS ID and revision history for the preferred workbook format.
-- Keep legacy Level 1–11 parsing conservative. Do not infer business meaning that the source does not state.
-- Preview and validate imports before applying them. Ordinary BOM imports require an explicit part-number mapping.
-- Export uses the active project and active scenario. Preserve stable, flat sheet names expected by downstream spreadsheet/Lucid users unless a requested change explicitly coordinates the break.
-
-### Custom components
-
-- The custom component code lives beside its Python wrapper in `utils/clipboard_image.py`, `utils/fishbone_visual.py`, or `utils/yamazumi_board.py`.
-- Keep component input data JSON-serializable and callbacks narrow. Persist actual business changes through store functions in the Python page callback, not directly in browser JavaScript.
+- Component code lives beside its Python wrapper in `utils/clipboard_image.py`, `utils/fishbone_visual.py`, or `utils/yamazumi_board.py`.
+- Keep inputs JSON-serializable and callbacks narrow. Persist business changes through store functions in Python, never directly from browser JavaScript.
 - Escape user-provided text before inserting it into component HTML.
-- When a front-end component change needs clients to reload a new component definition, follow the existing versioned component-name pattern.
-- Test both empty and populated component inputs. The board must retain an Unassigned destination and must not allow work to be dropped onto Open or Blocked pitches.
+- Follow the existing versioned component-name pattern when clients must load a new definition.
+- Test empty and populated inputs. The Yamazumi board must retain an Unassigned destination and reject drops onto Open or Blocked pitches.
 
-### Verification expectations
+## Local data and repository safety
 
-- There is currently no committed automated test suite. Use checks proportional to the change.
-- At minimum, compile changed Python files with the shared environment.
-- For page/data changes, run Streamlit `AppTest` smoke checks where supported, using a real project/scenario context and checking `a.exception`.
-- For database changes, test empty and populated results without rewriting the user's real data. Prefer a temporary database or a read-only query for diagnostics.
-- For Excel changes, generate a workbook in memory and open it with openpyxl to confirm the expected sheets.
-- Clipboard, upload, drag-and-drop, full-screen fishbone, and other browser-only behavior require a manual browser check because `AppTest` cannot fully exercise them.
-- Preserve unrelated working-tree changes. Do not reset, overwrite, or reformat files outside the requested scope.
+- `data/paag.db`, SQLite sidecars, `data/uploads/`, and `.streamlit/secrets.toml` are local and ignored by Git. Never commit them.
+- Local data cannot be recovered from Git. Back up `data/paag.db` before an experiment that intentionally removes or rewrites real planning data.
+- Temporary root directories are not application source; do not depend on or commit them.
+- Preserve unrelated worktree changes. Never reset, overwrite, or reformat files outside the requested scope.
 
-## Dormant and future tables — status and rules
+## Verification
 
-The schema contains tables that are implemented but not exposed in any active screen. They fall into three different statuses — treat each differently:
+Use checks proportional to the change:
 
-1. **NOT YET DESIGNED — `manufacturing_assemblies`, `assembly_scenario_policies`**
-   These support future make/buy, supplier, and buffer/storage policy tracking for assemblies. The design is not finalized. Do not build screens, features, or duplicate logic against these tables without a scoping discussion with the project owner first.
+- Compile changed Python files with the shared environment at minimum.
+- For page/data changes, run supported Streamlit `AppTest` smoke checks with a real project/scenario context and inspect `a.exception`.
+- For database changes, test empty and populated results without rewriting the user's real data; prefer a temporary database or read-only diagnostics.
+- For Excel changes, create the workbook in memory and open it with openpyxl to verify its sheets.
+- Manually check clipboard, upload, drag-and-drop, full-screen Fishbone, and other browser-only behavior that `AppTest` cannot exercise.
 
-2. **LOCKED — `work_element_material_groups`, `work_element_material_options`**
-   These are frozen as-is with no active plan to revisit. Do not modify, extend, or build new features against these tables. They are carried forward during scenario cloning only.
-
-3. **BLOCKED / TBD — `fishbone_nodes` and related PITS revision tables (MBOM review stage)**
-   This supports a Manufacturing BOM confirmation/review step with no active screen today. This is intentionally on hold until the PITS spreadsheet import is migrated to a better format. Do not build an MBOM review screen or duplicate this logic until that migration is complete and the project owner confirms it's ready to revisit.
-
-## Known incomplete or intentionally deferred areas
-
-### Incomplete current workflows
-
-- Bulk deletion of pitch addresses is not complete. Reassignment rules must be finalized before selected pitches can be safely removed.
-- Bulk deletion of Yamazumi work elements is not complete. Individual deletion exists, but the selected-row workflow remains forthcoming.
-- The Lucid export is a one-way workbook snapshot. There is no controlled live/two-way synchronization or final identifier strategy.
-- Standard history is partial. Parts, Process plan, and several Yamazumi operations use it, but not every editable screen or individual engineering change does.
-- The editable-table standard is not yet applied consistently to older screens. Questions & concerns is the clearest gap; model and fishbone tables also contain mixed-generation patterns.
-- `app_pages/assembly_sequence.py` is legacy/unlinked code.
-
-### Deferred product capabilities
-
-- User accounts, sign-in, roles, and permissions
-- Safe simultaneous editing by multiple people
-- A complete, immutable audit trail for every collaborator change
-- Threaded comments and notifications
-- Packaging and routing plans
-- PFMEA
-- Control plans
-- Work instructions
-- A production deployment and shared server-backed database
-- Controlled Lucid synchronization
-
-### Testing gaps
-
-- No repository test suite currently guards save, delete, clone, import, or reconciliation behavior.
-- The repository does not contain a maintained set of representative ordinary BOM, current PITS, and legacy PITS fixtures.
-- The three custom browser components do not have automated browser tests.
-
-When implementing deferred work, preserve the current rule that imported source data informs planning but does not silently replace a collaborator's reviewed decisions.
+The repository has a small committed `unittest` suite covering selected scenario, scope, table-helper, and Pin Map behavior, but it does not cover all save, deletion, import, or browser-component paths. Representative import fixtures are not maintained. See `PROJECT_STATUS.md` for current verification gaps and incomplete behavior.

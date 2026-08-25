@@ -11,7 +11,8 @@ from utils.table_filters import (
 )
 from utils.table_ui import (
     drop_untouched_new_rows,
-    editable_table_header,
+    editable_table_footer,
+    editable_table_heading,
     native_selected_rows,
     direct_entry_editor_rows,
 )
@@ -46,16 +47,7 @@ if concerns.empty:
 else:
     concerns = concerns.reindex(columns=columns)
 
-header_actions = editable_table_header(
-    "Questions and concerns",
-    editor_key=editor_key,
-    key_prefix="concerns",
-    save_label="Save & refresh",
-    native_row_selection=True,
-)
-if header_actions.undo:
-    request_table_editor_reset(editor_key)
-    st.rerun()
+editable_table_heading("Questions and concerns")
 
 visible_concerns = filter_table(
     concerns,
@@ -93,6 +85,14 @@ edited = st.data_editor(
         "created_at": st.column_config.DatetimeColumn("Created", format="MMM DD, YYYY HH:mm"),
     },
 )
+footer_actions = editable_table_footer(
+    editor_key=editor_key,
+    key_prefix="concerns",
+    native_row_selection=True,
+)
+if footer_actions.undo:
+    request_table_editor_reset(editor_key)
+    st.rerun()
 
 
 def clean_text(value: object) -> str:
@@ -166,7 +166,7 @@ selected_concerns = native_selected_rows(
     concerns_for_editing,
     editor_key=editor_key,
 )
-request_delete = False
+request_delete = not selected_concerns.empty
 if request_delete:
     pending_concerns = [
         {
@@ -201,6 +201,7 @@ def confirm_concern_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_concerns_bulk_delete"):
         st.session_state.pop(pending_delete_key, None)
+        request_table_editor_reset(editor_key)
         st.rerun()
     if actions.button(
         "Delete",
@@ -241,7 +242,7 @@ def confirm_concern_delete() -> None:
             record_audit_event(
                 project_id,
                 "Questions and concerns",
-                "Save & refresh",
+                "Save & Refresh",
                 len(other_edits),
                 editor_name,
                 {"concerns": other_edits, "saved_with_bulk_delete": True},
@@ -252,9 +253,10 @@ def confirm_concern_delete() -> None:
         st.rerun()
 
 
-st.session_state.pop(pending_delete_key, None)
+if st.session_state.get(pending_delete_key):
+    confirm_concern_delete()
 
-if header_actions.save_and_refresh:
+if footer_actions.save_and_refresh:
     if not selected_concerns.empty:
         st.warning("Clear selected rows before saving concern edits.")
     else:
@@ -265,7 +267,7 @@ if header_actions.save_and_refresh:
         record_audit_event(
             project_id,
             "Questions and concerns",
-            "Save & refresh",
+            "Save & Refresh",
             len(changed_concerns),
             st.session_state.get("current_editor", ""),
             {"concerns": changed_concerns},

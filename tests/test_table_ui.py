@@ -61,5 +61,65 @@ class DirectEntryEditorRowsTests(unittest.TestCase):
         self.assertTrue(controls.toggle.call_args.kwargs["disabled"])
 
 
+class NativeSelectedRowsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dataframe = pd.DataFrame({
+            "id": pd.Series(["row-1", "row-2", ""], dtype="string"),
+            "name": pd.Series(["Alpha", "Bravo", "New row"], dtype="string"),
+        })
+
+    def selected_rows(self, editor_state: dict[str, object]) -> pd.DataFrame:
+        with patch.object(
+            table_ui.st,
+            "session_state",
+            {"example_editor": editor_state},
+        ):
+            return table_ui.native_selected_rows(
+                self.dataframe,
+                editor_key="example_editor",
+            )
+
+    def test_native_deleted_rows_identify_persisted_records_for_confirmation(self) -> None:
+        selected = self.selected_rows({"deleted_rows": [0, 1]})
+
+        self.assertEqual(selected["id"].tolist(), ["row-1", "row-2"])
+
+    def test_new_blank_id_rows_are_not_treated_as_deletion_targets(self) -> None:
+        selected = self.selected_rows({"deleted_rows": [2]})
+
+        self.assertTrue(selected.empty)
+
+
+class EditableTableFooterTests(unittest.TestCase):
+    def test_footer_is_right_aligned_and_uses_standard_save_action(self) -> None:
+        footer = Mock()
+        footer.button.side_effect = [False, True]
+        editor_state = {"edited_rows": {0: {"name": "Changed"}}}
+
+        with (
+            patch.object(table_ui.st, "session_state", {"example_editor": editor_state}),
+            patch.object(table_ui.st, "container", return_value=footer) as container,
+        ):
+            actions = table_ui.editable_table_footer(
+                editor_key="example_editor",
+                key_prefix="example",
+                native_row_selection=True,
+            )
+
+        container.assert_called_once_with(
+            horizontal=True,
+            vertical_alignment="center",
+            horizontal_alignment="right",
+        )
+        footer.markdown.assert_called_once_with(
+            ":orange[:material/warning: **Unsaved changes**]"
+        )
+        save_call = footer.button.call_args_list[1]
+        self.assertEqual(save_call.args[0], "Save & Refresh")
+        self.assertEqual(save_call.kwargs["type"], "primary")
+        self.assertEqual(save_call.kwargs["icon"], ":material/save:")
+        self.assertTrue(actions.save_and_refresh)
+
+
 if __name__ == "__main__":
     unittest.main()
