@@ -16,7 +16,9 @@ from utils.store import (
     get_project,
     import_fishbone_nodes,
     import_pits_id_snapshot,
+    pits_records,
     project_models,
+    record_audit_event,
     upsert_part,
 )
 from utils.scope_ui import page_title_with_scope
@@ -70,7 +72,41 @@ with import_col.container(border=True):
                     )
                     selectable_dataframe(model_preview_table, key="pits_model_preview_table", hide_index=True)
                 if st.button("Import PITS snapshot", type="primary", icon=":material/upload:"):
+                    existing_pits = pits_records(project_id)
+                    previous_revisions = {
+                        str(row["pits_id"]): int(row["revision_no"])
+                        for _, row in existing_pits.iterrows()
+                    }
                     summary = import_pits_id_snapshot(project_id, records, models)
+                    imported_pits = pits_records(project_id)
+                    imported_ids = {str(record["pits_id"]).strip() for record in records}
+                    created_revisions = []
+                    updated_revisions = []
+                    for _, row in imported_pits.iterrows():
+                        pits_id = str(row["pits_id"])
+                        if pits_id not in imported_ids:
+                            continue
+                        revision = int(row["revision_no"])
+                        revision_detail = {"pits_id": pits_id, "revision_no": revision}
+                        previous_revision = previous_revisions.get(pits_id)
+                        if previous_revision is None:
+                            created_revisions.append(revision_detail)
+                        elif revision > previous_revision:
+                            updated_revisions.append(revision_detail)
+                    record_audit_event(
+                        project_id,
+                        "PITS snapshot",
+                        "Import PITS snapshot",
+                        len(records),
+                        st.session_state.get("current_editor", ""),
+                        {
+                            "rows_imported": len(records),
+                            "pits_revisions_created": created_revisions,
+                            "pits_revisions_updated": updated_revisions,
+                            "models_synchronized": summary["models"],
+                            "unchanged_pits_records": summary["unchanged"],
+                        },
+                    )
                     st.success(
                         f"Imported {summary['new']} new IDs, detected {summary['changed']} revised IDs, "
                         f"left {summary['unchanged']} unchanged, and synchronized {summary['models']} models.",
@@ -97,6 +133,18 @@ with import_col.container(border=True):
                 replace_existing = st.toggle("Replace the current fishbone", value=True, help="Turn this off to append another PITS section or model family.")
                 if st.button("Send PITS candidates to MBOM review", type="primary", icon=":material/upload:"):
                     count = import_fishbone_nodes(project_id, parsed, replace=replace_existing)
+                    record_audit_event(
+                        project_id,
+                        "MBOM review",
+                        "Send PITS candidates to MBOM review",
+                        count,
+                        st.session_state.get("current_editor", ""),
+                        {
+                            "candidates_sent": count,
+                            "review_status": "Needs review",
+                            "replaced_existing_fishbone": replace_existing,
+                        },
+                    )
                     st.success(f"Sent {count:,} source occurrences to MBOM review. No candidate was accepted into the part catalog automatically.", icon=":material/check_circle:")
                 st.stop()
             suggestions = suggest_mapping(raw.columns)
@@ -134,6 +182,17 @@ with import_col.container(border=True):
                 else:
                     for row in preview.to_dict("records"):
                         upsert_part(project_id, {**row, "source": "BOM import"})
+                    record_audit_event(
+                        project_id,
+                        "Parts",
+                        "Import parts",
+                        len(preview),
+                        st.session_state.get("current_editor", ""),
+                        {
+                            "parts_imported_or_updated": len(preview),
+                            "source": "BOM import",
+                        },
+                    )
                     st.success(f"Imported or updated {len(preview):,} parts.", icon=":material/check_circle:")
         except Exception as exc:
             st.error(f"Could not read this file: {exc}")

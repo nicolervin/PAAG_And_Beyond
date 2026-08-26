@@ -133,7 +133,22 @@ for _, feature in active_features.iterrows():
         defined_variant_options.append(short_label)
         stored_variant_labels[long_label] = short_label
 defined_variant_options = list(dict.fromkeys(defined_variant_options))
-rename_yamazumi_variants(project_id, scenario_id, stored_variant_labels)
+variant_rename_result = rename_yamazumi_variants(
+    project_id, scenario_id, stored_variant_labels
+)
+if variant_rename_result["changed_count"]:
+    record_audit_event(
+        project_id,
+        "Yamazumi variants",
+        "Automatic variant rename",
+        int(variant_rename_result["changed_count"]),
+        st.session_state.get("current_editor", ""),
+        {
+            "scenario_id": scenario_id,
+            "element_changes": variant_rename_result["element_changes"],
+            "pitch_changes": variant_rename_result["pitch_changes"],
+        },
+    )
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
 fishbone_sections = active_sections
 section_name_by_id = dict(zip(active_sections["id"].astype(str), active_sections["name"].astype(str))) if not active_sections.empty else {}

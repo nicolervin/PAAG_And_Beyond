@@ -467,6 +467,18 @@ with image_col.container(border=True):
     uploaded = st.file_uploader("Attach screenshot or rendered view", type=["png", "jpg", "jpeg", "webp"], key=f"image_{part['id']}")
     if uploaded and st.button("Save image", type="primary", icon=":material/upload:"):
         set_part_image(part["id"], uploaded)
+        record_audit_event(
+            project_id,
+            "Parts",
+            "Save image",
+            1,
+            st.session_state.get("current_editor", ""),
+            {
+                "part_id": str(part["id"]),
+                "part_number": str(part["part_number"]),
+                "primary_cad_image_replaced_via": "upload",
+            },
+        )
         st.toast("Image attached", icon=":material/check_circle:")
         st.rerun()
 
@@ -514,6 +526,18 @@ with image_col.container(border=True):
                 st.error("Choose an image first.")
             else:
                 add_part_image(part["id"], extra, image_type, caption)
+                record_audit_event(
+                    project_id,
+                    "Parts",
+                    "Add view",
+                    1,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "part_id": str(part["id"]),
+                        "part_number": str(part["part_number"]),
+                        "supplemental_view_type_added": image_type,
+                    },
+                )
                 st.toast("Additional view added", icon=":material/check_circle:")
                 st.rerun()
 
