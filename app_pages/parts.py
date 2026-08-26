@@ -37,6 +37,7 @@ from utils.table_ui import (
     required_field_errors,
     selectable_dataframe,
     selected_rows_action_bar,
+    stage_native_delete_confirmation,
     standard_details_column_config,
     direct_entry_editor_rows,
     table_has_unsaved_changes,
@@ -65,7 +66,7 @@ if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
 st.caption(f"Active scenario: Rev {scenario['revision_label']} · {scenario['name']}")
-apply_pending_table_editor_reset(parts_editor_key)
+parts_editor_key = apply_pending_table_editor_reset(parts_editor_key)
 
 parts = project_table("parts", project_id, "part_number")
 models = project_models(project_id)
@@ -316,9 +317,10 @@ if request_delete_bulk_parts:
         st.warning("Save or undo other table edits before deleting selected parts.")
     else:
         st.session_state.parts_pending_bulk_delete = selected_saved_parts["id"].astype(str).tolist()
+        stage_native_delete_confirmation(parts_editor_key)
 
 
-@st.dialog("Delete selected parts?")
+@st.dialog("Delete selected parts?", dismissible=False)
 def confirm_bulk_part_delete() -> None:
     pending_ids = st.session_state.get("parts_pending_bulk_delete", [])
     st.warning(

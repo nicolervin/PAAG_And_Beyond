@@ -34,7 +34,7 @@ def render_functional_review_shell(
     st.session_state.setdefault(saved_description_key, "")
     if st.session_state.pop(reset_description_key, False):
         st.session_state[description_key] = st.session_state[saved_description_key]
-    apply_pending_table_editor_reset(editor_key)
+    editor_key = apply_pending_table_editor_reset(editor_key)
 
     review_description = st.text_area(
         "Review description",

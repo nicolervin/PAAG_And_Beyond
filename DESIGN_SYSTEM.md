@@ -7,8 +7,8 @@ This file defines locked interaction and interface standards for Process at a Gl
 Every editable table in this app must follow this exact deletion pattern, with no exceptions:
 
 1. On a table with an approved deletion workflow, selecting one or more rows must reveal Streamlit's native **Delete row(s)** action in the table's upper-right toolbar.
-2. Clicking the native action initiates deletion but must not persist it immediately. Open a confirmation dialog that lists or summarizes the selected records and explains related records that will be deleted, preserved, unassigned, or otherwise affected.
-3. Cancel must restore the selected rows by resetting the editor state. The final confirmed action performs the database write, records history, resets the editor, shows a toast, and reruns.
+2. Clicking the native action initiates deletion but must not persist it immediately. Capture the selected records, reset and rerun the editor so every selected row remains visible, and only then open a confirmation dialog that lists or summarizes the selected records and explains related records that will be deleted, preserved, unassigned, or otherwise affected.
+3. The confirmation dialog must not be dismissible by clicking outside it, pressing Escape, or using a close control. Cancel clears the pending request while keeping every selected row visible. The final confirmed action performs the database write, records history, resets the editor, shows a toast, and reruns; only that confirmed rerun removes the rows from the table.
 4. Do not add a second trash-can button, separate Delete button beside the table, per-row delete control, or Delete `ButtonColumn`. The native toolbar action is the single table-level entry point.
 5. Tables without an approved, relationship-safe deletion workflow must keep the native Delete action hidden. Adding such a workflow still requires explicit project-owner approval.
 6. The final confirmation button is the red destructive action and must not require typing a confirmation word.

@@ -42,6 +42,7 @@ from utils.table_ui import (
     required_field_errors,
     selectable_dataframe,
     selected_rows_action_bar,
+    stage_native_delete_confirmation,
     standard_details_column_config,
     table_has_unsaved_changes,
 )
@@ -657,7 +658,7 @@ else:
                 pairing_editor_key = (
                     f"existing_process_pairings_{scenario_id}_{selected_process_id}"
                 )
-                apply_pending_table_editor_reset(pairing_editor_key)
+                pairing_editor_key = apply_pending_table_editor_reset(pairing_editor_key)
                 pairing_rows = pd.DataFrame(
                     [
                         {
@@ -721,11 +722,12 @@ else:
                             for group in selected_group_rows
                         ],
                     }
+                    stage_native_delete_confirmation(pairing_editor_key)
     else:
         st.caption("Select one Yamazumi work element to pair parts or add it to the plan.")
 
 st.divider()
-apply_pending_table_editor_reset(process_editor_key)
+process_editor_key = apply_pending_table_editor_reset(process_editor_key)
 elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
 models = project_models(project_id)
 model_labels = {
@@ -1020,9 +1022,10 @@ if apply_bulk:
 if request_bulk_delete:
     st.session_state.pop(f"selected_process_step_{scenario_id}", None)
     st.session_state[f"process_pending_delete_{scenario_id}"] = selected["id"].astype(str).tolist()
+    stage_native_delete_confirmation(process_editor_key)
 
 
-@st.dialog("Delete Process at a Glance steps?")
+@st.dialog("Delete Process at a Glance steps?", dismissible=False)
 def confirm_process_delete() -> None:
     pending_key = f"process_pending_delete_{scenario_id}"
     pending_ids = st.session_state.get(pending_key, [])
@@ -1096,7 +1099,7 @@ if footer_actions.save_and_refresh:
         st.error(str(exc))
 
 
-@st.dialog("Remove selected part pairings?")
+@st.dialog("Remove selected part pairings?", dismissible=False)
 def confirm_pairing_bulk_removal() -> None:
     pending = st.session_state.get(pairing_delete_key, {})
     groups = pending.get("groups", [])

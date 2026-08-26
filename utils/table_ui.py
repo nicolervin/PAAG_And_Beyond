@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Iterable
+from typing import Iterable, NoReturn
 
 import pandas as pd
 import streamlit as st
+
+from utils.table_filters import logical_table_editor_key, request_table_editor_reset
 
 
 DEFAULT_SELECTION_COLUMN = "selected"
@@ -42,8 +44,9 @@ def direct_entry_editor_rows(
     if not candidates:
         return dataframe.copy()
 
-    sort_key = f"{editor_key}_external_sort_column"
-    direction_key = f"{editor_key}_external_sort_direction"
+    sort_scope = logical_table_editor_key(editor_key)
+    sort_key = f"{sort_scope}_external_sort_column"
+    direction_key = f"{sort_scope}_external_sort_direction"
     valid_options = ["", *candidates]
     if st.session_state.get(sort_key) not in valid_options:
         st.session_state[sort_key] = ""
@@ -187,6 +190,19 @@ def native_selected_rows(
     return selected.loc[
         selected[id_column].notna() & selected[id_column].astype(str).str.strip().ne("")
     ].copy()
+
+
+def stage_native_delete_confirmation(editor_key: str) -> NoReturn:
+    """Restore native-deleted rows before showing their confirmation dialog.
+
+    Streamlit applies its native Delete row(s) action to the editor before
+    Python receives the resulting ``deleted_rows`` state. Call this only after
+    the page has copied those rows into durable pending-confirmation state.
+    The immediate full rerun rebuilds the editor from saved data, so no row
+    disappears from the table until the confirmed storage write succeeds.
+    """
+    request_table_editor_reset(editor_key)
+    st.rerun()
 
 
 def dataframe_to_excel(dataframe: pd.DataFrame, sheet_name: str = "Filtered rows") -> bytes:

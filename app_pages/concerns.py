@@ -15,6 +15,7 @@ from utils.table_ui import (
     editable_table_heading,
     native_selected_rows,
     direct_entry_editor_rows,
+    stage_native_delete_confirmation,
 )
 
 
@@ -25,7 +26,7 @@ page_title_with_scope("Questions and concerns", scope="project")
 st.caption("Keep unresolved assumptions and cross-functional decisions visible as the process changes.")
 if not project_id:
     st.stop()
-apply_pending_table_editor_reset(editor_key)
+editor_key = apply_pending_table_editor_reset(editor_key)
 
 concerns = project_table("concerns", project_id, "created_at DESC")
 columns = ["id", "category", "subject", "detail", "owner", "priority", "status", "related_part", "related_station", "created_at"]
@@ -181,9 +182,10 @@ if request_delete:
         "draft_rows": current_editor_rows().to_dict("records"),
         "other_edits": pending_edit_summaries(pending_ids),
     }
+    stage_native_delete_confirmation(editor_key)
 
 
-@st.dialog("Delete selected concerns?")
+@st.dialog("Delete selected concerns?", dismissible=False)
 def confirm_concern_delete() -> None:
     pending_state = st.session_state.get(pending_delete_key, {})
     pending = pending_state.get("concerns", [])
