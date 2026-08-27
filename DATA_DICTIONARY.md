@@ -96,9 +96,33 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `fishbone_part_assignments`
 
-- **Purpose:** Represents one placed occurrence or use of a catalog part in a fishbone section, with occurrence quantity, use or installation description, notes, and order. One part may have multiple assignments.
+- **Purpose:** Represents one placed occurrence or use of a catalog part in a fishbone section, with a strictly positive decimal occurrence quantity, use or installation description, notes, and order. One part may have multiple assignments.
 - **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section, but does not save the specific assignment ID.
 - **Scope:** Project-wide; scenario views filter these assignments using `part_scenario_activity`.
+
+### `manufacturing_assemblies`
+
+- **Purpose:** Stores the project-wide catalog of real, pre-existing assembly numbers, including friendly name, parent assembly, Built section, Installed section, active state, notes, primary image path, and timestamps. The parked `pits_reference` and `planning_reason` fields remain hidden from the active catalog workflow.
+- **Key relationships:** Belongs to `projects`; may reference another catalog assembly as its parent and references `assembly_sections` independently through Built and Installed section fields. Parent of `manufacturing_assembly_components`, `manufacturing_assembly_feature_rules`, `manufacturing_assembly_images`, and the still-dormant scenario-policy relationships.
+- **Scope:** Project-wide. Active catalog reads and writes are isolated from `assembly_scenario_policies` and never accept `scenario_id`.
+
+### `manufacturing_assembly_components`
+
+- **Purpose:** Stores one explicit, independently quantified mini-BOM component for an assembly number by referencing an exact Fishbone use. Quantities are positive decimals and do not stay synchronized with the Fishbone quantity after creation.
+- **Key relationships:** Belongs to `manufacturing_assemblies` and references `fishbone_part_assignments`; deleting the assembly or Fishbone use cascades to the component row.
+- **Scope:** Project-wide.
+
+### `manufacturing_assembly_feature_rules`
+
+- **Purpose:** Stores precise assembly applicability with at most one choice per feature and AND logic across features. Stale rows are retained, visibly flagged, and fail closed until deliberately corrected or removed.
+- **Key relationships:** Belongs to `manufacturing_assemblies` and references `complexity_features` with `ON DELETE RESTRICT`; values are validated against the feature's current JSON `allowed_values`.
+- **Scope:** Project-wide.
+
+### `manufacturing_assembly_images`
+
+- **Purpose:** Stores unlimited supplemental assembly-image paths and optional captions. The primary image remains on `manufacturing_assemblies.image_path`.
+- **Key relationships:** Belongs to `manufacturing_assemblies`; deleting the assembly deletes its image rows and owned upload files through the supported workflow.
+- **Scope:** Project-wide.
 
 ### `yamazumi_areas`
 
@@ -148,7 +172,129 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Key relationships:** Belongs to `process_part_groups` and references `parts`. It records the catalog part, not a specific `fishbone_part_assignments` occurrence.
 - **Scope:** Scenario-specific through the parent process part group.
 
-## Proposed modules — pending owner review
+## Module proposals and decision records
+
+### Assemblies catalog (real, pre-existing assembly numbers)
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** August 27, 2026
+- **Review status:** **Approved and implemented on `Nicole_Assemblies_Addition`, August 27, 2026.**
+- **Purpose:** Add a project-wide catalog of real, pre-existing assembly numbers. A Fishbone section and an assembly number remain separate entities: one section may be the built or installed location for many assembly numbers, and each assembly number owns an authoritative, explicitly edited mini-BOM rather than a BOM computed from feature rules.
+- **Connections:** Reuse `manufacturing_assemblies` as the authoritative assembly-number record. Every catalog assembly has a built-section reference and an installed-section reference to `assembly_sections`; the two references may be identical. Mini-BOM rows reference exact `fishbone_part_assignments` occurrences and reach Parts Catalog records through those occurrences. Assembly feature rules reference `complexity_features` and are compared with `model_feature_values`; they do not reuse or modify `part_feature_rules`. The locked `work_element_material_groups` and `work_element_material_options` tables are not used. Existing free-text Process output-assembly fields and all Process selection behavior remain out of scope.
+- **Relationship to the critical thread:** The catalog forms an explicit project-wide bridge from Model definitions and approved Fishbone structure toward future Process planning: `complexity_features` / `model_feature_values` -> assembly feature rules -> `manufacturing_assemblies`, and `parts` -> `fishbone_part_assignments` -> assembly mini-BOM components -> `manufacturing_assemblies` -> built/installed `assembly_sections`. A future Process task may offer an assembly only to steps tied to its installed section; this phase stores the required distinction but does not add that Process UI or relationship.
+- **Scope:** Project-wide, matching Parts Catalog, Fishbone structure, and `part_feature_rules`. No new catalog, mini-BOM, feature-rule, or image row carries `scenario_id`. The new Assemblies page must use the **Project-wide** scope badge. The lightweight assembly list on the Scenario-aware Parts to fishbone page still reads project-wide assembly data.
+- **Reuse and isolation:** Extend and reuse `manufacturing_assemblies`; do not create a second assembly master. Add normalized child tables for mini-BOM components, feature rules, and supplemental images. New catalog reads and writes must use isolated project-only store functions that do not accept `scenario_id`, join `assembly_scenario_policies`, or write scenario policies. The existing dormant `manufacturing_assemblies(project_id, scenario_id)`, `replace_manufacturing_assemblies(...)`, `bulk_update_assembly_policy(...)`, and scenario-cloning policy logic remain untouched and unreferenced by the new page. Existing `pits_reference` and `planning_reason` values remain stored but hidden and are not written by the new workflow; their meaning remains parked with the future make/buy discussion.
+
+#### Extended `manufacturing_assemblies`
+
+Retain every existing column and add the following catalog fields:
+
+| Column | Definition | Purpose |
+| --- | --- | --- |
+| `built_section_id` | `TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT` | Identifies the section where the assembly is built and whose placed Fishbone uses are eligible for its mini-BOM. Nullable at the database level for compatibility with the dormant writer, but required by every new isolated catalog save. |
+| `installed_section_id` | `TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT` | Identifies the section where the completed assembly is installed and supports future Process-step eligibility. Nullable at the database level for compatibility with the dormant writer, but required by every new isolated catalog save. |
+| `image_path` | `TEXT DEFAULT ''` | Stores the primary assembly-image path, mirroring the primary-image-on-master-record pattern used by Parts Catalog. |
+| `created_at` | `TEXT` | Stores the UTC creation timestamp. Existing rows are backfilled from `updated_at`; new isolated catalog writes always supply it. |
+
+`assembly_number` remains the stable, required real-world identifier and stays unique within a project. The app never generates an assembly number. `name` remains its editable friendly name. `parent_id` continues to represent assembly-number nesting independently of Fishbone section nesting. New saves validate same-project parents, reject self-parenting and cycles, and show the approved soft warning when a child's installed section differs from its parent's built section. Skipping an assembly-number tier requires no flag: it is represented simply by having no assembly record at that Fishbone tier.
+
+#### New `manufacturing_assembly_components`
+
+| Column | Definition | Purpose |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Stable string UUID for editing, deletion, and audit details. |
+| `project_id` | `TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE` | Carries and validates the project boundary. |
+| `assembly_id` | `TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE` | Identifies the assembly whose authoritative mini-BOM owns the row. |
+| `fishbone_assignment_id` | `TEXT NOT NULL REFERENCES fishbone_part_assignments(id) ON DELETE CASCADE` | References one exact placed Fishbone part-use. Deleting that use automatically removes this component row. |
+| `quantity` | `REAL NOT NULL CHECK(quantity > 0)` | Stores the explicit positive component quantity for this assembly. |
+| `created_at` | `TEXT NOT NULL` | UTC creation timestamp. |
+| `updated_at` | `TEXT NOT NULL` | UTC latest-change timestamp. |
+
+Enforce `UNIQUE(assembly_id, fishbone_assignment_id)`. Store validation must confirm that the assembly and assignment belong to `project_id` and that, when the component is added or edited, the assignment is currently placed in the assembly's built section. A newly added component defaults to the Fishbone use's current quantity at that moment. Its saved quantity then becomes independent: later Fishbone quantity changes do not update the mini-BOM, and mini-BOM quantity changes do not update Fishbone. The same Fishbone use may appear in any number of different assembly mini-BOMs with a different quantity in each.
+
+If an assembly's own `built_section_id` is changed, every Fishbone use referenced by that assembly's current mini-BOM is moved to the new section in the same atomic transaction. This relocation is unconditional, including when another assembly also references the same use. Parts in the old section that are not in this assembly's mini-BOM remain untouched. Any other assembly whose shared mini-BOM reference no longer matches its built section retains the component row and receives a visible mismatch warning for deliberate review; the row is not silently changed or removed. The same mismatch detection applies if a collaborator separately moves a referenced Fishbone use.
+
+Deleting one or more Fishbone uses must first show exactly which assembly numbers and mini-BOM component rows will be affected. Confirmation proceeds without blocking, and `ON DELETE CASCADE` removes those component rows while leaving the assembly records intact. Section-deletion impact calculations must likewise include mini-BOM rows that will disappear when uses inside the deleted section are removed.
+
+#### Completed existing quantity change
+
+`fishbone_part_assignments.quantity` was safely converted from `INTEGER` to `REAL NOT NULL DEFAULT 1 CHECK(quantity > 0)` after the project owner approved the usage audit. Fishbone and mini-BOM quantities now accept positive decimal values such as `1.5` inches of tape or `0.02` pints of lubricant; zero, negative, nonnumeric, NaN, and infinite values are rejected by the store layer. Fishbone and Process displays use shared clean-number formatting, and history change detection rounds to nine decimal places to avoid false changes from floating-point noise.
+
+#### New `manufacturing_assembly_feature_rules`
+
+| Column | Definition | Purpose |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Stable string UUID for editing, deletion, warning resolution, and audit details. |
+| `project_id` | `TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE` | Carries and validates the project boundary. |
+| `assembly_id` | `TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE` | Identifies the assembly-number owner. |
+| `feature_id` | `TEXT NOT NULL REFERENCES complexity_features(id) ON DELETE RESTRICT` | References one generic Model definitions feature and prevents silent feature deletion while a rule exists. |
+| `value` | `TEXT NOT NULL` | Stores one choice from the referenced feature's `allowed_values`; the store layer validates it because choices are JSON values rather than foreign-key rows. |
+| `created_at` | `TEXT NOT NULL` | UTC creation timestamp. |
+| `updated_at` | `TEXT NOT NULL` | UTC latest-change timestamp. |
+
+Enforce `UNIQUE(assembly_id, feature_id)`, so an assembly can have at most one choice for each feature. Rules across features combine with **AND**. An assembly with no rules applies to all models; otherwise, a model matches only when every assembly rule matches its corresponding `model_feature_values` value.
+
+New or changed rules must use a currently active feature and one of its current allowed choices. Deactivating a referenced feature or removing a referenced choice must retain the saved rule and visibly flag it, for example, **Warning: references a removed choice — review and update**. A stale rule evaluates **fail closed** and the assembly matches no model until the rule is corrected or removed. This higher-safety behavior is intentional because assembly applicability will eventually gate whether an authoritative assembly can be selected in Process at a Glance.
+
+This creates two deliberate differences from existing mechanisms:
+
+1. `part_feature_rules` permits multiple alternative choices for one feature and automatically deletes rules whose feature or choice is removed; assembly feature rules permit exactly one choice per feature and never silently auto-delete a stale rule.
+2. Stale assembly rules fail closed. The withdrawn section-level qualifying-condition proposal was designed to fail open because it affected only a visual Fishbone filter and should not hide real parts; assembly rules will eventually control higher-stakes Process selectability, so unresolved applicability must not qualify an assembly.
+
+#### New `manufacturing_assembly_images`
+
+| Column | Definition | Purpose |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Stable supplemental-image UUID. |
+| `project_id` | `TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE` | Carries and validates the project boundary. |
+| `assembly_id` | `TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE` | Attaches the image to exactly one assembly number. |
+| `image_path` | `TEXT NOT NULL` | Stores the validated uploaded-file path. |
+| `caption` | `TEXT DEFAULT ''` | Optional free-text caption; it is not a named image slot or image type. |
+| `created_at` | `TEXT NOT NULL` | UTC creation timestamp and stable display ordering. |
+
+The master row's `image_path` holds one primary image; this child table holds unlimited supplemental images. Both primary and supplemental images support validated PNG, JPG/JPEG, and WEBP uploads plus direct screenshot paste. No `image_type`, exploded-view slot, finished-view slot, grouping-level image, or other labeled slot is introduced. Parts Catalog's current image implementation remains unchanged. Deleting an image or assembly removes its owned upload files using the same safe upload-directory checks as Parts Catalog.
+
+#### Section references, replacement, and assembly nesting/deletion
+
+- A section referenced by any assembly's built or installed field cannot be deleted until every affected relationship has an explicit same-project replacement section outside the deletion set. Task 04 includes a minimal assembly-only replacement dialog now. It lists each affected assembly and whether its built reference, installed reference, or both require replacement; validates every replacement before writing; re-points all assembly references and completes the section deletion atomically. A follow-up task will fold these controls into the combined Yamazumi/Process/assembly re-pointing dialog.
+- Parent-nesting validation compares a child's installed section with its parent's built section. A mismatch opens one save-time warning dialog describing every mismatch. It is never a validation block: dismissing or declining the warning leaves the selected parent valid and the save may proceed with that choice.
+- Direct assembly deletion uses the Universal Deletion Standard and one upfront dialog showing the complete affected descendant tree. For each child depth/level, the contributor selects one action for that whole level: **Move to grandparent**, **Delete entirely**, or **Become unassigned**. Every level is shown in the same dialog, including levels below a group marked Delete entirely; each deeper level still receives its own explicit destination choice rather than inheriting an unseen cascade decision.
+- **Move to grandparent** assigns that level's surviving assemblies to the next surviving parent level while retaining their built section, installed section, mini-BOM, rules, and images. **Become unassigned** clears `parent_id`, `built_section_id`, and `installed_section_id`, removing the assemblies from catalog nesting and Fishbone built/installed lists without deleting their records; their retained mini-BOM rows are visibly mismatched until deliberately reassigned. **Delete entirely** removes the chosen assembly rows and their owned mini-BOM rows, feature rules, images, and uploaded files after all deeper-level choices have been validated.
+- The upfront dialog must disclose all affected catalog records, mini-BOM rows, rule rows, image rows/files, child levels, and existing dormant `assembly_scenario_policies`, `work_element_material_options`, and target-assembly links. Dormant references remain uneditable in this phase, but their actual foreign-key cascade or unassignment effects must never be omitted from the confirmation. The complete multi-level action validates before one atomic database write; no sequential per-level pop-ups or partial application is allowed.
+
+#### Store-layer functions
+
+Add isolated, project-bound store functions with no scenario-policy coupling:
+
+- `assembly_catalog_rows(project_id)`
+- `save_assembly_catalog_rows(project_id, rows)`
+- `assembly_catalog_delete_impact(project_id, assembly_ids)`
+- `delete_assembly_catalog_rows(project_id, assembly_ids, level_actions)`
+- `assembly_bom_components(project_id, assembly_id)`
+- `save_assembly_bom_components(project_id, assembly_id, rows)`
+- `assembly_feature_rules(project_id, assembly_id)`
+- `save_assembly_feature_rules(project_id, assembly_id, rows)`
+- `assembly_model_applicability(project_id, assembly_id)`
+- `assembly_images(project_id, assembly_id)`
+- `set_assembly_image(project_id, assembly_id, uploaded_file)`
+- `add_assembly_image(project_id, assembly_id, uploaded_file, caption='')`
+- `delete_assembly_images(project_id, assembly_id, image_ids)`
+- `assemblies_for_section(project_id, section_id)`
+- `fishbone_assignment_assembly_impact(project_id, assignment_ids)`
+- `assembly_section_reference_impact(project_id, section_ids)`
+- `repoint_assembly_section_references(project_id, replacements, connection=None)`
+
+All writes validate project ownership, complete input sets, required fields, uniqueness, parent cycles, positive quantities, section/component consistency, file types, and stale-rule restrictions before changing data. Multi-table operations use one connection so catalog changes, mini-BOM relocation, re-pointing, and deletion remain atomic. Expected failures raise user-readable `ValueError` messages.
+
+#### UI and applicable standards
+
+- Add a new **Assemblies** page and navigation item under Product structure. The page provides the full editor for catalog fields, built/installed sections, parent nesting, mini-BOM, feature rules, primary/supplemental images, and the warning/deletion workflows above. `pits_reference`, `planning_reason`, and every scenario-policy field stay hidden.
+- The main catalog table shows Assembly number, Assembly name, Built section, Installed section, Parent assembly, Active, Notes, and Details. It supports filters, direct blank-row entry and multi-row paste, external sorting, native row selection, filtered export, validation, Undo, and the standard **Save & Refresh** footer.
+- The selected assembly's mini-BOM editor offers only exact Fishbone uses currently in its built section for new rows, displays clear part-number/use context, and stores its independent decimal quantity. The feature-rule editor uses controlled feature/choice options, shows an AND-based plain-language summary, and retains visible stale rows and warnings. Image controls support upload and screenshot paste for both primary and supplemental images.
+- Parts to fishbone shows only a lightweight read-only list for the selected section. An assembly appears for both relationships, labeled **Built here** and/or **Installed here**; when both references point to the selected section, both relationships are shown. Each row displays the assembly number and a Details action that navigates to the shared Assemblies page and selects that same underlying record. No assembly editing is added to Fishbone.
+- Follow every locked `DESIGN_SYSTEM.md` standard: `page_title_with_scope()` with a Project-wide badge and standard hover text; native table selection/select-all; native confirmed deletion; direct row creation; filters and sorting above tables; orange Unsaved changes, Undo, and blue **Save & Refresh** immediately below each editable table; editor resets and reruns; Current editor attribution; `record_audit_event()` for every save, deletion, image action, re-pointing, and bulk action; and a bottom History expander with tabs when multiple assembly workflow categories are shown. Use stable UUIDs internally, friendly assembly/section labels in the UI, plain-language help for built versus installed sections, Material Symbols, native bordered containers, and no new general CSS.
+
+- **Out of scope:** Process at a Glance assembly selection, output-assembly-milestone linking, handling/sub-touch chains, exploded-BOM comparison, make/buy and scenario-policy behavior, and multi-touch/sub-touch support. Do not modify or build UI against `assembly_scenario_policies`, `work_element_material_groups`, or `work_element_material_options` except to disclose their existing foreign-key effects during an approved assembly deletion.
 
 ### Section-level qualifying-condition feature rules (OR across features) — Withdrawn
 
@@ -222,11 +368,7 @@ Any future database rename must update every query, page, validation path, impor
 
 The following tables are implemented in the schema and data layer but are not currently editable from any active application screen. Do not rename, remove, repurpose, extend, or build new UI around them without explicit project-owner approval. The scenario-owned records in this dormant model are copied during scenario cloning; project-wide manufacturing assemblies are reused by the cloned scenario rather than duplicated.
 
-### `manufacturing_assemblies`
-
-- **Purpose:** Intended to define made or purchased manufacturing assemblies, including assembly number, name, planning reason, parent assembly, active state, and notes.
-- **Relationships and cloning:** Belongs to `projects` and may reference another manufacturing assembly as its parent. It is project-wide and is referenced by scenario policies and dormant material options. It is reused across cloned scenarios rather than copied as a new assembly record.
-- **Current status — NOT YET DESIGNED:** No active screen edits this table. Future make/buy, supplier, and buffer/storage behavior is not finalized. Do not build UI, features, or duplicate logic against it without a scoping discussion and explicit project-owner approval.
+`manufacturing_assemblies` is now an active catalog table documented above. Its `pits_reference` and `planning_reason` fields, the legacy scenario-coupled reader/writer, and every make/buy or policy behavior remain parked and must not be exposed or modified by the active Assemblies workflow.
 
 ### `assembly_scenario_policies`
 
@@ -265,6 +407,7 @@ PITS / BOM evidence
 Parts Catalog ── feature applicability ── model/feature architecture
       ↓
 Fishbone sections + placed part occurrences
+      ├── explicit project-wide assembly mini-BOMs + assembly applicability
       ↓ section link
 Scenario-specific Yamazumi areas → pitches → work elements
       ↓ explicit reconciliation

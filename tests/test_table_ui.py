@@ -61,6 +61,35 @@ class DirectEntryEditorRowsTests(unittest.TestCase):
         self.assertTrue(controls.toggle.call_args.kwargs["disabled"])
 
 
+class DecimalNumberHelpersTests(unittest.TestCase):
+    def test_clean_number_hides_unnecessary_trailing_zeroes(self) -> None:
+        self.assertEqual(table_ui.format_clean_number(1.0), "1")
+        self.assertEqual(table_ui.format_clean_number(1.5), "1.5")
+        self.assertEqual(table_ui.format_clean_number(0.02), "0.02")
+
+    def test_decimal_comparison_ignores_insignificant_float_noise(self) -> None:
+        self.assertTrue(
+            table_ui.decimal_values_equal(1.5, 1.5000000004)
+        )
+        self.assertFalse(table_ui.decimal_values_equal(1.5, 1.5001))
+
+
+class DropUntouchedRowsTests(unittest.TestCase):
+    def test_empty_string_typed_frame_keeps_boolean_blank_mask(self) -> None:
+        dataframe = pd.DataFrame(
+            {
+                "id": pd.Series(dtype="string"),
+                "name": pd.Series(dtype="string"),
+            }
+        )
+
+        result = table_ui.drop_untouched_new_rows(
+            dataframe, identifying_columns=["name"]
+        )
+
+        self.assertTrue(result.empty)
+
+
 class NativeSelectedRowsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dataframe = pd.DataFrame({

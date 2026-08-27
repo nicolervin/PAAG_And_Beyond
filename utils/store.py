@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import hashlib
+import math
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
@@ -188,7 +189,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
                 section_id TEXT NOT NULL REFERENCES assembly_sections(id), sequence INTEGER NOT NULL DEFAULT 10,
-                quantity INTEGER NOT NULL DEFAULT 1, use_description TEXT DEFAULT '',
+                quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0), use_description TEXT DEFAULT '',
                 notes TEXT DEFAULT '', updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -245,8 +246,34 @@ def init_db() -> None:
                 assembly_number TEXT NOT NULL, name TEXT NOT NULL,
                 pits_reference TEXT DEFAULT '', planning_reason TEXT NOT NULL DEFAULT 'Other',
                 parent_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE SET NULL,
+                built_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
+                installed_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
+                image_path TEXT DEFAULT '', created_at TEXT,
                 active INTEGER NOT NULL DEFAULT 1, notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
                 UNIQUE(project_id, assembly_number)
+            );
+            CREATE TABLE IF NOT EXISTS manufacturing_assembly_components (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                assembly_id TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE,
+                fishbone_assignment_id TEXT NOT NULL REFERENCES fishbone_part_assignments(id) ON DELETE CASCADE,
+                quantity REAL NOT NULL CHECK(quantity > 0),
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(assembly_id, fishbone_assignment_id)
+            );
+            CREATE TABLE IF NOT EXISTS manufacturing_assembly_feature_rules (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                assembly_id TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE,
+                feature_id TEXT NOT NULL REFERENCES complexity_features(id) ON DELETE RESTRICT,
+                value TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(assembly_id, feature_id)
+            );
+            CREATE TABLE IF NOT EXISTS manufacturing_assembly_images (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                assembly_id TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE,
+                image_path TEXT NOT NULL, caption TEXT DEFAULT '', created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS assembly_scenario_policies (
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -300,6 +327,27 @@ def init_db() -> None:
         project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "product_line" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
+        manufacturing_assembly_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(manufacturing_assemblies)").fetchall()
+        }
+        for column, definition in {
+            "built_section_id": (
+                "TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT"
+            ),
+            "installed_section_id": (
+                "TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT"
+            ),
+            "image_path": "TEXT DEFAULT ''",
+            "created_at": "TEXT",
+        }.items():
+            if column not in manufacturing_assembly_columns:
+                conn.execute(
+                    f"ALTER TABLE manufacturing_assemblies ADD COLUMN {column} {definition}"
+                )
+        conn.execute(
+            """UPDATE manufacturing_assemblies SET created_at=updated_at
+               WHERE created_at IS NULL OR TRIM(created_at)=''"""
+        )
         assignment_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(fishbone_part_assignments)").fetchall()
         }
@@ -314,7 +362,7 @@ def init_db() -> None:
                     part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
                     section_id TEXT NOT NULL REFERENCES assembly_sections(id),
                     sequence INTEGER NOT NULL DEFAULT 10,
-                    quantity INTEGER NOT NULL DEFAULT 1,
+                    quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0),
                     use_description TEXT DEFAULT '',
                     notes TEXT DEFAULT '',
                     updated_at TEXT NOT NULL
@@ -327,8 +375,67 @@ def init_db() -> None:
                 ALTER TABLE fishbone_part_assignments_new RENAME TO fishbone_part_assignments;
                 """
             )
+        assignment_quantity_type = next(
+            (
+                str(row[2]).upper()
+                for row in conn.execute("PRAGMA table_info(fishbone_part_assignments)").fetchall()
+                if row[1] == "quantity"
+            ),
+            "",
+        )
+        if assignment_quantity_type != "REAL":
+            invalid_quantity_count = conn.execute(
+                """SELECT COUNT(*) FROM fishbone_part_assignments
+                   WHERE quantity IS NULL OR typeof(quantity) NOT IN ('integer', 'real')
+                      OR CAST(quantity AS REAL) <= 0"""
+            ).fetchone()[0]
+            if invalid_quantity_count:
+                raise ValueError(
+                    "Fishbone quantities must all be positive numbers before the decimal-quantity "
+                    "schema upgrade can run."
+                )
+            conn.executescript(
+                """
+                CREATE TABLE fishbone_part_assignments_quantity_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                    section_id TEXT NOT NULL REFERENCES assembly_sections(id),
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0),
+                    use_description TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO fishbone_part_assignments_quantity_new
+                    (id, project_id, part_id, section_id, sequence, quantity,
+                     use_description, notes, updated_at)
+                SELECT id, project_id, part_id, section_id, sequence, CAST(quantity AS REAL),
+                       use_description, notes, updated_at
+                FROM fishbone_part_assignments;
+                DROP TABLE fishbone_part_assignments;
+                ALTER TABLE fishbone_part_assignments_quantity_new
+                    RENAME TO fishbone_part_assignments;
+                """
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fishbone_assignment_part ON fishbone_part_assignments(project_id, part_id)"
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_catalog_sections
+               ON manufacturing_assemblies(project_id, built_section_id, installed_section_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_component_assignment
+               ON manufacturing_assembly_components(project_id, fishbone_assignment_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_rules_owner
+               ON manufacturing_assembly_feature_rules(project_id, assembly_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_images_owner
+               ON manufacturing_assembly_images(project_id, assembly_id)"""
         )
         fishbone_columns = {row[1] for row in conn.execute("PRAGMA table_info(fishbone_nodes)").fetchall()}
         if "review_status" not in fishbone_columns:
@@ -1003,6 +1110,826 @@ def audit_history(project_id: str, table_name: str | None = None, limit: int = 1
             (project_id, int(limit)),
         )
     return pd.DataFrame(rows)
+
+
+def _catalog_records(rows) -> list[dict]:
+    if isinstance(rows, pd.DataFrame):
+        return rows.to_dict("records")
+    return [dict(row) for row in rows]
+
+
+def _catalog_text(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _require_catalog_assembly(
+    conn: sqlite3.Connection, project_id: str, assembly_id: str
+) -> sqlite3.Row:
+    assembly = conn.execute(
+        "SELECT * FROM manufacturing_assemblies WHERE id=? AND project_id=?",
+        (assembly_id, project_id),
+    ).fetchone()
+    if not assembly:
+        raise ValueError("The selected assembly no longer exists in this project.")
+    return assembly
+
+
+def assembly_catalog_rows(project_id: str) -> pd.DataFrame:
+    """Return project-wide assembly catalog rows without scenario-policy joins."""
+    rows = query(
+        """SELECT assembly.*, parent.assembly_number AS parent_assembly_number,
+                  parent.name AS parent_name,
+                  built.name AS built_section_name,
+                  installed.name AS installed_section_name,
+                  (SELECT COUNT(*) FROM manufacturing_assembly_components component
+                   WHERE component.assembly_id=assembly.id) AS component_count,
+                  (SELECT COUNT(*) FROM manufacturing_assembly_feature_rules rule
+                   WHERE rule.assembly_id=assembly.id) AS rule_count,
+                  (SELECT COUNT(*) FROM manufacturing_assembly_images image
+                   WHERE image.assembly_id=assembly.id) AS supplemental_image_count,
+                  (SELECT COUNT(*) FROM manufacturing_assembly_components component
+                   JOIN fishbone_part_assignments assignment
+                     ON assignment.id=component.fishbone_assignment_id
+                   WHERE component.assembly_id=assembly.id
+                     AND (assembly.built_section_id IS NULL
+                          OR assignment.section_id<>assembly.built_section_id)) AS component_mismatch_count
+           FROM manufacturing_assemblies assembly
+           LEFT JOIN manufacturing_assemblies parent ON parent.id=assembly.parent_id
+           LEFT JOIN assembly_sections built ON built.id=assembly.built_section_id
+           LEFT JOIN assembly_sections installed ON installed.id=assembly.installed_section_id
+           WHERE assembly.project_id=?
+           ORDER BY assembly.assembly_number""",
+        (project_id,),
+    )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    stale_counts: dict[str, int] = {}
+    for row in query(
+        """SELECT rule.assembly_id, rule.value, feature.allowed_values, feature.active
+           FROM manufacturing_assembly_feature_rules rule
+           LEFT JOIN complexity_features feature ON feature.id=rule.feature_id
+           WHERE rule.project_id=?""",
+        (project_id,),
+    ):
+        try:
+            allowed_values = json.loads(row.get("allowed_values") or "[]")
+        except json.JSONDecodeError:
+            allowed_values = []
+        if not bool(row.get("active")) or str(row.get("value")) not in {
+            str(value) for value in allowed_values
+        }:
+            assembly_id = str(row["assembly_id"])
+            stale_counts[assembly_id] = stale_counts.get(assembly_id, 0) + 1
+    result["stale_rule_count"] = (
+        result["id"].astype(str).map(stale_counts).fillna(0).astype(int)
+    )
+    return result
+
+
+def save_assembly_catalog_rows(project_id: str, rows) -> dict:
+    """Save catalog-owned assembly fields without touching scenario-policy data."""
+    records = _catalog_records(rows)
+    timestamp = now_iso()
+    with connection() as conn:
+        current = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM manufacturing_assemblies WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        valid_sections = {
+            str(row[0]) for row in conn.execute(
+                "SELECT id FROM assembly_sections WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        normalized: list[dict] = []
+        seen_ids: set[str] = set()
+        for raw in records:
+            assembly_id = _catalog_text(raw.get("id")) or str(uuid4())
+            assembly_number = _catalog_text(raw.get("assembly_number"))
+            name = _catalog_text(raw.get("name"))
+            built_section_id = _catalog_text(raw.get("built_section_id"))
+            installed_section_id = _catalog_text(raw.get("installed_section_id"))
+            parent_id = _catalog_text(raw.get("parent_id")) or None
+            if assembly_id in seen_ids:
+                raise ValueError("The assembly table contains a duplicate internal identifier.")
+            if not assembly_number or not name:
+                raise ValueError("Every assembly requires an Assembly number and Assembly name.")
+            if built_section_id not in valid_sections or installed_section_id not in valid_sections:
+                raise ValueError("Every assembly requires valid Built section and Installed section values.")
+            if parent_id == assembly_id:
+                raise ValueError(f"Assembly {assembly_number} cannot be its own parent.")
+            raw_active = raw.get("active", True)
+            active = 1 if raw_active is None or pd.isna(raw_active) else int(bool(raw_active))
+            seen_ids.add(assembly_id)
+            normalized.append(
+                {
+                    "id": assembly_id,
+                    "assembly_number": assembly_number,
+                    "name": name,
+                    "parent_id": parent_id,
+                    "built_section_id": built_section_id,
+                    "installed_section_id": installed_section_id,
+                    "active": active,
+                    "notes": _catalog_text(raw.get("notes")),
+                }
+            )
+
+        merged = {assembly_id: dict(value) for assembly_id, value in current.items()}
+        merged.update({row["id"]: row for row in normalized})
+        numbers: dict[str, str] = {}
+        for assembly_id, row in merged.items():
+            number_key = _catalog_text(row.get("assembly_number")).casefold()
+            if number_key in numbers and numbers[number_key] != assembly_id:
+                raise ValueError("Assembly numbers must be unique within the project.")
+            numbers[number_key] = assembly_id
+        for row in normalized:
+            parent_id = row["parent_id"]
+            if parent_id and parent_id not in merged:
+                raise ValueError(f"Assembly {row['assembly_number']} has an invalid parent assembly.")
+
+        parent_by_id = {
+            assembly_id: _catalog_text(row.get("parent_id")) or None
+            for assembly_id, row in merged.items()
+        }
+        for assembly_id in parent_by_id:
+            visited: set[str] = set()
+            cursor = assembly_id
+            while cursor:
+                if cursor in visited:
+                    raise ValueError("Assembly nesting cannot contain a cycle.")
+                visited.add(cursor)
+                cursor = parent_by_id.get(cursor)
+
+        mismatch_warnings: list[dict] = []
+        for row in normalized:
+            parent_id = row["parent_id"]
+            parent = merged.get(parent_id) if parent_id else None
+            if parent and _catalog_text(row["installed_section_id"]) != _catalog_text(
+                parent.get("built_section_id")
+            ):
+                mismatch_warnings.append(
+                    {
+                        "assembly_id": row["id"],
+                        "assembly_number": row["assembly_number"],
+                        "parent_assembly_number": _catalog_text(parent.get("assembly_number")),
+                    }
+                )
+
+        for row in normalized:
+            previous = current.get(row["id"])
+            if previous:
+                if _catalog_text(previous.get("built_section_id")) != row["built_section_id"]:
+                    conn.execute(
+                        """UPDATE fishbone_part_assignments SET section_id=?, updated_at=?
+                           WHERE project_id=? AND id IN (
+                               SELECT fishbone_assignment_id
+                               FROM manufacturing_assembly_components
+                               WHERE project_id=? AND assembly_id=?
+                           )""",
+                        (row["built_section_id"], timestamp, project_id, project_id, row["id"]),
+                    )
+                conn.execute(
+                    """UPDATE manufacturing_assemblies
+                       SET assembly_number=?, name=?, parent_id=?, built_section_id=?,
+                           installed_section_id=?, active=?, notes=?, updated_at=?
+                       WHERE id=? AND project_id=?""",
+                    (
+                        row["assembly_number"], row["name"], row["parent_id"],
+                        row["built_section_id"], row["installed_section_id"],
+                        row["active"], row["notes"], timestamp, row["id"], project_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO manufacturing_assemblies
+                       (id, project_id, assembly_number, name, pits_reference,
+                        planning_reason, parent_id, built_section_id, installed_section_id,
+                        image_path, created_at, active, notes, updated_at)
+                       VALUES (?, ?, ?, ?, '', 'Other', ?, ?, ?, '', ?, ?, ?, ?)""",
+                    (
+                        row["id"], project_id, row["assembly_number"], row["name"],
+                        row["parent_id"], row["built_section_id"],
+                        row["installed_section_id"], timestamp, row["active"],
+                        row["notes"], timestamp,
+                    ),
+                )
+    return {
+        "count": len(normalized),
+        "updated_at": timestamp,
+        "mismatch_warnings": mismatch_warnings,
+        "assembly_ids": [row["id"] for row in normalized],
+    }
+
+
+def assembly_bom_components(project_id: str, assembly_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT component.*, assignment.part_id, assignment.section_id,
+                  assignment.quantity AS fishbone_quantity,
+                  assignment.use_description, assignment.notes AS fishbone_notes,
+                  part.part_number, part.description AS part_name,
+                  section.name AS current_section_name,
+                  assembly.built_section_id,
+                  CASE WHEN assignment.section_id=assembly.built_section_id THEN 0 ELSE 1 END
+                       AS section_mismatch
+           FROM manufacturing_assembly_components component
+           JOIN manufacturing_assemblies assembly ON assembly.id=component.assembly_id
+           JOIN fishbone_part_assignments assignment
+             ON assignment.id=component.fishbone_assignment_id
+           JOIN parts part ON part.id=assignment.part_id
+           JOIN assembly_sections section ON section.id=assignment.section_id
+           WHERE component.project_id=? AND component.assembly_id=?
+           ORDER BY part.part_number, assignment.sequence""",
+        (project_id, assembly_id),
+    ))
+
+
+def save_assembly_bom_components(project_id: str, assembly_id: str, rows) -> dict:
+    records = _catalog_records(rows)
+    timestamp = now_iso()
+    with connection() as conn:
+        assembly = _require_catalog_assembly(conn, project_id, assembly_id)
+        built_section_id = _catalog_text(assembly["built_section_id"])
+        if not built_section_id:
+            raise ValueError("Choose the assembly's Built section before editing its mini-BOM.")
+        existing = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                """SELECT * FROM manufacturing_assembly_components
+                   WHERE project_id=? AND assembly_id=?""",
+                (project_id, assembly_id),
+            ).fetchall()
+        }
+        normalized: list[dict] = []
+        assignment_ids: set[str] = set()
+        row_ids: set[str] = set()
+        for raw in records:
+            row_id = _catalog_text(raw.get("id")) or str(uuid4())
+            assignment_id = _catalog_text(raw.get("fishbone_assignment_id"))
+            if row_id in row_ids or assignment_id in assignment_ids:
+                raise ValueError("Each Fishbone use may appear only once in one assembly mini-BOM.")
+            assignment = conn.execute(
+                """SELECT id, section_id, quantity FROM fishbone_part_assignments
+                   WHERE id=? AND project_id=?""",
+                (assignment_id, project_id),
+            ).fetchone()
+            if not assignment:
+                raise ValueError("Every mini-BOM row must reference a current project Fishbone use.")
+            previous = existing.get(row_id)
+            raw_quantity = raw.get("quantity")
+            if (
+                not previous
+                and (
+                    raw_quantity is None
+                    or pd.isna(raw_quantity)
+                    or _catalog_text(raw_quantity) == ""
+                )
+            ):
+                raw_quantity = assignment["quantity"]
+            try:
+                quantity = float(raw_quantity)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Mini-BOM quantities must be numbers greater than zero.") from exc
+            if not math.isfinite(quantity) or quantity <= 0:
+                raise ValueError("Mini-BOM quantities must be numbers greater than zero.")
+            unchanged_stale = bool(
+                previous
+                and str(previous["fishbone_assignment_id"]) == assignment_id
+                and round(float(previous["quantity"]), 9) == round(quantity, 9)
+            )
+            if str(assignment["section_id"]) != built_section_id and not unchanged_stale:
+                raise ValueError(
+                    "New or changed mini-BOM rows must use parts currently placed in the assembly's Built section."
+                )
+            row_ids.add(row_id)
+            assignment_ids.add(assignment_id)
+            normalized.append(
+                {"id": row_id, "fishbone_assignment_id": assignment_id, "quantity": quantity}
+            )
+        conn.execute(
+            "DELETE FROM manufacturing_assembly_components WHERE project_id=? AND assembly_id=?",
+            (project_id, assembly_id),
+        )
+        conn.executemany(
+            """INSERT INTO manufacturing_assembly_components
+               (id, project_id, assembly_id, fishbone_assignment_id, quantity,
+                created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    row["id"], project_id, assembly_id, row["fishbone_assignment_id"],
+                    row["quantity"], existing.get(row["id"], {}).get("created_at", timestamp),
+                    timestamp,
+                )
+                for row in normalized
+            ],
+        )
+    return {"count": len(normalized), "updated_at": timestamp}
+
+
+def assembly_feature_rules(project_id: str, assembly_id: str) -> pd.DataFrame:
+    rows = query(
+        """SELECT rule.*, feature.name AS feature_name, feature.category,
+                  feature.allowed_values, feature.active AS feature_active
+           FROM manufacturing_assembly_feature_rules rule
+           LEFT JOIN complexity_features feature ON feature.id=rule.feature_id
+           WHERE rule.project_id=? AND rule.assembly_id=?
+           ORDER BY feature.category, feature.name, rule.created_at""",
+        (project_id, assembly_id),
+    )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    def stale(row) -> bool:
+        try:
+            choices = json.loads(row.get("allowed_values") or "[]")
+        except json.JSONDecodeError:
+            choices = []
+        return not bool(row.get("feature_active")) or str(row.get("value")) not in {
+            str(choice) for choice in choices
+        }
+
+    result["stale"] = result.apply(stale, axis=1)
+    result["warning"] = result["stale"].map(
+        lambda value: "Warning: references a removed choice — review and update" if value else ""
+    )
+    return result
+
+
+def save_assembly_feature_rules(project_id: str, assembly_id: str, rows) -> dict:
+    records = _catalog_records(rows)
+    timestamp = now_iso()
+    with connection() as conn:
+        _require_catalog_assembly(conn, project_id, assembly_id)
+        existing = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                """SELECT * FROM manufacturing_assembly_feature_rules
+                   WHERE project_id=? AND assembly_id=?""",
+                (project_id, assembly_id),
+            ).fetchall()
+        }
+        features = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM complexity_features WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        normalized: list[dict] = []
+        feature_ids: set[str] = set()
+        row_ids: set[str] = set()
+        for raw in records:
+            row_id = _catalog_text(raw.get("id")) or str(uuid4())
+            feature_id = _catalog_text(raw.get("feature_id"))
+            value = _catalog_text(raw.get("value"))
+            if row_id in row_ids or feature_id in feature_ids:
+                raise ValueError("An assembly may have at most one choice for each feature.")
+            feature = features.get(feature_id)
+            previous = existing.get(row_id)
+            unchanged_stale = bool(
+                previous
+                and str(previous["feature_id"]) == feature_id
+                and str(previous["value"]) == value
+            )
+            try:
+                allowed = {
+                    str(choice) for choice in json.loads((feature or {}).get("allowed_values") or "[]")
+                }
+            except json.JSONDecodeError:
+                allowed = set()
+            if (
+                not feature
+                or not bool(feature.get("active"))
+                or value not in allowed
+            ) and not unchanged_stale:
+                raise ValueError(
+                    "New or changed assembly rules must use an active feature and one of its current choices."
+                )
+            row_ids.add(row_id)
+            feature_ids.add(feature_id)
+            normalized.append({"id": row_id, "feature_id": feature_id, "value": value})
+        conn.execute(
+            """DELETE FROM manufacturing_assembly_feature_rules
+               WHERE project_id=? AND assembly_id=?""",
+            (project_id, assembly_id),
+        )
+        conn.executemany(
+            """INSERT INTO manufacturing_assembly_feature_rules
+               (id, project_id, assembly_id, feature_id, value, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    row["id"], project_id, assembly_id, row["feature_id"], row["value"],
+                    existing.get(row["id"], {}).get("created_at", timestamp), timestamp,
+                )
+                for row in normalized
+            ],
+        )
+    return {"count": len(normalized), "updated_at": timestamp}
+
+
+def assembly_model_applicability(project_id: str, assembly_id: str) -> dict:
+    rules = assembly_feature_rules(project_id, assembly_id)
+    models = project_models(project_id)
+    if not models.empty:
+        models = models.loc[models["active"].fillna(1).astype(bool)].copy()
+    if rules.empty:
+        return {"stale": False, "summary": "All models", "models": models}
+    if bool(rules["stale"].any()):
+        return {
+            "stale": True,
+            "summary": "No models while a rule references a removed feature or choice",
+            "models": models.iloc[0:0].copy(),
+        }
+    values = pd.DataFrame(query(
+        "SELECT model_id, feature_id, value FROM model_feature_values WHERE project_id=?",
+        (project_id,),
+    ))
+    required = {
+        str(row["feature_id"]): str(row["value"]) for _, row in rules.iterrows()
+    }
+    matched_ids: list[str] = []
+    for _, model in models.iterrows():
+        model_values = (
+            values.loc[values["model_id"].astype(str).eq(str(model["id"]))]
+            if not values.empty else values
+        )
+        by_feature = {
+            str(row["feature_id"]): str(row["value"]) for _, row in model_values.iterrows()
+        }
+        if all(by_feature.get(feature_id) == value for feature_id, value in required.items()):
+            matched_ids.append(str(model["id"]))
+    matching = models.loc[models["id"].astype(str).isin(matched_ids)].copy()
+    summary = " AND ".join(
+        f"{row['feature_name']} = {row['value']}" for _, row in rules.iterrows()
+    )
+    return {"stale": False, "summary": summary, "models": matching}
+
+
+def assembly_images(project_id: str, assembly_id: str) -> list[dict]:
+    return query(
+        """SELECT * FROM manufacturing_assembly_images
+           WHERE project_id=? AND assembly_id=? ORDER BY created_at""",
+        (project_id, assembly_id),
+    )
+
+
+def _assembly_image_target(assembly_id: str, uploaded_file) -> Path:
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise ValueError("Use PNG, JPG, JPEG, or WEBP images.")
+    return UPLOAD_DIR / f"assembly_{assembly_id}_{uuid4()}{suffix}"
+
+
+def _remove_owned_upload(path_value) -> None:
+    if not path_value:
+        return
+    path = Path(str(path_value))
+    try:
+        if path.exists() and path.is_file() and UPLOAD_DIR.resolve() in path.resolve().parents:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def set_assembly_image(project_id: str, assembly_id: str, uploaded_file) -> str:
+    target = _assembly_image_target(assembly_id, uploaded_file)
+    content = uploaded_file.getvalue()
+    if not content:
+        raise ValueError("Choose a non-empty image.")
+    target.write_bytes(content)
+    previous_path = ""
+    try:
+        with connection() as conn:
+            assembly = _require_catalog_assembly(conn, project_id, assembly_id)
+            previous_path = _catalog_text(assembly["image_path"])
+            conn.execute(
+                """UPDATE manufacturing_assemblies SET image_path=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (str(target), now_iso(), assembly_id, project_id),
+            )
+    except Exception:
+        _remove_owned_upload(target)
+        raise
+    if previous_path != str(target):
+        _remove_owned_upload(previous_path)
+    return str(target)
+
+
+def add_assembly_image(
+    project_id: str, assembly_id: str, uploaded_file, caption: str = ""
+) -> str:
+    target = _assembly_image_target(assembly_id, uploaded_file)
+    content = uploaded_file.getvalue()
+    if not content:
+        raise ValueError("Choose a non-empty image.")
+    target.write_bytes(content)
+    image_id = str(uuid4())
+    try:
+        with connection() as conn:
+            _require_catalog_assembly(conn, project_id, assembly_id)
+            conn.execute(
+                """INSERT INTO manufacturing_assembly_images
+                   (id, project_id, assembly_id, image_path, caption, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (image_id, project_id, assembly_id, str(target), _catalog_text(caption), now_iso()),
+            )
+    except Exception:
+        _remove_owned_upload(target)
+        raise
+    return image_id
+
+
+def delete_assembly_images(
+    project_id: str, assembly_id: str, image_ids: list[str]
+) -> int:
+    normalized = list(
+        dict.fromkeys(_catalog_text(value) for value in image_ids if _catalog_text(value))
+    )
+    if not normalized:
+        return 0
+    placeholders = ",".join("?" for _ in normalized)
+    with connection() as conn:
+        _require_catalog_assembly(conn, project_id, assembly_id)
+        rows = conn.execute(
+            f"""SELECT id, image_path FROM manufacturing_assembly_images
+                WHERE project_id=? AND assembly_id=? AND id IN ({placeholders})""",
+            (project_id, assembly_id, *normalized),
+        ).fetchall()
+        if len(rows) != len(normalized):
+            raise ValueError("One or more selected assembly images no longer exist.")
+        conn.execute(
+            f"""DELETE FROM manufacturing_assembly_images
+                WHERE project_id=? AND assembly_id=? AND id IN ({placeholders})""",
+            (project_id, assembly_id, *normalized),
+        )
+    for row in rows:
+        _remove_owned_upload(row["image_path"])
+    return len(rows)
+
+
+def assemblies_for_section(project_id: str, section_id: str) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT assembly.id, assembly.assembly_number, assembly.name,
+                  'Built here' AS relationship
+           FROM manufacturing_assemblies assembly
+           WHERE assembly.project_id=? AND assembly.built_section_id=?
+           UNION ALL
+           SELECT assembly.id, assembly.assembly_number, assembly.name,
+                  'Installed here' AS relationship
+           FROM manufacturing_assemblies assembly
+           WHERE assembly.project_id=? AND assembly.installed_section_id=?
+           ORDER BY assembly_number, relationship""",
+        (project_id, section_id, project_id, section_id),
+    ))
+
+
+def fishbone_assignment_assembly_impact(
+    project_id: str, assignment_ids: list[str]
+) -> pd.DataFrame:
+    normalized = list(
+        dict.fromkeys(_catalog_text(value) for value in assignment_ids if _catalog_text(value))
+    )
+    if not normalized:
+        return pd.DataFrame()
+    placeholders = ",".join("?" for _ in normalized)
+    return pd.DataFrame(query(
+        f"""SELECT component.id AS component_id, component.fishbone_assignment_id,
+                   assembly.id AS assembly_id, assembly.assembly_number, assembly.name
+            FROM manufacturing_assembly_components component
+            JOIN manufacturing_assemblies assembly ON assembly.id=component.assembly_id
+            WHERE component.project_id=?
+              AND component.fishbone_assignment_id IN ({placeholders})
+            ORDER BY assembly.assembly_number""",
+        (project_id, *normalized),
+    ))
+
+
+def assembly_section_reference_impact(
+    project_id: str, section_ids: list[str]
+) -> pd.DataFrame:
+    normalized = list(
+        dict.fromkeys(_catalog_text(value) for value in section_ids if _catalog_text(value))
+    )
+    if not normalized:
+        return pd.DataFrame()
+    placeholders = ",".join("?" for _ in normalized)
+    return pd.DataFrame(query(
+        f"""SELECT assembly.id AS assembly_id, assembly.assembly_number, assembly.name,
+                   assembly.built_section_id, built.name AS built_section_name,
+                   assembly.installed_section_id, installed.name AS installed_section_name
+            FROM manufacturing_assemblies assembly
+            LEFT JOIN assembly_sections built ON built.id=assembly.built_section_id
+            LEFT JOIN assembly_sections installed ON installed.id=assembly.installed_section_id
+            WHERE assembly.project_id=? AND (
+                assembly.built_section_id IN ({placeholders})
+                OR assembly.installed_section_id IN ({placeholders})
+            ) ORDER BY assembly.assembly_number""",
+        (project_id, *normalized, *normalized),
+    ))
+
+
+def repoint_assembly_section_references(
+    project_id: str, replacements, connection: sqlite3.Connection | None = None
+) -> int:
+    records = _catalog_records(replacements)
+    timestamp = now_iso()
+    context = nullcontext(connection) if connection is not None else globals()["connection"]()
+    with context as conn:
+        valid_sections = {
+            str(row[0]) for row in conn.execute(
+                "SELECT id FROM assembly_sections WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        normalized: list[tuple[str, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in records:
+            assembly_id = _catalog_text(row.get("assembly_id"))
+            field = _catalog_text(row.get("field"))
+            section_id = _catalog_text(row.get("section_id"))
+            if field not in {"built_section_id", "installed_section_id"}:
+                raise ValueError("Choose whether each replacement applies to Built or Installed section.")
+            if section_id not in valid_sections:
+                raise ValueError("Every assembly section replacement must be a current project section.")
+            _require_catalog_assembly(conn, project_id, assembly_id)
+            if (assembly_id, field) in seen:
+                raise ValueError("Each assembly section relationship needs exactly one replacement.")
+            seen.add((assembly_id, field))
+            normalized.append((assembly_id, field, section_id))
+        for assembly_id, field, section_id in normalized:
+            if field == "built_section_id":
+                conn.execute(
+                    """UPDATE fishbone_part_assignments SET section_id=?, updated_at=?
+                       WHERE project_id=? AND id IN (
+                           SELECT fishbone_assignment_id
+                           FROM manufacturing_assembly_components
+                           WHERE project_id=? AND assembly_id=?
+                       )""",
+                    (section_id, timestamp, project_id, project_id, assembly_id),
+                )
+            conn.execute(
+                f"""UPDATE manufacturing_assemblies SET {field}=?, updated_at=?
+                    WHERE id=? AND project_id=?""",
+                (section_id, timestamp, assembly_id, project_id),
+            )
+    return len(normalized)
+
+
+def assembly_catalog_delete_impact(project_id: str, assembly_ids: list[str]) -> dict:
+    normalized = list(
+        dict.fromkeys(_catalog_text(value) for value in assembly_ids if _catalog_text(value))
+    )
+    if not normalized:
+        raise ValueError("Select at least one assembly to delete.")
+    placeholders = ",".join("?" for _ in normalized)
+    with connection() as conn:
+        selected_count = conn.execute(
+            f"""SELECT COUNT(*) FROM manufacturing_assemblies
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *normalized),
+        ).fetchone()[0]
+        if int(selected_count) != len(normalized):
+            raise ValueError("One or more selected assemblies no longer exist.")
+        rows = conn.execute(
+            f"""WITH RECURSIVE tree(id, assembly_number, name, parent_id, depth) AS (
+                    SELECT id, assembly_number, name, parent_id, 0
+                    FROM manufacturing_assemblies
+                    WHERE project_id=? AND id IN ({placeholders})
+                    UNION
+                    SELECT child.id, child.assembly_number, child.name, child.parent_id,
+                           tree.depth + 1
+                    FROM manufacturing_assemblies child JOIN tree ON child.parent_id=tree.id
+                    WHERE child.project_id=?
+                )
+                SELECT id, assembly_number, name, parent_id, MIN(depth) AS depth
+                FROM tree GROUP BY id, assembly_number, name, parent_id
+                ORDER BY depth, assembly_number""",
+            (project_id, *normalized, project_id),
+        ).fetchall()
+        affected_ids = [str(row["id"]) for row in rows]
+        affected_placeholders = ",".join("?" for _ in affected_ids)
+
+        def count(table: str, column: str = "assembly_id") -> int:
+            return int(conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} IN ({affected_placeholders})",
+                tuple(affected_ids),
+            ).fetchone()[0])
+
+        levels: dict[int, list[dict]] = {}
+        for row in rows:
+            levels.setdefault(int(row["depth"]), []).append(dict(row))
+        image_paths = [
+            str(row[0]) for row in conn.execute(
+                f"""SELECT image_path FROM manufacturing_assemblies
+                    WHERE id IN ({affected_placeholders}) AND TRIM(COALESCE(image_path, ''))<>''
+                    UNION ALL
+                    SELECT image_path FROM manufacturing_assembly_images
+                    WHERE assembly_id IN ({affected_placeholders})""",
+                (*affected_ids, *affected_ids),
+            ).fetchall()
+        ]
+        return {
+            "selected_ids": normalized,
+            "affected_ids": affected_ids,
+            "selected_count": len(normalized),
+            "descendant_count": len(affected_ids) - len(normalized),
+            "levels": levels,
+            "component_count": count("manufacturing_assembly_components"),
+            "rule_count": count("manufacturing_assembly_feature_rules"),
+            "supplemental_image_count": count("manufacturing_assembly_images"),
+            "primary_image_count": int(conn.execute(
+                f"""SELECT COUNT(*) FROM manufacturing_assemblies
+                    WHERE id IN ({affected_placeholders})
+                      AND TRIM(COALESCE(image_path, ''))<>''""",
+                tuple(affected_ids),
+            ).fetchone()[0]),
+            "image_paths": image_paths,
+            "image_file_count": len(image_paths),
+            "policy_count": count("assembly_scenario_policies"),
+            "material_option_count": count("work_element_material_options"),
+            "target_assembly_link_count": count(
+                "work_element_material_groups", "target_assembly_id"
+            ),
+        }
+
+
+def delete_assembly_catalog_rows(
+    project_id: str, assembly_ids: list[str], level_actions: dict
+) -> dict:
+    impact = assembly_catalog_delete_impact(project_id, assembly_ids)
+    actions = {int(depth): str(action) for depth, action in dict(level_actions or {}).items()}
+    allowed = {"Move to grandparent", "Delete entirely", "Become unassigned"}
+    for depth in impact["levels"]:
+        if depth > 0 and actions.get(depth) not in allowed:
+            raise ValueError(f"Choose what happens to child assemblies at level {depth}.")
+    selected_ids = set(impact["selected_ids"])
+    deleted_ids = set(selected_ids)
+    for depth, rows in impact["levels"].items():
+        if depth > 0 and actions.get(depth) == "Delete entirely":
+            deleted_ids.update(str(row["id"]) for row in rows)
+    all_rows = {
+        str(row["id"]): dict(row)
+        for depth_rows in impact["levels"].values() for row in depth_rows
+    }
+    image_paths: list[str] = []
+    timestamp = now_iso()
+    with connection() as conn:
+        if deleted_ids:
+            placeholders = ",".join("?" for _ in deleted_ids)
+            image_paths.extend(
+                str(row[0]) for row in conn.execute(
+                    f"""SELECT image_path FROM manufacturing_assemblies
+                        WHERE project_id=? AND id IN ({placeholders})
+                          AND TRIM(COALESCE(image_path, ''))<>''""",
+                    (project_id, *deleted_ids),
+                ).fetchall()
+            )
+            image_paths.extend(
+                str(row[0]) for row in conn.execute(
+                    f"""SELECT image_path FROM manufacturing_assembly_images
+                        WHERE project_id=? AND assembly_id IN ({placeholders})""",
+                    (project_id, *deleted_ids),
+                ).fetchall()
+            )
+        for depth, rows in impact["levels"].items():
+            if depth == 0 or actions.get(depth) == "Delete entirely":
+                continue
+            action = actions[depth]
+            for row in rows:
+                assembly_id = str(row["id"])
+                if assembly_id in deleted_ids:
+                    continue
+                if action == "Become unassigned":
+                    conn.execute(
+                        """UPDATE manufacturing_assemblies
+                           SET parent_id=NULL, built_section_id=NULL, installed_section_id=NULL,
+                               updated_at=? WHERE id=? AND project_id=?""",
+                        (timestamp, assembly_id, project_id),
+                    )
+                else:
+                    parent_id = _catalog_text(row.get("parent_id")) or None
+                    while parent_id in deleted_ids:
+                        parent_id = (
+                            _catalog_text(all_rows.get(parent_id, {}).get("parent_id")) or None
+                        )
+                    conn.execute(
+                        """UPDATE manufacturing_assemblies SET parent_id=?, updated_at=?
+                           WHERE id=? AND project_id=?""",
+                        (parent_id, timestamp, assembly_id, project_id),
+                    )
+        if deleted_ids:
+            placeholders = ",".join("?" for _ in deleted_ids)
+            conn.execute(
+                f"""DELETE FROM manufacturing_assemblies
+                    WHERE project_id=? AND id IN ({placeholders})""",
+                (project_id, *deleted_ids),
+            )
+    for path in image_paths:
+        _remove_owned_upload(path)
+    return {**impact, "deleted_count": len(deleted_ids), "level_actions": actions}
 
 
 ASSEMBLY_PLANNING_REASONS = {
@@ -3575,6 +4502,27 @@ def assembly_section_delete_impact(
                 (project_id, *affected_ids),
             ).fetchone()[0])
 
+        assembly_references = [
+            dict(row) for row in conn.execute(
+                f"""SELECT assembly.id AS assembly_id, assembly.assembly_number,
+                           assembly.built_section_id, assembly.installed_section_id
+                    FROM manufacturing_assemblies assembly
+                    WHERE assembly.project_id=? AND (
+                        assembly.built_section_id IN ({affected_placeholders})
+                        OR assembly.installed_section_id IN ({affected_placeholders})
+                    ) ORDER BY assembly.assembly_number""",
+                (project_id, *affected_ids, *affected_ids),
+            ).fetchall()
+        ]
+        assembly_component_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM manufacturing_assembly_components component
+                JOIN fishbone_part_assignments assignment
+                  ON assignment.id=component.fishbone_assignment_id
+                WHERE component.project_id=?
+                  AND assignment.section_id IN ({affected_placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
+
         return {
             "selected_section_count": len(normalized_ids),
             "affected_section_count": len(affected_ids),
@@ -3584,15 +4532,45 @@ def assembly_section_delete_impact(
             "fishbone_use_count": count_rows("fishbone_part_assignments"),
             "yamazumi_area_count": count_rows("yamazumi_areas"),
             "process_link_count": count_rows("process_part_groups"),
+            "assembly_reference_count": sum(
+                int(str(row.get("built_section_id")) in affected_ids)
+                + int(str(row.get("installed_section_id")) in affected_ids)
+                for row in assembly_references
+            ),
+            "assembly_references": assembly_references,
+            "assembly_component_count": assembly_component_count,
         }
 
 
-def delete_assembly_sections(project_id: str, section_ids: list[str]) -> dict:
+def delete_assembly_sections(
+    project_id: str, section_ids: list[str], assembly_replacements=None
+) -> dict:
     """Delete selected sections and descendants using the disclosed relationship behavior."""
     impact = assembly_section_delete_impact(project_id, section_ids)
     affected_ids = impact["section_ids"]
     placeholders = ", ".join("?" for _ in affected_ids)
+    replacements = _catalog_records(assembly_replacements or [])
+    required_relationships: set[tuple[str, str]] = set()
+    for row in impact.get("assembly_references", []):
+        if _catalog_text(row.get("built_section_id")) in affected_ids:
+            required_relationships.add((str(row["assembly_id"]), "built_section_id"))
+        if _catalog_text(row.get("installed_section_id")) in affected_ids:
+            required_relationships.add((str(row["assembly_id"]), "installed_section_id"))
+    supplied_relationships = {
+        (_catalog_text(row.get("assembly_id")), _catalog_text(row.get("field")))
+        for row in replacements
+    }
+    if supplied_relationships != required_relationships:
+        raise ValueError(
+            "Choose one replacement section for every affected assembly Built or Installed relationship."
+        )
+    if any(_catalog_text(row.get("section_id")) in affected_ids for row in replacements):
+        raise ValueError("Assembly replacements must use sections outside the deletion set.")
     with connection() as conn:
+        if replacements:
+            repoint_assembly_section_references(
+                project_id, replacements, connection=conn
+            )
         conn.execute(
             f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
             (project_id, *affected_ids),
@@ -3603,7 +4581,7 @@ def delete_assembly_sections(project_id: str, section_ids: list[str]) -> dict:
             f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
             (project_id, *affected_ids),
         )
-    return impact
+    return {**impact, "assembly_replacement_count": len(replacements)}
 
 
 
@@ -3828,7 +4806,7 @@ def create_part_and_assign_to_section(
     project_id: str,
     section_id: str,
     values: dict,
-    placement_quantity: int,
+    placement_quantity: float,
     use_description: str = "",
     placement_notes: str = "",
 ) -> tuple[str, str, str]:
@@ -3844,10 +4822,10 @@ def create_part_and_assign_to_section(
     try:
         numeric_quantity = float(placement_quantity)
     except (TypeError, ValueError) as exc:
-        raise ValueError("Fishbone quantity must be a whole number.") from exc
-    if not numeric_quantity.is_integer() or numeric_quantity < 1:
-        raise ValueError("Fishbone quantity must be a positive whole number.")
-    quantity = int(numeric_quantity)
+        raise ValueError("Fishbone quantity must be a number greater than zero.") from exc
+    if not math.isfinite(numeric_quantity) or numeric_quantity <= 0:
+        raise ValueError("Fishbone quantity must be a number greater than zero.")
+    quantity = numeric_quantity
 
     part_id = str(uuid4())
     assignment_id = str(uuid4())
@@ -3977,7 +4955,7 @@ def assign_parts_to_section(
     use_description: str = "",
     *,
     allow_additional_use: bool = False,
-    quantities_by_part: dict[str, int] | None = None,
+    quantities_by_part: dict[str, float] | None = None,
 ) -> int:
     if not part_ids:
         return 0
@@ -4010,10 +4988,17 @@ def assign_parts_to_section(
                 if quantities_by_part and part_id in quantities_by_part
                 else part["quantity"]
             )
-            numeric_quantity = float(requested_quantity if requested_quantity is not None else 1)
-            if not numeric_quantity.is_integer() or numeric_quantity < 0:
-                raise ValueError("Placement quantities must be non-negative whole numbers.")
-            quantity = int(numeric_quantity)
+            try:
+                numeric_quantity = float(
+                    requested_quantity if requested_quantity is not None else 1
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Fishbone quantities must be numbers greater than zero."
+                ) from exc
+            if not math.isfinite(numeric_quantity) or numeric_quantity <= 0:
+                raise ValueError("Fishbone quantities must be numbers greater than zero.")
+            quantity = numeric_quantity
             assignment_id = str(uuid4())
             conn.execute(
                 """INSERT INTO fishbone_part_assignments
@@ -4075,12 +5060,17 @@ def replace_fishbone_part_assignments(
             part_id, section_id = str(row["part_id"]), str(row["section_id"])
             if part_id not in valid_parts or section_id not in valid_sections:
                 raise ValueError("Every assignment must reference a valid project part and assembly section.")
-            quantity = float(row.get("quantity") or 0)
-            if not quantity.is_integer():
-                raise ValueError("Fishbone quantities must be whole numbers.")
+            try:
+                quantity = float(row.get("quantity"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Fishbone quantities must be numbers greater than zero."
+                ) from exc
+            if not math.isfinite(quantity) or quantity <= 0:
+                raise ValueError("Fishbone quantities must be numbers greater than zero.")
             records.append((
                 str(row.get("id") or uuid4()), project_id, part_id, section_id,
-                int(row.get("sequence") or 0), int(quantity),
+                int(row.get("sequence") or 0), quantity,
                 str(row.get("use_description") or "").strip(),
                 str(row.get("notes") or "").strip(), timestamp,
             ))

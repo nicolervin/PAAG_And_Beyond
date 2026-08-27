@@ -4,6 +4,7 @@ import streamlit as st
 from utils.store import (
     active_part_ids,
     add_assembly_section,
+    assemblies_for_section,
     assembly_section_delete_impact,
     assembly_sections,
     assign_parts_to_section,
@@ -11,6 +12,7 @@ from utils.store import (
     delete_assembly_sections,
     delete_fishbone_part_assignments,
     fishbone_assignment_snapshot,
+    fishbone_assignment_assembly_impact,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
     part_feature_rules,
@@ -35,6 +37,7 @@ from utils.table_filters import (
 )
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
+    decimal_values_equal,
     editable_table_footer,
     native_selected_rows,
     selectable_dataframe,
@@ -268,6 +271,7 @@ with st.expander(
             ":material/arrow_downward: Move later",
             ":material/last_page: Move to end",
         ]] * len(framework)
+        framework["assemblies_action"] = ":material/list: Assemblies"
         full_framework = framework.copy()
         framework = filter_table(
             full_framework,
@@ -325,14 +329,21 @@ with st.expander(
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     st.toast(f"{framework.iloc[click['row']]['name']}: {action.lower()}", icon=":material/swap_vert:")
 
+        def show_framework_assemblies() -> None:
+            click = st.session_state.get("framework_assemblies_action") or {}
+            if 0 <= int(click.get("row", -1)) < len(framework):
+                st.session_state[f"fishbone_assembly_section_{project_id}"] = str(
+                    framework.iloc[int(click["row"])]["id"]
+                )
+
         framework_editor = st.data_editor(
             framework,
             key="assembly_framework_editor",
             hide_index=True,
             num_rows="delete",
             height=300,
-            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at"],
-            column_order=["hierarchy", "active", "sequence", "order_actions", "name", "section_type", "parent_assembly", "description"],
+            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at", "assemblies_action"],
+            column_order=["hierarchy", "active", "sequence", "order_actions", "assemblies_action", "name", "section_type", "parent_assembly", "description"],
             column_config={
                 "id": None,
                 "project_id": None,
@@ -351,6 +362,14 @@ with st.expander(
                     type="secondary",
                     on_click=handle_framework_order,
                     key="framework_order_action",
+                ),
+                "assemblies_action": st.column_config.ButtonColumn(
+                    "Assemblies",
+                    pinned=True,
+                    type="tertiary",
+                    on_click=show_framework_assemblies,
+                    key="framework_assemblies_action",
+                    help="Show assembly numbers built or installed in this section.",
                 ),
                 "name": st.column_config.TextColumn("Section / subassembly", required=True, pinned=True, width="large"),
                 "section_type": st.column_config.SelectboxColumn("Type", options=["Main spine", "Subassembly"], required=True),
@@ -410,11 +429,59 @@ with st.expander(
                 f"{impact['descendant_section_count']} child section(s)?"
             )
             st.markdown(
-                f"- **{impact['fishbone_use_count']}** Fishbone use(s) will be deleted.\n"
+                f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections; "
+                "mini-BOM uses tied to a re-pointed Built section move to its replacement, and remaining uses are deleted.\n"
                 f"- **{impact['yamazumi_area_count']}** Yamazumi area link(s) will be preserved but unassigned.\n"
-                f"- **{impact['process_link_count']}** Process link(s) will be preserved but unassigned."
+                f"- **{impact['process_link_count']}** Process link(s) will be preserved but unassigned.\n"
+                f"- **{impact['assembly_reference_count']}** assembly Built/Installed relationship(s) require replacement.\n"
+                f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections."
             )
             st.caption("Sections: " + ", ".join(impact["section_names"]))
+            replacement_sections = sections.loc[
+                ~sections["id"].astype(str).isin(impact["section_ids"])
+            ].copy()
+            replacement_ids = replacement_sections["id"].astype(str).tolist()
+            replacement_labels = {
+                str(row["id"]): str(row["name"])
+                for _, row in replacement_sections.iterrows()
+            }
+            assembly_replacements = []
+            if impact["assembly_reference_count"] and not replacement_ids:
+                st.error(
+                    "Create another Fishbone section before deleting these sections; each assembly "
+                    "Built or Installed relationship needs a replacement."
+                )
+            for reference in impact.get("assembly_references", []):
+                if str(reference.get("built_section_id")) in impact["section_ids"]:
+                    replacement_id = st.selectbox(
+                        f"{reference['assembly_number']} · replacement Built section",
+                        replacement_ids,
+                        format_func=lambda value: replacement_labels.get(value, value),
+                        key=f"assembly_built_replacement_{project_id}_{reference['assembly_id']}",
+                    ) if replacement_ids else None
+                    if replacement_id:
+                        assembly_replacements.append(
+                            {
+                                "assembly_id": str(reference["assembly_id"]),
+                                "field": "built_section_id",
+                                "section_id": replacement_id,
+                            }
+                        )
+                if str(reference.get("installed_section_id")) in impact["section_ids"]:
+                    replacement_id = st.selectbox(
+                        f"{reference['assembly_number']} · replacement Installed section",
+                        replacement_ids,
+                        format_func=lambda value: replacement_labels.get(value, value),
+                        key=f"assembly_installed_replacement_{project_id}_{reference['assembly_id']}",
+                    ) if replacement_ids else None
+                    if replacement_id:
+                        assembly_replacements.append(
+                            {
+                                "assembly_id": str(reference["assembly_id"]),
+                                "field": "installed_section_id",
+                                "section_id": replacement_id,
+                            }
+                        )
             actions = st.container(horizontal=True)
             if actions.button(
                 "Cancel", key=f"cancel_fishbone_framework_delete_{project_id}"
@@ -426,10 +493,13 @@ with st.expander(
                 "Delete sections",
                 type="primary",
                 icon=":material/delete:",
+                disabled=bool(impact["assembly_reference_count"] and not replacement_ids),
                 key=f"destructive_confirm_fishbone_framework_delete_{project_id}",
             ):
                 try:
-                    deleted = delete_assembly_sections(project_id, pending_ids)
+                    deleted = delete_assembly_sections(
+                        project_id, pending_ids, assembly_replacements
+                    )
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     record_audit_event(
                         project_id,
@@ -451,6 +521,51 @@ with st.expander(
 
         if st.session_state.get(framework_delete_key):
             confirm_framework_delete()
+
+        assembly_section_key = f"fishbone_assembly_section_{project_id}"
+        if st.session_state.get(assembly_section_key) in set(sections["id"].astype(str)):
+            selected_section_id = str(st.session_state[assembly_section_key])
+            section_assemblies = assemblies_for_section(project_id, selected_section_id)
+            with st.container(border=True):
+                st.markdown(
+                    f"#### Assemblies for {section_name_by_id.get(selected_section_id, selected_section_id)}"
+                )
+                st.caption(
+                    "Project-wide assembly numbers related to this selected Fishbone section. "
+                    "Open Details for full editing on the Assemblies page."
+                )
+                if section_assemblies.empty:
+                    st.caption("No assemblies are built or installed in this section.")
+                else:
+                    section_assemblies = section_assemblies.copy()
+                    section_assemblies["details"] = ":material/open_in_new: Details"
+
+                    def open_section_assembly() -> None:
+                        click = st.session_state.get("fishbone_assembly_details_action") or {}
+                        if 0 <= int(click.get("row", -1)) < len(section_assemblies):
+                            assembly_id = str(section_assemblies.iloc[int(click["row"])]["id"])
+                            st.session_state[f"assemblies_selected_id_{project_id}"] = assembly_id
+                            st.session_state[f"fishbone_open_assembly_{project_id}"] = True
+
+                    st.dataframe(
+                        section_assemblies,
+                        hide_index=True,
+                        column_order=["details", "assembly_number", "name", "relationship"],
+                        column_config={
+                            "id": None,
+                            "details": st.column_config.ButtonColumn(
+                                "Details",
+                                type="tertiary",
+                                on_click=open_section_assembly,
+                                key="fishbone_assembly_details_action",
+                            ),
+                            "assembly_number": "Assembly number",
+                            "name": "Assembly name",
+                            "relationship": "Relationship",
+                        },
+                    )
+            if st.session_state.pop(f"fishbone_open_assembly_{project_id}", False):
+                st.switch_page("app_pages/assemblies.py")
 
         st.caption("🟦 Main-spine section · 🟧 Subassembly · indentation shows the parent-child relationship.")
         id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
@@ -634,7 +749,7 @@ else:
                     "part_number": str(assignment["part_number"] or ""),
                     "description": str(assignment["description"] or ""),
                     "use_description": str(assignment["use_description"] or ""),
-                    "quantity": int(assignment["quantity"] or 0),
+                    "quantity": float(assignment["quantity"] or 0),
                     "models": applicability_label,
                     "image": part_thumbnail(image_path_by_part.get(part_id, "")),
                 })
@@ -797,7 +912,7 @@ else:
             "part_number": st.column_config.TextColumn("Part number", pinned=True),
             "description": st.column_config.TextColumn("Part Name", width="large"),
             "quantity": st.column_config.NumberColumn(
-                "Qty for this use", min_value=0, step=1, format="%d",
+                "Qty for this use", step=0.01, format="%g",
                 help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
             ),
             "model_applicability": None,
@@ -810,7 +925,7 @@ else:
     selected_parts = edited_pool.loc[edited_pool["place"].fillna(False).astype(bool)].copy()
     selected_part_ids = selected_parts["id"].astype(str).tolist()
     selected_quantities = {
-        str(row["id"]): int(row["quantity"])
+        str(row["id"]): float(row["quantity"])
         for _, row in selected_parts.iterrows()
     }
     placed_part_ids = set(assignments["part_id"].astype(str)) if not assignments.empty else set()
@@ -1000,7 +1115,7 @@ else:
                 width="large",
                 help="What this occurrence does or where it is installed.",
             ),
-            "quantity": st.column_config.NumberColumn("Qty", min_value=0, step=1, format="%d"),
+            "quantity": st.column_config.NumberColumn("Qty", step=0.01, format="%g"),
             "model_applicability": st.column_config.TextColumn("Feature applicability", width="medium"),
             "notes": st.column_config.TextColumn("IE notes", width="large"),
             "updated_at": None,
@@ -1044,10 +1159,17 @@ else:
     def confirm_assignment_delete() -> None:
         pending_key = f"fishbone_assignments_pending_delete_{project_id}"
         pending_ids = st.session_state.get(pending_key, [])
+        assembly_impact = fishbone_assignment_assembly_impact(project_id, pending_ids)
         st.warning(
             f"Delete {len(pending_ids)} selected Fishbone use(s)? Master Parts records and other "
             "uses will remain."
         )
+        if not assembly_impact.empty:
+            st.markdown(
+                f"**{len(assembly_impact)} assembly mini-BOM component row(s) will also be deleted:**"
+            )
+            for assembly_number, rows in assembly_impact.groupby("assembly_number", sort=False):
+                st.write(f"- {assembly_number}: {len(rows)} component row(s)")
         actions = st.container(horizontal=True)
         if actions.button("Cancel", key=f"cancel_fishbone_assignment_delete_{project_id}"):
             st.session_state.pop(pending_key, None)
@@ -1068,7 +1190,14 @@ else:
                     "Bulk delete",
                     count,
                     st.session_state.get("current_editor", ""),
-                    {"assignment_ids": pending_ids},
+                    {
+                        "assignment_ids": pending_ids,
+                        "assembly_component_rows_deleted": len(assembly_impact),
+                        "assembly_numbers_affected": (
+                            assembly_impact["assembly_number"].astype(str).drop_duplicates().tolist()
+                            if not assembly_impact.empty else []
+                        ),
+                    },
                 )
                 st.session_state.pop(pending_key, None)
                 request_table_editor_reset(assignment_editor_key)
@@ -1116,9 +1245,10 @@ else:
                 assignment_changed = any(
                     audit_text(row.get(field)) != audit_text(previous.get(field))
                     for field in ["section_id", "use_description", "notes"]
-                ) or any(
-                    audit_int(row.get(field)) != audit_int(previous.get(field))
-                    for field in ["sequence", "quantity"]
+                ) or audit_int(row.get("sequence")) != audit_int(
+                    previous.get("sequence")
+                ) or not decimal_values_equal(
+                    row.get("quantity"), previous.get("quantity")
                 )
                 if assignment_changed:
                     edited_assignment_ids.append(assignment_id)

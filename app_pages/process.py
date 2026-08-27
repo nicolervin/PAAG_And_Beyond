@@ -38,6 +38,7 @@ from utils.table_ui import (
     dataframe_to_excel,
     editable_table_footer,
     editable_table_heading,
+    format_clean_number,
     native_selected_rows,
     required_field_errors,
     selectable_dataframe,
@@ -224,7 +225,9 @@ else:
                 column_config={
                     "part_number": st.column_config.TextColumn("Part number", pinned=True),
                     "description": st.column_config.TextColumn("Part Name", width="large"),
-                    "quantity": st.column_config.NumberColumn("Fishbone qty."),
+                    "quantity": st.column_config.NumberColumn(
+                        "Fishbone qty.", format="%g"
+                    ),
                     "use_description": st.column_config.TextColumn("Use", width="medium"),
                     "model_applicability": "Models",
                 },
@@ -273,7 +276,7 @@ else:
                             use_text = str(placement.get("use_description") or "").strip()
                             placement_text = (
                                 f"{placement.get('section_name') or 'Unknown section'} "
-                                f"(qty {int(placement.get('quantity') or 0)})"
+                                f"(qty {format_clean_number(placement.get('quantity'))})"
                             )
                             if use_text:
                                 placement_text += f" — {use_text}"
@@ -353,7 +356,7 @@ else:
                         assignment_labels = {
                             str(row["assignment_id"]): (
                                 f"{row.get('section_name') or 'Unknown section'} — "
-                                f"qty {int(row.get('quantity') or 0)} — "
+                                f"qty {format_clean_number(row.get('quantity'))} — "
                                 f"{row.get('use_description') or 'No use description'}"
                             )
                             for _, row in other_placements.iterrows()
@@ -368,9 +371,9 @@ else:
                         placement_row = st.container(horizontal=True, vertical_alignment="bottom")
                         placement_quantity = placement_row.number_input(
                             "Fishbone quantity",
-                            min_value=1,
-                            value=1,
-                            step=1,
+                            value=1.0,
+                            step=0.01,
+                            format="%g",
                             key=f"process_missing_part_quantity_{scenario_id}_{current_section_id}",
                         )
 
@@ -393,7 +396,9 @@ else:
                                     target_section_id,
                                     "",
                                     allow_additional_use=not placements.empty,
-                                    quantities_by_part={str(selected_part_id): int(placement_quantity)},
+                                    quantities_by_part={
+                                        str(selected_part_id): float(placement_quantity)
+                                    },
                                 )
                                 if count != 1:
                                     raise ValueError("The part could not be placed in this section.")
@@ -442,9 +447,9 @@ else:
             new_placement = st.container(horizontal=True, vertical_alignment="bottom")
             new_quantity = new_placement.number_input(
                 "Fishbone quantity",
-                min_value=1,
-                value=1,
-                step=1,
+                value=1.0,
+                step=0.01,
+                format="%g",
                 key=f"process_new_part_quantity_{scenario_id}_{current_section_id}",
             )
             new_target_section_id = new_placement.selectbox(
@@ -496,7 +501,7 @@ else:
                             "model_applicability": "All",
                             "notes": new_notes,
                         },
-                        int(new_quantity),
+                        float(new_quantity),
                         "",
                     )
                     editor_name = st.session_state.get("current_editor", "")
@@ -1307,7 +1312,7 @@ def edit_process_step_details(element_id: str) -> None:
                 )
                 group_row.write(
                     f"**{group['name']}** · {group['selection_rule']} · "
-                    f"Qty {float(group['quantity']):g} · {group_parts}"
+                    f"Qty {format_clean_number(group['quantity'])} · {group_parts}"
                 )
                 if group_row.button(
                     "Remove pairing",
