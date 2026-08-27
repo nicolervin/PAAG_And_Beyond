@@ -52,6 +52,7 @@ from utils.table_ui import (
     required_field_errors,
     selectable_dataframe,
     selected_rows_action_bar,
+    stage_native_delete_confirmation,
     direct_entry_editor_rows,
     table_has_unsaved_changes,
 )
@@ -235,8 +236,8 @@ pitch_editor_key = f"yamazumi_pitch_editor_{scenario_id}_{area_id}"
 element_editor_key = f"yamazumi_element_editor_{scenario_id}_{area_id}"
 pitch_delete_key = f"yamazumi_pitches_pending_delete_{scenario_id}_{area_id}"
 element_delete_key = f"yamazumi_elements_pending_delete_{scenario_id}_{area_id}"
-apply_pending_table_editor_reset(pitch_editor_key)
-apply_pending_table_editor_reset(element_editor_key)
+pitch_editor_key = apply_pending_table_editor_reset(pitch_editor_key)
+element_editor_key = apply_pending_table_editor_reset(element_editor_key)
 
 if request_clear_area:
     st.session_state["yamazumi_reset_scope"] = "area"
@@ -454,7 +455,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         "existing elements but cannot be assigned to new ones."
     )
     region_editor_key = f"yamazumi_region_editor_{area_id}"
-    apply_pending_table_editor_reset(region_editor_key)
+    region_editor_key = apply_pending_table_editor_reset(region_editor_key)
     region_rows = region_definitions.reindex(
         columns=["id", "name", "description", "active", "color", "sequence", "updated_at"]
     )
@@ -577,8 +578,9 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
             st.session_state[f"yamazumi_regions_pending_delete_{area_id}"] = (
                 selected_regions["id"].astype(str).tolist()
             )
+            stage_native_delete_confirmation(region_editor_key)
 
-    @st.dialog("Delete selected work regions?")
+    @st.dialog("Delete selected work regions?", dismissible=False)
     def confirm_region_delete() -> None:
         pending_key = f"yamazumi_regions_pending_delete_{area_id}"
         pending_ids = st.session_state.get(pending_key, [])
@@ -658,7 +660,7 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
         "should be visible to the IE when editing a work element."
     )
     flag_editor_key = f"yamazumi_flag_editor_{project_id}"
-    apply_pending_table_editor_reset(flag_editor_key)
+    flag_editor_key = apply_pending_table_editor_reset(flag_editor_key)
     flag_rows = flag_definitions.copy()
     flag_rows["name"] = flag_rows["name"].astype("string").fillna("")
     flag_rows["description"] = flag_rows["description"].astype("string").fillna("")
@@ -777,8 +779,9 @@ with setup_columns[2].expander("Define element flags", icon=":material/label:"):
             st.session_state[f"yamazumi_flags_pending_delete_{project_id}"] = (
                 custom_selected_flags["id"].astype(str).tolist()
             )
+            stage_native_delete_confirmation(flag_editor_key)
 
-    @st.dialog("Delete custom Yamazumi flags?")
+    @st.dialog("Delete custom Yamazumi flags?", dismissible=False)
     def confirm_flag_delete() -> None:
         pending_key = f"yamazumi_flags_pending_delete_{project_id}"
         pending_ids = st.session_state.get(pending_key, [])
@@ -1436,6 +1439,7 @@ else:
             ),
             "pitch_edit_count": editor_edit_count(pitch_editor_key),
         }
+        stage_native_delete_confirmation(pitch_editor_key)
 st.download_button(
     "Export filtered pitches",
     data=dataframe_to_excel(
@@ -1692,6 +1696,7 @@ else:
                 else 0
             ),
         }
+        stage_native_delete_confirmation(element_editor_key)
 st.download_button(
     "Export filtered work elements",
     data=dataframe_to_excel(
@@ -1831,7 +1836,7 @@ if pending_pitch_delete and "element_draft" not in pending_pitch_delete:
     st.session_state[pitch_delete_key] = pending_pitch_delete
 
 
-@st.dialog("Delete selected pitches?")
+@st.dialog("Delete selected pitches?", dismissible=False)
 def confirm_pitch_bulk_delete() -> None:
     pending = st.session_state.get(pitch_delete_key, {})
     selected_rows = pending.get("pitches", [])
@@ -1922,7 +1927,7 @@ def confirm_pitch_bulk_delete() -> None:
             st.error(str(exc))
 
 
-@st.dialog("Delete selected Yamazumi work elements?")
+@st.dialog("Delete selected Yamazumi work elements?", dismissible=False)
 def confirm_element_bulk_delete() -> None:
     pending = st.session_state.get(element_delete_key, {})
     selected_rows = pending.get("elements", [])

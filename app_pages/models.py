@@ -25,6 +25,7 @@ from utils.table_ui import (
     editable_table_heading,
     native_selected_rows,
     direct_entry_editor_rows,
+    stage_native_delete_confirmation,
     table_has_unsaved_changes,
 )
 from utils.table_filters import (
@@ -40,12 +41,9 @@ page_title_with_scope("Model definitions", scope="project")
 st.caption("Translate official model numbers into the names and descriptions the IE and lean team use during planning.")
 if not project_id:
     st.stop()
-for editor_key in (
-    "model_definitions_editor_v2",
-    "complexity_feature_editor",
-    "complexity_tree_editor",
-):
-    apply_pending_table_editor_reset(editor_key)
+model_editor_key = apply_pending_table_editor_reset("model_definitions_editor_v2")
+feature_editor_key = apply_pending_table_editor_reset("complexity_feature_editor")
+tree_editor_key = apply_pending_table_editor_reset("complexity_tree_editor")
 
 models = project_models(project_id)
 model_undo_key = f"model_information_undo_{project_id}"
@@ -64,7 +62,7 @@ summary[1].metric("Active for planning", active_count)
 summary[2].metric("Imported from PITS", int(models["source_payload"].fillna("{}").ne("{}").sum()))
 
 has_unsaved_changes = table_has_unsaved_changes(
-    "model_definitions_editor_v2", native_row_selection=True
+    model_editor_key, native_row_selection=True
 )
 editable_table_heading("Model information")
 st.caption("Model number stays tied to the official source. Edit the team-facing definition and turn off models that should not appear on the Parts page.")
@@ -84,19 +82,19 @@ visible_models = filter_table(
     dropdown_columns=["active"],
     search_columns=["model_number", "display_name", "description"],
     labels={"active": "Planning status"},
-    reset_widget_keys=["model_definitions_editor_v2"],
+    reset_widget_keys=[model_editor_key],
 )
 
 
 models_editor_rows = direct_entry_editor_rows(
     visible_models,
-    editor_key="model_definitions_editor_v2",
+    editor_key=model_editor_key,
     sort_columns=["active", "display_name", "model_number", "eau", "description"],
     labels={"display_name": "Common name", "model_number": "Official model number", "eau": "EAU"},
 )
 edited_models = st.data_editor(
     models_editor_rows,
-    key="model_definitions_editor_v2",
+    key=model_editor_key,
     hide_index=True,
     num_rows="dynamic",
     height=500,
@@ -126,7 +124,7 @@ edited_models = st.data_editor(
     },
 )
 model_actions = editable_table_footer(
-    editor_key="model_definitions_editor_v2",
+    editor_key=model_editor_key,
     key_prefix="model_information",
     undo_available=model_undo_key in st.session_state,
     native_row_selection=True,
@@ -135,7 +133,7 @@ undo_requested = model_actions.undo
 save_requested = model_actions.save_and_refresh
 if undo_requested:
     if has_unsaved_changes:
-        request_table_editor_reset("model_definitions_editor_v2")
+        request_table_editor_reset(model_editor_key)
         st.toast("Discarded the unsaved model table edits", icon=":material/undo:")
     else:
         model_snapshot = st.session_state.pop(model_undo_key)
@@ -158,26 +156,27 @@ if undo_requested:
                 ),
             },
         )
-        request_table_editor_reset("model_definitions_editor_v2")
+        request_table_editor_reset(model_editor_key)
         st.toast("Undid the last saved model change", icon=":material/undo:")
     st.rerun()
 
 selected_models = native_selected_rows(
-    models_editor_rows, editor_key="model_definitions_editor_v2"
+    models_editor_rows, editor_key=model_editor_key
 )
 request_model_delete = not selected_models.empty
 if request_model_delete:
     if table_has_unsaved_changes(
-        "model_definitions_editor_v2", native_row_selection=True
+        model_editor_key, native_row_selection=True
     ):
         st.warning("Save or undo other model edits before deleting selected models.")
     else:
         st.session_state[f"models_pending_delete_{project_id}"] = (
             selected_models["id"].astype(str).tolist()
         )
+        stage_native_delete_confirmation(model_editor_key)
 
 
-@st.dialog("Delete selected models?")
+@st.dialog("Delete selected models?", dismissible=False)
 def confirm_model_delete() -> None:
     pending_key = f"models_pending_delete_{project_id}"
     pending_ids = st.session_state.get(pending_key, [])
@@ -188,7 +187,7 @@ def confirm_model_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_model_bulk_delete"):
         st.session_state.pop(pending_key, None)
-        request_table_editor_reset("model_definitions_editor_v2")
+        request_table_editor_reset(model_editor_key)
         st.rerun()
     if actions.button(
         "Delete models",
@@ -208,7 +207,7 @@ def confirm_model_delete() -> None:
                 {"models": labels},
             )
             st.session_state.pop(pending_key, None)
-            request_table_editor_reset("model_definitions_editor_v2")
+            request_table_editor_reset(model_editor_key)
             st.toast(f"Deleted {len(labels)} selected models", icon=":material/delete:")
             st.rerun()
         except ValueError as exc:
@@ -260,7 +259,7 @@ if save_requested:
             },
         )
         st.session_state[model_undo_key] = current_model_snapshot
-        request_table_editor_reset("model_definitions_editor_v2")
+        request_table_editor_reset(model_editor_key)
         st.toast(f"Saved {count} model definitions", icon=":material/check_circle:")
         st.rerun()
     except ValueError as exc:
@@ -271,7 +270,6 @@ st.divider()
 features = complexity_features(project_id)
 current_complexity_snapshot = complexity_planning_snapshot(project_id)
 feature_undo_key = f"complexity_features_undo_{project_id}"
-feature_editor_key = "complexity_feature_editor"
 feature_has_unsaved = table_has_unsaved_changes(
     feature_editor_key,
     native_row_selection=True,
@@ -356,7 +354,7 @@ if feature_actions.undo:
             },
         )
         request_table_editor_reset(feature_editor_key)
-        st.session_state.pop("complexity_tree_editor", None)
+        request_table_editor_reset(tree_editor_key)
         st.toast("Undid the last feature-definition change", icon=":material/undo:")
     st.rerun()
 
@@ -464,9 +462,10 @@ if request_feature_delete:
         "other_edits": pending_feature_edit_summaries(pending_ids),
         "snapshot": current_complexity_snapshot,
     }
+    stage_native_delete_confirmation(feature_editor_key)
 
 
-@st.dialog("Delete selected features?")
+@st.dialog("Delete selected features?", dismissible=False)
 def confirm_feature_delete() -> None:
     pending_state = st.session_state.get(feature_pending_delete_key, {})
     pending = pending_state.get("features", [])
@@ -538,7 +537,7 @@ def confirm_feature_delete() -> None:
                     {"features": other_edits, "saved_with_bulk_delete": True},
                 )
             st.session_state.pop(feature_pending_delete_key, None)
-            st.session_state.pop("complexity_tree_editor", None)
+            request_table_editor_reset(tree_editor_key)
             request_table_editor_reset(feature_editor_key)
             st.toast(f"Deleted {len(pending)} selected features", icon=":material/delete:")
             st.rerun()
@@ -568,7 +567,7 @@ if feature_actions.save_and_refresh:
             st.session_state.get("current_editor", ""),
             {"features": changed_features},
         )
-        st.session_state.pop("complexity_tree_editor", None)
+        request_table_editor_reset(tree_editor_key)
         request_table_editor_reset(feature_editor_key)
         st.toast(f"Saved {count} feature definitions", icon=":material/check_circle:")
         st.rerun()
@@ -578,7 +577,6 @@ if feature_actions.save_and_refresh:
 
 st.divider()
 tree_undo_key = f"complexity_tree_undo_{project_id}"
-tree_editor_key = "complexity_tree_editor"
 tree_has_unsaved = table_has_unsaved_changes(
     tree_editor_key, native_row_selection=True
 )
@@ -632,7 +630,7 @@ else:
     save_tree = tree_actions.save_and_refresh
     if undo_tree:
         if tree_has_unsaved:
-            st.session_state.pop(tree_editor_key, None)
+            request_table_editor_reset(tree_editor_key)
             st.toast("Discarded the unsaved complexity-tree edits", icon=":material/undo:")
         else:
             tree_snapshot = st.session_state.pop(tree_undo_key)
@@ -653,7 +651,7 @@ else:
                     ),
                 },
             )
-            st.session_state.pop(tree_editor_key, None)
+            request_table_editor_reset(tree_editor_key)
             st.toast("Undid the last complexity-tree change", icon=":material/undo:")
         st.rerun()
     selected_tree_rows = native_selected_rows(tree, editor_key=tree_editor_key)

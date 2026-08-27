@@ -140,7 +140,7 @@ with st.container(border=True):
 
 if scenario:
     scenario_editor_key = f"overview_scenario_editor_{project_id}"
-    apply_pending_table_editor_reset(scenario_editor_key)
+    scenario_editor_key = apply_pending_table_editor_reset(scenario_editor_key)
     all_scenarios = planning_scenarios(project_id, include_archived=True)
     scenario_columns = [
         "id", "view_details", "current_view", "name", "revision_label", "status",

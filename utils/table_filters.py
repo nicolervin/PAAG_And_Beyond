@@ -6,6 +6,9 @@ import pandas as pd
 import streamlit as st
 
 
+_EDITOR_INSTANCE_MARKER = "__editor_instance_"
+
+
 def filter_table(
     dataframe: pd.DataFrame,
     *,
@@ -143,12 +146,31 @@ def has_unsaved_table_changes(key: str) -> bool:
     return bool(state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"))
 
 
+def logical_table_editor_key(key: str) -> str:
+    """Return the stable logical key behind a versioned editor instance."""
+    return str(key).split(_EDITOR_INSTANCE_MARKER, 1)[0]
+
+
 def request_table_editor_reset(key: str) -> None:
-    """Clear a saved editor safely at the start of its next Streamlit rerun."""
-    st.session_state[f"_reset_table_editor_{key}"] = True
+    """Request a fresh keyed editor instance on the next Streamlit rerun."""
+    logical_key = logical_table_editor_key(key)
+    st.session_state[f"_reset_table_editor_{logical_key}"] = True
 
 
-def apply_pending_table_editor_reset(key: str) -> None:
-    """Apply a deferred reset before the keyed editor is instantiated."""
-    if st.session_state.pop(f"_reset_table_editor_{key}", False):
-        st.session_state.pop(key, None)
+def apply_pending_table_editor_reset(key: str) -> str:
+    """Return the current editor-instance key, rotating it after a reset request.
+
+    Removing Session State for a data editor does not reliably discard the
+    browser's native ``deleted_rows`` state. A generation suffix changes widget
+    identity and guarantees that Streamlit mounts the editor again from its
+    supplied dataframe.
+    """
+    logical_key = logical_table_editor_key(key)
+    generation_key = f"_table_editor_generation_{logical_key}"
+    generation = int(st.session_state.get(generation_key, 0) or 0)
+    if st.session_state.pop(f"_reset_table_editor_{logical_key}", False):
+        previous_key = f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
+        st.session_state.pop(previous_key, None)
+        generation += 1
+        st.session_state[generation_key] = generation
+    return f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"

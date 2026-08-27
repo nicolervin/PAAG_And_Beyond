@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from utils import table_ui
+from utils import table_filters, table_ui
 
 
 class DirectEntryEditorRowsTests(unittest.TestCase):
@@ -88,6 +88,42 @@ class NativeSelectedRowsTests(unittest.TestCase):
         selected = self.selected_rows({"deleted_rows": [2]})
 
         self.assertTrue(selected.empty)
+
+
+class NativeDeleteConfirmationTests(unittest.TestCase):
+    def test_staging_restores_editor_before_confirmation_rerun(self) -> None:
+        with (
+            patch.object(table_ui, "request_table_editor_reset") as request_reset,
+            patch.object(table_ui.st, "rerun", side_effect=RuntimeError("rerun")) as rerun,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rerun"):
+                table_ui.stage_native_delete_confirmation("example_editor")
+
+        request_reset.assert_called_once_with("example_editor")
+        rerun.assert_called_once_with()
+
+
+class TableEditorResetTests(unittest.TestCase):
+    def test_reset_rotates_widget_identity_and_discards_old_editor_state(self) -> None:
+        session_state: dict[str, object] = {}
+        with patch.object(table_filters.st, "session_state", session_state):
+            first_key = table_filters.apply_pending_table_editor_reset("example_editor")
+            session_state[first_key] = {"deleted_rows": [0]}
+
+            table_filters.request_table_editor_reset(first_key)
+            second_key = table_filters.apply_pending_table_editor_reset(first_key)
+
+        self.assertEqual(first_key, "example_editor__editor_instance_0")
+        self.assertEqual(second_key, "example_editor__editor_instance_1")
+        self.assertNotIn(first_key, session_state)
+
+    def test_editor_identity_stays_stable_without_a_reset(self) -> None:
+        session_state: dict[str, object] = {}
+        with patch.object(table_filters.st, "session_state", session_state):
+            first_key = table_filters.apply_pending_table_editor_reset("example_editor")
+            second_key = table_filters.apply_pending_table_editor_reset(first_key)
+
+        self.assertEqual(first_key, second_key)
 
 
 class EditableTableFooterTests(unittest.TestCase):
