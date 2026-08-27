@@ -41,9 +41,21 @@ def new_project_dialog():
             if not name.strip():
                 st.error("Project name is required.")
             else:
-                st.session_state.project_id = create_project(
+                created_project_id = create_project(
                     name, program, owner, takt, product_line=product_line
                 )
+                record_audit_event(
+                    created_project_id,
+                    "Projects",
+                    "Create project",
+                    1,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "created_project_id": created_project_id,
+                        "created_project_name": name.strip(),
+                    },
+                )
+                st.session_state.project_id = created_project_id
                 st.rerun()
 
 
@@ -101,12 +113,26 @@ with st.container(border=True):
             placeholder="Assumptions, scope, milestones, or known changes…",
         )
         if st.form_submit_button("Save project", type="primary", icon=":material/save:"):
-            update_project(
+            project_values = {
+                "name": name, "program": program, "product_line": product_line,
+                "owner": owner, "revision": revision, "status": status,
+                "takt_time_s": takt, "notes": notes,
+            }
+            project_changed_fields = [
+                field for field, value in project_values.items()
+                if value != project.get(field)
+            ]
+            update_project(project_id, project_values)
+            record_audit_event(
                 project_id,
+                "Projects",
+                "Save project",
+                1,
+                st.session_state.get("current_editor", ""),
                 {
-                    "name": name, "program": program, "product_line": product_line,
-                    "owner": owner, "revision": revision, "status": status,
-                    "takt_time_s": takt, "notes": notes,
+                    "project_id": project_id,
+                    "project_name": name,
+                    "project_changed_fields": project_changed_fields,
                 },
             )
             st.toast("Project saved", icon=":material/check_circle:")
@@ -279,6 +305,21 @@ if scenario:
                 )
                 if errors:
                     raise ValueError(" ".join(errors))
+                active_scenario_row = merged_scenarios.loc[
+                    merged_scenarios["id"].astype(str) == str(scenario_id)
+                ]
+                active_scenario_values = (
+                    active_scenario_row.iloc[0].to_dict()
+                    if not active_scenario_row.empty else scenario
+                )
+                active_scenario_changed_fields = [
+                    field
+                    for field in [
+                        "name", "revision_label", "status", "takt_time_s",
+                        "change_summary",
+                    ]
+                    if active_scenario_values.get(field) != scenario.get(field)
+                ]
                 result = save_planning_scenario_rows(
                     project_id, str(scenario_id), merged_scenarios.to_dict("records"),
                     st.session_state.get("current_editor", ""),
@@ -291,6 +332,8 @@ if scenario:
                         "source_scenario_id": str(scenario_id),
                         "created_scenario_ids": result["created_ids"],
                         "updated_count": result["updated_count"],
+                        "active_scenario_name": str(active_scenario_values.get("name") or ""),
+                        "active_scenario_changed_fields": active_scenario_changed_fields,
                     },
                 )
                 if result["created_ids"]:

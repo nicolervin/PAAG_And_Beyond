@@ -184,6 +184,16 @@ def init_db() -> None:
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 UNIQUE(project_id, name), FOREIGN KEY(parent_id) REFERENCES assembly_sections(id)
             );
+            CREATE TABLE IF NOT EXISTS assembly_section_feature_conditions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                feature_id TEXT NOT NULL REFERENCES complexity_features(id) ON DELETE RESTRICT,
+                value TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(section_id, feature_id, value)
+            );
             CREATE TABLE IF NOT EXISTS fishbone_part_assignments (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
@@ -329,6 +339,10 @@ def init_db() -> None:
             )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fishbone_assignment_part ON fishbone_part_assignments(project_id, part_id)"
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_section_conditions_section
+               ON assembly_section_feature_conditions(project_id, section_id)"""
         )
         fishbone_columns = {row[1] for row in conn.execute("PRAGMA table_info(fishbone_nodes)").fetchall()}
         if "review_status" not in fishbone_columns:
@@ -2184,12 +2198,15 @@ def delete_yamazumi_flag_definitions(project_id: str, flag_ids: list[str]) -> in
         return len(rows)
 
 
-def rename_yamazumi_variants(project_id: str, scenario_id: str, label_mapping: dict[str, str]) -> int:
-    """Normalize saved Yamazumi labels after a display-label convention changes."""
+def rename_yamazumi_variants(
+    project_id: str, scenario_id: str, label_mapping: dict[str, str]
+) -> dict[str, object]:
+    """Normalize saved Yamazumi labels and describe every persisted change."""
     mapping = {str(old): str(new) for old, new in label_mapping.items() if str(old) != str(new)}
     if not mapping:
-        return 0
-    changed = 0
+        return {"changed_count": 0, "element_changes": [], "pitch_changes": []}
+    element_changes: list[dict[str, object]] = []
+    pitch_changes: list[dict[str, object]] = []
     timestamp = now_iso()
     with connection() as conn:
         elements = conn.execute(
@@ -2209,7 +2226,15 @@ def rename_yamazumi_variants(project_id: str, scenario_id: str, label_mapping: d
                        SET model_variant=?, model_variants=?, updated_at=? WHERE id=?""",
                     (primary_variant, json.dumps(normalized), timestamp, element["id"]),
                 )
-                changed += 1
+                element_changes.append(
+                    {
+                        "element_id": str(element["id"]),
+                        "old_primary_variant": str(element["model_variant"] or "Base"),
+                        "new_primary_variant": primary_variant,
+                        "old_variants": variants,
+                        "new_variants": normalized,
+                    }
+                )
         pitches = conn.execute(
             """SELECT p.id, p.model_variants FROM yamazumi_pitches p
                JOIN yamazumi_areas a ON a.id=p.area_id
@@ -2223,8 +2248,18 @@ def rename_yamazumi_variants(project_id: str, scenario_id: str, label_mapping: d
                     "UPDATE yamazumi_pitches SET model_variants=?, updated_at=? WHERE id=?",
                     (json.dumps(normalized), timestamp, pitch["id"]),
                 )
-                changed += 1
-    return changed
+                pitch_changes.append(
+                    {
+                        "pitch_id": str(pitch["id"]),
+                        "old_variants": variants,
+                        "new_variants": normalized,
+                    }
+                )
+    return {
+        "changed_count": len(element_changes) + len(pitch_changes),
+        "element_changes": element_changes,
+        "pitch_changes": pitch_changes,
+    }
 
 
 def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None = None) -> dict[str, int]:
@@ -3510,6 +3545,347 @@ def assembly_sections(project_id: str) -> pd.DataFrame:
     ))
 
 
+def assembly_section_feature_conditions(
+    project_id: str, section_id: str | None = None
+) -> pd.DataFrame:
+    """Return section qualifying conditions without hiding stale references."""
+    columns = [
+        "id", "project_id", "section_id", "feature_id", "value", "created_at",
+        "updated_at", "category", "feature_name", "feature_active", "allowed_values",
+        "is_stale", "stale_reason",
+    ]
+    parameters: list[str] = [project_id]
+    section_clause = ""
+    if section_id is not None:
+        section_clause = " AND condition.section_id=?"
+        parameters.append(str(section_id))
+    rows = query(
+        f"""SELECT condition.id, condition.project_id, condition.section_id,
+                   condition.feature_id, condition.value, condition.created_at,
+                   condition.updated_at, feature.category,
+                   feature.name AS feature_name, feature.active AS feature_active,
+                   feature.allowed_values
+            FROM assembly_section_feature_conditions condition
+            LEFT JOIN complexity_features feature
+              ON feature.id=condition.feature_id
+             AND feature.project_id=condition.project_id
+            WHERE condition.project_id=?{section_clause}
+            ORDER BY feature.sequence, feature.category, feature.name, condition.value""",
+        tuple(parameters),
+    )
+    if not rows:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "section_id": pd.Series(dtype="string"),
+            "feature_id": pd.Series(dtype="string"),
+            "value": pd.Series(dtype="string"),
+            "created_at": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+            "category": pd.Series(dtype="string"),
+            "feature_name": pd.Series(dtype="string"),
+            "feature_active": pd.Series(dtype="bool"),
+            "allowed_values": pd.Series(dtype="string"),
+            "is_stale": pd.Series(dtype="bool"),
+            "stale_reason": pd.Series(dtype="string"),
+        })[columns]
+
+    frame = pd.DataFrame(rows)
+
+    def condition_state(row: pd.Series) -> tuple[bool, str]:
+        if pd.isna(row.get("feature_name")):
+            return True, "references a removed feature — review and update"
+        if not bool(row.get("feature_active")):
+            return True, "references an inactive feature — review and update"
+        try:
+            allowed = json.loads(row.get("allowed_values") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            allowed = []
+        if str(row.get("value") or "") not in allowed:
+            return True, "references a removed choice — review and update"
+        return False, ""
+
+    states = frame.apply(condition_state, axis=1)
+    frame["is_stale"] = states.map(lambda state: state[0]).astype(bool)
+    frame["stale_reason"] = states.map(lambda state: state[1]).astype("string")
+    frame["feature_active"] = frame["feature_active"].fillna(0).astype(bool)
+    for column in [
+        "id", "project_id", "section_id", "feature_id", "value", "created_at",
+        "updated_at", "category", "feature_name", "allowed_values",
+    ]:
+        frame[column] = frame[column].fillna("").astype("string")
+    return frame[columns]
+
+
+def save_assembly_section_feature_conditions(
+    project_id: str, section_id: str, rows: pd.DataFrame
+) -> int:
+    """Insert or update section conditions while allowing unchanged stale rows to remain."""
+    required = {"id", "feature_id", "value"}
+    if not required.issubset(rows.columns):
+        raise ValueError("The qualifying-conditions list is missing required fields.")
+
+    def clean(value: object) -> str:
+        if value is None:
+            return ""
+        try:
+            if bool(pd.isna(value)):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return str(value).strip()
+
+    timestamp = now_iso()
+    with connection() as conn:
+        section = conn.execute(
+            "SELECT id FROM assembly_sections WHERE id=? AND project_id=?",
+            (section_id, project_id),
+        ).fetchone()
+        if not section:
+            raise ValueError("The selected Fishbone section no longer exists.")
+
+        existing = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                """SELECT id, feature_id, value, created_at
+                   FROM assembly_section_feature_conditions
+                   WHERE project_id=? AND section_id=?""",
+                (project_id, section_id),
+            ).fetchall()
+        }
+        features = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                """SELECT id, name, active, allowed_values
+                   FROM complexity_features WHERE project_id=?""",
+                (project_id,),
+            ).fetchall()
+        }
+        prepared: list[dict] = []
+        pairs: set[tuple[str, str]] = set()
+        seen_ids: set[str] = set()
+        for row in rows.to_dict("records"):
+            condition_id = clean(row.get("id"))
+            feature_id = clean(row.get("feature_id"))
+            value = clean(row.get("value"))
+            if not feature_id and not value and not condition_id:
+                continue
+            if not feature_id or not value:
+                raise ValueError("Every qualifying condition needs a feature and a choice.")
+            if condition_id:
+                if condition_id in seen_ids:
+                    raise ValueError("The qualifying-conditions list contains the same row twice.")
+                if condition_id not in existing:
+                    raise ValueError("A qualifying condition no longer exists in this section.")
+                seen_ids.add(condition_id)
+            pair = (feature_id, value)
+            if pair in pairs:
+                raise ValueError("Each feature and choice pair can appear only once per section.")
+            pairs.add(pair)
+
+            original = existing.get(condition_id)
+            unchanged = bool(
+                original
+                and str(original["feature_id"]) == feature_id
+                and str(original["value"]) == value
+            )
+            feature = features.get(feature_id)
+            if not unchanged:
+                if feature is None:
+                    raise ValueError("Choose a feature defined in this project.")
+                if not bool(feature["active"]):
+                    raise ValueError(f"{feature['name']} is inactive. Choose an active feature.")
+                try:
+                    allowed_values = json.loads(feature["allowed_values"] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    allowed_values = []
+                if value not in allowed_values:
+                    raise ValueError(
+                        f"{value} is no longer an allowed choice for {feature['name']}."
+                    )
+            prepared.append({
+                "id": condition_id or str(uuid4()),
+                "feature_id": feature_id,
+                "value": value,
+                "created_at": original["created_at"] if original else timestamp,
+            })
+
+        try:
+            for record in prepared:
+                conn.execute(
+                    """INSERT INTO assembly_section_feature_conditions
+                       (id, project_id, section_id, feature_id, value, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET feature_id=excluded.feature_id,
+                           value=excluded.value, updated_at=excluded.updated_at""",
+                    (
+                        record["id"], project_id, section_id, record["feature_id"],
+                        record["value"], record["created_at"], timestamp,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(
+                "Each feature and choice pair can appear only once per section."
+            ) from exc
+    return len(prepared)
+
+
+def delete_assembly_section_feature_conditions(
+    project_id: str, section_id: str, condition_ids: list[str]
+) -> int:
+    """Delete selected section conditions atomically."""
+    normalized_ids = list(dict.fromkeys(
+        str(condition_id).strip() for condition_id in condition_ids
+        if str(condition_id).strip()
+    ))
+    if not normalized_ids:
+        raise ValueError("Select at least one qualifying condition to delete.")
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    with connection() as conn:
+        existing_count = conn.execute(
+            f"""SELECT COUNT(*) FROM assembly_section_feature_conditions
+                WHERE project_id=? AND section_id=? AND id IN ({placeholders})""",
+            (project_id, section_id, *normalized_ids),
+        ).fetchone()[0]
+        if int(existing_count) != len(normalized_ids):
+            raise ValueError("One or more selected qualifying conditions no longer exist.")
+        conn.execute(
+            f"""DELETE FROM assembly_section_feature_conditions
+                WHERE project_id=? AND section_id=? AND id IN ({placeholders})""",
+            (project_id, section_id, *normalized_ids),
+        )
+    return len(normalized_ids)
+
+
+def assembly_section_delete_impact(
+    project_id: str, section_ids: list[str]
+) -> dict:
+    """Describe the complete, approved effect of deleting Fishbone sections."""
+    normalized_ids = list(dict.fromkeys(
+        str(section_id).strip() for section_id in section_ids if str(section_id).strip()
+    ))
+    if not normalized_ids:
+        raise ValueError("Select at least one Fishbone section to delete.")
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    with connection() as conn:
+        selected_count = conn.execute(
+            f"""SELECT COUNT(*) FROM assembly_sections
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *normalized_ids),
+        ).fetchone()[0]
+        if int(selected_count) != len(normalized_ids):
+            raise ValueError("One or more selected Fishbone sections no longer exist.")
+        section_rows = conn.execute(
+            f"""WITH RECURSIVE affected(id, name, parent_id, depth) AS (
+                    SELECT id, name, parent_id, 0 FROM assembly_sections
+                    WHERE project_id=? AND id IN ({placeholders})
+                    UNION
+                    SELECT child.id, child.name, child.parent_id, affected.depth + 1
+                    FROM assembly_sections child
+                    JOIN affected ON child.parent_id=affected.id
+                    WHERE child.project_id=?
+                )
+                SELECT id, name, MAX(depth) AS depth FROM affected
+                GROUP BY id, name ORDER BY depth, name""",
+            (project_id, *normalized_ids, project_id),
+        ).fetchall()
+        affected_ids = [str(row["id"]) for row in section_rows]
+        affected_placeholders = ", ".join("?" for _ in affected_ids)
+
+        def count_rows(table: str) -> int:
+            return int(conn.execute(
+                f"""SELECT COUNT(*) FROM {table}
+                    WHERE project_id=? AND section_id IN ({affected_placeholders})""",
+                (project_id, *affected_ids),
+            ).fetchone()[0])
+
+        return {
+            "selected_section_count": len(normalized_ids),
+            "affected_section_count": len(affected_ids),
+            "descendant_section_count": len(affected_ids) - len(normalized_ids),
+            "section_ids": affected_ids,
+            "section_names": [str(row["name"]) for row in section_rows],
+            "fishbone_use_count": count_rows("fishbone_part_assignments"),
+            "yamazumi_area_count": count_rows("yamazumi_areas"),
+            "process_link_count": count_rows("process_part_groups"),
+            "condition_count": count_rows("assembly_section_feature_conditions"),
+        }
+
+
+def delete_assembly_sections(project_id: str, section_ids: list[str]) -> dict:
+    """Delete selected sections and descendants using the disclosed relationship behavior."""
+    impact = assembly_section_delete_impact(project_id, section_ids)
+    affected_ids = impact["section_ids"]
+    placeholders = ", ".join("?" for _ in affected_ids)
+    with connection() as conn:
+        conn.execute(
+            f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
+            (project_id, *affected_ids),
+        )
+        # ON DELETE SET NULL preserves linked Yamazumi and Process records. The
+        # condition table cascades, while this one statement removes descendants.
+        conn.execute(
+            f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
+            (project_id, *affected_ids),
+        )
+    return impact
+
+
+def fishbone_visual_feature_matches(
+    project_id: str, selected_conditions: list[tuple[str, str]]
+) -> set[str]:
+    """Return Fishbone-use IDs matching the visual's simple feature membership lookup."""
+    selected = {
+        (str(feature_id).strip(), str(value).strip())
+        for feature_id, value in selected_conditions
+        if str(feature_id).strip() and str(value).strip()
+    }
+    assignments = query(
+        """SELECT id, part_id, section_id FROM fishbone_part_assignments
+           WHERE project_id=?""",
+        (project_id,),
+    )
+    if not selected:
+        return {str(row["id"]) for row in assignments}
+
+    condition_rows = assembly_section_feature_conditions(project_id)
+    conditions_by_section: dict[str, set[tuple[str, str]]] = {}
+    stale_sections: set[str] = set()
+    for row in condition_rows.to_dict("records"):
+        section_id = str(row["section_id"])
+        conditions_by_section.setdefault(section_id, set()).add(
+            (str(row["feature_id"]), str(row["value"]))
+        )
+        if bool(row["is_stale"]):
+            stale_sections.add(section_id)
+
+    part_rules_by_part: dict[str, set[tuple[str, str]]] = {}
+    for row in query(
+        """SELECT part_id, feature_id, value FROM part_feature_rules
+           WHERE project_id=?""",
+        (project_id,),
+    ):
+        part_rules_by_part.setdefault(str(row["part_id"]), set()).add(
+            (str(row["feature_id"]), str(row["value"]))
+        )
+
+    matches: set[str] = set()
+    for assignment in assignments:
+        section_id = str(assignment["section_id"])
+        part_id = str(assignment["part_id"])
+        section_rules = conditions_by_section.get(section_id, set())
+        part_rules = part_rules_by_part.get(part_id, set())
+        section_matches = (
+            not section_rules
+            or section_id in stale_sections
+            or bool(section_rules & selected)
+        )
+        part_matches = not part_rules or bool(part_rules & selected)
+        if section_matches and part_matches:
+            matches.add(str(assignment["id"]))
+    return matches
+
+
 def add_assembly_section(
     project_id: str,
     name: str,
@@ -4098,7 +4474,7 @@ def complexity_feature_delete_impacts(
     )
     columns = [
         "id", "category", "name", "model_value_count", "part_rule_count",
-        "affected_part_count",
+        "affected_part_count", "section_condition_count",
     ]
     if not normalized_ids:
         return pd.DataFrame(
@@ -4109,6 +4485,7 @@ def complexity_feature_delete_impacts(
                 "model_value_count": pd.Series(dtype="int64"),
                 "part_rule_count": pd.Series(dtype="int64"),
                 "affected_part_count": pd.Series(dtype="int64"),
+                "section_condition_count": pd.Series(dtype="int64"),
             }
         )
     placeholders = ", ".join("?" for _ in normalized_ids)
@@ -4123,7 +4500,10 @@ def complexity_feature_delete_impacts(
                            AS part_rule_count,
                        (SELECT COUNT(DISTINCT rule.part_id) FROM part_feature_rules rule
                         WHERE rule.project_id=f.project_id AND rule.feature_id=f.id)
-                           AS affected_part_count
+                           AS affected_part_count,
+                       (SELECT COUNT(*) FROM assembly_section_feature_conditions condition
+                        WHERE condition.project_id=f.project_id AND condition.feature_id=f.id)
+                           AS section_condition_count
                 FROM complexity_features f
                 WHERE f.project_id=? AND f.id IN ({placeholders})
                 ORDER BY f.sequence, f.category, f.name""",
@@ -4292,6 +4672,16 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
         )}
         retained_ids = {record["id"] for record in records}
         for feature_id in existing_ids - retained_ids:
+            condition_count = int(conn.execute(
+                """SELECT COUNT(*) FROM assembly_section_feature_conditions
+                   WHERE project_id=? AND feature_id=?""",
+                (project_id, feature_id),
+            ).fetchone()[0])
+            if condition_count:
+                raise ValueError(
+                    f"This feature is referenced by {condition_count} Fishbone section "
+                    "qualifying condition(s). Remove those conditions before deleting the feature."
+                )
             affected_part_ids = [row[0] for row in conn.execute(
                 "SELECT DISTINCT part_id FROM part_feature_rules WHERE project_id=? AND feature_id=?",
                 (project_id, feature_id),
@@ -4468,6 +4858,11 @@ def fishbone_plan_snapshot(project_id: str) -> dict:
             "assignments": [dict(row) for row in conn.execute(
                 "SELECT * FROM fishbone_part_assignments WHERE project_id=?", (project_id,)
             ).fetchall()],
+            "conditions": [dict(row) for row in conn.execute(
+                """SELECT * FROM assembly_section_feature_conditions
+                   WHERE project_id=?""",
+                (project_id,),
+            ).fetchall()],
         }
 
 
@@ -4483,7 +4878,16 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
     """Restore framework rows and assignments, including parent relationships."""
     sections = snapshot.get("sections", [])
     assignments = snapshot.get("assignments", [])
+    conditions = snapshot.get("conditions")
     with connection() as conn:
+        if conditions is None:
+            # Preserve conditions when undoing a pre-feature snapshot retained by
+            # a browser session across a development hot reload.
+            conditions = [dict(row) for row in conn.execute(
+                """SELECT * FROM assembly_section_feature_conditions
+                   WHERE project_id=?""",
+                (project_id,),
+            ).fetchall()]
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
         # Insert parents and children with empty parent IDs first, then reconnect them.
@@ -4495,6 +4899,7 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
                     "UPDATE assembly_sections SET parent_id=? WHERE id=? AND project_id=?",
                     (row["parent_id"], row["id"], project_id),
                 )
+        _insert_snapshot_rows(conn, "assembly_section_feature_conditions", conditions)
         _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
 
 

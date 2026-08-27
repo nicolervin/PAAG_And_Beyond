@@ -136,7 +136,26 @@ if undo_requested:
         request_table_editor_reset(model_editor_key)
         st.toast("Discarded the unsaved model table edits", icon=":material/undo:")
     else:
-        restore_model_planning_snapshot(project_id, st.session_state.pop(model_undo_key))
+        model_snapshot = st.session_state.pop(model_undo_key)
+        restore_model_planning_snapshot(project_id, model_snapshot)
+        record_audit_event(
+            project_id,
+            "Model definitions",
+            "Undo saved change",
+            len(model_snapshot.get("models", [])),
+            st.session_state.get("current_editor", ""),
+            {
+                "model_snapshot_restore": True,
+                "models_restored": len(model_snapshot.get("models", [])),
+                "part_applicability_rows_restored": len(model_snapshot.get("parts", [])),
+                "work_element_applicability_rows_restored": len(
+                    model_snapshot.get("work_elements", [])
+                ),
+                "fishbone_applicability_rows_restored": len(
+                    model_snapshot.get("fishbone_nodes", [])
+                ),
+            },
+        )
         request_table_editor_reset(model_editor_key)
         st.toast("Undid the last saved model change", icon=":material/undo:")
     st.rerun()
@@ -205,7 +224,40 @@ if save_requested:
         edited_models = drop_untouched_new_rows(
             edited_models, identifying_columns=["model_number"]
         )
+        existing_models_by_id = {
+            str(row["id"]): row
+            for _, row in models_for_editing.iterrows()
+            if pd.notna(row.get("id")) and str(row.get("id")).strip()
+        }
+        model_audit_fields = [
+            "model_number", "display_name", "eau", "description", "active", "notes",
+        ]
+        added_model_rows = 0
+        edited_model_rows = 0
+        for _, row in edited_models.iterrows():
+            model_id = "" if pd.isna(row.get("id")) else str(row.get("id")).strip()
+            if not model_id or model_id not in existing_models_by_id:
+                added_model_rows += 1
+                continue
+            previous = existing_models_by_id[model_id]
+            if any(
+                (None if pd.isna(row.get(field)) else row.get(field))
+                != (None if pd.isna(previous.get(field)) else previous.get(field))
+                for field in model_audit_fields
+            ):
+                edited_model_rows += 1
         count = update_project_model_rows(project_id, edited_models)
+        record_audit_event(
+            project_id,
+            "Model definitions",
+            "Save & Refresh",
+            added_model_rows + edited_model_rows,
+            st.session_state.get("current_editor", ""),
+            {
+                "model_rows_added": added_model_rows,
+                "model_rows_edited": edited_model_rows,
+            },
+        )
         st.session_state[model_undo_key] = current_model_snapshot
         request_table_editor_reset(model_editor_key)
         st.toast(f"Saved {count} model definitions", icon=":material/check_circle:")
@@ -281,7 +333,26 @@ if feature_actions.undo:
         request_table_editor_reset(feature_editor_key)
         st.toast("Discarded the unsaved feature edits", icon=":material/undo:")
     else:
-        restore_complexity_planning_snapshot(project_id, st.session_state.pop(feature_undo_key))
+        feature_snapshot = st.session_state.pop(feature_undo_key)
+        restore_complexity_planning_snapshot(project_id, feature_snapshot)
+        record_audit_event(
+            project_id,
+            "Feature definitions",
+            "Undo saved change",
+            len(feature_snapshot.get("features", [])),
+            st.session_state.get("current_editor", ""),
+            {
+                "feature_snapshot_restore": True,
+                "features_restored": len(feature_snapshot.get("features", [])),
+                "model_feature_assignments_restored": len(
+                    feature_snapshot.get("values", [])
+                ),
+                "part_rules_restored": len(feature_snapshot.get("part_rules", [])),
+                "part_applicability_rows_restored": len(
+                    feature_snapshot.get("part_applicability", [])
+                ),
+            },
+        )
         request_table_editor_reset(feature_editor_key)
         request_table_editor_reset(tree_editor_key)
         st.toast("Undid the last feature-definition change", icon=":material/undo:")
@@ -379,6 +450,9 @@ if request_feature_delete:
                 "model_value_count": int(impact.get("model_value_count") or 0),
                 "part_rule_count": int(impact.get("part_rule_count") or 0),
                 "affected_part_count": int(impact.get("affected_part_count") or 0),
+                "section_condition_count": int(
+                    impact.get("section_condition_count") or 0
+                ),
             }
         )
     pending_ids = {item["id"] for item in pending_features}
@@ -395,15 +469,24 @@ if request_feature_delete:
 def confirm_feature_delete() -> None:
     pending_state = st.session_state.get(feature_pending_delete_key, {})
     pending = pending_state.get("features", [])
+    referenced_condition_count = sum(
+        item.get("section_condition_count", 0) for item in pending
+    )
     st.warning(
         f"Delete {len(pending)} selected feature(s)? Their Complexity tree assignments and "
         "part applicability rules will also be deleted. Affected parts will require applicability review."
     )
+    if referenced_condition_count:
+        st.error(
+            f"Deletion cannot proceed because {referenced_condition_count} Fishbone section "
+            "qualifying condition(s) reference the selected feature(s). Remove those conditions first."
+        )
     for item in pending:
         st.write(
             f"- {item['summary']} — {item['model_value_count']} assigned Complexity tree "
             f"value(s), {item['part_rule_count']} part rule(s) across "
-            f"{item['affected_part_count']} part(s)"
+            f"{item['affected_part_count']} part(s), and "
+            f"{item['section_condition_count']} Fishbone section condition(s)"
         )
     other_edits = pending_state.get("other_edits", [])
     if other_edits:
@@ -420,6 +503,7 @@ def confirm_feature_delete() -> None:
         type="primary",
         icon=":material/delete:",
         key="destructive_confirm_feature_bulk_delete",
+        disabled=bool(referenced_condition_count),
     ):
         try:
             draft_rows = pd.DataFrame(
@@ -549,7 +633,24 @@ else:
             request_table_editor_reset(tree_editor_key)
             st.toast("Discarded the unsaved complexity-tree edits", icon=":material/undo:")
         else:
-            restore_complexity_planning_snapshot(project_id, st.session_state.pop(tree_undo_key))
+            tree_snapshot = st.session_state.pop(tree_undo_key)
+            restore_complexity_planning_snapshot(project_id, tree_snapshot)
+            record_audit_event(
+                project_id,
+                "Complexity tree",
+                "Undo saved change",
+                len(tree_snapshot.get("values", [])),
+                st.session_state.get("current_editor", ""),
+                {
+                    "complexity_tree_snapshot_restore": True,
+                    "model_feature_assignments_restored": len(
+                        tree_snapshot.get("values", [])
+                    ),
+                    "part_applicability_rows_restored": len(
+                        tree_snapshot.get("part_applicability", [])
+                    ),
+                },
+            )
             request_table_editor_reset(tree_editor_key)
             st.toast("Undid the last complexity-tree change", icon=":material/undo:")
         st.rerun()
@@ -558,7 +659,36 @@ else:
         try:
             if not selected_tree_rows.empty:
                 raise ValueError("Clear selected rows before saving complexity-tree edits.")
+            existing_tree_by_model = {
+                str(row["model_id"]): row for _, row in tree.iterrows()
+            }
+            changed_assignment_count = 0
+            for _, row in edited_tree.iterrows():
+                previous = existing_tree_by_model.get(str(row["model_id"]))
+                if previous is None:
+                    continue
+                for feature_id in active_feature_ids:
+                    edited_value = (
+                        "" if pd.isna(row.get(feature_id))
+                        else str(row.get(feature_id) or "").strip()
+                    )
+                    previous_value = (
+                        "" if pd.isna(previous.get(feature_id))
+                        else str(previous.get(feature_id) or "").strip()
+                    )
+                    if edited_value != previous_value:
+                        changed_assignment_count += 1
             count = update_complexity_tree(project_id, edited_tree)
+            record_audit_event(
+                project_id,
+                "Complexity tree",
+                "Save & Refresh",
+                changed_assignment_count,
+                st.session_state.get("current_editor", ""),
+                {
+                    "model_feature_assignments_changed": changed_assignment_count,
+                },
+            )
             st.session_state[tree_undo_key] = current_complexity_snapshot
             request_table_editor_reset(tree_editor_key)
             st.toast(f"Saved {count} model feature selections", icon=":material/check_circle:")
