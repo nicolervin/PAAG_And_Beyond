@@ -452,9 +452,6 @@ if request_feature_delete:
                 "model_value_count": int(impact.get("model_value_count") or 0),
                 "part_rule_count": int(impact.get("part_rule_count") or 0),
                 "affected_part_count": int(impact.get("affected_part_count") or 0),
-                "section_condition_count": int(
-                    impact.get("section_condition_count") or 0
-                ),
             }
         )
     pending_ids = {item["id"] for item in pending_features}
@@ -470,24 +467,15 @@ if request_feature_delete:
 def confirm_feature_delete() -> None:
     pending_state = st.session_state.get(feature_pending_delete_key, {})
     pending = pending_state.get("features", [])
-    referenced_condition_count = sum(
-        item.get("section_condition_count", 0) for item in pending
-    )
     st.warning(
         f"Delete {len(pending)} selected feature(s)? Their Complexity tree assignments and "
         "part applicability rules will also be deleted. Affected parts will require applicability review."
     )
-    if referenced_condition_count:
-        st.error(
-            f"Deletion cannot proceed because {referenced_condition_count} Fishbone section "
-            "qualifying condition(s) reference the selected feature(s). Remove those conditions first."
-        )
     for item in pending:
         st.write(
             f"- {item['summary']} — {item['model_value_count']} assigned Complexity tree "
             f"value(s), {item['part_rule_count']} part rule(s) across "
-            f"{item['affected_part_count']} part(s), and "
-            f"{item['section_condition_count']} Fishbone section condition(s)"
+            f"{item['affected_part_count']} part(s)"
         )
     other_edits = pending_state.get("other_edits", [])
     if other_edits:
@@ -504,7 +492,6 @@ def confirm_feature_delete() -> None:
         type="primary",
         icon=":material/delete:",
         key="destructive_confirm_feature_bulk_delete",
-        disabled=bool(referenced_condition_count),
     ):
         try:
             draft_rows = pd.DataFrame(

@@ -150,8 +150,9 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ## Proposed modules — pending owner review
 
-### Section-level qualifying-condition feature rules (OR across features)
+### Section-level qualifying-condition feature rules (OR across features) — Withdrawn
 
+- **Status:** **Withdrawn — reverted before merge by project owner decision, August 27, 2026.** This section is retained only as a decision record. The table, store behavior, Fishbone UI, filter integration, and feature-specific tests described below are not part of the active application or schema and must not be restored without a new approved proposal.
 - **Proposed by:** Nicole Ervin, project owner
 - **Date proposed:** August 25, 2026
 - **Purpose:** Add a separate, additive set of qualifying conditions to a Fishbone section. Each condition is exactly one manufacturing feature plus one allowed choice. Multiple conditions attached to the same section combine with OR. Existing `part_feature_rules` remain unchanged and continue using their current same-feature-alternatives/different-features-AND behavior.
@@ -176,7 +177,7 @@ This file is the authoritative reference for every Process at a Glance database 
 - **UI:** On Parts to fishbone, selecting a Fishbone section reveals an inline condition editor beneath that section. Its approved horizontal builder presents a Feature dropdown, a dependent Choice dropdown containing only that feature's current allowed values, and **Add condition**. Additions remain unsaved until the resulting condition list's standard **Save & Refresh** action. The editor shows a live plain-language summary from the unsaved draft, such as **This section applies to models where: Brand = Acme OR Product Line = Commercial**. No standalone rules-management screen or per-row dialog is added. Any collaborator may edit these conditions; this is not IE-exclusive ownership.
 - **Applicable standards:** Follow every locked table standard in `DESIGN_SYSTEM.md`: direct entry where supported, native row selection, external sorting when row creation disables native sorting, orange unsaved warning, Undo, and the blue **Save & Refresh** footer; validation before atomic store-layer writes; editor reset and rerun; Current editor attribution; `record_audit_event()` for saves and deletions; and the page's bottom History expander. Native deletion must use a confirmed workflow. The section-deletion confirmation must disclose the exact number of qualifying-condition rows that will be cascade-deleted with the section.
 - **Phase boundary:** This phase does not modify or build against the dormant Phase 2 Assemblies catalog (`manufacturing_assemblies` or `assembly_scenario_policies`) and does not extend effective applicability into Phase 3 Process at a Glance integration, exports, or other screens.
-- **Approval status:** Nicole Ervin approved Phase 1 implementation on August 26, 2026, including the horizontal Feature / Choice / Add condition layout, preservation of the existing feature-choice Fishbone filter, non-blocking disclosed section deletion, and all previously documented schema, scope, stale-condition, audit, history, and phase-boundary decisions.
+- **Decision history:** Nicole Ervin approved Phase 1 implementation on August 26, 2026, then withdrew it before merge on August 27, 2026. The independent preservation of the original **View fishbone for features** behavior and the separate Fishbone section-deletion Yamazumi/Process re-pointing correction are not part of this withdrawal.
 
 ### Pin Map
 
