@@ -620,11 +620,21 @@ if not catalog.empty:
                 column_config={"id": None, "feature_id": None, "warning": "Review"},
             )
             selected_rules = native_selected_rows(rule_rows, editor_key=rule_editor_key)
-            if not selected_rules.empty:
-                st.warning(f"Remove {len(selected_rules)} selected rule(s) from the unsaved draft?")
-                if st.button(
-                    "Remove selected rules", icon=":material/delete:",
-                    key=f"remove_assembly_rules_{assembly_id}",
+
+            @st.dialog("Remove selected assembly rules?")
+            def confirm_rule_removal() -> None:
+                st.warning(
+                    f"Remove {len(selected_rules)} selected rule(s) from assembly "
+                    f"{assembly['assembly_number']}? This changes the unsaved draft; use "
+                    "Save & Refresh to persist the removal."
+                )
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_rule_removal_{assembly_id}"):
+                    request_table_editor_reset(rule_editor_key)
+                    st.rerun()
+                if actions.button(
+                    "Remove rules", type="primary", icon=":material/delete:",
+                    key=f"confirm_rule_removal_{assembly_id}",
                 ):
                     selected_ids = set(selected_rules["id"].astype(str))
                     st.session_state[rules_draft_key] = [
@@ -632,6 +642,9 @@ if not catalog.empty:
                     ]
                     request_table_editor_reset(rule_editor_key)
                     st.rerun()
+
+            if not selected_rules.empty:
+                confirm_rule_removal()
         current_signature = tuple(
             (rule["id"], rule["feature_id"], rule["value"]) for rule in draft_rules
         )
