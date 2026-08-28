@@ -42,7 +42,6 @@ from utils.table_ui import (
     format_clean_number,
     native_selected_rows,
     selectable_dataframe,
-    selected_rows_action_bar,
     standard_details_column_config,
     table_has_unsaved_changes,
 )
@@ -610,6 +609,7 @@ if not catalog.empty:
                 + "**"
             )
             rule_editor_key = f"assembly_rule_list_{assembly_id}"
+            apply_pending_table_editor_reset(rule_editor_key)
             rule_editor = st.data_editor(
                 rule_rows,
                 key=rule_editor_key,
@@ -754,22 +754,23 @@ if not catalog.empty:
                 st.error(str(exc))
         if supplemental:
             image_table = pd.DataFrame(supplemental)[["id", "caption", "created_at"]]
-            image_event = selectable_dataframe(
+            image_editor_key = f"assembly_image_selection_{assembly_id}"
+            apply_pending_table_editor_reset(image_editor_key)
+            st.data_editor(
                 image_table,
-                key=f"assembly_image_selection_{assembly_id}",
+                key=image_editor_key,
                 hide_index=True,
+                num_rows="delete",
+                disabled=list(image_table.columns),
                 column_config={"id": None, "caption": "Caption", "created_at": "Added"},
             )
-            selected_images = image_table.iloc[image_event.selection.rows]
+            selected_images = native_selected_rows(
+                image_table, editor_key=image_editor_key
+            )
             if not selected_images.empty:
-                image_actions = selected_rows_action_bar()
-                if image_actions.button(
-                    "Delete selected images", icon=":material/delete:",
-                    key=f"destructive_delete_assembly_images_{assembly_id}",
-                ):
-                    st.session_state[f"assembly_images_pending_delete_{assembly_id}"] = (
-                        selected_images["id"].astype(str).tolist()
-                    )
+                st.session_state[f"assembly_images_pending_delete_{assembly_id}"] = (
+                    selected_images["id"].astype(str).tolist()
+                )
 
             @st.dialog("Delete selected assembly images?")
             def confirm_image_delete() -> None:
@@ -782,6 +783,7 @@ if not catalog.empty:
                 actions = st.container(horizontal=True)
                 if actions.button("Cancel", key=f"cancel_assembly_image_delete_{assembly_id}"):
                     st.session_state.pop(pending_key, None)
+                    request_table_editor_reset(image_editor_key)
                     st.rerun()
                 if actions.button(
                     "Delete images", type="primary", icon=":material/delete:",
@@ -795,6 +797,7 @@ if not catalog.empty:
                         st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
                     )
                     st.session_state.pop(pending_key, None)
+                    request_table_editor_reset(image_editor_key)
                     st.rerun()
 
             if st.session_state.get(f"assembly_images_pending_delete_{assembly_id}"):
