@@ -194,6 +194,61 @@ class AssemblyCatalogTests(unittest.TestCase):
                 [{"id": rule_id, "feature_id": feature_id, "value": "Other"}],
             )
 
+    def test_feature_rules_reject_a_second_choice_for_the_same_feature(self) -> None:
+        assembly_id, feature_id = str(uuid4()), str(uuid4())
+        self.save_assembly(assembly_id, "ASM-301")
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO complexity_features
+                   (id, project_id, category, name, allowed_values, active, updated_at)
+                   VALUES (?, ?, 'Product', 'Brand', ?, 1, ?)""",
+                (feature_id, self.project_id, json.dumps(["Acme", "Other"]), store.now_iso()),
+            )
+        with self.assertRaisesRegex(ValueError, "at most one choice"):
+            store.save_assembly_feature_rules(
+                self.project_id,
+                assembly_id,
+                [
+                    {"id": str(uuid4()), "feature_id": feature_id, "value": "Acme"},
+                    {"id": str(uuid4()), "feature_id": feature_id, "value": "Other"},
+                ],
+            )
+        store.save_assembly_feature_rules(
+            self.project_id,
+            assembly_id,
+            [{"id": str(uuid4()), "feature_id": feature_id, "value": "Acme"}],
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            with store.connection() as conn:
+                conn.execute(
+                    """INSERT INTO manufacturing_assembly_feature_rules
+                       (id, project_id, assembly_id, feature_id, value, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 'Other', ?, ?)""",
+                    (
+                        str(uuid4()), self.project_id, assembly_id, feature_id,
+                        store.now_iso(), store.now_iso(),
+                    ),
+                )
+
+    def test_section_list_reports_built_and_installed_relationships_separately(self) -> None:
+        assembly_id = str(uuid4())
+        self.save_assembly(
+            assembly_id,
+            "ASM-302",
+            built_section_id=self.built_section_id,
+            installed_section_id=self.built_section_id,
+        )
+
+        relationships = store.assemblies_for_section(
+            self.project_id, self.built_section_id
+        )
+
+        self.assertEqual(relationships["assembly_number"].tolist(), ["ASM-302", "ASM-302"])
+        self.assertEqual(
+            set(relationships["relationship"].tolist()),
+            {"Built here", "Installed here"},
+        )
+
     def test_section_repoint_and_fishbone_delete_disclose_and_preserve_relationship_rules(self) -> None:
         assembly_id = str(uuid4())
         self.save_assembly(
