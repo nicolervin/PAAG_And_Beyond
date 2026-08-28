@@ -1279,31 +1279,45 @@ else:
             st.error(str(exc))
 
 
-def render_fishbone_history(
-    history: pd.DataFrame, *, key: str, empty_text: str
-) -> None:
-    if history.empty:
-        st.caption(empty_text)
-        return
-    selectable_dataframe(
-        history.drop(columns=["details"], errors="ignore"),
-        key=key,
-        hide_index=True,
-        column_config={
-            "action": "Action",
-            "row_count": "Rows",
-            "editor_name": "Editor",
-            "created_at": st.column_config.DatetimeColumn(
-                "When", format="MMM DD, YYYY HH:mm"
-            ),
-        },
-        width="stretch",
+with st.expander("History", icon=":material/history:"):
+    framework_history_tab, uses_history_tab = st.tabs(
+        ["Fishbone framework", "Fishbone uses"]
     )
-
-
-with st.expander("Parts to fishbone history", icon=":material/history:"):
-    render_fishbone_history(
-        audit_history(project_id, "Fishbone framework", limit=50),
-        key=f"fishbone_framework_history_{project_id}",
-        empty_text="No standardized Fishbone framework changes have been recorded yet.",
-    )
+    with framework_history_tab:
+        framework_history = audit_history(project_id, "Fishbone framework", limit=50)
+        if framework_history.empty:
+            st.caption("No Fishbone framework history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                framework_history.drop(columns=["details"], errors="ignore"),
+                key=f"fishbone_framework_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with uses_history_tab:
+        uses_history = audit_history(
+            project_id, "Fishbone part assignments", limit=50
+        )
+        if uses_history.empty:
+            st.caption("No Fishbone-use history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                uses_history.drop(columns=["details"], errors="ignore"),
+                key=f"fishbone_uses_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )

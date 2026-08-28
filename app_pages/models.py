@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import (
+    audit_history,
     complexity_feature_delete_impacts,
     complexity_features,
     complexity_planning_snapshot,
@@ -25,6 +26,7 @@ from utils.table_ui import (
     editable_table_heading,
     native_selected_rows,
     direct_entry_editor_rows,
+    selectable_dataframe,
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
 )
@@ -682,3 +684,63 @@ else:
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
+
+
+with st.expander("History", icon=":material/history:"):
+    models_history_tab, features_history_tab, tree_history_tab = st.tabs(
+        ["Model information", "Feature definitions", "Complexity tree"]
+    )
+    with models_history_tab:
+        models_history = audit_history(project_id, "Model definitions", limit=50)
+        if models_history.empty:
+            st.caption("No model-information history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                models_history.drop(columns=["details"], errors="ignore"),
+                key=f"models_history_table_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with features_history_tab:
+        features_history = audit_history(project_id, "Feature definitions", limit=50)
+        if features_history.empty:
+            st.caption("No feature-definition history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                features_history.drop(columns=["details"], errors="ignore"),
+                key=f"features_history_table_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with tree_history_tab:
+        tree_history = audit_history(project_id, "Complexity tree", limit=50)
+        if tree_history.empty:
+            st.caption("No complexity-tree history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                tree_history.drop(columns=["details"], errors="ignore"),
+                key=f"complexity_tree_history_table_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )

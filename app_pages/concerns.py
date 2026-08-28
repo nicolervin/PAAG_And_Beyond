@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from utils.store import project_table, record_audit_event, replace_concerns
+from utils.store import audit_history, project_table, record_audit_event, replace_concerns
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
@@ -15,6 +15,7 @@ from utils.table_ui import (
     editable_table_heading,
     native_selected_rows,
     direct_entry_editor_rows,
+    selectable_dataframe,
     stage_native_delete_confirmation,
 )
 
@@ -277,3 +278,23 @@ if footer_actions.save_and_refresh:
         request_table_editor_reset(editor_key)
         st.toast("Questions and concerns saved", icon=":material/check_circle:")
         st.rerun()
+
+
+with st.expander("History", icon=":material/history:"):
+    history = audit_history(project_id, "Questions and concerns", limit=50)
+    if history.empty:
+        st.caption("No Questions and concerns history has been recorded yet.")
+    else:
+        selectable_dataframe(
+            history.drop(columns=["details"], errors="ignore"),
+            key=f"concerns_history_table_{project_id}",
+            hide_index=True,
+            column_config={
+                "action": "Action",
+                "row_count": "Rows",
+                "editor_name": "Editor",
+                "created_at": st.column_config.DatetimeColumn(
+                    "When", format="MMM DD, YYYY HH:mm"
+                ),
+            },
+        )

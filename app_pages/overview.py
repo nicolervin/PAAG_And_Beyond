@@ -377,22 +377,43 @@ if scenario:
                 f"{detail.get('updated_at') or 'on an unknown date'}"
             )
 
-scenario_history = audit_history(project_id, "Planning scenarios")
 with st.expander("History", icon=":material/history:"):
-    if scenario_history.empty:
-        st.info("No planning-scenario history has been recorded yet.")
-    else:
-        selectable_dataframe(
-            scenario_history, key=f"overview_scenario_history_{project_id}",
-            hide_index=True,
-            column_order=["created_at", "action", "row_count", "editor_name", "details"],
-            column_config={
-                "created_at": st.column_config.DatetimeColumn(
-                    "When", format="MMM DD, YYYY HH:mm"
-                ),
-                "action": st.column_config.TextColumn("Action"),
-                "row_count": st.column_config.NumberColumn("Rows", format="%d"),
-                "editor_name": st.column_config.TextColumn("Current editor"),
-                "details": st.column_config.JsonColumn("Details"),
-            },
-        )
+    project_history_tab, scenario_history_tab = st.tabs(
+        ["Project", "Planning scenarios"]
+    )
+    with project_history_tab:
+        project_history = audit_history(project_id, "Projects", limit=50)
+        if project_history.empty:
+            st.caption("No project history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                project_history.drop(columns=["details"], errors="ignore"),
+                key=f"overview_project_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with scenario_history_tab:
+        scenario_history = audit_history(project_id, "Planning scenarios", limit=50)
+        if scenario_history.empty:
+            st.caption("No planning-scenario history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                scenario_history.drop(columns=["details"], errors="ignore"),
+                key=f"overview_scenario_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )

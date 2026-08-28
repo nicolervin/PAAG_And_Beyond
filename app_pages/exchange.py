@@ -12,6 +12,7 @@ from utils.excel_io import (
     suggest_mapping,
 )
 from utils.store import (
+    audit_history,
     get_planning_scenario,
     get_project,
     import_fishbone_nodes,
@@ -208,3 +209,67 @@ with export_col.container(border=True):
     revision_label = scenario["revision_label"] if scenario else project["revision"]
     st.download_button("Download Excel workbook", workbook, file_name=f"{safe_name}_rev_{revision_label}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", icon=":material/download:")
+
+
+with st.expander("History", icon=":material/history:"):
+    pits_history_tab, mbom_history_tab, parts_history_tab = st.tabs(
+        ["PITS snapshots", "MBOM review", "Parts import"]
+    )
+    with pits_history_tab:
+        pits_history = audit_history(project_id, "PITS snapshot", limit=50)
+        if pits_history.empty:
+            st.caption("No PITS snapshot history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                pits_history.drop(columns=["details"], errors="ignore"),
+                key=f"exchange_pits_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with mbom_history_tab:
+        mbom_history = audit_history(project_id, "MBOM review", limit=50)
+        if mbom_history.empty:
+            st.caption("No MBOM review history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                mbom_history.drop(columns=["details"], errors="ignore"),
+                key=f"exchange_mbom_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with parts_history_tab:
+        parts_import_history = audit_history(project_id, "Parts", limit=50)
+        if not parts_import_history.empty:
+            parts_import_history = parts_import_history.loc[
+                parts_import_history["action"] == "Import parts"
+            ].copy()
+        if parts_import_history.empty:
+            st.caption("No parts-import history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                parts_import_history.drop(columns=["details"], errors="ignore"),
+                key=f"exchange_parts_import_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
