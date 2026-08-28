@@ -48,6 +48,7 @@ PAAG currently supports:
 - project definitions, planning assumptions, and named planning scenarios;
 - official models, team-friendly names, annual usage, manufacturing features, and controlled model-to-feature mappings;
 - a Parts Catalog with revision, provenance, applicability, primary and supplemental CAD images, and scenario-specific Active state;
+- a project-wide Assemblies catalog with real assembly numbers, built and installed Fishbone sections, explicit mini-BOMs, precise feature applicability, nesting, and images;
 - ordinary BOM imports, preferred ID-based PITS imports, conservative legacy PITS imports, source revisions, and reconciliation evidence;
 - a station-independent assembly Fishbone with main-spine sections, nested subassemblies, and placed part uses;
 - Yamazumi balancing areas, pitch addresses, model variants, work regions, flags, takt comparison, and drag-and-drop work assignment;
@@ -77,6 +78,7 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/exchange.py` — Ordinary BOM and PITS imports, preview/mapping, and Excel snapshot export.
 - `app_pages/models.py` — Model catalog, common names, usage, manufacturing features, and the model-feature complexity tree.
 - `app_pages/parts.py` — Parts Catalog, applicability, images, filters, bulk actions, export, and history.
+- `app_pages/assemblies.py` — Project-wide assembly-number catalog, mini-BOMs, feature rules, nesting, images, deletion handling, and history.
 - `app_pages/fishbone.py` — Assembly framework, nested subassemblies, part placement, occurrence ordering, and the interactive Fishbone.
 - `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, flags, model variants, visual board, and work tables.
 - `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, ordered process requirements, bulk actions, export, and workload chart.
@@ -110,6 +112,7 @@ Navigation is defined in `streamlit_app.py`.
 - **Import PITS and export** accepts ordinary BOM data, the preferred `part_tracker` plus `models` PITS format, and legacy Level 1–11 PITS data. Preferred imports use `ID Number` as the stable source key; changed source content creates a revision and reconciliation item instead of overwriting reviewed planning decisions. The page also creates the one-way Excel snapshot.
 - **Model definitions** maintains official model numbers, common names, descriptions, annual usage, manufacturing features, allowed feature choices, and model-to-feature mappings.
 - **Parts Catalog** maintains one approved record per official part number. Catalog data is project-wide while Active state is scenario-specific. The page supports primary and supplemental images, including direct Windows screenshot paste.
+- **Assemblies** maintains real, pre-existing assembly numbers separately from Fishbone sections. Each record identifies where it is built and installed and owns an explicit mini-BOM, precise feature rules, nesting, and primary or supplemental images.
 - **Parts to fishbone** defines the station-independent assembly sequence through ordered main-spine sections, nested subassemblies, and one or more placed uses of approved catalog parts.
 
 ### Process planning
@@ -131,6 +134,7 @@ Navigation is defined in `streamlit_app.py`.
 - **PITS** — The upstream product-information workbook. The preferred format has stable `ID Number` values in `part_tracker` and definitions in `models`; older Level 1–11 formats are interpreted conservatively.
 - **PITS record/revision** — The latest imported source row for a stable PITS ID and its preserved earlier source versions.
 - **Parts Catalog** — The approved project-wide list of part numbers, names, revisions, images, provenance, and applicability.
+- **Assemblies catalog** — The approved project-wide list of real assembly numbers and their explicit mini-BOMs, built and installed sections, nesting, applicability, and images.
 - **Fishbone** — The station-independent assembly-order view whose main spine represents product flow and whose branches represent subassemblies and placed parts.
 - **Fishbone section** — A named assembly stage, either on the main spine or attached as a subassembly.
 - **Fishbone use** — One placement or installation occurrence of a catalog part. The same part may have multiple uses.

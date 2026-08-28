@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Iterable, NoReturn
@@ -11,6 +12,30 @@ from utils.table_filters import logical_table_editor_key, request_table_editor_r
 
 
 DEFAULT_SELECTION_COLUMN = "selected"
+DECIMAL_COMPARISON_PLACES = 9
+
+
+def _rounded_decimal(value, *, decimal_places: int = DECIMAL_COMPARISON_PLACES) -> float | None:
+    """Normalize a scalar number for clean display and tolerant comparisons."""
+    if value is None or pd.isna(value):
+        return None
+    number = float(value)
+    return round(number, decimal_places) if math.isfinite(number) else number
+
+
+def format_clean_number(value, *, decimal_places: int = DECIMAL_COMPARISON_PLACES) -> str:
+    """Display whole and decimal quantities without trailing zeroes."""
+    number = _rounded_decimal(value, decimal_places=decimal_places)
+    return "" if number is None else f"{number:g}"
+
+
+def decimal_values_equal(
+    left, right, *, decimal_places: int = DECIMAL_COMPARISON_PLACES
+) -> bool:
+    """Compare editor-backed numbers after suppressing insignificant float noise."""
+    return _rounded_decimal(left, decimal_places=decimal_places) == _rounded_decimal(
+        right, decimal_places=decimal_places
+    )
 
 
 def selectable_dataframe(data, *, key: str, **kwargs):
@@ -130,12 +155,12 @@ def drop_untouched_new_rows(
     if not identifying_columns:
         return dataframe.copy()
     if id_column in dataframe.columns:
-        new_record = dataframe[id_column].apply(is_blank)
+        new_record = dataframe[id_column].apply(is_blank).astype(bool)
     else:
         new_record = pd.Series(True, index=dataframe.index)
     untouched = new_record.copy()
     for column in identifying_columns:
-        untouched &= dataframe[column].apply(is_blank)
+        untouched = untouched & dataframe[column].apply(is_blank).astype(bool)
     return dataframe.loc[~untouched].copy()
 
 

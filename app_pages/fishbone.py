@@ -1,24 +1,21 @@
-import json
-
 import pandas as pd
 import streamlit as st
 
 from utils.store import (
     active_part_ids,
     add_assembly_section,
+    assemblies_for_section,
     assembly_section_delete_impact,
-    assembly_section_feature_conditions,
+    assembly_section_delete_target_validation,
     assembly_sections,
     assign_parts_to_section,
     audit_history,
-    complexity_features,
-    delete_assembly_section_feature_conditions,
     delete_assembly_sections,
     delete_fishbone_part_assignments,
     fishbone_assignment_snapshot,
+    fishbone_assignment_assembly_impact,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
-    fishbone_visual_feature_matches,
     part_feature_rules,
     project_models,
     project_table,
@@ -27,10 +24,9 @@ from utils.store import (
     replace_fishbone_part_assignments,
     restore_fishbone_assignment_snapshot,
     restore_fishbone_plan_snapshot,
-    save_assembly_section_feature_conditions,
     update_assembly_section_rows,
 )
-from utils.scope_ui import page_title_with_scope, section_heading_with_scope
+from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -42,6 +38,7 @@ from utils.table_filters import (
 )
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
+    decimal_values_equal,
     editable_table_footer,
     native_selected_rows,
     stage_native_delete_confirmation,
@@ -85,29 +82,14 @@ else:
     assignments = all_assignments.loc[assignment_is_active].copy()
     inactive_assignments = all_assignments.loc[~assignment_is_active].copy()
 models = project_models(project_id)
-features = complexity_features(project_id)
 feature_rules = part_feature_rules(project_id)
-section_conditions = assembly_section_feature_conditions(project_id)
 feature_labels_by_part: dict[str, list[str]] = {}
-feature_token_by_label: dict[str, tuple[str, str]] = {}
 if not feature_rules.empty:
     for part_id, part_rules in feature_rules.groupby("part_id", sort=False):
         feature_labels_by_part[str(part_id)] = [
             f"{row['category']} · {row['feature_name']} = {row['value']}"
             for _, row in part_rules.iterrows()
         ]
-        for _, row in part_rules.iterrows():
-            label = f"{row['category']} · {row['feature_name']} = {row['value']}"
-            feature_token_by_label[label] = (
-                str(row["feature_id"]), str(row["value"])
-            )
-if not section_conditions.empty:
-    current_conditions = section_conditions.loc[~section_conditions["is_stale"]]
-    for _, row in current_conditions.iterrows():
-        label = f"{row['category']} · {row['feature_name']} = {row['value']}"
-        feature_token_by_label[label] = (
-            str(row["feature_id"]), str(row["value"])
-        )
 framework_undo_key = f"fishbone_framework_undo_{project_id}"
 assignment_undo_key = f"fishbone_assignment_undo_{project_id}"
 pending_use_key = f"fishbone_pending_additional_uses_{project_id}"
@@ -288,7 +270,7 @@ with st.expander(
             ":material/arrow_downward: Move later",
             ":material/last_page: Move to end",
         ]] * len(framework)
-        framework["condition_actions"] = ":material/rule: Edit"
+        framework["assemblies_action"] = ":material/list: Assemblies"
         full_framework = framework.copy()
         framework = filter_table(
             full_framework,
@@ -298,19 +280,6 @@ with st.expander(
             labels={"section_type": "Framework type", "parent_assembly": "Parent assembly", "active": "Use status"},
             reset_widget_keys=[framework_editor_key],
         )
-
-        condition_section_key = f"fishbone_condition_section_{project_id}"
-        valid_section_ids = set(sections["id"].astype(str))
-        if st.session_state.get(condition_section_key) not in valid_section_ids:
-            st.session_state[condition_section_key] = str(framework.iloc[0]["id"])
-
-        def open_section_conditions() -> None:
-            click = st.session_state.get("framework_condition_action")
-            if not click or not 0 <= click["row"] < len(framework):
-                return
-            st.session_state[condition_section_key] = str(
-                framework.iloc[click["row"]]["id"]
-            )
 
         def handle_framework_order() -> None:
             click = st.session_state.get("framework_order_action")
@@ -359,14 +328,21 @@ with st.expander(
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     st.toast(f"{framework.iloc[click['row']]['name']}: {action.lower()}", icon=":material/swap_vert:")
 
+        def show_framework_assemblies() -> None:
+            click = st.session_state.get("framework_assemblies_action") or {}
+            if 0 <= int(click.get("row", -1)) < len(framework):
+                st.session_state[f"fishbone_assembly_section_{project_id}"] = str(
+                    framework.iloc[int(click["row"])]["id"]
+                )
+
         framework_editor = st.data_editor(
             framework,
             key=framework_editor_key,
             hide_index=True,
             num_rows="delete",
             height=300,
-            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at"],
-            column_order=["condition_actions", "hierarchy", "active", "sequence", "order_actions", "name", "section_type", "parent_assembly", "description"],
+            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at", "assemblies_action"],
+            column_order=["hierarchy", "active", "sequence", "order_actions", "assemblies_action", "name", "section_type", "parent_assembly", "description"],
             column_config={
                 "id": None,
                 "project_id": None,
@@ -386,13 +362,13 @@ with st.expander(
                     on_click=handle_framework_order,
                     key="framework_order_action",
                 ),
-                "condition_actions": st.column_config.ButtonColumn(
-                    "Conditions",
+                "assemblies_action": st.column_config.ButtonColumn(
+                    "Assemblies",
                     pinned=True,
                     type="tertiary",
-                    on_click=open_section_conditions,
-                    key="framework_condition_action",
-                    help="Edit the qualifying conditions for this Fishbone section.",
+                    on_click=show_framework_assemblies,
+                    key="framework_assemblies_action",
+                    help="Show assembly numbers built or installed in this section.",
                 ),
                 "name": st.column_config.TextColumn("Section / subassembly", required=True, pinned=True, width="large"),
                 "section_type": st.column_config.SelectboxColumn("Type", options=["Main spine", "Subassembly"], required=True),
@@ -452,12 +428,61 @@ with st.expander(
                 f"{impact['descendant_section_count']} child section(s)?"
             )
             st.markdown(
-                f"- **{impact['fishbone_use_count']}** Fishbone use(s) will be deleted.\n"
-                f"- **{impact['condition_count']}** qualifying-condition row(s) will be deleted.\n"
-                f"- **{impact['yamazumi_area_count']}** Yamazumi area link(s) will be preserved but unassigned.\n"
-                f"- **{impact['process_link_count']}** Process link(s) will be preserved but unassigned."
+                f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections; "
+                "mini-BOM uses tied to a re-pointed Built section move to the target, and all "
+                "other uses return to Not placed.\n"
+                f"- **{impact['yamazumi_area_count']}** Yamazumi area(s) will be re-pointed.\n"
+                f"- **{impact['process_link_count']}** Process at a Glance part requirement(s) will be re-pointed.\n"
+                f"- **{impact['assembly_reference_count']}** assembly Built/Installed reference(s) will be re-pointed.\n"
+                f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections."
             )
             st.caption("Sections: " + ", ".join(impact["section_names"]))
+            replacement_sections = sections.loc[
+                ~sections["id"].astype(str).isin(impact["section_ids"])
+            ].copy()
+            replacement_ids = replacement_sections["id"].astype(str).tolist()
+            replacement_labels = {
+                str(row["id"]): str(row["name"])
+                for _, row in replacement_sections.iterrows()
+            }
+            target_section_id = None
+            target_is_valid = not impact["requires_repointing"]
+            if impact["requires_repointing"] and not replacement_ids:
+                st.error(
+                    "Create another Fishbone section before deleting these sections. Yamazumi, "
+                    "Process at a Glance, and assembly references require a continuity target."
+                )
+            if impact["requires_repointing"] and replacement_ids:
+                st.info(
+                    "Choose one existing Fishbone section to continue all affected Yamazumi, "
+                    "Process at a Glance, and assembly references under before deleting."
+                )
+                target_section_id = st.selectbox(
+                    "Continue work under Fishbone section",
+                    replacement_ids,
+                    index=None,
+                    placeholder="Choose a target Fishbone section",
+                    format_func=lambda value: replacement_labels.get(value, value),
+                    key=f"fishbone_delete_target_{project_id}",
+                    help=(
+                        "This one target receives every affected Yamazumi, Process at a Glance, "
+                        "and assembly Built or Installed section reference."
+                    ),
+                )
+                if target_section_id:
+                    try:
+                        target_validation = assembly_section_delete_target_validation(
+                            project_id,
+                            pending_ids,
+                            str(target_section_id),
+                            scenario_id,
+                        )
+                        target_is_valid = bool(target_validation["valid"])
+                        if not target_is_valid:
+                            st.error(str(target_validation["message"]))
+                    except ValueError as exc:
+                        target_is_valid = False
+                        st.error(str(exc))
             actions = st.container(horizontal=True)
             if actions.button(
                 "Cancel", key=f"cancel_fishbone_framework_delete_{project_id}"
@@ -469,10 +494,16 @@ with st.expander(
                 "Delete sections",
                 type="primary",
                 icon=":material/delete:",
+                disabled=bool(impact["requires_repointing"] and not target_is_valid),
                 key=f"destructive_confirm_fishbone_framework_delete_{project_id}",
             ):
                 try:
-                    deleted = delete_assembly_sections(project_id, pending_ids)
+                    deleted = delete_assembly_sections(
+                        project_id,
+                        pending_ids,
+                        str(target_section_id) if target_section_id else None,
+                        scenario_id,
+                    )
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     record_audit_event(
                         project_id,
@@ -482,10 +513,6 @@ with st.expander(
                         st.session_state.get("current_editor", ""),
                         deleted,
                     )
-                    if st.session_state.get(condition_section_key) in set(
-                        deleted["section_ids"]
-                    ):
-                        st.session_state.pop(condition_section_key, None)
                     st.session_state.pop(framework_delete_key, None)
                     request_table_editor_reset("assembly_framework_editor")
                     st.toast(
@@ -498,6 +525,51 @@ with st.expander(
 
         if st.session_state.get(framework_delete_key):
             confirm_framework_delete()
+
+        assembly_section_key = f"fishbone_assembly_section_{project_id}"
+        if st.session_state.get(assembly_section_key) in set(sections["id"].astype(str)):
+            selected_section_id = str(st.session_state[assembly_section_key])
+            section_assemblies = assemblies_for_section(project_id, selected_section_id)
+            with st.container(border=True):
+                st.markdown(
+                    f"#### Assemblies for {section_name_by_id.get(selected_section_id, selected_section_id)}"
+                )
+                st.caption(
+                    "Project-wide assembly numbers related to this selected Fishbone section. "
+                    "Open Details for full editing on the Assemblies page."
+                )
+                if section_assemblies.empty:
+                    st.caption("No assemblies are built or installed in this section.")
+                else:
+                    section_assemblies = section_assemblies.copy()
+                    section_assemblies["details"] = ":material/open_in_new: Details"
+
+                    def open_section_assembly() -> None:
+                        click = st.session_state.get("fishbone_assembly_details_action") or {}
+                        if 0 <= int(click.get("row", -1)) < len(section_assemblies):
+                            assembly_id = str(section_assemblies.iloc[int(click["row"])]["id"])
+                            st.session_state[f"assemblies_selected_id_{project_id}"] = assembly_id
+                            st.session_state[f"fishbone_open_assembly_{project_id}"] = True
+
+                    st.dataframe(
+                        section_assemblies,
+                        hide_index=True,
+                        column_order=["details", "assembly_number", "name", "relationship"],
+                        column_config={
+                            "id": None,
+                            "details": st.column_config.ButtonColumn(
+                                "Details",
+                                type="tertiary",
+                                on_click=open_section_assembly,
+                                key="fishbone_assembly_details_action",
+                            ),
+                            "assembly_number": "Assembly number",
+                            "name": "Assembly name",
+                            "relationship": "Relationship",
+                        },
+                    )
+            if st.session_state.pop(f"fishbone_open_assembly_{project_id}", False):
+                st.switch_page("app_pages/assemblies.py")
 
         st.caption("🟦 Main-spine section · 🟧 Subassembly · indentation shows the parent-child relationship.")
         id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
@@ -571,358 +643,6 @@ with st.expander(
             except ValueError as exc:
                 st.error(str(exc))
 
-        selected_condition_section_id = st.session_state.get(condition_section_key)
-        selected_condition_section = sections.loc[
-            sections["id"].astype(str) == str(selected_condition_section_id)
-        ]
-        if not selected_condition_section.empty:
-            selected_condition_section_name = str(
-                selected_condition_section.iloc[0]["name"]
-            )
-            with st.container(border=True):
-                section_heading_with_scope(
-                    "Qualifying conditions",
-                    scope="project",
-                    help_text=(
-                        "Changes in this subsection affect every planning scenario in this project."
-                    ),
-                )
-                st.caption(
-                    f"Fishbone section: {selected_condition_section_name}. "
-                    "Add single feature and choice pairs; matching any one condition qualifies the section."
-                )
-
-                selected_saved_conditions = assembly_section_feature_conditions(
-                    project_id, str(selected_condition_section_id)
-                )
-                condition_drafts_key = (
-                    f"fishbone_condition_drafts_{project_id}_{selected_condition_section_id}"
-                )
-                condition_editor_key = (
-                    f"assembly_section_conditions_editor_{project_id}_{selected_condition_section_id}"
-                )
-                apply_pending_table_editor_reset(condition_editor_key)
-                st.session_state.setdefault(condition_drafts_key, [])
-
-                feature_records = {
-                    str(row["id"]): row.to_dict()
-                    for _, row in features.iterrows()
-                }
-                active_feature_ids = [
-                    str(row["id"])
-                    for _, row in features.iterrows()
-                    if bool(row.get("active"))
-                ]
-
-                builder = st.container(horizontal=True, vertical_alignment="bottom")
-                selected_feature_id = builder.selectbox(
-                    "Feature",
-                    options=active_feature_ids,
-                    index=None,
-                    format_func=lambda feature_id: (
-                        f"{feature_records[feature_id]['category']} · "
-                        f"{feature_records[feature_id]['name']}"
-                    ),
-                    placeholder="Choose a feature",
-                    key=f"condition_feature_{project_id}_{selected_condition_section_id}",
-                    width="stretch",
-                )
-                selected_feature_choices = []
-                if selected_feature_id:
-                    try:
-                        selected_feature_choices = json.loads(
-                            feature_records[selected_feature_id].get("allowed_values") or "[]"
-                        )
-                    except (TypeError, json.JSONDecodeError):
-                        selected_feature_choices = []
-                selected_choice = builder.selectbox(
-                    "Choice",
-                    options=selected_feature_choices,
-                    index=None,
-                    placeholder=(
-                        "Choose a choice"
-                        if selected_feature_id
-                        else "Choose a feature first"
-                    ),
-                    disabled=not selected_feature_id,
-                    key=(
-                        f"condition_choice_{project_id}_{selected_condition_section_id}_"
-                        f"{selected_feature_id or 'none'}"
-                    ),
-                    width="stretch",
-                )
-                add_condition = builder.button(
-                    "Add condition",
-                    icon=":material/add:",
-                    type="primary",
-                    disabled=not selected_feature_id or selected_choice is None,
-                    key=f"add_condition_{project_id}_{selected_condition_section_id}",
-                    width="content",
-                )
-                if add_condition:
-                    existing_pairs = {
-                        (str(row["feature_id"]), str(row["value"]))
-                        for row in selected_saved_conditions.to_dict("records")
-                    }
-                    draft_pairs = {
-                        (str(row["feature_id"]), str(row["value"]))
-                        for row in st.session_state[condition_drafts_key]
-                    }
-                    pair = (str(selected_feature_id), str(selected_choice))
-                    if pair in existing_pairs | draft_pairs:
-                        st.warning("That qualifying condition is already listed for this section.")
-                    else:
-                        st.session_state[condition_drafts_key].append({
-                            "id": "",
-                            "feature_id": pair[0],
-                            "value": pair[1],
-                            "is_stale": False,
-                            "stale_reason": "",
-                        })
-                        request_table_editor_reset(condition_editor_key)
-                        st.rerun()
-
-                condition_records: list[dict] = []
-                for row in selected_saved_conditions.to_dict("records"):
-                    feature_name = str(row.get("feature_name") or "Removed feature")
-                    condition_records.append({
-                        "id": str(row["id"]),
-                        "feature_id": str(row["feature_id"]),
-                        "value": str(row["value"]),
-                        "feature": feature_name,
-                        "choice": str(row["value"]),
-                        "status": (
-                            f"⚠ {row['stale_reason']}"
-                            if bool(row["is_stale"])
-                            else "Current"
-                        ),
-                        "is_stale": bool(row["is_stale"]),
-                        "stale_reason": str(row["stale_reason"]),
-                    })
-                for row in st.session_state[condition_drafts_key]:
-                    feature = feature_records.get(str(row["feature_id"]), {})
-                    condition_records.append({
-                        "id": "",
-                        "feature_id": str(row["feature_id"]),
-                        "value": str(row["value"]),
-                        "feature": str(feature.get("name") or "Removed feature"),
-                        "choice": str(row["value"]),
-                        "status": "Unsaved",
-                        "is_stale": False,
-                        "stale_reason": "",
-                    })
-                condition_table = pd.DataFrame({
-                    "id": pd.Series(
-                        [row["id"] for row in condition_records], dtype="string"
-                    ),
-                    "feature_id": pd.Series(
-                        [row["feature_id"] for row in condition_records], dtype="string"
-                    ),
-                    "value": pd.Series(
-                        [row["value"] for row in condition_records], dtype="string"
-                    ),
-                    "feature": pd.Series(
-                        [row["feature"] for row in condition_records], dtype="string"
-                    ),
-                    "choice": pd.Series(
-                        [row["choice"] for row in condition_records], dtype="string"
-                    ),
-                    "status": pd.Series(
-                        [row["status"] for row in condition_records], dtype="string"
-                    ),
-                    "is_stale": pd.Series(
-                        [row["is_stale"] for row in condition_records], dtype="bool"
-                    ),
-                    "stale_reason": pd.Series(
-                        [row["stale_reason"] for row in condition_records], dtype="string"
-                    ),
-                })
-                edited_conditions = st.data_editor(
-                    condition_table,
-                    key=condition_editor_key,
-                    hide_index=True,
-                    num_rows="delete",
-                    disabled=list(condition_table.columns),
-                    column_order=["feature", "choice", "status"],
-                    column_config={
-                        "id": None,
-                        "feature_id": None,
-                        "value": None,
-                        "feature": st.column_config.TextColumn("Feature", width="large"),
-                        "choice": st.column_config.TextColumn("Choice", width="large"),
-                        "status": st.column_config.TextColumn("Status", width="large"),
-                        "is_stale": None,
-                        "stale_reason": None,
-                    },
-                    width="stretch",
-                )
-
-                summary_rows = edited_conditions.to_dict("records")
-                if summary_rows:
-                    summary = " OR ".join(
-                        f"{row['feature']} = {row['choice']}" for row in summary_rows
-                    )
-                    st.info(f"This section applies to models where: {summary}")
-                else:
-                    st.info(
-                        "This section has no qualifying conditions and applies to all models."
-                    )
-                stale_summary_rows = [
-                    row for row in summary_rows if bool(row.get("is_stale"))
-                ]
-                for row in stale_summary_rows:
-                    st.warning(
-                        f"⚠ {row['feature']} = {row['choice']} {row['stale_reason']}. "
-                        "While unresolved, this condition imposes no restriction."
-                    )
-
-                condition_actions = editable_table_footer(
-                    editor_key=condition_editor_key,
-                    key_prefix=(
-                        f"assembly_section_conditions_{project_id}_"
-                        f"{selected_condition_section_id}"
-                    ),
-                    native_row_selection=True,
-                    additional_unsaved_changes=bool(
-                        st.session_state[condition_drafts_key]
-                    ),
-                )
-                if condition_actions.undo:
-                    st.session_state[condition_drafts_key] = []
-                    request_table_editor_reset(condition_editor_key)
-                    st.toast(
-                        "Discarded unsaved qualifying-condition changes",
-                        icon=":material/undo:",
-                    )
-                    st.rerun()
-
-                selected_condition_rows = native_selected_rows(
-                    condition_table, editor_key=condition_editor_key
-                )
-                condition_delete_key = (
-                    f"fishbone_conditions_pending_delete_{project_id}_"
-                    f"{selected_condition_section_id}"
-                )
-                if not selected_condition_rows.empty:
-                    if st.session_state[condition_drafts_key]:
-                        st.warning(
-                            "Save or undo newly added conditions before deleting saved conditions."
-                        )
-                    else:
-                        st.session_state[condition_delete_key] = (
-                            selected_condition_rows["id"].astype(str).tolist()
-                        )
-
-                @st.dialog("Delete selected qualifying conditions?")
-                def confirm_condition_delete() -> None:
-                    pending_ids = st.session_state.get(condition_delete_key, [])
-                    pending_rows = selected_saved_conditions.loc[
-                        selected_saved_conditions["id"].astype(str).isin(pending_ids)
-                    ]
-                    descriptions = [
-                        f"{row['feature_name']} = {row['value']}"
-                        for _, row in pending_rows.iterrows()
-                    ]
-                    st.warning(
-                        f"Delete {len(pending_ids)} qualifying-condition row(s) from "
-                        f"{selected_condition_section_name}?"
-                    )
-                    if descriptions:
-                        st.markdown("- " + "\n- ".join(descriptions))
-                    st.caption(
-                        "The Fishbone section and its part uses will remain. Its feature-filter "
-                        "applicability may become broader."
-                    )
-                    actions = st.container(horizontal=True)
-                    if actions.button(
-                        "Cancel",
-                        key=(
-                            f"cancel_fishbone_condition_delete_{project_id}_"
-                            f"{selected_condition_section_id}"
-                        ),
-                    ):
-                        st.session_state.pop(condition_delete_key, None)
-                        request_table_editor_reset(condition_editor_key)
-                        st.rerun()
-                    if actions.button(
-                        "Delete conditions",
-                        type="primary",
-                        icon=":material/delete:",
-                        key=(
-                            f"destructive_confirm_fishbone_condition_delete_{project_id}_"
-                            f"{selected_condition_section_id}"
-                        ),
-                    ):
-                        try:
-                            count = delete_assembly_section_feature_conditions(
-                                project_id,
-                                str(selected_condition_section_id),
-                                pending_ids,
-                            )
-                            record_audit_event(
-                                project_id,
-                                "Fishbone section qualifying conditions",
-                                "Bulk delete",
-                                count,
-                                st.session_state.get("current_editor", ""),
-                                {
-                                    "section_id": str(selected_condition_section_id),
-                                    "section_name": selected_condition_section_name,
-                                    "conditions": descriptions,
-                                },
-                            )
-                            st.session_state.pop(condition_delete_key, None)
-                            request_table_editor_reset(condition_editor_key)
-                            st.toast(
-                                f"Deleted {count} qualifying conditions",
-                                icon=":material/delete:",
-                            )
-                            st.rerun()
-                        except ValueError as exc:
-                            st.error(str(exc))
-
-                if st.session_state.get(condition_delete_key):
-                    confirm_condition_delete()
-
-                if condition_actions.save_and_refresh:
-                    try:
-                        if not selected_condition_rows.empty:
-                            raise ValueError(
-                                "Clear selected conditions before saving changes."
-                            )
-                        rows_to_save = edited_conditions[
-                            ["id", "feature_id", "value"]
-                        ].copy()
-                        count = save_assembly_section_feature_conditions(
-                            project_id,
-                            str(selected_condition_section_id),
-                            rows_to_save,
-                        )
-                        saved_descriptions = [
-                            f"{row['feature']} = {row['choice']}"
-                            for row in summary_rows
-                        ]
-                        record_audit_event(
-                            project_id,
-                            "Fishbone section qualifying conditions",
-                            "Save & Refresh",
-                            count,
-                            st.session_state.get("current_editor", ""),
-                            {
-                                "section_id": str(selected_condition_section_id),
-                                "section_name": selected_condition_section_name,
-                                "conditions": saved_descriptions,
-                            },
-                        )
-                        st.session_state[condition_drafts_key] = []
-                        request_table_editor_reset(condition_editor_key)
-                        st.toast(
-                            f"Saved {count} qualifying conditions",
-                            icon=":material/check_circle:",
-                        )
-                        st.rerun()
-                    except ValueError as exc:
-                        st.error(str(exc))
 
 if sections.empty:
     fishbone_visual_slot.caption("The visual framework will appear after the first section is added.")
@@ -989,7 +709,10 @@ else:
             if not parts.empty and "image_path" in parts.columns
             else {}
         )
-        visual_feature_options = sorted(feature_token_by_label, key=str.casefold)
+        visual_feature_options = sorted(
+            {label for labels in feature_labels_by_part.values() for label in labels},
+            key=str.casefold,
+        )
         with fishbone_visual_slot.container():
             visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
             selected_visual_features = visual_controls.multiselect(
@@ -999,14 +722,6 @@ else:
                     key=f"fishbone_visual_features_{project_id}",
                     help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
                 )
-            selected_visual_tokens = [
-                feature_token_by_label[label]
-                for label in selected_visual_features
-                if label in feature_token_by_label
-            ]
-            matching_assignment_ids = fishbone_visual_feature_matches(
-                project_id, selected_visual_tokens
-            )
             if visual_controls.button(
                 "Edit parts & photos",
                 icon=":material/edit:",
@@ -1018,23 +733,27 @@ else:
             st.session_state.setdefault(fishbone_refresh_key, 0)
             visual_parts = []
             for _, assignment in assignments.iterrows():
-                assignment_id = str(assignment["id"])
                 part_id = str(assignment["part_id"])
                 section_id = str(assignment["section_id"])
                 if section_id not in coordinates:
                     continue
                 applicability_label = feature_applicability(part_id, assignment["model_applicability"])
-                if selected_visual_features and assignment_id not in matching_assignment_ids:
+                if (
+                    selected_visual_features
+                    and applicability_label != "All models"
+                    and not set(selected_visual_features)
+                    & set(feature_labels_by_part.get(part_id, []))
+                ):
                     continue
                 visual_parts.append({
-                    "id": assignment_id,
+                    "id": str(assignment["id"]),
                     "part_id": part_id,
                     "section_id": section_id,
                     "section_name": str(assignment["section_name"]),
                     "part_number": str(assignment["part_number"] or ""),
                     "description": str(assignment["description"] or ""),
                     "use_description": str(assignment["use_description"] or ""),
-                    "quantity": int(assignment["quantity"] or 0),
+                    "quantity": float(assignment["quantity"] or 0),
                     "models": applicability_label,
                     "image": part_thumbnail(image_path_by_part.get(part_id, "")),
                 })
@@ -1197,7 +916,7 @@ else:
             "part_number": st.column_config.TextColumn("Part number", pinned=True),
             "description": st.column_config.TextColumn("Part Name", width="large"),
             "quantity": st.column_config.NumberColumn(
-                "Qty for this use", min_value=0, step=1, format="%d",
+                "Qty for this use", step=0.01, format="%g",
                 help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
             ),
             "model_applicability": None,
@@ -1210,7 +929,7 @@ else:
     selected_parts = edited_pool.loc[edited_pool["place"].fillna(False).astype(bool)].copy()
     selected_part_ids = selected_parts["id"].astype(str).tolist()
     selected_quantities = {
-        str(row["id"]): int(row["quantity"])
+        str(row["id"]): float(row["quantity"])
         for _, row in selected_parts.iterrows()
     }
     placed_part_ids = set(assignments["part_id"].astype(str)) if not assignments.empty else set()
@@ -1400,7 +1119,7 @@ else:
                 width="large",
                 help="What this occurrence does or where it is installed.",
             ),
-            "quantity": st.column_config.NumberColumn("Qty", min_value=0, step=1, format="%d"),
+            "quantity": st.column_config.NumberColumn("Qty", step=0.01, format="%g"),
             "model_applicability": st.column_config.TextColumn("Feature applicability", width="medium"),
             "notes": st.column_config.TextColumn("IE notes", width="large"),
             "updated_at": None,
@@ -1445,10 +1164,17 @@ else:
     def confirm_assignment_delete() -> None:
         pending_key = f"fishbone_assignments_pending_delete_{project_id}"
         pending_ids = st.session_state.get(pending_key, [])
+        assembly_impact = fishbone_assignment_assembly_impact(project_id, pending_ids)
         st.warning(
             f"Delete {len(pending_ids)} selected Fishbone use(s)? Master Parts records and other "
             "uses will remain."
         )
+        if not assembly_impact.empty:
+            st.markdown(
+                f"**{len(assembly_impact)} assembly mini-BOM component row(s) will also be deleted:**"
+            )
+            for assembly_number, rows in assembly_impact.groupby("assembly_number", sort=False):
+                st.write(f"- {assembly_number}: {len(rows)} component row(s)")
         actions = st.container(horizontal=True)
         if actions.button("Cancel", key=f"cancel_fishbone_assignment_delete_{project_id}"):
             st.session_state.pop(pending_key, None)
@@ -1469,7 +1195,14 @@ else:
                     "Bulk delete",
                     count,
                     st.session_state.get("current_editor", ""),
-                    {"assignment_ids": pending_ids},
+                    {
+                        "assignment_ids": pending_ids,
+                        "assembly_component_rows_deleted": len(assembly_impact),
+                        "assembly_numbers_affected": (
+                            assembly_impact["assembly_number"].astype(str).drop_duplicates().tolist()
+                            if not assembly_impact.empty else []
+                        ),
+                    },
                 )
                 st.session_state.pop(pending_key, None)
                 request_table_editor_reset(assignment_editor_key)
@@ -1517,9 +1250,10 @@ else:
                 assignment_changed = any(
                     audit_text(row.get(field)) != audit_text(previous.get(field))
                     for field in ["section_id", "use_description", "notes"]
-                ) or any(
-                    audit_int(row.get(field)) != audit_int(previous.get(field))
-                    for field in ["sequence", "quantity"]
+                ) or audit_int(row.get("sequence")) != audit_int(
+                    previous.get("sequence")
+                ) or not decimal_values_equal(
+                    row.get("quantity"), previous.get("quantity")
                 )
                 if assignment_changed:
                     edited_assignment_ids.append(assignment_id)
@@ -1568,20 +1302,8 @@ def render_fishbone_history(
 
 
 with st.expander("Parts to fishbone history", icon=":material/history:"):
-    condition_history_tab, framework_history_tab = st.tabs(
-        ["Qualifying conditions", "Fishbone framework"]
+    render_fishbone_history(
+        audit_history(project_id, "Fishbone framework", limit=50),
+        key=f"fishbone_framework_history_{project_id}",
+        empty_text="No standardized Fishbone framework changes have been recorded yet.",
     )
-    with condition_history_tab:
-        render_fishbone_history(
-            audit_history(
-                project_id, "Fishbone section qualifying conditions", limit=50
-            ),
-            key=f"fishbone_condition_history_{project_id}",
-            empty_text="No qualifying-condition changes have been recorded yet.",
-        )
-    with framework_history_tab:
-        render_fishbone_history(
-            audit_history(project_id, "Fishbone framework", limit=50),
-            key=f"fishbone_framework_history_{project_id}",
-            empty_text="No standardized Fishbone framework deletions have been recorded yet.",
-        )
