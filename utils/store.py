@@ -1709,7 +1709,9 @@ def fishbone_assignment_assembly_impact(
 
 
 def assembly_section_reference_impact(
-    project_id: str, section_ids: list[str]
+    project_id: str,
+    section_ids: list[str],
+    connection: sqlite3.Connection | None = None,
 ) -> pd.DataFrame:
     normalized = list(
         dict.fromkeys(_catalog_text(value) for value in section_ids if _catalog_text(value))
@@ -1717,19 +1719,20 @@ def assembly_section_reference_impact(
     if not normalized:
         return pd.DataFrame()
     placeholders = ",".join("?" for _ in normalized)
-    return pd.DataFrame(query(
-        f"""SELECT assembly.id AS assembly_id, assembly.assembly_number, assembly.name,
-                   assembly.built_section_id, built.name AS built_section_name,
-                   assembly.installed_section_id, installed.name AS installed_section_name
-            FROM manufacturing_assemblies assembly
-            LEFT JOIN assembly_sections built ON built.id=assembly.built_section_id
-            LEFT JOIN assembly_sections installed ON installed.id=assembly.installed_section_id
-            WHERE assembly.project_id=? AND (
-                assembly.built_section_id IN ({placeholders})
-                OR assembly.installed_section_id IN ({placeholders})
-            ) ORDER BY assembly.assembly_number""",
-        (project_id, *normalized, *normalized),
-    ))
+    sql = f"""SELECT assembly.id AS assembly_id, assembly.assembly_number, assembly.name,
+                     assembly.built_section_id, built.name AS built_section_name,
+                     assembly.installed_section_id, installed.name AS installed_section_name
+              FROM manufacturing_assemblies assembly
+              LEFT JOIN assembly_sections built ON built.id=assembly.built_section_id
+              LEFT JOIN assembly_sections installed ON installed.id=assembly.installed_section_id
+              WHERE assembly.project_id=? AND (
+                  assembly.built_section_id IN ({placeholders})
+                  OR assembly.installed_section_id IN ({placeholders})
+              ) ORDER BY assembly.assembly_number"""
+    params = (project_id, *normalized, *normalized)
+    if connection is not None:
+        return pd.DataFrame([dict(row) for row in connection.execute(sql, params).fetchall()])
+    return pd.DataFrame(query(sql, params))
 
 
 def repoint_assembly_section_references(
@@ -4460,6 +4463,154 @@ def assembly_sections(project_id: str) -> pd.DataFrame:
 
 
 
+def _assembly_section_delete_rows(
+    conn: sqlite3.Connection, project_id: str, section_ids: list[str]
+) -> list[sqlite3.Row]:
+    normalized_ids = list(dict.fromkeys(
+        str(section_id).strip() for section_id in section_ids if str(section_id).strip()
+    ))
+    if not normalized_ids:
+        raise ValueError("Select at least one Fishbone section to delete.")
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    selected_count = conn.execute(
+        f"""SELECT COUNT(*) FROM assembly_sections
+            WHERE project_id=? AND id IN ({placeholders})""",
+        (project_id, *normalized_ids),
+    ).fetchone()[0]
+    if int(selected_count) != len(normalized_ids):
+        raise ValueError("One or more selected Fishbone sections no longer exist.")
+    return conn.execute(
+        f"""WITH RECURSIVE affected(id, name, parent_id, depth) AS (
+                SELECT id, name, parent_id, 0 FROM assembly_sections
+                WHERE project_id=? AND id IN ({placeholders})
+                UNION
+                SELECT child.id, child.name, child.parent_id, affected.depth + 1
+                FROM assembly_sections child
+                JOIN affected ON child.parent_id=affected.id
+                WHERE child.project_id=?
+            )
+            SELECT id, name, MAX(depth) AS depth FROM affected
+            GROUP BY id, name ORDER BY depth, name""",
+        (project_id, *normalized_ids, project_id),
+    ).fetchall()
+
+
+def _assembly_section_target_validation(
+    conn: sqlite3.Connection,
+    project_id: str,
+    affected_ids: list[str],
+    target_section_id: str,
+    active_scenario_id: str | None = None,
+) -> dict:
+    target_id = _catalog_text(target_section_id)
+    if not target_id:
+        raise ValueError("Choose an existing Fishbone section to continue this work under.")
+    if target_id in affected_ids:
+        raise ValueError("The target Fishbone section must be outside the deletion set.")
+    target = conn.execute(
+        "SELECT id, name FROM assembly_sections WHERE id=? AND project_id=?",
+        (target_id, project_id),
+    ).fetchone()
+    if not target:
+        raise ValueError("Choose an existing Fishbone section from this project.")
+    active_scenario = _catalog_text(active_scenario_id) or None
+    if active_scenario and not conn.execute(
+        "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+        (active_scenario, project_id),
+    ).fetchone():
+        raise ValueError("The active planning scenario no longer exists in this project.")
+
+    placeholders = ", ".join("?" for _ in affected_ids)
+    source_counts = {
+        str(row["scenario_id"]): int(row["area_count"])
+        for row in conn.execute(
+            f"""SELECT scenario_id, COUNT(*) AS area_count
+                FROM yamazumi_areas
+                WHERE project_id=? AND section_id IN ({placeholders})
+                GROUP BY scenario_id""",
+            (project_id, *affected_ids),
+        ).fetchall()
+    }
+    target_counts = {
+        str(row["scenario_id"]): int(row["area_count"])
+        for row in conn.execute(
+            """SELECT scenario_id, COUNT(*) AS area_count
+               FROM yamazumi_areas
+               WHERE project_id=? AND section_id=?
+               GROUP BY scenario_id""",
+            (project_id, target_id),
+        ).fetchall()
+    }
+    conflicts: list[dict] = []
+    for scenario_id, source_count in source_counts.items():
+        target_count = target_counts.get(scenario_id, 0)
+        if source_count + target_count <= 1:
+            continue
+        scenario = conn.execute(
+            """SELECT name, revision_label FROM planning_scenarios
+               WHERE id=? AND project_id=?""",
+            (scenario_id, project_id),
+        ).fetchone()
+        conflicts.append(
+            {
+                "scenario_id": scenario_id,
+                "scenario_name": str(scenario["name"]) if scenario else "Unknown scenario",
+                "revision_label": str(scenario["revision_label"]) if scenario else "",
+                "source_area_count": source_count,
+                "target_area_count": target_count,
+            }
+        )
+    conflicts.sort(
+        key=lambda row: (
+            str(row["scenario_id"]) != str(active_scenario or ""),
+            str(row["revision_label"]),
+            str(row["scenario_name"]),
+        )
+    )
+    message = ""
+    if conflicts:
+        first = conflicts[0]
+        if int(first["target_area_count"]) > 0:
+            message = (
+                "The selected target section already has its own Yamazumi area. "
+                "Choose a different target, or reconcile the duplicate manually in "
+                "Yamazumi before deleting."
+            )
+        else:
+            message = (
+                "More than one Yamazumi area would be re-pointed to the selected target "
+                "section. Choose a different target, or reconcile the duplicate manually "
+                "in Yamazumi before deleting."
+            )
+        if str(first["scenario_id"]) != str(active_scenario or ""):
+            message += (
+                f" Conflict found in Rev {first['revision_label']} · "
+                f"{first['scenario_name']}."
+            )
+    return {
+        "valid": not conflicts,
+        "message": message,
+        "target_section_id": target_id,
+        "target_section_name": str(target["name"]),
+        "conflicts": conflicts,
+    }
+
+
+def assembly_section_delete_target_validation(
+    project_id: str,
+    section_ids: list[str],
+    target_section_id: str,
+    active_scenario_id: str | None = None,
+) -> dict:
+    """Validate one shared continuity target without changing persisted records."""
+    with connection() as conn:
+        section_rows = _assembly_section_delete_rows(conn, project_id, section_ids)
+        affected_ids = [str(row["id"]) for row in section_rows]
+        return _assembly_section_target_validation(
+            conn, project_id, affected_ids, target_section_id, active_scenario_id
+        )
+
+
 def assembly_section_delete_impact(
     project_id: str, section_ids: list[str]
 ) -> dict:
@@ -4467,31 +4618,8 @@ def assembly_section_delete_impact(
     normalized_ids = list(dict.fromkeys(
         str(section_id).strip() for section_id in section_ids if str(section_id).strip()
     ))
-    if not normalized_ids:
-        raise ValueError("Select at least one Fishbone section to delete.")
-    placeholders = ", ".join("?" for _ in normalized_ids)
     with connection() as conn:
-        selected_count = conn.execute(
-            f"""SELECT COUNT(*) FROM assembly_sections
-                WHERE project_id=? AND id IN ({placeholders})""",
-            (project_id, *normalized_ids),
-        ).fetchone()[0]
-        if int(selected_count) != len(normalized_ids):
-            raise ValueError("One or more selected Fishbone sections no longer exist.")
-        section_rows = conn.execute(
-            f"""WITH RECURSIVE affected(id, name, parent_id, depth) AS (
-                    SELECT id, name, parent_id, 0 FROM assembly_sections
-                    WHERE project_id=? AND id IN ({placeholders})
-                    UNION
-                    SELECT child.id, child.name, child.parent_id, affected.depth + 1
-                    FROM assembly_sections child
-                    JOIN affected ON child.parent_id=affected.id
-                    WHERE child.project_id=?
-                )
-                SELECT id, name, MAX(depth) AS depth FROM affected
-                GROUP BY id, name ORDER BY depth, name""",
-            (project_id, *normalized_ids, project_id),
-        ).fetchall()
+        section_rows = _assembly_section_delete_rows(conn, project_id, normalized_ids)
         affected_ids = [str(row["id"]) for row in section_rows]
         affected_placeholders = ", ".join("?" for _ in affected_ids)
 
@@ -4502,18 +4630,10 @@ def assembly_section_delete_impact(
                 (project_id, *affected_ids),
             ).fetchone()[0])
 
-        assembly_references = [
-            dict(row) for row in conn.execute(
-                f"""SELECT assembly.id AS assembly_id, assembly.assembly_number,
-                           assembly.built_section_id, assembly.installed_section_id
-                    FROM manufacturing_assemblies assembly
-                    WHERE assembly.project_id=? AND (
-                        assembly.built_section_id IN ({affected_placeholders})
-                        OR assembly.installed_section_id IN ({affected_placeholders})
-                    ) ORDER BY assembly.assembly_number""",
-                (project_id, *affected_ids, *affected_ids),
-            ).fetchall()
-        ]
+        assembly_impact = assembly_section_reference_impact(
+            project_id, affected_ids, connection=conn
+        )
+        assembly_references = assembly_impact.to_dict("records")
         assembly_component_count = int(conn.execute(
             f"""SELECT COUNT(*) FROM manufacturing_assembly_components component
                 JOIN fishbone_part_assignments assignment
@@ -4523,6 +4643,13 @@ def assembly_section_delete_impact(
             (project_id, *affected_ids),
         ).fetchone()[0])
 
+        yamazumi_area_count = count_rows("yamazumi_areas")
+        process_link_count = count_rows("process_part_groups")
+        assembly_reference_count = sum(
+            int(str(row.get("built_section_id")) in affected_ids)
+            + int(str(row.get("installed_section_id")) in affected_ids)
+            for row in assembly_references
+        )
         return {
             "selected_section_count": len(normalized_ids),
             "affected_section_count": len(affected_ids),
@@ -4530,58 +4657,116 @@ def assembly_section_delete_impact(
             "section_ids": affected_ids,
             "section_names": [str(row["name"]) for row in section_rows],
             "fishbone_use_count": count_rows("fishbone_part_assignments"),
-            "yamazumi_area_count": count_rows("yamazumi_areas"),
-            "process_link_count": count_rows("process_part_groups"),
-            "assembly_reference_count": sum(
-                int(str(row.get("built_section_id")) in affected_ids)
-                + int(str(row.get("installed_section_id")) in affected_ids)
-                for row in assembly_references
-            ),
+            "yamazumi_area_count": yamazumi_area_count,
+            "process_link_count": process_link_count,
+            "assembly_reference_count": assembly_reference_count,
             "assembly_references": assembly_references,
             "assembly_component_count": assembly_component_count,
+            "requires_repointing": bool(
+                yamazumi_area_count or process_link_count or assembly_reference_count
+            ),
         }
 
 
 def delete_assembly_sections(
-    project_id: str, section_ids: list[str], assembly_replacements=None
+    project_id: str,
+    section_ids: list[str],
+    target_section_id: str | None = None,
+    active_scenario_id: str | None = None,
 ) -> dict:
-    """Delete selected sections and descendants using the disclosed relationship behavior."""
+    """Atomically re-point continuity references and delete Fishbone sections."""
     impact = assembly_section_delete_impact(project_id, section_ids)
-    affected_ids = impact["section_ids"]
-    placeholders = ", ".join("?" for _ in affected_ids)
-    replacements = _catalog_records(assembly_replacements or [])
-    required_relationships: set[tuple[str, str]] = set()
-    for row in impact.get("assembly_references", []):
-        if _catalog_text(row.get("built_section_id")) in affected_ids:
-            required_relationships.add((str(row["assembly_id"]), "built_section_id"))
-        if _catalog_text(row.get("installed_section_id")) in affected_ids:
-            required_relationships.add((str(row["assembly_id"]), "installed_section_id"))
-    supplied_relationships = {
-        (_catalog_text(row.get("assembly_id")), _catalog_text(row.get("field")))
-        for row in replacements
-    }
-    if supplied_relationships != required_relationships:
-        raise ValueError(
-            "Choose one replacement section for every affected assembly Built or Installed relationship."
-        )
-    if any(_catalog_text(row.get("section_id")) in affected_ids for row in replacements):
-        raise ValueError("Assembly replacements must use sections outside the deletion set.")
+    timestamp = now_iso()
+    target_id = _catalog_text(target_section_id) or None
+    target_validation = None
+    yamazumi_repointed = 0
+    process_repointed = 0
+    assembly_replacements: list[dict] = []
     with connection() as conn:
-        if replacements:
+        section_rows = _assembly_section_delete_rows(conn, project_id, section_ids)
+        affected_ids = [str(row["id"]) for row in section_rows]
+        placeholders = ", ".join("?" for _ in affected_ids)
+        yamazumi_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM yamazumi_areas
+                WHERE project_id=? AND section_id IN ({placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
+        process_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM process_part_groups
+                WHERE project_id=? AND section_id IN ({placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
+        assembly_impact = assembly_section_reference_impact(
+            project_id, affected_ids, connection=conn
+        )
+        assembly_rows = assembly_impact.to_dict("records")
+        assembly_reference_count = sum(
+            int(_catalog_text(row.get("built_section_id")) in affected_ids)
+            + int(_catalog_text(row.get("installed_section_id")) in affected_ids)
+            for row in assembly_rows
+        )
+        requires_repointing = bool(
+            yamazumi_count or process_count or assembly_reference_count
+        )
+        if requires_repointing:
+            target_validation = _assembly_section_target_validation(
+                conn, project_id, affected_ids, target_id or "", active_scenario_id
+            )
+            if not target_validation["valid"]:
+                raise ValueError(str(target_validation["message"]))
+            yamazumi_repointed = conn.execute(
+                f"""UPDATE yamazumi_areas SET section_id=?, updated_at=?
+                    WHERE project_id=? AND section_id IN ({placeholders})""",
+                (target_id, timestamp, project_id, *affected_ids),
+            ).rowcount
+            process_repointed = conn.execute(
+                f"""UPDATE process_part_groups SET section_id=?, updated_at=?
+                    WHERE project_id=? AND section_id IN ({placeholders})""",
+                (target_id, timestamp, project_id, *affected_ids),
+            ).rowcount
+            for row in assembly_rows:
+                if _catalog_text(row.get("built_section_id")) in affected_ids:
+                    assembly_replacements.append(
+                        {
+                            "assembly_id": str(row["assembly_id"]),
+                            "field": "built_section_id",
+                            "section_id": target_id,
+                        }
+                    )
+                if _catalog_text(row.get("installed_section_id")) in affected_ids:
+                    assembly_replacements.append(
+                        {
+                            "assembly_id": str(row["assembly_id"]),
+                            "field": "installed_section_id",
+                            "section_id": target_id,
+                        }
+                    )
+        elif target_id:
+            _assembly_section_target_validation(
+                conn, project_id, affected_ids, target_id, active_scenario_id
+            )
+        if assembly_replacements:
             repoint_assembly_section_references(
-                project_id, replacements, connection=conn
+                project_id, assembly_replacements, connection=conn
             )
         conn.execute(
             f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
             (project_id, *affected_ids),
         )
-        # ON DELETE SET NULL preserves linked Yamazumi and Process records while
-        # this one statement removes descendants.
         conn.execute(
             f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
             (project_id, *affected_ids),
         )
-    return {**impact, "assembly_replacement_count": len(replacements)}
+    return {
+        **impact,
+        "target_section_id": target_id,
+        "target_section_name": (
+            str(target_validation["target_section_name"]) if target_validation else ""
+        ),
+        "yamazumi_repointed_count": int(yamazumi_repointed),
+        "process_repointed_count": int(process_repointed),
+        "assembly_replacement_count": len(assembly_replacements),
+    }
 
 
 
@@ -5547,7 +5732,7 @@ def restore_model_planning_snapshot(project_id: str, snapshot: dict) -> None:
 
 
 def fishbone_plan_snapshot(project_id: str) -> dict:
-    """Capture the framework and its part uses as one referentially consistent unit."""
+    """Capture the framework and every section-linked record needed for saved-state Undo."""
     with connection() as conn:
         return {
             "sections": [dict(row) for row in conn.execute(
@@ -5555,6 +5740,23 @@ def fishbone_plan_snapshot(project_id: str) -> dict:
             ).fetchall()],
             "assignments": [dict(row) for row in conn.execute(
                 "SELECT * FROM fishbone_part_assignments WHERE project_id=?", (project_id,)
+            ).fetchall()],
+            "assembly_components": [dict(row) for row in conn.execute(
+                "SELECT * FROM manufacturing_assembly_components WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
+            "yamazumi_section_references": [dict(row) for row in conn.execute(
+                "SELECT id, section_id FROM yamazumi_areas WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
+            "process_section_references": [dict(row) for row in conn.execute(
+                "SELECT id, section_id FROM process_part_groups WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
+            "assembly_section_references": [dict(row) for row in conn.execute(
+                """SELECT id, built_section_id, installed_section_id, updated_at
+                   FROM manufacturing_assemblies WHERE project_id=?""",
+                (project_id,),
             ).fetchall()],
         }
 
@@ -5568,10 +5770,25 @@ def fishbone_assignment_snapshot(project_id: str) -> list[dict]:
 
 
 def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
-    """Restore framework rows and assignments, including parent relationships."""
+    """Restore a framework snapshot and its section-linked records atomically."""
     sections = snapshot.get("sections", [])
     assignments = snapshot.get("assignments", [])
+    assembly_components = snapshot.get("assembly_components", [])
     with connection() as conn:
+        # The framework is rebuilt as one unit. Temporarily release every section
+        # reference so RESTRICT relationships cannot leave a partial restore.
+        conn.execute(
+            "UPDATE yamazumi_areas SET section_id=NULL WHERE project_id=?", (project_id,)
+        )
+        conn.execute(
+            "UPDATE process_part_groups SET section_id=NULL WHERE project_id=?", (project_id,)
+        )
+        conn.execute(
+            """UPDATE manufacturing_assemblies
+               SET built_section_id=NULL, installed_section_id=NULL
+               WHERE project_id=?""",
+            (project_id,),
+        )
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
         # Insert parents and children with empty parent IDs first, then reconnect them.
@@ -5584,6 +5801,30 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
                     (row["parent_id"], row["id"], project_id),
                 )
         _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
+        _insert_snapshot_rows(conn, "manufacturing_assembly_components", assembly_components)
+        for row in snapshot.get("yamazumi_section_references", []):
+            conn.execute(
+                "UPDATE yamazumi_areas SET section_id=? WHERE id=? AND project_id=?",
+                (row.get("section_id"), row.get("id"), project_id),
+            )
+        for row in snapshot.get("process_section_references", []):
+            conn.execute(
+                "UPDATE process_part_groups SET section_id=? WHERE id=? AND project_id=?",
+                (row.get("section_id"), row.get("id"), project_id),
+            )
+        for row in snapshot.get("assembly_section_references", []):
+            conn.execute(
+                """UPDATE manufacturing_assemblies
+                   SET built_section_id=?, installed_section_id=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    row.get("built_section_id"),
+                    row.get("installed_section_id"),
+                    row.get("updated_at"),
+                    row.get("id"),
+                    project_id,
+                ),
+            )
 
 
 def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) -> None:

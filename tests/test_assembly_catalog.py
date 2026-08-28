@@ -271,22 +271,12 @@ class AssemblyCatalogTests(unittest.TestCase):
         store.delete_assembly_sections(
             self.project_id,
             [self.built_section_id],
-            [
-                {
-                    "assembly_id": assembly_id,
-                    "field": "built_section_id",
-                    "section_id": self.other_section_id,
-                },
-                {
-                    "assembly_id": assembly_id,
-                    "field": "installed_section_id",
-                    "section_id": self.installed_section_id,
-                },
-            ],
+            self.other_section_id,
+            self.scenario_id,
         )
         catalog_row = store.assembly_catalog_rows(self.project_id).iloc[0]
         self.assertEqual(str(catalog_row["built_section_id"]), self.other_section_id)
-        self.assertEqual(str(catalog_row["installed_section_id"]), self.installed_section_id)
+        self.assertEqual(str(catalog_row["installed_section_id"]), self.other_section_id)
         self.assertEqual(
             str(store.fishbone_part_assignments(self.project_id).iloc[0]["section_id"]),
             self.other_section_id,

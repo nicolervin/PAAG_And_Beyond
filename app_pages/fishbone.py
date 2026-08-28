@@ -6,6 +6,7 @@ from utils.store import (
     add_assembly_section,
     assemblies_for_section,
     assembly_section_delete_impact,
+    assembly_section_delete_target_validation,
     assembly_sections,
     assign_parts_to_section,
     audit_history,
@@ -430,10 +431,11 @@ with st.expander(
             )
             st.markdown(
                 f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections; "
-                "mini-BOM uses tied to a re-pointed Built section move to its replacement, and remaining uses are deleted.\n"
-                f"- **{impact['yamazumi_area_count']}** Yamazumi area link(s) will be preserved but unassigned.\n"
-                f"- **{impact['process_link_count']}** Process link(s) will be preserved but unassigned.\n"
-                f"- **{impact['assembly_reference_count']}** assembly Built/Installed relationship(s) require replacement.\n"
+                "mini-BOM uses tied to a re-pointed Built section move to the target, and all "
+                "other uses return to Not placed.\n"
+                f"- **{impact['yamazumi_area_count']}** Yamazumi area(s) will be re-pointed.\n"
+                f"- **{impact['process_link_count']}** Process at a Glance part requirement(s) will be re-pointed.\n"
+                f"- **{impact['assembly_reference_count']}** assembly Built/Installed reference(s) will be re-pointed.\n"
                 f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections."
             )
             st.caption("Sections: " + ", ".join(impact["section_names"]))
@@ -445,43 +447,44 @@ with st.expander(
                 str(row["id"]): str(row["name"])
                 for _, row in replacement_sections.iterrows()
             }
-            assembly_replacements = []
-            if impact["assembly_reference_count"] and not replacement_ids:
+            target_section_id = None
+            target_is_valid = not impact["requires_repointing"]
+            if impact["requires_repointing"] and not replacement_ids:
                 st.error(
-                    "Create another Fishbone section before deleting these sections; each assembly "
-                    "Built or Installed relationship needs a replacement."
+                    "Create another Fishbone section before deleting these sections. Yamazumi, "
+                    "Process at a Glance, and assembly references require a continuity target."
                 )
-            for reference in impact.get("assembly_references", []):
-                if str(reference.get("built_section_id")) in impact["section_ids"]:
-                    replacement_id = st.selectbox(
-                        f"{reference['assembly_number']} · replacement Built section",
-                        replacement_ids,
-                        format_func=lambda value: replacement_labels.get(value, value),
-                        key=f"assembly_built_replacement_{project_id}_{reference['assembly_id']}",
-                    ) if replacement_ids else None
-                    if replacement_id:
-                        assembly_replacements.append(
-                            {
-                                "assembly_id": str(reference["assembly_id"]),
-                                "field": "built_section_id",
-                                "section_id": replacement_id,
-                            }
+            if impact["requires_repointing"] and replacement_ids:
+                st.info(
+                    "Choose one existing Fishbone section to continue all affected Yamazumi, "
+                    "Process at a Glance, and assembly references under before deleting."
+                )
+                target_section_id = st.selectbox(
+                    "Continue work under Fishbone section",
+                    replacement_ids,
+                    index=None,
+                    placeholder="Choose a target Fishbone section",
+                    format_func=lambda value: replacement_labels.get(value, value),
+                    key=f"fishbone_delete_target_{project_id}",
+                    help=(
+                        "This one target receives every affected Yamazumi, Process at a Glance, "
+                        "and assembly Built or Installed section reference."
+                    ),
+                )
+                if target_section_id:
+                    try:
+                        target_validation = assembly_section_delete_target_validation(
+                            project_id,
+                            pending_ids,
+                            str(target_section_id),
+                            scenario_id,
                         )
-                if str(reference.get("installed_section_id")) in impact["section_ids"]:
-                    replacement_id = st.selectbox(
-                        f"{reference['assembly_number']} · replacement Installed section",
-                        replacement_ids,
-                        format_func=lambda value: replacement_labels.get(value, value),
-                        key=f"assembly_installed_replacement_{project_id}_{reference['assembly_id']}",
-                    ) if replacement_ids else None
-                    if replacement_id:
-                        assembly_replacements.append(
-                            {
-                                "assembly_id": str(reference["assembly_id"]),
-                                "field": "installed_section_id",
-                                "section_id": replacement_id,
-                            }
-                        )
+                        target_is_valid = bool(target_validation["valid"])
+                        if not target_is_valid:
+                            st.error(str(target_validation["message"]))
+                    except ValueError as exc:
+                        target_is_valid = False
+                        st.error(str(exc))
             actions = st.container(horizontal=True)
             if actions.button(
                 "Cancel", key=f"cancel_fishbone_framework_delete_{project_id}"
@@ -493,12 +496,15 @@ with st.expander(
                 "Delete sections",
                 type="primary",
                 icon=":material/delete:",
-                disabled=bool(impact["assembly_reference_count"] and not replacement_ids),
+                disabled=bool(impact["requires_repointing"] and not target_is_valid),
                 key=f"destructive_confirm_fishbone_framework_delete_{project_id}",
             ):
                 try:
                     deleted = delete_assembly_sections(
-                        project_id, pending_ids, assembly_replacements
+                        project_id,
+                        pending_ids,
+                        str(target_section_id) if target_section_id else None,
+                        scenario_id,
                     )
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     record_audit_event(
