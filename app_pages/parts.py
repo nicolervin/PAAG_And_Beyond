@@ -51,7 +51,7 @@ page_title_with_scope(
     "Parts Catalog",
     scope="scenario-aware",
     help_text=(
-        "The parts catalog itself is shared across every scenario. Whether a part is marked "
+        "The Parts Catalog itself is shared across every scenario. Whether a part is marked "
         "Active applies only to the currently selected scenario."
     ),
 )
@@ -82,7 +82,7 @@ else:
     active_model_numbers = active_models["model_number"].fillna("").astype(str).tolist()
     model_labels = {
         str(row["model_number"]): (
-            str(row["display_name"]).strip() or "Familiar name not defined"
+            str(row["display_name"]).strip() or "Common name not defined"
         )
         for _, row in models.iterrows()
     }
@@ -248,7 +248,7 @@ parts_actions = editable_table_footer(
 save_part_table = parts_actions.save_and_refresh
 if parts_actions.undo:
     request_table_editor_reset(parts_editor_key)
-    st.toast("Discarded the unsaved part-table edits", icon=":material/undo:")
+    st.toast("Discarded the unsaved Parts Catalog edits", icon=":material/undo:")
     st.rerun()
 st.caption(
     "Type or paste new parts directly into the blank entry row, then save. Use View details to manage its Primary CAD image "
@@ -428,7 +428,7 @@ def render_parts_history() -> None:
     with st.expander("Parts history", icon=":material/history:"):
         history = audit_history(project_id, "Parts", limit=50)
         if history.empty:
-            st.caption("No standardized Parts-table changes have been recorded yet.")
+            st.caption("No standardized Parts Catalog changes have been recorded yet.")
         else:
             selectable_dataframe(
                 history.drop(columns=["details"], errors="ignore"),

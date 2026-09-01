@@ -65,7 +65,7 @@ page_title_with_scope(
     "Process at a Glance", scope="scenario", scenario_name=scenario["name"]
 )
 st.caption(
-    "Pair fishbone parts to Yamazumi work elements section by section, then complete the ordered "
+    "Create Part requirements for Yamazumi work elements section by section, then complete the ordered "
     "Process at a Glance by pitch. A purchased assembly is handled as one catalog part."
 )
 st.caption(f"Rev {scenario['revision_label']} · {scenario['name']} · {scenario['status']}")
@@ -79,13 +79,13 @@ section_labels = {
     for _, row in sections.iterrows()
 }
 
-st.subheader("Pair work and material")
+st.subheader("Create Part requirements")
 st.caption(
     "The selected fishbone section controls both lists. Use **Choose one** for alternatives such "
     "as black or silver versions of the same panel."
 )
 if not section_ids:
-    st.info("Create and populate the assembly fishbone before pairing parts to process work.")
+    st.info("Create and populate the Fishbone framework before adding Part requirements to process work.")
 else:
     section_id = st.selectbox(
         "Fishbone section",
@@ -152,6 +152,14 @@ else:
         available_parts = available_parts.loc[part_mask].copy()
 
     work_column, part_column = st.columns(2, vertical_alignment="top")
+    work_source_key = apply_pending_table_editor_reset(
+        f"process_yamazumi_source_{scenario_id}_{section_id}"
+    )
+    part_source_key = apply_pending_table_editor_reset(
+        f"process_part_source_{scenario_id}_{section_id}"
+    )
+    work_selection_expired = False
+    part_selection_expired = False
     with work_column.container(border=True, height="stretch"):
         st.markdown("#### Yamazumi work elements")
         st.caption("Select the work element that consumes the parts.")
@@ -166,7 +174,7 @@ else:
         else:
             work_event = selectable_dataframe(
                 yamazumi_rows,
-                key=f"process_yamazumi_source_{scenario_id}_{section_id}",
+                key=work_source_key,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="multi-row",
@@ -179,18 +187,29 @@ else:
                     "description": st.column_config.TextColumn("Work element", width="large"),
                     "time_s": st.column_config.NumberColumn("Time (s)", format="%.1f"),
                     "model_variants": st.column_config.ListColumn("Models"),
-                    "material_group_count": st.column_config.NumberColumn("Part groups"),
+                    "material_group_count": st.column_config.NumberColumn("Part requirements"),
                     "process_sync_status": "Plan status",
                 },
             )
-            selected_yamazumi = yamazumi_rows.iloc[work_event.selection.rows]
+            work_selection_rows = list(work_event.selection.rows)
+            valid_work_selection_rows = [
+                row
+                for row in work_selection_rows
+                if isinstance(row, int) and 0 <= row < len(yamazumi_rows)
+            ]
+            work_selection_expired = len(valid_work_selection_rows) != len(
+                work_selection_rows
+            )
+            selected_yamazumi = yamazumi_rows.iloc[
+                [] if work_selection_expired else valid_work_selection_rows
+            ]
 
     with part_column.container(border=True, height="stretch"):
         st.markdown("#### Available fishbone parts")
         st.caption("Select one or more catalog parts from this section.")
         st.caption(
             "Don't see your part? Check whether it is in another fishbone section, "
-            "or add it to the Parts catalog and this section without leaving the page."
+            "or add it to the Parts Catalog and this section without leaving the page."
         )
         find_or_add_part = st.button(
             "Find or add a missing part",
@@ -208,14 +227,14 @@ else:
             if pairing_search and section_has_available_fishbone_parts:
                 st.info("No available fishbone parts match this filter.")
             elif section_has_fishbone_parts:
-                st.info("All fishbone parts in this section are already paired below.")
+                st.info("All fishbone parts in this section are already included in Part requirements below.")
             else:
                 st.info("No catalog parts are placed in this fishbone section.")
             selected_parts = available_parts
         else:
             part_event = selectable_dataframe(
                 available_parts,
-                key=f"process_part_source_{scenario_id}_{section_id}",
+                key=part_source_key,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="multi-row",
@@ -227,13 +246,38 @@ else:
                     "part_number": st.column_config.TextColumn("Part number", pinned=True),
                     "description": st.column_config.TextColumn("Part Name", width="large"),
                     "quantity": st.column_config.NumberColumn(
-                        "Fishbone qty.", format="%g"
+                        "Fishbone quantity", format="%g"
                     ),
-                    "use_description": st.column_config.TextColumn("Use", width="medium"),
+                    "use_description": st.column_config.TextColumn(
+                        "Use / installation location", width="medium"
+                    ),
                     "model_applicability": "Models",
                 },
             )
-            selected_parts = available_parts.iloc[part_event.selection.rows]
+            part_selection_rows = list(part_event.selection.rows)
+            valid_part_selection_rows = [
+                row
+                for row in part_selection_rows
+                if isinstance(row, int) and 0 <= row < len(available_parts)
+            ]
+            part_selection_expired = len(valid_part_selection_rows) != len(
+                part_selection_rows
+            )
+            selected_parts = available_parts.iloc[
+                [] if part_selection_expired else valid_part_selection_rows
+            ]
+
+    if work_selection_expired or part_selection_expired:
+        request_table_editor_reset(work_source_key)
+        request_table_editor_reset(part_source_key)
+        if part_selection_expired:
+            st.warning(
+                "Your part selection changed and was cleared. Please reselect the parts for the Part requirement."
+            )
+        else:
+            st.warning(
+                "Your work-element selection changed and was cleared. Please reselect the work element."
+            )
 
 
     def close_missing_part_dialog() -> None:
@@ -261,7 +305,7 @@ else:
                 key=f"process_missing_part_search_{scenario_id}_{current_section_id}",
             ).strip()
             if len(search_text) < 2:
-                st.info("Enter at least two characters to search the Parts catalog and all fishbone sections.")
+                st.info("Enter at least two characters to search the Parts Catalog and all Fishbone sections.")
             else:
                 matches = search_parts_and_fishbone(
                     project_id, search_text, scenario_id
@@ -277,7 +321,7 @@ else:
                             use_text = str(placement.get("use_description") or "").strip()
                             placement_text = (
                                 f"{placement.get('section_name') or 'Unknown section'} "
-                                f"(qty {format_clean_number(placement.get('quantity'))})"
+                                f"(Fishbone quantity {format_clean_number(placement.get('quantity'))})"
                             )
                             if use_text:
                                 placement_text += f" — {use_text}"
@@ -357,7 +401,7 @@ else:
                         assignment_labels = {
                             str(row["assignment_id"]): (
                                 f"{row.get('section_name') or 'Unknown section'} — "
-                                f"qty {format_clean_number(row.get('quantity'))} — "
+                                f"Fishbone quantity {format_clean_number(row.get('quantity'))} — "
                                 f"{row.get('use_description') or 'No use description'}"
                             )
                             for _, row in other_placements.iterrows()
@@ -429,8 +473,8 @@ else:
 
         with add_tab:
             st.caption(
-                "This creates a project Parts-catalog record and its first fishbone use together. "
-                "Images and advanced applicability can be added later on the Parts page."
+                "This creates a project Parts Catalog record and its first Fishbone use together. "
+                "Images and advanced applicability can be added later in the Parts Catalog."
             )
             new_part_number = st.text_input(
                 "Part number",
@@ -569,8 +613,8 @@ else:
                 "Part requirement",
                 placeholder="Example: Control panel color",
                 help=(
-                    "Names this group of paired parts. It distinguishes alternatives or optional "
-                    "groups, such as a control panel color; for a single Use all group, use a short "
+                    "Names this Part requirement. It distinguishes alternatives or optional "
+                    "requirements, such as a control panel color; for a single Use all requirement, use a short "
                     "installation label."
                 ),
             )
@@ -579,11 +623,11 @@ else:
             )
             quantity = form_row.number_input("Quantity", min_value=0.01, value=1.0, step=1.0)
             notes = st.text_input(
-                "Pairing notes",
+                "Part requirement notes",
                 placeholder="Model choice, installation intent, or other IE guidance",
             )
             pair_parts = st.form_submit_button(
-                f"Pair selected parts ({len(selected_parts)})",
+                f"Create Part requirement ({len(selected_parts)} parts)",
                 type="primary",
                 icon=":material/link:",
                 disabled=selected_parts.empty,
@@ -621,6 +665,8 @@ else:
                     selected_parts["part_id"].astype(str).tolist(),
                     notes,
                 )
+                request_table_editor_reset(work_source_key)
+                request_table_editor_reset(part_source_key)
                 record_audit_event(
                     project_id,
                     "Process part pairings",
@@ -634,7 +680,7 @@ else:
                         "section": section_labels.get(section_id, section_id),
                     },
                 )
-                st.toast("Parts paired to the process work element", icon=":material/check_circle:")
+                st.toast("Part requirement added to the process work element", icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
@@ -659,7 +705,7 @@ else:
                 project_id, scenario_id, selected_process_id, active_only=True
             )
             if saved_groups:
-                st.markdown("##### Existing part pairings")
+                st.markdown("##### Existing Part requirements")
                 pairing_editor_key = (
                     f"existing_process_pairings_{scenario_id}_{selected_process_id}"
                 )
@@ -696,7 +742,7 @@ else:
                             "Quantity", format="%.2f"
                         ),
                         "parts": st.column_config.TextColumn(
-                            "Paired Fishbone Parts", width="large"
+                            "Parts in requirement", width="large"
                         ),
                     },
                 )
@@ -736,7 +782,7 @@ process_editor_key = apply_pending_table_editor_reset(process_editor_key)
 elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
 models = project_models(project_id)
 model_labels = {
-    str(row["model_number"]): (str(row["display_name"]).strip() or "Familiar name not defined")
+    str(row["model_number"]): (str(row["display_name"]).strip() or "Common name not defined")
     for _, row in models.iterrows()
 }
 model_numbers_by_label = {label: number for number, label in model_labels.items()}
@@ -891,7 +937,7 @@ edited = st.data_editor(
             "Work Element", required=True, pinned=True, width="large"
         ),
         "assigned_parts": st.column_config.TextColumn(
-            "Paired Fishbone Parts", width="large"
+            "Part requirements", width="large"
         ),
         "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
         "model_applicability": st.column_config.MultiselectColumn(
@@ -1035,7 +1081,7 @@ def confirm_process_delete() -> None:
     pending_key = f"process_pending_delete_{scenario_id}"
     pending_ids = st.session_state.get(pending_key, [])
     st.warning(
-        f"Delete {len(pending_ids)} process step(s)? Their part pairings will also be deleted."
+        f"Delete {len(pending_ids)} process step(s)? Their Part requirements will also be deleted."
     )
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_process_delete_{scenario_id}"):
@@ -1104,13 +1150,13 @@ if footer_actions.save_and_refresh:
         st.error(str(exc))
 
 
-@st.dialog("Remove selected part pairings?", dismissible=False)
+@st.dialog("Remove selected Part requirements?", dismissible=False)
 def confirm_pairing_bulk_removal() -> None:
     pending = st.session_state.get(pairing_delete_key, {})
     groups = pending.get("groups", [])
     st.warning(
-        f"Remove {len(groups)} selected part pairing(s)? The parts listed below will be "
-        "unpaired from this work element."
+        f"Remove {len(groups)} selected Part requirement(s)? The parts listed below will be "
+        "removed from this work element."
     )
     for group in groups:
         parts = ", ".join(group.get("parts", [])) or "No active parts"
@@ -1135,7 +1181,7 @@ def confirm_pairing_bulk_removal() -> None:
             request_table_editor_reset(pairing_editor_key)
         st.rerun()
     if actions.button(
-        "Remove pairings",
+        "Remove Part requirements",
         type="primary",
         icon=":material/link_off:",
         key=f"destructive_confirm_pairing_bulk_remove_{scenario_id}",
@@ -1165,7 +1211,7 @@ def confirm_pairing_bulk_removal() -> None:
             if pairing_editor_key:
                 request_table_editor_reset(pairing_editor_key)
             st.toast(
-                f"Removed {removed_count} pairing(s); their parts are available again.",
+                f"Removed {removed_count} Part requirement(s); their parts are available again.",
                 icon=":material/check_circle:",
             )
             st.rerun()
@@ -1299,13 +1345,13 @@ def edit_process_step_details(element_id: str) -> None:
             )
 
     with parts_tab:
-        st.markdown("**Paired fishbone parts**")
-        st.write(step.get("assigned_parts") or "No fishbone parts are paired to this step.")
+        st.markdown("**Part requirements**")
+        st.write(step.get("assigned_parts") or "No Part requirements are defined for this step.")
         saved_step_groups = process_part_groups(
             project_id, scenario_id, element_id, active_only=True
         )
         if saved_step_groups:
-            st.caption("Remove an incorrect pairing here. Its parts will return to the available-parts table.")
+            st.caption("Remove an incorrect Part requirement here. Its parts will return to the available-parts table.")
             for group in saved_step_groups:
                 group_parts = ", ".join(
                     str(option["part_number"]) for option in group["options"]
@@ -1315,10 +1361,10 @@ def edit_process_step_details(element_id: str) -> None:
                 )
                 group_row.write(
                     f"**{group['name']}** · {group['selection_rule']} · "
-                    f"Qty {format_clean_number(group['quantity'])} · {group_parts}"
+                    f"Fishbone quantity {format_clean_number(group['quantity'])} · {group_parts}"
                 )
                 if group_row.button(
-                    "Remove pairing",
+                    "Remove Part requirement",
                     icon=":material/link_off:",
                     key=f"destructive_{widget_prefix}_remove_pairing_{group['id']}",
                 ):
@@ -1425,7 +1471,7 @@ def edit_process_step_details(element_id: str) -> None:
 
 
 @st.dialog(
-    "Remove process pairing?",
+    "Remove Part requirement?",
     dismissible=False,
     icon=":material/link_off:",
 )
@@ -1458,7 +1504,7 @@ def confirm_detail_pairing_removal() -> None:
         st.session_state.pop(detail_pairing_delete_key, None)
         st.rerun()
     if actions.button(
-        "Remove pairing",
+        "Remove Part requirement",
         type="primary",
         icon=":material/link_off:",
         key=f"destructive_confirm_detail_pairing_remove_{scenario_id}",
@@ -1520,7 +1566,7 @@ def confirm_detail_pairing_removal() -> None:
             close_process_details()
             request_table_editor_reset(process_editor_key)
             st.toast(
-                "Pairing removed; its parts are available again.",
+                "Part requirement removed; its parts are available again.",
                 icon=":material/check_circle:",
             )
             st.rerun()
@@ -1561,7 +1607,24 @@ if not edited.empty:
 with st.expander("Process at a Glance history", icon=":material/history:"):
     history = audit_history(project_id, "Process plan", limit=50)
     pairing_history = audit_history(project_id, "Process part pairings", limit=50)
-    combined_history = pd.concat([history, pairing_history], ignore_index=True)
+    parts_history = audit_history(project_id, "Parts", limit=50)
+    if not parts_history.empty:
+        parts_history = parts_history.loc[
+            parts_history["action"].eq("Create from Process at a Glance")
+        ]
+    fishbone_history = audit_history(
+        project_id, "Fishbone part assignments", limit=50
+    )
+    if not fishbone_history.empty:
+        fishbone_history = fishbone_history.loc[
+            fishbone_history["action"].isin(
+                {"Place part", "Place new part", "Move part use"}
+            )
+        ]
+    combined_history = pd.concat(
+        [history, pairing_history, parts_history, fishbone_history],
+        ignore_index=True,
+    )
     if combined_history.empty:
         st.caption("No standardized Process at a Glance changes have been recorded yet.")
     else:
@@ -1570,7 +1633,10 @@ with st.expander("Process at a Glance history", icon=":material/history:"):
         )
         if "table_name" in display_history.columns:
             display_history["table_name"] = display_history["table_name"].replace(
-                {"Process plan": "Process at a Glance"}
+                {
+                    "Process plan": "Process at a Glance",
+                    "Process part pairings": "Part requirements",
+                }
             )
         selectable_dataframe(
             display_history,

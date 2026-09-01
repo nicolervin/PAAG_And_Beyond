@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import (
+    audit_history,
     complexity_feature_delete_impacts,
     complexity_features,
     complexity_planning_snapshot,
@@ -25,6 +26,7 @@ from utils.table_ui import (
     editable_table_heading,
     native_selected_rows,
     direct_entry_editor_rows,
+    selectable_dataframe,
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
 )
@@ -38,7 +40,7 @@ from utils.table_filters import (
 
 project_id = st.session_state.get("project_id")
 page_title_with_scope("Model definitions", scope="project")
-st.caption("Translate official model numbers into the names and descriptions the IE and lean team use during planning.")
+st.caption("Translate each Official model number into the Common name and description the IE and lean team use during planning.")
 if not project_id:
     st.stop()
 model_editor_key = apply_pending_table_editor_reset("model_definitions_editor_v2")
@@ -65,7 +67,7 @@ has_unsaved_changes = table_has_unsaved_changes(
     model_editor_key, native_row_selection=True
 )
 editable_table_heading("Model information")
-st.caption("Model number stays tied to the official source. Edit the team-facing definition and turn off models that should not appear on the Parts page.")
+st.caption("Official model number stays tied to the official source. Edit the Common name and turn off models that should not appear in the Parts Catalog.")
 st.caption("Type or paste new model rows directly into the blank entry row, then save.")
 definition_columns = [
     "id", "model_number", "display_name", "eau", "description", "active", "notes",
@@ -105,12 +107,12 @@ edited_models = st.data_editor(
     column_config={
         "id": None,
         "active": st.column_config.CheckboxColumn(
-            "Use in planning",
+            "Active",
             default=True,
-            help="Active models appear as choices on the Parts page.",
+            help="Active models appear as choices in the Parts Catalog.",
         ),
         "display_name": st.column_config.TextColumn("Common name", width="medium"),
-        "model_number": st.column_config.TextColumn("Official model numbers", required=True),
+        "model_number": st.column_config.TextColumn("Official model number", required=True),
         "eau": st.column_config.NumberColumn(
             "EAU",
             min_value=0,
@@ -297,7 +299,7 @@ feature_editor_rows = direct_entry_editor_rows(
     feature_rows,
     editor_key=feature_editor_key,
     sort_columns=["active", "category", "name", "allowed_choices", "description"],
-    labels={"active": "Use", "name": "Feature"},
+    labels={"active": "Active", "name": "Feature"},
 )
 edited_features = st.data_editor(
     feature_editor_rows,
@@ -309,7 +311,7 @@ edited_features = st.data_editor(
     column_order=["active", "category", "name", "allowed_choices", "description"],
     column_config={
         "id": None,
-        "active": st.column_config.CheckboxColumn("Use", default=True),
+        "active": st.column_config.CheckboxColumn("Active", default=True),
         "category": st.column_config.TextColumn(
             "Category", required=True, help="A team-defined grouping such as Door, Controls, or Installation."
         ),
@@ -682,3 +684,63 @@ else:
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
+
+
+with st.expander("History", icon=":material/history:"):
+    models_history_tab, features_history_tab, tree_history_tab = st.tabs(
+        ["Model information", "Feature definitions", "Complexity tree"]
+    )
+    with models_history_tab:
+        models_history = audit_history(project_id, "Model definitions", limit=50)
+        if models_history.empty:
+            st.caption("No model-information history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                models_history.drop(columns=["details"], errors="ignore"),
+                key=f"models_history_table_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with features_history_tab:
+        features_history = audit_history(project_id, "Feature definitions", limit=50)
+        if features_history.empty:
+            st.caption("No feature-definition history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                features_history.drop(columns=["details"], errors="ignore"),
+                key=f"features_history_table_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with tree_history_tab:
+        tree_history = audit_history(project_id, "Complexity tree", limit=50)
+        if tree_history.empty:
+            st.caption("No complexity-tree history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                tree_history.drop(columns=["details"], errors="ignore"),
+                key=f"complexity_tree_history_table_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
