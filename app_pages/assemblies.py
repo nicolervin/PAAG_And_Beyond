@@ -41,6 +41,7 @@ from utils.table_ui import (
     editable_table_heading,
     format_clean_number,
     native_selected_rows,
+    part_number_cell_style,
     selectable_dataframe,
     standard_details_column_config,
     table_has_unsaved_changes,
@@ -75,6 +76,7 @@ def empty_catalog_rows() -> pd.DataFrame:
             "id": pd.Series(dtype="string"),
             "assembly_number": pd.Series(dtype="string"),
             "name": pd.Series(dtype="string"),
+            "make_buy": pd.Series(dtype="string"),
             "built_section_id": pd.Series(dtype="string"),
             "installed_section_id": pd.Series(dtype="string"),
             "parent_id": pd.Series(dtype="string"),
@@ -94,6 +96,7 @@ def save_catalog_records(records: list[dict]) -> None:
         st.session_state.get("current_editor", ""),
         {
             "assembly_ids": result["assembly_ids"],
+            "make_buy_changes": result["make_buy_changes"],
             "nesting_mismatch_count": len(result["mismatch_warnings"]),
             "updated_at": result["updated_at"],
         },
@@ -113,6 +116,13 @@ if sections.empty:
     st.info("Create at least one Fishbone section before adding an assembly.")
 else:
     catalog_source = catalog.copy() if not catalog.empty else empty_catalog_rows()
+    catalog_source["make_buy"] = (
+        catalog_source.get("make_buy", pd.Series(dtype="string"))
+        .fillna("")
+        .astype("string")
+        .replace("", pd.NA)
+    )
+    catalog_source["make_buy_filter"] = catalog_source["make_buy"].fillna("Unclassified")
     assembly_number_by_id = (
         {str(row["id"]): str(row["assembly_number"]) for _, row in catalog.iterrows()}
         if not catalog.empty else {}
@@ -149,11 +159,12 @@ else:
     visible_catalog = filter_table(
         catalog_source,
         key=f"assembly_catalog_filters_{project_id}",
-        dropdown_columns=["built_section", "installed_section", "active"],
+        dropdown_columns=["make_buy_filter", "built_section", "installed_section", "active"],
         search_columns=["assembly_number", "name", "notes"],
         labels={
             "built_section": "Built section",
             "installed_section": "Installed section",
+            "make_buy_filter": "Make / buy",
             "active": "Active",
         },
         reset_widget_keys=[catalog_editor_key],
@@ -161,7 +172,9 @@ else:
     visible_catalog = direct_entry_editor_rows(
         visible_catalog,
         editor_key=catalog_editor_key,
-        sort_columns=["assembly_number", "name", "built_section", "installed_section"],
+        sort_columns=[
+            "assembly_number", "name", "make_buy", "built_section", "installed_section"
+        ],
     )
 
     def open_assembly_details() -> None:
@@ -181,8 +194,8 @@ else:
             "supplemental_image_count", "component_mismatch_count", "stale_rule_count",
         ],
         column_order=[
-            "details", "assembly_number", "name", "built_section", "installed_section",
-            "parent_assembly", "active", "notes", "warnings",
+            "details", "assembly_number", "name", "make_buy", "built_section",
+            "installed_section", "parent_assembly", "active", "notes", "warnings",
         ],
         column_config={
             "id": None,
@@ -193,6 +206,15 @@ else:
                 "Assembly number", required=True, pinned=True
             ),
             "name": st.column_config.TextColumn("Assembly name", required=True, width="large"),
+            "make_buy": st.column_config.SelectboxColumn(
+                "Make / buy",
+                options=["Make", "Buy"],
+                help=(
+                    "Make means the assembly is produced internally. Buy means it is obtained "
+                    "as a complete assembly. This classification applies across every planning "
+                    "scenario."
+                ),
+            ),
             "built_section": st.column_config.SelectboxColumn(
                 "Built section",
                 options=list(section_id_by_name),
@@ -316,6 +338,10 @@ else:
                 "id": row_id or str(uuid4()),
                 "assembly_number": str(row.get("assembly_number") or "").strip(),
                 "name": str(row.get("name") or "").strip(),
+                "make_buy": (
+                    "" if pd.isna(row.get("make_buy"))
+                    else str(row.get("make_buy") or "").strip()
+                ),
                 "built_section_id": section_id_by_name.get(str(row.get("built_section") or "")),
                 "installed_section_id": section_id_by_name.get(
                     str(row.get("installed_section") or "")
@@ -380,7 +406,10 @@ else:
 
     st.download_button(
         "Export filtered assemblies",
-        dataframe_to_excel(visible_catalog.drop(columns=["details"], errors="ignore"), "Assemblies"),
+        dataframe_to_excel(
+            visible_catalog.drop(columns=["details", "make_buy_filter"], errors="ignore"),
+            "Assemblies",
+        ),
         file_name="assemblies.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon=":material/download:",
@@ -403,6 +432,15 @@ if not catalog.empty:
             f"{assembly.get('built_section_name') or 'Not assigned'}. Quantities are independent after saving."
         )
         components = assembly_bom_components(project_id, assembly_id)
+        if components.empty:
+            if str(assembly.get("make_buy") or "") == "Buy":
+                st.caption(
+                    "No components listed. A Buy assembly may intentionally have an empty mini-BOM."
+                )
+            elif str(assembly.get("make_buy") or "") == "Make":
+                st.caption("No components listed yet.")
+            else:
+                st.caption("No components listed.")
         all_uses = fishbone_part_assignments(project_id)
         eligible = all_uses.loc[
             all_uses["section_id"].astype(str).eq(str(assembly.get("built_section_id") or ""))
@@ -431,6 +469,7 @@ if not catalog.empty:
             bom_source = pd.DataFrame(
                 {
                     "id": pd.Series(dtype="string"),
+                    "part_number": pd.Series(dtype="string"),
                     "fishbone_use": pd.Series(dtype="string"),
                     "quantity": pd.Series(dtype="float"),
                     "status": pd.Series(dtype="string"),
@@ -447,17 +486,23 @@ if not catalog.empty:
         bom_source = direct_entry_editor_rows(
             bom_source,
             editor_key=bom_editor_key,
-            sort_columns=["fishbone_use", "quantity"],
+            sort_columns=["part_number", "fishbone_use", "quantity"],
+        )
+        styled_bom_source = bom_source.style.map(
+            part_number_cell_style, subset=["part_number"]
         )
         edited_bom = st.data_editor(
-            bom_source,
+            styled_bom_source,
             key=bom_editor_key,
             hide_index=True,
             num_rows="dynamic",
-            disabled=["id", "status"],
-            column_order=["fishbone_use", "quantity", "status"],
+            disabled=["id", "part_number", "status"],
+            column_order=["part_number", "fishbone_use", "quantity", "status"],
             column_config={
                 "id": None,
+                "part_number": st.column_config.TextColumn(
+                    "Part number", pinned=True
+                ),
                 "fishbone_use": st.column_config.SelectboxColumn(
                     "Fishbone use", options=list(use_id_by_label), required=True, width="large"
                 ),
@@ -815,14 +860,41 @@ with st.expander("History", icon=":material/history:"):
             if history.empty:
                 st.caption("No standardized changes recorded yet.")
             else:
+                if table_name == "Assemblies catalog":
+                    def make_buy_history_summary(raw_details) -> str:
+                        try:
+                            details = json.loads(str(raw_details or "{}"))
+                        except (TypeError, json.JSONDecodeError):
+                            return ""
+                        summaries = []
+                        for change in details.get("make_buy_changes", []):
+                            old_value = str(change.get("old_value") or "Unclassified")
+                            new_value = str(change.get("new_value") or "Unclassified")
+                            summaries.append(
+                                f"{change.get('assembly_number') or 'Unknown assembly'}: "
+                                f"{old_value} → {new_value}"
+                            )
+                        return "; ".join(summaries)
+
+                    history = history.copy()
+                    history["make_buy_changes"] = history["details"].apply(
+                        make_buy_history_summary
+                    )
+                history_column_config = {
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                }
+                if "make_buy_changes" in history.columns:
+                    history_column_config["make_buy_changes"] = st.column_config.TextColumn(
+                        "Make / buy changes", width="large"
+                    )
                 selectable_dataframe(
                     history.drop(columns=["details"], errors="ignore"),
                     key=f"assembly_history_{project_id}_{table_name}",
                     hide_index=True,
-                    column_config={
-                        "action": "Action", "row_count": "Rows", "editor_name": "Editor",
-                        "created_at": st.column_config.DatetimeColumn(
-                            "When", format="MMM DD, YYYY HH:mm"
-                        ),
-                    },
+                    column_config=history_column_config,
                 )

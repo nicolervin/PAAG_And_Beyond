@@ -101,6 +101,7 @@ class SectionDeletionTests(unittest.TestCase):
                     "id": assembly_id,
                     "assembly_number": f"ASM-{assembly_id[:8]}",
                     "name": "Deletion test assembly",
+                    "make_buy": "Make",
                     "parent_id": None,
                     "built_section_id": built_id,
                     "installed_section_id": installed_id,

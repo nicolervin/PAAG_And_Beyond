@@ -244,6 +244,8 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 assembly_number TEXT NOT NULL, name TEXT NOT NULL,
+                make_buy TEXT NOT NULL DEFAULT ''
+                    CHECK (make_buy IN ('', 'Make', 'Buy')),
                 pits_reference TEXT DEFAULT '', planning_reason TEXT NOT NULL DEFAULT 'Other',
                 parent_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE SET NULL,
                 built_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
@@ -331,6 +333,9 @@ def init_db() -> None:
             row[1] for row in conn.execute("PRAGMA table_info(manufacturing_assemblies)").fetchall()
         }
         for column, definition in {
+            "make_buy": (
+                "TEXT NOT NULL DEFAULT '' CHECK (make_buy IN ('', 'Make', 'Buy'))"
+            ),
             "built_section_id": (
                 "TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT"
             ),
@@ -1211,6 +1216,7 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
             assembly_id = _catalog_text(raw.get("id")) or str(uuid4())
             assembly_number = _catalog_text(raw.get("assembly_number"))
             name = _catalog_text(raw.get("name"))
+            make_buy = _catalog_text(raw.get("make_buy"))
             built_section_id = _catalog_text(raw.get("built_section_id"))
             installed_section_id = _catalog_text(raw.get("installed_section_id"))
             parent_id = _catalog_text(raw.get("parent_id")) or None
@@ -1218,6 +1224,13 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
                 raise ValueError("The assembly table contains a duplicate internal identifier.")
             if not assembly_number or not name:
                 raise ValueError("Every assembly requires an Assembly number and Assembly name.")
+            if make_buy not in {"", "Make", "Buy"}:
+                raise ValueError("Make / buy must be Make or Buy.")
+            previous = current.get(assembly_id)
+            if previous is None and not make_buy:
+                raise ValueError("Every new assembly requires a Make / buy selection.")
+            if previous and _catalog_text(previous.get("make_buy")) and not make_buy:
+                raise ValueError("Make / buy cannot be cleared. Choose Make or Buy.")
             if built_section_id not in valid_sections or installed_section_id not in valid_sections:
                 raise ValueError("Every assembly requires valid Built section and Installed section values.")
             if parent_id == assembly_id:
@@ -1230,6 +1243,7 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
                     "id": assembly_id,
                     "assembly_number": assembly_number,
                     "name": name,
+                    "make_buy": make_buy,
                     "parent_id": parent_id,
                     "built_section_id": built_section_id,
                     "installed_section_id": installed_section_id,
@@ -1279,8 +1293,19 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
                     }
                 )
 
+        make_buy_changes: list[dict] = []
         for row in normalized:
             previous = current.get(row["id"])
+            previous_make_buy = _catalog_text(previous.get("make_buy")) if previous else ""
+            if previous_make_buy != row["make_buy"]:
+                make_buy_changes.append(
+                    {
+                        "assembly_id": row["id"],
+                        "assembly_number": row["assembly_number"],
+                        "old_value": previous_make_buy,
+                        "new_value": row["make_buy"],
+                    }
+                )
             if previous:
                 if _catalog_text(previous.get("built_section_id")) != row["built_section_id"]:
                     conn.execute(
@@ -1294,11 +1319,11 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
                     )
                 conn.execute(
                     """UPDATE manufacturing_assemblies
-                       SET assembly_number=?, name=?, parent_id=?, built_section_id=?,
+                       SET assembly_number=?, name=?, make_buy=?, parent_id=?, built_section_id=?,
                            installed_section_id=?, active=?, notes=?, updated_at=?
                        WHERE id=? AND project_id=?""",
                     (
-                        row["assembly_number"], row["name"], row["parent_id"],
+                        row["assembly_number"], row["name"], row["make_buy"], row["parent_id"],
                         row["built_section_id"], row["installed_section_id"],
                         row["active"], row["notes"], timestamp, row["id"], project_id,
                     ),
@@ -1306,13 +1331,13 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
             else:
                 conn.execute(
                     """INSERT INTO manufacturing_assemblies
-                       (id, project_id, assembly_number, name, pits_reference,
+                       (id, project_id, assembly_number, name, make_buy, pits_reference,
                         planning_reason, parent_id, built_section_id, installed_section_id,
                         image_path, created_at, active, notes, updated_at)
-                       VALUES (?, ?, ?, ?, '', 'Other', ?, ?, ?, '', ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, '', 'Other', ?, ?, ?, '', ?, ?, ?, ?)""",
                     (
                         row["id"], project_id, row["assembly_number"], row["name"],
-                        row["parent_id"], row["built_section_id"],
+                        row["make_buy"], row["parent_id"], row["built_section_id"],
                         row["installed_section_id"], timestamp, row["active"],
                         row["notes"], timestamp,
                     ),
@@ -1321,6 +1346,7 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
         "count": len(normalized),
         "updated_at": timestamp,
         "mismatch_warnings": mismatch_warnings,
+        "make_buy_changes": make_buy_changes,
         "assembly_ids": [row["id"] for row in normalized],
     }
 
@@ -5424,6 +5450,80 @@ def complexity_tree(project_id: str) -> pd.DataFrame:
             lambda model_id: value_map.get((model_id, feature_id)) or None
         )
     return result
+
+
+def potential_duplicate_models(project_id: str, edited: pd.DataFrame) -> list[dict]:
+    """Return active-model pairs whose mutually assigned feature values all match."""
+    if "model_id" not in edited.columns:
+        raise ValueError("The complexity tree is missing model identifiers.")
+
+    features = complexity_features(project_id)
+    active_features = (
+        features.loc[features["active"].fillna(1).astype(bool)]
+        if not features.empty
+        else features
+    )
+    allowed_by_id = {
+        str(row["id"]): {str(value) for value in json.loads(row["allowed_values"] or "[]")}
+        for _, row in active_features.iterrows()
+    }
+    models = project_models(project_id)
+    if models.empty:
+        return []
+    model_by_id = {str(row["id"]): row for _, row in models.iterrows()}
+    active_model_ids = {
+        str(row["id"])
+        for _, row in models.loc[models["active"].fillna(1).astype(bool)].iterrows()
+    }
+
+    candidates: list[dict] = []
+    seen_model_ids: set[str] = set()
+    for _, row in edited.iterrows():
+        model_id = _catalog_text(row.get("model_id"))
+        if model_id not in model_by_id or model_id in seen_model_ids:
+            continue
+        seen_model_ids.add(model_id)
+        values: dict[str, str] = {}
+        for feature_id, choices in allowed_by_id.items():
+            value = _catalog_text(row.get(feature_id))
+            if value and value not in choices:
+                raise ValueError("Choose only values defined in Feature definitions.")
+            if value:
+                values[feature_id] = value
+        if model_id not in active_model_ids:
+            continue
+        model = model_by_id[model_id]
+        candidates.append(
+            {
+                "model_id": model_id,
+                "common_name": _catalog_text(model.get("display_name")),
+                "official_model_number": _catalog_text(model.get("model_number")),
+                "values": values,
+            }
+        )
+
+    conflicts: list[dict] = []
+    for left_index, left in enumerate(candidates):
+        for right in candidates[left_index + 1 :]:
+            mutual_feature_ids = set(left["values"]) & set(right["values"])
+            if not mutual_feature_ids:
+                continue
+            if all(
+                left["values"][feature_id] == right["values"][feature_id]
+                for feature_id in mutual_feature_ids
+            ):
+                conflicts.append(
+                    {
+                        "left_model_id": left["model_id"],
+                        "left_common_name": left["common_name"],
+                        "left_official_model_number": left["official_model_number"],
+                        "right_model_id": right["model_id"],
+                        "right_common_name": right["common_name"],
+                        "right_official_model_number": right["official_model_number"],
+                        "mutual_feature_count": len(mutual_feature_ids),
+                    }
+                )
+    return conflicts
 
 
 def part_feature_rules(project_id: str) -> pd.DataFrame:

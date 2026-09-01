@@ -11,6 +11,7 @@ from utils.store import (
     complexity_tree,
     delete_project_models,
     model_planning_snapshot,
+    potential_duplicate_models,
     project_models,
     record_audit_event,
     restore_model_planning_snapshot,
@@ -566,6 +567,7 @@ if feature_actions.save_and_refresh:
 
 st.divider()
 tree_undo_key = f"complexity_tree_undo_{project_id}"
+tree_pending_save_key = f"complexity_tree_pending_save_{project_id}"
 tree_has_unsaved = table_has_unsaved_changes(
     tree_editor_key, native_row_selection=True
 )
@@ -644,6 +646,68 @@ else:
             st.toast("Undid the last complexity-tree change", icon=":material/undo:")
         st.rerun()
     selected_tree_rows = native_selected_rows(tree, editor_key=tree_editor_key)
+
+    def persist_complexity_tree_save(pending: dict) -> None:
+        pending_tree = pd.DataFrame(pending.get("rows", []))
+        changed_assignment_count = int(pending.get("changed_assignment_count", 0))
+        count = update_complexity_tree(project_id, pending_tree)
+        record_audit_event(
+            project_id,
+            "Complexity tree",
+            "Save & Refresh",
+            changed_assignment_count,
+            st.session_state.get("current_editor", ""),
+            {
+                "model_feature_assignments_changed": changed_assignment_count,
+            },
+        )
+        st.session_state[tree_undo_key] = pending.get(
+            "snapshot", current_complexity_snapshot
+        )
+        st.session_state.pop(tree_pending_save_key, None)
+        request_table_editor_reset(tree_editor_key)
+        st.toast(f"Saved {count} model feature selections", icon=":material/check_circle:")
+        st.rerun()
+
+    def dismiss_duplicate_model_warning() -> None:
+        st.session_state.pop(tree_pending_save_key, None)
+
+    @st.dialog(
+        "Review potential duplicate models",
+        width="large",
+        icon=":material/warning:",
+        on_dismiss=dismiss_duplicate_model_warning,
+    )
+    def confirm_duplicate_model_save() -> None:
+        pending = st.session_state.get(tree_pending_save_key) or {}
+        conflicts = pending.get("conflicts", [])
+        st.warning(
+            "These active models match on every feature that has a value assigned on both models."
+        )
+        for conflict in conflicts:
+            left_name = conflict.get("left_common_name") or "No common name"
+            left_number = conflict.get("left_official_model_number") or "No official model number"
+            right_name = conflict.get("right_common_name") or "No common name"
+            right_number = conflict.get("right_official_model_number") or "No official model number"
+            st.write(
+                f"{left_name} ({left_number}) and {right_name} ({right_number}) "
+                f"— {int(conflict.get('mutual_feature_count', 0))} mutually assigned feature(s) match."
+            )
+        st.caption(
+            "This is a review warning only. You may return to the table or save the values anyway."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Return to table", key=f"review_duplicate_models_{project_id}"):
+            st.session_state.pop(tree_pending_save_key, None)
+            st.rerun()
+        if actions.button(
+            "Save anyway",
+            type="primary",
+            icon=":material/save:",
+            key=f"save_duplicate_models_anyway_{project_id}",
+        ):
+            persist_complexity_tree_save(pending)
+
     if save_tree:
         try:
             if not selected_tree_rows.empty:
@@ -667,23 +731,21 @@ else:
                     )
                     if edited_value != previous_value:
                         changed_assignment_count += 1
-            count = update_complexity_tree(project_id, edited_tree)
-            record_audit_event(
-                project_id,
-                "Complexity tree",
-                "Save & Refresh",
-                changed_assignment_count,
-                st.session_state.get("current_editor", ""),
-                {
-                    "model_feature_assignments_changed": changed_assignment_count,
-                },
-            )
-            st.session_state[tree_undo_key] = current_complexity_snapshot
-            request_table_editor_reset(tree_editor_key)
-            st.toast(f"Saved {count} model feature selections", icon=":material/check_circle:")
-            st.rerun()
+            conflicts = potential_duplicate_models(project_id, edited_tree)
+            pending = {
+                "rows": edited_tree.to_dict("records"),
+                "changed_assignment_count": changed_assignment_count,
+                "snapshot": current_complexity_snapshot,
+                "conflicts": conflicts,
+            }
+            if conflicts:
+                st.session_state[tree_pending_save_key] = pending
+            else:
+                persist_complexity_tree_save(pending)
         except ValueError as exc:
             st.error(str(exc))
+    if st.session_state.get(tree_pending_save_key):
+        confirm_duplicate_model_save()
 
 
 with st.expander("History", icon=":material/history:"):

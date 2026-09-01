@@ -102,7 +102,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `manufacturing_assemblies`
 
-- **Purpose:** Stores the project-wide catalog of real, pre-existing assembly numbers, including friendly name, parent assembly, Built section, Installed section, active state, notes, primary image path, and timestamps. The parked `pits_reference` and `planning_reason` fields remain hidden from the active catalog workflow.
+- **Purpose:** Stores the project-wide catalog of real, pre-existing assembly numbers, including friendly name, parent assembly, Built section, Installed section, active state, notes, primary image path, and timestamps. The parked `pits_reference` and `planning_reason` fields remain hidden from the active catalog workflow. The confirmed Task 08 proposal below adds a project-wide Make / buy classification after its separate implementation go-ahead.
 - **Key relationships:** Belongs to `projects`; may reference another catalog assembly as its parent and references `assembly_sections` independently through Built and Installed section fields. Parent of `manufacturing_assembly_components`, `manufacturing_assembly_feature_rules`, `manufacturing_assembly_images`, and the still-dormant scenario-policy relationships.
 - **Scope:** Project-wide. Active catalog reads and writes are isolated from `assembly_scenario_policies` and never accept `scenario_id`.
 
@@ -174,6 +174,57 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ## Module proposals and decision records
 
+### Task 08 — Duplicate-model warning, assembly make/buy classification, and shared part-number colors
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** September 1, 2026
+- **Review status:** **Design confirmed by the project owner on September 1, 2026. Implementation has not started and requires a separate explicit go-ahead.**
+- **Purpose:** Add a project-wide, save-time potential-duplicate warning to Model definitions; add one project-wide Make / buy classification to each real assembly-number record; and make repeated real part numbers visually recognizable in the existing mini-BOM editor. This task adds no new screen and does not create the deferred cross-model or cross-assembly comparison view.
+- **Connections:** Duplicate detection uses only `project_models`, `complexity_features`, and `model_feature_values` from the current Model definitions Complexity Tree. Make / buy is stored directly on `manufacturing_assemblies`. Mini-BOM colors derive the real part number through `manufacturing_assembly_components.fishbone_assignment_id` -> `fishbone_part_assignments.part_id` -> `parts.part_number`. No behavior in this task reads or writes Fishbone, Assemblies, or downstream data while checking models, and no behavior reads or writes `assembly_scenario_policies`.
+- **Relationship to the critical thread:** The duplicate warning protects the project-wide Model definitions portion of the critical thread before downstream structure may exist. The Make / buy value extends the existing project-wide assembly identity already bridged from Parts Catalog and Fishbone through explicit mini-BOM components. Part-number coloring is a presentation-only view of those existing links and does not copy, replace, approve, or reinterpret any planning record.
+- **Scope:** All three additions are project-wide. Duplicate detection excludes inactive `project_models` rows from the comparison set entirely and compares the currently active Complexity Tree features presented at save time. `manufacturing_assemblies.make_buy` applies to the same real assembly identity in every planning scenario. Colors are derived from project-wide real part numbers and carry no scenario state. Model definitions and Assemblies retain their **Project-wide** scope badges.
+
+#### Duplicate-model detection
+
+No new table or field is required. When a contributor clicks **Save & Refresh** for the Complexity Tree, the app evaluates the complete edited table before the database write:
+
+1. Exclude every inactive model from the comparison set entirely.
+2. For each unordered pair of remaining active models, normalize null, `NaN`, empty, and whitespace-only feature cells as unassigned.
+3. Compare only currently active features that have a nonblank value on both models in that pair. A feature blank on either model is ignored and is never treated as a matching value.
+4. If the pair has zero mutually assigned features, do not flag it.
+5. If every mutually assigned feature value matches exactly, flag the pair as a potential duplicate. One mismatch among the mutually assigned features means the pair is not flagged.
+
+The calculation uses only the edited Model definitions data and has no Fishbone, Assemblies, Parts Catalog, scenario, or downstream dependency. It is a soft warning, never validation: a save-time dialog lists each flagged pair using **Common name** and **Official model number**, offers a return to the table, and permits **Save anyway**. Closing or returning from the dialog does not save; choosing **Save anyway** performs the ordinary atomic Complexity Tree save. The warning result is not persisted, does not create a new audit event, and has no consequence after the save. The successful save continues using the existing Complexity Tree audit and History workflow.
+
+#### New project-wide `manufacturing_assemblies.make_buy`
+
+Add exactly one column to the existing assembly master:
+
+| Column | Definition | Purpose |
+| --- | --- | --- |
+| `make_buy` | `TEXT NOT NULL DEFAULT '' CHECK (make_buy IN ('', 'Make', 'Buy'))` | Stores the project-wide Make / buy classification for one real assembly number. The empty string exists only to preserve unclassified records created before Task 08; it is not a third business status. |
+
+The safe in-place schema upgrade adds the column with its empty default and performs no backfill. Existing assembly records remain blank and unclassified; the app must not infer or default them to Make or Buy. New assembly records require an explicit `Make` or `Buy` selection. An existing blank record may remain blank through unrelated catalog work and receives a value only when a contributor deliberately edits its Make / buy field. Catalog validation accepts only the compatibility blank, `Make`, or `Buy`, validates the complete operation before writing, and persists the field atomically through the isolated project-wide assembly-catalog writer.
+
+This decision supersedes the earlier decision that parked make/buy under `assembly_scenario_policies`. Once Task 08 is implemented, `manufacturing_assemblies.make_buy` is the sole active and authoritative Make / buy value; no active Make / buy workflow exists before that implementation. The dormant `assembly_scenario_policies.sourcing_decision` column and its table remain completely untouched, unread by active workflows, unsynchronized, un-migrated, and non-authoritative. A future owner-reviewed scenario-policy proposal must explicitly reconcile that legacy dormant column; this task does not do so. The hidden `manufacturing_assemblies.pits_reference` and `planning_reason` fields remain stored, hidden, and unmodified and are not repurposed for Make / buy.
+
+The Assembly catalog adds a controlled **Make / buy** column beside the assembly identity fields and a corresponding filter and filtered-export column. A `Buy` assembly may have zero, one, or many explicit mini-BOM components. The existing component store already accepts an empty mini-BOM, so no component schema or validation exception is added. When a selected `Buy` assembly has no components, the UI shows the neutral explanation **No components listed. A Buy assembly may intentionally have an empty mini-BOM.** A selected `Make` assembly with no components shows **No components listed yet.** The editable table remains available in both cases, and a populated Buy mini-BOM is not warned against or blocked.
+
+#### Shared part-number color-coding
+
+No color table, field, preference, or persisted mapping is added. In this task, color appears only on a new disabled **Part number** column in the selected assembly's mini-BOM editor. The displayed value is derived from the existing Fishbone-use-to-Part relationship. A shared deterministic hash-based helper maps the exact trimmed real `parts.part_number` to a contrast-safe background and text color, so the same part number receives the same visual color across assemblies and reruns without hardcoding colors to known parts. Native `pandas.Styler` coloring applies only to this noneditable column; no general CSS or custom component is introduced.
+
+Do not add part-number coloring to the Assembly catalog table or the Fishbone inline assembly list in this task. Those views do not currently contain assembly-component part-number comparisons, and extending them would change their approved purpose. The fuller cross-model/cross-assembly comparison view represented by the original spreadsheet example is explicitly deferred as a separate, unscoped future proposal; it may reuse the deterministic color helper after passing its own gate.
+
+#### Applicable standards
+
+- Keep the exact **Save & Refresh** action and shared editable-table footer for both existing editors. Duplicate detection runs from the Complexity Tree action before its write; Make / buy saves with the complete Assembly catalog operation.
+- Record Make / buy changes under the existing `Assemblies catalog` / `Save & Refresh` audit category with the assembly ID/number and old/new value in JSON details. Expose a readable Make / buy change summary in the existing bottom History expander's **Catalog** tab so the persisted change is not hidden only in JSON. Do not create a separate History section.
+- Retain the Assemblies **Project-wide** scope badge. Use **Make / buy** as the UI label and `Make` and `Buy` as its controlled values.
+- Use this help text for the field: **Make means the assembly is produced internally. Buy means it is obtained as a complete assembly. This classification applies across every planning scenario.**
+- No new deletion workflow or dependent-record disclosure is required for the scalar Make / buy field. It is removed with its owning assembly through the already-approved assembly deletion workflow.
+- Preserve filtered-out catalog rows, stable assembly identifiers, Current editor attribution, editor reset/rerun behavior, full-operation validation, and atomic store-layer writes. The duplicate warning and color assignment are computation/UI-only and require no new audit records.
+
 ### Assemblies catalog (real, pre-existing assembly numbers)
 
 - **Proposed by:** Nicole Ervin, project owner
@@ -183,7 +234,7 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Connections:** Reuse `manufacturing_assemblies` as the authoritative assembly-number record. Every catalog assembly has a built-section reference and an installed-section reference to `assembly_sections`; the two references may be identical. Mini-BOM rows reference exact `fishbone_part_assignments` occurrences and reach Parts Catalog records through those occurrences. Assembly feature rules reference `complexity_features` and are compared with `model_feature_values`; they do not reuse or modify `part_feature_rules`. The locked `work_element_material_groups` and `work_element_material_options` tables are not used. Existing free-text Process output-assembly fields and all Process selection behavior remain out of scope.
 - **Relationship to the critical thread:** The catalog forms an explicit project-wide bridge from Model definitions and approved Fishbone structure toward future Process planning: `complexity_features` / `model_feature_values` -> assembly feature rules -> `manufacturing_assemblies`, and `parts` -> `fishbone_part_assignments` -> assembly mini-BOM components -> `manufacturing_assemblies` -> built/installed `assembly_sections`. A future Process task may offer an assembly only to steps tied to its installed section; this phase stores the required distinction but does not add that Process UI or relationship.
 - **Scope:** Project-wide, matching Parts Catalog, Fishbone structure, and `part_feature_rules`. No new catalog, mini-BOM, feature-rule, or image row carries `scenario_id`. The new Assemblies page must use the **Project-wide** scope badge. The lightweight assembly list on the Scenario-aware Parts to fishbone page still reads project-wide assembly data.
-- **Reuse and isolation:** Extend and reuse `manufacturing_assemblies`; do not create a second assembly master. Add normalized child tables for mini-BOM components, feature rules, and supplemental images. New catalog reads and writes must use isolated project-only store functions that do not accept `scenario_id`, join `assembly_scenario_policies`, or write scenario policies. The existing dormant `manufacturing_assemblies(project_id, scenario_id)`, `replace_manufacturing_assemblies(...)`, `bulk_update_assembly_policy(...)`, and scenario-cloning policy logic remain untouched and unreferenced by the new page. Existing `pits_reference` and `planning_reason` values remain stored but hidden and are not written by the new workflow; their meaning remains parked with the future make/buy discussion.
+- **Reuse and isolation:** Extend and reuse `manufacturing_assemblies`; do not create a second assembly master. Add normalized child tables for mini-BOM components, feature rules, and supplemental images. New catalog reads and writes must use isolated project-only store functions that do not accept `scenario_id`, join `assembly_scenario_policies`, or write scenario policies. The existing dormant `manufacturing_assemblies(project_id, scenario_id)`, `replace_manufacturing_assemblies(...)`, `bulk_update_assembly_policy(...)`, and scenario-cloning policy logic remain untouched and unreferenced by the new page. Existing `pits_reference` and `planning_reason` values remain stored but hidden and are not written by the new workflow; Task 08 does not repurpose them when it adds the separate authoritative `make_buy` field.
 
 #### Extended `manufacturing_assemblies`
 
@@ -299,7 +350,7 @@ All writes validate project ownership, complete input sets, required fields, uni
 - Parts to fishbone shows only a lightweight read-only list for the selected section. An assembly appears for both relationships, labeled **Built here** and/or **Installed here**; when both references point to the selected section, both relationships are shown. Each row displays the assembly number and a Details action that navigates to the shared Assemblies page and selects that same underlying record. No assembly editing is added to Fishbone.
 - Follow every locked `DESIGN_SYSTEM.md` standard: `page_title_with_scope()` with a Project-wide badge and standard hover text; native table selection/select-all; native confirmed deletion; direct row creation; filters and sorting above tables; orange Unsaved changes, Undo, and blue **Save & Refresh** immediately below each editable table; editor resets and reruns; Current editor attribution; `record_audit_event()` for every save, deletion, image action, re-pointing, and bulk action; and a bottom History expander with tabs when multiple assembly workflow categories are shown. Use stable UUIDs internally, friendly assembly/section labels in the UI, plain-language help for built versus installed sections, Material Symbols, native bordered containers, and no new general CSS.
 
-- **Out of scope:** Process at a Glance assembly selection, output-assembly-milestone linking, handling/sub-touch chains, exploded-BOM comparison, make/buy and scenario-policy behavior, and multi-touch/sub-touch support. Do not modify or build UI against `assembly_scenario_policies`, `work_element_material_groups`, or `work_element_material_options` except to disclose their existing foreign-key effects during an approved assembly deletion.
+- **Out of scope:** Process at a Glance assembly selection, output-assembly-milestone linking, handling/sub-touch chains, exploded-BOM comparison, supplier/cost/buffer and other scenario-policy behavior, and multi-touch/sub-touch support. Task 08 separately approves one project-wide `manufacturing_assemblies.make_buy` value without activating or consulting scenario policies. Do not modify or build UI against `assembly_scenario_policies`, `work_element_material_groups`, or `work_element_material_options` except to disclose their existing foreign-key effects during an approved assembly deletion.
 
 ### Section-level qualifying-condition feature rules (OR across features) — Withdrawn
 
@@ -373,13 +424,13 @@ Any future database rename must update every query, page, validation path, impor
 
 The following tables are implemented in the schema and data layer but are not currently editable from any active application screen. Do not rename, remove, repurpose, extend, or build new UI around them without explicit project-owner approval. The scenario-owned records in this dormant model are copied during scenario cloning; project-wide manufacturing assemblies are reused by the cloned scenario rather than duplicated.
 
-`manufacturing_assemblies` is now an active catalog table documented above. Its `pits_reference` and `planning_reason` fields, the legacy scenario-coupled reader/writer, and every make/buy or policy behavior remain parked and must not be exposed or modified by the active Assemblies workflow.
+`manufacturing_assemblies` is now an active catalog table documented above. Task 08 approves its project-wide `make_buy` field as the sole active Make / buy value after implementation; no active Make / buy workflow exists until that separate go-ahead. Its `pits_reference` and `planning_reason` fields, the legacy scenario-coupled reader/writer, and every supplier/cost/buffer or other scenario-policy behavior remain parked and must not be exposed or modified by the active Assemblies workflow.
 
 ### `assembly_scenario_policies`
 
-- **Purpose:** Intended to hold scenario-specific make/buy, supplier, build-area, buffer, storage, and minimum/target/maximum quantity decisions for a manufacturing assembly.
+- **Purpose:** Dormant legacy structure intended to hold scenario-specific supplier, build-area, buffer, storage, and minimum/target/maximum quantity decisions for a manufacturing assembly. Its existing `sourcing_decision` column is retained untouched but is non-authoritative; Task 08 assigns sole future active Make / buy authority to `manufacturing_assemblies.make_buy` after implementation.
 - **Relationships and cloning:** Junction between `planning_scenarios` and `manufacturing_assemblies`; policy rows are copied when a planning scenario is cloned.
-- **Current status — NOT YET DESIGNED:** No active screen edits this table. Future make/buy, supplier, and buffer/storage behavior is not finalized. Do not build UI, features, or duplicate logic against it without a scoping discussion and explicit project-owner approval.
+- **Current status — NOT YET DESIGNED:** No active screen reads or edits this table. Task 08 does not read, write, synchronize, migrate, or expose `sourcing_decision`. Future supplier, cost, buffer/storage, and other scenario-policy behavior is not finalized. Any future proposal must explicitly reconcile the legacy dormant sourcing field without treating it as authoritative. Do not build UI, features, or duplicate logic against this table without a scoping discussion and explicit project-owner approval.
 
 ### `work_element_material_groups`
 
