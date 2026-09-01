@@ -40,7 +40,7 @@ from utils.table_filters import (
 
 project_id = st.session_state.get("project_id")
 page_title_with_scope("Model definitions", scope="project")
-st.caption("Translate official model numbers into the names and descriptions the IE and lean team use during planning.")
+st.caption("Translate each Official model number into the Common name and description the IE and lean team use during planning.")
 if not project_id:
     st.stop()
 model_editor_key = apply_pending_table_editor_reset("model_definitions_editor_v2")
@@ -67,7 +67,7 @@ has_unsaved_changes = table_has_unsaved_changes(
     model_editor_key, native_row_selection=True
 )
 editable_table_heading("Model information")
-st.caption("Model number stays tied to the official source. Edit the team-facing definition and turn off models that should not appear on the Parts page.")
+st.caption("Official model number stays tied to the official source. Edit the Common name and turn off models that should not appear in the Parts Catalog.")
 st.caption("Type or paste new model rows directly into the blank entry row, then save.")
 definition_columns = [
     "id", "model_number", "display_name", "eau", "description", "active", "notes",
@@ -107,12 +107,12 @@ edited_models = st.data_editor(
     column_config={
         "id": None,
         "active": st.column_config.CheckboxColumn(
-            "Use in planning",
+            "Active",
             default=True,
-            help="Active models appear as choices on the Parts page.",
+            help="Active models appear as choices in the Parts Catalog.",
         ),
         "display_name": st.column_config.TextColumn("Common name", width="medium"),
-        "model_number": st.column_config.TextColumn("Official model numbers", required=True),
+        "model_number": st.column_config.TextColumn("Official model number", required=True),
         "eau": st.column_config.NumberColumn(
             "EAU",
             min_value=0,
@@ -299,7 +299,7 @@ feature_editor_rows = direct_entry_editor_rows(
     feature_rows,
     editor_key=feature_editor_key,
     sort_columns=["active", "category", "name", "allowed_choices", "description"],
-    labels={"active": "Use", "name": "Feature"},
+    labels={"active": "Active", "name": "Feature"},
 )
 edited_features = st.data_editor(
     feature_editor_rows,
@@ -311,7 +311,7 @@ edited_features = st.data_editor(
     column_order=["active", "category", "name", "allowed_choices", "description"],
     column_config={
         "id": None,
-        "active": st.column_config.CheckboxColumn("Use", default=True),
+        "active": st.column_config.CheckboxColumn("Active", default=True),
         "category": st.column_config.TextColumn(
             "Category", required=True, help="A team-defined grouping such as Door, Controls, or Installation."
         ),

@@ -50,14 +50,14 @@ from utils.table_ui import (
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 page_title_with_scope(
-    "Parts to assembly fishbone",
+    "Parts to fishbone",
     scope="scenario-aware",
     help_text=(
-        "The fishbone structure is shared across every scenario. Which parts are visible and "
+        "The Fishbone framework is shared across every scenario. Which parts are visible and "
         "available on this page depends on the currently selected scenario."
     ),
 )
-st.caption("Build the assembly framework first, then place approved Parts-table content into its sections and subassemblies.")
+st.caption("Build the Fishbone framework first, then place approved Parts Catalog content into its sections and subassemblies.")
 if not project_id or not scenario_id:
     st.stop()
 pool_editor_key = f"parts_fishbone_pool_v3_{project_id}_{scenario_id}"
@@ -109,7 +109,7 @@ def familiar_models(value) -> str:
     model_numbers = split_filter_values(value)
     if not model_numbers or any(model.casefold() in {"all", "all models"} for model in model_numbers):
         return "All models"
-    return ", ".join(familiar_model_names.get(model, "Familiar name not defined") for model in model_numbers)
+    return ", ".join(familiar_model_names.get(model, "Common name not defined") for model in model_numbers)
 
 
 def feature_applicability(part_id, legacy_value) -> str:
@@ -147,16 +147,16 @@ def audit_bool(value) -> bool:
 
 metrics = st.columns(4)
 metrics[0].metric("Parts available", len(parts), border=True)
-metrics[1].metric("Framework sections", len(sections), border=True)
+metrics[1].metric("Fishbone sections", len(sections), border=True)
 placed_catalog_parts = assignments["part_id"].nunique() if not assignments.empty else 0
-metrics[2].metric("Part uses placed", len(assignments), border=True)
+metrics[2].metric("Fishbone uses placed", len(assignments), border=True)
 metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_parts), border=True)
 
 st.subheader("Fishbone framework")
 fishbone_visual_slot = st.empty()
 
 with st.expander(
-    "1 · Build the assembly framework",
+    "1 · Build the Fishbone framework",
     icon=":material/account_tree:",
     expanded=True,
 ):
@@ -164,14 +164,14 @@ with st.expander(
         framework_editor_key, native_row_selection=True
     )
     refresh_framework = False
-    st.caption("Main-spine sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent section or subassembly.")
+    st.caption("Main-spine Fishbone sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent Fishbone section or subassembly.")
 
     active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
     section_name_by_id = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
     parent_options = active_sections["id"].astype(str).tolist() if not active_sections.empty else []
 
     with st.container(border=True):
-        st.subheader("Add a section or subassembly")
+        st.subheader("Add a Fishbone section or subassembly")
         section_form_version_key = f"section_form_version_{project_id}"
         st.session_state.setdefault(section_form_version_key, 0)
         with st.form(f"add_assembly_section_{st.session_state[section_form_version_key]}"):
@@ -184,8 +184,8 @@ with st.expander(
                 format_func=lambda value: "Product / main assembly" if value is None else section_name_by_id.get(value, value),
                 help="Required for a subassembly. Main-spine sections attach directly to the product.",
             )
-            section_description = st.text_area("Framework description", placeholder="What is assembled in this section?")
-            if st.form_submit_button("Add to framework", type="primary", icon=":material/account_tree:"):
+            section_description = st.text_area("Fishbone section description", placeholder="What is assembled in this section?")
+            if st.form_submit_button("Add to Fishbone framework", type="primary", icon=":material/account_tree:"):
                 try:
                     section_id = add_assembly_section(
                         project_id, section_name, section_type, parent_id,
@@ -211,13 +211,13 @@ with st.expander(
                     )
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     st.session_state[section_form_version_key] += 1
-                    st.toast("Framework item added", icon=":material/check_circle:")
+                    st.toast("Fishbone section added", icon=":material/check_circle:")
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
 
     if sections.empty:
-        st.info("Add at least one main-spine section to begin the assembly framework.")
+        st.info("Add at least one main-spine Fishbone section to begin the Fishbone framework.")
     else:
         framework_records = {str(row["id"]): row.to_dict() for _, row in sections.iterrows()}
         framework_children: dict[str, list[str]] = {}
@@ -277,7 +277,7 @@ with st.expander(
             key="assembly_framework_filters",
             dropdown_columns=["section_type", "parent_assembly", "active"],
             search_columns=["hierarchy", "name", "parent_assembly", "description"],
-            labels={"section_type": "Framework type", "parent_assembly": "Parent assembly", "active": "Use status"},
+            labels={"section_type": "Fishbone section type", "parent_assembly": "Parent assembly", "active": "Active status"},
             reset_widget_keys=[framework_editor_key],
         )
 
@@ -348,12 +348,12 @@ with st.expander(
                 "project_id": None,
                 "parent_id": None,
                 "hierarchy": st.column_config.TextColumn(
-                    "Assembly hierarchy",
+                    "Fishbone section hierarchy",
                     pinned=True,
                     width="large",
                     help="Blue rows are main-spine sections. Orange indented rows are subassemblies grouped under their parent.",
                 ),
-                "active": st.column_config.CheckboxColumn("Use", help="Inactive framework items remain in history but are hidden from new part placement."),
+                "active": st.column_config.CheckboxColumn("Active", help="Inactive Fishbone sections remain in history but are hidden from new part placement."),
                 "sequence": st.column_config.NumberColumn("Order", format="%d", pinned=True, help="Managed automatically by the move actions."),
                 "order_actions": st.column_config.ButtonColumn(
                     "Move",
@@ -370,7 +370,7 @@ with st.expander(
                     key="framework_assemblies_action",
                     help="Show assembly numbers built or installed in this section.",
                 ),
-                "name": st.column_config.TextColumn("Section / subassembly", required=True, pinned=True, width="large"),
+                "name": st.column_config.TextColumn("Fishbone section", required=True, pinned=True, width="large"),
                 "section_type": st.column_config.SelectboxColumn("Type", options=["Main spine", "Subassembly"], required=True),
                 "parent_assembly": st.column_config.SelectboxColumn(
                     "Parent assembly",
@@ -378,7 +378,7 @@ with st.expander(
                     required=True,
                     width="large",
                 ),
-                "description": st.column_config.TextColumn("Framework description", width="large"),
+                "description": st.column_config.TextColumn("Fishbone section description", width="large"),
                 "created_at": None,
                 "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
             },
@@ -393,13 +393,13 @@ with st.expander(
         if framework_actions.undo:
             if framework_has_unsaved:
                 request_table_editor_reset(framework_editor_key)
-                st.toast("Discarded the unsaved framework edits", icon=":material/undo:")
+                st.toast("Discarded the unsaved Fishbone framework edits", icon=":material/undo:")
             else:
                 restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
                 st.session_state.pop(assignment_undo_key, None)
                 request_table_editor_reset(framework_editor_key)
                 request_table_editor_reset(assignment_editor_key)
-                st.toast("Undid the last assembly framework change", icon=":material/undo:")
+                st.toast("Undid the last Fishbone framework change", icon=":material/undo:")
             st.rerun()
         selected_framework_rows = native_selected_rows(
             framework, editor_key=framework_editor_key
@@ -409,7 +409,7 @@ with st.expander(
             if table_has_unsaved_changes(
                 "assembly_framework_editor", native_row_selection=True
             ):
-                st.warning("Save or undo other framework edits before deleting sections.")
+                st.warning("Save or undo other Fishbone framework edits before deleting sections.")
             else:
                 st.session_state[framework_delete_key] = (
                     selected_framework_rows["id"].astype(str).tolist()
@@ -580,7 +580,7 @@ with st.expander(
         if refresh_framework:
             try:
                 if not selected_framework_rows.empty:
-                    raise ValueError("Clear selected rows before saving the assembly framework.")
+                    raise ValueError("Clear selected rows before saving the Fishbone framework.")
                 previous_sections_by_id = {
                     str(row["id"]): row for _, row in sections.iterrows()
                 }
@@ -638,14 +638,14 @@ with st.expander(
                 )
                 st.session_state[framework_undo_key] = current_plan_snapshot
                 request_table_editor_reset(framework_editor_key)
-                st.toast(f"Saved {count} framework items", icon=":material/check_circle:")
+                st.toast(f"Saved {count} Fishbone sections", icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
 
 
 if sections.empty:
-    fishbone_visual_slot.caption("The visual framework will appear after the first section is added.")
+    fishbone_visual_slot.caption("The visual Fishbone framework will appear after the first section is added.")
 else:
     visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
     records = {str(row["id"]): row.to_dict() for _, row in visible_sections.iterrows()}
@@ -702,7 +702,7 @@ else:
         edge_rows.append({"from": left_id, "to": right_id})
 
     if not node_rows:
-        fishbone_visual_slot.info("Activate at least one main-spine section to draw the framework.")
+        fishbone_visual_slot.info("Activate at least one main-spine Fishbone section to draw the Fishbone framework.")
     else:
         image_path_by_part = (
             parts.set_index(parts["id"].astype(str))["image_path"].to_dict()
@@ -726,7 +726,7 @@ else:
                 "Edit parts & photos",
                 icon=":material/edit:",
                 key="fishbone_edit_parts_visual",
-                help="Open the Parts page to edit part details or add more photos.",
+                help="Open the Parts Catalog to edit part details or add more photos.",
             ):
                 st.switch_page("app_pages/parts.py")
             fishbone_refresh_key = f"fishbone_refresh_version_{project_id}"
@@ -770,7 +770,7 @@ else:
             )
 
 section_2_title, section_2_undo = st.columns([5, 0.7], vertical_alignment="center")
-section_2_title.header("2 · Place parts into the framework")
+section_2_title.header("2 · Place parts into the Fishbone framework")
 placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
 undo_placement = section_2_undo.button(
     "Undo",
@@ -796,9 +796,9 @@ if undo_placement:
         st.toast("Undid the last part placement change", icon=":material/undo:")
     st.rerun()
 if parts.empty:
-    st.info("Add or import parts on the Parts page before building the fishbone.")
+    st.info("Add or import parts in the Parts Catalog before building the Fishbone framework.")
 elif active_sections.empty:
-    st.info("Create and activate a framework section before placing parts.")
+    st.info("Create and activate a Fishbone section before placing parts.")
 else:
     pending_use_ids = {
         str(part_id) for part_id in st.session_state.get(pending_use_key, [])
@@ -911,12 +911,12 @@ else:
                 type="tertiary",
                 on_click=open_pool_part,
                 key="fishbone_pool_edit_part",
-                help="Open this exact catalog part on the Parts page to edit its models, details, and photos.",
+                help="Open this exact catalog part in the Parts Catalog to edit its models, details, and photos.",
             ),
             "part_number": st.column_config.TextColumn("Part number", pinned=True),
             "description": st.column_config.TextColumn("Part Name", width="large"),
             "quantity": st.column_config.NumberColumn(
-                "Qty for this use", step=0.01, format="%g",
+                "Fishbone quantity", step=0.01, format="%g",
                 help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
             ),
             "model_applicability": None,
@@ -1025,7 +1025,7 @@ assignments_have_unsaved = table_has_unsaved_changes(
 refresh_part_placement = False
 selected_assignment_rows = assignments.iloc[0:0].copy()
 if assignments.empty:
-    st.caption("Assigned parts will appear here for ordering within each framework section.")
+    st.caption("Assigned parts will appear here for ordering within each Fishbone section.")
 else:
     full_assignment_editor = assignments.copy()
     full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_name_by_id)
@@ -1037,7 +1037,7 @@ else:
         key="fishbone_assignment_filters",
         dropdown_columns=["section", "revision", "model_applicability"],
         search_columns=["section", "part_number", "description", "use_description", "revision", "model_applicability", "notes"],
-        labels={"section": "Assembly section", "model_applicability": "Feature applicability"},
+        labels={"section": "Fishbone section", "model_applicability": "Feature applicability"},
         reset_widget_keys=[assignment_editor_key],
         multi_value_columns=["model_applicability"],
         universal_values={"model_applicability": ["All", "All models", ""]},
@@ -1094,10 +1094,10 @@ else:
                 type="tertiary",
                 on_click=open_assigned_part,
                 key="fishbone_assignment_edit_part",
-                help="Open this exact part on the Parts page to edit its catalog details and photos.",
+                help="Open this exact part in the Parts Catalog to edit its catalog details and photos.",
             ),
             "add_use": st.column_config.ButtonColumn(
-                "Another use",
+                "Another Fishbone use",
                 pinned=True,
                 type="tertiary",
                 on_click=add_assigned_part_use,
@@ -1105,7 +1105,7 @@ else:
                 help="Return this catalog part to Section 2 so its additional use can be placed deliberately.",
             ),
             "section": st.column_config.SelectboxColumn(
-                "Assembly section",
+                "Fishbone section",
                 options=active_sections["name"].astype(str).tolist(),
                 required=True,
                 pinned=True,
@@ -1119,7 +1119,7 @@ else:
                 width="large",
                 help="What this occurrence does or where it is installed.",
             ),
-            "quantity": st.column_config.NumberColumn("Qty", step=0.01, format="%g"),
+            "quantity": st.column_config.NumberColumn("Fishbone quantity", step=0.01, format="%g"),
             "model_applicability": st.column_config.TextColumn("Feature applicability", width="medium"),
             "notes": st.column_config.TextColumn("IE notes", width="large"),
             "updated_at": None,
@@ -1160,13 +1160,13 @@ else:
             )
             stage_native_delete_confirmation(assignment_editor_key)
 
-    @st.dialog("Delete selected fishbone uses?", dismissible=False)
+    @st.dialog("Delete selected Fishbone uses?", dismissible=False)
     def confirm_assignment_delete() -> None:
         pending_key = f"fishbone_assignments_pending_delete_{project_id}"
         pending_ids = st.session_state.get(pending_key, [])
         assembly_impact = fishbone_assignment_assembly_impact(project_id, pending_ids)
         st.warning(
-            f"Delete {len(pending_ids)} selected Fishbone use(s)? Master Parts records and other "
+            f"Delete {len(pending_ids)} selected Fishbone use(s)? Parts Catalog records and other "
             "uses will remain."
         )
         if not assembly_impact.empty:
@@ -1181,7 +1181,7 @@ else:
             request_table_editor_reset(assignment_editor_key)
             st.rerun()
         if actions.button(
-            "Delete uses",
+            "Delete Fishbone uses",
             type="primary",
             icon=":material/delete:",
             key=f"destructive_confirm_fishbone_assignment_delete_{project_id}",
@@ -1215,7 +1215,7 @@ else:
         confirm_assignment_delete()
 
     st.caption(
-        "Each row is one use of a catalog part. Edit its location, Qty, section, or order, then select Save & Refresh below the table. "
+        "Each row is one use of a catalog part. Edit its location, Fishbone quantity, section, or order, then select Save & Refresh below the table. "
         "Another use stages the part in Section 2 instead of creating a duplicate here."
     )
     assignments_to_save = merge_filtered_edits(
@@ -1306,7 +1306,7 @@ with st.expander("History", icon=":material/history:"):
             project_id, "Fishbone part assignments", limit=50
         )
         if uses_history.empty:
-            st.caption("No Fishbone-use history has been recorded yet.")
+            st.caption("No Fishbone use history has been recorded yet.")
         else:
             selectable_dataframe(
                 uses_history.drop(columns=["details"], errors="ignore"),

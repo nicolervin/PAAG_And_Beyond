@@ -29,7 +29,7 @@ from utils.table_ui import selectable_dataframe
 
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
-page_title_with_scope("Import and export", scope="project")
+page_title_with_scope("Import PITS and export", scope="project")
 st.caption("Start from a draft BOM and publish a stable, tabular snapshot for Excel or Lucid data linking.")
 if not project_id:
     st.stop()

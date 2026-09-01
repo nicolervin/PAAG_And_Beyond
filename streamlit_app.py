@@ -54,10 +54,10 @@ st.session_state.setdefault("scenario_id", None)
 pages = {
     "Project": [
         st.Page("app_pages/overview.py", title="Overview", icon=":material/dashboard:"),
-        st.Page("app_pages/concerns.py", title="Questions & concerns", icon=":material/forum:"),
+        st.Page("app_pages/concerns.py", title="Questions and concerns", icon=":material/forum:"),
     ],
     "Product structure": [
-        st.Page("app_pages/exchange.py", title="Import PITS & export", icon=":material/sync_alt:"),
+        st.Page("app_pages/exchange.py", title="Import PITS and export", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
         st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
         st.Page("app_pages/assemblies.py", title="Assemblies", icon=":material/account_tree:"),

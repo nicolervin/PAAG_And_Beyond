@@ -83,7 +83,7 @@ page_title_with_scope(
     "Yamazumi", scope="scenario", scenario_name=scenario["name"]
 )
 st.caption(
-    "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating the Process Plan."
+    "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating Process at a Glance."
 )
 
 has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
@@ -180,7 +180,7 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
 
 areas = yamazumi_areas(project_id, scenario_id)
 if fishbone_sections.empty and areas.empty:
-    st.info("Build an active Fishbone section first, or import a Yamazumi workbook to create an unlinked balancing area.")
+    st.info("Build an active Fishbone section first, or import a Yamazumi workbook to create an unlinked Yamazumi area.")
     st.stop()
 
 if not fishbone_sections.empty:
@@ -188,7 +188,7 @@ if not fishbone_sections.empty:
     if link_status["needs_sync"] and st.button(
         "Create Yamazumi areas from Fishbone",
         icon=":material/account_tree:",
-        help="Creates or repairs one linked balancing area for every active Fishbone section, including subassemblies with no assigned parts.",
+        help="Creates or repairs one linked Yamazumi area for every active Fishbone section, including subassemblies with no assigned parts.",
     ):
         try:
             summary = sync_yamazumi_areas_from_fishbone(project_id, scenario_id)
@@ -226,7 +226,7 @@ for _, row in areas.iterrows():
         else f"{row['name']} · Unlinked"
     )
 area_id = st.selectbox(
-    "Balancing area / Fishbone spine",
+    "Yamazumi area",
     options=list(area_labels),
     format_func=lambda value: area_labels[value],
     key=area_selector_key,
@@ -256,7 +256,7 @@ def confirm_yamazumi_reset() -> None:
         st.warning(
             f"This will permanently remove the Yamazumi area **{area['name']}**, including all of its pitches, work elements, takt time, and pending IE review items."
         )
-    st.caption("Fishbone sections and existing Process Plan records will not be deleted or changed.")
+    st.caption("Fishbone sections and existing Process at a Glance records will not be deleted or changed.")
     confirmation = st.text_input(
         "Type CLEAR to confirm",
         key="yamazumi_reset_confirmation",
@@ -2017,9 +2017,95 @@ elif st.session_state.get(element_delete_key):
 
 
 with st.expander("Yamazumi history", icon=":material/history:"):
-    region_history_tab, flag_history_tab = st.tabs(
-        ["Work regions", "Element flags"]
+    (
+        yamazumi_history_tab,
+        pitch_history_tab,
+        element_history_tab,
+        variant_history_tab,
+        region_history_tab,
+        flag_history_tab,
+    ) = st.tabs(
+        [
+            "Yamazumi actions",
+            "Pitches",
+            "Work elements",
+            "Variants",
+            "Work regions",
+            "Element flags",
+        ]
     )
+    with yamazumi_history_tab:
+        yamazumi_history = audit_history(project_id, "Yamazumi", limit=50)
+        if yamazumi_history.empty:
+            st.caption("No Yamazumi action history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                yamazumi_history.drop(columns=["details"], errors="ignore"),
+                key=f"yamazumi_action_history_{project_id}_{scenario_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with pitch_history_tab:
+        pitch_history = audit_history(project_id, "Yamazumi pitches", limit=50)
+        if pitch_history.empty:
+            st.caption("No Yamazumi pitch history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                pitch_history.drop(columns=["details"], errors="ignore"),
+                key=f"yamazumi_pitch_history_{project_id}_{scenario_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with element_history_tab:
+        element_history = audit_history(project_id, "Yamazumi elements", limit=50)
+        if element_history.empty:
+            st.caption("No Yamazumi work-element history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                element_history.drop(columns=["details"], errors="ignore"),
+                key=f"yamazumi_element_history_{project_id}_{scenario_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with variant_history_tab:
+        variant_history = audit_history(project_id, "Yamazumi variants", limit=50)
+        if variant_history.empty:
+            st.caption("No Yamazumi variant history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                variant_history.drop(columns=["details"], errors="ignore"),
+                key=f"yamazumi_variant_history_{project_id}_{scenario_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
     with region_history_tab:
         region_history = audit_history(
             project_id, "Yamazumi work regions", limit=50
