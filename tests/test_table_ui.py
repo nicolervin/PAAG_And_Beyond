@@ -74,6 +74,16 @@ class DecimalNumberHelpersTests(unittest.TestCase):
         self.assertFalse(table_ui.decimal_values_equal(1.5, 1.5001))
 
 
+class PartNumberColorTests(unittest.TestCase):
+    def test_part_number_style_is_trimmed_deterministic_and_contrast_safe(self) -> None:
+        style = table_ui.part_number_cell_style("PN-100")
+        self.assertEqual(style, table_ui.part_number_cell_style("  PN-100  "))
+        self.assertIn("background-color: #", style)
+        self.assertIn("color: #17212B", style)
+        self.assertNotEqual(style, table_ui.part_number_cell_style("PN-101"))
+        self.assertEqual(table_ui.part_number_cell_style(""), "")
+
+
 class DropUntouchedRowsTests(unittest.TestCase):
     def test_empty_string_typed_frame_keeps_boolean_blank_mask(self) -> None:
         dataframe = pd.DataFrame(

@@ -91,7 +91,7 @@ This is a documentation-only decision. Do not modify screen code as part of docu
 
 ## Universal Audit Trail Standard
 
-Every persisted change in this app — every save, delete, and bulk action, on every screen, with no exceptions — must write an entry to `audit_log`. This applies even to screens currently considered low-stakes, such as Questions and concerns, and screens that currently record nothing, including Overview, imports, normal Model definitions saves, Feature and Complexity-tree saves, and most Parts to fishbone changes.
+Every persisted change in this app — every save, delete, and bulk action, on every screen, with no exceptions — must write an entry to `audit_log`. This applies even to screens currently considered low-stakes, such as Questions and concerns, and screens that still have incomplete coverage, including Overview, imports, and most Parts to fishbone changes. Model definitions now records standardized Model information, Feature definitions, and Complexity tree saves and displays their History at the bottom of the page.
 
 Each `audit_log` entry must follow the existing pattern used by compliant screens such as Parts, Process at a Glance, and most of Yamazumi. It must record:
 
@@ -112,7 +112,7 @@ This is a documentation-only standard. Do not modify screen code as part of docu
 
 Every screen or tab in this app must display a **History** section at the bottom of the page showing that screen's own `audit_log` entries in a consistent, shared layout. Reuse the existing history-display pattern implemented on Parts Catalog and Process at a Glance.
 
-This standard pairs directly with the Universal Audit Trail Standard: if a screen logs events, it must also display them. No screen is exempt, including currently history-less screens such as Overview, Questions and concerns, Model definitions, Parts to fishbone, and Pin Map.
+This standard pairs directly with the Universal Audit Trail Standard: if a screen logs events, it must also display them. No screen is exempt, including currently history-less or incomplete screens such as Overview, Questions and concerns, Parts to fishbone, and Pin Map. Model definitions already displays its Model information, Feature definitions, and Complexity tree audit categories in one bottom History expander.
 
 The History section must show, at minimum:
 

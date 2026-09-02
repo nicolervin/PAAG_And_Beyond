@@ -180,6 +180,14 @@ if scenario:
             "currently viewed scenario, including its Yamazumi and Process at a Glance data. "
             "The newest saved branch becomes the shared scenario view across pages."
         )
+        st.info(
+            "When you switch scenarios, the app changes which Parts Catalog records are Active, "
+            "along with the Yamazumi plan, Process at a Glance plan, and derived Pin Map. Project "
+            "definitions, Model definitions, Parts Catalog master records, Assemblies, the "
+            "Fishbone framework and uses, imports, and Questions and concerns stay shared across "
+            "all scenarios, so edits to that shared data affect every scenario.",
+            icon=":material/info:",
+        )
         editable_table_heading("Scenario definitions")
 
         visible_scenarios = filter_table(

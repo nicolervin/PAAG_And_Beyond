@@ -46,6 +46,7 @@ class AssemblyCatalogTests(unittest.TestCase):
         parent_id: str | None = None,
         built_section_id: str | None = None,
         installed_section_id: str | None = None,
+        make_buy: str = "Make",
     ) -> None:
         store.save_assembly_catalog_rows(
             self.project_id,
@@ -54,6 +55,7 @@ class AssemblyCatalogTests(unittest.TestCase):
                     "id": assembly_id,
                     "assembly_number": number,
                     "name": f"{number} name",
+                    "make_buy": make_buy,
                     "parent_id": parent_id,
                     "built_section_id": built_section_id or self.built_section_id,
                     "installed_section_id": installed_section_id or self.installed_section_id,
@@ -94,9 +96,11 @@ class AssemblyCatalogTests(unittest.TestCase):
         self.save_assembly(assembly_id, "ASM-100")
 
         row = store.query(
-            "SELECT pits_reference, planning_reason FROM manufacturing_assemblies WHERE id=?",
+            """SELECT make_buy, pits_reference, planning_reason
+               FROM manufacturing_assemblies WHERE id=?""",
             (assembly_id,),
         )[0]
+        self.assertEqual(row["make_buy"], "Make")
         self.assertEqual(row["pits_reference"], "PITS-keep")
         self.assertEqual(row["planning_reason"], "Purchased complete")
         self.assertEqual(
@@ -106,6 +110,82 @@ class AssemblyCatalogTests(unittest.TestCase):
             )[0]["count"],
             1,
         )
+
+    def test_make_buy_preserves_legacy_blank_and_reports_deliberate_change(self) -> None:
+        legacy_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO manufacturing_assemblies
+                   (id, project_id, assembly_number, name, built_section_id,
+                    installed_section_id, created_at, updated_at)
+                   VALUES (?, ?, 'ASM-LEGACY', 'Legacy assembly', ?, ?, ?, ?)""",
+                (
+                    legacy_id,
+                    self.project_id,
+                    self.built_section_id,
+                    self.installed_section_id,
+                    store.now_iso(),
+                    store.now_iso(),
+                ),
+            )
+
+        legacy_row = {
+            "id": legacy_id,
+            "assembly_number": "ASM-LEGACY",
+            "name": "Legacy assembly",
+            "parent_id": None,
+            "built_section_id": self.built_section_id,
+            "installed_section_id": self.installed_section_id,
+            "active": True,
+            "notes": "",
+        }
+        unchanged = store.save_assembly_catalog_rows(self.project_id, [legacy_row])
+        self.assertEqual(unchanged["make_buy_changes"], [])
+        self.assertEqual(
+            store.query(
+                "SELECT make_buy FROM manufacturing_assemblies WHERE id=?", (legacy_id,)
+            )[0]["make_buy"],
+            "",
+        )
+
+        classified = store.save_assembly_catalog_rows(
+            self.project_id, [{**legacy_row, "make_buy": "Buy"}]
+        )
+        self.assertEqual(
+            classified["make_buy_changes"],
+            [
+                {
+                    "assembly_id": legacy_id,
+                    "assembly_number": "ASM-LEGACY",
+                    "old_value": "",
+                    "new_value": "Buy",
+                }
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be cleared"):
+            store.save_assembly_catalog_rows(self.project_id, [legacy_row])
+        with self.assertRaises(sqlite3.IntegrityError):
+            store.execute(
+                "UPDATE manufacturing_assemblies SET make_buy='Invalid' WHERE id=?",
+                (legacy_id,),
+            )
+
+    def test_new_assembly_requires_make_buy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires a Make / buy"):
+            store.save_assembly_catalog_rows(
+                self.project_id,
+                [
+                    {
+                        "id": str(uuid4()),
+                        "assembly_number": "ASM-NO-SOURCE",
+                        "name": "Missing classification",
+                        "built_section_id": self.built_section_id,
+                        "installed_section_id": self.installed_section_id,
+                        "active": True,
+                        "notes": "",
+                    }
+                ],
+            )
 
     def test_component_defaults_to_fishbone_quantity_and_built_change_relocates_use(self) -> None:
         first_id, second_id = str(uuid4()), str(uuid4())

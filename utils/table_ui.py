@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import colorsys
+import hashlib
 import math
 from dataclasses import dataclass
 from io import BytesIO
@@ -27,6 +29,22 @@ def format_clean_number(value, *, decimal_places: int = DECIMAL_COMPARISON_PLACE
     """Display whole and decimal quantities without trailing zeroes."""
     number = _rounded_decimal(value, decimal_places=decimal_places)
     return "" if number is None else f"{number:g}"
+
+
+def part_number_cell_style(value) -> str:
+    """Return a stable, contrast-safe cell style for one real part number."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return ""
+    part_number = str(value).strip()
+    if not part_number:
+        return ""
+    digest = hashlib.sha256(part_number.encode("utf-8")).digest()
+    hue = int.from_bytes(digest[:2], "big") / 65535
+    red, green, blue = colorsys.hls_to_rgb(hue, 0.84, 0.55)
+    background = "#{:02X}{:02X}{:02X}".format(
+        round(red * 255), round(green * 255), round(blue * 255)
+    )
+    return f"background-color: {background}; color: #17212B; font-weight: 600"
 
 
 def decimal_values_equal(
