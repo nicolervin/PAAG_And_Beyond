@@ -434,6 +434,9 @@ with st.expander(
                 f"- **{impact['yamazumi_area_count']}** Yamazumi area(s) will be re-pointed.\n"
                 f"- **{impact['process_link_count']}** Process at a Glance part requirement(s) will be re-pointed.\n"
                 f"- **{impact['assembly_reference_count']}** assembly Built/Installed reference(s) will be re-pointed.\n"
+                f"- **{impact['category_built_reference_count']}** assembly-grid category Built reference(s) will be re-pointed.\n"
+                f"- **{impact['category_installed_reference_count']}** assembly-grid category Installed reference(s) will be re-pointed.\n"
+                f"- **{impact['feature_visibility_preference_count']}** section-specific grid feature visibility preference(s) will be removed.\n"
                 f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections."
             )
             st.caption("Sections: " + ", ".join(impact["section_names"]))
@@ -450,12 +453,14 @@ with st.expander(
             if impact["requires_repointing"] and not replacement_ids:
                 st.error(
                     "Create another Fishbone section before deleting these sections. Yamazumi, "
-                    "Process at a Glance, and assembly references require a continuity target."
+                    "Process at a Glance, assembly, and assembly-grid category references require "
+                    "a continuity target."
                 )
             if impact["requires_repointing"] and replacement_ids:
                 st.info(
                     "Choose one existing Fishbone section to continue all affected Yamazumi, "
-                    "Process at a Glance, and assembly references under before deleting."
+                    "Process at a Glance, assembly, and assembly-grid category references under "
+                    "before deleting."
                 )
                 target_section_id = st.selectbox(
                     "Continue work under Fishbone section",
@@ -466,7 +471,9 @@ with st.expander(
                     key=f"fishbone_delete_target_{project_id}",
                     help=(
                         "This one target receives every affected Yamazumi, Process at a Glance, "
-                        "and assembly Built or Installed section reference."
+                        "assembly Built or Installed, and assembly-grid category Built or "
+                        "Installed section reference. Section-specific grid feature visibility "
+                        "preferences are removed instead of re-pointed."
                     ),
                 )
                 if target_section_id:

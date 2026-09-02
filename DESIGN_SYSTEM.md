@@ -20,6 +20,22 @@ This standard is **locked** and replaces prior inconsistent patterns, including 
 
 Retrofitting existing screens to this standard is a separate future task and is not part of this documentation update. Do not modify screen code as part of documenting this standard.
 
+### Approved Task 09 Components v2 exception
+
+The project-wide Task 09 assembly grid is the only approved exception to the native-toolbar entry-point requirement in items 1, 2, and 4 above and to the native row-selection checkbox requirement in the Universal Table Row Selection Standard below. Its integrated category, model, assembly, and nested mini-BOM layout requires a Components v2 grid that Streamlit's native table editor cannot represent. The component may therefore use its own selection and deletion controls for assembly-grid categories, direct model mappings, and nested mini-BOM component rows.
+
+This exception changes only where the deletion request begins. The component must never write to the database or remove a row by itself. It sends stable record identifiers to Python, which resets and reruns the draft as needed and opens the same non-dismissible, relationship-aware Streamlit confirmation required everywhere else. The dialog must list or summarize the selected records and disclose what will be deleted, preserved, or otherwise affected. Cancel preserves the records and clears the pending request. Confirmation validates the complete action, performs one atomic store-layer write, records Current editor history, resets the component, shows a toast, and reruns.
+
+For Task 09 specifically:
+
+- Clearing a direct model mapping deletes only the mapping row. The real `manufacturing_assemblies` record and its mini-BOM, rules, images, nesting, and uploaded files remain unchanged.
+- Deleting an assembly-grid category deletes its mapping rows but preserves every mapped assembly and all assembly-owned data.
+- Deleting a nested mini-BOM component removes only the selected `manufacturing_assembly_components` row; its Fishbone use and Parts Catalog record remain.
+- Reassigning a mapping cell from one assembly to another is an ordinary edit and does not require deletion confirmation.
+- Deleting a real assembly remains available only through the existing full Task 04 assembly-deletion workflow and is not part of this exception.
+
+All destructive confirmation widget keys still begin with `destructive_`. No other custom component or screen inherits this exception; every other table continues to require the native Streamlit deletion entry point.
+
 ## Universal Table Row Selection Standard
 
 Every data table in this app must show Streamlit's native row-selection checkboxes on the far left. The unlabeled checkbox in the upper-left corner must select or clear all rows currently visible in the table with one click.

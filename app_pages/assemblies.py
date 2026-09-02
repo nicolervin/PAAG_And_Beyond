@@ -5,6 +5,7 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 
+from utils.assembly_grid import assembly_grid as render_assembly_grid
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
@@ -13,18 +14,26 @@ from utils.store import (
     assembly_catalog_delete_impact,
     assembly_catalog_rows,
     assembly_feature_rules,
+    assembly_grid_categories,
+    assembly_grid_feature_visibility,
+    assembly_grid_model_mappings,
     assembly_images,
     assembly_model_applicability,
     assembly_sections,
     audit_history,
     complexity_features,
+    complexity_tree,
+    delete_assembly_grid_categories,
     delete_assembly_catalog_rows,
     delete_assembly_images,
     fishbone_part_assignments,
+    project_models,
     record_audit_event,
     save_assembly_bom_components,
     save_assembly_catalog_rows,
     save_assembly_feature_rules,
+    save_assembly_grid_model_mappings,
+    save_assembly_grid_section,
     set_assembly_image,
 )
 from utils.table_filters import (
@@ -49,10 +58,10 @@ from utils.table_ui import (
 
 
 project_id = st.session_state.get("project_id")
-page_title_with_scope("Assemblies", scope="project")
+page_title_with_scope("Assembly grid", scope="project")
 st.caption(
-    "Maintain real assembly numbers, their built and installed Fishbone sections, explicit "
-    "mini-BOMs, model rules, nesting, and images."
+    "Map named EBOM categories to real assembly numbers by official model, then open Details "
+    "for the full assembly editor."
 )
 if not project_id:
     st.stop()
@@ -68,6 +77,414 @@ section_name_by_id = (
     if not sections.empty else {}
 )
 section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
+
+
+def _component_event(component_key: str, event_name: str) -> dict:
+    state = st.session_state.get(component_key, {}) or {}
+    value = state.get(event_name) if hasattr(state, "get") else getattr(state, event_name, None)
+    return dict(value or {})
+
+
+if sections.empty:
+    st.info("Create at least one Fishbone section before building an assembly grid.")
+else:
+    selected_section_id = st.selectbox(
+        "Fishbone section",
+        sections["id"].astype(str).tolist(),
+        format_func=lambda value: section_name_by_id.get(value, value),
+        key=f"assembly_grid_section_{project_id}",
+        help="Each grid category is built in this Fishbone section.",
+    )
+    saved_categories = assembly_grid_categories(project_id, selected_section_id)
+    saved_section_mappings = assembly_grid_model_mappings(project_id, selected_section_id)
+    saved_all_mappings = assembly_grid_model_mappings(project_id)
+    models = complexity_tree(project_id)
+    model_definitions = {
+        str(row["id"]): dict(row)
+        for row in project_models(project_id).to_dict("records")
+    }
+    active_model_ids = [
+        str(model_id)
+        for model_id, row in model_definitions.items()
+        if bool(row.get("active", True))
+    ]
+    model_labels = {
+        model_id: (
+            f"{model_definitions[model_id].get('model_number', '')} · "
+            f"{model_definitions[model_id].get('display_name', '')}".rstrip(" ·")
+        )
+        for model_id in active_model_ids
+    }
+    visible_model_ids = st.multiselect(
+        "Visible official models",
+        active_model_ids,
+        default=active_model_ids,
+        format_func=lambda value: model_labels.get(value, value),
+        key=f"assembly_grid_visible_models_{project_id}_{selected_section_id}",
+        help="This affects display only. Hidden models and their saved mappings are preserved.",
+    )
+
+    features = complexity_features(project_id)
+    active_features = (
+        features.loc[features["active"].fillna(1).astype(bool)].copy()
+        if not features.empty else features
+    )
+    feature_preferences = assembly_grid_feature_visibility(
+        project_id, selected_section_id
+    )
+    preference_by_id = (
+        {
+            str(row["feature_id"]): bool(row["is_visible"])
+            for _, row in feature_preferences.iterrows()
+        }
+        if not feature_preferences.empty else {}
+    )
+    feature_label_by_id = {
+        str(row["id"]): f"{row['category']} · {row['name']}"
+        for _, row in active_features.iterrows()
+    }
+    default_visible_features = [
+        feature_id for feature_id in feature_label_by_id
+        if preference_by_id.get(feature_id, True)
+    ]
+    visible_feature_ids = st.multiselect(
+        "Visible feature headers",
+        list(feature_label_by_id),
+        default=default_visible_features,
+        format_func=lambda value: feature_label_by_id.get(value, value),
+        key=f"assembly_grid_visible_features_{project_id}_{selected_section_id}",
+        help="Only active features can appear. This display preference is saved per Fishbone section.",
+    )
+
+    value_by_model_feature = {}
+    if not models.empty:
+        for _, row in models.iterrows():
+            for feature_id in feature_label_by_id:
+                value_by_model_feature[(str(row["model_id"]), feature_id)] = row.get(feature_id)
+    component_cache: dict[str, list[dict]] = {}
+    for assembly_id in (
+        saved_section_mappings.get("assembly_id", pd.Series(dtype="string"))
+        .dropna().astype(str).unique().tolist()
+    ):
+        component_cache[assembly_id] = assembly_bom_components(
+            project_id, assembly_id
+        ).to_dict("records")
+    mapping_by_cell = {
+        (str(row["category_id"]), str(row["model_id"])): dict(row)
+        for _, row in saved_section_mappings.iterrows()
+    } if not saved_section_mappings.empty else {}
+    initial_grid_draft: list[dict] = []
+    for _, category in saved_categories.iterrows():
+        cells = {}
+        for model_id in active_model_ids:
+            mapping = mapping_by_cell.get((str(category["id"]), model_id), {})
+            assembly_number = str(mapping.get("assembly_number") or "")
+            root_number = str(category.get("root_number") or "")
+            follows_root = bool(assembly_number and assembly_number.startswith(root_number))
+            cells[model_id] = {
+                "mapping_id": str(mapping.get("id") or ""),
+                "assembly_id": str(mapping.get("assembly_id") or ""),
+                "assembly_number": assembly_number,
+                "mode": "suffix" if follows_root else "full",
+                "suffix": assembly_number[len(root_number):] if follows_root else "",
+                "components": component_cache.get(str(mapping.get("assembly_id") or ""), []),
+            }
+        initial_grid_draft.append(
+            {
+                "id": str(category["id"]),
+                "ebom_name": str(category["ebom_name"]),
+                "display_name": str(category["display_name"]),
+                "root_number": str(category["root_number"]),
+                "installed_section_id": str(category.get("installed_section_id") or ""),
+                "sequence": int(category.get("sequence") or 10),
+                "cells": cells,
+            }
+        )
+
+    grid_key = f"assembly_grid_component_{project_id}_{selected_section_id}"
+    pending_category_key = f"assembly_grid_pending_category_delete_{project_id}"
+    pending_mapping_key = f"assembly_grid_pending_mapping_clear_{project_id}"
+    pending_component_key = f"assembly_grid_pending_component_delete_{project_id}"
+
+    def grid_draft() -> list[dict]:
+        state = st.session_state.get(grid_key, {}) or {}
+        return list(state.get("draft", initial_grid_draft))
+
+    def set_grid_draft(rows: list[dict]) -> None:
+        state = st.session_state.get(grid_key, {}) or {}
+        state["draft"] = rows
+        st.session_state[grid_key] = state
+
+    def on_grid_draft_change() -> None:
+        return None
+
+    def on_grid_details_change() -> None:
+        event = _component_event(grid_key, "details")
+        if event.get("assembly_id"):
+            st.session_state[selected_assembly_key] = str(event["assembly_id"])
+
+    def on_grid_category_delete_change() -> None:
+        event = _component_event(grid_key, "delete_category")
+        if event:
+            st.session_state[pending_category_key] = event
+
+    def on_grid_mapping_clear_change() -> None:
+        event = _component_event(grid_key, "clear_mapping")
+        if event:
+            st.session_state[pending_mapping_key] = event
+
+    def on_grid_component_delete_change() -> None:
+        event = _component_event(grid_key, "delete_component")
+        if event:
+            st.session_state[pending_component_key] = event
+
+    @st.dialog("Delete assembly-grid category?", dismissible=False)
+    def confirm_grid_category_delete() -> None:
+        pending = dict(st.session_state.get(pending_category_key, {}))
+        category_id = str(pending.get("category_id") or "")
+        st.warning(
+            f"Delete category {pending.get('display_name') or 'Untitled category'} and all of "
+            "its model mappings? Every real assembly record, mini-BOM, feature rule, image, "
+            "nesting relationship, and uploaded file remains unchanged."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_grid_category_delete_{project_id}"):
+            st.session_state.pop(pending_category_key, None)
+            st.rerun()
+        if actions.button(
+            "Delete category", type="primary", icon=":material/delete:",
+            key=f"destructive_grid_category_delete_{project_id}",
+        ):
+            if category_id:
+                result = delete_assembly_grid_categories(
+                    project_id, selected_section_id, [category_id]
+                )
+                record_audit_event(
+                    project_id, "Assembly grid categories", "Delete category",
+                    result["deleted_count"], st.session_state.get("current_editor", ""), result,
+                )
+            else:
+                rows = grid_draft()
+                index = int(pending.get("category_index", -1))
+                if 0 <= index < len(rows):
+                    rows.pop(index)
+                    set_grid_draft(rows)
+            st.session_state.pop(pending_category_key, None)
+            st.session_state.pop(grid_key, None)
+            st.toast("Deleted assembly-grid category", icon=":material/delete:")
+            st.rerun()
+
+    @st.dialog("Clear model mapping?", dismissible=False)
+    def confirm_grid_mapping_clear() -> None:
+        pending = dict(st.session_state.get(pending_mapping_key, {}))
+        st.warning(
+            f"Clear the mapping to assembly {pending.get('assembly_number') or 'this assembly'}? "
+            "Only the model-to-assembly link is removed. The real assembly and all of its "
+            "mini-BOM, rules, images, nesting, and uploaded files remain unchanged."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_grid_mapping_clear_{project_id}"):
+            st.session_state.pop(pending_mapping_key, None)
+            st.rerun()
+        if actions.button(
+            "Clear mapping", type="primary", icon=":material/link_off:",
+            key=f"destructive_grid_mapping_clear_{project_id}",
+        ):
+            mapping_id = str(pending.get("mapping_id") or "")
+            if mapping_id:
+                retained = saved_all_mappings.loc[
+                    ~saved_all_mappings["id"].astype(str).eq(mapping_id)
+                ].to_dict("records")
+                result = save_assembly_grid_model_mappings(project_id, retained)
+                record_audit_event(
+                    project_id, "Assembly grid mappings", "Clear mapping", 1,
+                    st.session_state.get("current_editor", ""),
+                    {"mapping_id": mapping_id, "assembly_id": pending.get("assembly_id"),
+                     "remaining_count": result["count"]},
+                )
+            st.session_state.pop(pending_mapping_key, None)
+            st.session_state.pop(grid_key, None)
+            st.toast("Cleared model mapping; assembly preserved", icon=":material/link_off:")
+            st.rerun()
+
+    @st.dialog("Delete mini-BOM component?", dismissible=False)
+    def confirm_grid_component_delete() -> None:
+        pending = dict(st.session_state.get(pending_component_key, {}))
+        st.warning(
+            f"Delete component {pending.get('part_number') or ''} from this assembly mini-BOM? "
+            "The Fishbone use and Parts Catalog record remain unchanged."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_grid_component_delete_{project_id}"):
+            st.session_state.pop(pending_component_key, None)
+            st.rerun()
+        if actions.button(
+            "Delete component", type="primary", icon=":material/delete:",
+            key=f"destructive_grid_component_delete_{project_id}",
+        ):
+            assembly_id = str(pending.get("assembly_id") or "")
+            component_id = str(pending.get("component_id") or "")
+            remaining = assembly_bom_components(project_id, assembly_id)
+            remaining = remaining.loc[~remaining["id"].astype(str).eq(component_id)]
+            result = save_assembly_bom_components(
+                project_id, assembly_id, remaining.to_dict("records")
+            )
+            record_audit_event(
+                project_id, "Assembly mini-BOM", "Delete components", 1,
+                st.session_state.get("current_editor", ""),
+                {"assembly_id": assembly_id, "component_id": component_id,
+                 "remaining_count": result["count"]},
+            )
+            st.session_state.pop(pending_component_key, None)
+            st.session_state.pop(grid_key, None)
+            st.toast("Deleted mini-BOM component", icon=":material/delete:")
+            st.rerun()
+
+    if st.session_state.get(pending_category_key):
+        confirm_grid_category_delete()
+    if st.session_state.get(pending_mapping_key):
+        confirm_grid_mapping_clear()
+    if st.session_state.get(pending_component_key):
+        confirm_grid_component_delete()
+
+    model_payload = [
+        {
+            "id": model_id,
+            "model_number": model_definitions[model_id].get("model_number", ""),
+            "display_name": model_definitions[model_id].get("display_name", ""),
+            "features": {
+                feature_id: value_by_model_feature.get((model_id, feature_id))
+                for feature_id in visible_feature_ids
+            },
+        }
+        for model_id in visible_model_ids
+    ]
+    render_assembly_grid(
+        key=grid_key,
+        draft=initial_grid_draft,
+        models=model_payload,
+        features=[
+            {"id": feature_id, "label": feature_label_by_id[feature_id]}
+            for feature_id in visible_feature_ids
+        ],
+        sections=[
+            {"id": str(row["id"]), "name": str(row["name"])}
+            for _, row in sections.iterrows()
+        ],
+        on_draft_change=on_grid_draft_change,
+        on_details_change=on_grid_details_change,
+        on_delete_category_change=on_grid_category_delete_change,
+        on_clear_mapping_change=on_grid_mapping_clear_change,
+        on_delete_component_change=on_grid_component_delete_change,
+    )
+    current_draft = grid_draft()
+    draft_dirty = json.dumps(current_draft, sort_keys=True, default=str) != json.dumps(
+        initial_grid_draft, sort_keys=True, default=str
+    )
+    visibility_dirty = set(visible_feature_ids) != set(default_visible_features)
+    grid_actions = editable_table_footer(
+        editor_key=f"assembly_grid_footer_state_{project_id}",
+        key_prefix=f"assembly_grid_{project_id}_{selected_section_id}",
+        additional_unsaved_changes=draft_dirty or visibility_dirty,
+    )
+    if grid_actions.undo:
+        st.session_state.pop(grid_key, None)
+        st.session_state[
+            f"assembly_grid_visible_features_{project_id}_{selected_section_id}"
+        ] = default_visible_features
+        st.toast("Discarded unsaved assembly-grid changes", icon=":material/undo:")
+        st.rerun()
+    if grid_actions.save_and_refresh:
+        try:
+            prepared_categories = []
+            category_id_map = {}
+            for index, category in enumerate(current_draft):
+                category_id = str(category.get("id") or uuid4())
+                category_id_map[index] = category_id
+                prepared_categories.append({**category, "id": category_id})
+            complete_mappings = (
+                saved_all_mappings.loc[
+                    ~saved_all_mappings["section_id"].astype(str).eq(selected_section_id)
+                ].to_dict("records")
+                if not saved_all_mappings.empty else []
+            )
+            if not saved_section_mappings.empty:
+                complete_mappings.extend(
+                    saved_section_mappings.loc[
+                        ~saved_section_mappings["model_id"].astype(str).isin(active_model_ids)
+                    ].to_dict("records")
+                )
+            component_rows_by_assembly = {}
+            for index, category in enumerate(prepared_categories):
+                for model_id, cell in dict(category.get("cells") or {}).items():
+                    assembly_number = str(cell.get("assembly_number") or "").strip()
+                    if not assembly_number:
+                        continue
+                    saved_cell = mapping_by_cell.get((str(category.get("id") or ""), str(model_id)), {})
+                    assembly_id = str(cell.get("assembly_id") or "")
+                    if assembly_number.casefold() != str(saved_cell.get("assembly_number") or "").casefold():
+                        assembly_id = ""
+                    complete_mappings.append(
+                        {
+                            "id": str(cell.get("mapping_id") or ""),
+                            "category_id": category_id_map[index],
+                            "model_id": str(model_id),
+                            "assembly_id": assembly_id,
+                            "assembly_number": assembly_number,
+                        }
+                    )
+                    if assembly_id and cell.get("components") is not None:
+                        component_rows_by_assembly[assembly_id] = list(cell["components"])
+            result = save_assembly_grid_section(
+                project_id,
+                selected_section_id,
+                [{key: value for key, value in category.items() if key != "cells"}
+                 for category in prepared_categories],
+                complete_mappings,
+                [
+                    {"feature_id": feature_id, "is_visible": feature_id in visible_feature_ids}
+                    for feature_id in feature_label_by_id
+                ],
+                component_rows_by_assembly,
+            )
+            editor = st.session_state.get("current_editor", "")
+            record_audit_event(
+                project_id, "Assembly grid categories", "Save & Refresh",
+                result["categories"]["count"], editor,
+                {"section_id": selected_section_id,
+                 "installed_section_sync_changes": result["categories"]["installed_section_sync_changes"]},
+            )
+            record_audit_event(
+                project_id, "Assembly grid mappings", "Save & Refresh",
+                result["mappings"]["count"], editor,
+                {"section_id": selected_section_id,
+                 "created_assemblies": result["mappings"]["created_assemblies"]},
+            )
+            record_audit_event(
+                project_id, "Assembly grid feature visibility", "Save & Refresh",
+                result["feature_visibility"]["count"], editor,
+                {"section_id": selected_section_id,
+                 "hidden_feature_ids": result["feature_visibility"]["hidden_feature_ids"]},
+            )
+            if result["components"]:
+                record_audit_event(
+                    project_id, "Assembly mini-BOM", "Grid Save & Refresh",
+                    sum(item["count"] for item in result["components"].values()), editor,
+                    {"section_id": selected_section_id,
+                     "assembly_ids": list(result["components"])},
+                )
+            st.session_state.pop(grid_key, None)
+            st.toast("Saved and refreshed the assembly grid", icon=":material/check_circle:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+st.divider()
+st.caption(
+    "The full Task 04 catalog remains below for assembly metadata, nesting, deletion, "
+    "mini-BOM additions, feature rules, and images. Grid-mapped Built and Installed sections "
+    "are controlled by their category."
+)
 
 
 def empty_catalog_rows() -> pd.DataFrame:
@@ -107,7 +524,7 @@ def save_catalog_records(records: list[dict]) -> None:
     st.rerun()
 
 
-editable_table_heading("Assembly catalog")
+editable_table_heading("Full assembly catalog and deletion")
 st.caption(
     "Built section is where component work occurs. Installed section is where the completed "
     "assembly will eventually be available to downstream Process planning."
@@ -135,7 +552,7 @@ else:
     ).map(section_name_by_id)
     catalog_source["installed_section"] = catalog_source.get(
         "installed_section_id", pd.Series(dtype="string")
-    ).map(section_name_by_id)
+    ).map(section_name_by_id).fillna("Not assigned")
     catalog_source["parent_assembly"] = catalog_source.get(
         "parent_id", pd.Series(dtype="string")
     ).map(assembly_number_by_id).fillna("No parent")
@@ -223,9 +640,12 @@ else:
             ),
             "installed_section": st.column_config.SelectboxColumn(
                 "Installed section",
-                options=list(section_id_by_name),
+                options=["Not assigned", *list(section_id_by_name)],
                 required=True,
-                help="The Fishbone section where the completed assembly is installed.",
+                help=(
+                    "The Fishbone section where the completed assembly is installed. A mapped "
+                    "assembly may show Not assigned until its grid category is assigned."
+                ),
             ),
             "parent_assembly": st.column_config.SelectboxColumn(
                 "Parent assembly", options=["No parent", *list(assembly_id_by_number)]
@@ -271,6 +691,7 @@ else:
             f"- **{impact['rule_count']}** feature-rule row(s)\n"
             f"- **{impact['primary_image_count']}** primary image(s)\n"
             f"- **{impact['supplemental_image_count']}** supplemental image row(s)\n"
+            f"- **{impact['grid_mapping_count']}** direct assembly-grid mapping(s)\n"
             f"- **{impact['image_file_count']}** owned uploaded image file(s)\n"
             f"- **{impact['policy_count']}** dormant scenario-policy row(s)\n"
             f"- **{impact['material_option_count']}** dormant material-option row(s)\n"

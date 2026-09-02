@@ -39,6 +39,35 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 }
             ],
         )
+        model_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO project_models
+                   (id, project_id, model_number, source_payload, active, updated_at)
+                   VALUES (?, ?, 'SMOKE-MODEL', '{}', 1, ?)""",
+                (model_id, self.project_id, store.now_iso()),
+            )
+        category_id = str(uuid4())
+        store.save_assembly_grid_categories(
+            self.project_id,
+            section_id,
+            [{
+                "id": category_id,
+                "ebom_name": "Smoke EBOM category",
+                "display_name": "Smoke category",
+                "root_number": "ASM-",
+                "installed_section_id": section_id,
+                "sequence": 10,
+            }],
+        )
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [{
+                "category_id": category_id,
+                "model_id": model_id,
+                "assembly_id": assembly_id,
+            }],
+        )
         store.record_audit_event(
             self.project_id,
             "Assemblies catalog",
@@ -97,7 +126,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
 
     def test_assemblies_smoke(self) -> None:
         app = self.run_page("app_pages/assemblies.py")
-        self.assertTrue(any(title.value == "Assemblies" for title in app.title))
+        self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
 
 
 if __name__ == "__main__":
