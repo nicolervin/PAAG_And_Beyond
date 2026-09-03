@@ -1322,18 +1322,22 @@ def save_assembly_grid_categories(
             category_id = _catalog_text(raw.get("id")) or str(uuid4())
             ebom_name = _catalog_text(raw.get("ebom_name"))
             display_name = _catalog_text(raw.get("display_name"))
-            root_number = _catalog_text(raw.get("root_number"))
             installed_section_id = _catalog_text(raw.get("installed_section_id")) or None
             if category_id in seen_ids:
                 raise ValueError("The assembly grid contains a duplicate category identifier.")
-            if not ebom_name or not display_name or not root_number:
+            if not ebom_name or not display_name:
                 raise ValueError(
-                    "Every assembly-grid category requires an Official EBOM category name, "
-                    "Display name, and Root number."
+                    "Every assembly-grid category requires an Official EBOM category name "
+                    "and Display name."
                 )
             if installed_section_id and installed_section_id not in valid_installed:
                 raise ValueError("Choose an existing Installed section from this project.")
             previous = current.get(category_id)
+            root_number = (
+                _catalog_text(raw.get("root_number"))
+                if "root_number" in raw
+                else _catalog_text((previous or {}).get("root_number"))
+            )
             if previous and _catalog_text(previous.get("section_id")) != section_id:
                 raise ValueError(
                     "A category can be moved to another Fishbone section only through the "
@@ -1472,6 +1476,64 @@ def save_assembly_grid_model_mappings(
                 (project_id,),
             ).fetchall()
         }
+        original_numbers = {
+            assembly_id: _catalog_text(row["assembly_number"])
+            for assembly_id, row in assemblies.items()
+        }
+        rename_candidates: dict[str, dict[str, str]] = {}
+        for raw in records:
+            assembly_id = _catalog_text(raw.get("assembly_id"))
+            requested_number = _catalog_text(raw.get("assembly_number"))
+            current_number = original_numbers.get(assembly_id, "")
+            if (
+                assembly_id in assemblies
+                and requested_number
+                and requested_number != current_number
+            ):
+                rename_candidates.setdefault(assembly_id, {})[
+                    requested_number.casefold()
+                ] = requested_number
+
+        planned_renames: dict[str, str] = {}
+        for assembly_id, candidates in rename_candidates.items():
+            changed_numbers = {
+                key: value
+                for key, value in candidates.items()
+                if key != original_numbers[assembly_id].casefold()
+            }
+            if len(changed_numbers) > 1:
+                raise ValueError(
+                    f"Assembly {original_numbers[assembly_id]} has conflicting Part number "
+                    "edits. Use one Part number for every model mapped to that assembly."
+                )
+            if changed_numbers:
+                planned_renames[assembly_id] = next(iter(changed_numbers.values()))
+            elif candidates:
+                # Preserve deliberate capitalization-only corrections.
+                planned_renames[assembly_id] = next(iter(candidates.values()))
+
+        final_number_owners: dict[str, str] = {}
+        renamed_assemblies: list[dict] = []
+        for assembly_id, assembly in assemblies.items():
+            old_number = original_numbers[assembly_id]
+            final_number = planned_renames.get(assembly_id, old_number)
+            owner = final_number_owners.get(final_number.casefold())
+            if owner and owner != assembly_id:
+                raise ValueError(
+                    f"Part number {final_number} already belongs to another assembly. "
+                    "Choose a unique Part number."
+                )
+            final_number_owners[final_number.casefold()] = assembly_id
+            if final_number != old_number:
+                assembly["assembly_number"] = final_number
+                renamed_assemblies.append(
+                    {
+                        "assembly_id": assembly_id,
+                        "old_assembly_number": old_number,
+                        "assembly_number": final_number,
+                    }
+                )
+        assembly_by_number = dict(final_number_owners)
         normalized: list[dict] = []
         seen_ids: set[str] = set()
         seen_cells: set[tuple[str, str]] = set()
@@ -1561,6 +1623,16 @@ def save_assembly_grid_model_mappings(
                     timestamp, timestamp,
                 ),
             )
+        for assembly in renamed_assemblies:
+            conn.execute(
+                """UPDATE manufacturing_assemblies
+                   SET assembly_number=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    assembly["assembly_number"], timestamp,
+                    assembly["assembly_id"], project_id,
+                ),
+            )
         conn.execute(
             "DELETE FROM assembly_grid_model_mappings WHERE project_id=?", (project_id,)
         )
@@ -1586,6 +1658,7 @@ def save_assembly_grid_model_mappings(
             {"assembly_id": row["id"], "assembly_number": row["assembly_number"]}
             for row in created_assemblies
         ],
+        "renamed_assemblies": renamed_assemblies,
         "updated_at": timestamp,
     }
 
@@ -2171,41 +2244,24 @@ def save_assembly_feature_rules(project_id: str, assembly_id: str, rows) -> dict
 
 
 def assembly_model_applicability(project_id: str, assembly_id: str) -> dict:
-    rules = assembly_feature_rules(project_id, assembly_id)
+    """Return active official models explicitly paired to an assembly in the grid."""
     models = project_models(project_id)
     if not models.empty:
         models = models.loc[models["active"].fillna(1).astype(bool)].copy()
-    if rules.empty:
-        return {"stale": False, "summary": "All models", "models": models}
-    if bool(rules["stale"].any()):
-        return {
-            "stale": True,
-            "summary": "No models while a rule references a removed feature or choice",
-            "models": models.iloc[0:0].copy(),
-        }
-    values = pd.DataFrame(query(
-        "SELECT model_id, feature_id, value FROM model_feature_values WHERE project_id=?",
-        (project_id,),
-    ))
-    required = {
-        str(row["feature_id"]): str(row["value"]) for _, row in rules.iterrows()
-    }
-    matched_ids: list[str] = []
-    for _, model in models.iterrows():
-        model_values = (
-            values.loc[values["model_id"].astype(str).eq(str(model["id"]))]
-            if not values.empty else values
+    mapped_ids = {
+        str(row["model_id"])
+        for row in query(
+            """SELECT DISTINCT model_id FROM assembly_grid_model_mappings
+               WHERE project_id=? AND assembly_id=?""",
+            (project_id, assembly_id),
         )
-        by_feature = {
-            str(row["feature_id"]): str(row["value"]) for _, row in model_values.iterrows()
-        }
-        if all(by_feature.get(feature_id) == value for feature_id, value in required.items()):
-            matched_ids.append(str(model["id"]))
-    matching = models.loc[models["id"].astype(str).isin(matched_ids)].copy()
-    summary = " AND ".join(
-        f"{row['feature_name']} = {row['value']}" for _, row in rules.iterrows()
-    )
-    return {"stale": False, "summary": summary, "models": matching}
+    }
+    matching = models.loc[models["id"].astype(str).isin(mapped_ids)].copy()
+    return {
+        "stale": False,
+        "summary": "Mapped in Assembly grid" if mapped_ids else "No mapped models",
+        "models": matching,
+    }
 
 
 def assembly_images(project_id: str, assembly_id: str) -> list[dict]:
@@ -2639,7 +2695,7 @@ def reset_manufacturing_assembly_catalog(
             conn.execute(
                 """INSERT INTO audit_log
                    (id, project_id, table_name, action, row_count, editor_name, details, created_at)
-                   VALUES (?, ?, 'Assemblies catalog', 'One-time reset', ?, ?, ?, ?)""",
+                   VALUES (?, ?, 'Assemblies catalog', 'Prototype data reset', ?, ?, ?, ?)""",
                 (
                     str(uuid4()),
                     str(project["project_id"]),

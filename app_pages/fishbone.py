@@ -270,7 +270,7 @@ with st.expander(
             ":material/arrow_downward: Move later",
             ":material/last_page: Move to end",
         ]] * len(framework)
-        framework["assemblies_action"] = ":material/list: Assemblies"
+        framework["assemblies_action"] = ":material/grid_on: Assembly grid"
         full_framework = framework.copy()
         framework = filter_table(
             full_framework,
@@ -363,7 +363,7 @@ with st.expander(
                     key="framework_order_action",
                 ),
                 "assemblies_action": st.column_config.ButtonColumn(
-                    "Assemblies",
+                    "Assembly grid",
                     pinned=True,
                     type="tertiary",
                     on_click=show_framework_assemblies,
@@ -543,7 +543,7 @@ with st.expander(
                 )
                 st.caption(
                     "Project-wide assembly numbers related to this selected Fishbone section. "
-                    "Open Details for full editing on the Assemblies page."
+                    "Open Details for full editing on the Assembly grid page."
                 )
                 if section_assemblies.empty:
                     st.caption("No assemblies are built or installed in this section.")

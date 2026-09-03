@@ -240,6 +240,141 @@ class AssemblyGridStoreTests(unittest.TestCase):
             1,
         )
 
+    def test_editing_mapped_part_number_renames_assembly_and_preserves_mini_bom(self) -> None:
+        category_id, _ = self._save_categories()
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [
+                {
+                    "category_id": category_id,
+                    "model_id": self.model_ids[0],
+                    "assembly_number": "ASM-BEFORE",
+                },
+                {
+                    "category_id": category_id,
+                    "model_id": self.model_ids[1],
+                    "assembly_number": "ASM-BEFORE",
+                },
+            ],
+        )
+        mappings = store.assembly_grid_model_mappings(self.project_id).set_index("model_id")
+        first_mapping = mappings.loc[self.model_ids[0]]
+        second_mapping = mappings.loc[self.model_ids[1]]
+        assembly_id = str(first_mapping["assembly_id"])
+        part_id = str(
+            store.project_table("parts", self.project_id, "part_number").iloc[0]["id"]
+        )
+        store.assign_parts_to_section(
+            self.project_id,
+            [part_id],
+            self.built_section_id,
+            allow_additional_use=True,
+            quantities_by_part={part_id: 2.5},
+        )
+        assignment = store.fishbone_part_assignments(self.project_id).loc[
+            lambda rows: rows["section_id"].astype(str).eq(self.built_section_id)
+            & rows["part_id"].astype(str).eq(part_id)
+        ].iloc[-1]
+        component_id = str(uuid4())
+        store.save_assembly_bom_components(
+            self.project_id,
+            assembly_id,
+            [{
+                "id": component_id,
+                "fishbone_assignment_id": str(assignment["id"]),
+                "quantity": 1.75,
+            }],
+        )
+
+        result = store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [
+                {
+                    "id": str(first_mapping["id"]),
+                    "category_id": category_id,
+                    "model_id": self.model_ids[0],
+                    "assembly_id": assembly_id,
+                    "assembly_number": "ASM-AFTER",
+                },
+                {
+                    "id": str(second_mapping["id"]),
+                    "category_id": category_id,
+                    "model_id": self.model_ids[1],
+                    "assembly_id": assembly_id,
+                    # This is the unchanged value from the other rendered cell.
+                    "assembly_number": "ASM-BEFORE",
+                },
+            ],
+        )
+
+        self.assertEqual(result["created_assemblies"], [])
+        self.assertEqual(
+            result["renamed_assemblies"],
+            [{
+                "assembly_id": assembly_id,
+                "old_assembly_number": "ASM-BEFORE",
+                "assembly_number": "ASM-AFTER",
+            }],
+        )
+        assemblies = store.assembly_catalog_rows(self.project_id)
+        self.assertEqual(len(assemblies), 1)
+        self.assertEqual(str(assemblies.iloc[0]["id"]), assembly_id)
+        self.assertEqual(str(assemblies.iloc[0]["assembly_number"]), "ASM-AFTER")
+        saved_mappings = store.assembly_grid_model_mappings(self.project_id)
+        self.assertEqual(len(saved_mappings), 2)
+        self.assertEqual(set(saved_mappings["assembly_id"].astype(str)), {assembly_id})
+        self.assertEqual(set(saved_mappings["assembly_number"]), {"ASM-AFTER"})
+        components = store.assembly_bom_components(self.project_id, assembly_id)
+        self.assertEqual(str(components.iloc[0]["id"]), component_id)
+        self.assertEqual(float(components.iloc[0]["quantity"]), 1.75)
+
+    def test_mapped_part_number_rename_rejects_another_assembly_number(self) -> None:
+        category_id, _ = self._save_categories()
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [
+                {
+                    "category_id": category_id,
+                    "model_id": self.model_ids[0],
+                    "assembly_number": "ASM-FIRST",
+                },
+                {
+                    "category_id": category_id,
+                    "model_id": self.model_ids[1],
+                    "assembly_number": "ASM-SECOND",
+                },
+            ],
+        )
+        mappings = store.assembly_grid_model_mappings(self.project_id).set_index("model_id")
+        first = mappings.loc[self.model_ids[0]]
+        second = mappings.loc[self.model_ids[1]]
+
+        with self.assertRaisesRegex(ValueError, "already belongs to another assembly"):
+            store.save_assembly_grid_model_mappings(
+                self.project_id,
+                [
+                    {
+                        "id": str(first["id"]),
+                        "category_id": category_id,
+                        "model_id": self.model_ids[0],
+                        "assembly_id": str(first["assembly_id"]),
+                        "assembly_number": "ASM-SECOND",
+                    },
+                    {
+                        "id": str(second["id"]),
+                        "category_id": category_id,
+                        "model_id": self.model_ids[1],
+                        "assembly_id": str(second["assembly_id"]),
+                        "assembly_number": "ASM-SECOND",
+                    },
+                ],
+            )
+
+        self.assertEqual(
+            set(store.assembly_catalog_rows(self.project_id)["assembly_number"]),
+            {"ASM-FIRST", "ASM-SECOND"},
+        )
+
     def test_feature_visibility_stores_only_hidden_preferences(self) -> None:
         features = store.complexity_features(self.project_id)
         if features.empty:
@@ -307,9 +442,64 @@ class AssemblyGridStoreTests(unittest.TestCase):
                ORDER BY created_at DESC LIMIT 1""",
             (self.project_id,),
         )[0]
-        self.assertEqual(event["action"], "One-time reset")
+        self.assertEqual(event["action"], "Prototype data reset")
         self.assertEqual(event["row_count"], 1)
         self.assertEqual(event["editor_name"], "Nicole Ervin")
+
+    def test_complete_section_save_rolls_back_every_table_on_validation_failure(self) -> None:
+        category_id, _ = self._save_categories()
+        with self.assertRaisesRegex(ValueError, "current official model"):
+            store.save_assembly_grid_section(
+                self.project_id,
+                self.built_section_id,
+                [{
+                    "id": category_id,
+                    "ebom_name": "FASCIA_EBOM",
+                    "display_name": "Should roll back",
+                    "root_number": "290D5251",
+                    "installed_section_id": self.installed_section_id,
+                    "sequence": 10,
+                }],
+                [{
+                    "category_id": category_id,
+                    "model_id": "missing-model",
+                    "assembly_number": "ASM-INVALID",
+                }],
+                [],
+            )
+        category = store.query(
+            "SELECT display_name FROM assembly_grid_categories WHERE id=?", (category_id,)
+        )[0]
+        self.assertEqual(category["display_name"], "Fascia SubAsm")
+        self.assertEqual(
+            store.query("SELECT COUNT(*) AS count FROM manufacturing_assemblies")[0]["count"],
+            0,
+        )
+
+    def test_model_saved_state_undo_restores_direct_grid_mappings(self) -> None:
+        category_id, _ = self._save_categories()
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [{
+                "category_id": category_id,
+                "model_id": self.model_ids[0],
+                "assembly_number": "ASM-MODEL-UNDO",
+            }],
+        )
+        mapping_id = str(store.assembly_grid_model_mappings(self.project_id).iloc[0]["id"])
+        snapshot = store.model_planning_snapshot(self.project_id)
+
+        store.delete_project_models(self.project_id, [self.model_ids[0]])
+        self.assertTrue(store.assembly_grid_model_mappings(self.project_id).empty)
+        store.restore_model_planning_snapshot(self.project_id, snapshot)
+
+        self.assertEqual(
+            store.query(
+                "SELECT COUNT(*) AS count FROM assembly_grid_model_mappings WHERE id=?",
+                (mapping_id,),
+            )[0]["count"],
+            1,
+        )
 
 
 if __name__ == "__main__":

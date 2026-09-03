@@ -221,7 +221,7 @@ class AssemblyCatalogTests(unittest.TestCase):
         self.assertTrue(bool(second["section_mismatch"]))
         self.assertEqual(float(second["quantity"]), 0.02)
 
-    def test_stale_rule_is_retained_and_fails_closed(self) -> None:
+    def test_grid_mapping_drives_applicability_while_legacy_rules_remain(self) -> None:
         assembly_id = str(uuid4())
         feature_id, model_id = str(uuid4()), str(uuid4())
         self.save_assembly(assembly_id, "ASM-300")
@@ -250,6 +250,34 @@ class AssemblyCatalogTests(unittest.TestCase):
             assembly_id,
             [{"id": rule_id, "feature_id": feature_id, "value": "Acme"}],
         )
+        self.assertTrue(
+            store.assembly_model_applicability(self.project_id, assembly_id)["models"].empty
+        )
+        category_id = str(uuid4())
+        store.save_assembly_grid_categories(
+            self.project_id,
+            self.built_section_id,
+            [
+                {
+                    "id": category_id,
+                    "ebom_name": "ASM-300-EBOM",
+                    "display_name": "ASM-300 category",
+                    "installed_section_id": self.installed_section_id,
+                    "sequence": 10,
+                }
+            ],
+        )
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [
+                {
+                    "id": str(uuid4()),
+                    "category_id": category_id,
+                    "model_id": model_id,
+                    "assembly_id": assembly_id,
+                }
+            ],
+        )
         self.assertEqual(
             store.assembly_model_applicability(self.project_id, assembly_id)["models"][
                 "model_number"
@@ -265,8 +293,8 @@ class AssemblyCatalogTests(unittest.TestCase):
         rules = store.assembly_feature_rules(self.project_id, assembly_id)
         self.assertTrue(bool(rules.iloc[0]["stale"]))
         applicability = store.assembly_model_applicability(self.project_id, assembly_id)
-        self.assertTrue(applicability["stale"])
-        self.assertTrue(applicability["models"].empty)
+        self.assertFalse(applicability["stale"])
+        self.assertEqual(applicability["models"]["model_number"].tolist(), ["MODEL-1"])
         with self.assertRaisesRegex(ValueError, "active feature"):
             store.save_assembly_feature_rules(
                 self.project_id,

@@ -7,22 +7,23 @@ import streamlit as st
 
 from utils.assembly_grid import assembly_grid as render_assembly_grid
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
+from utils.component_payload import is_empty_unsaved_grid_category
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     add_assembly_image,
+    assign_parts_to_section,
     assembly_bom_components,
     assembly_catalog_delete_impact,
     assembly_catalog_rows,
-    assembly_feature_rules,
     assembly_grid_categories,
     assembly_grid_feature_visibility,
     assembly_grid_model_mappings,
     assembly_images,
-    assembly_model_applicability,
     assembly_sections,
     audit_history,
     complexity_features,
     complexity_tree,
+    create_part_and_assign_to_section,
     delete_assembly_grid_categories,
     delete_assembly_catalog_rows,
     delete_assembly_images,
@@ -31,9 +32,9 @@ from utils.store import (
     record_audit_event,
     save_assembly_bom_components,
     save_assembly_catalog_rows,
-    save_assembly_feature_rules,
     save_assembly_grid_model_mappings,
     save_assembly_grid_section,
+    search_parts_and_fishbone,
     set_assembly_image,
 )
 from utils.table_filters import (
@@ -155,6 +156,170 @@ else:
         key=f"assembly_grid_visible_features_{project_id}_{selected_section_id}",
         help="Only active features can appear. This display preference is saved per Fishbone section.",
     )
+    missing_part_key = f"assembly_grid_missing_part_{project_id}_{selected_section_id}"
+    if st.button(
+        "Find or add a missing part",
+        icon=":material/search:",
+        type="tertiary",
+        key=f"assembly_grid_find_part_{project_id}_{selected_section_id}",
+    ):
+        st.session_state[missing_part_key] = True
+
+    @st.dialog(
+        "Find or add a Fishbone part",
+        width="large",
+        dismissible=False,
+        icon=":material/search:",
+    )
+    def assembly_grid_missing_part_dialog() -> None:
+        st.caption(
+            f"Components must reference an exact Fishbone use in "
+            f"{section_name_by_id.get(selected_section_id, selected_section_id)}. "
+            "Search the whole Parts Catalog before creating a new part."
+        )
+        find_tab, add_tab = st.tabs(["Find existing", "Add new part"])
+        with find_tab:
+            search_text = st.text_input(
+                "Search by part number or Part Name",
+                key=f"assembly_grid_part_search_{project_id}_{selected_section_id}",
+            ).strip()
+            if len(search_text) < 2:
+                st.info("Enter at least two characters to search.")
+            else:
+                matches = search_parts_and_fishbone(project_id, search_text)
+                if matches.empty:
+                    st.warning("No similar catalog parts were found. Use Add new part if this is new.")
+                else:
+                    summary = matches[["part_id", "part_number", "description", "revision"]].drop_duplicates()
+                    selectable_dataframe(
+                        summary.drop(columns=["part_id"]),
+                        key=f"assembly_grid_part_matches_{project_id}_{selected_section_id}",
+                        hide_index=True,
+                        column_config={
+                            "part_number": "Part number",
+                            "description": st.column_config.TextColumn("Part Name", width="large"),
+                            "revision": "Revision",
+                        },
+                    )
+                    labels = {
+                        str(row["part_id"]): f"{row['part_number']} · {row['description']}"
+                        for _, row in summary.iterrows()
+                    }
+                    part_id = st.selectbox(
+                        "Part to place",
+                        list(labels),
+                        format_func=lambda value: labels.get(value, value),
+                        key=f"assembly_grid_part_choice_{project_id}_{selected_section_id}",
+                    )
+                    current_uses = matches.loc[
+                        matches["part_id"].astype(str).eq(str(part_id))
+                        & matches["section_id"].fillna("").astype(str).eq(selected_section_id)
+                    ]
+                    if current_uses.empty:
+                        placement = st.container(horizontal=True, vertical_alignment="bottom")
+                        quantity = placement.number_input(
+                            "Fishbone quantity", value=1.0, step=0.01, format="%g",
+                            key=f"assembly_grid_place_quantity_{project_id}_{selected_section_id}",
+                        )
+                        use_description = placement.text_input(
+                            "Use / installation location",
+                            key=f"assembly_grid_place_use_{project_id}_{selected_section_id}",
+                        )
+                        if st.button(
+                            "Place in this Fishbone section",
+                            type="primary",
+                            icon=":material/account_tree:",
+                            key=f"assembly_grid_place_part_{project_id}_{selected_section_id}",
+                        ):
+                            try:
+                                assign_parts_to_section(
+                                    project_id, [str(part_id)], selected_section_id,
+                                    use_description,
+                                    allow_additional_use=True,
+                                    quantities_by_part={str(part_id): float(quantity)},
+                                )
+                                record_audit_event(
+                                    project_id, "Fishbone part assignments", "Place part", 1,
+                                    st.session_state.get("current_editor", ""),
+                                    {"part_id": str(part_id), "section_id": selected_section_id},
+                                )
+                                st.session_state.pop(missing_part_key, None)
+                                st.toast("Placed the part; it is now available in the grid", icon=":material/check_circle:")
+                                st.rerun()
+                            except ValueError as exc:
+                                st.error(str(exc))
+                    else:
+                        st.success(
+                            f"This part already has {len(current_uses)} Fishbone use(s) in this section. "
+                            "Close this dialog and choose the exact use in the grid."
+                        )
+        with add_tab:
+            st.caption("Create the Parts Catalog record and its first Fishbone use together.")
+            part_number = st.text_input(
+                "Part number", key=f"assembly_grid_new_part_number_{project_id}_{selected_section_id}"
+            )
+            part_name = st.text_input(
+                "Part Name", key=f"assembly_grid_new_part_name_{project_id}_{selected_section_id}"
+            )
+            revision = st.text_input(
+                "Revision", value="0", key=f"assembly_grid_new_part_revision_{project_id}_{selected_section_id}"
+            )
+            new_row = st.container(horizontal=True, vertical_alignment="bottom")
+            quantity = new_row.number_input(
+                "Fishbone quantity", value=1.0, step=0.01, format="%g",
+                key=f"assembly_grid_new_part_quantity_{project_id}_{selected_section_id}",
+            )
+            use_description = new_row.text_input(
+                "Use / installation location",
+                key=f"assembly_grid_new_part_use_{project_id}_{selected_section_id}",
+            )
+            notes = st.text_area(
+                "Part notes", key=f"assembly_grid_new_part_notes_{project_id}_{selected_section_id}"
+            )
+            if st.button(
+                "Add part and place it",
+                type="primary",
+                icon=":material/add_circle:",
+                key=f"assembly_grid_create_part_{project_id}_{selected_section_id}",
+            ):
+                try:
+                    part_id, assignment_id, updated_at = create_part_and_assign_to_section(
+                        project_id,
+                        selected_section_id,
+                        {
+                            "part_number": part_number,
+                            "description": part_name,
+                            "revision": revision,
+                            "model_applicability": "All",
+                            "notes": notes,
+                        },
+                        float(quantity),
+                        use_description,
+                    )
+                    editor = st.session_state.get("current_editor", "")
+                    record_audit_event(
+                        project_id, "Parts", "Create from Assembly grid", 1, editor,
+                        {"part_id": part_id, "updated_at": updated_at},
+                    )
+                    record_audit_event(
+                        project_id, "Fishbone part assignments", "Place new part", 1, editor,
+                        {"part_id": part_id, "assignment_id": assignment_id,
+                         "section_id": selected_section_id, "updated_at": updated_at},
+                    )
+                    st.session_state.pop(missing_part_key, None)
+                    st.toast("Added and placed the new part", icon=":material/check_circle:")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        if st.button(
+            "Cancel", icon=":material/close:",
+            key=f"assembly_grid_missing_part_cancel_{project_id}_{selected_section_id}",
+        ):
+            st.session_state.pop(missing_part_key, None)
+            st.rerun()
+
+    if st.session_state.get(missing_part_key):
+        assembly_grid_missing_part_dialog()
 
     value_by_model_feature = {}
     if not models.empty:
@@ -166,9 +331,30 @@ else:
         saved_section_mappings.get("assembly_id", pd.Series(dtype="string"))
         .dropna().astype(str).unique().tolist()
     ):
-        component_cache[assembly_id] = assembly_bom_components(
-            project_id, assembly_id
-        ).to_dict("records")
+        assembly_components = assembly_bom_components(project_id, assembly_id)
+        component_cache[assembly_id] = [
+            {
+                "id": str(component["id"]),
+                "fishbone_assignment_id": str(component["fishbone_assignment_id"]),
+                "part_number": (
+                    ""
+                    if pd.isna(component.get("part_number"))
+                    else str(component.get("part_number"))
+                ),
+                "part_name": (
+                    ""
+                    if pd.isna(component.get("part_name"))
+                    else str(component.get("part_name"))
+                ),
+                "quantity": float(component["quantity"]),
+            }
+            for _, component in assembly_components.iterrows()
+        ]
+    grid_uses = fishbone_part_assignments(project_id)
+    grid_uses = (
+        grid_uses.loc[grid_uses["section_id"].astype(str).eq(selected_section_id)].copy()
+        if not grid_uses.empty else grid_uses
+    )
     mapping_by_cell = {
         (str(row["category_id"]), str(row["model_id"])): dict(row)
         for _, row in saved_section_mappings.iterrows()
@@ -179,14 +365,10 @@ else:
         for model_id in active_model_ids:
             mapping = mapping_by_cell.get((str(category["id"]), model_id), {})
             assembly_number = str(mapping.get("assembly_number") or "")
-            root_number = str(category.get("root_number") or "")
-            follows_root = bool(assembly_number and assembly_number.startswith(root_number))
             cells[model_id] = {
                 "mapping_id": str(mapping.get("id") or ""),
                 "assembly_id": str(mapping.get("assembly_id") or ""),
                 "assembly_number": assembly_number,
-                "mode": "suffix" if follows_root else "full",
-                "suffix": assembly_number[len(root_number):] if follows_root else "",
                 "components": component_cache.get(str(mapping.get("assembly_id") or ""), []),
             }
         initial_grid_draft.append(
@@ -194,14 +376,13 @@ else:
                 "id": str(category["id"]),
                 "ebom_name": str(category["ebom_name"]),
                 "display_name": str(category["display_name"]),
-                "root_number": str(category["root_number"]),
                 "installed_section_id": str(category.get("installed_section_id") or ""),
                 "sequence": int(category.get("sequence") or 10),
                 "cells": cells,
             }
         )
 
-    grid_key = f"assembly_grid_component_{project_id}_{selected_section_id}"
+    grid_key = f"assembly_grid_component_v5_{project_id}_{selected_section_id}"
     pending_category_key = f"assembly_grid_pending_category_delete_{project_id}"
     pending_mapping_key = f"assembly_grid_pending_mapping_clear_{project_id}"
     pending_component_key = f"assembly_grid_pending_component_delete_{project_id}"
@@ -263,6 +444,7 @@ else:
                     project_id, "Assembly grid categories", "Delete category",
                     result["deleted_count"], st.session_state.get("current_editor", ""), result,
                 )
+                st.session_state.pop(grid_key, None)
             else:
                 rows = grid_draft()
                 index = int(pending.get("category_index", -1))
@@ -270,7 +452,6 @@ else:
                     rows.pop(index)
                     set_grid_draft(rows)
             st.session_state.pop(pending_category_key, None)
-            st.session_state.pop(grid_key, None)
             st.toast("Deleted assembly-grid category", icon=":material/delete:")
             st.rerun()
 
@@ -324,19 +505,32 @@ else:
         ):
             assembly_id = str(pending.get("assembly_id") or "")
             component_id = str(pending.get("component_id") or "")
-            remaining = assembly_bom_components(project_id, assembly_id)
-            remaining = remaining.loc[~remaining["id"].astype(str).eq(component_id)]
-            result = save_assembly_bom_components(
-                project_id, assembly_id, remaining.to_dict("records")
-            )
-            record_audit_event(
-                project_id, "Assembly mini-BOM", "Delete components", 1,
-                st.session_state.get("current_editor", ""),
-                {"assembly_id": assembly_id, "component_id": component_id,
-                 "remaining_count": result["count"]},
-            )
+            if component_id:
+                remaining = assembly_bom_components(project_id, assembly_id)
+                remaining = remaining.loc[~remaining["id"].astype(str).eq(component_id)]
+                result = save_assembly_bom_components(
+                    project_id, assembly_id, remaining.to_dict("records")
+                )
+                record_audit_event(
+                    project_id, "Assembly mini-BOM", "Delete components", 1,
+                    st.session_state.get("current_editor", ""),
+                    {"assembly_id": assembly_id, "component_id": component_id,
+                     "remaining_count": result["count"]},
+                )
+                st.session_state.pop(grid_key, None)
+            else:
+                rows = grid_draft()
+                component_index = int(pending.get("component_index", -1))
+                for category in rows:
+                    for cell in dict(category.get("cells") or {}).values():
+                        if str(cell.get("assembly_id") or "") != assembly_id:
+                            continue
+                        components = list(cell.get("components") or [])
+                        if 0 <= component_index < len(components):
+                            components.pop(component_index)
+                        cell["components"] = components
+                set_grid_draft(rows)
             st.session_state.pop(pending_component_key, None)
-            st.session_state.pop(grid_key, None)
             st.toast("Deleted mini-BOM component", icon=":material/delete:")
             st.rerun()
 
@@ -359,6 +553,28 @@ else:
         }
         for model_id in visible_model_ids
     ]
+    grid_use_payload = []
+    for _, row in grid_uses.iterrows():
+        part_number = str(row["part_number"])
+        part_name = "" if pd.isna(row.get("description")) else str(row.get("description"))
+        use_description = (
+            ""
+            if pd.isna(row.get("use_description"))
+            else str(row.get("use_description") or "")
+        )
+        grid_use_payload.append(
+            {
+                "id": str(row["id"]),
+                "part_number": part_number,
+                "part_name": part_name,
+                "quantity": float(row["quantity"]),
+                "label": (
+                    f"{part_number} · {part_name or 'No Part Name'} · "
+                    f"{use_description or 'No use description'} · "
+                    f"Fishbone qty {format_clean_number(row['quantity'])}"
+                ),
+            }
+        )
     render_assembly_grid(
         key=grid_key,
         draft=initial_grid_draft,
@@ -371,6 +587,7 @@ else:
             {"id": str(row["id"]), "name": str(row["name"])}
             for _, row in sections.iterrows()
         ],
+        uses=grid_use_payload,
         on_draft_change=on_grid_draft_change,
         on_details_change=on_grid_details_change,
         on_delete_category_change=on_grid_category_delete_change,
@@ -396,6 +613,11 @@ else:
         st.rerun()
     if grid_actions.save_and_refresh:
         try:
+            current_draft = [
+                category
+                for category in current_draft
+                if not is_empty_unsaved_grid_category(category)
+            ]
             prepared_categories = []
             category_id_map = {}
             for index, category in enumerate(current_draft):
@@ -420,10 +642,7 @@ else:
                     assembly_number = str(cell.get("assembly_number") or "").strip()
                     if not assembly_number:
                         continue
-                    saved_cell = mapping_by_cell.get((str(category.get("id") or ""), str(model_id)), {})
                     assembly_id = str(cell.get("assembly_id") or "")
-                    if assembly_number.casefold() != str(saved_cell.get("assembly_number") or "").casefold():
-                        assembly_id = ""
                     complete_mappings.append(
                         {
                             "id": str(cell.get("mapping_id") or ""),
@@ -458,7 +677,8 @@ else:
                 project_id, "Assembly grid mappings", "Save & Refresh",
                 result["mappings"]["count"], editor,
                 {"section_id": selected_section_id,
-                 "created_assemblies": result["mappings"]["created_assemblies"]},
+                 "created_assemblies": result["mappings"]["created_assemblies"],
+                 "renamed_assemblies": result["mappings"]["renamed_assemblies"]},
             )
             record_audit_event(
                 project_id, "Assembly grid feature visibility", "Save & Refresh",
@@ -482,7 +702,7 @@ else:
 st.divider()
 st.caption(
     "The full Task 04 catalog remains below for assembly metadata, nesting, deletion, "
-    "mini-BOM additions, feature rules, and images. Grid-mapped Built and Installed sections "
+    "images, and mini-BOM additions. Grid-mapped Built and Installed sections "
     "are controlled by their category."
 )
 
@@ -845,7 +1065,7 @@ if not catalog.empty:
     assembly_id = str(st.session_state[selected_assembly_key])
     assembly = catalog.loc[catalog["id"].astype(str).eq(assembly_id)].iloc[0].to_dict()
     st.subheader(f"Assembly details · {assembly['assembly_number']} {assembly['name']}")
-    bom_tab, rules_tab, images_tab = st.tabs(["Mini-BOM", "Feature rules", "Images"])
+    images_tab, bom_tab = st.tabs(["Images", "Mini-BOM"])
 
     with bom_tab:
         st.caption(
@@ -996,157 +1216,6 @@ if not catalog.empty:
             except ValueError as exc:
                 st.error(str(exc))
 
-    with rules_tab:
-        saved_rules = assembly_feature_rules(project_id, assembly_id)
-        features = complexity_features(project_id)
-        active_features = (
-            features.loc[features["active"].fillna(1).astype(bool)].copy()
-            if not features.empty else features
-        )
-        feature_label_by_id = {
-            str(row["id"]): f"{row['category']} · {row['name']}"
-            for _, row in features.iterrows()
-        }
-        feature_id_by_label = {label: feature_id for feature_id, label in feature_label_by_id.items()}
-        saved_signature = tuple(
-            (str(row["id"]), str(row["feature_id"]), str(row["value"]))
-            for _, row in saved_rules.iterrows()
-        ) if not saved_rules.empty else ()
-        rules_draft_key = f"assembly_rules_draft_{assembly_id}"
-        rules_signature_key = f"assembly_rules_signature_{assembly_id}"
-        if st.session_state.get(rules_signature_key) != saved_signature:
-            st.session_state[rules_signature_key] = saved_signature
-            st.session_state[rules_draft_key] = [
-                {"id": item[0], "feature_id": item[1], "value": item[2]}
-                for item in saved_signature
-            ]
-        draft_rules = list(st.session_state.get(rules_draft_key, []))
-        controls = st.container(horizontal=True, vertical_alignment="bottom")
-        active_labels = [
-            feature_label_by_id[str(row["id"])] for _, row in active_features.iterrows()
-        ]
-        selected_feature_label = controls.selectbox(
-            "Feature", active_labels, key=f"assembly_rule_feature_{assembly_id}"
-        ) if active_labels else None
-        selected_feature_id = feature_id_by_label.get(selected_feature_label or "")
-        feature_row = (
-            features.loc[features["id"].astype(str).eq(str(selected_feature_id))].iloc[0]
-            if selected_feature_id and not features.empty else None
-        )
-        choices = json.loads(feature_row["allowed_values"] or "[]") if feature_row is not None else []
-        selected_choice = controls.selectbox(
-            "Choice", [str(choice) for choice in choices],
-            key=f"assembly_rule_choice_{assembly_id}",
-        ) if choices else None
-        if controls.button(
-            "Add rule", icon=":material/add:", disabled=not selected_feature_id or not selected_choice,
-            key=f"assembly_add_rule_{assembly_id}",
-        ):
-            if any(rule["feature_id"] == selected_feature_id for rule in draft_rules):
-                st.error("This assembly already has a rule for that feature.")
-            else:
-                draft_rules.append(
-                    {"id": str(uuid4()), "feature_id": selected_feature_id, "value": selected_choice}
-                )
-                st.session_state[rules_draft_key] = draft_rules
-                st.rerun()
-        rule_rows = pd.DataFrame(
-            [
-                {
-                    **rule,
-                    "feature": feature_label_by_id.get(rule["feature_id"], "Removed feature"),
-                    "choice": rule["value"],
-                    "warning": (
-                        str(saved_rules.loc[saved_rules["id"].astype(str).eq(rule["id"]), "warning"].iloc[0])
-                        if not saved_rules.empty
-                        and saved_rules["id"].astype(str).eq(rule["id"]).any() else ""
-                    ),
-                }
-                for rule in draft_rules
-            ]
-        )
-        if rule_rows.empty:
-            st.info("No rules recorded. This assembly applies to all models.")
-            st.write("**This assembly applies to: All models**")
-        else:
-            st.write(
-                "**This assembly applies where: "
-                + " AND ".join(f"{row['feature']} = {row['choice']}" for _, row in rule_rows.iterrows())
-                + "**"
-            )
-            rule_editor_key = f"assembly_rule_list_{assembly_id}"
-            apply_pending_table_editor_reset(rule_editor_key)
-            rule_editor = st.data_editor(
-                rule_rows,
-                key=rule_editor_key,
-                hide_index=True,
-                num_rows="delete",
-                disabled=list(rule_rows.columns),
-                column_order=["feature", "choice", "warning"],
-                column_config={"id": None, "feature_id": None, "warning": "Review"},
-            )
-            selected_rules = native_selected_rows(rule_rows, editor_key=rule_editor_key)
-
-            @st.dialog("Remove selected assembly rules?")
-            def confirm_rule_removal() -> None:
-                st.warning(
-                    f"Remove {len(selected_rules)} selected rule(s) from assembly "
-                    f"{assembly['assembly_number']}? This changes the unsaved draft; use "
-                    "Save & Refresh to persist the removal."
-                )
-                actions = st.container(horizontal=True)
-                if actions.button("Cancel", key=f"cancel_rule_removal_{assembly_id}"):
-                    request_table_editor_reset(rule_editor_key)
-                    st.rerun()
-                if actions.button(
-                    "Remove rules", type="primary", icon=":material/delete:",
-                    key=f"confirm_rule_removal_{assembly_id}",
-                ):
-                    selected_ids = set(selected_rules["id"].astype(str))
-                    st.session_state[rules_draft_key] = [
-                        rule for rule in draft_rules if rule["id"] not in selected_ids
-                    ]
-                    request_table_editor_reset(rule_editor_key)
-                    st.rerun()
-
-            if not selected_rules.empty:
-                confirm_rule_removal()
-        current_signature = tuple(
-            (rule["id"], rule["feature_id"], rule["value"]) for rule in draft_rules
-        )
-        rules_dirty = current_signature != saved_signature
-        rules_footer_key = f"assembly_rules_footer_{assembly_id}"
-        rules_actions = editable_table_footer(
-            editor_key=rules_footer_key,
-            key_prefix=f"assembly_rules_{assembly_id}",
-            additional_unsaved_changes=rules_dirty,
-        )
-        if rules_actions.undo:
-            st.session_state[rules_draft_key] = [
-                {"id": item[0], "feature_id": item[1], "value": item[2]}
-                for item in saved_signature
-            ]
-            st.rerun()
-        if rules_actions.save_and_refresh:
-            try:
-                result = save_assembly_feature_rules(project_id, assembly_id, draft_rules)
-                record_audit_event(
-                    project_id, "Assembly feature rules", "Save & Refresh", result["count"],
-                    st.session_state.get("current_editor", ""),
-                    {"assembly_id": assembly_id, "updated_at": result["updated_at"]},
-                )
-                st.session_state.pop(rules_draft_key, None)
-                st.session_state.pop(rules_signature_key, None)
-                st.toast("Saved assembly feature rules", icon=":material/check_circle:")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-        applicability = assembly_model_applicability(project_id, assembly_id)
-        if applicability["stale"]:
-            st.warning("A stale rule fails closed, so this assembly currently matches no models.")
-        else:
-            model_names = applicability["models"].get("model_number", pd.Series(dtype="string")).astype(str).tolist()
-            st.caption("Matching official models: " + (", ".join(model_names) or "None"))
 
     with images_tab:
         image_path = Path(str(assembly.get("image_path") or ""))
@@ -1271,10 +1340,16 @@ if not catalog.empty:
 
 
 with st.expander("History", icon=":material/history:"):
-    history_tabs = st.tabs(["Catalog", "Mini-BOM", "Feature rules", "Images"])
+    history_tabs = st.tabs(
+        ["Grid categories", "Grid mappings", "Feature visibility", "Catalog", "Mini-BOM", "Images"]
+    )
     for tab, table_name in zip(
         history_tabs,
-        ["Assemblies catalog", "Assembly mini-BOM", "Assembly feature rules", "Assembly images"],
+        [
+            "Assembly grid categories", "Assembly grid mappings",
+            "Assembly grid feature visibility", "Assemblies catalog",
+            "Assembly mini-BOM", "Assembly images",
+        ],
     ):
         with tab:
             history = audit_history(project_id, table_name, limit=50)

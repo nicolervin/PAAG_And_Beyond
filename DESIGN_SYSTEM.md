@@ -22,6 +22,8 @@ Retrofitting existing screens to this standard is a separate future task and is 
 
 ### Approved Task 09 Components v2 exception
 
+**Implementation status:** Active on `Nicole_assembly_grid_editor` as of September 3, 2026.
+
 The project-wide Task 09 assembly grid is the only approved exception to the native-toolbar entry-point requirement in items 1, 2, and 4 above and to the native row-selection checkbox requirement in the Universal Table Row Selection Standard below. Its integrated category, model, assembly, and nested mini-BOM layout requires a Components v2 grid that Streamlit's native table editor cannot represent. The component may therefore use its own selection and deletion controls for assembly-grid categories, direct model mappings, and nested mini-BOM component rows.
 
 This exception changes only where the deletion request begins. The component must never write to the database or remove a row by itself. It sends stable record identifiers to Python, which resets and reruns the draft as needed and opens the same non-dismissible, relationship-aware Streamlit confirmation required everywhere else. The dialog must list or summarize the selected records and disclose what will be deleted, preserved, or otherwise affected. Cancel preserves the records and clears the pending request. Confirmation validates the complete action, performs one atomic store-layer write, records Current editor history, resets the component, shows a toast, and reruns.
