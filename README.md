@@ -81,12 +81,16 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, flags, model variants, visual board, and work tables.
 - `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, ordered process requirements, bulk actions, export, and workload chart.
 - `app_pages/pin_map.py` — Scenario-specific read-only line visualization of pitches and explicitly linked Process work.
-- `app_pages/functional_*.py` — Non-persistent Equipment, Ergonomics, Quality, Materials, and Safety review shells.
+- `app_pages/functional_quality.py` — Scenario-aware Quality page with the project-wide Requirements repository, scenario-specific PFMEA tab, and Control Plan placeholder.
+- `app_pages/functional_equipment.py`, `functional_ergonomics.py`, `functional_materials.py`, and `functional_safety.py` — Non-persistent Functional Reviews shells.
 - `app_pages/assembly_sequence.py` — Legacy, unlinked assembly-Fishbone implementation; do not extend unless explicitly revived.
 
 ### Shared utility files
 
 - `utils/store.py` — Schema, initialization, validation, CRUD, scenario cloning, snapshots, history, and file storage.
+- `utils/quality_store.py` — Quality requirements repository, Process-step assignments, controlled synchronization, and scenario-cloning persistence.
+- `utils/pfmea_store.py` — Scenario-specific PFMEA schema, validation, CRUD, source review, persisted RPN calculations, and scenario cloning.
+- `utils/pfmea_ui.py` — PFMEA tab tables, source-review and deletion dialogs, RPN summary, and editable child workflows.
 - `utils/excel_io.py` — BOM/PITS parsing, column mapping, and multi-sheet export.
 - `utils/table_ui.py` — Shared table headers, selection interpretation, change detection, required-field checks, row actions, resets, and export helpers.
 - `utils/table_filters.py` — Keyword/dropdown filters, filtered-edit merging, multi-value filters, and editor reset behavior.
@@ -94,7 +98,7 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `utils/yamazumi_board.py` — Components v2 balancing board.
 - `utils/fishbone_visual.py` — Components v2 interactive assembly Fishbone.
 - `utils/clipboard_image.py` — Components v2 clipboard capture and server-side image normalization.
-- `utils/functional_review_ui.py` — Shared shell for the five Functional Reviews pages.
+- `utils/functional_review_ui.py` — Shared shell for Equipment, Ergonomics, Materials, and Safety.
 
 ## Navigation and screens
 
@@ -120,7 +124,7 @@ Navigation is defined in `streamlit_app.py`.
 
 ### Functional Reviews
 
-**Equipment**, **Ergonomics**, **Quality**, **Materials**, and **Safety** are project-wide, non-persistent shells. Quality is the approved future home for requirements-review content. Persisted relationships, ownership, scope, and storage require proposal and owner review before implementation.
+**Quality** is Scenario-aware: its Requirements repository is project-wide, while PFMEA belongs to the active scenario and links failure modes, Effects, Causes, explicitly classified published Quality controls, saved RPN calculations, and Recommended Actions to Process at a Glance steps. The Control Plan tab is a placeholder and does not generate or store Control Plan data. **Equipment**, **Ergonomics**, **Materials**, and **Safety** remain project-wide, non-persistent shells; their persisted relationships, ownership, scope, and storage require proposal and owner review before implementation.
 
 ## Domain glossary
 

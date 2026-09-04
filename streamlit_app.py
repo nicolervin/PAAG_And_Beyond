@@ -34,7 +34,11 @@ st.html(
     div[class*="st-key-yamazumi_pitch_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-yamazumi_element_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-existing_process_pairings"] button[aria-label="Delete row(s)"],
-    div[class*="st-key-process_editor"] button[aria-label="Delete row(s)"] {
+    div[class*="st-key-process_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-pfmea_flat_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-pfmea_prevention_options_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-pfmea_detection_options_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-quality_requirements_editor"] button[aria-label="Delete row(s)"] {
         display: inline-flex !important;
     }
     </style>

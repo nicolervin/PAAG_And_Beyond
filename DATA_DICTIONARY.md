@@ -148,6 +148,69 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Key relationships:** Belongs to `process_part_groups` and references `parts`. It records the catalog part, not a specific `fishbone_part_assignments` occurrence.
 - **Scope:** Scenario-specific through the parent process part group.
 
+### `quality_requirements`
+
+- **Purpose:** Stores the reusable Quality requirements repository, including Type, Description, Unique identifier, Pass/fail behavior, Target value, Tolerances, and Unit. Repository edits remain project reference data until an explicit push synchronizes them to linked Process requirements.
+- **Key relationships:** Belongs to `projects` and is the project-wide parent of `quality_requirement_assignments` and, for requirements whose Type is Torque, the optional one-to-one `quality_requirement_torque_details` record. Unique identifiers are case-insensitively unique within a project. A repository requirement cannot be deleted while Process assignments or Torque tool details still reference it.
+- **Scope:** Project-wide.
+
+### `quality_requirement_assignments`
+
+- **Purpose:** Attaches a published copy of a repository Quality requirement to a specific Process at a Glance step. The copied requirement values remain unchanged during an ordinary repository save and are updated only by the explicit repository push workflow.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`, references `work_elements`, and references `quality_requirements`. Project and scenario boundaries are validated against the selected Process step. Deleting a Process step or scenario deletes its assignments; deleting the referenced repository requirement is restricted until its assignments are removed. Scenario cloning copies assignments and remaps them to the cloned `work_elements` records while retaining their project-wide repository links.
+- **Scope:** Scenario-specific through the referenced Process at a Glance step, with published content sourced from the project-wide repository.
+
+### `quality_requirement_torque_details`
+
+- **Purpose:** Stores the project-wide Torque tool details for a Quality requirement whose Type is Torque, including Tool type, Tool orientation, and Screw bit type.
+- **Key relationships:** Belongs to `projects` and references exactly one `quality_requirements` row through a unique `quality_requirement_id`, creating an optional one-to-one relationship. The parent requirement must belong to the same project and have Type set to Torque. Its indirect connection to the critical thread is `quality_requirements` → `quality_requirement_assignments` → `work_elements`.
+- **Scope:** Project-wide, matching the parent Quality requirement. Tool type is limited to Air tool, Electric clutch tool, or DC tool. Tool orientation is limited to Fixtured, Pistol, In-line, or Right angle. Screw bit type is free-entry text with project suggestions sourced from previously saved values.
+- **Deletion and type changes:** Deleting the detail record preserves the parent Quality requirement and every Process-step assignment. The parent requirement cannot be deleted or changed away from Type Torque until its detail record is removed through the confirmed workflow.
+
+### `pfmea_entries`
+
+- **Purpose:** Stores one scenario-specific Potential Failure Mode for a Process at a Glance step, its reviewed Classification (blank, Safety, or Critical Quality), read-only Process Function snapshots, and source fingerprints used to flag later upstream changes without replacing reviewed PFMEA evidence.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`, and references one `work_elements` row. It is the parent of `pfmea_effects`, `pfmea_causes`, the structured Prevention/Detection selections, `pfmea_risk_rows`, and `pfmea_actions`. A cloned scenario receives independent PFMEA IDs and retains `source_pfmea_entry_id` lineage to the source entry.
+- **Scope:** Scenario-specific. The referenced Process step must belong to the same project and scenario. A Process step with PFMEA entries cannot be deleted until those entries are removed through the confirmed PFMEA workflow.
+
+### `pfmea_effects`
+
+- **Purpose:** Stores one or more Potential Effects for a PFMEA entry, with a collaborator-entered whole-number Severity from 1 through 10 and sequence.
+- **Key relationships:** Belongs to one `pfmea_entries` row. Deleting an Effect through the confirmed workflow also removes its derived Effect-Cause `pfmea_risk_rows` records.
+- **Scope:** Scenario-specific through the parent PFMEA entry. The module does not define or persist a company Severity scale.
+
+### `pfmea_causes`
+
+- **Purpose:** Stores one or more Potential Causes for a PFMEA entry, with optional collaborator-entered whole-number Occurrence and Detection ratings from 1 through 10 and sequence. `control_source_review_required` marks source changes or removals for review. Detection-source changes additionally set `detection_review_required` without changing the Detection rating.
+- **Key relationships:** Belongs to one `pfmea_entries` row and is parent of its structured Prevention/Detection selections, applicable `pfmea_risk_rows`, and optional cause-level `pfmea_actions`.
+- **Scope:** Scenario-specific through the parent PFMEA entry. The module does not define or persist company Occurrence or Detection scales. Detection may be entered without a selected Detection control.
+
+### `pfmea_prevention_options` and `pfmea_detection_options`
+
+- **Purpose:** Store reusable manual phrases for Prevention and Detection controls in separate catalogs. Each row has a required Label and Active state; labels are case-insensitively unique within its project and catalog.
+- **Key relationships:** Belongs to `projects` and may be referenced by the corresponding selection table. Deactivation preserves existing selections but prevents new selection. Confirmed deletion cascades only dependent selections and flags their Causes for review.
+- **Scope:** Project-wide. Scenario cloning continues to reference the same manual option IDs.
+
+### `pfmea_prevention_selections` and `pfmea_detection_selections`
+
+- **Purpose:** Store ordered, structured Cause-level Current Process Controls. Each selection is either one published `quality_requirement_assignments` record or one manual option from the corresponding project catalog; check constraints require exactly one valid source.
+- **Key relationships:** Belongs to one scenario-specific `pfmea_entries` row and `pfmea_causes` row. A Quality source must belong to the same project/scenario and linked `work_elements.id`; a manual source must belong to the same project and correct catalog. Partial unique indexes prevent duplicate Cause/source selections within one control list, while the same Quality assignment may appear once in each of the Prevention and Detection lists.
+- **Scope:** Scenario-specific. Stable selection IDs and sequence preserve collaborator order. Scenario cloning creates new selection IDs, remaps PFMEA parents and Quality assignment IDs, and retains project-wide manual option IDs.
+- **Source review and deletion:** `source_updated_at_snapshot` records the source version acknowledged at Save & Refresh. Live source labels are displayed; source updates set Cause review flags. A Quality unlink or catalog-option deletion removes only dependent selections transactionally, preserves Quality definitions/PFMEA ratings, and flags affected Causes. Detection-source changes also require Detection-rating review.
+- **Legacy migration:** On the first PFMEA opening for a project with legacy `pfmea_controls` rows, a nonblank Current editor is required. The rows and their text are atomically discarded, affected Causes are flagged, and exactly one project-scoped PFMEA audit event records counts without recording discarded text. The obsolete table is dropped after no project retains legacy rows. Quality requirements and assignments are preserved.
+
+### `pfmea_risk_rows`
+
+- **Purpose:** Stores the calculated initial RPN for each Effect-Cause combination as historical save evidence. RPN is recorded as Severity × Occurrence × Detection when all three ratings exist and remains blank otherwise.
+- **Key relationships:** Belongs to one PFMEA entry and references one `pfmea_effects` row and one `pfmea_causes` row. It is derived and refreshed atomically whenever the applicable flat line is saved. The separate **Recalculate RPN** action refreshes the same calculation from unsaved editor values without persistence and preserves each stable flat-line identity without appending duplicate saved rows.
+- **Scope:** Scenario-specific through the parent PFMEA entry. No threshold, rating lookup, or risk classification is inferred from RPN.
+
+### `pfmea_actions`
+
+- **Purpose:** Stores one or more Recommended Actions for a PFMEA failure mode or a specific cause, including Responsibility, Target Completion Date, Actions Taken, Resulting Severity, Resulting Occurrence, Resulting Detection, and the persisted calculated Resulting RPN.
+- **Key relationships:** Belongs to one `pfmea_entries` row and may reference one of that entry's `pfmea_causes` rows. Resulting ratings are whole-number values from 1 through 10. Resulting RPN is recalculated and overwritten on every PFMEA line-item save when all three resulting ratings exist; **Recalculate RPN** refreshes the unsaved display without persistence.
+- **Scope:** Scenario-specific through the parent PFMEA entry. These actions do not automatically create future Control Method or Reaction Plan content.
+
 ## Proposed modules — pending owner review
 
 ### Pin Map
@@ -166,13 +229,37 @@ This file is the authoritative reference for every Process at a Glance database 
 
 - **Proposed by:** Nicole Ervin, project owner
 - **Date proposed:** August 21, 2026
-- **Purpose:** Add project-wide navigation shells for Equipment, Ergonomics, Quality, Materials, and Safety functional reviews.
+- **Purpose:** Add project-wide navigation shells for Equipment, Ergonomics, Quality, Materials, and Safety functional reviews. Quality later received the separate, approved Quality requirements scope documented below.
 - **Potential connections:** Future review records may connect to Parts, Fishbone sections, Yamazumi records, Process at a Glance steps, planning scenarios, or other approved critical-thread entities.
 - **Relationship to the critical thread:** Exact relationships and foreign keys are intentionally not defined in this shell phase. The project owner approved navigation-only, non-persistent shells before those relationships are designed. No persisted review fields may be added until each relationship is approved.
-- **Scope:** The Functional Reviews navigation group and its five shell pages are project-wide. Future review content may be project-wide or scenario-specific, but every persisted record type must receive one explicit scope before implementation.
-- **Storage:** No database table or field is added in this phase. Each shell contains only browser-session description state and an empty, schema-free table. Existing tables cannot be selected or ruled out until the review fields and relationships are defined.
+- **Scope:** The Functional Reviews navigation group and its four remaining shell pages are project-wide. Quality follows the separately approved scope below. Future review content may be project-wide or scenario-specific, but every persisted record type must receive one explicit scope before implementation.
+- **Storage:** No database table or field was added in this shell phase. Equipment, Ergonomics, Materials, and Safety contain only browser-session description state and an empty, schema-free table. Quality follows the separately approved storage design below. Existing tables cannot be selected or ruled out for the remaining reviews until their fields and relationships are defined.
 - **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply, including table row selection, deletion safety, Save & Refresh, audit logging for persisted changes, History placement, Scenario Boundary badges, help text, canonical terminology, stable identifiers, and imperial units where relevant.
-- **Approval status:** Nicole Ervin approved this shell-only exception. The data model, ownership, relationships, and persisted fields remain pending owner review.
+- **Approval status:** Nicole Ervin approved this shell-only exception. Equipment, Ergonomics, Materials, and Safety remain shells whose data model, ownership, relationships, and persisted fields are pending owner review. Quality follows the separate approval below.
+
+### Quality requirements
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** August 27, 2026
+- **Purpose:** Add a reusable Quality requirements repository for dimensional specifications, present-and-fully-seated checks, torque specifications, vision-system validations, and other quality requirements. Allow collaborators to attach repository requirements to specific Process at a Glance steps so the published requirements support process planning, structured PFMEA control selection, and future Control Plan generation.
+- **Connections:** Connects project-wide Quality requirement definitions to scenario-specific `work_elements` records. A Process step may receive one or more requirements, and the same repository definition may be attached to multiple steps, including separate screw operations that share one torque definition. A Torque requirement may also own one project-wide `quality_requirement_torque_details` record. Fishbone section or subassembly context is inherited through the selected Process step rather than stored as a separate direct Quality requirement connection.
+- **Relationship to the critical thread:** Each attached requirement links directly to its Process at a Glance step through `work_elements.id`. The repository definition remains reusable project reference data, while every attachment validates the Process step's project and planning-scenario boundaries. A collaborator may explicitly select a published assignment as a Cause-level PFMEA Prevention control, Detection control, or both; nothing is auto-classified. These references do not change upstream Fishbone, Yamazumi, or Process decisions.
+- **Scope:** Quality requirement definitions are project-wide and shared across planning scenarios. Attachments are associated with scenario-specific Process steps through `work_elements`, but their published requirement content remains synchronized with the shared project repository. Scenario cloning must preserve the applicable attachments for the cloned Process steps.
+- **Storage:** New storage is required because one Process step may have multiple typed Quality requirements and one reusable repository definition may serve multiple Process steps; the existing `work_elements` requirement fields cannot represent that relationship. The design requires a project-wide repository table and a Process-step attachment table. Each requirement contains Type, Description, Unique identifier, Pass/fail, Target value, Tolerances, and Unit, in addition to the standard internal identifier, project relationship, and audit timestamps. Torque-only tool information is stored separately in the one-to-one `quality_requirement_torque_details` table instead of adding sparse columns to `quality_requirements`. Tool type and Tool orientation use the approved controlled choices; Screw bit type accepts free-entry text and offers previously saved project values. The implemented Quality-page interaction creates a linked Process requirement record when a collaborator attaches a saved repository requirement and removes that assignment only through the confirmed unlink workflow. Unlink discloses and transactionally removes dependent structured PFMEA selections, flags affected Causes, preserves ratings/Quality definitions, and records both Quality and PFMEA audit evidence. The separate read-only linked-requirements view shows every assignment across the active project while retaining each assignment's scenario ownership. Repository edits do not update linked Process requirements during an ordinary table save; a separate explicit push action publishes the saved repository values to every linked Process step so propagation is deliberate and predictable.
+- **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply, including native table row selection, relationship-safe deletion confirmation, direct row entry, **Save & Refresh**, audit logging for every persisted change and synchronization action, bottom History sections, project-wide and scenario-specific boundary indicators where applicable, plain-language help text, canonical terminology, stable identifiers, and imperial storage and display for linear dimensional values. The repository's explicit push action is separate from **Save & Refresh**, must preview or explain all affected linked Process requirements, validate the complete synchronization before writing, apply it atomically, record Current editor attribution and affected rows in history, and never propagate an unsaved repository edit.
+- **Approval status:** Nicole Ervin approved the documented schema and data-access implementation on August 27, 2026, and subsequently approved the project-wide editable repository page with deliberate publication to existing linked Process requirements. On August 31, 2026, Nicole Ervin approved creating and removing scenario-specific Process-step assignments and the Torque-only tool-details panel. On September 2, 2026, Nicole approved explicit use of published assignments as structured Cause-level PFMEA controls and the relationship-aware unlink cascade. The project-wide linked-requirements view remains read-only. Control Plan generation remains pending owner review.
+
+### Process FMEA
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date approved:** August 31, 2026
+- **Purpose:** Add a traditional AIAG-format Process FMEA workflow within the Quality page. The visible editor follows the approved 19-column flat line-item body of `FRM-GEA-QYS-033 PFMEA Template.xlsx`, while normalized storage continues to permit multiple Potential Effects, Potential Causes, Current Process Controls, and Recommended Actions. A separate read-only high-risk view filters saved lines when either RPN or Resulting RPN exceeds a collaborator-entered positive threshold, displays both values, and sorts by the higher value descending.
+- **Connections:** Connects each `pfmea_entries` record to a scenario-specific `work_elements.id`. Item # displays the linked step's Pitch (`work_elements.station`). Process Function/Requirements displays the same Work Element label as Process at a Glance: the linked `yamazumi_elements.description` when present, otherwise `work_elements.operation`. Cause-level Prevention and Detection lists are explicit structured references to applicable published Quality assignments or project-wide manual catalog options; no source is auto-classified.
+- **Relationship to the critical thread:** PFMEA enters after scenario-specific Process at a Glance. It does not rewrite Fishbone, Yamazumi, Process, or Quality decisions. Process source fingerprints surface a non-blocking upstream-change flag; only a separate confirmed review action accepts current Process source values. Quality/catalog changes show live labels and mark affected Causes for review without silently changing Detection ratings.
+- **Scope:** Scenario-specific. The Quality page is Scenario-aware because the Requirements repository and manual control catalogs are project-wide while PFMEA entries and selections belong to the active scenario. Scenario cloning copies the PFMEA graph with new entry/Cause/selection IDs, remapped Work Element and Quality assignment links, reused project-wide manual options, preserved selection order/review state, and source-entry lineage.
+- **Storage:** `pfmea_entries` stores the failure mode, approved Classification value, Process snapshots, and source fingerprints. `pfmea_effects` stores Effects/Severity; `pfmea_causes` stores Causes, optional Occurrence/Detection, and source/Detection review flags. `pfmea_prevention_options` and `pfmea_detection_options` store project-wide manual choices. `pfmea_prevention_selections` and `pfmea_detection_selections` store ordered scenario-specific source identities and acknowledged source versions. The 19-column flat table displays those sources as friendly multiselect tags and permits native same-column control-cell copy/paste. A paste replaces the target list, propagates across repeated flat lines backed by the same Cause, and remains staged until the shared **Undo** or **Save & Refresh** action. Applicable controls stage without interruption; incompatible step-specific Quality controls require explicit compatible-only confirmation, while inactive or unavailable manual options are omitted with an inline warning. The selected-Cause panel remains available for deliberate row-specific editing and previewed Cause-to-Cause copying. Ordinary editable cells retain native spreadsheet copy/paste. A governed duplicate-line workflow creates an independent unsaved flat line and, on save, fresh Entry, Effect, Cause, risk, Action, and control-selection IDs without persisting a source-line relationship. Same-step duplicates may reference the same applicable Quality assignment but never copy the Quality definition or assignment itself. Completion evidence and resulting ratings are cleared. Changing the duplicate's Process Function requires confirmation when step-specific Quality controls will be removed; active project-wide manual controls and the Detection rating remain. `pfmea_risk_rows` and `pfmea_actions` retain the existing RPN behavior. Internal identifiers stay hidden. The read-only high-risk view and lack of company scoring guidance, persisted threshold, or approval lifecycle remain unchanged.
+- **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply, including native selection, direct entry, relationship-safe confirmed deletion, hidden stable IDs, filters, filtered export, Undo, **Save & Refresh**, audit logging with Editor attribution, scenario boundary explanation, canonical terminology, and one bottom History expander with Requirements and PFMEA history tabs.
+- **Approval status:** Nicole Ervin approved this schema and Phase 2 editable PFMEA module on August 31, 2026, the workbook-aligned flat presentation on September 1, 2026, and the structured Cause-level Prevention/Detection selection model described here on September 2, 2026. The Quality page includes Requirements repository, PFMEA, and placeholder Control Plan tabs. Control Plan tables, generation, approval workflows, scoring definitions, and automatic action disposition remain unapproved and unimplemented.
 
 ## Known naming debt — approved for future correction, not yet changed
 
@@ -245,5 +332,9 @@ Process part groups → paired catalog parts from a fishbone section
       ↓
 Scenario-specific Pin Map (derived visual view)
       ↓
-Quality functional review (future home for requirements; persisted design pending)
+Quality requirements repository -> scenario-specific assignments linked to Process steps
+      ↓
+Scenario-specific Process FMEA
+      ↓
+Future Control Plan generation (not implemented)
 ```

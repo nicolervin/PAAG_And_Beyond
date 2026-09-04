@@ -10,6 +10,12 @@ from uuid import uuid4
 
 import pandas as pd
 
+from utils.quality_store import (
+    clone_quality_requirement_assignments,
+    init_quality_schema,
+)
+from utils.pfmea_store import clone_pfmea_scenario, init_pfmea_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -297,6 +303,8 @@ def init_db() -> None:
             );
             """
         )
+        init_quality_schema(conn)
+        init_pfmea_schema(conn)
         project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "product_line" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
@@ -765,6 +773,26 @@ def clone_planning_scenario(
                         tuple(option[column] for column in option_columns),
                     )
 
+            quality_assignment_id_map: dict[str, str] = {}
+            clone_quality_requirement_assignments(
+                conn,
+                project_id,
+                source_scenario_id,
+                new_scenario_id,
+                process_id_map,
+                timestamp,
+                quality_assignment_id_map,
+            )
+            clone_pfmea_scenario(
+                conn,
+                project_id,
+                source_scenario_id,
+                new_scenario_id,
+                process_id_map,
+                quality_assignment_id_map,
+                timestamp,
+            )
+
             area_id_map: dict[str, str] = {}
             for source_row in conn.execute(
                 "SELECT * FROM yamazumi_areas WHERE project_id=? AND scenario_id=? ORDER BY name",
@@ -974,17 +1002,23 @@ def record_audit_event(
     row_count: int,
     editor_name: str = "",
     details: dict | None = None,
+    *,
+    _conn: sqlite3.Connection | None = None,
 ) -> None:
     """Record a concise, project-scoped history entry for a persisted table action."""
-    execute(
+    sql = (
         """INSERT INTO audit_log
            (id, project_id, table_name, action, row_count, editor_name, details, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            str(uuid4()), project_id, table_name, action, int(row_count), editor_name.strip(),
-            json.dumps(details or {}, ensure_ascii=False), now_iso(),
-        ),
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
     )
+    params = (
+        str(uuid4()), project_id, table_name, action, int(row_count), editor_name.strip(),
+        json.dumps(details or {}, ensure_ascii=False), now_iso(),
+    )
+    if _conn is not None:
+        _conn.execute(sql, params)
+    else:
+        execute(sql, params)
 
 
 def audit_history(project_id: str, table_name: str | None = None, limit: int = 100) -> pd.DataFrame:
@@ -5102,6 +5136,15 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
         removed = existing_ids - saved_ids
         if removed:
             placeholders = ",".join("?" for _ in removed)
+            protected_count = conn.execute(
+                f"""SELECT COUNT(*) FROM pfmea_entries
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IN ({placeholders})""",
+                (project_id, scenario_id, *removed),
+            ).fetchone()[0]
+            if protected_count:
+                raise ValueError(
+                    "Remove the linked PFMEA entries before deleting this Process at a Glance step."
+                )
             conn.execute(
                 f"""UPDATE yamazumi_elements
                     SET process_element_id=NULL, process_sync_status='Needs IE review', updated_at=?
