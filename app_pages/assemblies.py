@@ -19,6 +19,7 @@ from utils.store import (
     assembly_grid_feature_visibility,
     assembly_grid_model_mappings,
     assembly_grid_number_merge_impact,
+    assembly_grid_part_relink_impact,
     assembly_images,
     assembly_sections,
     audit_history,
@@ -34,7 +35,7 @@ from utils.store import (
     save_assembly_bom_components,
     save_assembly_catalog_rows,
     save_assembly_grid_model_mappings,
-    save_assembly_grid_section,
+    save_assembly_grid_sections,
     search_parts_and_fishbone,
     set_assembly_image,
 )
@@ -62,8 +63,8 @@ from utils.table_ui import (
 project_id = st.session_state.get("project_id")
 page_title_with_scope("Assembly grid", scope="project")
 st.caption(
-    "Map named EBOM categories to real assembly numbers by official model, then open Details "
-    "for the full assembly editor."
+    "View one or more Fishbone sections together, map named EBOM categories to real assembly "
+    "numbers by official model, and nest completed subassemblies through their mini-BOMs."
 )
 if not project_id:
     st.stop()
@@ -90,16 +91,46 @@ def _component_event(component_key: str, event_name: str) -> dict:
 if sections.empty:
     st.info("Create at least one Fishbone section before building an assembly grid.")
 else:
-    selected_section_id = st.selectbox(
-        "Fishbone section",
-        sections["id"].astype(str).tolist(),
-        format_func=lambda value: section_name_by_id.get(value, value),
-        key=f"assembly_grid_section_{project_id}",
-        help="Each grid category is built in this Fishbone section.",
+    active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
+    active_section_ids = active_sections["id"].astype(str).tolist()
+    all_sections_token = "__all_active_sections__"
+    selected_section_values = st.multiselect(
+        "Fishbone sections",
+        [all_sections_token, *active_section_ids],
+        default=[all_sections_token],
+        format_func=lambda value: (
+            "All active sections"
+            if value == all_sections_token else section_name_by_id.get(value, value)
+        ),
+        key=f"assembly_grid_sections_{project_id}",
+        help="Selected sections appear together in Fishbone order and save atomically.",
     )
-    saved_categories = assembly_grid_categories(project_id, selected_section_id)
-    saved_section_mappings = assembly_grid_model_mappings(project_id, selected_section_id)
+    selected_section_ids = (
+        active_section_ids
+        if all_sections_token in selected_section_values else [
+            section_id
+            for section_id in active_section_ids
+            if section_id in selected_section_values
+        ]
+    )
+    if not selected_section_ids:
+        st.info("Select at least one Fishbone section to display its assembly grid.")
+        st.stop()
+    selected_section_scope = "_".join(selected_section_ids)
+    all_saved_categories = assembly_grid_categories(project_id)
+    saved_categories = (
+        all_saved_categories.loc[
+            all_saved_categories["section_id"].astype(str).isin(selected_section_ids)
+            | all_saved_categories["is_top_level"].fillna(0).astype(bool)
+        ].copy()
+        if not all_saved_categories.empty
+        else all_saved_categories
+    )
+    displayed_category_ids = set(saved_categories["id"].astype(str))
     saved_all_mappings = assembly_grid_model_mappings(project_id)
+    saved_section_mappings = saved_all_mappings.loc[
+        saved_all_mappings["category_id"].astype(str).isin(displayed_category_ids)
+    ].copy() if not saved_all_mappings.empty else saved_all_mappings
     models = complexity_tree(project_id)
     model_definitions = {
         str(row["id"]): dict(row)
@@ -122,7 +153,7 @@ else:
         active_model_ids,
         default=active_model_ids,
         format_func=lambda value: model_labels.get(value, value),
-        key=f"assembly_grid_visible_models_{project_id}_{selected_section_id}",
+        key=f"assembly_grid_visible_models_{project_id}",
         help="This affects display only. Hidden models and their saved mappings are preserved.",
     )
 
@@ -131,38 +162,45 @@ else:
         features.loc[features["active"].fillna(1).astype(bool)].copy()
         if not features.empty else features
     )
-    feature_preferences = assembly_grid_feature_visibility(
-        project_id, selected_section_id
-    )
-    preference_by_id = (
-        {
+    preference_by_section = {}
+    for section_id in selected_section_ids:
+        feature_preferences = assembly_grid_feature_visibility(project_id, section_id)
+        preference_by_section[section_id] = {
             str(row["feature_id"]): bool(row["is_visible"])
             for _, row in feature_preferences.iterrows()
-        }
-        if not feature_preferences.empty else {}
-    )
+        } if not feature_preferences.empty else {}
     feature_label_by_id = {
         str(row["id"]): f"{row['category']} · {row['name']}"
         for _, row in active_features.iterrows()
     }
     default_visible_features = [
         feature_id for feature_id in feature_label_by_id
-        if preference_by_id.get(feature_id, True)
+        if all(
+            preference_by_section[section_id].get(feature_id, True)
+            for section_id in selected_section_ids
+        )
     ]
     visible_feature_ids = st.multiselect(
         "Visible feature headers",
         list(feature_label_by_id),
         default=default_visible_features,
         format_func=lambda value: feature_label_by_id.get(value, value),
-        key=f"assembly_grid_visible_features_{project_id}_{selected_section_id}",
-        help="Only active features can appear. This display preference is saved per Fishbone section.",
+        key=f"assembly_grid_visible_features_{project_id}",
+        help="Only active features can appear. This shared choice is saved for every displayed section.",
     )
-    missing_part_key = f"assembly_grid_missing_part_{project_id}_{selected_section_id}"
+    part_target_section_id = st.selectbox(
+        "Part placement section",
+        selected_section_ids,
+        format_func=lambda value: section_name_by_id.get(value, value),
+        key=f"assembly_grid_part_target_section_{project_id}",
+        help="Find/add part places ordinary component uses in this displayed section.",
+    )
+    missing_part_key = f"assembly_grid_missing_part_{project_id}"
     if st.button(
         "Find or add a missing part",
         icon=":material/search:",
         type="tertiary",
-        key=f"assembly_grid_find_part_{project_id}_{selected_section_id}",
+        key=f"assembly_grid_find_part_{project_id}",
     ):
         st.session_state[missing_part_key] = True
 
@@ -175,14 +213,14 @@ else:
     def assembly_grid_missing_part_dialog() -> None:
         st.caption(
             f"Components must reference an exact Fishbone use in "
-            f"{section_name_by_id.get(selected_section_id, selected_section_id)}. "
+            f"{section_name_by_id.get(part_target_section_id, part_target_section_id)}. "
             "Search the whole Parts Catalog before creating a new part."
         )
         find_tab, add_tab = st.tabs(["Find existing", "Add new part"])
         with find_tab:
             search_text = st.text_input(
                 "Search by part number or Part Name",
-                key=f"assembly_grid_part_search_{project_id}_{selected_section_id}",
+                key=f"assembly_grid_part_search_{project_id}_{part_target_section_id}",
             ).strip()
             if len(search_text) < 2:
                 st.info("Enter at least two characters to search.")
@@ -194,7 +232,7 @@ else:
                     summary = matches[["part_id", "part_number", "description", "revision"]].drop_duplicates()
                     selectable_dataframe(
                         summary.drop(columns=["part_id"]),
-                        key=f"assembly_grid_part_matches_{project_id}_{selected_section_id}",
+                        key=f"assembly_grid_part_matches_{project_id}_{part_target_section_id}",
                         hide_index=True,
                         column_config={
                             "part_number": "Part number",
@@ -210,31 +248,31 @@ else:
                         "Part to place",
                         list(labels),
                         format_func=lambda value: labels.get(value, value),
-                        key=f"assembly_grid_part_choice_{project_id}_{selected_section_id}",
+                        key=f"assembly_grid_part_choice_{project_id}_{part_target_section_id}",
                     )
                     current_uses = matches.loc[
                         matches["part_id"].astype(str).eq(str(part_id))
-                        & matches["section_id"].fillna("").astype(str).eq(selected_section_id)
+                        & matches["section_id"].fillna("").astype(str).eq(part_target_section_id)
                     ]
                     if current_uses.empty:
                         placement = st.container(horizontal=True, vertical_alignment="bottom")
                         quantity = placement.number_input(
                             "Fishbone quantity", value=1.0, step=0.01, format="%g",
-                            key=f"assembly_grid_place_quantity_{project_id}_{selected_section_id}",
+                            key=f"assembly_grid_place_quantity_{project_id}_{part_target_section_id}",
                         )
                         use_description = placement.text_input(
                             "Use / installation location",
-                            key=f"assembly_grid_place_use_{project_id}_{selected_section_id}",
+                            key=f"assembly_grid_place_use_{project_id}_{part_target_section_id}",
                         )
                         if st.button(
                             "Place in this Fishbone section",
                             type="primary",
                             icon=":material/account_tree:",
-                            key=f"assembly_grid_place_part_{project_id}_{selected_section_id}",
+                            key=f"assembly_grid_place_part_{project_id}_{part_target_section_id}",
                         ):
                             try:
                                 assign_parts_to_section(
-                                    project_id, [str(part_id)], selected_section_id,
+                                    project_id, [str(part_id)], part_target_section_id,
                                     use_description,
                                     allow_additional_use=True,
                                     quantities_by_part={str(part_id): float(quantity)},
@@ -242,7 +280,7 @@ else:
                                 record_audit_event(
                                     project_id, "Fishbone part assignments", "Place part", 1,
                                     st.session_state.get("current_editor", ""),
-                                    {"part_id": str(part_id), "section_id": selected_section_id},
+                                    {"part_id": str(part_id), "section_id": part_target_section_id},
                                 )
                                 st.session_state.pop(missing_part_key, None)
                                 st.toast("Placed the part; it is now available in the grid", icon=":material/check_circle:")
@@ -257,36 +295,36 @@ else:
         with add_tab:
             st.caption("Create the Parts Catalog record and its first Fishbone use together.")
             part_number = st.text_input(
-                "Part number", key=f"assembly_grid_new_part_number_{project_id}_{selected_section_id}"
+                "Part number", key=f"assembly_grid_new_part_number_{project_id}_{part_target_section_id}"
             )
             part_name = st.text_input(
-                "Part Name", key=f"assembly_grid_new_part_name_{project_id}_{selected_section_id}"
+                "Part Name", key=f"assembly_grid_new_part_name_{project_id}_{part_target_section_id}"
             )
             revision = st.text_input(
-                "Revision", value="0", key=f"assembly_grid_new_part_revision_{project_id}_{selected_section_id}"
+                "Revision", value="0", key=f"assembly_grid_new_part_revision_{project_id}_{part_target_section_id}"
             )
             new_row = st.container(horizontal=True, vertical_alignment="bottom")
             quantity = new_row.number_input(
                 "Fishbone quantity", value=1.0, step=0.01, format="%g",
-                key=f"assembly_grid_new_part_quantity_{project_id}_{selected_section_id}",
+                key=f"assembly_grid_new_part_quantity_{project_id}_{part_target_section_id}",
             )
             use_description = new_row.text_input(
                 "Use / installation location",
-                key=f"assembly_grid_new_part_use_{project_id}_{selected_section_id}",
+                key=f"assembly_grid_new_part_use_{project_id}_{part_target_section_id}",
             )
             notes = st.text_area(
-                "Part notes", key=f"assembly_grid_new_part_notes_{project_id}_{selected_section_id}"
+                "Part notes", key=f"assembly_grid_new_part_notes_{project_id}_{part_target_section_id}"
             )
             if st.button(
                 "Add part and place it",
                 type="primary",
                 icon=":material/add_circle:",
-                key=f"assembly_grid_create_part_{project_id}_{selected_section_id}",
+                key=f"assembly_grid_create_part_{project_id}_{part_target_section_id}",
             ):
                 try:
                     part_id, assignment_id, updated_at = create_part_and_assign_to_section(
                         project_id,
-                        selected_section_id,
+                        part_target_section_id,
                         {
                             "part_number": part_number,
                             "description": part_name,
@@ -305,7 +343,7 @@ else:
                     record_audit_event(
                         project_id, "Fishbone part assignments", "Place new part", 1, editor,
                         {"part_id": part_id, "assignment_id": assignment_id,
-                         "section_id": selected_section_id, "updated_at": updated_at},
+                         "section_id": part_target_section_id, "updated_at": updated_at},
                     )
                     st.session_state.pop(missing_part_key, None)
                     st.toast("Added and placed the new part", icon=":material/check_circle:")
@@ -314,7 +352,7 @@ else:
                     st.error(str(exc))
         if st.button(
             "Cancel", icon=":material/close:",
-            key=f"assembly_grid_missing_part_cancel_{project_id}_{selected_section_id}",
+            key=f"assembly_grid_missing_part_cancel_{project_id}",
         ):
             st.session_state.pop(missing_part_key, None)
             st.rerun()
@@ -337,6 +375,11 @@ else:
             {
                 "id": str(component["id"]),
                 "fishbone_assignment_id": str(component["fishbone_assignment_id"]),
+                "nested_assembly_id": (
+                    ""
+                    if pd.isna(component.get("nested_assembly_id"))
+                    else str(component.get("nested_assembly_id") or "")
+                ),
                 "part_number": (
                     ""
                     if pd.isna(component.get("part_number"))
@@ -352,10 +395,6 @@ else:
             for _, component in assembly_components.iterrows()
         ]
     grid_uses = fishbone_part_assignments(project_id)
-    grid_uses = (
-        grid_uses.loc[grid_uses["section_id"].astype(str).eq(selected_section_id)].copy()
-        if not grid_uses.empty else grid_uses
-    )
     mapping_by_cell = {
         (str(row["category_id"]), str(row["model_id"])): dict(row)
         for _, row in saved_section_mappings.iterrows()
@@ -375,15 +414,40 @@ else:
         initial_grid_draft.append(
             {
                 "id": str(category["id"]),
+                "section_id": str(category["section_id"]),
                 "ebom_name": str(category["ebom_name"]),
                 "display_name": str(category["display_name"]),
+                "is_top_level": bool(category.get("is_top_level", False)),
                 "installed_section_id": str(category.get("installed_section_id") or ""),
                 "sequence": int(category.get("sequence") or 10),
                 "cells": cells,
             }
         )
 
-    grid_key = f"assembly_grid_component_v6_{project_id}_{selected_section_id}"
+    if not any(category.get("is_top_level") for category in initial_grid_draft):
+        initial_grid_draft.insert(
+            0,
+            {
+                "id": "",
+                "section_id": "",
+                "ebom_name": "Top-level packaged unit",
+                "display_name": "Top-level packaged unit",
+                "is_top_level": True,
+                "installed_section_id": "",
+                "sequence": 0,
+                "cells": {
+                    model_id: {
+                        "mapping_id": "",
+                        "assembly_id": "",
+                        "assembly_number": "",
+                        "components": [],
+                    }
+                    for model_id in active_model_ids
+                },
+            },
+        )
+
+    grid_key = f"assembly_grid_component_v8_{project_id}_{selected_section_scope}"
     pending_category_key = f"assembly_grid_pending_category_delete_{project_id}"
     pending_mapping_key = f"assembly_grid_pending_mapping_clear_{project_id}"
     pending_component_key = f"assembly_grid_pending_component_delete_{project_id}"
@@ -425,6 +489,7 @@ else:
     def confirm_grid_category_delete() -> None:
         pending = dict(st.session_state.get(pending_category_key, {}))
         category_id = str(pending.get("category_id") or "")
+        category_section_id = str(pending.get("section_id") or "")
         st.warning(
             f"Delete category {pending.get('display_name') or 'Untitled category'} and all of "
             "its model mappings? Every real assembly record, mini-BOM, feature rule, image, "
@@ -440,7 +505,7 @@ else:
         ):
             if category_id:
                 result = delete_assembly_grid_categories(
-                    project_id, selected_section_id, [category_id]
+                    project_id, category_section_id, [category_id]
                 )
                 record_audit_event(
                     project_id, "Assembly grid categories", "Delete category",
@@ -556,7 +621,24 @@ else:
         for model_id in visible_model_ids
     ]
     grid_use_payload = []
+    assembly_part_ids = {
+        str(value)
+        for value in catalog.get("catalog_part_id", pd.Series(dtype="string")).dropna()
+        if str(value).strip()
+    }
+    top_level_assembly_ids = (
+        set(
+            saved_all_mappings.loc[
+                saved_all_mappings["is_top_level"].fillna(0).astype(bool),
+                "assembly_id",
+            ].astype(str)
+        )
+        if not saved_all_mappings.empty
+        else set()
+    )
     for _, row in grid_uses.iterrows():
+        if str(row.get("part_id") or "") in assembly_part_ids:
+            continue
         part_number = str(row["part_number"])
         part_name = "" if pd.isna(row.get("description")) else str(row.get("description"))
         use_description = (
@@ -567,6 +649,8 @@ else:
         grid_use_payload.append(
             {
                 "id": str(row["id"]),
+                "kind": "part",
+                "section_id": str(row["section_id"]),
                 "part_number": part_number,
                 "part_name": part_name,
                 "quantity": float(row["quantity"]),
@@ -574,6 +658,39 @@ else:
                     f"{part_number} · {part_name or 'No Part Name'} · "
                     f"{use_description or 'No use description'} · "
                     f"Fishbone qty {format_clean_number(row['quantity'])}"
+                ),
+            }
+        )
+    for _, assembly_option in catalog.iterrows():
+        raw_built_section_id = assembly_option.get("built_section_id")
+        built_section_id = (
+            "" if pd.isna(raw_built_section_id) else str(raw_built_section_id or "")
+        )
+        raw_catalog_part_id = assembly_option.get("catalog_part_id")
+        catalog_part_id = (
+            "" if pd.isna(raw_catalog_part_id) else str(raw_catalog_part_id or "").strip()
+        )
+        if (
+            not bool(assembly_option.get("active", True))
+            or not catalog_part_id
+            or built_section_id not in active_section_ids
+            or str(assembly_option["id"]) in top_level_assembly_ids
+        ):
+            continue
+        assembly_number = str(assembly_option["assembly_number"])
+        assembly_name = str(assembly_option.get("name") or "")
+        grid_use_payload.append(
+            {
+                "id": f"assembly:{assembly_option['id']}",
+                "kind": "assembly",
+                "nested_assembly_id": str(assembly_option["id"]),
+                "section_id": built_section_id,
+                "part_number": assembly_number,
+                "part_name": assembly_name,
+                "quantity": 1.0,
+                "label": (
+                    f"Subassembly · {assembly_number} · {assembly_name or 'No name'} · "
+                    f"Built in {section_name_by_id.get(built_section_id, built_section_id)}"
                 ),
             }
         )
@@ -589,6 +706,10 @@ else:
             {"id": str(row["id"]), "name": str(row["name"])}
             for _, row in sections.iterrows()
         ],
+        grid_sections=[
+            {"id": section_id, "name": section_name_by_id.get(section_id, section_id)}
+            for section_id in selected_section_ids
+        ],
         uses=grid_use_payload,
         on_draft_change=on_grid_draft_change,
         on_details_change=on_grid_details_change,
@@ -603,15 +724,15 @@ else:
     visibility_dirty = set(visible_feature_ids) != set(default_visible_features)
     grid_actions = editable_table_footer(
         editor_key=f"assembly_grid_footer_state_{project_id}",
-        key_prefix=f"assembly_grid_{project_id}_{selected_section_id}",
+        key_prefix=f"assembly_grid_{project_id}_{selected_section_scope}",
         additional_unsaved_changes=draft_dirty or visibility_dirty,
     )
     if grid_actions.undo:
         st.session_state.pop(grid_key, None)
         st.session_state.pop(pending_merge_key, None)
-        st.session_state[
-            f"assembly_grid_visible_features_{project_id}_{selected_section_id}"
-        ] = default_visible_features
+        st.session_state[f"assembly_grid_visible_features_{project_id}"] = (
+            default_visible_features
+        )
         st.toast("Discarded unsaved assembly-grid changes", icon=":material/undo:")
         st.rerun()
 
@@ -627,9 +748,30 @@ else:
             category_id = str(category.get("id") or uuid4())
             category_id_map[index] = category_id
             prepared_categories.append({**category, "id": category_id})
+        top_level_categories = [
+            category
+            for category in prepared_categories
+            if bool(category.get("is_top_level"))
+        ]
+        if len(top_level_categories) != 1:
+            raise ValueError(
+                "The grid requires exactly one Top-level packaged unit row."
+            )
+        top_level_section_id = str(
+            top_level_categories[0].get("section_id") or ""
+        ).strip()
+        if not top_level_section_id:
+            raise ValueError(
+                "Choose the final Built section for the Top-level packaged unit."
+            )
+        save_section_ids = list(selected_section_ids)
+        if top_level_section_id not in save_section_ids:
+            save_section_ids.append(top_level_section_id)
         complete_mappings = (
             saved_all_mappings.loc[
-                ~saved_all_mappings["section_id"].astype(str).eq(selected_section_id)
+                ~saved_all_mappings["category_id"].astype(str).isin(
+                    {str(category["id"]) for category in prepared_categories}
+                )
             ].to_dict("records")
             if not saved_all_mappings.empty else []
         )
@@ -657,16 +799,32 @@ else:
                 )
                 if assembly_id and cell.get("components") is not None:
                     component_rows_by_assembly[assembly_id] = list(cell["components"])
+        feature_visibility = [
+            {"feature_id": feature_id, "is_visible": feature_id in visible_feature_ids}
+            for feature_id in feature_label_by_id
+        ]
         return {
-            "categories": [
-                {key: value for key, value in category.items() if key != "cells"}
-                for category in prepared_categories
+            "sections": [
+                {
+                    "section_id": section_id,
+                    "categories": [
+                        {
+                            key: value
+                            for key, value in category.items()
+                            if key not in {"cells", "section_id"}
+                        }
+                        for category in prepared_categories
+                        if str(category.get("section_id") or "") == section_id
+                    ],
+                    **(
+                        {"feature_visibility": feature_visibility}
+                        if section_id in selected_section_ids
+                        else {}
+                    ),
+                }
+                for section_id in save_section_ids
             ],
             "mappings": complete_mappings,
-            "feature_visibility": [
-                {"feature_id": feature_id, "is_visible": feature_id in visible_feature_ids}
-                for feature_id in feature_label_by_id
-            ],
             "components": component_rows_by_assembly,
         }
 
@@ -676,38 +834,101 @@ else:
             {key: value for key, value in impact.items() if key != "source_image_paths"}
             for impact in result["assembly_merges"]
         ]
+        category_count = sum(
+            section_result["categories"]["count"]
+            for section_result in result["sections"].values()
+        )
+        installed_sync_changes = [
+            change
+            for section_result in result["sections"].values()
+            for change in section_result["categories"]["installed_section_sync_changes"]
+        ]
+        built_sync_changes = [
+            change
+            for section_result in result["sections"].values()
+            for change in section_result["categories"]["built_section_sync_changes"]
+        ]
+        visibility_count = sum(
+            section_result["feature_visibility"]["count"]
+            for section_result in result["sections"].values()
+        )
+        created_nested_uses = [
+            use
+            for item in result["components"].values()
+            for use in item.get("created_fishbone_uses", [])
+        ]
         record_audit_event(
             project_id, "Assembly grid categories", "Save & Refresh",
-            result["categories"]["count"], editor,
-            {"section_id": selected_section_id,
-             "installed_section_sync_changes": result["categories"]["installed_section_sync_changes"]},
+            category_count, editor,
+            {"section_ids": selected_section_ids,
+             "built_section_sync_changes": built_sync_changes,
+             "installed_section_sync_changes": installed_sync_changes},
         )
         record_audit_event(
             project_id, "Assembly grid mappings", "Save & Refresh",
             result["mappings"]["count"], editor,
-            {"section_id": selected_section_id,
+            {"section_ids": selected_section_ids,
              "created_assemblies": result["mappings"]["created_assemblies"],
              "renamed_assemblies": result["mappings"]["renamed_assemblies"],
              "assembly_merges": merge_audit},
         )
         record_audit_event(
             project_id, "Assembly grid feature visibility", "Save & Refresh",
-            result["feature_visibility"]["count"], editor,
-            {"section_id": selected_section_id,
-             "hidden_feature_ids": result["feature_visibility"]["hidden_feature_ids"]},
+            visibility_count, editor,
+            {"section_ids": selected_section_ids,
+             "hidden_feature_ids": [
+                 feature_id for feature_id in feature_label_by_id
+                 if feature_id not in visible_feature_ids
+             ]},
         )
         if result["components"]:
             record_audit_event(
                 project_id, "Assembly mini-BOM", "Grid Save & Refresh",
                 sum(item["count"] for item in result["components"].values()), editor,
-                {"section_id": selected_section_id,
-                 "assembly_ids": list(result["components"])},
+                {"section_ids": selected_section_ids,
+                 "assembly_ids": list(result["components"]),
+                 "created_fishbone_uses": created_nested_uses,
+                 "nested_relationships": [
+                     relationship
+                     for item in result["components"].values()
+                     for relationship in item.get("nested_relationships", [])
+                 ]},
+            )
+        if created_nested_uses:
+            record_audit_event(
+                project_id,
+                "Fishbone part assignments",
+                "Place nested assemblies",
+                len(created_nested_uses),
+                editor,
+                {
+                    "section_ids": selected_section_ids,
+                    "created_fishbone_uses": created_nested_uses,
+                },
             )
         if merge_audit:
             record_audit_event(
                 project_id, "Assemblies catalog", "Merge assembly number",
                 len(merge_audit), editor,
-                {"section_id": selected_section_id, "assembly_merges": merge_audit},
+                {"section_ids": selected_section_ids, "assembly_merges": merge_audit},
+            )
+        part_changes = list(result["mappings"].get("catalog_part_changes") or [])
+        applicability_changes = list(
+            result["mappings"].get("catalog_part_applicability_changes") or []
+        )
+        if part_changes or applicability_changes:
+            record_audit_event(
+                project_id,
+                "Parts",
+                "Assembly grid synchronization",
+                len(part_changes) + len(applicability_changes),
+                editor,
+                {
+                    "section_ids": selected_section_ids,
+                    "catalog_part_changes": part_changes,
+                    "applicability_changes": applicability_changes,
+                    "assembly_merges": merge_audit,
+                },
             )
         st.session_state.pop(grid_key, None)
         st.session_state.pop(pending_merge_key, None)
@@ -718,29 +939,39 @@ else:
         st.toast(message, icon=":material/check_circle:")
         st.rerun()
 
-    def commit_grid_save(payload: dict, merges: list[dict] | None = None) -> None:
-        result = save_assembly_grid_section(
+    def commit_grid_save(
+        payload: dict,
+        merges: list[dict] | None = None,
+        part_relinks: list[dict] | None = None,
+    ) -> None:
+        result = save_assembly_grid_sections(
             project_id,
-            selected_section_id,
-            payload["categories"],
+            payload["sections"],
             payload["mappings"],
-            payload["feature_visibility"],
             payload["components"],
             assembly_merges=merges,
+            catalog_part_relinks=part_relinks,
         )
         finish_grid_save(result)
 
-    @st.dialog("Merge assembly numbers?", dismissible=False, width="large")
+    @st.dialog("Confirm assembly and Parts Catalog changes?", dismissible=False, width="large")
     def confirm_assembly_number_merge() -> None:
         pending = st.session_state.get(pending_merge_key, {})
         impacts = list(pending.get("impacts") or [])
-        if not impacts:
+        part_relinks = list(pending.get("part_relinks") or [])
+        if not impacts and not part_relinks:
             st.error("The pending assembly-number merge is no longer available.")
             return
-        st.warning(
-            "The old assembly group number(s) below will be permanently deleted. "
-            "Their grid mappings will use the existing assembly instead."
-        )
+        if impacts:
+            st.warning(
+                "The old assembly group number(s) below will be permanently deleted. "
+                "Their grid mappings will use the existing assembly instead."
+            )
+        else:
+            st.warning(
+                "The new assembly number already exists as a Parts Catalog row. Confirm how "
+                "the stable assembly-to-part link will change before saving."
+            )
         for impact in impacts:
             st.markdown(
                 f"**{impact['source_assembly_number']} → "
@@ -758,7 +989,25 @@ else:
                 f"- **{impact['source_child_count']}** child assembly relationship(s) and "
                 f"**{impact['source_target_link_count']}** dormant target link(s) will become unassigned.\n"
                 f"- **{impact['source_policy_count']}** dormant scenario-policy row(s) and "
-                f"**{impact['source_material_option_count']}** dormant material-option row(s) will be removed."
+                f"**{impact['source_material_option_count']}** dormant material-option row(s) will be removed.\n"
+                f"- Its completed-subassembly Parts Catalog row will be **{impact['source_part_action']}**. "
+                f"That part currently owns **{impact['fishbone_use_count']}** Fishbone use(s), "
+                f"**{impact['process_option_count']}** Process option(s), and "
+                f"**{impact['feature_rule_count']}** stored part-feature rule(s)."
+            )
+        for impact in part_relinks:
+            st.markdown(
+                f"**{impact['source_assembly_number']} → "
+                f"{impact['target_assembly_number']} (existing Parts Catalog row)**"
+            )
+            st.markdown(
+                f"- The assembly will link to existing Part number **{impact['target_part_number']}**; "
+                "that row's catalog fields and downstream relationships remain authoritative.\n"
+                f"- The prior Part number **{impact['source_part_number']}** will be "
+                f"**{impact['source_part_action']}**. It currently owns "
+                f"**{impact['fishbone_use_count']}** Fishbone use(s), "
+                f"**{impact['process_option_count']}** Process option(s), and "
+                f"**{impact['feature_rule_count']}** stored feature rule(s)."
             )
         actions = st.container(horizontal=True)
         if actions.button("Cancel", key=f"cancel_assembly_number_merge_{project_id}"):
@@ -771,7 +1020,7 @@ else:
             key=f"confirm_assembly_number_merge_{project_id}",
         ):
             try:
-                commit_grid_save(pending["payload"], impacts)
+                commit_grid_save(pending["payload"], impacts, part_relinks)
             except ValueError as exc:
                 st.error(str(exc))
 
@@ -779,10 +1028,14 @@ else:
         try:
             payload = prepare_grid_save()
             impacts = assembly_grid_number_merge_impact(project_id, payload["mappings"])
-            if impacts:
+            part_relinks = assembly_grid_part_relink_impact(
+                project_id, payload["mappings"]
+            )
+            if impacts or part_relinks:
                 st.session_state[pending_merge_key] = {
                     "payload": payload,
                     "impacts": impacts,
+                    "part_relinks": part_relinks,
                 }
             else:
                 commit_grid_save(payload)
@@ -1100,12 +1353,13 @@ def empty_catalog_rows() -> pd.DataFrame:
 
 def save_catalog_records(records: list[dict]) -> None:
     result = save_assembly_catalog_rows(project_id, records)
+    editor = st.session_state.get("current_editor", "")
     record_audit_event(
         project_id,
         "Assemblies catalog",
         "Save & Refresh",
         result["count"],
-        st.session_state.get("current_editor", ""),
+        editor,
         {
             "assembly_ids": result["assembly_ids"],
             "make_buy_changes": result["make_buy_changes"],
@@ -1113,6 +1367,23 @@ def save_catalog_records(records: list[dict]) -> None:
             "updated_at": result["updated_at"],
         },
     )
+    part_changes = list(result.get("catalog_part_changes") or [])
+    applicability_changes = list(
+        result.get("catalog_part_applicability_changes") or []
+    )
+    if part_changes or applicability_changes:
+        record_audit_event(
+            project_id,
+            "Parts",
+            "Assembly catalog synchronization",
+            len(part_changes) + len(applicability_changes),
+            editor,
+            {
+                "catalog_part_changes": part_changes,
+                "applicability_changes": applicability_changes,
+                "updated_at": result["updated_at"],
+            },
+        )
     st.session_state.pop(f"assembly_catalog_pending_save_{project_id}", None)
     request_table_editor_reset(catalog_editor_key)
     st.toast(f"Saved {result['count']} assemblies", icon=":material/check_circle:")
@@ -1292,6 +1563,22 @@ else:
             f"- **{impact['material_option_count']}** dormant material-option row(s)\n"
             f"- **{impact['target_assembly_link_count']}** dormant target-assembly link(s)"
         )
+        st.info(
+            f"**{impact['preserved_catalog_part_count']}** linked completed-subassembly "
+            "Parts Catalog row(s), including their Fishbone and Process relationships, "
+            "will be preserved."
+        )
+        if impact.get("nested_parent_link_count"):
+            nested_labels = ", ".join(
+                f"{row['child_assembly_number']} in {row['parent_assembly_number']}"
+                for row in impact["nested_parent_links"]
+            )
+            st.warning(
+                f"**{impact['nested_parent_link_count']}** parent mini-BOM nesting link(s) "
+                f"currently use these assemblies: {nested_labels}. The preserved catalog "
+                "parts remain in those mini-BOMs, but they will no longer resolve to an "
+                "assembly after deletion."
+            )
         level_actions = {}
         for depth, level_rows in sorted(impact["levels"].items()):
             labels = ", ".join(str(row["assembly_number"]) for row in level_rows)
@@ -1434,14 +1721,17 @@ else:
 
 with st.expander("History", icon=":material/history:"):
     history_tabs = st.tabs(
-        ["Grid categories", "Grid mappings", "Feature visibility", "Catalog", "Mini-BOM", "Images"]
+        [
+            "Grid categories", "Grid mappings", "Feature visibility", "Catalog",
+            "Mini-BOM", "Images", "Parts",
+        ]
     )
     for tab, table_name in zip(
         history_tabs,
         [
             "Assembly grid categories", "Assembly grid mappings",
             "Assembly grid feature visibility", "Assemblies catalog",
-            "Assembly mini-BOM", "Assembly images",
+            "Assembly mini-BOM", "Assembly images", "Parts",
         ],
     ):
         with tab:

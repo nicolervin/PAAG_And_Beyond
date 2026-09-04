@@ -72,7 +72,11 @@ class AssemblyGridComponentTests(unittest.TestCase):
         self.assertIn("modelCell.querySelector('.assembly-entry')", source)
         self.assertIn("const focusState = new WeakMap()", source)
         self.assertIn("if (!instanceFocus.key) queueFocusRestore", source)
-        self.assertIn('"paag_assembly_grid_v6"', source)
+        self.assertIn('"paag_assembly_grid_v8"', source)
+        self.assertIn("Top-level packaged unit", source)
+        self.assertIn("__top_level__", source)
+        self.assertIn("if (deleteCategory)", source)
+        self.assertIn("nested_assembly_id", source)
 
 
 if __name__ == "__main__":

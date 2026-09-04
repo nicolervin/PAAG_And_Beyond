@@ -88,6 +88,19 @@ class AssemblyGridStoreTests(unittest.TestCase):
         )
         return first_id, second_id
 
+    def _create_component_use(self, part_number: str) -> tuple[str, str]:
+        part_id, assignment_id, _ = store.create_part_and_assign_to_section(
+            self.project_id,
+            self.built_section_id,
+            {
+                "part_number": part_number,
+                "description": f"Component {part_number}",
+                "revision": "0",
+            },
+            2.5,
+        )
+        return part_id, assignment_id
+
     def test_schema_and_minimal_assembly_creation(self) -> None:
         table_names = {
             str(row["name"])
@@ -123,6 +136,417 @@ class AssemblyGridStoreTests(unittest.TestCase):
         self.assertEqual(str(assembly["built_section_id"]), self.built_section_id)
         self.assertEqual(str(assembly["installed_section_id"]), self.installed_section_id)
         self.assertEqual(str(assembly["make_buy"]), "")
+        self.assertTrue(str(assembly["catalog_part_id"]))
+        linked_part = store.query(
+            "SELECT * FROM parts WHERE id=?", (str(assembly["catalog_part_id"]),)
+        )[0]
+        self.assertEqual(linked_part["part_number"], "290D5251G020")
+        self.assertEqual(linked_part["description"], "Fascia SubAsm")
+        self.assertEqual(linked_part["quantity"], 1)
+        self.assertEqual(linked_part["revision"], "0")
+        self.assertEqual(linked_part["source"], "Assembly grid")
+        self.assertEqual(linked_part["model_applicability"], "GRID-MODEL-1")
+
+    def test_top_level_packaged_unit_is_unique_protected_and_syncs_built_section(self) -> None:
+        category_id = str(uuid4())
+        saved = store.save_assembly_grid_sections(
+            self.project_id,
+            [{
+                "section_id": self.built_section_id,
+                "categories": [{
+                    "id": category_id,
+                    "ebom_name": "Top-level packaged unit",
+                    "display_name": "Top-level packaged unit",
+                    "is_top_level": True,
+                    "installed_section_id": None,
+                    "sequence": 0,
+                }],
+            }],
+            [{
+                    "category_id": category_id,
+                    "model_id": self.model_ids[0],
+                    "assembly_number": "PACKAGED-UNIT-1",
+            }],
+        )
+        mapping_result = saved["mappings"]
+        self.assertEqual(
+            saved["sections"][self.built_section_id]["feature_visibility"]["count"],
+            0,
+        )
+        assembly_id = mapping_result["created_assemblies"][0]["assembly_id"]
+        _, assignment_id = self._create_component_use("PACKED-COMPONENT")
+        store.save_assembly_bom_components(
+            self.project_id,
+            assembly_id,
+            [{"fishbone_assignment_id": assignment_id, "quantity": 1}],
+        )
+
+        result = store.save_assembly_grid_categories(
+            self.project_id,
+            self.other_section_id,
+            [{
+                "id": category_id,
+                "ebom_name": "Top-level packaged unit",
+                "display_name": "Top-level packaged unit",
+                "is_top_level": True,
+                "installed_section_id": None,
+                "sequence": 0,
+            }],
+        )
+
+        category = store.assembly_grid_categories(self.project_id).iloc[0]
+        assembly = store.assembly_catalog_rows(self.project_id).set_index("id").loc[assembly_id]
+        assignment = store.query(
+            "SELECT section_id FROM fishbone_part_assignments WHERE id=?",
+            (assignment_id,),
+        )[0]
+        self.assertTrue(bool(category["is_top_level"]))
+        self.assertEqual(str(category["section_id"]), self.other_section_id)
+        self.assertEqual(str(assembly["built_section_id"]), self.other_section_id)
+        self.assertEqual(str(assignment["section_id"]), self.other_section_id)
+        self.assertTrue(
+            any(
+                change.get("new_built_section_id") == self.other_section_id
+                for change in result["built_section_sync_changes"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be deleted"):
+            store.delete_assembly_grid_categories(
+                self.project_id, self.other_section_id, [category_id]
+            )
+        with self.assertRaisesRegex(ValueError, "Only one Top-level"):
+            store.save_assembly_grid_categories(
+                self.project_id,
+                self.built_section_id,
+                [{
+                    "id": str(uuid4()),
+                    "ebom_name": "Top-level packaged unit",
+                    "display_name": "Top-level packaged unit",
+                    "is_top_level": True,
+                    "installed_section_id": None,
+                    "sequence": 0,
+                }],
+            )
+
+    def test_nested_assembly_creates_fishbone_use_and_rejects_cycles(self) -> None:
+        parent_category, _ = self._save_categories()
+        child_category = str(uuid4())
+        store.save_assembly_grid_categories(
+            self.project_id,
+            self.other_section_id,
+            [{
+                "id": child_category,
+                "ebom_name": "CHILD_EBOM",
+                "display_name": "Child Subassembly",
+                "installed_section_id": self.installed_section_id,
+                "sequence": 10,
+            }],
+        )
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [
+                {
+                    "category_id": parent_category,
+                    "model_id": self.model_ids[0],
+                    "assembly_number": "ASM-PARENT",
+                },
+                {
+                    "category_id": child_category,
+                    "model_id": self.model_ids[0],
+                    "assembly_number": "ASM-CHILD",
+                },
+            ],
+        )
+        mappings = store.assembly_grid_model_mappings(self.project_id)
+        parent_id = str(
+            mappings.loc[mappings["assembly_number"].eq("ASM-PARENT")].iloc[0]["assembly_id"]
+        )
+        child_id = str(
+            mappings.loc[mappings["assembly_number"].eq("ASM-CHILD")].iloc[0]["assembly_id"]
+        )
+
+        result = store.save_assembly_bom_components(
+            self.project_id,
+            parent_id,
+            [{"nested_assembly_id": child_id, "quantity": 2}],
+        )
+        self.assertEqual(len(result["created_fishbone_uses"]), 1)
+        component = store.assembly_bom_components(self.project_id, parent_id).iloc[0]
+        self.assertEqual(str(component["nested_assembly_id"]), child_id)
+        self.assertEqual(float(component["quantity"]), 2)
+        deletion_impact = store.assembly_catalog_delete_impact(
+            self.project_id, [child_id]
+        )
+        self.assertEqual(deletion_impact["nested_parent_link_count"], 1)
+        self.assertEqual(
+            deletion_impact["nested_parent_links"][0]["parent_assembly_id"],
+            parent_id,
+        )
+        child_part_id = store.query(
+            "SELECT catalog_part_id FROM manufacturing_assemblies WHERE id=?",
+            (child_id,),
+        )[0]["catalog_part_id"]
+        created_use = store.query(
+            """SELECT section_id FROM fishbone_part_assignments
+               WHERE project_id=? AND part_id=?""",
+            (self.project_id, child_part_id),
+        )
+        self.assertEqual(created_use[0]["section_id"], self.built_section_id)
+
+        with self.assertRaisesRegex(ValueError, "cannot contain a cycle"):
+            store.save_assembly_bom_components(
+                self.project_id,
+                child_id,
+                [{"nested_assembly_id": parent_id, "quantity": 1}],
+            )
+        self.assertTrue(store.assembly_bom_components(self.project_id, child_id).empty)
+
+    def test_nested_child_must_cover_every_parent_model(self) -> None:
+        parent_category, _ = self._save_categories()
+        child_category = str(uuid4())
+        store.save_assembly_grid_categories(
+            self.project_id,
+            self.other_section_id,
+            [{
+                "id": child_category,
+                "ebom_name": "LIMITED_CHILD_EBOM",
+                "display_name": "Limited child",
+                "installed_section_id": self.installed_section_id,
+                "sequence": 10,
+            }],
+        )
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [
+                {
+                    "category_id": parent_category,
+                    "model_id": model_id,
+                    "assembly_number": "ASM-PARENT-ALL",
+                }
+                for model_id in self.model_ids
+            ] + [{
+                "category_id": child_category,
+                "model_id": self.model_ids[0],
+                "assembly_number": "ASM-CHILD-LIMITED",
+            }],
+        )
+        mappings = store.assembly_grid_model_mappings(self.project_id)
+        parent_id = str(
+            mappings.loc[mappings["assembly_number"].eq("ASM-PARENT-ALL")].iloc[0]["assembly_id"]
+        )
+        child_id = str(
+            mappings.loc[mappings["assembly_number"].eq("ASM-CHILD-LIMITED")].iloc[0]["assembly_id"]
+        )
+        with self.assertRaisesRegex(
+            ValueError, "ASM-CHILD-LIMITED.*ASM-PARENT-ALL.*GRID-MODEL-2"
+        ):
+            store.save_assembly_bom_components(
+                self.project_id,
+                parent_id,
+                [{"nested_assembly_id": child_id, "quantity": 1}],
+            )
+        self.assertTrue(store.assembly_bom_components(self.project_id, parent_id).empty)
+
+    def test_multi_section_grid_save_is_atomic(self) -> None:
+        first_category = str(uuid4())
+        second_category = str(uuid4())
+        with self.assertRaisesRegex(ValueError, "Official EBOM category name"):
+            store.save_assembly_grid_sections(
+                self.project_id,
+                [
+                    {
+                        "section_id": self.built_section_id,
+                        "categories": [{
+                            "id": first_category,
+                            "ebom_name": "FIRST_EBOM",
+                            "display_name": "First group",
+                            "sequence": 10,
+                        }],
+                        "feature_visibility": [],
+                    },
+                    {
+                        "section_id": self.other_section_id,
+                        "categories": [{
+                            "id": second_category,
+                            "ebom_name": "",
+                            "display_name": "Invalid group",
+                            "sequence": 10,
+                        }],
+                        "feature_visibility": [],
+                    },
+                ],
+                [],
+            )
+        saved = store.assembly_grid_categories(self.project_id)
+        saved_ids = set(saved["id"].astype(str)) if not saved.empty else set()
+        self.assertNotIn(first_category, saved_ids)
+        self.assertNotIn(second_category, saved_ids)
+        result = store.save_assembly_grid_sections(
+            self.project_id,
+            [
+                {
+                    "section_id": self.built_section_id,
+                    "categories": [{
+                        "id": first_category,
+                        "ebom_name": "FIRST_EBOM",
+                        "display_name": "First group",
+                        "sequence": 10,
+                    }],
+                    "feature_visibility": [],
+                },
+                {
+                    "section_id": self.other_section_id,
+                    "categories": [{
+                        "id": second_category,
+                        "ebom_name": "SECOND_EBOM",
+                        "display_name": "Second group",
+                        "sequence": 10,
+                    }],
+                    "feature_visibility": [],
+                },
+            ],
+            [],
+        )
+        self.assertEqual(set(result["sections"]), {
+            self.built_section_id, self.other_section_id
+        })
+        self.assertEqual(
+            set(store.assembly_grid_categories(self.project_id)["id"].astype(str)),
+            {first_category, second_category},
+        )
+    def test_new_assembly_reuses_existing_catalog_part_without_overwriting_it(self) -> None:
+        category_id, _ = self._save_categories()
+        existing_part_id = store.upsert_part(
+            self.project_id,
+            {
+                "part_number": "ASM-EXISTING-PART",
+                "description": "Collaborator part name",
+                "quantity": 4,
+                "revision": "C",
+                "source": "Manual",
+                "model_applicability": "All",
+                "notes": "Keep this metadata",
+            },
+        )
+
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [{
+                "category_id": category_id,
+                "model_id": self.model_ids[0],
+                "assembly_number": "ASM-EXISTING-PART",
+            }],
+        )
+
+        assembly = store.assembly_catalog_rows(self.project_id).iloc[0]
+        self.assertEqual(str(assembly["catalog_part_id"]), existing_part_id)
+        part = store.query("SELECT * FROM parts WHERE id=?", (existing_part_id,))[0]
+        self.assertEqual(part["description"], "Collaborator part name")
+        self.assertEqual(part["quantity"], 4)
+        self.assertEqual(part["revision"], "C")
+        self.assertEqual(part["source"], "Manual")
+        self.assertEqual(part["notes"], "Keep this metadata")
+        self.assertEqual(part["model_applicability"], "GRID-MODEL-1")
+
+    def test_linked_catalog_part_rename_delete_and_assembly_delete_rules(self) -> None:
+        category_id, _ = self._save_categories()
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [{
+                "category_id": category_id,
+                "model_id": self.model_ids[0],
+                "assembly_number": "ASM-LINKED-BEFORE",
+            }],
+        )
+        mapping = store.assembly_grid_model_mappings(self.project_id).iloc[0]
+        assembly_id = str(mapping["assembly_id"])
+        assembly = store.assembly_catalog_rows(self.project_id).iloc[0]
+        part_id = str(assembly["catalog_part_id"])
+
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [{
+                "id": str(mapping["id"]),
+                "category_id": category_id,
+                "model_id": self.model_ids[0],
+                "assembly_id": assembly_id,
+                "assembly_number": "ASM-LINKED-AFTER",
+            }],
+        )
+        self.assertEqual(
+            store.query("SELECT part_number FROM parts WHERE id=?", (part_id,))[0]["part_number"],
+            "ASM-LINKED-AFTER",
+        )
+        with self.assertRaisesRegex(ValueError, "Delete or merge that assembly first"):
+            store.delete_project_part(self.project_id, part_id)
+        delete_impact = store.part_delete_impact(self.project_id, [part_id])
+        self.assertEqual(
+            delete_impact["linked_assemblies"][0]["assembly_number"],
+            "ASM-LINKED-AFTER",
+        )
+        with self.assertRaisesRegex(ValueError, "gets its model applicability from the Assembly grid"):
+            store.update_part_feature_rules(
+                self.project_id, {part_id: ["All models"]}
+            )
+
+        store.delete_assembly_catalog_rows(self.project_id, [assembly_id], {})
+        self.assertEqual(
+            store.query("SELECT COUNT(*) AS count FROM parts WHERE id=?", (part_id,))[0]["count"],
+            1,
+        )
+
+    def test_rename_to_existing_part_requires_confirmation_and_relinks(self) -> None:
+        category_id, _ = self._save_categories()
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [{
+                "category_id": category_id,
+                "model_id": self.model_ids[0],
+                "assembly_number": "ASM-RELINK-OLD",
+            }],
+        )
+        mapping = store.assembly_grid_model_mappings(self.project_id).iloc[0]
+        assembly_id = str(mapping["assembly_id"])
+        old_part_id = str(store.assembly_catalog_rows(self.project_id).iloc[0]["catalog_part_id"])
+        target_part_id = store.upsert_part(
+            self.project_id,
+            {
+                "part_number": "ASM-RELINK-TARGET",
+                "description": "Existing handled part",
+                "quantity": 2,
+                "revision": "B",
+                "source": "Manual",
+                "model_applicability": "All",
+                "notes": "Preserve",
+            },
+        )
+        draft = [{
+            "id": str(mapping["id"]),
+            "category_id": category_id,
+            "model_id": self.model_ids[0],
+            "assembly_id": assembly_id,
+            "assembly_number": "ASM-RELINK-TARGET",
+        }]
+        impact = store.assembly_grid_part_relink_impact(self.project_id, draft)
+        self.assertEqual(len(impact), 1)
+        self.assertEqual(impact[0]["target_part_id"], target_part_id)
+        with self.assertRaisesRegex(ValueError, "confirm the existing Parts Catalog relink"):
+            store.save_assembly_grid_model_mappings(self.project_id, draft)
+
+        result = store.save_assembly_grid_model_mappings(
+            self.project_id, draft, catalog_part_relinks=impact
+        )
+        self.assertEqual(result["catalog_part_relinks"], impact)
+        assembly = store.assembly_catalog_rows(self.project_id).iloc[0]
+        self.assertEqual(str(assembly["catalog_part_id"]), target_part_id)
+        target = store.query("SELECT * FROM parts WHERE id=?", (target_part_id,))[0]
+        self.assertEqual(target["description"], "Existing handled part")
+        self.assertEqual(target["revision"], "B")
+        self.assertEqual(target["notes"], "Preserve")
+        self.assertEqual(
+            store.query("SELECT COUNT(*) AS count FROM parts WHERE id=?", (old_part_id,))[0]["count"],
+            0,
+        )
 
     def test_one_assembly_may_serve_many_models_only_inside_one_category(self) -> None:
         first_id, second_id = self._save_categories()
@@ -261,27 +685,14 @@ class AssemblyGridStoreTests(unittest.TestCase):
         first_mapping = mappings.loc[self.model_ids[0]]
         second_mapping = mappings.loc[self.model_ids[1]]
         assembly_id = str(first_mapping["assembly_id"])
-        part_id = str(
-            store.project_table("parts", self.project_id, "part_number").iloc[0]["id"]
-        )
-        store.assign_parts_to_section(
-            self.project_id,
-            [part_id],
-            self.built_section_id,
-            allow_additional_use=True,
-            quantities_by_part={part_id: 2.5},
-        )
-        assignment = store.fishbone_part_assignments(self.project_id).loc[
-            lambda rows: rows["section_id"].astype(str).eq(self.built_section_id)
-            & rows["part_id"].astype(str).eq(part_id)
-        ].iloc[-1]
+        _, assignment_id = self._create_component_use("COMP-RENAME")
         component_id = str(uuid4())
         store.save_assembly_bom_components(
             self.project_id,
             assembly_id,
             [{
                 "id": component_id,
-                "fishbone_assignment_id": str(assignment["id"]),
+                "fishbone_assignment_id": assignment_id,
                 "quantity": 1.75,
             }],
         )
@@ -397,22 +808,7 @@ class AssemblyGridStoreTests(unittest.TestCase):
         target = mappings.loc[self.model_ids[1]]
         source_id = str(source["assembly_id"])
         target_id = str(target["assembly_id"])
-        part_id = str(
-            store.project_table("parts", self.project_id, "part_number").iloc[0]["id"]
-        )
-        store.assign_parts_to_section(
-            self.project_id,
-            [part_id],
-            self.built_section_id,
-            allow_additional_use=True,
-            quantities_by_part={part_id: 2.5},
-        )
-        assignment_id = str(
-            store.fishbone_part_assignments(self.project_id).loc[
-                lambda rows: rows["section_id"].astype(str).eq(self.built_section_id)
-                & rows["part_id"].astype(str).eq(part_id)
-            ].iloc[-1]["id"]
-        )
+        _, assignment_id = self._create_component_use("COMP-MERGE")
         source_component_id = str(uuid4())
         target_component_id = str(uuid4())
         store.save_assembly_bom_components(

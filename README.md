@@ -48,7 +48,7 @@ PAAG currently supports:
 - project definitions, planning assumptions, and named planning scenarios;
 - official models, team-friendly names, annual usage, manufacturing features, and controlled model-to-feature mappings;
 - a Parts Catalog with revision, provenance, applicability, primary and supplemental CAD images, and scenario-specific Active state;
-- a project-wide Assembly grid that maps named EBOM categories to real assembly numbers by official model, with shared Installed sections, nested mini-BOMs, and access to the full catalog details workflow;
+- a project-wide Assembly grid with a protected packaged-unit row followed by Fishbone-section categories mapped to real assembly numbers by official model, with shared section controls, nested mini-BOMs, and access to the full catalog details workflow;
 - ordinary BOM imports, preferred ID-based PITS imports, conservative legacy PITS imports, source revisions, and reconciliation evidence;
 - a station-independent assembly Fishbone with main-spine sections, nested subassemblies, and placed part uses;
 - Yamazumi balancing areas, pitch addresses, model variants, work regions, flags, takt comparison, and drag-and-drop work assignment;
@@ -78,7 +78,7 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/exchange.py` — Ordinary BOM and PITS imports, preview/mapping, and Excel snapshot export.
 - `app_pages/models.py` — Model catalog, common names, usage, manufacturing features, and the model-feature complexity tree.
 - `app_pages/parts.py` — Parts Catalog, applicability, images, filters, bulk actions, export, and history.
-- `app_pages/assemblies.py` — Project-wide assembly-to-model grid plus the shared full assembly catalog, mini-BOM, feature-rule, nesting, image, deletion, and history workflows.
+- `app_pages/assemblies.py` — Project-wide multi-section assembly-to-model grid plus the shared full assembly catalog, operational mini-BOM nesting, image, deletion, and history workflows.
 - `utils/assembly_grid.py` — Components v2 category/model grid renderer and its narrow interaction event contract.
 - `app_pages/fishbone.py` — Assembly framework, nested subassemblies, part placement, occurrence ordering, and the interactive Fishbone.
 - `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, flags, model variants, visual board, and work tables.
@@ -112,8 +112,8 @@ Navigation is defined in `streamlit_app.py`.
 
 - **Import PITS and export** accepts ordinary BOM data, the preferred `part_tracker` plus `models` PITS format, and legacy Level 1–11 PITS data. Preferred imports use `ID Number` as the stable source key; changed source content creates a revision and reconciliation item instead of overwriting reviewed planning decisions. The page also creates the one-way Excel snapshot.
 - **Model definitions** maintains official model numbers, common names, descriptions, annual usage, manufacturing features, allowed feature choices, and model-to-feature mappings.
-- **Parts Catalog** maintains one approved record per official part number. Catalog data is project-wide while Active state is scenario-specific. The page supports primary and supplemental images, including direct Windows screenshot paste.
-- **Assembly grid** maps section-owned EBOM categories to real assembly numbers for each active official model, making those mappings the source of model applicability. Category Installed sections continuously synchronize mapped assemblies. Changing a saved cell to another same-category assembly's existing number opens a confirmed merge that redirects the old mappings, reuses the target mini-BOM, and deletes the disclosed superseded assembly. Details opens with Images first, Mini-BOM second, and retains catalog editing for Make / buy, nesting, and full deletion. Legacy assembly feature rules are not shown or evaluated.
+- **Parts Catalog** maintains one approved record per official part number. Catalog data is project-wide while Active state is scenario-specific. Completed manufacturing assemblies are linked catalog parts so a built subassembly can be placed on the Fishbone and handled again downstream; their model applicability comes from Assembly grid mappings. The page supports primary and supplemental images, including direct Windows screenshot paste.
+- **Assembly grid** begins with one protected Top-level packaged unit row immediately below the active feature headers, followed by one or more selected Fishbone sections as labeled grid groups. The top row maps one final warehouse-handoff assembly per active official model, has a selectable final Built section and optional Installed section, and can nest completed subassemblies from every active Fishbone section. Section categories map their own real assembly numbers per model. Creating an assembly creates or reuses its linked completed-subassembly Parts Catalog row in the same save. Quantity-bearing mini-BOM links use automatic Fishbone-use placement, model-coverage validation, and cycle prevention. Category section values continuously synchronize mapped assemblies. Changing a saved cell to another same-category assembly's existing number opens a confirmed merge that redirects the old mappings, reuses the target mini-BOM and catalog part, and deletes the disclosed superseded assembly. Details opens with Images first, Mini-BOM second, and retains catalog editing for Make / buy, optional legacy parent grouping, and full deletion. Legacy assembly feature rules are not shown or evaluated.
 - **Parts to fishbone** defines the station-independent assembly sequence through ordered main-spine sections, nested subassemblies, and one or more placed uses of approved catalog parts.
 
 ### Process planning
@@ -136,7 +136,7 @@ Navigation is defined in `streamlit_app.py`.
 - **PITS record/revision** — The latest imported source row for a stable PITS ID and its preserved earlier source versions.
 - **Parts Catalog** — The approved project-wide list of part numbers, names, revisions, images, provenance, and applicability.
 - **Assembly grid** — The project-wide category-by-model mapping view whose cells reference real assembly records and whose nested rows reuse each assembly's explicit mini-BOM.
-- **Assemblies catalog** — The authoritative project-wide list of real assembly numbers and their explicit mini-BOMs, built and installed sections, nesting, applicability, and images, retained as the grid's full Details workflow.
+- **Assemblies catalog** — The authoritative project-wide list of real assembly numbers and their explicit mini-BOMs, built and installed sections, optional parent grouping, applicability, and images, retained as the grid's full Details workflow. Quantity-bearing operational nesting comes from completed subassemblies used in those mini-BOMs.
 - **Fishbone** — The station-independent assembly-order view whose main spine represents product flow and whose branches represent subassemblies and placed parts.
 - **Fishbone section** — A named assembly stage, either on the main spine or attached as a subassembly.
 - **Fishbone use** — One placement or installation occurrence of a catalog part. The same part may have multiple uses.

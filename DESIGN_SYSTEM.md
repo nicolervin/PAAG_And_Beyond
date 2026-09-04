@@ -18,6 +18,8 @@ Every approved destructive confirmation or standalone destructive action must us
 
 This standard is **locked** and replaces prior inconsistent patterns, including globally hiding Streamlit's native deletion action, Yamazumi's typed-`CLEAR` dialogs, Process at a Glance's single-click **Remove pairing** action, and delete-on-save behavior in Questions and concerns and Feature definitions.
 
+A Parts Catalog row linked from `manufacturing_assemblies.catalog_part_id` cannot be deleted directly. The relationship-aware Parts deletion dialog must identify every selected linked Part number and assembly number, keep confirmation unavailable while any such link exists, and instruct the contributor to delete or merge the assembly first. Deleting an assembly preserves its completed-subassembly Parts Catalog row and every downstream relationship owned by that part.
+
 Retrofitting existing screens to this standard is a separate future task and is not part of this documentation update. Do not modify screen code as part of documenting this standard.
 
 ### Approved Task 09 Components v2 exception
@@ -25,6 +27,10 @@ Retrofitting existing screens to this standard is a separate future task and is 
 **Implementation status:** Active on `Nicole_assembly_grid_editor` as of September 3, 2026.
 
 The project-wide Task 09 assembly grid is the only approved exception to the native-toolbar entry-point requirement in items 1, 2, and 4 above and to the native row-selection checkbox requirement in the Universal Table Row Selection Standard below. Its integrated category, model, assembly, and nested mini-BOM layout requires a Components v2 grid that Streamlit's native table editor cannot represent. The component may therefore use its own selection and deletion controls for assembly-grid categories, direct model mappings, and nested mini-BOM component rows.
+
+The same exception covers the approved multi-section Assembly grid. Selected Fishbone sections appear as separate labeled groups in one workspace with shared model and active-feature filters and one atomic **Save & Refresh** footer. The component must always show the owning Fishbone section for each category group and distinguish completed-subassembly component choices from ordinary Fishbone parts. Multi-section display does not weaken the existing confirmation, deletion disclosure, audit, Undo, or preservation requirements.
+
+The Assembly grid begins with one protected **Top-level packaged unit** row immediately below the active feature headers and before all Fishbone-section headings. It remains visible regardless of the section filter, exposes a required final Built-section selector and optional Installed-section selector, and provides one Part number cell per visible official model. Its mini-BOM may select completed subassemblies from any active Fishbone section; ordinary parts remain limited to exact uses in the selected final Built section. The structural row has no category-delete control, although its model mappings and mini-BOM rows retain the approved confirmation behavior below.
 
 This exception changes only where the deletion request begins. The component must never write to the database or remove a row by itself. It sends stable record identifiers to Python, which resets and reruns the draft as needed and opens the same non-dismissible, relationship-aware Streamlit confirmation required everywhere else. The dialog must list or summarize the selected records and disclose what will be deleted, preserved, or otherwise affected. Cancel preserves the records and clears the pending request. Confirmation validates the complete action, performs one atomic store-layer write, records Current editor history, resets the component, shows a toast, and reruns.
 

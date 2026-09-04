@@ -86,27 +86,25 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 ]
             },
         )
-        parts = store.project_table("parts", self.project_id, "part_number")
-        if not parts.empty:
-            part_id = str(parts.iloc[0]["id"])
-            store.assign_parts_to_section(
-                self.project_id, [part_id], section_id, allow_additional_use=True
-            )
-            assignment = store.fishbone_part_assignments(self.project_id).loc[
-                lambda rows: rows["part_id"].astype(str).eq(part_id)
-                & rows["section_id"].astype(str).eq(section_id)
-            ].iloc[-1]
-            store.save_assembly_bom_components(
-                self.project_id,
-                assembly_id,
-                [
-                    {
-                        "id": str(uuid4()),
-                        "fishbone_assignment_id": str(assignment["id"]),
-                        "quantity": 1,
-                    }
-                ],
-            )
+        _, assignment_id, _ = store.create_part_and_assign_to_section(
+            self.project_id,
+            section_id,
+            {
+                "part_number": "COMP-SMOKE",
+                "description": "Smoke component",
+                "revision": "0",
+            },
+            1,
+        )
+        store.save_assembly_bom_components(
+            self.project_id,
+            assembly_id,
+            [{
+                "id": str(uuid4()),
+                "fishbone_assignment_id": assignment_id,
+                "quantity": 1,
+            }],
+        )
 
     def tearDown(self) -> None:
         self.database_patch.stop()
@@ -126,9 +124,40 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app = self.run_page("app_pages/models.py")
         self.assertTrue(any(title.value == "Model definitions" for title in app.title))
 
+    def test_parts_catalog_smoke_with_linked_assembly_part(self) -> None:
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app = self.run_page("app_pages/parts.py")
+        self.assertTrue(any(title.value == "Parts Catalog" for title in app.title))
+        linked_part = store.query(
+            """SELECT part.id, part.part_number
+               FROM manufacturing_assemblies assembly
+               JOIN parts part ON part.id=assembly.catalog_part_id
+               WHERE assembly.project_id=? AND assembly.assembly_number='ASM-SMOKE'""",
+            (self.project_id,),
+        )
+        self.assertEqual(linked_part[0]["part_number"], "ASM-SMOKE")
+        app.session_state[f"parts_selected_id_{self.project_id}"] = linked_part[0]["id"]
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(any(header.value == "Mini-BOM" for header in app.subheader))
+        mini_bom_tables = [
+            table.value
+            for table in app.dataframe
+            if "Part number" in table.value.columns
+            and "Part name" in table.value.columns
+            and "Quantity" in table.value.columns
+        ]
+        self.assertTrue(mini_bom_tables)
+        self.assertFalse(mini_bom_tables[0].empty)
+
     def test_assemblies_smoke(self) -> None:
         app = self.run_page("app_pages/assemblies.py")
         self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
+        section_filter = next(
+            widget for widget in app.multiselect if widget.label == "Fishbone sections"
+        )
+        self.assertIn("__all_active_sections__", section_filter.value)
         subheaders = [subheader.value for subheader in app.subheader]
         details_index = next(
             index
@@ -141,21 +170,35 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             self.project_id, self.section_id
         ).iloc[0]
         app.session_state[
-            f"assembly_grid_component_v5_{self.project_id}_{self.section_id}"
+            f"assembly_grid_component_v8_{self.project_id}_{self.section_id}"
         ] = {
             "draft": [
                 {
+                    "id": "",
+                    "section_id": self.section_id,
+                    "ebom_name": "Top-level packaged unit",
+                    "display_name": "Top-level packaged unit",
+                    "is_top_level": True,
+                    "installed_section_id": "",
+                    "sequence": 0,
+                    "cells": {},
+                },
+                {
                     "id": str(saved_category["id"]),
+                    "section_id": self.section_id,
                     "ebom_name": str(saved_category["ebom_name"]),
                     "display_name": str(saved_category["display_name"]),
+                    "is_top_level": False,
                     "installed_section_id": str(saved_category["installed_section_id"]),
                     "sequence": 10,
                     "cells": {},
                 },
                 {
                     "id": "",
+                    "section_id": self.section_id,
                     "ebom_name": "",
                     "display_name": "",
+                    "is_top_level": False,
                     "installed_section_id": "",
                     "sequence": 20,
                     "cells": {},

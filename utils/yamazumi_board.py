@@ -5,6 +5,8 @@ from collections.abc import Callable
 
 import streamlit as st
 
+from utils.component_payload import json_safe
+
 
 _HTML = """
 <div class="board">
@@ -231,7 +233,14 @@ def yamazumi_board(
         safe_takt = 0.0
     return _YAMAZUMI_BOARD(
         key=key,
-        data={"pitches": pitches, "elements": elements, "variants": variants, "takt": safe_takt},
+        data=json_safe(
+            {
+                "pitches": pitches,
+                "elements": elements,
+                "variants": variants,
+                "takt": safe_takt,
+            }
+        ),
         on_move_change=on_move,
         on_add_pitch_change=on_add_pitch,
         on_add_element_change=on_add_element,
