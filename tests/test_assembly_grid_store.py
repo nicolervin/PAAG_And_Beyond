@@ -375,6 +375,139 @@ class AssemblyGridStoreTests(unittest.TestCase):
             {"ASM-FIRST", "ASM-SECOND"},
         )
 
+    def test_confirmed_existing_number_merge_uses_target_mini_bom_and_deletes_source(self) -> None:
+        category_id, _ = self._save_categories()
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [
+                {
+                    "category_id": category_id,
+                    "model_id": self.model_ids[0],
+                    "assembly_number": "ASM-OLD",
+                },
+                {
+                    "category_id": category_id,
+                    "model_id": self.model_ids[1],
+                    "assembly_number": "ASM-EXISTING",
+                },
+            ],
+        )
+        mappings = store.assembly_grid_model_mappings(self.project_id).set_index("model_id")
+        source = mappings.loc[self.model_ids[0]]
+        target = mappings.loc[self.model_ids[1]]
+        source_id = str(source["assembly_id"])
+        target_id = str(target["assembly_id"])
+        part_id = str(
+            store.project_table("parts", self.project_id, "part_number").iloc[0]["id"]
+        )
+        store.assign_parts_to_section(
+            self.project_id,
+            [part_id],
+            self.built_section_id,
+            allow_additional_use=True,
+            quantities_by_part={part_id: 2.5},
+        )
+        assignment_id = str(
+            store.fishbone_part_assignments(self.project_id).loc[
+                lambda rows: rows["section_id"].astype(str).eq(self.built_section_id)
+                & rows["part_id"].astype(str).eq(part_id)
+            ].iloc[-1]["id"]
+        )
+        source_component_id = str(uuid4())
+        target_component_id = str(uuid4())
+        store.save_assembly_bom_components(
+            self.project_id,
+            source_id,
+            [{
+                "id": source_component_id,
+                "fishbone_assignment_id": assignment_id,
+                "quantity": 1.0,
+            }],
+        )
+        store.save_assembly_bom_components(
+            self.project_id,
+            target_id,
+            [{
+                "id": target_component_id,
+                "fishbone_assignment_id": assignment_id,
+                "quantity": 3.0,
+            }],
+        )
+        category = store.assembly_grid_categories(
+            self.project_id, self.built_section_id
+        ).loc[lambda rows: rows["id"].astype(str).eq(category_id)].iloc[0]
+        mapping_rows = [
+            {
+                "id": str(source["id"]),
+                "category_id": category_id,
+                "model_id": self.model_ids[0],
+                "assembly_id": source_id,
+                "assembly_number": "ASM-EXISTING",
+            },
+            {
+                "id": str(target["id"]),
+                "category_id": category_id,
+                "model_id": self.model_ids[1],
+                "assembly_id": target_id,
+                "assembly_number": "ASM-EXISTING",
+            },
+        ]
+        impacts = store.assembly_grid_number_merge_impact(
+            self.project_id, mapping_rows
+        )
+        self.assertEqual(len(impacts), 1)
+        self.assertEqual(impacts[0]["source_assembly_id"], source_id)
+        self.assertEqual(impacts[0]["target_assembly_id"], target_id)
+        self.assertEqual(impacts[0]["source_component_count"], 1)
+        self.assertEqual(impacts[0]["target_component_count"], 1)
+
+        with self.assertRaisesRegex(ValueError, "Review and confirm"):
+            store.save_assembly_grid_section(
+                self.project_id,
+                self.built_section_id,
+                [dict(category)],
+                mapping_rows,
+                [],
+                {},
+            )
+
+        result = store.save_assembly_grid_section(
+            self.project_id,
+            self.built_section_id,
+            [dict(category)],
+            mapping_rows,
+            [],
+            {
+                source_id: [{
+                    "id": source_component_id,
+                    "fishbone_assignment_id": assignment_id,
+                    "quantity": 1.0,
+                }],
+                target_id: [{
+                    "id": target_component_id,
+                    "fishbone_assignment_id": assignment_id,
+                    "quantity": 3.0,
+                }],
+            },
+            assembly_merges=impacts,
+        )
+
+        self.assertEqual(len(result["assembly_merges"]), 1)
+        assemblies = store.assembly_catalog_rows(self.project_id)
+        self.assertNotIn("ASM-OLD", set(assemblies["assembly_number"]))
+        saved_mappings = store.assembly_grid_model_mappings(self.project_id)
+        self.assertEqual(set(saved_mappings["assembly_id"].astype(str)), {target_id})
+        components = store.assembly_bom_components(self.project_id, target_id)
+        self.assertEqual(components["id"].astype(str).tolist(), [target_component_id])
+        self.assertEqual(components["quantity"].tolist(), [3.0])
+        self.assertEqual(
+            store.query(
+                "SELECT COUNT(*) AS count FROM manufacturing_assemblies WHERE id=?",
+                (source_id,),
+            )[0]["count"],
+            0,
+        )
+
     def test_feature_visibility_stores_only_hidden_preferences(self) -> None:
         features = store.complexity_features(self.project_id)
         if features.empty:

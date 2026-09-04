@@ -33,8 +33,9 @@ For Task 09 specifically:
 - Clearing a direct model mapping deletes only the mapping row. The real `manufacturing_assemblies` record and its mini-BOM, rules, images, nesting, and uploaded files remain unchanged.
 - Deleting an assembly-grid category deletes its mapping rows but preserves every mapped assembly and all assembly-owned data.
 - Deleting a nested mini-BOM component removes only the selected `manufacturing_assembly_components` row; its Fishbone use and Parts Catalog record remain.
-- Reassigning a mapping cell from one assembly to another is an ordinary edit and does not require deletion confirmation.
-- Deleting a real assembly remains available only through the existing full Task 04 assembly-deletion workflow and is not part of this exception.
+- Reassigning a blank mapping cell to an existing assembly, or renaming a mapped assembly to an unused number, is an ordinary edit and does not require deletion confirmation.
+- Editing a mapped cell to a number already owned by another same-category assembly is a narrowly scoped merge action because it deletes the superseded old assembly. **Save & Refresh** must open a non-dismissible dialog that names the old and target numbers, states that the old assembly record will be deleted, discloses every affected relationship and dependent-record count, and explains that the target assembly's existing mini-BOM will appear in the redirected cells. Cancel preserves the draft and both records. Confirmation performs the mapping redirection and old-record deletion atomically, records Current editor history under both the grid mapping and Assemblies catalog categories, resets the grid, shows a toast, and reruns.
+- Outside that confirmed same-category merge, deleting a real assembly remains available only through the existing full Task 04 assembly-deletion workflow.
 
 All destructive confirmation widget keys still begin with `destructive_`. No other custom component or screen inherits this exception; every other table continues to require the native Streamlit deletion entry point.
 

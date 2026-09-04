@@ -129,6 +129,14 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
     def test_assemblies_smoke(self) -> None:
         app = self.run_page("app_pages/assemblies.py")
         self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
+        subheaders = [subheader.value for subheader in app.subheader]
+        details_index = next(
+            index
+            for index, value in enumerate(subheaders)
+            if value.startswith("Assembly details · ")
+        )
+        catalog_index = subheaders.index("Full assembly catalog and deletion")
+        self.assertLess(details_index, catalog_index)
         saved_category = store.assembly_grid_categories(
             self.project_id, self.section_id
         ).iloc[0]

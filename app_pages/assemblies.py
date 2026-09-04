@@ -18,6 +18,7 @@ from utils.store import (
     assembly_grid_categories,
     assembly_grid_feature_visibility,
     assembly_grid_model_mappings,
+    assembly_grid_number_merge_impact,
     assembly_images,
     assembly_sections,
     audit_history,
@@ -382,10 +383,11 @@ else:
             }
         )
 
-    grid_key = f"assembly_grid_component_v5_{project_id}_{selected_section_id}"
+    grid_key = f"assembly_grid_component_v6_{project_id}_{selected_section_id}"
     pending_category_key = f"assembly_grid_pending_category_delete_{project_id}"
     pending_mapping_key = f"assembly_grid_pending_mapping_clear_{project_id}"
     pending_component_key = f"assembly_grid_pending_component_delete_{project_id}"
+    pending_merge_key = f"assembly_grid_pending_number_merge_{project_id}"
 
     def grid_draft() -> list[dict]:
         state = st.session_state.get(grid_key, {}) or {}
@@ -606,98 +608,471 @@ else:
     )
     if grid_actions.undo:
         st.session_state.pop(grid_key, None)
+        st.session_state.pop(pending_merge_key, None)
         st.session_state[
             f"assembly_grid_visible_features_{project_id}_{selected_section_id}"
         ] = default_visible_features
         st.toast("Discarded unsaved assembly-grid changes", icon=":material/undo:")
         st.rerun()
+
+    def prepare_grid_save() -> dict:
+        save_draft = [
+            category
+            for category in current_draft
+            if not is_empty_unsaved_grid_category(category)
+        ]
+        prepared_categories = []
+        category_id_map = {}
+        for index, category in enumerate(save_draft):
+            category_id = str(category.get("id") or uuid4())
+            category_id_map[index] = category_id
+            prepared_categories.append({**category, "id": category_id})
+        complete_mappings = (
+            saved_all_mappings.loc[
+                ~saved_all_mappings["section_id"].astype(str).eq(selected_section_id)
+            ].to_dict("records")
+            if not saved_all_mappings.empty else []
+        )
+        if not saved_section_mappings.empty:
+            complete_mappings.extend(
+                saved_section_mappings.loc[
+                    ~saved_section_mappings["model_id"].astype(str).isin(active_model_ids)
+                ].to_dict("records")
+            )
+        component_rows_by_assembly = {}
+        for index, category in enumerate(prepared_categories):
+            for model_id, cell in dict(category.get("cells") or {}).items():
+                assembly_number = str(cell.get("assembly_number") or "").strip()
+                if not assembly_number:
+                    continue
+                assembly_id = str(cell.get("assembly_id") or "")
+                complete_mappings.append(
+                    {
+                        "id": str(cell.get("mapping_id") or ""),
+                        "category_id": category_id_map[index],
+                        "model_id": str(model_id),
+                        "assembly_id": assembly_id,
+                        "assembly_number": assembly_number,
+                    }
+                )
+                if assembly_id and cell.get("components") is not None:
+                    component_rows_by_assembly[assembly_id] = list(cell["components"])
+        return {
+            "categories": [
+                {key: value for key, value in category.items() if key != "cells"}
+                for category in prepared_categories
+            ],
+            "mappings": complete_mappings,
+            "feature_visibility": [
+                {"feature_id": feature_id, "is_visible": feature_id in visible_feature_ids}
+                for feature_id in feature_label_by_id
+            ],
+            "components": component_rows_by_assembly,
+        }
+
+    def finish_grid_save(result: dict) -> None:
+        editor = st.session_state.get("current_editor", "")
+        merge_audit = [
+            {key: value for key, value in impact.items() if key != "source_image_paths"}
+            for impact in result["assembly_merges"]
+        ]
+        record_audit_event(
+            project_id, "Assembly grid categories", "Save & Refresh",
+            result["categories"]["count"], editor,
+            {"section_id": selected_section_id,
+             "installed_section_sync_changes": result["categories"]["installed_section_sync_changes"]},
+        )
+        record_audit_event(
+            project_id, "Assembly grid mappings", "Save & Refresh",
+            result["mappings"]["count"], editor,
+            {"section_id": selected_section_id,
+             "created_assemblies": result["mappings"]["created_assemblies"],
+             "renamed_assemblies": result["mappings"]["renamed_assemblies"],
+             "assembly_merges": merge_audit},
+        )
+        record_audit_event(
+            project_id, "Assembly grid feature visibility", "Save & Refresh",
+            result["feature_visibility"]["count"], editor,
+            {"section_id": selected_section_id,
+             "hidden_feature_ids": result["feature_visibility"]["hidden_feature_ids"]},
+        )
+        if result["components"]:
+            record_audit_event(
+                project_id, "Assembly mini-BOM", "Grid Save & Refresh",
+                sum(item["count"] for item in result["components"].values()), editor,
+                {"section_id": selected_section_id,
+                 "assembly_ids": list(result["components"])},
+            )
+        if merge_audit:
+            record_audit_event(
+                project_id, "Assemblies catalog", "Merge assembly number",
+                len(merge_audit), editor,
+                {"section_id": selected_section_id, "assembly_merges": merge_audit},
+            )
+        st.session_state.pop(grid_key, None)
+        st.session_state.pop(pending_merge_key, None)
+        message = (
+            "Merged assembly numbers and refreshed the assembly grid"
+            if merge_audit else "Saved and refreshed the assembly grid"
+        )
+        st.toast(message, icon=":material/check_circle:")
+        st.rerun()
+
+    def commit_grid_save(payload: dict, merges: list[dict] | None = None) -> None:
+        result = save_assembly_grid_section(
+            project_id,
+            selected_section_id,
+            payload["categories"],
+            payload["mappings"],
+            payload["feature_visibility"],
+            payload["components"],
+            assembly_merges=merges,
+        )
+        finish_grid_save(result)
+
+    @st.dialog("Merge assembly numbers?", dismissible=False, width="large")
+    def confirm_assembly_number_merge() -> None:
+        pending = st.session_state.get(pending_merge_key, {})
+        impacts = list(pending.get("impacts") or [])
+        if not impacts:
+            st.error("The pending assembly-number merge is no longer available.")
+            return
+        st.warning(
+            "The old assembly group number(s) below will be permanently deleted. "
+            "Their grid mappings will use the existing assembly instead."
+        )
+        for impact in impacts:
+            st.markdown(
+                f"**{impact['source_assembly_number']} → "
+                f"{impact['target_assembly_number']}**"
+            )
+            st.markdown(
+                f"- The old **{impact['source_assembly_number']}** assembly record will be deleted.\n"
+                f"- **{impact['reassigned_mapping_count']}** of its **{impact['source_mapping_count']}** grid mapping(s) will move to the existing assembly.\n"
+                f"- The existing assembly's **{impact['target_component_count']}** mini-BOM component(s) will appear in those grid cells.\n"
+                f"- The old assembly's **{impact['source_component_count']}** mini-BOM component(s) will be deleted.\n"
+                f"- **{impact['source_rule_count']}** legacy feature rule(s), "
+                f"**{impact['source_primary_image_count']}** primary image(s), and "
+                f"**{impact['source_supplemental_image_count']}** supplemental image(s) will be deleted.\n"
+                f"- Any unsaved mini-BOM edits under the old assembly will be discarded.\n"
+                f"- **{impact['source_child_count']}** child assembly relationship(s) and "
+                f"**{impact['source_target_link_count']}** dormant target link(s) will become unassigned.\n"
+                f"- **{impact['source_policy_count']}** dormant scenario-policy row(s) and "
+                f"**{impact['source_material_option_count']}** dormant material-option row(s) will be removed."
+            )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_assembly_number_merge_{project_id}"):
+            st.session_state.pop(pending_merge_key, None)
+            st.rerun()
+        if actions.button(
+            "Merge and save",
+            type="primary",
+            icon=":material/merge:",
+            key=f"confirm_assembly_number_merge_{project_id}",
+        ):
+            try:
+                commit_grid_save(pending["payload"], impacts)
+            except ValueError as exc:
+                st.error(str(exc))
+
     if grid_actions.save_and_refresh:
         try:
-            current_draft = [
-                category
-                for category in current_draft
-                if not is_empty_unsaved_grid_category(category)
-            ]
-            prepared_categories = []
-            category_id_map = {}
-            for index, category in enumerate(current_draft):
-                category_id = str(category.get("id") or uuid4())
-                category_id_map[index] = category_id
-                prepared_categories.append({**category, "id": category_id})
-            complete_mappings = (
-                saved_all_mappings.loc[
-                    ~saved_all_mappings["section_id"].astype(str).eq(selected_section_id)
-                ].to_dict("records")
-                if not saved_all_mappings.empty else []
-            )
-            if not saved_section_mappings.empty:
-                complete_mappings.extend(
-                    saved_section_mappings.loc[
-                        ~saved_section_mappings["model_id"].astype(str).isin(active_model_ids)
-                    ].to_dict("records")
-                )
-            component_rows_by_assembly = {}
-            for index, category in enumerate(prepared_categories):
-                for model_id, cell in dict(category.get("cells") or {}).items():
-                    assembly_number = str(cell.get("assembly_number") or "").strip()
-                    if not assembly_number:
-                        continue
-                    assembly_id = str(cell.get("assembly_id") or "")
-                    complete_mappings.append(
-                        {
-                            "id": str(cell.get("mapping_id") or ""),
-                            "category_id": category_id_map[index],
-                            "model_id": str(model_id),
-                            "assembly_id": assembly_id,
-                            "assembly_number": assembly_number,
-                        }
-                    )
-                    if assembly_id and cell.get("components") is not None:
-                        component_rows_by_assembly[assembly_id] = list(cell["components"])
-            result = save_assembly_grid_section(
-                project_id,
-                selected_section_id,
-                [{key: value for key, value in category.items() if key != "cells"}
-                 for category in prepared_categories],
-                complete_mappings,
-                [
-                    {"feature_id": feature_id, "is_visible": feature_id in visible_feature_ids}
-                    for feature_id in feature_label_by_id
-                ],
-                component_rows_by_assembly,
-            )
-            editor = st.session_state.get("current_editor", "")
-            record_audit_event(
-                project_id, "Assembly grid categories", "Save & Refresh",
-                result["categories"]["count"], editor,
-                {"section_id": selected_section_id,
-                 "installed_section_sync_changes": result["categories"]["installed_section_sync_changes"]},
-            )
-            record_audit_event(
-                project_id, "Assembly grid mappings", "Save & Refresh",
-                result["mappings"]["count"], editor,
-                {"section_id": selected_section_id,
-                 "created_assemblies": result["mappings"]["created_assemblies"],
-                 "renamed_assemblies": result["mappings"]["renamed_assemblies"]},
-            )
-            record_audit_event(
-                project_id, "Assembly grid feature visibility", "Save & Refresh",
-                result["feature_visibility"]["count"], editor,
-                {"section_id": selected_section_id,
-                 "hidden_feature_ids": result["feature_visibility"]["hidden_feature_ids"]},
-            )
-            if result["components"]:
-                record_audit_event(
-                    project_id, "Assembly mini-BOM", "Grid Save & Refresh",
-                    sum(item["count"] for item in result["components"].values()), editor,
-                    {"section_id": selected_section_id,
-                     "assembly_ids": list(result["components"])},
-                )
-            st.session_state.pop(grid_key, None)
-            st.toast("Saved and refreshed the assembly grid", icon=":material/check_circle:")
-            st.rerun()
+            payload = prepare_grid_save()
+            impacts = assembly_grid_number_merge_impact(project_id, payload["mappings"])
+            if impacts:
+                st.session_state[pending_merge_key] = {
+                    "payload": payload,
+                    "impacts": impacts,
+                }
+            else:
+                commit_grid_save(payload)
         except ValueError as exc:
             st.error(str(exc))
+    if st.session_state.get(pending_merge_key):
+        confirm_assembly_number_merge()
+
+st.divider()
+catalog = assembly_catalog_rows(project_id)
+if not catalog.empty:
+    valid_ids = set(catalog["id"].astype(str))
+    if st.session_state.get(selected_assembly_key) not in valid_ids:
+        st.session_state[selected_assembly_key] = str(catalog.iloc[0]["id"])
+    assembly_id = str(st.session_state[selected_assembly_key])
+    assembly = catalog.loc[catalog["id"].astype(str).eq(assembly_id)].iloc[0].to_dict()
+    st.subheader(f"Assembly details · {assembly['assembly_number']} {assembly['name']}")
+    images_tab, bom_tab = st.tabs(["Images", "Mini-BOM"])
+
+    with bom_tab:
+        st.caption(
+            f"Components must come from exact Fishbone uses in Built section: "
+            f"{assembly.get('built_section_name') or 'Not assigned'}. Quantities are independent after saving."
+        )
+        components = assembly_bom_components(project_id, assembly_id)
+        if components.empty:
+            if str(assembly.get("make_buy") or "") == "Buy":
+                st.caption(
+                    "No components listed. A Buy assembly may intentionally have an empty mini-BOM."
+                )
+            elif str(assembly.get("make_buy") or "") == "Make":
+                st.caption("No components listed yet.")
+            else:
+                st.caption("No components listed.")
+        all_uses = fishbone_part_assignments(project_id)
+        eligible = all_uses.loc[
+            all_uses["section_id"].astype(str).eq(str(assembly.get("built_section_id") or ""))
+        ].copy() if not all_uses.empty else all_uses
+        existing_use_ids = (
+            set(components["fishbone_assignment_id"].astype(str))
+            if not components.empty else set()
+        )
+        use_options = eligible.copy()
+        if existing_use_ids and not all_uses.empty:
+            use_options = pd.concat(
+                [use_options, all_uses.loc[all_uses["id"].astype(str).isin(existing_use_ids)]],
+                ignore_index=True,
+            ).drop_duplicates("id")
+        use_label_by_id = {
+            str(row["id"]): (
+                f"{row['part_number']} · {row.get('use_description') or 'No use description'} "
+                f"· Fishbone qty {format_clean_number(row['quantity'])}"
+            )
+            for _, row in use_options.iterrows()
+        }
+        use_id_by_label = {label: use_id for use_id, label in use_label_by_id.items()}
+        bom_editor_key = f"assembly_bom_editor_{assembly_id}"
+        apply_pending_table_editor_reset(bom_editor_key)
+        if components.empty:
+            bom_source = pd.DataFrame(
+                {
+                    "id": pd.Series(dtype="string"),
+                    "part_number": pd.Series(dtype="string"),
+                    "fishbone_use": pd.Series(dtype="string"),
+                    "quantity": pd.Series(dtype="float"),
+                    "status": pd.Series(dtype="string"),
+                }
+            )
+        else:
+            bom_source = components.copy()
+            bom_source["fishbone_use"] = bom_source["fishbone_assignment_id"].astype(str).map(
+                use_label_by_id
+            )
+            bom_source["status"] = bom_source["section_mismatch"].map(
+                lambda value: "Warning: Fishbone use is outside the Built section" if value else "Current"
+            )
+        bom_source = direct_entry_editor_rows(
+            bom_source,
+            editor_key=bom_editor_key,
+            sort_columns=["part_number", "fishbone_use", "quantity"],
+        )
+        styled_bom_source = bom_source.style.map(
+            part_number_cell_style, subset=["part_number"]
+        )
+        edited_bom = st.data_editor(
+            styled_bom_source,
+            key=bom_editor_key,
+            hide_index=True,
+            num_rows="dynamic",
+            disabled=["id", "part_number", "status"],
+            column_order=["part_number", "fishbone_use", "quantity", "status"],
+            column_config={
+                "id": None,
+                "part_number": st.column_config.TextColumn(
+                    "Part number", pinned=True
+                ),
+                "fishbone_use": st.column_config.SelectboxColumn(
+                    "Fishbone use", options=list(use_id_by_label), required=True, width="large"
+                ),
+                "quantity": st.column_config.NumberColumn(
+                    "Quantity", step=0.01, format="%g",
+                    help="A blank new quantity defaults to the Fishbone quantity when saved.",
+                ),
+                "status": st.column_config.TextColumn("Review", width="large"),
+            },
+        )
+        bom_actions = editable_table_footer(
+            editor_key=bom_editor_key,
+            key_prefix=f"assembly_bom_{assembly_id}",
+            native_row_selection=True,
+        )
+        if bom_actions.undo:
+            st.session_state.pop(bom_editor_key, None)
+            st.rerun()
+        selected_bom = native_selected_rows(bom_source, editor_key=bom_editor_key)
+        bom_to_save = drop_untouched_new_rows(
+            edited_bom, identifying_columns=["fishbone_use"]
+        )
+        bom_records = [
+            {
+                "id": "" if pd.isna(row.get("id")) else str(row.get("id") or ""),
+                "fishbone_assignment_id": use_id_by_label.get(str(row.get("fishbone_use") or "")),
+                "quantity": row.get("quantity"),
+            }
+            for _, row in bom_to_save.iterrows()
+        ]
+
+        @st.dialog("Delete selected mini-BOM rows?")
+        def confirm_bom_delete() -> None:
+            st.warning(
+                f"Delete {len(selected_bom)} selected component row(s) from "
+                f"assembly {assembly['assembly_number']}? Fishbone uses remain unchanged."
+            )
+            actions = st.container(horizontal=True)
+            if actions.button("Cancel", key=f"cancel_bom_delete_{assembly_id}"):
+                request_table_editor_reset(bom_editor_key)
+                st.rerun()
+            if actions.button(
+                "Delete components", type="primary", icon=":material/delete:",
+                key=f"destructive_bom_delete_{assembly_id}",
+            ):
+                result = save_assembly_bom_components(project_id, assembly_id, bom_records)
+                record_audit_event(
+                    project_id, "Assembly mini-BOM", "Delete components", len(selected_bom),
+                    st.session_state.get("current_editor", ""),
+                    {"assembly_id": assembly_id, "remaining_count": result["count"]},
+                )
+                request_table_editor_reset(bom_editor_key)
+                st.rerun()
+
+        if not selected_bom.empty:
+            confirm_bom_delete()
+        if bom_actions.save_and_refresh:
+            try:
+                if not selected_bom.empty:
+                    raise ValueError("Clear selected mini-BOM rows before saving.")
+                result = save_assembly_bom_components(project_id, assembly_id, bom_records)
+                record_audit_event(
+                    project_id, "Assembly mini-BOM", "Save & Refresh", result["count"],
+                    st.session_state.get("current_editor", ""),
+                    {"assembly_id": assembly_id, "updated_at": result["updated_at"]},
+                )
+                request_table_editor_reset(bom_editor_key)
+                st.toast("Saved assembly mini-BOM", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+    with images_tab:
+        image_path = Path(str(assembly.get("image_path") or ""))
+        st.subheader("Primary assembly image")
+        if image_path.is_file():
+            st.image(str(image_path), caption=str(assembly["assembly_number"]))
+        else:
+            st.caption("No primary image attached.")
+        primary_upload = st.file_uploader(
+            "Upload primary assembly image", type=["png", "jpg", "jpeg", "webp"],
+            key=f"assembly_primary_upload_{assembly_id}",
+        )
+        if primary_upload and st.button(
+            "Save primary image", type="primary", icon=":material/upload:",
+            key=f"save_assembly_primary_{assembly_id}",
+        ):
+            set_assembly_image(project_id, assembly_id, primary_upload)
+            record_audit_event(
+                project_id, "Assembly images", "Save primary image", 1,
+                st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
+            )
+            st.rerun()
+        st.caption("Or paste a Windows screenshot; it saves immediately as the primary image.")
+        primary_paste = clipboard_image(key=f"assembly_primary_paste_{assembly_id}")
+        if getattr(primary_paste, "image", None):
+            try:
+                payload = decode_clipboard_image(primary_paste.image)
+                set_assembly_image(project_id, assembly_id, as_uploaded_file(payload))
+                record_audit_event(
+                    project_id, "Assembly images", "Paste primary image", 1,
+                    st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
+                )
+                st.rerun()
+            except (OSError, ValueError) as exc:
+                st.error(str(exc))
+        st.subheader("Supplemental images")
+        supplemental = assembly_images(project_id, assembly_id)
+        for image in supplemental:
+            supplemental_path = Path(str(image["image_path"]))
+            if supplemental_path.is_file():
+                st.image(str(supplemental_path), caption=image.get("caption") or "Supplemental image")
+        extra_caption = st.text_input("Supplemental image caption", key=f"assembly_extra_caption_{assembly_id}")
+        extra_upload = st.file_uploader(
+            "Upload supplemental image", type=["png", "jpg", "jpeg", "webp"],
+            key=f"assembly_extra_upload_{assembly_id}",
+        )
+        if extra_upload and st.button(
+            "Add supplemental image", icon=":material/add_photo_alternate:",
+            key=f"add_assembly_extra_{assembly_id}",
+        ):
+            add_assembly_image(project_id, assembly_id, extra_upload, extra_caption)
+            record_audit_event(
+                project_id, "Assembly images", "Add supplemental image", 1,
+                st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
+            )
+            st.rerun()
+        st.caption("You can also paste a screenshot as a supplemental image.")
+        supplemental_paste = clipboard_image(key=f"assembly_extra_paste_{assembly_id}")
+        if getattr(supplemental_paste, "image", None):
+            try:
+                payload = decode_clipboard_image(supplemental_paste.image)
+                add_assembly_image(
+                    project_id, assembly_id, as_uploaded_file(payload), extra_caption
+                )
+                record_audit_event(
+                    project_id, "Assembly images", "Paste supplemental image", 1,
+                    st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
+                )
+                st.rerun()
+            except (OSError, ValueError) as exc:
+                st.error(str(exc))
+        if supplemental:
+            image_table = pd.DataFrame(supplemental)[["id", "caption", "created_at"]]
+            image_editor_key = f"assembly_image_selection_{assembly_id}"
+            apply_pending_table_editor_reset(image_editor_key)
+            st.data_editor(
+                image_table,
+                key=image_editor_key,
+                hide_index=True,
+                num_rows="delete",
+                disabled=list(image_table.columns),
+                column_config={"id": None, "caption": "Caption", "created_at": "Added"},
+            )
+            selected_images = native_selected_rows(
+                image_table, editor_key=image_editor_key
+            )
+            if not selected_images.empty:
+                st.session_state[f"assembly_images_pending_delete_{assembly_id}"] = (
+                    selected_images["id"].astype(str).tolist()
+                )
+
+            @st.dialog("Delete selected assembly images?")
+            def confirm_image_delete() -> None:
+                pending_key = f"assembly_images_pending_delete_{assembly_id}"
+                pending_ids = st.session_state.get(pending_key, [])
+                st.warning(
+                    f"Delete {len(pending_ids)} supplemental image(s) from "
+                    f"assembly {assembly['assembly_number']}? The uploaded files will also be removed."
+                )
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_assembly_image_delete_{assembly_id}"):
+                    st.session_state.pop(pending_key, None)
+                    request_table_editor_reset(image_editor_key)
+                    st.rerun()
+                if actions.button(
+                    "Delete images", type="primary", icon=":material/delete:",
+                    key=f"destructive_confirm_assembly_image_delete_{assembly_id}",
+                ):
+                    count = delete_assembly_images(
+                        project_id, assembly_id, pending_ids
+                    )
+                    record_audit_event(
+                        project_id, "Assembly images", "Delete supplemental images", count,
+                        st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
+                    )
+                    st.session_state.pop(pending_key, None)
+                    request_table_editor_reset(image_editor_key)
+                    st.rerun()
+
+            if st.session_state.get(f"assembly_images_pending_delete_{assembly_id}"):
+                confirm_image_delete()
+
 
 st.divider()
 st.caption(
@@ -1055,288 +1430,6 @@ else:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon=":material/download:",
     )
-
-
-catalog = assembly_catalog_rows(project_id)
-if not catalog.empty:
-    valid_ids = set(catalog["id"].astype(str))
-    if st.session_state.get(selected_assembly_key) not in valid_ids:
-        st.session_state[selected_assembly_key] = str(catalog.iloc[0]["id"])
-    assembly_id = str(st.session_state[selected_assembly_key])
-    assembly = catalog.loc[catalog["id"].astype(str).eq(assembly_id)].iloc[0].to_dict()
-    st.subheader(f"Assembly details · {assembly['assembly_number']} {assembly['name']}")
-    images_tab, bom_tab = st.tabs(["Images", "Mini-BOM"])
-
-    with bom_tab:
-        st.caption(
-            f"Components must come from exact Fishbone uses in Built section: "
-            f"{assembly.get('built_section_name') or 'Not assigned'}. Quantities are independent after saving."
-        )
-        components = assembly_bom_components(project_id, assembly_id)
-        if components.empty:
-            if str(assembly.get("make_buy") or "") == "Buy":
-                st.caption(
-                    "No components listed. A Buy assembly may intentionally have an empty mini-BOM."
-                )
-            elif str(assembly.get("make_buy") or "") == "Make":
-                st.caption("No components listed yet.")
-            else:
-                st.caption("No components listed.")
-        all_uses = fishbone_part_assignments(project_id)
-        eligible = all_uses.loc[
-            all_uses["section_id"].astype(str).eq(str(assembly.get("built_section_id") or ""))
-        ].copy() if not all_uses.empty else all_uses
-        existing_use_ids = (
-            set(components["fishbone_assignment_id"].astype(str))
-            if not components.empty else set()
-        )
-        use_options = eligible.copy()
-        if existing_use_ids and not all_uses.empty:
-            use_options = pd.concat(
-                [use_options, all_uses.loc[all_uses["id"].astype(str).isin(existing_use_ids)]],
-                ignore_index=True,
-            ).drop_duplicates("id")
-        use_label_by_id = {
-            str(row["id"]): (
-                f"{row['part_number']} · {row.get('use_description') or 'No use description'} "
-                f"· Fishbone qty {format_clean_number(row['quantity'])}"
-            )
-            for _, row in use_options.iterrows()
-        }
-        use_id_by_label = {label: use_id for use_id, label in use_label_by_id.items()}
-        bom_editor_key = f"assembly_bom_editor_{assembly_id}"
-        apply_pending_table_editor_reset(bom_editor_key)
-        if components.empty:
-            bom_source = pd.DataFrame(
-                {
-                    "id": pd.Series(dtype="string"),
-                    "part_number": pd.Series(dtype="string"),
-                    "fishbone_use": pd.Series(dtype="string"),
-                    "quantity": pd.Series(dtype="float"),
-                    "status": pd.Series(dtype="string"),
-                }
-            )
-        else:
-            bom_source = components.copy()
-            bom_source["fishbone_use"] = bom_source["fishbone_assignment_id"].astype(str).map(
-                use_label_by_id
-            )
-            bom_source["status"] = bom_source["section_mismatch"].map(
-                lambda value: "Warning: Fishbone use is outside the Built section" if value else "Current"
-            )
-        bom_source = direct_entry_editor_rows(
-            bom_source,
-            editor_key=bom_editor_key,
-            sort_columns=["part_number", "fishbone_use", "quantity"],
-        )
-        styled_bom_source = bom_source.style.map(
-            part_number_cell_style, subset=["part_number"]
-        )
-        edited_bom = st.data_editor(
-            styled_bom_source,
-            key=bom_editor_key,
-            hide_index=True,
-            num_rows="dynamic",
-            disabled=["id", "part_number", "status"],
-            column_order=["part_number", "fishbone_use", "quantity", "status"],
-            column_config={
-                "id": None,
-                "part_number": st.column_config.TextColumn(
-                    "Part number", pinned=True
-                ),
-                "fishbone_use": st.column_config.SelectboxColumn(
-                    "Fishbone use", options=list(use_id_by_label), required=True, width="large"
-                ),
-                "quantity": st.column_config.NumberColumn(
-                    "Quantity", step=0.01, format="%g",
-                    help="A blank new quantity defaults to the Fishbone quantity when saved.",
-                ),
-                "status": st.column_config.TextColumn("Review", width="large"),
-            },
-        )
-        bom_actions = editable_table_footer(
-            editor_key=bom_editor_key,
-            key_prefix=f"assembly_bom_{assembly_id}",
-            native_row_selection=True,
-        )
-        if bom_actions.undo:
-            st.session_state.pop(bom_editor_key, None)
-            st.rerun()
-        selected_bom = native_selected_rows(bom_source, editor_key=bom_editor_key)
-        bom_to_save = drop_untouched_new_rows(
-            edited_bom, identifying_columns=["fishbone_use"]
-        )
-        bom_records = [
-            {
-                "id": "" if pd.isna(row.get("id")) else str(row.get("id") or ""),
-                "fishbone_assignment_id": use_id_by_label.get(str(row.get("fishbone_use") or "")),
-                "quantity": row.get("quantity"),
-            }
-            for _, row in bom_to_save.iterrows()
-        ]
-
-        @st.dialog("Delete selected mini-BOM rows?")
-        def confirm_bom_delete() -> None:
-            st.warning(
-                f"Delete {len(selected_bom)} selected component row(s) from "
-                f"assembly {assembly['assembly_number']}? Fishbone uses remain unchanged."
-            )
-            actions = st.container(horizontal=True)
-            if actions.button("Cancel", key=f"cancel_bom_delete_{assembly_id}"):
-                request_table_editor_reset(bom_editor_key)
-                st.rerun()
-            if actions.button(
-                "Delete components", type="primary", icon=":material/delete:",
-                key=f"destructive_bom_delete_{assembly_id}",
-            ):
-                result = save_assembly_bom_components(project_id, assembly_id, bom_records)
-                record_audit_event(
-                    project_id, "Assembly mini-BOM", "Delete components", len(selected_bom),
-                    st.session_state.get("current_editor", ""),
-                    {"assembly_id": assembly_id, "remaining_count": result["count"]},
-                )
-                request_table_editor_reset(bom_editor_key)
-                st.rerun()
-
-        if not selected_bom.empty:
-            confirm_bom_delete()
-        if bom_actions.save_and_refresh:
-            try:
-                if not selected_bom.empty:
-                    raise ValueError("Clear selected mini-BOM rows before saving.")
-                result = save_assembly_bom_components(project_id, assembly_id, bom_records)
-                record_audit_event(
-                    project_id, "Assembly mini-BOM", "Save & Refresh", result["count"],
-                    st.session_state.get("current_editor", ""),
-                    {"assembly_id": assembly_id, "updated_at": result["updated_at"]},
-                )
-                request_table_editor_reset(bom_editor_key)
-                st.toast("Saved assembly mini-BOM", icon=":material/check_circle:")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-
-    with images_tab:
-        image_path = Path(str(assembly.get("image_path") or ""))
-        st.subheader("Primary assembly image")
-        if image_path.is_file():
-            st.image(str(image_path), caption=str(assembly["assembly_number"]))
-        else:
-            st.caption("No primary image attached.")
-        primary_upload = st.file_uploader(
-            "Upload primary assembly image", type=["png", "jpg", "jpeg", "webp"],
-            key=f"assembly_primary_upload_{assembly_id}",
-        )
-        if primary_upload and st.button(
-            "Save primary image", type="primary", icon=":material/upload:",
-            key=f"save_assembly_primary_{assembly_id}",
-        ):
-            set_assembly_image(project_id, assembly_id, primary_upload)
-            record_audit_event(
-                project_id, "Assembly images", "Save primary image", 1,
-                st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
-            )
-            st.rerun()
-        st.caption("Or paste a Windows screenshot; it saves immediately as the primary image.")
-        primary_paste = clipboard_image(key=f"assembly_primary_paste_{assembly_id}")
-        if getattr(primary_paste, "image", None):
-            try:
-                payload = decode_clipboard_image(primary_paste.image)
-                set_assembly_image(project_id, assembly_id, as_uploaded_file(payload))
-                record_audit_event(
-                    project_id, "Assembly images", "Paste primary image", 1,
-                    st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
-                )
-                st.rerun()
-            except (OSError, ValueError) as exc:
-                st.error(str(exc))
-        st.subheader("Supplemental images")
-        supplemental = assembly_images(project_id, assembly_id)
-        for image in supplemental:
-            supplemental_path = Path(str(image["image_path"]))
-            if supplemental_path.is_file():
-                st.image(str(supplemental_path), caption=image.get("caption") or "Supplemental image")
-        extra_caption = st.text_input("Supplemental image caption", key=f"assembly_extra_caption_{assembly_id}")
-        extra_upload = st.file_uploader(
-            "Upload supplemental image", type=["png", "jpg", "jpeg", "webp"],
-            key=f"assembly_extra_upload_{assembly_id}",
-        )
-        if extra_upload and st.button(
-            "Add supplemental image", icon=":material/add_photo_alternate:",
-            key=f"add_assembly_extra_{assembly_id}",
-        ):
-            add_assembly_image(project_id, assembly_id, extra_upload, extra_caption)
-            record_audit_event(
-                project_id, "Assembly images", "Add supplemental image", 1,
-                st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
-            )
-            st.rerun()
-        st.caption("You can also paste a screenshot as a supplemental image.")
-        supplemental_paste = clipboard_image(key=f"assembly_extra_paste_{assembly_id}")
-        if getattr(supplemental_paste, "image", None):
-            try:
-                payload = decode_clipboard_image(supplemental_paste.image)
-                add_assembly_image(
-                    project_id, assembly_id, as_uploaded_file(payload), extra_caption
-                )
-                record_audit_event(
-                    project_id, "Assembly images", "Paste supplemental image", 1,
-                    st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
-                )
-                st.rerun()
-            except (OSError, ValueError) as exc:
-                st.error(str(exc))
-        if supplemental:
-            image_table = pd.DataFrame(supplemental)[["id", "caption", "created_at"]]
-            image_editor_key = f"assembly_image_selection_{assembly_id}"
-            apply_pending_table_editor_reset(image_editor_key)
-            st.data_editor(
-                image_table,
-                key=image_editor_key,
-                hide_index=True,
-                num_rows="delete",
-                disabled=list(image_table.columns),
-                column_config={"id": None, "caption": "Caption", "created_at": "Added"},
-            )
-            selected_images = native_selected_rows(
-                image_table, editor_key=image_editor_key
-            )
-            if not selected_images.empty:
-                st.session_state[f"assembly_images_pending_delete_{assembly_id}"] = (
-                    selected_images["id"].astype(str).tolist()
-                )
-
-            @st.dialog("Delete selected assembly images?")
-            def confirm_image_delete() -> None:
-                pending_key = f"assembly_images_pending_delete_{assembly_id}"
-                pending_ids = st.session_state.get(pending_key, [])
-                st.warning(
-                    f"Delete {len(pending_ids)} supplemental image(s) from "
-                    f"assembly {assembly['assembly_number']}? The uploaded files will also be removed."
-                )
-                actions = st.container(horizontal=True)
-                if actions.button("Cancel", key=f"cancel_assembly_image_delete_{assembly_id}"):
-                    st.session_state.pop(pending_key, None)
-                    request_table_editor_reset(image_editor_key)
-                    st.rerun()
-                if actions.button(
-                    "Delete images", type="primary", icon=":material/delete:",
-                    key=f"destructive_confirm_assembly_image_delete_{assembly_id}",
-                ):
-                    count = delete_assembly_images(
-                        project_id, assembly_id, pending_ids
-                    )
-                    record_audit_event(
-                        project_id, "Assembly images", "Delete supplemental images", count,
-                        st.session_state.get("current_editor", ""), {"assembly_id": assembly_id},
-                    )
-                    st.session_state.pop(pending_key, None)
-                    request_table_editor_reset(image_editor_key)
-                    st.rerun()
-
-            if st.session_state.get(f"assembly_images_pending_delete_{assembly_id}"):
-                confirm_image_delete()
 
 
 with st.expander("History", icon=":material/history:"):

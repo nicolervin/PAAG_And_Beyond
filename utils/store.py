@@ -1465,10 +1465,6 @@ def save_assembly_grid_model_mappings(
                 (project_id,),
             ).fetchall()
         }
-        assembly_by_number = {
-            _catalog_text(row["assembly_number"]).casefold(): assembly_id
-            for assembly_id, row in assemblies.items()
-        }
         existing_mappings = {
             str(row["id"]): dict(row)
             for row in conn.execute(
@@ -1663,6 +1659,132 @@ def save_assembly_grid_model_mappings(
     }
 
 
+def assembly_grid_number_merge_impact(
+    project_id: str, rows, *, _conn: sqlite3.Connection | None = None
+) -> list[dict]:
+    """Describe saved assemblies that a grid draft would replace with existing numbers."""
+    records = _catalog_records(rows)
+    with (connection() if _conn is None else nullcontext(_conn)) as conn:
+        assemblies = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM manufacturing_assemblies WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        assembly_by_number = {
+            _catalog_text(row["assembly_number"]).casefold(): assembly_id
+            for assembly_id, row in assemblies.items()
+        }
+        requested_targets: dict[str, str] = {}
+        categories_by_assembly: dict[str, set[str]] = {}
+        for raw in records:
+            assembly_id = _catalog_text(raw.get("assembly_id"))
+            category_id = _catalog_text(raw.get("category_id"))
+            requested_number = _catalog_text(raw.get("assembly_number"))
+            if assembly_id:
+                categories_by_assembly.setdefault(assembly_id, set()).add(category_id)
+            target_id = assembly_by_number.get(requested_number.casefold())
+            if not assembly_id or assembly_id not in assemblies or not target_id:
+                continue
+            if target_id == assembly_id:
+                continue
+            previous_target = requested_targets.get(assembly_id)
+            if previous_target and previous_target != target_id:
+                raise ValueError(
+                    f"Assembly {assemblies[assembly_id]['assembly_number']} has conflicting "
+                    "Part number edits. Use one Part number for every model mapped to it."
+                )
+            requested_targets[assembly_id] = target_id
+
+        impacts: list[dict] = []
+        for source_id, target_id in requested_targets.items():
+            if target_id in requested_targets:
+                raise ValueError(
+                    "Assembly-number merges cannot be chained in one save. Complete one merge "
+                    "and refresh the grid before starting another."
+                )
+            source_categories = categories_by_assembly.get(source_id, set()) - {""}
+            target_categories = categories_by_assembly.get(target_id, set()) - {""}
+            combined_categories = source_categories | target_categories
+            if len(combined_categories) > 1:
+                category_rows = conn.execute(
+                    f"""SELECT id, display_name FROM assembly_grid_categories
+                        WHERE project_id=? AND id IN ({','.join('?' for _ in combined_categories)})""",
+                    (project_id, *combined_categories),
+                ).fetchall()
+                category_names = ", ".join(str(row["display_name"]) for row in category_rows)
+                raise ValueError(
+                    f"Assembly {assemblies[target_id]['assembly_number']} is mapped under a "
+                    f"different category ({category_names}). Move or clear those mappings "
+                    "before merging assembly numbers."
+                )
+
+            def direct_count(table: str, column: str = "assembly_id") -> int:
+                return int(conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {column}=?",
+                    (source_id,),
+                ).fetchone()[0])
+
+            source_image_paths = [
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT image_path FROM manufacturing_assemblies
+                       WHERE project_id=? AND id=?
+                         AND TRIM(COALESCE(image_path, ''))<>''
+                       UNION ALL
+                       SELECT image_path FROM manufacturing_assembly_images
+                       WHERE project_id=? AND assembly_id=?""",
+                    (project_id, source_id, project_id, source_id),
+                ).fetchall()
+            ]
+            impacts.append(
+                {
+                    "source_assembly_id": source_id,
+                    "source_assembly_number": str(assemblies[source_id]["assembly_number"]),
+                    "target_assembly_id": target_id,
+                    "target_assembly_number": str(assemblies[target_id]["assembly_number"]),
+                    "source_component_count": direct_count(
+                        "manufacturing_assembly_components"
+                    ),
+                    "target_component_count": int(conn.execute(
+                        """SELECT COUNT(*) FROM manufacturing_assembly_components
+                           WHERE project_id=? AND assembly_id=?""",
+                        (project_id, target_id),
+                    ).fetchone()[0]),
+                    "source_rule_count": direct_count(
+                        "manufacturing_assembly_feature_rules"
+                    ),
+                    "source_supplemental_image_count": direct_count(
+                        "manufacturing_assembly_images"
+                    ),
+                    "source_primary_image_count": int(bool(
+                        _catalog_text(assemblies[source_id].get("image_path"))
+                    )),
+                    "source_child_count": int(conn.execute(
+                        """SELECT COUNT(*) FROM manufacturing_assemblies
+                           WHERE project_id=? AND parent_id=?""",
+                        (project_id, source_id),
+                    ).fetchone()[0]),
+                    "source_policy_count": direct_count("assembly_scenario_policies"),
+                    "source_material_option_count": direct_count(
+                        "work_element_material_options"
+                    ),
+                    "source_target_link_count": direct_count(
+                        "work_element_material_groups", "target_assembly_id"
+                    ),
+                    "source_mapping_count": direct_count("assembly_grid_model_mappings"),
+                    "reassigned_mapping_count": sum(
+                        1
+                        for raw in records
+                        if _catalog_text(raw.get("assembly_id")) == source_id
+                    ),
+                    "source_image_paths": source_image_paths,
+                }
+            )
+        return impacts
+
+
 def save_assembly_grid_feature_visibility(
     project_id: str, section_id: str, rows, *, _conn: sqlite3.Connection | None = None
 ) -> dict:
@@ -1732,28 +1854,79 @@ def save_assembly_grid_section(
     complete_mapping_rows,
     feature_visibility_rows,
     component_rows_by_assembly: dict[str, list[dict]] | None = None,
+    assembly_merges: list[dict] | None = None,
 ) -> dict:
     """Validate and save one complete grid draft in a single transaction."""
+    deleted_image_paths: list[str] = []
     with connection() as conn:
+        merge_impact = assembly_grid_number_merge_impact(
+            project_id, complete_mapping_rows, _conn=conn
+        )
+        actual_merges = {
+            (row["source_assembly_id"], row["target_assembly_id"])
+            for row in merge_impact
+        }
+        confirmed_merges = {
+            (
+                _catalog_text(row.get("source_assembly_id")),
+                _catalog_text(row.get("target_assembly_id")),
+            )
+            for row in (assembly_merges or [])
+        }
+        if actual_merges != confirmed_merges:
+            if actual_merges:
+                raise ValueError(
+                    "Review and confirm the assembly-number merge before saving."
+                )
+            raise ValueError(
+                "The pending assembly-number merge is no longer present. Review the grid again."
+            )
+        target_by_source = dict(actual_merges)
+        resolved_mapping_rows = []
+        for raw in _catalog_records(complete_mapping_rows):
+            source_id = _catalog_text(raw.get("assembly_id"))
+            target_id = target_by_source.get(source_id)
+            if target_id:
+                target_number = next(
+                    row["target_assembly_number"]
+                    for row in merge_impact
+                    if row["source_assembly_id"] == source_id
+                )
+                resolved_mapping_rows.append(
+                    {**raw, "assembly_id": target_id, "assembly_number": target_number}
+                )
+            else:
+                resolved_mapping_rows.append(raw)
         categories_result = save_assembly_grid_categories(
             project_id, section_id, category_rows, _conn=conn
         )
         mappings_result = save_assembly_grid_model_mappings(
-            project_id, complete_mapping_rows, _conn=conn
+            project_id, resolved_mapping_rows, _conn=conn
         )
         visibility_result = save_assembly_grid_feature_visibility(
             project_id, section_id, feature_visibility_rows, _conn=conn
         )
         component_results: dict[str, dict] = {}
         for assembly_id, rows in (component_rows_by_assembly or {}).items():
+            if str(assembly_id) in target_by_source:
+                continue
             component_results[str(assembly_id)] = save_assembly_bom_components(
                 project_id, str(assembly_id), rows, _conn=conn
             )
+        for impact in merge_impact:
+            deleted_image_paths.extend(impact["source_image_paths"])
+            conn.execute(
+                "DELETE FROM manufacturing_assemblies WHERE project_id=? AND id=?",
+                (project_id, impact["source_assembly_id"]),
+            )
+    for image_path in deleted_image_paths:
+        _remove_owned_upload(image_path)
     return {
         "categories": categories_result,
         "mappings": mappings_result,
         "feature_visibility": visibility_result,
         "components": component_results,
+        "assembly_merges": merge_impact,
         "updated_at": now_iso(),
     }
 

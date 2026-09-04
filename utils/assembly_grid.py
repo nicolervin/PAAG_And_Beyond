@@ -48,11 +48,15 @@ input, select { box-sizing:border-box; width:100%; border:1px solid var(--st-bor
 """
 
 _JS = r"""
+const focusState = new WeakMap()
+
 export default function(component) {
   const { parentElement, data, setStateValue, setTriggerValue } = component
   const table = parentElement.querySelector('#assembly-grid')
   const addButton = parentElement.querySelector('#add-category')
   if (!table || !addButton) return
+  const instanceFocus = focusState.get(parentElement) || {key:''}
+  focusState.set(parentElement, instanceFocus)
   const clone = value => JSON.parse(JSON.stringify(value || []))
   const draft = clone(data.draft)
   const models = data.models || []
@@ -62,6 +66,56 @@ export default function(component) {
     /[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]
   )
   const emitDraft = () => setStateValue('draft', draft)
+  const focusableControls = () => Array.from(
+    table.querySelectorAll('[data-grid-focus]:not([disabled])')
+  )
+  const queueFocusRestore = focusKey => {
+    instanceFocus.key = focusKey || ''
+    setTimeout(() => {
+      if (instanceFocus.key === focusKey) instanceFocus.key = ''
+    }, 5000)
+  }
+  const restoreQueuedFocus = () => {
+    const focusKey = instanceFocus.key
+    if (!focusKey) return
+    const target = focusableControls().find(control => control.dataset.gridFocus === focusKey)
+    instanceFocus.key = ''
+    if (target) target.focus({preventScroll:true})
+  }
+  const wireFocusNavigation = () => {
+    table.onpointerdown = event => {
+      let target = event.target.closest('[data-grid-focus]')
+      if (!target) {
+        const modelCell = event.target.closest('td[data-model]')
+        target = modelCell && modelCell.querySelector('.assembly-entry')
+        if (target) {
+          event.preventDefault()
+          queueFocusRestore(target.dataset.gridFocus)
+          target.focus({preventScroll:true})
+          return
+        }
+      }
+      const root = parentElement.getRootNode ? parentElement.getRootNode() : parentElement
+      const active = parentElement.activeElement || root.activeElement
+      if (target && active && active !== target) {
+        queueFocusRestore(target.dataset.gridFocus)
+      }
+    }
+    table.onkeydown = event => {
+      if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey) return
+      const current = event.target.closest('[data-grid-focus]')
+      if (!current) return
+      const controls = focusableControls()
+      const currentIndex = controls.indexOf(current)
+      const nextIndex = currentIndex + (event.shiftKey ? -1 : 1)
+      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= controls.length) return
+      event.preventDefault()
+      const next = controls[nextIndex]
+      queueFocusRestore(next.dataset.gridFocus)
+      next.focus({preventScroll:true})
+    }
+    requestAnimationFrame(restoreQueuedFocus)
+  }
   const valueFor = (category, modelId) => {
     category.cells ||= {}
     category.cells[modelId] ||= {mapping_id:'', assembly_id:'', assembly_number:'', components:[]}
@@ -81,14 +135,15 @@ export default function(component) {
     html += '</thead><tbody>'
     draft.forEach((category, categoryIndex) => {
       html += `<tr class="category-row" data-category="${categoryIndex}">`
-      html += `<td class="sticky-1"><input data-field="display_name" value="${escapeHtml(category.display_name)}" placeholder="Display name"><input data-field="ebom_name" value="${escapeHtml(category.ebom_name)}" placeholder="Official EBOM name" style="margin-top:4px"><div class="cell-actions"><button class="danger delete-category" type="button">Delete</button></div></td>`
-      html += `<td class="sticky-2"><select data-field="installed_section_id">${sectionOptions(category.installed_section_id || '')}</select></td>`
+      html += `<td class="sticky-1"><input data-grid-focus="category-${categoryIndex}-display" data-field="display_name" value="${escapeHtml(category.display_name)}" placeholder="Display name"><input data-grid-focus="category-${categoryIndex}-ebom" data-field="ebom_name" value="${escapeHtml(category.ebom_name)}" placeholder="Official EBOM name" style="margin-top:4px"><div class="cell-actions"><button data-grid-focus="category-${categoryIndex}-delete" class="danger delete-category" type="button">Delete</button></div></td>`
+      html += `<td class="sticky-2"><select data-grid-focus="category-${categoryIndex}-installed" data-field="installed_section_id">${sectionOptions(category.installed_section_id || '')}</select></td>`
       let priorNumber = ''
       models.forEach(model => {
         const cell = valueFor(category, model.id)
         const repeated = cell.assembly_number && cell.assembly_number === priorNumber
         priorNumber = cell.assembly_number || ''
-        html += `<td class="${repeated ? 'merged' : ''}" data-model="${escapeHtml(model.id)}"><label class="field-label">Part number</label><input class="assembly-entry" value="${escapeHtml(cell.assembly_number)}" placeholder="Part number"><div class="cell-actions">${cell.assembly_id ? '<button class="details" type="button">Details</button><button class="danger clear-mapping" type="button">Clear</button>' : ''}</div></td>`
+        const cellFocus = `category-${categoryIndex}-model-${model.id}`
+        html += `<td class="${repeated ? 'merged' : ''}" data-model="${escapeHtml(model.id)}"><label class="field-label">Part number</label><input data-grid-focus="${escapeHtml(cellFocus)}-part-number" class="assembly-entry" value="${escapeHtml(cell.assembly_number)}" placeholder="Part number"><div class="cell-actions">${cell.assembly_id ? `<button data-grid-focus="${escapeHtml(cellFocus)}-details" class="details" type="button">Details</button><button data-grid-focus="${escapeHtml(cellFocus)}-clear" class="danger clear-mapping" type="button">Clear</button>` : ''}</div></td>`
       })
       html += '</tr>'
       const hasMappedAssembly = models.some(model => valueFor(category, model.id).assembly_id)
@@ -98,10 +153,11 @@ export default function(component) {
           const cell = valueFor(category, model.id)
           const usedIds = new Set((cell.components || []).map(item => item.fishbone_assignment_id))
           const availableUses = (data.uses || []).filter(item => !usedIds.has(item.id))
+          const componentFocus = `category-${categoryIndex}-model-${model.id}`
           const addControl = cell.assembly_id
-            ? `<div class="component"><select class="component-use"><option value="">Choose Fishbone use</option>${availableUses.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('')}</select><span></span><button class="add-component" type="button">＋ Add part</button></div>`
+            ? `<div class="component"><select data-grid-focus="${escapeHtml(componentFocus)}-new-part" class="component-use"><option value="">Choose Fishbone use</option>${availableUses.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('')}</select><span></span><button data-grid-focus="${escapeHtml(componentFocus)}-add-part" class="add-component" type="button">＋ Add part</button></div>`
             : ''
-          html += '<td>' + (cell.components || []).map((item, componentIndex) => `<div class="component" data-component="${componentIndex}"><span class="component-identity"><strong>${escapeHtml(item.part_number)}</strong><span class="muted">${escapeHtml(item.part_name || '')}</span></span><input class="component-quantity" type="number" min="0.000001" step="0.01" value="${escapeHtml(item.quantity)}"><button class="danger delete-component" type="button">×</button></div>`).join('') + addControl + '</td>'
+          html += '<td>' + (cell.components || []).map((item, componentIndex) => `<div class="component" data-component="${componentIndex}"><span class="component-identity"><strong>${escapeHtml(item.part_number)}</strong><span class="muted">${escapeHtml(item.part_name || '')}</span></span><input data-grid-focus="${escapeHtml(componentFocus)}-component-${componentIndex}-quantity" class="component-quantity" type="number" min="0.000001" step="0.01" value="${escapeHtml(item.quantity)}"><button data-grid-focus="${escapeHtml(componentFocus)}-component-${componentIndex}-delete" class="danger delete-component" type="button">×</button></div>`).join('') + addControl + '</td>'
         })
         html += '</tr>'
       }
@@ -111,6 +167,7 @@ export default function(component) {
       const categoryIndex = Number(row.dataset.category)
       row.querySelectorAll('[data-field]').forEach(input => input.onchange = () => {
         draft[categoryIndex][input.dataset.field] = input.value
+        if (!instanceFocus.key) queueFocusRestore(input.dataset.gridFocus)
         emitDraft()
       })
       row.querySelector('.delete-category').onclick = () => {
@@ -129,6 +186,7 @@ export default function(component) {
         const entry = cellElement.querySelector('.assembly-entry')
         entry.onchange = () => {
           cell.assembly_number = entry.value.trim()
+          if (!instanceFocus.key) queueFocusRestore(entry.dataset.gridFocus)
           emitDraft()
         }
         const details = cellElement.querySelector('.details')
@@ -153,6 +211,9 @@ export default function(component) {
               const matching = (otherCell.components || []).find(item => item.id === componentId)
               if (matching) matching.quantity = event.target.value
             }))
+            if (!instanceFocus.key) {
+              queueFocusRestore(event.target.dataset.gridFocus)
+            }
             emitDraft()
           }
           componentElement.querySelector('.delete-component').onclick = () => setTriggerValue('delete_component', {category_index:categoryIndex, model_id:models[modelColumn].id, component_index:componentIndex, assembly_id:cell.assembly_id, component_id:cell.components[componentIndex].id, part_number:cell.components[componentIndex].part_number})
@@ -179,9 +240,11 @@ export default function(component) {
         }
       })
     })
+    wireFocusNavigation()
   }
   addButton.onclick = () => {
     draft.push({id:'', ebom_name:'', display_name:'', installed_section_id:'', sequence:(draft.length + 1) * 10, cells:{}})
+    queueFocusRestore(`category-${draft.length - 1}-display`)
     emitDraft(); render()
   }
   render()
@@ -190,7 +253,7 @@ export default function(component) {
 
 
 _ASSEMBLY_GRID = st.components.v2.component(
-    "paag_assembly_grid_v5", html=_HTML, css=_CSS, js=_JS
+    "paag_assembly_grid_v6", html=_HTML, css=_CSS, js=_JS
 )
 
 

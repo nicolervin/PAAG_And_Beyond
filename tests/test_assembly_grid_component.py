@@ -58,6 +58,22 @@ class AssemblyGridComponentTests(unittest.TestCase):
         self.assertIn("Add part", source)
         self.assertIn("item.part_name", source)
 
+    def test_grid_restores_click_and_tab_focus_after_draft_reruns(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "utils" / "assembly_grid.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("table.onpointerdown = event =>", source)
+        self.assertIn("table.onkeydown = event =>", source)
+        self.assertIn("event.key !== 'Tab'", source)
+        self.assertIn("event.shiftKey ? -1 : 1", source)
+        self.assertIn("queueFocusRestore(next.dataset.gridFocus)", source)
+        self.assertIn("target.focus({preventScroll:true})", source)
+        self.assertIn("modelCell.querySelector('.assembly-entry')", source)
+        self.assertIn("const focusState = new WeakMap()", source)
+        self.assertIn("if (!instanceFocus.key) queueFocusRestore", source)
+        self.assertIn('"paag_assembly_grid_v6"', source)
+
 
 if __name__ == "__main__":
     unittest.main()
