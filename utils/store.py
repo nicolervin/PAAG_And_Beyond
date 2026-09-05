@@ -4,7 +4,7 @@ import sqlite3
 import json
 import hashlib
 import math
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -250,6 +250,7 @@ def init_db() -> None:
                 parent_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE SET NULL,
                 built_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
                 installed_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
+                catalog_part_id TEXT REFERENCES parts(id) ON DELETE RESTRICT,
                 image_path TEXT DEFAULT '', created_at TEXT,
                 active INTEGER NOT NULL DEFAULT 1, notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
                 UNIQUE(project_id, assembly_number)
@@ -276,6 +277,38 @@ def init_db() -> None:
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 assembly_id TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE,
                 image_path TEXT NOT NULL, caption TEXT DEFAULT '', created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS assembly_grid_categories (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE RESTRICT,
+                ebom_name TEXT NOT NULL COLLATE NOCASE,
+                display_name TEXT NOT NULL COLLATE NOCASE,
+                root_number TEXT NOT NULL,
+                is_top_level INTEGER NOT NULL DEFAULT 0 CHECK(is_top_level IN (0, 1)),
+                installed_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
+                sequence INTEGER NOT NULL DEFAULT 10,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(project_id, section_id, ebom_name),
+                UNIQUE(project_id, section_id, display_name)
+            );
+            CREATE TABLE IF NOT EXISTS assembly_grid_model_mappings (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                category_id TEXT NOT NULL REFERENCES assembly_grid_categories(id) ON DELETE CASCADE,
+                model_id TEXT NOT NULL REFERENCES project_models(id) ON DELETE CASCADE,
+                assembly_id TEXT NOT NULL REFERENCES manufacturing_assemblies(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(category_id, model_id)
+            );
+            CREATE TABLE IF NOT EXISTS assembly_grid_feature_visibility (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                feature_id TEXT NOT NULL REFERENCES complexity_features(id) ON DELETE CASCADE,
+                is_visible INTEGER NOT NULL DEFAULT 1 CHECK(is_visible IN (0, 1)),
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(section_id, feature_id)
             );
             CREATE TABLE IF NOT EXISTS assembly_scenario_policies (
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -342,6 +375,7 @@ def init_db() -> None:
             "installed_section_id": (
                 "TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT"
             ),
+            "catalog_part_id": "TEXT REFERENCES parts(id) ON DELETE RESTRICT",
             "image_path": "TEXT DEFAULT ''",
             "created_at": "TEXT",
         }.items():
@@ -431,6 +465,11 @@ def init_db() -> None:
                ON manufacturing_assemblies(project_id, built_section_id, installed_section_id)"""
         )
         conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_assembly_catalog_part
+               ON manufacturing_assemblies(project_id, catalog_part_id)
+               WHERE catalog_part_id IS NOT NULL"""
+        )
+        conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_assembly_component_assignment
                ON manufacturing_assembly_components(project_id, fishbone_assignment_id)"""
         )
@@ -441,6 +480,39 @@ def init_db() -> None:
         conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_assembly_images_owner
                ON manufacturing_assembly_images(project_id, assembly_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_grid_categories_section
+               ON assembly_grid_categories(project_id, section_id, sequence)"""
+        )
+        assembly_grid_category_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(assembly_grid_categories)"
+            ).fetchall()
+        }
+        if "is_top_level" not in assembly_grid_category_columns:
+            conn.execute(
+                """ALTER TABLE assembly_grid_categories
+                   ADD COLUMN is_top_level INTEGER NOT NULL DEFAULT 0
+                   CHECK(is_top_level IN (0, 1))"""
+            )
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_assembly_grid_one_top_level
+               ON assembly_grid_categories(project_id)
+               WHERE is_top_level=1"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_grid_mapping_assembly
+               ON assembly_grid_model_mappings(project_id, assembly_id, category_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_grid_mapping_model
+               ON assembly_grid_model_mappings(project_id, model_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_assembly_grid_visibility_section
+               ON assembly_grid_feature_visibility(project_id, section_id, feature_id)"""
         )
         fishbone_columns = {row[1] for row in conn.execute("PRAGMA table_info(fishbone_nodes)").fetchall()}
         if "review_status" not in fishbone_columns:
@@ -653,6 +725,85 @@ def init_db() -> None:
             conn.execute(
                 """ALTER TABLE work_element_material_groups
                    ADD COLUMN target_assembly_id TEXT REFERENCES manufacturing_assemblies(id) ON DELETE SET NULL"""
+            )
+
+        # A completed manufacturing assembly is handled material again downstream.
+        # Backfill one stable Parts Catalog identity for legacy assembly rows. Matching
+        # part numbers are reused without overwriting collaborator-authored fields.
+        backfilled_by_project: dict[str, list[dict]] = {}
+        timestamp = now_iso()
+        for assembly in conn.execute(
+            """SELECT id, project_id, assembly_number, name
+               FROM manufacturing_assemblies
+               WHERE catalog_part_id IS NULL
+               ORDER BY project_id, assembly_number"""
+        ).fetchall():
+            matches = conn.execute(
+                """SELECT id FROM parts
+                   WHERE project_id=? AND LOWER(TRIM(part_number))=LOWER(TRIM(?))
+                   ORDER BY CASE WHEN part_number=? THEN 0 ELSE 1 END, id""",
+                (
+                    assembly["project_id"], assembly["assembly_number"],
+                    assembly["assembly_number"],
+                ),
+            ).fetchall()
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Assembly {assembly['assembly_number']} matches multiple Parts Catalog "
+                    "rows after case-insensitive comparison. Resolve the duplicate part numbers "
+                    "before the assembly-part schema upgrade can run."
+                )
+            created = not matches
+            part_id = str(matches[0]["id"]) if matches else str(uuid4())
+            if created:
+                conn.execute(
+                    """INSERT INTO parts
+                       (id, project_id, part_number, description, quantity, revision, source,
+                        image_path, model_applicability, notes, updated_at)
+                       VALUES (?, ?, ?, ?, 1, '0', 'Assembly grid', '', '', '', ?)""",
+                    (
+                        part_id, assembly["project_id"], assembly["assembly_number"],
+                        assembly["name"], timestamp,
+                    ),
+                )
+            conn.execute(
+                """UPDATE manufacturing_assemblies
+                   SET catalog_part_id=?, updated_at=? WHERE id=? AND project_id=?""",
+                (part_id, timestamp, assembly["id"], assembly["project_id"]),
+            )
+            model_numbers = [
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT DISTINCT model.model_number
+                       FROM assembly_grid_model_mappings mapping
+                       JOIN project_models model ON model.id=mapping.model_id
+                       WHERE mapping.project_id=? AND mapping.assembly_id=? AND model.active=1
+                       ORDER BY model.model_number""",
+                    (assembly["project_id"], assembly["id"]),
+                ).fetchall()
+            ]
+            conn.execute(
+                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=?",
+                (", ".join(model_numbers), timestamp, part_id),
+            )
+            backfilled_by_project.setdefault(str(assembly["project_id"]), []).append(
+                {
+                    "assembly_id": str(assembly["id"]),
+                    "assembly_number": str(assembly["assembly_number"]),
+                    "part_id": part_id,
+                    "action": "created" if created else "reused",
+                }
+            )
+        for project_id, changes in backfilled_by_project.items():
+            conn.execute(
+                """INSERT INTO audit_log
+                   (id, project_id, table_name, action, row_count, editor_name, details, created_at)
+                   VALUES (?, ?, 'Parts', 'Assembly catalog backfill', ?,
+                           'Schema upgrade', ?, ?)""",
+                (
+                    str(uuid4()), project_id, len(changes),
+                    json.dumps({"assembly_parts": changes}, ensure_ascii=False), timestamp,
+                ),
             )
 
 
@@ -1117,6 +1268,38 @@ def audit_history(project_id: str, table_name: str | None = None, limit: int = 1
     return pd.DataFrame(rows)
 
 
+def backup_database(target_path: str | Path) -> Path:
+    """Create and validate a consistent SQLite backup without modifying the source DB."""
+    source = DB_PATH.resolve()
+    target = Path(target_path).resolve()
+    data_root = DATA_DIR.resolve()
+    if not source.exists() or not source.is_file():
+        raise ValueError("The local PAAG database does not exist, so it cannot be backed up.")
+    if target == source:
+        raise ValueError("Choose a backup path different from the live PAAG database.")
+    if data_root != target.parent and data_root not in target.parents:
+        raise ValueError("Store the PAAG database backup beneath the data directory.")
+    if target.exists():
+        raise ValueError("The requested PAAG database backup already exists.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with closing(sqlite3.connect(
+            f"file:{source.as_posix()}?mode=ro", uri=True
+        )) as source_conn:
+            with closing(sqlite3.connect(target)) as target_conn:
+                source_conn.backup(target_conn)
+                result = target_conn.execute("PRAGMA quick_check").fetchone()
+                if not result or str(result[0]).lower() != "ok":
+                    raise ValueError("The PAAG database backup failed SQLite validation.")
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    if not target.exists() or target.stat().st_size <= 0:
+        target.unlink(missing_ok=True)
+        raise ValueError("The PAAG database backup was not created successfully.")
+    return target
+
+
 def _catalog_records(rows) -> list[dict]:
     if isinstance(rows, pd.DataFrame):
         return rows.to_dict("records")
@@ -1139,6 +1322,1406 @@ def _require_catalog_assembly(
     if not assembly:
         raise ValueError("The selected assembly no longer exists in this project.")
     return assembly
+
+
+def _catalog_part_by_number(
+    conn: sqlite3.Connection,
+    project_id: str,
+    part_number: str,
+) -> sqlite3.Row | None:
+    matches = conn.execute(
+        """SELECT * FROM parts
+           WHERE project_id=? AND LOWER(TRIM(part_number))=LOWER(TRIM(?))
+           ORDER BY CASE WHEN part_number=? THEN 0 ELSE 1 END, id""",
+        (project_id, part_number, part_number),
+    ).fetchall()
+    if len(matches) > 1:
+        raise ValueError(
+            f"Part number {part_number} matches multiple Parts Catalog rows. "
+            "Resolve the duplicate catalog numbers before saving assemblies."
+        )
+    return matches[0] if matches else None
+
+
+def _assembly_part_relationship_counts(
+    conn: sqlite3.Connection, part_id: str
+) -> dict[str, int]:
+    def count(table: str, column: str = "part_id") -> int:
+        return int(conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {column}=?", (part_id,)
+        ).fetchone()[0])
+
+    return {
+        "fishbone_use_count": count("fishbone_part_assignments"),
+        "process_option_count": count("process_part_options"),
+        "feature_rule_count": count("part_feature_rules"),
+        "scenario_activity_count": count("part_scenario_activity"),
+        "supplemental_image_count": count("part_images"),
+    }
+
+
+def _release_or_remove_generated_assembly_part(
+    conn: sqlite3.Connection,
+    project_id: str,
+    part_id: str | None,
+) -> str:
+    """Remove only an untouched generated orphan; preserve every used/authored part."""
+    if not part_id:
+        return "none"
+    part = conn.execute(
+        "SELECT * FROM parts WHERE id=? AND project_id=?", (part_id, project_id)
+    ).fetchone()
+    if not part:
+        return "none"
+    linked = conn.execute(
+        "SELECT 1 FROM manufacturing_assemblies WHERE catalog_part_id=? LIMIT 1",
+        (part_id,),
+    ).fetchone()
+    relationships = _assembly_part_relationship_counts(conn, part_id)
+    generated = str(part["source"] or "") == "Assembly grid"
+    untouched = (
+        float(part["quantity"] or 0) == 1
+        and str(part["revision"] or "") == "0"
+        and not str(part["image_path"] or "").strip()
+        and not str(part["notes"] or "").strip()
+    )
+    if not linked and generated and untouched and not any(relationships.values()):
+        conn.execute("DELETE FROM parts WHERE id=? AND project_id=?", (part_id, project_id))
+        return "deleted generated orphan"
+    return "preserved independent part"
+
+
+def _ensure_assembly_catalog_part(
+    conn: sqlite3.Connection,
+    project_id: str,
+    assembly_id: str,
+    assembly_number: str,
+    assembly_name: str,
+    timestamp: str,
+    *,
+    allow_existing_relink: bool = False,
+) -> dict:
+    assembly = conn.execute(
+        "SELECT catalog_part_id FROM manufacturing_assemblies WHERE id=? AND project_id=?",
+        (assembly_id, project_id),
+    ).fetchone()
+    if not assembly:
+        raise ValueError("The selected assembly no longer exists in this project.")
+    old_part_id = _catalog_text(assembly["catalog_part_id"]) or None
+    old_part = (
+        conn.execute(
+            "SELECT * FROM parts WHERE id=? AND project_id=?", (old_part_id, project_id)
+        ).fetchone()
+        if old_part_id else None
+    )
+    matching_part = _catalog_part_by_number(conn, project_id, assembly_number)
+    if matching_part and str(matching_part["id"]) != old_part_id:
+        owner = conn.execute(
+            """SELECT assembly_number FROM manufacturing_assemblies
+               WHERE project_id=? AND catalog_part_id=? AND id<>?""",
+            (project_id, matching_part["id"], assembly_id),
+        ).fetchone()
+        if owner:
+            raise ValueError(
+                f"Part number {assembly_number} is already linked to assembly "
+                f"{owner['assembly_number']}."
+            )
+        if old_part and not allow_existing_relink:
+            raise ValueError(
+                f"Part number {assembly_number} already exists in the Parts Catalog. "
+                "Review and confirm the catalog-part relink before saving."
+            )
+        part_id = str(matching_part["id"])
+        action = "reused existing part"
+    elif matching_part:
+        part_id = str(matching_part["id"])
+        action = "kept linked part"
+    elif old_part:
+        conn.execute(
+            "UPDATE parts SET part_number=?, updated_at=? WHERE id=? AND project_id=?",
+            (assembly_number, timestamp, old_part_id, project_id),
+        )
+        part_id = old_part_id
+        action = "renamed linked part"
+    else:
+        part_id = str(uuid4())
+        conn.execute(
+            """INSERT INTO parts
+               (id, project_id, part_number, description, quantity, revision, source,
+                image_path, model_applicability, notes, updated_at)
+               VALUES (?, ?, ?, ?, 1, '0', 'Assembly grid', '', '', '', ?)""",
+            (part_id, project_id, assembly_number, assembly_name, timestamp),
+        )
+        action = "created part"
+    conn.execute(
+        """UPDATE manufacturing_assemblies SET catalog_part_id=?, updated_at=?
+           WHERE id=? AND project_id=?""",
+        (part_id, timestamp, assembly_id, project_id),
+    )
+    old_part_action = (
+        _release_or_remove_generated_assembly_part(conn, project_id, old_part_id)
+        if old_part_id and old_part_id != part_id else "none"
+    )
+    return {
+        "assembly_id": assembly_id,
+        "assembly_number": assembly_number,
+        "part_id": part_id,
+        "action": action,
+        "old_part_id": old_part_id,
+        "old_part_action": old_part_action,
+    }
+
+
+def _sync_assembly_catalog_part_applicability(
+    conn: sqlite3.Connection,
+    project_id: str,
+    timestamp: str,
+) -> list[dict]:
+    changes: list[dict] = []
+    assemblies = conn.execute(
+        """SELECT id, assembly_number, catalog_part_id
+           FROM manufacturing_assemblies
+           WHERE project_id=? AND catalog_part_id IS NOT NULL""",
+        (project_id,),
+    ).fetchall()
+    for assembly in assemblies:
+        model_numbers = [
+            str(row[0])
+            for row in conn.execute(
+                """SELECT DISTINCT model.model_number
+                   FROM assembly_grid_model_mappings mapping
+                   JOIN project_models model ON model.id=mapping.model_id
+                   WHERE mapping.project_id=? AND mapping.assembly_id=? AND model.active=1
+                   ORDER BY model.model_number""",
+                (project_id, assembly["id"]),
+            ).fetchall()
+        ]
+        applicability = normalize_model_applicability(model_numbers) if model_numbers else ""
+        part = conn.execute(
+            "SELECT model_applicability FROM parts WHERE id=? AND project_id=?",
+            (assembly["catalog_part_id"], project_id),
+        ).fetchone()
+        if part and str(part["model_applicability"] or "") != applicability:
+            conn.execute(
+                """UPDATE parts SET model_applicability=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (applicability, timestamp, assembly["catalog_part_id"], project_id),
+            )
+            changes.append(
+                {
+                    "assembly_id": str(assembly["id"]),
+                    "assembly_number": str(assembly["assembly_number"]),
+                    "part_id": str(assembly["catalog_part_id"]),
+                    "model_applicability": applicability,
+                }
+            )
+    return changes
+
+
+def assembly_grid_categories(
+    project_id: str, section_id: str | None = None
+) -> pd.DataFrame:
+    params: list[str] = [project_id]
+    section_clause = ""
+    if _catalog_text(section_id):
+        section_clause = " AND category.section_id=?"
+        params.append(_catalog_text(section_id))
+    return pd.DataFrame(query(
+        f"""SELECT category.*, built.name AS section_name,
+                   installed.name AS installed_section_name,
+                   COUNT(DISTINCT mapping.id) AS mapping_count,
+                   COUNT(DISTINCT mapping.assembly_id) AS assembly_count
+            FROM assembly_grid_categories category
+            JOIN assembly_sections built ON built.id=category.section_id
+            LEFT JOIN assembly_sections installed
+              ON installed.id=category.installed_section_id
+            LEFT JOIN assembly_grid_model_mappings mapping
+              ON mapping.category_id=category.id
+            WHERE category.project_id=?{section_clause}
+            GROUP BY category.id
+            ORDER BY built.sequence, category.sequence, category.display_name""",
+        tuple(params),
+    ))
+
+
+def assembly_grid_model_mappings(
+    project_id: str, section_id: str | None = None
+) -> pd.DataFrame:
+    params: list[str] = [project_id]
+    section_clause = ""
+    if _catalog_text(section_id):
+        section_clause = " AND category.section_id=?"
+        params.append(_catalog_text(section_id))
+    return pd.DataFrame(query(
+        f"""SELECT mapping.*, category.section_id, category.ebom_name,
+                   category.display_name AS category_display_name,
+                   category.root_number, category.is_top_level,
+                   category.installed_section_id,
+                   model.model_number, model.display_name AS model_display_name,
+                   model.active AS model_active,
+                   assembly.assembly_number, assembly.name AS assembly_name,
+                   assembly.built_section_id AS assembly_built_section_id,
+                   assembly.installed_section_id AS assembly_installed_section_id
+            FROM assembly_grid_model_mappings mapping
+            JOIN assembly_grid_categories category ON category.id=mapping.category_id
+            JOIN project_models model ON model.id=mapping.model_id
+            JOIN manufacturing_assemblies assembly ON assembly.id=mapping.assembly_id
+            WHERE mapping.project_id=?{section_clause}
+            ORDER BY category.sequence, category.display_name, model.model_number""",
+        tuple(params),
+    ))
+
+
+def assembly_grid_feature_visibility(
+    project_id: str, section_id: str
+) -> pd.DataFrame:
+    return pd.DataFrame(query(
+        """SELECT feature.id AS feature_id, feature.category, feature.name,
+                  feature.sequence, feature.active,
+                  COALESCE(preference.is_visible, 1) AS is_visible,
+                  preference.id, preference.created_at, preference.updated_at
+           FROM complexity_features feature
+           LEFT JOIN assembly_grid_feature_visibility preference
+             ON preference.feature_id=feature.id AND preference.section_id=?
+           WHERE feature.project_id=?
+           ORDER BY feature.sequence, feature.category, feature.name""",
+        (section_id, project_id),
+    ))
+
+
+def save_assembly_grid_categories(
+    project_id: str, section_id: str, rows, *, _conn: sqlite3.Connection | None = None
+) -> dict:
+    """Upsert category rows and continuously sync their mapped assemblies."""
+    records = _catalog_records(rows)
+    section_id = _catalog_text(section_id)
+    timestamp = now_iso()
+    with (connection() if _conn is None else nullcontext(_conn)) as conn:
+        section = conn.execute(
+            "SELECT id FROM assembly_sections WHERE id=? AND project_id=?",
+            (section_id, project_id),
+        ).fetchone()
+        if not section:
+            raise ValueError("Choose an existing Fishbone section from this project.")
+        valid_installed = {
+            str(row[0]) for row in conn.execute(
+                "SELECT id FROM assembly_sections WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        current = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM assembly_grid_categories WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        normalized: list[dict] = []
+        seen_ids: set[str] = set()
+        for raw in records:
+            category_id = _catalog_text(raw.get("id")) or str(uuid4())
+            ebom_name = _catalog_text(raw.get("ebom_name"))
+            display_name = _catalog_text(raw.get("display_name"))
+            is_top_level = int(
+                raw.get("is_top_level") in (True, 1, "1", "true", "True")
+            )
+            installed_section_id = _catalog_text(raw.get("installed_section_id")) or None
+            if category_id in seen_ids:
+                raise ValueError("The assembly grid contains a duplicate category identifier.")
+            if not ebom_name or not display_name:
+                raise ValueError(
+                    "Every assembly-grid category requires an Official EBOM category name "
+                    "and Display name."
+                )
+            if installed_section_id and installed_section_id not in valid_installed:
+                raise ValueError("Choose an existing Installed section from this project.")
+            previous = current.get(category_id)
+            root_number = (
+                _catalog_text(raw.get("root_number"))
+                if "root_number" in raw
+                else _catalog_text((previous or {}).get("root_number"))
+            )
+            if previous and _catalog_text(previous.get("section_id")) != section_id:
+                if not bool(previous.get("is_top_level")):
+                    raise ValueError(
+                        "A category can be moved to another Fishbone section only through the "
+                        "approved section-continuity workflow."
+                    )
+            if previous and bool(previous.get("is_top_level")) != bool(is_top_level):
+                raise ValueError(
+                    "The protected Top-level packaged unit row cannot be converted to or "
+                    "from a Fishbone-section category."
+                )
+            if is_top_level and (
+                ebom_name != "Top-level packaged unit"
+                or display_name != "Top-level packaged unit"
+            ):
+                raise ValueError(
+                    "The protected row must keep the name Top-level packaged unit."
+                )
+            try:
+                sequence = int(raw.get("sequence", 10))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Assembly-grid category sequence values must be whole numbers.") from exc
+            seen_ids.add(category_id)
+            normalized.append(
+                {
+                    "id": category_id,
+                    "ebom_name": ebom_name,
+                    "display_name": display_name,
+                    "root_number": root_number,
+                    "is_top_level": is_top_level,
+                    "installed_section_id": installed_section_id,
+                    "sequence": sequence,
+                }
+            )
+
+        merged = {category_id: dict(value) for category_id, value in current.items()}
+        merged.update(
+            {
+                row["id"]: {
+                    **row,
+                    "project_id": project_id,
+                    "section_id": section_id,
+                }
+                for row in normalized
+            }
+        )
+        top_level_ids = [
+            category_id
+            for category_id, row in merged.items()
+            if bool(row.get("is_top_level"))
+        ]
+        if len(top_level_ids) > 1:
+            raise ValueError(
+                "Only one Top-level packaged unit row is allowed in a project."
+            )
+        for field, label in (("ebom_name", "Official EBOM category name"), ("display_name", "Display name")):
+            seen: dict[tuple[str, str], str] = {}
+            for category_id, row in merged.items():
+                key = (
+                    _catalog_text(row.get("section_id")),
+                    _catalog_text(row.get(field)).casefold(),
+                )
+                if key in seen and seen[key] != category_id:
+                    raise ValueError(f"{label} values must be unique within a Fishbone section.")
+                seen[key] = category_id
+
+        sync_changes: list[dict] = []
+        built_sync_changes: list[dict] = []
+        for row in normalized:
+            previous = current.get(row["id"])
+            created_at = _catalog_text(previous.get("created_at")) if previous else timestamp
+            conn.execute(
+                """INSERT INTO assembly_grid_categories
+                   (id, project_id, section_id, ebom_name, display_name, root_number,
+                    is_top_level, installed_section_id, sequence, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       section_id=excluded.section_id,
+                       ebom_name=excluded.ebom_name,
+                       display_name=excluded.display_name,
+                       root_number=excluded.root_number,
+                       is_top_level=excluded.is_top_level,
+                       installed_section_id=excluded.installed_section_id,
+                       sequence=excluded.sequence,
+                       updated_at=excluded.updated_at""",
+                (
+                    row["id"], project_id, section_id, row["ebom_name"],
+                    row["display_name"], row["root_number"],
+                    row["is_top_level"], row["installed_section_id"], row["sequence"],
+                    created_at, timestamp,
+                ),
+            )
+            mapped = conn.execute(
+                """SELECT DISTINCT assembly.id, assembly.assembly_number,
+                          assembly.installed_section_id
+                   FROM assembly_grid_model_mappings mapping
+                   JOIN manufacturing_assemblies assembly ON assembly.id=mapping.assembly_id
+                   WHERE mapping.project_id=? AND mapping.category_id=?""",
+                (project_id, row["id"]),
+            ).fetchall()
+            for assembly in mapped:
+                previous_built_section_id = (
+                    _catalog_text((previous or {}).get("section_id")) or None
+                )
+                if (
+                    row["is_top_level"]
+                    and previous_built_section_id
+                    and previous_built_section_id != section_id
+                ):
+                    conn.execute(
+                        """UPDATE fishbone_part_assignments SET section_id=?, updated_at=?
+                           WHERE project_id=? AND id IN (
+                               SELECT fishbone_assignment_id
+                               FROM manufacturing_assembly_components
+                               WHERE project_id=? AND assembly_id=?
+                           )""",
+                        (
+                            section_id,
+                            timestamp,
+                            project_id,
+                            project_id,
+                            assembly["id"],
+                        ),
+                    )
+                    conn.execute(
+                        """UPDATE manufacturing_assemblies
+                           SET built_section_id=?, updated_at=?
+                           WHERE id=? AND project_id=?""",
+                        (section_id, timestamp, assembly["id"], project_id),
+                    )
+                    built_sync_changes.append(
+                        {
+                            "assembly_id": str(assembly["id"]),
+                            "assembly_number": str(assembly["assembly_number"]),
+                            "old_built_section_id": previous_built_section_id,
+                            "new_built_section_id": section_id,
+                        }
+                    )
+                old_value = _catalog_text(assembly["installed_section_id"]) or None
+                if old_value == row["installed_section_id"]:
+                    continue
+                conn.execute(
+                    """UPDATE manufacturing_assemblies
+                       SET installed_section_id=?, updated_at=?
+                       WHERE id=? AND project_id=?""",
+                    (row["installed_section_id"], timestamp, assembly["id"], project_id),
+                )
+                sync_changes.append(
+                    {
+                        "assembly_id": str(assembly["id"]),
+                        "assembly_number": str(assembly["assembly_number"]),
+                        "old_installed_section_id": old_value,
+                        "new_installed_section_id": row["installed_section_id"],
+                    }
+                )
+    return {
+        "count": len(normalized),
+        "category_ids": [row["id"] for row in normalized],
+        "built_section_sync_changes": built_sync_changes,
+        "installed_section_sync_changes": sync_changes,
+        "updated_at": timestamp,
+    }
+
+
+def assembly_grid_part_relink_impact(
+    project_id: str, rows, *, _conn: sqlite3.Connection | None = None
+) -> list[dict]:
+    """Describe mapped-assembly renames that would relink to an existing catalog part."""
+    records = _catalog_records(rows)
+    with (connection() if _conn is None else nullcontext(_conn)) as conn:
+        assemblies = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM manufacturing_assemblies WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        assembly_by_number = {
+            _catalog_text(row["assembly_number"]).casefold(): assembly_id
+            for assembly_id, row in assemblies.items()
+        }
+        candidates: dict[str, dict[str, str]] = {}
+        for raw in records:
+            assembly_id = _catalog_text(raw.get("assembly_id"))
+            requested_number = _catalog_text(raw.get("assembly_number"))
+            if (
+                assembly_id in assemblies
+                and requested_number
+                and requested_number.casefold()
+                != _catalog_text(assemblies[assembly_id]["assembly_number"]).casefold()
+            ):
+                candidates.setdefault(assembly_id, {})[
+                    requested_number.casefold()
+                ] = requested_number
+
+        impacts: list[dict] = []
+        for assembly_id, requested in candidates.items():
+            if len(requested) != 1:
+                continue
+            target_number = next(iter(requested.values()))
+            if assembly_by_number.get(target_number.casefold()) not in {None, assembly_id}:
+                continue
+            assembly = assemblies[assembly_id]
+            source_part_id = _catalog_text(assembly.get("catalog_part_id"))
+            target_part = _catalog_part_by_number(conn, project_id, target_number)
+            if not source_part_id or not target_part or str(target_part["id"]) == source_part_id:
+                continue
+            owner = conn.execute(
+                """SELECT assembly_number FROM manufacturing_assemblies
+                   WHERE project_id=? AND catalog_part_id=? AND id<>?""",
+                (project_id, target_part["id"], assembly_id),
+            ).fetchone()
+            if owner:
+                raise ValueError(
+                    f"Part number {target_number} is already linked to assembly "
+                    f"{owner['assembly_number']}."
+                )
+            source_part = conn.execute(
+                "SELECT * FROM parts WHERE id=? AND project_id=?",
+                (source_part_id, project_id),
+            ).fetchone()
+            relationships = _assembly_part_relationship_counts(conn, source_part_id)
+            generated_orphan = bool(
+                source_part
+                and str(source_part["source"] or "") == "Assembly grid"
+                and float(source_part["quantity"] or 0) == 1
+                and str(source_part["revision"] or "") == "0"
+                and not str(source_part["image_path"] or "").strip()
+                and not str(source_part["notes"] or "").strip()
+                and not any(relationships.values())
+            )
+            impacts.append(
+                {
+                    "assembly_id": assembly_id,
+                    "source_assembly_number": _catalog_text(assembly["assembly_number"]),
+                    "target_assembly_number": target_number,
+                    "source_part_id": source_part_id,
+                    "target_part_id": str(target_part["id"]),
+                    "source_part_number": str(source_part["part_number"]) if source_part else "",
+                    "target_part_number": str(target_part["part_number"]),
+                    "source_part_action": (
+                        "deleted generated orphan" if generated_orphan
+                        else "preserved independent part"
+                    ),
+                    **relationships,
+                }
+            )
+        return impacts
+
+
+def save_assembly_grid_model_mappings(
+    project_id: str,
+    rows,
+    *,
+    catalog_part_relinks: list[dict] | None = None,
+    _validate_containment: bool = True,
+    _conn: sqlite3.Connection | None = None,
+) -> dict:
+    """Replace the complete project mapping state after validating every relationship."""
+    records = _catalog_records(rows)
+    timestamp = now_iso()
+    with (connection() if _conn is None else nullcontext(_conn)) as conn:
+        actual_part_relinks = assembly_grid_part_relink_impact(
+            project_id, records, _conn=conn
+        )
+        actual_relink_pairs = {
+            (row["assembly_id"], row["target_part_id"])
+            for row in actual_part_relinks
+        }
+        confirmed_relink_pairs = {
+            (
+                _catalog_text(row.get("assembly_id")),
+                _catalog_text(row.get("target_part_id")),
+            )
+            for row in (catalog_part_relinks or [])
+        }
+        if actual_relink_pairs != confirmed_relink_pairs:
+            if actual_relink_pairs:
+                raise ValueError(
+                    "Review and confirm the existing Parts Catalog relink before saving."
+                )
+            raise ValueError(
+                "The pending Parts Catalog relink is no longer present. Review the grid again."
+            )
+        confirmed_relink_assemblies = {row[0] for row in actual_relink_pairs}
+        categories = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM assembly_grid_categories WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        models = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT id, model_number FROM project_models WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        assemblies = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM manufacturing_assemblies WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        existing_mappings = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM assembly_grid_model_mappings WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        original_numbers = {
+            assembly_id: _catalog_text(row["assembly_number"])
+            for assembly_id, row in assemblies.items()
+        }
+        rename_candidates: dict[str, dict[str, str]] = {}
+        for raw in records:
+            assembly_id = _catalog_text(raw.get("assembly_id"))
+            requested_number = _catalog_text(raw.get("assembly_number"))
+            current_number = original_numbers.get(assembly_id, "")
+            if (
+                assembly_id in assemblies
+                and requested_number
+                and requested_number != current_number
+            ):
+                rename_candidates.setdefault(assembly_id, {})[
+                    requested_number.casefold()
+                ] = requested_number
+
+        planned_renames: dict[str, str] = {}
+        for assembly_id, candidates in rename_candidates.items():
+            changed_numbers = {
+                key: value
+                for key, value in candidates.items()
+                if key != original_numbers[assembly_id].casefold()
+            }
+            if len(changed_numbers) > 1:
+                raise ValueError(
+                    f"Assembly {original_numbers[assembly_id]} has conflicting Part number "
+                    "edits. Use one Part number for every model mapped to that assembly."
+                )
+            if changed_numbers:
+                planned_renames[assembly_id] = next(iter(changed_numbers.values()))
+            elif candidates:
+                # Preserve deliberate capitalization-only corrections.
+                planned_renames[assembly_id] = next(iter(candidates.values()))
+
+        final_number_owners: dict[str, str] = {}
+        renamed_assemblies: list[dict] = []
+        for assembly_id, assembly in assemblies.items():
+            old_number = original_numbers[assembly_id]
+            final_number = planned_renames.get(assembly_id, old_number)
+            owner = final_number_owners.get(final_number.casefold())
+            if owner and owner != assembly_id:
+                raise ValueError(
+                    f"Part number {final_number} already belongs to another assembly. "
+                    "Choose a unique Part number."
+                )
+            final_number_owners[final_number.casefold()] = assembly_id
+            if final_number != old_number:
+                assembly["assembly_number"] = final_number
+                renamed_assemblies.append(
+                    {
+                        "assembly_id": assembly_id,
+                        "old_assembly_number": old_number,
+                        "assembly_number": final_number,
+                    }
+                )
+        assembly_by_number = dict(final_number_owners)
+        normalized: list[dict] = []
+        seen_ids: set[str] = set()
+        seen_cells: set[tuple[str, str]] = set()
+        category_by_assembly: dict[str, str] = {}
+        created_assemblies: list[dict] = []
+        for raw in records:
+            mapping_id = _catalog_text(raw.get("id")) or str(uuid4())
+            category_id = _catalog_text(raw.get("category_id"))
+            model_id = _catalog_text(raw.get("model_id"))
+            category = categories.get(category_id)
+            model = models.get(model_id)
+            if not category:
+                raise ValueError("Every mapping must use a current project assembly-grid category.")
+            if not model:
+                raise ValueError("Every mapping must use a current official model.")
+            assembly_id = _catalog_text(raw.get("assembly_id"))
+            assembly_number = _catalog_text(raw.get("assembly_number"))
+            assembly = assemblies.get(assembly_id) if assembly_id else None
+            if assembly is None:
+                if not assembly_number:
+                    raise ValueError("Every mapping requires an assembly number.")
+                existing_id = assembly_by_number.get(assembly_number.casefold())
+                if existing_id:
+                    assembly_id = existing_id
+                    assembly = assemblies[assembly_id]
+                else:
+                    assembly_id = str(uuid4())
+                    assembly = {
+                        "id": assembly_id,
+                        "project_id": project_id,
+                        "assembly_number": assembly_number,
+                        "name": _catalog_text(category.get("display_name")),
+                        "make_buy": "",
+                        "built_section_id": category["section_id"],
+                        "installed_section_id": category["installed_section_id"],
+                    }
+                    assemblies[assembly_id] = assembly
+                    assembly_by_number[assembly_number.casefold()] = assembly_id
+                    created_assemblies.append(assembly)
+            if mapping_id in seen_ids:
+                raise ValueError("The assembly grid contains a duplicate mapping identifier.")
+            cell = (category_id, model_id)
+            if cell in seen_cells:
+                raise ValueError("Each category may map an official model only once.")
+            if _catalog_text(assembly.get("built_section_id")) != _catalog_text(category.get("section_id")):
+                raise ValueError(
+                    f"Assembly {assembly['assembly_number']} is built in a different Fishbone "
+                    "section and cannot be mapped here."
+                )
+            assembly_installed = _catalog_text(assembly.get("installed_section_id")) or None
+            category_installed = _catalog_text(category.get("installed_section_id")) or None
+            if assembly_installed != category_installed:
+                raise ValueError(
+                    f"Assembly {assembly['assembly_number']} has an Installed section that "
+                    "does not match this category. Reconcile it before mapping."
+                )
+            prior_category = category_by_assembly.get(assembly_id)
+            if prior_category and prior_category != category_id:
+                prior = categories[prior_category]
+                raise ValueError(
+                    f"Assembly {assembly['assembly_number']} is already mapped under category "
+                    f"{prior['display_name']} and cannot also be mapped under "
+                    f"{category['display_name']} for model {model['model_number']}."
+                )
+            category_by_assembly[assembly_id] = category_id
+            seen_ids.add(mapping_id)
+            seen_cells.add(cell)
+            normalized.append(
+                {
+                    "id": mapping_id,
+                    "category_id": category_id,
+                    "model_id": model_id,
+                    "assembly_id": assembly_id,
+                }
+            )
+
+        for assembly in created_assemblies:
+            conn.execute(
+                """INSERT INTO manufacturing_assemblies
+                   (id, project_id, assembly_number, name, make_buy, pits_reference,
+                    planning_reason, parent_id, built_section_id, installed_section_id,
+                    image_path, created_at, active, notes, updated_at)
+                   VALUES (?, ?, ?, ?, '', '', 'Other', NULL, ?, ?, '', ?, 1, '', ?)""",
+                (
+                    assembly["id"], project_id, assembly["assembly_number"], assembly["name"],
+                    assembly["built_section_id"], assembly["installed_section_id"],
+                    timestamp, timestamp,
+                ),
+            )
+        catalog_part_changes: list[dict] = []
+        for assembly in created_assemblies:
+            catalog_part_changes.append(
+                _ensure_assembly_catalog_part(
+                    conn, project_id, assembly["id"], assembly["assembly_number"],
+                    assembly["name"], timestamp,
+                )
+            )
+        for assembly in renamed_assemblies:
+            conn.execute(
+                """UPDATE manufacturing_assemblies
+                   SET assembly_number=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    assembly["assembly_number"], timestamp,
+                    assembly["assembly_id"], project_id,
+                ),
+            )
+            catalog_part_changes.append(
+                _ensure_assembly_catalog_part(
+                    conn, project_id, assembly["assembly_id"],
+                    assembly["assembly_number"],
+                    _catalog_text(assemblies[assembly["assembly_id"]].get("name")),
+                    timestamp,
+                    allow_existing_relink=(
+                        assembly["assembly_id"] in confirmed_relink_assemblies
+                    ),
+                )
+            )
+        for assembly_id, assembly in assemblies.items():
+            if assembly_id in {row["id"] for row in created_assemblies}:
+                continue
+            if assembly_id in {row["assembly_id"] for row in renamed_assemblies}:
+                continue
+            if not _catalog_text(assembly.get("catalog_part_id")):
+                catalog_part_changes.append(
+                    _ensure_assembly_catalog_part(
+                        conn, project_id, assembly_id,
+                        _catalog_text(assembly.get("assembly_number")),
+                        _catalog_text(assembly.get("name")), timestamp,
+                    )
+                )
+        conn.execute(
+            "DELETE FROM assembly_grid_model_mappings WHERE project_id=?", (project_id,)
+        )
+        conn.executemany(
+            """INSERT INTO assembly_grid_model_mappings
+               (id, project_id, category_id, model_id, assembly_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    row["id"], project_id, row["category_id"], row["model_id"],
+                    row["assembly_id"],
+                    _catalog_text(existing_mappings.get(row["id"], {}).get("created_at"))
+                    or timestamp,
+                    timestamp,
+                )
+                for row in normalized
+            ],
+        )
+        applicability_changes = _sync_assembly_catalog_part_applicability(
+            conn, project_id, timestamp
+        )
+        if _validate_containment:
+            _validate_assembly_containment(conn, project_id)
+    return {
+        "count": len(normalized),
+        "mapping_ids": [row["id"] for row in normalized],
+        "created_assemblies": [
+            {"assembly_id": row["id"], "assembly_number": row["assembly_number"]}
+            for row in created_assemblies
+        ],
+        "renamed_assemblies": renamed_assemblies,
+        "catalog_part_changes": catalog_part_changes,
+        "catalog_part_relinks": actual_part_relinks,
+        "catalog_part_applicability_changes": applicability_changes,
+        "updated_at": timestamp,
+    }
+
+
+def assembly_grid_number_merge_impact(
+    project_id: str, rows, *, _conn: sqlite3.Connection | None = None
+) -> list[dict]:
+    """Describe saved assemblies that a grid draft would replace with existing numbers."""
+    records = _catalog_records(rows)
+    with (connection() if _conn is None else nullcontext(_conn)) as conn:
+        assemblies = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM manufacturing_assemblies WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        assembly_by_number = {
+            _catalog_text(row["assembly_number"]).casefold(): assembly_id
+            for assembly_id, row in assemblies.items()
+        }
+        requested_targets: dict[str, str] = {}
+        categories_by_assembly: dict[str, set[str]] = {}
+        for raw in records:
+            assembly_id = _catalog_text(raw.get("assembly_id"))
+            category_id = _catalog_text(raw.get("category_id"))
+            requested_number = _catalog_text(raw.get("assembly_number"))
+            if assembly_id:
+                categories_by_assembly.setdefault(assembly_id, set()).add(category_id)
+            target_id = assembly_by_number.get(requested_number.casefold())
+            if not assembly_id or assembly_id not in assemblies or not target_id:
+                continue
+            if target_id == assembly_id:
+                continue
+            previous_target = requested_targets.get(assembly_id)
+            if previous_target and previous_target != target_id:
+                raise ValueError(
+                    f"Assembly {assemblies[assembly_id]['assembly_number']} has conflicting "
+                    "Part number edits. Use one Part number for every model mapped to it."
+                )
+            requested_targets[assembly_id] = target_id
+
+        impacts: list[dict] = []
+        for source_id, target_id in requested_targets.items():
+            if target_id in requested_targets:
+                raise ValueError(
+                    "Assembly-number merges cannot be chained in one save. Complete one merge "
+                    "and refresh the grid before starting another."
+                )
+            source_categories = categories_by_assembly.get(source_id, set()) - {""}
+            target_categories = categories_by_assembly.get(target_id, set()) - {""}
+            combined_categories = source_categories | target_categories
+            if len(combined_categories) > 1:
+                category_rows = conn.execute(
+                    f"""SELECT id, display_name FROM assembly_grid_categories
+                        WHERE project_id=? AND id IN ({','.join('?' for _ in combined_categories)})""",
+                    (project_id, *combined_categories),
+                ).fetchall()
+                category_names = ", ".join(str(row["display_name"]) for row in category_rows)
+                raise ValueError(
+                    f"Assembly {assemblies[target_id]['assembly_number']} is mapped under a "
+                    f"different category ({category_names}). Move or clear those mappings "
+                    "before merging assembly numbers."
+                )
+
+            def direct_count(table: str, column: str = "assembly_id") -> int:
+                return int(conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {column}=?",
+                    (source_id,),
+                ).fetchone()[0])
+
+            source_image_paths = [
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT image_path FROM manufacturing_assemblies
+                       WHERE project_id=? AND id=?
+                         AND TRIM(COALESCE(image_path, ''))<>''
+                       UNION ALL
+                       SELECT image_path FROM manufacturing_assembly_images
+                       WHERE project_id=? AND assembly_id=?""",
+                    (project_id, source_id, project_id, source_id),
+                ).fetchall()
+            ]
+            source_part_id = _catalog_text(
+                assemblies[source_id].get("catalog_part_id")
+            )
+            target_part_id = _catalog_text(
+                assemblies[target_id].get("catalog_part_id")
+            )
+            source_part_relationships = (
+                _assembly_part_relationship_counts(conn, source_part_id)
+                if source_part_id else {
+                    "fishbone_use_count": 0,
+                    "process_option_count": 0,
+                    "feature_rule_count": 0,
+                    "scenario_activity_count": 0,
+                    "supplemental_image_count": 0,
+                }
+            )
+            source_part = conn.execute(
+                "SELECT * FROM parts WHERE id=? AND project_id=?",
+                (source_part_id, project_id),
+            ).fetchone() if source_part_id else None
+            source_part_action = "none"
+            if source_part:
+                removable_generated_part = bool(
+                    str(source_part["source"] or "") == "Assembly grid"
+                    and float(source_part["quantity"] or 0) == 1
+                    and str(source_part["revision"] or "") == "0"
+                    and not str(source_part["image_path"] or "").strip()
+                    and not str(source_part["notes"] or "").strip()
+                    and not any(source_part_relationships.values())
+                )
+                source_part_action = (
+                    "deleted generated orphan" if removable_generated_part
+                    else "preserved independent part"
+                )
+            impacts.append(
+                {
+                    "source_assembly_id": source_id,
+                    "source_assembly_number": str(assemblies[source_id]["assembly_number"]),
+                    "target_assembly_id": target_id,
+                    "target_assembly_number": str(assemblies[target_id]["assembly_number"]),
+                    "source_component_count": direct_count(
+                        "manufacturing_assembly_components"
+                    ),
+                    "target_component_count": int(conn.execute(
+                        """SELECT COUNT(*) FROM manufacturing_assembly_components
+                           WHERE project_id=? AND assembly_id=?""",
+                        (project_id, target_id),
+                    ).fetchone()[0]),
+                    "source_rule_count": direct_count(
+                        "manufacturing_assembly_feature_rules"
+                    ),
+                    "source_supplemental_image_count": direct_count(
+                        "manufacturing_assembly_images"
+                    ),
+                    "source_primary_image_count": int(bool(
+                        _catalog_text(assemblies[source_id].get("image_path"))
+                    )),
+                    "source_child_count": int(conn.execute(
+                        """SELECT COUNT(*) FROM manufacturing_assemblies
+                           WHERE project_id=? AND parent_id=?""",
+                        (project_id, source_id),
+                    ).fetchone()[0]),
+                    "source_policy_count": direct_count("assembly_scenario_policies"),
+                    "source_material_option_count": direct_count(
+                        "work_element_material_options"
+                    ),
+                    "source_target_link_count": direct_count(
+                        "work_element_material_groups", "target_assembly_id"
+                    ),
+                    "source_mapping_count": direct_count("assembly_grid_model_mappings"),
+                    "reassigned_mapping_count": sum(
+                        1
+                        for raw in records
+                        if _catalog_text(raw.get("assembly_id")) == source_id
+                    ),
+                    "source_part_id": source_part_id,
+                    "target_part_id": target_part_id,
+                    "source_part_number": (
+                        str(source_part["part_number"]) if source_part else ""
+                    ),
+                    "source_part_action": source_part_action,
+                    **source_part_relationships,
+                    "source_image_paths": source_image_paths,
+                }
+            )
+        return impacts
+
+
+def save_assembly_grid_feature_visibility(
+    project_id: str, section_id: str, rows, *, _conn: sqlite3.Connection | None = None
+) -> dict:
+    """Persist only non-default hidden-feature preferences for one section."""
+    records = _catalog_records(rows)
+    timestamp = now_iso()
+    with (connection() if _conn is None else nullcontext(_conn)) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM assembly_sections WHERE id=? AND project_id=?",
+            (section_id, project_id),
+        ).fetchone():
+            raise ValueError("Choose an existing Fishbone section from this project.")
+        valid_features = {
+            str(row[0]) for row in conn.execute(
+                "SELECT id FROM complexity_features WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        existing = {
+            str(row["feature_id"]): dict(row)
+            for row in conn.execute(
+                """SELECT * FROM assembly_grid_feature_visibility
+                   WHERE project_id=? AND section_id=?""",
+                (project_id, section_id),
+            ).fetchall()
+        }
+        hidden_features: list[str] = []
+        seen: set[str] = set()
+        for raw in records:
+            feature_id = _catalog_text(raw.get("feature_id"))
+            if feature_id not in valid_features:
+                raise ValueError("Every feature preference must use a current project feature.")
+            if feature_id in seen:
+                raise ValueError("A feature may have only one visibility preference per section.")
+            seen.add(feature_id)
+            if not bool(raw.get("is_visible", True)):
+                hidden_features.append(feature_id)
+        conn.execute(
+            """DELETE FROM assembly_grid_feature_visibility
+               WHERE project_id=? AND section_id=?""",
+            (project_id, section_id),
+        )
+        conn.executemany(
+            """INSERT INTO assembly_grid_feature_visibility
+               (id, project_id, section_id, feature_id, is_visible, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 0, ?, ?)""",
+            [
+                (
+                    _catalog_text(existing.get(feature_id, {}).get("id")) or str(uuid4()),
+                    project_id, section_id, feature_id,
+                    _catalog_text(existing.get(feature_id, {}).get("created_at")) or timestamp,
+                    timestamp,
+                )
+                for feature_id in hidden_features
+            ],
+        )
+    return {
+        "count": len(hidden_features),
+        "hidden_feature_ids": hidden_features,
+        "updated_at": timestamp,
+    }
+
+
+def save_assembly_grid_section(
+    project_id: str,
+    section_id: str,
+    category_rows,
+    complete_mapping_rows,
+    feature_visibility_rows,
+    component_rows_by_assembly: dict[str, list[dict]] | None = None,
+    assembly_merges: list[dict] | None = None,
+    catalog_part_relinks: list[dict] | None = None,
+) -> dict:
+    """Validate and save one complete grid draft in a single transaction."""
+    deleted_image_paths: list[str] = []
+    with connection() as conn:
+        merge_impact = assembly_grid_number_merge_impact(
+            project_id, complete_mapping_rows, _conn=conn
+        )
+        part_relink_impact = assembly_grid_part_relink_impact(
+            project_id, complete_mapping_rows, _conn=conn
+        )
+        actual_part_relinks = {
+            (row["assembly_id"], row["target_part_id"])
+            for row in part_relink_impact
+        }
+        confirmed_part_relinks = {
+            (
+                _catalog_text(row.get("assembly_id")),
+                _catalog_text(row.get("target_part_id")),
+            )
+            for row in (catalog_part_relinks or [])
+        }
+        if actual_part_relinks != confirmed_part_relinks:
+            if actual_part_relinks:
+                raise ValueError(
+                    "Review and confirm the existing Parts Catalog relink before saving."
+                )
+            raise ValueError(
+                "The pending Parts Catalog relink is no longer present. Review the grid again."
+            )
+        actual_merges = {
+            (row["source_assembly_id"], row["target_assembly_id"])
+            for row in merge_impact
+        }
+        confirmed_merges = {
+            (
+                _catalog_text(row.get("source_assembly_id")),
+                _catalog_text(row.get("target_assembly_id")),
+            )
+            for row in (assembly_merges or [])
+        }
+        if actual_merges != confirmed_merges:
+            if actual_merges:
+                raise ValueError(
+                    "Review and confirm the assembly-number merge before saving."
+                )
+            raise ValueError(
+                "The pending assembly-number merge is no longer present. Review the grid again."
+            )
+        target_by_source = dict(actual_merges)
+        resolved_mapping_rows = []
+        for raw in _catalog_records(complete_mapping_rows):
+            source_id = _catalog_text(raw.get("assembly_id"))
+            target_id = target_by_source.get(source_id)
+            if target_id:
+                target_number = next(
+                    row["target_assembly_number"]
+                    for row in merge_impact
+                    if row["source_assembly_id"] == source_id
+                )
+                resolved_mapping_rows.append(
+                    {**raw, "assembly_id": target_id, "assembly_number": target_number}
+                )
+            else:
+                resolved_mapping_rows.append(raw)
+        categories_result = save_assembly_grid_categories(
+            project_id, section_id, category_rows, _conn=conn
+        )
+        mappings_result = save_assembly_grid_model_mappings(
+            project_id,
+            resolved_mapping_rows,
+            catalog_part_relinks=part_relink_impact,
+            _validate_containment=False,
+            _conn=conn,
+        )
+        visibility_result = save_assembly_grid_feature_visibility(
+            project_id, section_id, feature_visibility_rows, _conn=conn
+        )
+        component_results: dict[str, dict] = {}
+        for assembly_id, rows in (component_rows_by_assembly or {}).items():
+            if str(assembly_id) in target_by_source:
+                continue
+            component_results[str(assembly_id)] = save_assembly_bom_components(
+                project_id,
+                str(assembly_id),
+                rows,
+                _validate_containment=False,
+                _conn=conn,
+            )
+        for impact in merge_impact:
+            deleted_image_paths.extend(impact["source_image_paths"])
+            conn.execute(
+                "DELETE FROM manufacturing_assemblies WHERE project_id=? AND id=?",
+                (project_id, impact["source_assembly_id"]),
+            )
+            impact["source_part_action"] = _release_or_remove_generated_assembly_part(
+                conn, project_id, impact.get("source_part_id")
+            )
+        _validate_assembly_containment(conn, project_id)
+    for image_path in deleted_image_paths:
+        _remove_owned_upload(image_path)
+    return {
+        "categories": categories_result,
+        "mappings": mappings_result,
+        "feature_visibility": visibility_result,
+        "components": component_results,
+        "assembly_merges": merge_impact,
+        "catalog_part_relinks": part_relink_impact,
+        "updated_at": now_iso(),
+    }
+
+
+def save_assembly_grid_sections(
+    project_id: str,
+    section_payloads: list[dict],
+    complete_mapping_rows,
+    component_rows_by_assembly: dict[str, list[dict]] | None = None,
+    assembly_merges: list[dict] | None = None,
+    catalog_part_relinks: list[dict] | None = None,
+) -> dict:
+    """Validate and atomically save every displayed Assembly grid section."""
+    payloads = [dict(payload) for payload in section_payloads]
+    section_ids = [_catalog_text(payload.get("section_id")) for payload in payloads]
+    if not section_ids or any(not section_id for section_id in section_ids):
+        raise ValueError("Select at least one Fishbone section to save.")
+    if len(section_ids) != len(set(section_ids)):
+        raise ValueError("Each selected Fishbone section may appear only once in a grid save.")
+
+    deleted_image_paths: list[str] = []
+    with connection() as conn:
+        merge_impact = assembly_grid_number_merge_impact(
+            project_id, complete_mapping_rows, _conn=conn
+        )
+        part_relink_impact = assembly_grid_part_relink_impact(
+            project_id, complete_mapping_rows, _conn=conn
+        )
+        actual_part_relinks = {
+            (row["assembly_id"], row["target_part_id"])
+            for row in part_relink_impact
+        }
+        confirmed_part_relinks = {
+            (
+                _catalog_text(row.get("assembly_id")),
+                _catalog_text(row.get("target_part_id")),
+            )
+            for row in (catalog_part_relinks or [])
+        }
+        if actual_part_relinks != confirmed_part_relinks:
+            if actual_part_relinks:
+                raise ValueError(
+                    "Review and confirm the existing Parts Catalog relink before saving."
+                )
+            raise ValueError(
+                "The pending Parts Catalog relink is no longer present. Review the grid again."
+            )
+        actual_merges = {
+            (row["source_assembly_id"], row["target_assembly_id"])
+            for row in merge_impact
+        }
+        confirmed_merges = {
+            (
+                _catalog_text(row.get("source_assembly_id")),
+                _catalog_text(row.get("target_assembly_id")),
+            )
+            for row in (assembly_merges or [])
+        }
+        if actual_merges != confirmed_merges:
+            if actual_merges:
+                raise ValueError("Review and confirm the assembly-number merge before saving.")
+            raise ValueError(
+                "The pending assembly-number merge is no longer present. Review the grid again."
+            )
+
+        target_by_source = dict(actual_merges)
+        target_number_by_source = {
+            row["source_assembly_id"]: row["target_assembly_number"]
+            for row in merge_impact
+        }
+        resolved_mapping_rows = []
+        for raw in _catalog_records(complete_mapping_rows):
+            source_id = _catalog_text(raw.get("assembly_id"))
+            target_id = target_by_source.get(source_id)
+            resolved_mapping_rows.append(
+                {
+                    **raw,
+                    **(
+                        {
+                            "assembly_id": target_id,
+                            "assembly_number": target_number_by_source[source_id],
+                        }
+                        if target_id else {}
+                    ),
+                }
+            )
+
+        section_results: dict[str, dict] = {}
+        for section_id, payload in zip(section_ids, payloads):
+            section_results[section_id] = {
+                "categories": save_assembly_grid_categories(
+                    project_id,
+                    section_id,
+                    payload.get("categories", []),
+                    _conn=conn,
+                )
+            }
+        mappings_result = save_assembly_grid_model_mappings(
+            project_id,
+            resolved_mapping_rows,
+            catalog_part_relinks=part_relink_impact,
+            _validate_containment=False,
+            _conn=conn,
+        )
+        for section_id, payload in zip(section_ids, payloads):
+            section_results[section_id]["feature_visibility"] = (
+                save_assembly_grid_feature_visibility(
+                    project_id,
+                    section_id,
+                    payload["feature_visibility"],
+                    _conn=conn,
+                )
+                if "feature_visibility" in payload
+                else {
+                    "count": 0,
+                    "hidden_feature_ids": [],
+                    "updated_at": now_iso(),
+                }
+            )
+
+        component_results: dict[str, dict] = {}
+        for assembly_id, rows in (component_rows_by_assembly or {}).items():
+            if str(assembly_id) in target_by_source:
+                continue
+            component_results[str(assembly_id)] = save_assembly_bom_components(
+                project_id,
+                str(assembly_id),
+                rows,
+                _validate_containment=False,
+                _conn=conn,
+            )
+        for impact in merge_impact:
+            deleted_image_paths.extend(impact["source_image_paths"])
+            conn.execute(
+                "DELETE FROM manufacturing_assemblies WHERE project_id=? AND id=?",
+                (project_id, impact["source_assembly_id"]),
+            )
+            impact["source_part_action"] = _release_or_remove_generated_assembly_part(
+                conn, project_id, impact.get("source_part_id")
+            )
+        _validate_assembly_containment(conn, project_id)
+
+    for image_path in deleted_image_paths:
+        _remove_owned_upload(image_path)
+    return {
+        "sections": section_results,
+        "mappings": mappings_result,
+        "components": component_results,
+        "assembly_merges": merge_impact,
+        "catalog_part_relinks": part_relink_impact,
+        "updated_at": now_iso(),
+    }
+
+
+def delete_assembly_grid_categories(
+    project_id: str, section_id: str, category_ids: list[str]
+) -> dict:
+    """Delete selected grid categories and mappings while preserving assemblies."""
+    normalized = list(dict.fromkeys(
+        _catalog_text(category_id) for category_id in category_ids
+        if _catalog_text(category_id)
+    ))
+    if not normalized:
+        raise ValueError("Select at least one assembly-grid category to delete.")
+    placeholders = ", ".join("?" for _ in normalized)
+    with connection() as conn:
+        categories = conn.execute(
+            f"""SELECT id, display_name, is_top_level FROM assembly_grid_categories
+                WHERE project_id=? AND section_id=? AND id IN ({placeholders})""",
+            (project_id, section_id, *normalized),
+        ).fetchall()
+        if len(categories) != len(normalized):
+            raise ValueError("One or more selected assembly-grid categories no longer exist.")
+        if any(bool(row["is_top_level"]) for row in categories):
+            raise ValueError(
+                "The Top-level packaged unit row cannot be deleted. Clear its model "
+                "mappings instead."
+            )
+        mapping_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM assembly_grid_model_mappings
+                WHERE project_id=? AND category_id IN ({placeholders})""",
+            (project_id, *normalized),
+        ).fetchone()[0])
+        conn.execute(
+            f"""DELETE FROM assembly_grid_categories
+                WHERE project_id=? AND section_id=? AND id IN ({placeholders})""",
+            (project_id, section_id, *normalized),
+        )
+        applicability_changes = _sync_assembly_catalog_part_applicability(
+            conn, project_id, now_iso()
+        )
+    return {
+        "deleted_count": len(normalized),
+        "mapping_count": mapping_count,
+        "category_ids": normalized,
+        "category_names": [str(row["display_name"]) for row in categories],
+        "catalog_part_applicability_changes": applicability_changes,
+    }
 
 
 def assembly_catalog_rows(project_id: str) -> pd.DataFrame:
@@ -1231,8 +2814,34 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
                 raise ValueError("Every new assembly requires a Make / buy selection.")
             if previous and _catalog_text(previous.get("make_buy")) and not make_buy:
                 raise ValueError("Make / buy cannot be cleared. Choose Make or Buy.")
-            if built_section_id not in valid_sections or installed_section_id not in valid_sections:
-                raise ValueError("Every assembly requires valid Built section and Installed section values.")
+            managed_category = conn.execute(
+                """SELECT DISTINCT category.id, category.display_name, category.section_id,
+                          category.installed_section_id
+                   FROM assembly_grid_model_mappings mapping
+                   JOIN assembly_grid_categories category ON category.id=mapping.category_id
+                   WHERE mapping.project_id=? AND mapping.assembly_id=?""",
+                (project_id, assembly_id),
+            ).fetchone()
+            if (
+                built_section_id not in valid_sections
+                or (installed_section_id and installed_section_id not in valid_sections)
+                or (not installed_section_id and not managed_category)
+            ):
+                raise ValueError(
+                    "Every assembly requires valid Built section and Installed section values. "
+                    "A grid-managed assembly may remain without an Installed section while its "
+                    "category is unassigned."
+                )
+            if managed_category and (
+                built_section_id != _catalog_text(managed_category["section_id"])
+                or (installed_section_id or None)
+                != (_catalog_text(managed_category["installed_section_id"]) or None)
+            ):
+                raise ValueError(
+                    f"Assembly {assembly_number} is mapped under category "
+                    f"{managed_category['display_name']}. Change its Built or Installed section "
+                    "through the assembly grid category."
+                )
             if parent_id == assembly_id:
                 raise ValueError(f"Assembly {assembly_number} cannot be its own parent.")
             raw_active = raw.get("active", True)
@@ -1294,6 +2903,7 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
                 )
 
         make_buy_changes: list[dict] = []
+        catalog_part_changes: list[dict] = []
         for row in normalized:
             previous = current.get(row["id"])
             previous_make_buy = _catalog_text(previous.get("make_buy")) if previous else ""
@@ -1342,11 +2952,26 @@ def save_assembly_catalog_rows(project_id: str, rows) -> dict:
                         row["notes"], timestamp,
                     ),
                 )
+            catalog_part_changes.append(
+                _ensure_assembly_catalog_part(
+                    conn,
+                    project_id,
+                    row["id"],
+                    row["assembly_number"],
+                    row["name"],
+                    timestamp,
+                )
+            )
+        applicability_changes = _sync_assembly_catalog_part_applicability(
+            conn, project_id, timestamp
+        )
     return {
         "count": len(normalized),
         "updated_at": timestamp,
         "mismatch_warnings": mismatch_warnings,
         "make_buy_changes": make_buy_changes,
+        "catalog_part_changes": catalog_part_changes,
+        "catalog_part_applicability_changes": applicability_changes,
         "assembly_ids": [row["id"] for row in normalized],
     }
 
@@ -1357,6 +2982,8 @@ def assembly_bom_components(project_id: str, assembly_id: str) -> pd.DataFrame:
                   assignment.quantity AS fishbone_quantity,
                   assignment.use_description, assignment.notes AS fishbone_notes,
                   part.part_number, part.description AS part_name,
+                  child.id AS nested_assembly_id,
+                  child.assembly_number AS nested_assembly_number,
                   section.name AS current_section_name,
                   assembly.built_section_id,
                   CASE WHEN assignment.section_id=assembly.built_section_id THEN 0 ELSE 1 END
@@ -1366,6 +2993,8 @@ def assembly_bom_components(project_id: str, assembly_id: str) -> pd.DataFrame:
            JOIN fishbone_part_assignments assignment
              ON assignment.id=component.fishbone_assignment_id
            JOIN parts part ON part.id=assignment.part_id
+           LEFT JOIN manufacturing_assemblies child
+             ON child.catalog_part_id=part.id AND child.project_id=component.project_id
            JOIN assembly_sections section ON section.id=assignment.section_id
            WHERE component.project_id=? AND component.assembly_id=?
            ORDER BY part.part_number, assignment.sequence""",
@@ -1373,10 +3002,107 @@ def assembly_bom_components(project_id: str, assembly_id: str) -> pd.DataFrame:
     ))
 
 
-def save_assembly_bom_components(project_id: str, assembly_id: str, rows) -> dict:
+def _assembly_containment_edges(
+    conn: sqlite3.Connection, project_id: str
+) -> list[dict]:
+    """Return operational parent/child assembly links derived from mini-BOM parts."""
+    return [
+        dict(row)
+        for row in conn.execute(
+            """SELECT DISTINCT component.assembly_id AS parent_assembly_id,
+                              child.id AS child_assembly_id,
+                              parent.assembly_number AS parent_assembly_number,
+                              child.assembly_number AS child_assembly_number
+               FROM manufacturing_assembly_components component
+               JOIN manufacturing_assemblies parent
+                 ON parent.id=component.assembly_id AND parent.project_id=component.project_id
+               JOIN fishbone_part_assignments assignment
+                 ON assignment.id=component.fishbone_assignment_id
+                AND assignment.project_id=component.project_id
+               JOIN manufacturing_assemblies child
+                 ON child.catalog_part_id=assignment.part_id
+                AND child.project_id=component.project_id
+               WHERE component.project_id=?""",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
+def _validate_assembly_containment(
+    conn: sqlite3.Connection, project_id: str
+) -> None:
+    """Reject mini-BOM assembly cycles and incomplete child model coverage."""
+    edges = _assembly_containment_edges(conn, project_id)
+    children_by_parent: dict[str, set[str]] = {}
+    number_by_id: dict[str, str] = {}
+    for edge in edges:
+        parent_id = str(edge["parent_assembly_id"])
+        child_id = str(edge["child_assembly_id"])
+        number_by_id[parent_id] = str(edge["parent_assembly_number"])
+        number_by_id[child_id] = str(edge["child_assembly_number"])
+        if parent_id == child_id:
+            raise ValueError(
+                f"Assembly {number_by_id[parent_id]} cannot contain itself in its mini-BOM."
+            )
+        children_by_parent.setdefault(parent_id, set()).add(child_id)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(assembly_id: str, path: list[str]) -> None:
+        if assembly_id in visiting:
+            cycle_start = path.index(assembly_id)
+            cycle = path[cycle_start:] + [assembly_id]
+            labels = " → ".join(number_by_id.get(value, value) for value in cycle)
+            raise ValueError(f"Assembly mini-BOM nesting cannot contain a cycle: {labels}.")
+        if assembly_id in visited:
+            return
+        visiting.add(assembly_id)
+        for child_id in children_by_parent.get(assembly_id, set()):
+            visit(child_id, [*path, child_id])
+        visiting.remove(assembly_id)
+        visited.add(assembly_id)
+
+    for parent_id in children_by_parent:
+        visit(parent_id, [parent_id])
+
+    mapped_models: dict[str, set[str]] = {}
+    model_number_by_id: dict[str, str] = {}
+    for row in conn.execute(
+        """SELECT mapping.assembly_id, mapping.model_id, model.model_number
+           FROM assembly_grid_model_mappings mapping
+           JOIN project_models model
+             ON model.id=mapping.model_id AND model.project_id=mapping.project_id
+           WHERE mapping.project_id=?""",
+        (project_id,),
+    ).fetchall():
+        mapped_models.setdefault(str(row["assembly_id"]), set()).add(str(row["model_id"]))
+        model_number_by_id[str(row["model_id"])] = str(row["model_number"])
+    for edge in edges:
+        parent_id = str(edge["parent_assembly_id"])
+        child_id = str(edge["child_assembly_id"])
+        missing = mapped_models.get(parent_id, set()) - mapped_models.get(child_id, set())
+        if missing:
+            labels = ", ".join(
+                sorted(model_number_by_id.get(model_id, model_id) for model_id in missing)
+            )
+            raise ValueError(
+                f"Child assembly {edge['child_assembly_number']} does not cover every model "
+                f"mapped to parent assembly {edge['parent_assembly_number']}. Missing: {labels}."
+            )
+
+
+def save_assembly_bom_components(
+    project_id: str,
+    assembly_id: str,
+    rows,
+    *,
+    _validate_containment: bool = True,
+    _conn: sqlite3.Connection | None = None,
+) -> dict:
     records = _catalog_records(rows)
     timestamp = now_iso()
-    with connection() as conn:
+    with (connection() if _conn is None else nullcontext(_conn)) as conn:
         assembly = _require_catalog_assembly(conn, project_id, assembly_id)
         built_section_id = _catalog_text(assembly["built_section_id"])
         if not built_section_id:
@@ -1390,11 +3116,78 @@ def save_assembly_bom_components(project_id: str, assembly_id: str, rows) -> dic
             ).fetchall()
         }
         normalized: list[dict] = []
+        created_fishbone_uses: list[dict] = []
         assignment_ids: set[str] = set()
         row_ids: set[str] = set()
         for raw in records:
             row_id = _catalog_text(raw.get("id")) or str(uuid4())
             assignment_id = _catalog_text(raw.get("fishbone_assignment_id"))
+            nested_assembly_id = _catalog_text(raw.get("nested_assembly_id"))
+            if nested_assembly_id and not assignment_id:
+                child = conn.execute(
+                    """SELECT id, assembly_number, catalog_part_id
+                       FROM manufacturing_assemblies
+                       WHERE id=? AND project_id=?""",
+                    (nested_assembly_id, project_id),
+                ).fetchone()
+                if not child or not _catalog_text(child["catalog_part_id"]):
+                    raise ValueError(
+                        "Every nested subassembly must be a current project assembly with a "
+                        "linked Parts Catalog row."
+                    )
+                existing_use = conn.execute(
+                    """SELECT id FROM fishbone_part_assignments
+                       WHERE project_id=? AND section_id=? AND part_id=?
+                       ORDER BY sequence, id LIMIT 1""",
+                    (project_id, built_section_id, child["catalog_part_id"]),
+                ).fetchone()
+                if existing_use:
+                    assignment_id = str(existing_use["id"])
+                else:
+                    assignment_id = str(uuid4())
+                    next_sequence = conn.execute(
+                        """SELECT COALESCE(MAX(sequence), 0) + 10
+                           FROM fishbone_part_assignments
+                           WHERE project_id=? AND section_id=?""",
+                        (project_id, built_section_id),
+                    ).fetchone()[0]
+                    raw_quantity = raw.get("quantity")
+                    try:
+                        placement_quantity = float(raw_quantity or 1)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            "Nested subassembly quantities must be numbers greater than zero."
+                        ) from exc
+                    if not math.isfinite(placement_quantity) or placement_quantity <= 0:
+                        raise ValueError(
+                            "Nested subassembly quantities must be numbers greater than zero."
+                        )
+                    conn.execute(
+                        """INSERT INTO fishbone_part_assignments
+                           (id, project_id, part_id, section_id, sequence, quantity,
+                            use_description, notes, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)""",
+                        (
+                            assignment_id,
+                            project_id,
+                            child["catalog_part_id"],
+                            built_section_id,
+                            next_sequence,
+                            placement_quantity,
+                            f"Nested assembly {child['assembly_number']}",
+                            timestamp,
+                        ),
+                    )
+                    created_fishbone_uses.append(
+                        {
+                            "assignment_id": assignment_id,
+                            "parent_assembly_id": assembly_id,
+                            "parent_assembly_number": str(assembly["assembly_number"]),
+                            "child_assembly_id": nested_assembly_id,
+                            "child_assembly_number": str(child["assembly_number"]),
+                            "section_id": built_section_id,
+                        }
+                    )
             if row_id in row_ids or assignment_id in assignment_ids:
                 raise ValueError("Each Fishbone use may appear only once in one assembly mini-BOM.")
             assignment = conn.execute(
@@ -1452,7 +3245,19 @@ def save_assembly_bom_components(project_id: str, assembly_id: str, rows) -> dic
                 for row in normalized
             ],
         )
-    return {"count": len(normalized), "updated_at": timestamp}
+        if _validate_containment:
+            _validate_assembly_containment(conn, project_id)
+        nested_relationships = [
+            edge
+            for edge in _assembly_containment_edges(conn, project_id)
+            if str(edge["parent_assembly_id"]) == str(assembly_id)
+        ]
+    return {
+        "count": len(normalized),
+        "created_fishbone_uses": created_fishbone_uses,
+        "nested_relationships": nested_relationships,
+        "updated_at": timestamp,
+    }
 
 
 def assembly_feature_rules(project_id: str, assembly_id: str) -> pd.DataFrame:
@@ -1558,41 +3363,24 @@ def save_assembly_feature_rules(project_id: str, assembly_id: str, rows) -> dict
 
 
 def assembly_model_applicability(project_id: str, assembly_id: str) -> dict:
-    rules = assembly_feature_rules(project_id, assembly_id)
+    """Return active official models explicitly paired to an assembly in the grid."""
     models = project_models(project_id)
     if not models.empty:
         models = models.loc[models["active"].fillna(1).astype(bool)].copy()
-    if rules.empty:
-        return {"stale": False, "summary": "All models", "models": models}
-    if bool(rules["stale"].any()):
-        return {
-            "stale": True,
-            "summary": "No models while a rule references a removed feature or choice",
-            "models": models.iloc[0:0].copy(),
-        }
-    values = pd.DataFrame(query(
-        "SELECT model_id, feature_id, value FROM model_feature_values WHERE project_id=?",
-        (project_id,),
-    ))
-    required = {
-        str(row["feature_id"]): str(row["value"]) for _, row in rules.iterrows()
-    }
-    matched_ids: list[str] = []
-    for _, model in models.iterrows():
-        model_values = (
-            values.loc[values["model_id"].astype(str).eq(str(model["id"]))]
-            if not values.empty else values
+    mapped_ids = {
+        str(row["model_id"])
+        for row in query(
+            """SELECT DISTINCT model_id FROM assembly_grid_model_mappings
+               WHERE project_id=? AND assembly_id=?""",
+            (project_id, assembly_id),
         )
-        by_feature = {
-            str(row["feature_id"]): str(row["value"]) for _, row in model_values.iterrows()
-        }
-        if all(by_feature.get(feature_id) == value for feature_id, value in required.items()):
-            matched_ids.append(str(model["id"]))
-    matching = models.loc[models["id"].astype(str).isin(matched_ids)].copy()
-    summary = " AND ".join(
-        f"{row['feature_name']} = {row['value']}" for _, row in rules.iterrows()
-    )
-    return {"stale": False, "summary": summary, "models": matching}
+    }
+    matching = models.loc[models["id"].astype(str).isin(mapped_ids)].copy()
+    return {
+        "stale": False,
+        "summary": "Mapped in Assembly grid" if mapped_ids else "No mapped models",
+        "models": matching,
+    }
 
 
 def assembly_images(project_id: str, assembly_id: str) -> list[dict]:
@@ -1860,6 +3648,40 @@ def assembly_catalog_delete_impact(project_id: str, assembly_ids: list[str]) -> 
                 (*affected_ids, *affected_ids),
             ).fetchall()
         ]
+        preserved_catalog_parts = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT assembly.id AS assembly_id, assembly.assembly_number,
+                            part.id AS part_id, part.part_number
+                     FROM manufacturing_assemblies assembly
+                     JOIN parts part ON part.id=assembly.catalog_part_id
+                     WHERE assembly.id IN ({affected_placeholders})
+                     ORDER BY assembly.assembly_number""",
+                tuple(affected_ids),
+            ).fetchall()
+        ]
+        nested_parent_links = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT DISTINCT child.id AS child_assembly_id,
+                                   child.assembly_number AS child_assembly_number,
+                                   parent.id AS parent_assembly_id,
+                                   parent.assembly_number AS parent_assembly_number
+                    FROM manufacturing_assemblies child
+                    JOIN fishbone_part_assignments assignment
+                      ON assignment.part_id=child.catalog_part_id
+                     AND assignment.project_id=child.project_id
+                    JOIN manufacturing_assembly_components component
+                      ON component.fishbone_assignment_id=assignment.id
+                     AND component.project_id=child.project_id
+                    JOIN manufacturing_assemblies parent
+                      ON parent.id=component.assembly_id
+                    WHERE child.project_id=?
+                      AND child.id IN ({affected_placeholders})
+                    ORDER BY child.assembly_number, parent.assembly_number""",
+                (project_id, *affected_ids),
+            ).fetchall()
+        ]
         return {
             "selected_ids": normalized,
             "affected_ids": affected_ids,
@@ -1869,6 +3691,7 @@ def assembly_catalog_delete_impact(project_id: str, assembly_ids: list[str]) -> 
             "component_count": count("manufacturing_assembly_components"),
             "rule_count": count("manufacturing_assembly_feature_rules"),
             "supplemental_image_count": count("manufacturing_assembly_images"),
+            "grid_mapping_count": count("assembly_grid_model_mappings"),
             "primary_image_count": int(conn.execute(
                 f"""SELECT COUNT(*) FROM manufacturing_assemblies
                     WHERE id IN ({affected_placeholders})
@@ -1882,6 +3705,10 @@ def assembly_catalog_delete_impact(project_id: str, assembly_ids: list[str]) -> 
             "target_assembly_link_count": count(
                 "work_element_material_groups", "target_assembly_id"
             ),
+            "preserved_catalog_parts": preserved_catalog_parts,
+            "preserved_catalog_part_count": len(preserved_catalog_parts),
+            "nested_parent_links": nested_parent_links,
+            "nested_parent_link_count": len(nested_parent_links),
         }
 
 
@@ -1959,6 +3786,85 @@ def delete_assembly_catalog_rows(
     for path in image_paths:
         _remove_owned_upload(path)
     return {**impact, "deleted_count": len(deleted_ids), "level_actions": actions}
+
+
+def reset_manufacturing_assembly_catalog(
+    verified_backup_path: str | Path,
+    editor_name: str,
+) -> dict:
+    """Perform the approved one-time catalog reset after validating its DB backup."""
+    backup_path = Path(verified_backup_path).resolve()
+    if not backup_path.exists() or not backup_path.is_file() or backup_path.stat().st_size <= 0:
+        raise ValueError("Confirm a valid PAAG database backup before resetting assemblies.")
+    if backup_path == DB_PATH.resolve():
+        raise ValueError("The verified backup must be separate from the live PAAG database.")
+    with closing(sqlite3.connect(
+        f"file:{backup_path.as_posix()}?mode=ro", uri=True
+    )) as backup_conn:
+        result = backup_conn.execute("PRAGMA quick_check").fetchone()
+        if not result or str(result[0]).lower() != "ok":
+            raise ValueError("The verified PAAG database backup did not pass SQLite validation.")
+
+    timestamp = now_iso()
+    image_paths: list[str] = []
+    summary: dict = {}
+    with connection() as conn:
+        project_counts = [dict(row) for row in conn.execute(
+            """SELECT project_id, COUNT(*) AS assembly_count
+               FROM manufacturing_assemblies GROUP BY project_id"""
+        ).fetchall()]
+
+        def table_count(table: str) -> int:
+            return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+        image_paths = [
+            str(row[0])
+            for row in conn.execute(
+                """SELECT image_path FROM manufacturing_assemblies
+                   WHERE TRIM(COALESCE(image_path, ''))<>''
+                   UNION ALL
+                   SELECT image_path FROM manufacturing_assembly_images"""
+            ).fetchall()
+        ]
+        summary = {
+            "assembly_count": table_count("manufacturing_assemblies"),
+            "component_count": table_count("manufacturing_assembly_components"),
+            "feature_rule_count": table_count("manufacturing_assembly_feature_rules"),
+            "supplemental_image_count": table_count("manufacturing_assembly_images"),
+            "owned_image_file_count": len(image_paths),
+            "grid_mapping_count": table_count("assembly_grid_model_mappings"),
+            "scenario_policy_count": table_count("assembly_scenario_policies"),
+            "material_option_count": int(conn.execute(
+                "SELECT COUNT(*) FROM work_element_material_options WHERE assembly_id IS NOT NULL"
+            ).fetchone()[0]),
+            "material_target_count": int(conn.execute(
+                "SELECT COUNT(*) FROM work_element_material_groups WHERE target_assembly_id IS NOT NULL"
+            ).fetchone()[0]),
+            "backup_path": str(backup_path),
+        }
+        conn.execute("DELETE FROM manufacturing_assemblies")
+        for project in project_counts:
+            details = {
+                **summary,
+                "project_assembly_count": int(project["assembly_count"]),
+                "scope": "Approved Task 09 one-time assembly-catalog reset",
+            }
+            conn.execute(
+                """INSERT INTO audit_log
+                   (id, project_id, table_name, action, row_count, editor_name, details, created_at)
+                   VALUES (?, ?, 'Assemblies catalog', 'Prototype data reset', ?, ?, ?, ?)""",
+                (
+                    str(uuid4()),
+                    str(project["project_id"]),
+                    int(project["assembly_count"]),
+                    editor_name.strip(),
+                    json.dumps(details, ensure_ascii=False),
+                    timestamp,
+                ),
+            )
+    for image_path in image_paths:
+        _remove_owned_upload(image_path)
+    return summary
 
 
 ASSEMBLY_PLANNING_REASONS = {
@@ -4207,7 +6113,27 @@ def project_table(
             f"SELECT * FROM {table} WHERE project_id=? AND scenario_id=? ORDER BY {order_by}",
             (project_id, scenario_id),
         ))
-    return pd.DataFrame(query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,)))
+    frame = pd.DataFrame(
+        query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,))
+    )
+    if table == "parts" and not frame.empty:
+        links = assembly_catalog_part_applicability(project_id)
+        frame["assembly_id"] = ""
+        frame["assembly_number"] = ""
+        if not links.empty:
+            links_by_part = links.set_index(links["part_id"].astype(str))
+            part_ids = frame["id"].astype(str)
+            linked = part_ids.isin(links_by_part.index)
+            frame.loc[linked, "assembly_id"] = part_ids[linked].map(
+                links_by_part["assembly_id"]
+            )
+            frame.loc[linked, "assembly_number"] = part_ids[linked].map(
+                links_by_part["assembly_number"]
+            )
+            frame.loc[linked, "model_applicability"] = part_ids[linked].map(
+                links_by_part["model_applicability"]
+            ).fillna("")
+    return frame
 
 
 def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]:
@@ -4372,9 +6298,20 @@ def update_part_rows(
             (scenario_id, project_id),
         ).fetchone():
             raise ValueError("The active planning scenario no longer exists.")
-        existing_ids = {
-            str(existing[0]) for existing in conn.execute(
-                "SELECT id FROM parts WHERE project_id=?", (project_id,)
+        existing_parts = {
+            str(existing["id"]): dict(existing)
+            for existing in conn.execute(
+                "SELECT * FROM parts WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        existing_ids = set(existing_parts)
+        linked_assemblies = {
+            str(row["catalog_part_id"]): str(row["assembly_number"])
+            for row in conn.execute(
+                """SELECT catalog_part_id, assembly_number
+                   FROM manufacturing_assemblies
+                   WHERE project_id=? AND catalog_part_id IS NOT NULL""",
+                (project_id,),
             ).fetchall()
         }
         for _, row in edited.iterrows():
@@ -4388,9 +6325,25 @@ def update_part_rows(
             revision = clean_text(row.get("revision"))
             if part_id not in existing_ids and not revision:
                 revision = "0"
+            previous = existing_parts.get(part_id)
+            part_number = str(row["part_number"]).strip()
+            if (
+                part_id in linked_assemblies
+                and previous
+                and part_number != str(previous["part_number"])
+            ):
+                raise ValueError(
+                    f"Part number {previous['part_number']} represents assembly "
+                    f"{linked_assemblies[part_id]}. Rename it through the Assembly grid."
+                )
+            applicability = (
+                str(previous["model_applicability"] or "")
+                if part_id in linked_assemblies and previous
+                else normalize_model_applicability(row.get("model_applicability"))
+            )
             values = (
-                str(row["part_number"]).strip(), clean_text(row.get("description")), quantity,
-                revision, normalize_model_applicability(row.get("model_applicability")),
+                part_number, clean_text(row.get("description")), quantity,
+                revision, applicability,
                 clean_text(row.get("notes")), timestamp,
             )
             if part_id in existing_ids:
@@ -4428,6 +6381,36 @@ def update_part_rows(
     return len(edited)
 
 
+def part_delete_impact(project_id: str, part_ids: list[str]) -> dict:
+    normalized = list(dict.fromkeys(
+        str(part_id).strip() for part_id in part_ids if str(part_id).strip()
+    ))
+    if not normalized:
+        raise ValueError("Select at least one part to delete.")
+    placeholders = ",".join("?" for _ in normalized)
+    with connection() as conn:
+        parts = conn.execute(
+            f"""SELECT id, part_number FROM parts
+                WHERE project_id=? AND id IN ({placeholders})
+                ORDER BY part_number""",
+            (project_id, *normalized),
+        ).fetchall()
+        if len(parts) != len(normalized):
+            raise ValueError("One or more selected parts no longer exist.")
+        linked = conn.execute(
+            f"""SELECT catalog_part_id AS part_id, assembly_number, name AS assembly_name
+                FROM manufacturing_assemblies
+                WHERE project_id=? AND catalog_part_id IN ({placeholders})
+                ORDER BY assembly_number""",
+            (project_id, *normalized),
+        ).fetchall()
+        return {
+            "part_ids": normalized,
+            "part_numbers": [str(row["part_number"]) for row in parts],
+            "linked_assemblies": [dict(row) for row in linked],
+        }
+
+
 def delete_project_part(project_id: str, part_id: str) -> str:
     """Delete one catalog part and its cascading fishbone uses and image records."""
     with connection() as conn:
@@ -4437,6 +6420,16 @@ def delete_project_part(project_id: str, part_id: str) -> str:
         ).fetchone()
         if not part:
             raise ValueError("That part no longer exists.")
+        linked = conn.execute(
+            """SELECT assembly_number FROM manufacturing_assemblies
+               WHERE project_id=? AND catalog_part_id=?""",
+            (project_id, part_id),
+        ).fetchone()
+        if linked:
+            raise ValueError(
+                f"Part number {part['part_number']} represents assembly "
+                f"{linked['assembly_number']}. Delete or merge that assembly first."
+            )
         supplemental_paths = [row[0] for row in conn.execute(
             "SELECT image_path FROM part_images WHERE part_id=?", (part_id,)
         ).fetchall()]
@@ -4593,6 +6586,57 @@ def _assembly_section_target_validation(
             str(row["scenario_name"]),
         )
     )
+    category_conflicts: list[dict] = []
+    incoming_categories = [
+        dict(row)
+        for row in conn.execute(
+            f"""SELECT id, ebom_name, display_name
+                FROM assembly_grid_categories
+                WHERE project_id=? AND section_id IN ({placeholders})
+                ORDER BY sequence, display_name""",
+            (project_id, *affected_ids),
+        ).fetchall()
+    ]
+    target_categories = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT id, ebom_name, display_name
+               FROM assembly_grid_categories
+               WHERE project_id=? AND section_id=?
+               ORDER BY sequence, display_name""",
+            (project_id, target_id),
+        ).fetchall()
+    ]
+    for field, label in (
+        ("ebom_name", "Official EBOM category name"),
+        ("display_name", "Display name"),
+    ):
+        combined: list[tuple[dict, bool]] = [
+            *((row, False) for row in target_categories),
+            *((row, True) for row in incoming_categories),
+        ]
+        seen_values: dict[str, tuple[dict, bool]] = {}
+        for category, is_incoming in combined:
+            value = _catalog_text(category.get(field))
+            key = value.casefold()
+            previous = seen_values.get(key)
+            if previous and (is_incoming or previous[1]):
+                incoming = category if is_incoming else previous[0]
+                conflicting = previous[0] if is_incoming else category
+                category_conflicts.append(
+                    {
+                        "type": "category",
+                        "field": field,
+                        "field_label": label,
+                        "value": value,
+                        "incoming_category_id": str(incoming["id"]),
+                        "incoming_category_name": str(incoming["display_name"]),
+                        "conflicting_category_id": str(conflicting["id"]),
+                        "conflicting_category_name": str(conflicting["display_name"]),
+                    }
+                )
+                continue
+            seen_values[key] = (category, is_incoming)
     message = ""
     if conflicts:
         first = conflicts[0]
@@ -4613,12 +6657,21 @@ def _assembly_section_target_validation(
                 f" Conflict found in Rev {first['revision_label']} · "
                 f"{first['scenario_name']}."
             )
+    elif category_conflicts:
+        first = category_conflicts[0]
+        message = (
+            f"Cannot continue under Fishbone section {target['name']}: incoming category "
+            f"{first['incoming_category_name']} has {first['field_label']} "
+            f"\"{first['value']}\" that conflicts with category "
+            f"{first['conflicting_category_name']}. Choose a different target Fishbone section."
+        )
     return {
-        "valid": not conflicts,
+        "valid": not conflicts and not category_conflicts,
         "message": message,
         "target_section_id": target_id,
         "target_section_name": str(target["name"]),
-        "conflicts": conflicts,
+        "conflicts": [*conflicts, *category_conflicts],
+        "category_conflicts": category_conflicts,
     }
 
 
@@ -4671,6 +6724,31 @@ def assembly_section_delete_impact(
 
         yamazumi_area_count = count_rows("yamazumi_areas")
         process_link_count = count_rows("process_part_groups")
+        category_references = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT id AS category_id, ebom_name, display_name,
+                           section_id, installed_section_id
+                    FROM assembly_grid_categories
+                    WHERE project_id=? AND (
+                        section_id IN ({affected_placeholders}) OR
+                        installed_section_id IN ({affected_placeholders})
+                    )
+                    ORDER BY sequence, display_name""",
+                (project_id, *affected_ids, *affected_ids),
+            ).fetchall()
+        ]
+        category_built_reference_count = sum(
+            int(str(row.get("section_id")) in affected_ids)
+            for row in category_references
+        )
+        category_installed_reference_count = sum(
+            int(str(row.get("installed_section_id")) in affected_ids)
+            for row in category_references
+        )
+        feature_visibility_preference_count = count_rows(
+            "assembly_grid_feature_visibility"
+        )
         assembly_reference_count = sum(
             int(str(row.get("built_section_id")) in affected_ids)
             + int(str(row.get("installed_section_id")) in affected_ids)
@@ -4687,9 +6765,20 @@ def assembly_section_delete_impact(
             "process_link_count": process_link_count,
             "assembly_reference_count": assembly_reference_count,
             "assembly_references": assembly_references,
+            "category_built_reference_count": category_built_reference_count,
+            "category_installed_reference_count": category_installed_reference_count,
+            "category_reference_count": (
+                category_built_reference_count + category_installed_reference_count
+            ),
+            "category_references": category_references,
+            "feature_visibility_preference_count": feature_visibility_preference_count,
             "assembly_component_count": assembly_component_count,
             "requires_repointing": bool(
-                yamazumi_area_count or process_link_count or assembly_reference_count
+                yamazumi_area_count
+                or process_link_count
+                or assembly_reference_count
+                or category_built_reference_count
+                or category_installed_reference_count
             ),
         }
 
@@ -4707,6 +6796,9 @@ def delete_assembly_sections(
     target_validation = None
     yamazumi_repointed = 0
     process_repointed = 0
+    category_built_repointed = 0
+    category_installed_repointed = 0
+    feature_visibility_deleted = 0
     assembly_replacements: list[dict] = []
     with connection() as conn:
         section_rows = _assembly_section_delete_rows(conn, project_id, section_ids)
@@ -4731,8 +6823,27 @@ def delete_assembly_sections(
             + int(_catalog_text(row.get("installed_section_id")) in affected_ids)
             for row in assembly_rows
         )
+        category_built_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM assembly_grid_categories
+                WHERE project_id=? AND section_id IN ({placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
+        category_installed_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM assembly_grid_categories
+                WHERE project_id=? AND installed_section_id IN ({placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
+        feature_visibility_deleted = int(conn.execute(
+            f"""SELECT COUNT(*) FROM assembly_grid_feature_visibility
+                WHERE project_id=? AND section_id IN ({placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
         requires_repointing = bool(
-            yamazumi_count or process_count or assembly_reference_count
+            yamazumi_count
+            or process_count
+            or assembly_reference_count
+            or category_built_count
+            or category_installed_count
         )
         if requires_repointing:
             target_validation = _assembly_section_target_validation(
@@ -4748,6 +6859,18 @@ def delete_assembly_sections(
             process_repointed = conn.execute(
                 f"""UPDATE process_part_groups SET section_id=?, updated_at=?
                     WHERE project_id=? AND section_id IN ({placeholders})""",
+                (target_id, timestamp, project_id, *affected_ids),
+            ).rowcount
+            category_built_repointed = conn.execute(
+                f"""UPDATE assembly_grid_categories
+                    SET section_id=?, updated_at=?
+                    WHERE project_id=? AND section_id IN ({placeholders})""",
+                (target_id, timestamp, project_id, *affected_ids),
+            ).rowcount
+            category_installed_repointed = conn.execute(
+                f"""UPDATE assembly_grid_categories
+                    SET installed_section_id=?, updated_at=?
+                    WHERE project_id=? AND installed_section_id IN ({placeholders})""",
                 (target_id, timestamp, project_id, *affected_ids),
             ).rowcount
             for row in assembly_rows:
@@ -4792,6 +6915,9 @@ def delete_assembly_sections(
         "yamazumi_repointed_count": int(yamazumi_repointed),
         "process_repointed_count": int(process_repointed),
         "assembly_replacement_count": len(assembly_replacements),
+        "category_built_repointed_count": int(category_built_repointed),
+        "category_installed_repointed_count": int(category_installed_repointed),
+        "feature_visibility_deleted_count": int(feature_visibility_deleted),
     }
 
 
@@ -5371,6 +7497,45 @@ def project_models(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query("SELECT * FROM project_models WHERE project_id = ? ORDER BY model_number", (project_id,)))
 
 
+def assembly_catalog_part_applicability(project_id: str) -> pd.DataFrame:
+    """Return linked assembly parts and their directly mapped active official models."""
+    rows = query(
+        """SELECT assembly.catalog_part_id AS part_id, assembly.id AS assembly_id,
+                  assembly.assembly_number, model.model_number
+           FROM manufacturing_assemblies assembly
+           LEFT JOIN assembly_grid_model_mappings mapping
+             ON mapping.project_id=assembly.project_id AND mapping.assembly_id=assembly.id
+           LEFT JOIN project_models model
+             ON model.id=mapping.model_id AND model.project_id=assembly.project_id
+            AND model.active=1
+           WHERE assembly.project_id=? AND assembly.catalog_part_id IS NOT NULL
+           ORDER BY assembly.assembly_number, model.model_number""",
+        (project_id,),
+    )
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        part_id = str(row["part_id"])
+        grouped.setdefault(
+            part_id,
+            {
+                "part_id": part_id,
+                "assembly_id": str(row["assembly_id"]),
+                "assembly_number": str(row["assembly_number"]),
+                "model_numbers": [],
+            },
+        )
+        if row.get("model_number") is not None:
+            grouped[part_id]["model_numbers"].append(str(row["model_number"]))
+    result = []
+    for row in grouped.values():
+        model_numbers = list(dict.fromkeys(row.pop("model_numbers")))
+        result.append({**row, "model_applicability": ", ".join(model_numbers)})
+    return pd.DataFrame(
+        result,
+        columns=["part_id", "assembly_id", "assembly_number", "model_applicability"],
+    )
+
+
 def complexity_features(project_id: str) -> pd.DataFrame:
     rows = query(
         "SELECT * FROM complexity_features WHERE project_id=? ORDER BY sequence, category, name",
@@ -5527,13 +7692,32 @@ def potential_duplicate_models(project_id: str, edited: pd.DataFrame) -> list[di
 
 
 def part_feature_rules(project_id: str) -> pd.DataFrame:
-    """Return saved manufacturing-feature applicability rules for project parts."""
+    """Return saved part rules plus mapping-derived rows for linked assembly parts."""
     return pd.DataFrame(query(
         """SELECT r.part_id, r.feature_id, r.value, f.category, f.name AS feature_name
            FROM part_feature_rules r
            JOIN complexity_features f ON f.id=r.feature_id
-           WHERE r.project_id=? ORDER BY f.sequence, f.category, f.name, r.value""",
-        (project_id,),
+           WHERE r.project_id=?
+             AND NOT EXISTS (
+                 SELECT 1 FROM manufacturing_assemblies assembly
+                 WHERE assembly.project_id=r.project_id
+                   AND assembly.catalog_part_id=r.part_id
+             )
+           UNION
+           SELECT assembly.catalog_part_id AS part_id, value.feature_id, value.value,
+                  f.category, f.name AS feature_name
+           FROM manufacturing_assemblies assembly
+           JOIN assembly_grid_model_mappings mapping
+             ON mapping.project_id=assembly.project_id AND mapping.assembly_id=assembly.id
+           JOIN project_models model
+             ON model.id=mapping.model_id AND model.active=1
+           JOIN model_feature_values value
+             ON value.project_id=assembly.project_id AND value.model_id=model.id
+           JOIN complexity_features f
+             ON f.id=value.feature_id AND f.active=1
+           WHERE assembly.project_id=? AND assembly.catalog_part_id IS NOT NULL
+           ORDER BY category, feature_name, value""",
+        (project_id, project_id),
     ))
 
 
@@ -5543,6 +7727,32 @@ def update_part_feature_rules(project_id: str, selections_by_part: dict[str, lis
     feature_by_id = {str(row["id"]): row for _, row in features.iterrows()}
     tree = complexity_tree(project_id)
     valid_parts = {str(row["id"]) for row in query("SELECT id FROM parts WHERE project_id=?", (project_id,))}
+    linked_parts = {
+        str(row["part_id"]): str(row["assembly_number"])
+        for row in query(
+            """SELECT catalog_part_id AS part_id, assembly_number
+               FROM manufacturing_assemblies
+               WHERE project_id=? AND catalog_part_id IS NOT NULL""",
+            (project_id,),
+        )
+    }
+    derived_tokens: dict[str, set[str]] = {part_id: set() for part_id in linked_parts}
+    for row in query(
+        """SELECT assembly.catalog_part_id AS part_id, value.feature_id, value.value
+           FROM manufacturing_assemblies assembly
+           JOIN assembly_grid_model_mappings mapping
+             ON mapping.project_id=assembly.project_id AND mapping.assembly_id=assembly.id
+           JOIN project_models model ON model.id=mapping.model_id AND model.active=1
+           JOIN model_feature_values value
+             ON value.project_id=assembly.project_id AND value.model_id=model.id
+           JOIN complexity_features feature
+             ON feature.id=value.feature_id AND feature.active=1
+           WHERE assembly.project_id=? AND assembly.catalog_part_id IS NOT NULL""",
+        (project_id,),
+    ):
+        derived_tokens.setdefault(str(row["part_id"]), set()).add(
+            f"{row['feature_id']}::{row['value']}"
+        )
     timestamp = now_iso()
     updated = 0
     with connection() as conn:
@@ -5550,6 +7760,13 @@ def update_part_feature_rules(project_id: str, selections_by_part: dict[str, lis
             if part_id not in valid_parts:
                 continue
             tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
+            if part_id in linked_parts:
+                if set(tokens) != derived_tokens.get(part_id, set()):
+                    raise ValueError(
+                        f"Part number for assembly {linked_parts[part_id]} gets its model "
+                        "applicability from the Assembly grid and cannot use Parts feature rules."
+                    )
+                continue
             if not tokens:
                 continue  # Preserve legacy model-number applicability until the user tags it.
             if "All models" in tokens:
@@ -5800,6 +8017,9 @@ def model_planning_snapshot(project_id: str) -> dict:
             "fishbone_nodes": [dict(row) for row in conn.execute(
                 "SELECT id, applicable_models, updated_at FROM fishbone_nodes WHERE project_id=?", (project_id,)
             ).fetchall()],
+            "assembly_grid_model_mappings": [dict(row) for row in conn.execute(
+                "SELECT * FROM assembly_grid_model_mappings WHERE project_id=?", (project_id,)
+            ).fetchall()],
         }
 
 
@@ -5817,8 +8037,16 @@ def _insert_snapshot_rows(conn: sqlite3.Connection, table: str, rows: list[dict]
 def restore_model_planning_snapshot(project_id: str, snapshot: dict) -> None:
     """Restore the last model edit along with propagated model applicability values."""
     with connection() as conn:
+        conn.execute(
+            "DELETE FROM assembly_grid_model_mappings WHERE project_id=?", (project_id,)
+        )
         conn.execute("DELETE FROM project_models WHERE project_id=?", (project_id,))
         _insert_snapshot_rows(conn, "project_models", snapshot.get("models", []))
+        _insert_snapshot_rows(
+            conn,
+            "assembly_grid_model_mappings",
+            snapshot.get("assembly_grid_model_mappings", []),
+        )
         for table, value_column in (
             ("parts", "model_applicability"),
             ("work_elements", "model_applicability"),
@@ -5858,6 +8086,18 @@ def fishbone_plan_snapshot(project_id: str) -> dict:
                    FROM manufacturing_assemblies WHERE project_id=?""",
                 (project_id,),
             ).fetchall()],
+            "assembly_grid_categories": [dict(row) for row in conn.execute(
+                "SELECT * FROM assembly_grid_categories WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
+            "assembly_grid_model_mappings": [dict(row) for row in conn.execute(
+                "SELECT * FROM assembly_grid_model_mappings WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
+            "assembly_grid_feature_visibility": [dict(row) for row in conn.execute(
+                "SELECT * FROM assembly_grid_feature_visibility WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
         }
 
 
@@ -5874,6 +8114,11 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
     sections = snapshot.get("sections", [])
     assignments = snapshot.get("assignments", [])
     assembly_components = snapshot.get("assembly_components", [])
+    grid_categories = snapshot.get("assembly_grid_categories", [])
+    grid_mappings = snapshot.get("assembly_grid_model_mappings", [])
+    grid_feature_visibility = snapshot.get(
+        "assembly_grid_feature_visibility", []
+    )
     with connection() as conn:
         # The framework is rebuilt as one unit. Temporarily release every section
         # reference so RESTRICT relationships cannot leave a partial restore.
@@ -5889,6 +8134,19 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
                WHERE project_id=?""",
             (project_id,),
         )
+        # Category section references are RESTRICT relationships. Remove the
+        # project-owned grid state before rebuilding the framework, then restore
+        # the same stable category, mapping, and preference IDs afterward.
+        conn.execute(
+            "DELETE FROM assembly_grid_model_mappings WHERE project_id=?", (project_id,)
+        )
+        conn.execute(
+            "DELETE FROM assembly_grid_categories WHERE project_id=?", (project_id,)
+        )
+        conn.execute(
+            "DELETE FROM assembly_grid_feature_visibility WHERE project_id=?",
+            (project_id,),
+        )
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
         # Insert parents and children with empty parent IDs first, then reconnect them.
@@ -5902,6 +8160,11 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
                 )
         _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
         _insert_snapshot_rows(conn, "manufacturing_assembly_components", assembly_components)
+        _insert_snapshot_rows(conn, "assembly_grid_categories", grid_categories)
+        _insert_snapshot_rows(conn, "assembly_grid_model_mappings", grid_mappings)
+        _insert_snapshot_rows(
+            conn, "assembly_grid_feature_visibility", grid_feature_visibility
+        )
         for row in snapshot.get("yamazumi_section_references", []):
             conn.execute(
                 "UPDATE yamazumi_areas SET section_id=? WHERE id=? AND project_id=?",
@@ -5955,11 +8218,21 @@ def delete_project_models(project_id: str, model_ids: list[str]) -> list[str]:
             label = str(model["display_name"] or model_number)
             labels.append(label)
             reference_count = 0
-            for table in ("parts", "work_elements"):
-                reference_count += conn.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE project_id=? AND instr(model_applicability, ?) > 0",
-                    (project_id, model_number),
-                ).fetchone()[0]
+            reference_count += conn.execute(
+                """SELECT COUNT(*) FROM parts part
+                   WHERE part.project_id=? AND instr(part.model_applicability, ?) > 0
+                     AND NOT EXISTS (
+                         SELECT 1 FROM manufacturing_assemblies assembly
+                         WHERE assembly.project_id=part.project_id
+                           AND assembly.catalog_part_id=part.id
+                     )""",
+                (project_id, model_number),
+            ).fetchone()[0]
+            reference_count += conn.execute(
+                """SELECT COUNT(*) FROM work_elements
+                   WHERE project_id=? AND instr(model_applicability, ?) > 0""",
+                (project_id, model_number),
+            ).fetchone()[0]
             for row in conn.execute(
                 "SELECT applicable_models FROM fishbone_nodes WHERE project_id=?",
                 (project_id,),
@@ -5980,6 +8253,7 @@ def delete_project_models(project_id: str, model_ids: list[str]) -> list[str]:
             f"DELETE FROM project_models WHERE project_id=? AND id IN ({placeholders})",
             (project_id, *selected_ids),
         )
+        _sync_assembly_catalog_part_applicability(conn, project_id, now_iso())
         return labels
 
 
@@ -6131,6 +8405,7 @@ def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
                             "UPDATE fishbone_nodes SET applicable_models=?, updated_at=? WHERE id=?",
                             (json.dumps(updated), timestamp, node["id"]),
                         )
+            _sync_assembly_catalog_part_applicability(conn, project_id, timestamp)
         except sqlite3.IntegrityError as exc:
             raise ValueError("Official model numbers must be unique.") from exc
     return len(edited)

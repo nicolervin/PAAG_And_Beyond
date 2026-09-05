@@ -183,7 +183,7 @@ if scenario:
         st.info(
             "When you switch scenarios, the app changes which Parts Catalog records are Active, "
             "along with the Yamazumi plan, Process at a Glance plan, and derived Pin Map. Project "
-            "definitions, Model definitions, Parts Catalog master records, Assemblies, the "
+            "definitions, Model definitions, Parts Catalog master records, Assembly grid, the "
             "Fishbone framework and uses, imports, and Questions and concerns stay shared across "
             "all scenarios, so edits to that shared data affect every scenario.",
             icon=":material/info:",

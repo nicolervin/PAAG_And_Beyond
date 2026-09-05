@@ -112,6 +112,29 @@ class SectionDeletionTests(unittest.TestCase):
         )
         return assembly_id
 
+    def add_grid_category(
+        self,
+        section_id: str,
+        installed_section_id: str | None,
+        *,
+        ebom_name: str = "Fascia SubAsm",
+        display_name: str = "Fascia",
+    ) -> str:
+        category_id = str(uuid4())
+        store.save_assembly_grid_categories(
+            self.project_id,
+            section_id,
+            [{
+                "id": category_id,
+                "ebom_name": ebom_name,
+                "display_name": display_name,
+                "root_number": "290D5251",
+                "installed_section_id": installed_section_id,
+                "sequence": 10,
+            }],
+        )
+        return category_id
+
     def test_no_reference_deletion_requires_no_target(self) -> None:
         source_id = self.add_section("No references")
         impact = store.assembly_section_delete_impact(self.project_id, [source_id])
@@ -155,6 +178,95 @@ class SectionDeletionTests(unittest.TestCase):
         assembly = store.assembly_catalog_rows(self.project_id).set_index("id").loc[assembly_id]
         self.assertEqual(str(assembly["built_section_id"]), target_id)
         self.assertEqual(str(assembly["installed_section_id"]), target_id)
+
+    def test_grid_category_references_require_and_use_the_shared_target(self) -> None:
+        source_id = self.add_section("Grid category source")
+        target_id = self.add_section("Grid category target")
+        category_id = self.add_grid_category(source_id, source_id)
+
+        impact = store.assembly_section_delete_impact(self.project_id, [source_id])
+
+        self.assertEqual(impact["category_built_reference_count"], 1)
+        self.assertEqual(impact["category_installed_reference_count"], 1)
+        self.assertEqual(impact["category_reference_count"], 2)
+        self.assertTrue(impact["requires_repointing"])
+        with self.assertRaisesRegex(ValueError, "Choose an existing Fishbone section"):
+            store.delete_assembly_sections(
+                self.project_id, [source_id], active_scenario_id=self.scenario_id
+            )
+
+        result = store.delete_assembly_sections(
+            self.project_id, [source_id], target_id, self.scenario_id
+        )
+
+        category = store.query(
+            "SELECT section_id, installed_section_id FROM assembly_grid_categories WHERE id=?",
+            (category_id,),
+        )[0]
+        self.assertEqual(category["section_id"], target_id)
+        self.assertEqual(category["installed_section_id"], target_id)
+        self.assertEqual(result["category_built_repointed_count"], 1)
+        self.assertEqual(result["category_installed_repointed_count"], 1)
+
+    def test_grid_category_name_collision_identifies_category_field_and_value(self) -> None:
+        source_id = self.add_section("Collision source")
+        target_id = self.add_section("Collision target")
+        self.add_grid_category(
+            source_id,
+            None,
+            ebom_name="Fascia SubAsm",
+            display_name="Incoming fascia",
+        )
+        self.add_grid_category(
+            target_id,
+            None,
+            ebom_name="fascia subasm",
+            display_name="Existing fascia",
+        )
+
+        validation = store.assembly_section_delete_target_validation(
+            self.project_id, [source_id], target_id, self.scenario_id
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["category_conflicts"][0]["field"], "ebom_name")
+        self.assertIn("Incoming fascia", validation["message"])
+        self.assertIn("Official EBOM category name", validation["message"])
+        self.assertIn('"Fascia SubAsm"', validation["message"])
+        self.assertIn("Existing fascia", validation["message"])
+        self.assertIn("Choose a different target Fishbone section", validation["message"])
+
+    def test_grid_feature_visibility_is_disclosed_and_removed_not_repointed(self) -> None:
+        source_id = self.add_section("Visibility source")
+        feature_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO complexity_features
+                   (id, project_id, category, name, allowed_values, active, updated_at)
+                   VALUES (?, ?, 'Product', 'Brand', '[\"Acme\"]', 1, ?)""",
+                (feature_id, self.project_id, store.now_iso()),
+            )
+        store.save_assembly_grid_feature_visibility(
+            self.project_id,
+            source_id,
+            [{"feature_id": feature_id, "is_visible": False}],
+        )
+
+        impact = store.assembly_section_delete_impact(self.project_id, [source_id])
+        self.assertEqual(impact["feature_visibility_preference_count"], 1)
+        self.assertFalse(impact["requires_repointing"])
+
+        result = store.delete_assembly_sections(
+            self.project_id, [source_id], active_scenario_id=self.scenario_id
+        )
+        self.assertEqual(result["feature_visibility_deleted_count"], 1)
+        self.assertEqual(
+            store.query(
+                "SELECT COUNT(*) AS count FROM assembly_grid_feature_visibility WHERE project_id=?",
+                (self.project_id,),
+            )[0]["count"],
+            0,
+        )
 
     def test_descendant_references_are_included_and_repointed(self) -> None:
         parent_id = self.add_section("Delete parent")
@@ -308,6 +420,38 @@ class SectionDeletionTests(unittest.TestCase):
                 "quantity": 1.5,
             }],
         )
+        category_id = self.add_grid_category(source_id, source_id)
+        model_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO project_models
+                   (id, project_id, model_number, source_payload, active, updated_at)
+                   VALUES (?, ?, 'UNDO-MODEL', '{}', 1, ?)""",
+                (model_id, self.project_id, store.now_iso()),
+            )
+        mapping_id = str(uuid4())
+        store.save_assembly_grid_model_mappings(
+            self.project_id,
+            [{
+                "id": mapping_id,
+                "category_id": category_id,
+                "model_id": model_id,
+                "assembly_id": assembly_id,
+            }],
+        )
+        feature_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO complexity_features
+                   (id, project_id, category, name, allowed_values, active, updated_at)
+                   VALUES (?, ?, 'Product', 'Undo feature', '[\"Yes\"]', 1, ?)""",
+                (feature_id, self.project_id, store.now_iso()),
+            )
+        store.save_assembly_grid_feature_visibility(
+            self.project_id,
+            source_id,
+            [{"feature_id": feature_id, "is_visible": False}],
+        )
         snapshot = store.fishbone_plan_snapshot(self.project_id)
 
         store.delete_assembly_sections(
@@ -331,6 +475,30 @@ class SectionDeletionTests(unittest.TestCase):
         component = store.assembly_bom_components(self.project_id, assembly_id).set_index("id").loc[component_id]
         self.assertEqual(float(component["quantity"]), 1.5)
         self.assertFalse(bool(component["section_mismatch"]))
+        category = store.query(
+            "SELECT section_id, installed_section_id FROM assembly_grid_categories WHERE id=?",
+            (category_id,),
+        )[0]
+        self.assertEqual(category["section_id"], source_id)
+        self.assertEqual(category["installed_section_id"], source_id)
+        self.assertEqual(
+            store.query(
+                "SELECT category_id, model_id, assembly_id FROM assembly_grid_model_mappings WHERE id=?",
+                (mapping_id,),
+            )[0],
+            {
+                "category_id": category_id,
+                "model_id": model_id,
+                "assembly_id": assembly_id,
+            },
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT is_visible FROM assembly_grid_feature_visibility WHERE feature_id=?",
+                (feature_id,),
+            )[0]["is_visible"],
+            0,
+        )
 
 
 if __name__ == "__main__":
