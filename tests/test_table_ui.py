@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pandas as pd
@@ -88,6 +89,40 @@ class NativeSelectedRowsTests(unittest.TestCase):
         selected = self.selected_rows({"deleted_rows": [2]})
 
         self.assertTrue(selected.empty)
+
+
+class SelectedDataframeRowsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dataframe = pd.DataFrame({
+            "id": pd.Series(["row-1", "row-2", ""], dtype="string"),
+            "name": pd.Series(["Alpha", "Bravo", "New row"], dtype="string"),
+        })
+
+    def test_selection_event_resolves_one_or_multiple_saved_rows(self) -> None:
+        event = SimpleNamespace(selection=SimpleNamespace(rows=[0, 1]))
+
+        selected = table_ui.selected_dataframe_rows(self.dataframe, event)
+
+        self.assertEqual(selected["id"].tolist(), ["row-1", "row-2"])
+
+    def test_selection_event_supports_mapping_state_and_rejects_invalid_rows(self) -> None:
+        selected = table_ui.selected_dataframe_rows(
+            self.dataframe,
+            {"selection": {"rows": [1, 1, 20, "invalid", 2]}},
+        )
+
+        self.assertEqual(selected["id"].tolist(), ["row-2"])
+
+    def test_missing_selection_or_id_column_returns_empty_rows(self) -> None:
+        self.assertTrue(
+            table_ui.selected_dataframe_rows(self.dataframe, {}).empty
+        )
+        self.assertTrue(
+            table_ui.selected_dataframe_rows(
+                self.dataframe.drop(columns=["id"]),
+                {"selection": {"rows": [0]}},
+            ).empty
+        )
 
 
 class NativeDeleteConfirmationTests(unittest.TestCase):

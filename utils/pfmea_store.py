@@ -17,7 +17,9 @@ from uuid import uuid4
 import pandas as pd
 
 
-PFMEA_CLASSIFICATIONS = ["", "Safety", "Critical Quality"]
+PFMEA_CLASSIFICATIONS = ["", "Product Safety", "Critical Quality"]
+LEGACY_PFMEA_SAFETY_CLASSIFICATION = "Safety"
+PRODUCT_SAFETY_CLASSIFICATION = "Product Safety"
 PFMEA_RATINGS = list(range(1, 11))
 
 
@@ -248,7 +250,7 @@ def _rating(value, label: str) -> int | None:
 def _classification(value) -> str:
     classification = _text(value)
     if classification not in PFMEA_CLASSIFICATIONS:
-        raise ValueError("Classification must be Safety, Critical Quality, or blank.")
+        raise ValueError("Classification must be Product Safety, Critical Quality, or blank.")
     return classification
 
 
@@ -402,6 +404,51 @@ def migrate_legacy_pfmea_controls(project_id: str, editor_name: str) -> dict:
             "affected_cause_count": len(cause_ids),
             "timestamp": timestamp,
         }
+
+
+def migrate_pfmea_safety_classification(project_id: str, editor_name: str) -> dict:
+    """Rename the legacy PFMEA Safety classification once, with atomic audit evidence."""
+    timestamp = _store().now_iso()
+    with _store().connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM pfmea_entries WHERE project_id=? AND class_code=? ORDER BY id",
+            (project_id, LEGACY_PFMEA_SAFETY_CLASSIFICATION),
+        ).fetchall()
+        if not rows:
+            return {"row_count": 0, "entry_ids": [], "timestamp": timestamp}
+        if not _text(editor_name):
+            raise ValueError(
+                "Enter Current editor before opening PFMEA so the Product Safety "
+                "classification migration can be recorded in History."
+            )
+        entry_ids = [str(row["id"]) for row in rows]
+        conn.execute(
+            """UPDATE pfmea_entries
+               SET class_code=?, updated_at=?
+               WHERE project_id=? AND class_code=?""",
+            (
+                PRODUCT_SAFETY_CLASSIFICATION,
+                timestamp,
+                project_id,
+                LEGACY_PFMEA_SAFETY_CLASSIFICATION,
+            ),
+        )
+        _store().record_audit_event(
+            project_id,
+            "PFMEA",
+            "Migrate Classification",
+            len(entry_ids),
+            editor_name,
+            {
+                "affected_entry_count": len(entry_ids),
+                "affected_entry_ids": entry_ids,
+                "old_value": LEGACY_PFMEA_SAFETY_CLASSIFICATION,
+                "new_value": PRODUCT_SAFETY_CLASSIFICATION,
+                "store_timestamp": timestamp,
+            },
+            _conn=conn,
+        )
+        return {"row_count": len(entry_ids), "entry_ids": entry_ids, "timestamp": timestamp}
 
 
 def pfmea_control_options(project_id: str, control_type: str) -> pd.DataFrame:

@@ -20,6 +20,39 @@ def selectable_dataframe(data, *, key: str, **kwargs):
     return st.dataframe(data, key=key, **kwargs)
 
 
+def selected_dataframe_rows(
+    source_dataframe: pd.DataFrame,
+    selection_event: object,
+    *,
+    id_column: str = "id",
+) -> pd.DataFrame:
+    """Resolve a read-only dataframe selection event to persisted source rows."""
+    if id_column not in source_dataframe:
+        return source_dataframe.iloc[0:0].copy()
+    selection = getattr(selection_event, "selection", None)
+    if selection is None and isinstance(selection_event, dict):
+        selection = selection_event.get("selection")
+    positions = getattr(selection, "rows", None)
+    if positions is None and isinstance(selection, dict):
+        positions = selection.get("rows")
+
+    normalized_positions: list[int] = []
+    for raw_position in positions or []:
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= position < len(source_dataframe) and position not in normalized_positions:
+            normalized_positions.append(position)
+    if not normalized_positions:
+        return source_dataframe.iloc[0:0].copy()
+
+    selected = source_dataframe.iloc[normalized_positions].copy()
+    return selected.loc[
+        selected[id_column].notna() & selected[id_column].astype(str).str.strip().ne("")
+    ].copy()
+
+
 def direct_entry_editor_rows(
     dataframe: pd.DataFrame,
     *,

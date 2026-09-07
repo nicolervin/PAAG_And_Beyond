@@ -31,6 +31,18 @@ TORQUE_DETAIL_COLUMNS = [
     "tool_orientation", "screw_bit_type", "created_at", "updated_at",
 ]
 
+REQUIREMENT_TYPE_COLUMNS = [
+    "id", "project_id", "label", "active", "created_at", "updated_at",
+]
+
+QUALITY_REQUIREMENT_TYPE_DEFAULTS = [
+    "Dimensional",
+    "Present and fully seated",
+    "Torque",
+    "Vision system",
+]
+PROTECTED_QUALITY_REQUIREMENT_TYPE = "Torque"
+
 TORQUE_TOOL_TYPES = ["Air tool", "Electric clutch tool", "DC tool"]
 TORQUE_TOOL_ORIENTATIONS = ["Fixtured", "Pistol", "In-line", "Right angle"]
 
@@ -86,6 +98,16 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             UNIQUE(project_id, quality_requirement_id)
         );
+        CREATE TABLE IF NOT EXISTS quality_requirement_types (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_requirement_type_label
+            ON quality_requirement_types(project_id, label COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_quality_requirements_project
             ON quality_requirements(project_id, unique_identifier);
         CREATE INDEX IF NOT EXISTS idx_quality_assignments_scenario
@@ -96,6 +118,68 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
             ON quality_requirement_torque_details(project_id, quality_requirement_id);
         """
     )
+    project_rows = conn.execute("SELECT id FROM projects").fetchall()
+    for project_row in project_rows:
+        _ensure_quality_requirement_types(conn, str(project_row["id"]))
+
+
+def _ensure_quality_requirement_types(
+    conn: sqlite3.Connection, project_id: str
+) -> None:
+    """Seed reusable defaults and exact legacy Type values without rewriting requirements."""
+    timestamp = datetime.now(timezone.utc).isoformat()
+    existing_rows = conn.execute(
+        "SELECT label FROM quality_requirement_types WHERE project_id=?",
+        (project_id,),
+    ).fetchall()
+    existing_keys = {
+        str(row["label"]).strip().casefold() for row in existing_rows
+    }
+    # Defaults initialize a project once. Afterward, an intentionally deleted
+    # unused default stays deleted, while an exact value that is still in use is
+    # always represented so legacy repository data cannot become invalid.
+    labels: list[str] = [] if existing_rows else list(QUALITY_REQUIREMENT_TYPE_DEFAULTS)
+    labels.extend(
+        str(row["requirement_type"]).strip()
+        for row in conn.execute(
+            """SELECT DISTINCT requirement_type FROM quality_requirements
+               WHERE project_id=? AND TRIM(requirement_type)<>''
+               ORDER BY requirement_type COLLATE NOCASE""",
+            (project_id,),
+        ).fetchall()
+    )
+    for label in labels:
+        cleaned = str(label).strip()
+        key = cleaned.casefold()
+        if not cleaned or key in existing_keys:
+            continue
+        conn.execute(
+            """INSERT INTO quality_requirement_types
+               (id, project_id, label, active, created_at, updated_at)
+               VALUES (?, ?, ?, 1, ?, ?)""",
+            (str(uuid4()), project_id, cleaned, timestamp, timestamp),
+        )
+        existing_keys.add(key)
+
+
+def _quality_requirement_type_row(
+    conn: sqlite3.Connection, project_id: str, label: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """SELECT * FROM quality_requirement_types
+           WHERE project_id=? AND LOWER(TRIM(label))=LOWER(TRIM(?))""",
+        (project_id, label),
+    ).fetchone()
+
+
+def _validate_new_requirement_type(
+    conn: sqlite3.Connection, project_id: str, label: str
+) -> None:
+    catalog_row = _quality_requirement_type_row(conn, project_id, label)
+    if not catalog_row or not bool(catalog_row["active"]):
+        raise ValueError(
+            "Choose an active Type from the Quality requirement types catalog."
+        )
 
 
 def _store_module():
@@ -147,6 +231,23 @@ def _pass_fail_value(value) -> int:
     if normalized in {"1", "true", "yes", "y", "pass/fail"}:
         return 1
     raise ValueError("Pass/fail must be a yes/no value.")
+
+
+def _active_value(value) -> int:
+    if value is None:
+        return 1
+    try:
+        if pd.isna(value):
+            return 1
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"", "true", "yes", "1"}:
+            return 1
+        if normalized in {"false", "no", "0"}:
+            return 0
+    return int(bool(value))
 
 
 def _validated_requirement(values: dict) -> dict:
@@ -217,6 +318,290 @@ def _normalized_ids(record_ids: list[str]) -> list[str]:
     ))
 
 
+def quality_requirement_types(project_id: str) -> pd.DataFrame:
+    """Return the project Type catalog with case-insensitive requirement usage counts."""
+    store = _store_module()
+    with store.connection() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise ValueError("The selected project no longer exists.")
+        _ensure_quality_requirement_types(conn, project_id)
+        rows = conn.execute(
+            """SELECT catalog.*,
+                      (SELECT COUNT(*) FROM quality_requirements requirement
+                       WHERE requirement.project_id=catalog.project_id
+                         AND LOWER(TRIM(requirement.requirement_type))=
+                             LOWER(TRIM(catalog.label))) AS requirement_count
+               FROM quality_requirement_types catalog
+               WHERE catalog.project_id=?
+               ORDER BY catalog.active DESC, catalog.label COLLATE NOCASE, catalog.id""",
+            (project_id,),
+        ).fetchall()
+    return pd.DataFrame(
+        [dict(row) for row in rows],
+        columns=[*REQUIREMENT_TYPE_COLUMNS, "requirement_count"],
+    )
+
+
+def quality_requirement_type_rename_impact(
+    project_id: str, edited: pd.DataFrame
+) -> list[dict[str, object]]:
+    """Describe in-use catalog renames before the collaborator confirms them."""
+    required = {"id", "label", "active"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The Quality requirement types table is missing required columns.")
+    store = _store_module()
+    with store.connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (project_id,)
+        ).fetchone():
+            raise ValueError("The selected project no longer exists.")
+        _ensure_quality_requirement_types(conn, project_id)
+        existing = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM quality_requirement_types WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        impacts: list[dict[str, object]] = []
+        for record in edited.to_dict("records"):
+            record_id = _clean_text(record.get("id"))
+            if not record_id or record_id not in existing:
+                continue
+            old_label = str(existing[record_id]["label"])
+            new_label = _clean_text(record.get("label"))
+            if not new_label or new_label == old_label:
+                continue
+            requirement_count = int(
+                conn.execute(
+                    """SELECT COUNT(*) FROM quality_requirements
+                       WHERE project_id=?
+                         AND LOWER(TRIM(requirement_type))=LOWER(TRIM(?))""",
+                    (project_id, old_label),
+                ).fetchone()[0]
+            )
+            if requirement_count:
+                impacts.append(
+                    {
+                        "id": record_id,
+                        "old_label": old_label,
+                        "new_label": new_label,
+                        "requirement_count": requirement_count,
+                    }
+                )
+        return impacts
+
+
+def save_quality_requirement_type_rows(
+    project_id: str,
+    edited: pd.DataFrame,
+    *,
+    confirm_in_use_renames: bool = False,
+) -> dict[str, object]:
+    """Atomically save the Type catalog and confirmed repository rename cascades."""
+    required = {"id", "label", "active"}
+    if not required.issubset(edited.columns):
+        raise ValueError("The Quality requirement types table is missing required columns.")
+
+    prepared: list[dict[str, object]] = []
+    seen_labels: set[str] = set()
+    supplied_ids: set[str] = set()
+    for record in edited.to_dict("records"):
+        label = _clean_text(record.get("label"))
+        if not label:
+            raise ValueError("Every Quality requirement Type requires a Label.")
+        label_key = label.casefold()
+        if label_key in seen_labels:
+            raise ValueError(
+                "Quality requirement Type labels must be unique within the project."
+            )
+        seen_labels.add(label_key)
+        record_id = _clean_text(record.get("id"))
+        if record_id:
+            if record_id in supplied_ids:
+                raise ValueError("The Quality requirement types table contains a duplicate row.")
+            supplied_ids.add(record_id)
+        prepared.append(
+            {
+                "id": record_id,
+                "label": label,
+                "active": _active_value(record.get("active", True)),
+            }
+        )
+
+    store = _store_module()
+    timestamp = store.now_iso()
+    created_ids: list[str] = []
+    updated_ids: list[str] = []
+    renamed_requirements: list[str] = []
+    rename_mapping: dict[str, str] = {}
+    try:
+        with store.connection() as conn:
+            if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+                raise ValueError("The selected project no longer exists.")
+            _ensure_quality_requirement_types(conn, project_id)
+            existing = {
+                str(row["id"]): dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM quality_requirement_types WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+            }
+            unknown_ids = supplied_ids - set(existing)
+            if unknown_ids:
+                raise ValueError(
+                    "One or more Quality requirement Types no longer exist. Refresh and try again."
+                )
+            if set(existing) - supplied_ids:
+                raise ValueError(
+                    "Use the confirmed deletion workflow to remove Quality requirement Types."
+                )
+
+            for row in prepared:
+                record_id = str(row["id"])
+                if not record_id:
+                    record_id = str(uuid4())
+                    conn.execute(
+                        """INSERT INTO quality_requirement_types
+                           (id, project_id, label, active, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            record_id,
+                            project_id,
+                            row["label"],
+                            row["active"],
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    created_ids.append(record_id)
+                    continue
+
+                prior = existing[record_id]
+                old_label = str(prior["label"])
+                new_label = str(row["label"])
+                new_active = int(row["active"])
+                if old_label.casefold() == PROTECTED_QUALITY_REQUIREMENT_TYPE.casefold():
+                    if new_label != PROTECTED_QUALITY_REQUIREMENT_TYPE or not new_active:
+                        raise ValueError(
+                            "Torque is a permanent Quality requirement Type and cannot be "
+                            "renamed or deactivated."
+                        )
+                changed = new_label != old_label or new_active != int(prior["active"])
+                if not changed:
+                    continue
+                usage_rows = conn.execute(
+                    """SELECT id FROM quality_requirements
+                       WHERE project_id=?
+                         AND LOWER(TRIM(requirement_type))=LOWER(TRIM(?))""",
+                    (project_id, old_label),
+                ).fetchall()
+                if new_label != old_label and usage_rows:
+                    if not confirm_in_use_renames:
+                        raise ValueError(
+                            "Confirm the in-use Type rename before saving these changes."
+                        )
+                    requirement_ids = [str(usage["id"]) for usage in usage_rows]
+                    conn.execute(
+                        """UPDATE quality_requirements
+                           SET requirement_type=?, updated_at=?
+                           WHERE project_id=?
+                             AND LOWER(TRIM(requirement_type))=LOWER(TRIM(?))""",
+                        (new_label, timestamp, project_id, old_label),
+                    )
+                    renamed_requirements.extend(requirement_ids)
+                    rename_mapping[old_label] = new_label
+                conn.execute(
+                    """UPDATE quality_requirement_types
+                       SET label=?, active=?, updated_at=?
+                       WHERE id=? AND project_id=?""",
+                    (new_label, new_active, timestamp, record_id, project_id),
+                )
+                updated_ids.append(record_id)
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(
+            "Quality requirement Type labels must be unique within the project."
+        ) from exc
+
+    return {
+        "row_count": len(created_ids) + len(updated_ids),
+        "created_ids": created_ids,
+        "updated_ids": updated_ids,
+        "renamed_requirement_ids": list(dict.fromkeys(renamed_requirements)),
+        "rename_mapping": rename_mapping,
+        "timestamp": timestamp,
+    }
+
+
+def delete_quality_requirement_types(
+    project_id: str, type_ids: list[str]
+) -> dict[str, object]:
+    """Delete unused catalog entries after validating the complete request."""
+    normalized_ids = _normalized_ids(type_ids)
+    store = _store_module()
+    timestamp = store.now_iso()
+    if not normalized_ids:
+        return {"row_count": 0, "deleted_ids": [], "timestamp": timestamp}
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    with store.connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (project_id,)
+        ).fetchone():
+            raise ValueError("The selected project no longer exists.")
+        _ensure_quality_requirement_types(conn, project_id)
+        rows = conn.execute(
+            f"""SELECT id, label FROM quality_requirement_types
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *normalized_ids),
+        ).fetchall()
+        if {str(row["id"]) for row in rows} != set(normalized_ids):
+            raise ValueError(
+                "One or more selected Quality requirement Types no longer exist. "
+                "Refresh and try again."
+            )
+        protected = [
+            str(row["label"])
+            for row in rows
+            if str(row["label"]).casefold()
+            == PROTECTED_QUALITY_REQUIREMENT_TYPE.casefold()
+        ]
+        if protected:
+            raise ValueError(
+                "Torque is a permanent Quality requirement Type and cannot be deleted."
+            )
+        used_labels: list[str] = []
+        for row in rows:
+            count = int(
+                conn.execute(
+                    """SELECT COUNT(*) FROM quality_requirements
+                       WHERE project_id=?
+                         AND LOWER(TRIM(requirement_type))=LOWER(TRIM(?))""",
+                    (project_id, row["label"]),
+                ).fetchone()[0]
+            )
+            if count:
+                used_labels.append(str(row["label"]))
+        if used_labels:
+            raise ValueError(
+                "These Type entries cannot be deleted while Quality requirements use "
+                "them: " + ", ".join(used_labels) + "."
+            )
+        cursor = conn.execute(
+            f"""DELETE FROM quality_requirement_types
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *normalized_ids),
+        )
+        if int(cursor.rowcount) != len(normalized_ids):
+            raise ValueError(
+                "One or more selected Quality requirement Types changed. Refresh and try again."
+            )
+    return {
+        "row_count": len(normalized_ids),
+        "deleted_ids": normalized_ids,
+        "timestamp": timestamp,
+    }
+
+
 def quality_requirements(project_id: str) -> pd.DataFrame:
     """Return project-wide repository definitions with their assignment counts."""
     store = _store_module()
@@ -268,13 +653,18 @@ def save_quality_requirement(
         with store.connection() as conn:
             if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
                 raise ValueError("The active project no longer exists.")
+            _ensure_quality_requirement_types(conn, project_id)
             existing = conn.execute(
-                "SELECT 1 FROM quality_requirements WHERE id=? AND project_id=?",
+                "SELECT * FROM quality_requirements WHERE id=? AND project_id=?",
                 (requirement_id, project_id),
             ).fetchone()
             if supplied_id and not existing:
                 raise ValueError("That Quality requirement no longer exists.")
             if existing:
+                if str(existing["requirement_type"]) != validated["requirement_type"]:
+                    _validate_new_requirement_type(
+                        conn, project_id, validated["requirement_type"]
+                    )
                 _validate_torque_detail_parent_type(
                     conn,
                     project_id,
@@ -289,6 +679,9 @@ def save_quality_requirement(
                     (*validated.values(), timestamp, requirement_id, project_id),
                 )
             else:
+                _validate_new_requirement_type(
+                    conn, project_id, validated["requirement_type"]
+                )
                 conn.execute(
                     """INSERT INTO quality_requirements
                        (id, project_id, requirement_type, description, unique_identifier,
@@ -346,6 +739,7 @@ def save_quality_requirement_rows(
         with store.connection() as conn:
             if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
                 raise ValueError("The active project no longer exists.")
+            _ensure_quality_requirement_types(conn, project_id)
             existing_rows = conn.execute(
                 "SELECT * FROM quality_requirements WHERE project_id=?", (project_id,)
             ).fetchall()
@@ -373,6 +767,9 @@ def save_quality_requirement_rows(
             for row in prepared:
                 requirement_id = row["id"]
                 if not requirement_id:
+                    _validate_new_requirement_type(
+                        conn, project_id, row["requirement_type"]
+                    )
                     requirement_id = str(uuid4())
                     conn.execute(
                         """INSERT INTO quality_requirements
@@ -393,6 +790,10 @@ def save_quality_requirement_rows(
                 existing = existing_by_id[requirement_id]
                 if all(existing[field] == row[field] for field in fields):
                     continue
+                if existing["requirement_type"] != row["requirement_type"]:
+                    _validate_new_requirement_type(
+                        conn, project_id, row["requirement_type"]
+                    )
                 _validate_torque_detail_parent_type(
                     conn,
                     project_id,

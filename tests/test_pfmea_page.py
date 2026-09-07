@@ -17,6 +17,13 @@ PAGE_PATH = Path(__file__).resolve().parents[1] / "app_pages" / "functional_qual
 
 
 class PfmeaPageSmokeTests(unittest.TestCase):
+    def test_pfmea_classification_choices_use_product_safety(self) -> None:
+        self.assertEqual(
+            pfmea_ui.PFMEA_CLASSIFICATIONS,
+            ["", "Product Safety", "Critical Quality"],
+        )
+        self.assertNotIn("Safety", pfmea_ui.PFMEA_CLASSIFICATIONS)
+
     @staticmethod
     def _process_steps() -> tuple[pd.DataFrame, dict[str, pd.Series]]:
         steps = pd.DataFrame(
@@ -262,7 +269,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         rows = pd.DataFrame(
             [
                 {"item_number": "Pitch A", "potential_failure_mode": "Initial risk",
-                 "classification": "Safety", "severity": 10, "occurrence": 5,
+                 "classification": "Product Safety", "severity": 10, "occurrence": 5,
                  "detection": 3, "rpn": 150, "resulting_rpn": 80},
                 {"item_number": "Pitch B", "potential_failure_mode": "Resulting risk",
                  "classification": "Critical Quality", "severity": 8, "occurrence": 4,
@@ -273,6 +280,10 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             ]
         )
         filtered = pfmea_ui._high_risk_pfmea_rows(rows, 100)
+        self.assertEqual(
+            list(filtered.columns)[:3],
+            ["item_number", "process_function", "potential_failure_mode"],
+        )
         self.assertEqual(
             filtered["potential_failure_mode"].tolist(),
             ["Resulting risk", "Initial risk"],
@@ -567,7 +578,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                 "potential_failure_mode": "Housing loose",
                 "potential_effects": "Noise",
                 "severity": 8,
-                "classification": "Critical Quality",
+                "classification": "Product Safety",
                 "potential_causes": "Fastener loose",
                 "occurrence": 3,
                 "prevention_controls": ["quality:q-1", "manual:m-active", "manual:m-old"],
@@ -611,6 +622,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             duplicate["prevention_controls"], ["quality:q-1", "manual:m-active"]
         )
         self.assertEqual(duplicate["detection_controls"], ["quality:q-1"])
+        self.assertEqual(duplicate["classification"], "Product Safety")
         self.assertEqual(omitted, ["manual:m-old"])
         self.assertEqual(duplicate["actions_taken"], "")
         self.assertTrue(pd.isna(duplicate["resulting_rpn"]))
@@ -1067,6 +1079,11 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             patch.object(pfmea_ui, "pfmea_causes", return_value=causes),
             patch.object(pfmea_ui, "pfmea_actions", return_value=pd.DataFrame()),
             patch.object(pfmea_ui, "migrate_legacy_pfmea_controls", return_value={"row_count": 0}),
+            patch.object(
+                pfmea_ui,
+                "migrate_pfmea_safety_classification",
+                return_value={"row_count": 0},
+            ),
             patch.object(pfmea_ui, "pfmea_control_selections", return_value=pd.DataFrame()),
             patch.object(pfmea_ui, "pfmea_control_candidates", return_value=pd.DataFrame(
                 columns=["source_key", "label", "active"]
@@ -1080,6 +1097,21 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             app.session_state["quality_page_tabs_project-1"] = "PFMEA"
             app.run(timeout=15)
             self.assertEqual(app.number_input[0].value, 100)
+            high_risk_tables = [
+                widget.value
+                for widget in app.dataframe
+                if "Process Function" in widget.value.columns
+                and "Resulting RPN" in widget.value.columns
+            ]
+            self.assertEqual(len(high_risk_tables), 1)
+            self.assertEqual(
+                list(high_risk_tables[0].columns)[:3],
+                ["Item #", "Process Function", "Potential Failure Mode"],
+            )
+            self.assertEqual(
+                high_risk_tables[0].iloc[0]["Process Function"],
+                pfmea_ui._process_step_option_label(steps.iloc[0]),
+            )
             app.number_input[0].set_value(130).run(timeout=15)
 
         self.assertEqual(len(app.exception), 0)

@@ -669,11 +669,152 @@ class PfmeaStoreTests(unittest.TestCase):
         entries = pfmea_store.pfmea_entries(
             self.project_id, self.scenario_id, self.work_element_id
         )[["id", "potential_failure_mode", "class_code"]]
-        entries.loc[0, "class_code"] = "Legacy class"
-        with self.assertRaisesRegex(ValueError, "Safety, Critical Quality, or blank"):
+        entries.loc[0, "class_code"] = "Product Safety"
+        pfmea_store.save_pfmea_entry_rows(
+            self.project_id, self.scenario_id, self.work_element_id, entries
+        )
+        self.assertEqual(
+            pfmea_store.pfmea_entries(
+                self.project_id, self.scenario_id, self.work_element_id
+            ).iloc[0]["class_code"],
+            "Product Safety",
+        )
+        entries.loc[0, "class_code"] = "Safety"
+        with self.assertRaisesRegex(ValueError, "Product Safety, Critical Quality, or blank"):
             pfmea_store.save_pfmea_entry_rows(
                 self.project_id, self.scenario_id, self.work_element_id, entries
             )
+        entries.loc[0, "class_code"] = "Legacy class"
+        with self.assertRaisesRegex(ValueError, "Product Safety, Critical Quality, or blank"):
+            pfmea_store.save_pfmea_entry_rows(
+                self.project_id, self.scenario_id, self.work_element_id, entries
+            )
+
+    def test_safety_classification_migrates_once_across_project_scenarios(self) -> None:
+        entry_id = self.create_entry()
+        effect_id = pfmea_store.save_pfmea_effect_rows(
+            self.project_id,
+            self.scenario_id,
+            entry_id,
+            pd.DataFrame([
+                {"id": "", "effect_description": "Loss of function", "severity": 8,
+                 "sequence": 10}
+            ]),
+        )["created_ids"][0]
+        cause_id = pfmea_store.save_pfmea_cause_rows(
+            self.project_id,
+            self.scenario_id,
+            entry_id,
+            pd.DataFrame([
+                {"id": "", "cause_description": "Loose fastener", "occurrence": 3,
+                 "detection": 4, "sequence": 10}
+            ]),
+        )["created_ids"][0]
+        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
+        flat.loc[:, "severity"] = 8
+        flat.loc[:, "occurrence"] = 3
+        flat.loc[:, "detection"] = 4
+        flat.loc[:, "recommended_action"] = "Add rundown monitor"
+        flat.loc[:, "actions_taken"] = "Monitor installed"
+        flat.loc[:, "resulting_severity"] = 8
+        flat.loc[:, "resulting_occurrence"] = 2
+        flat.loc[:, "resulting_detection"] = 2
+        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE pfmea_entries SET class_code='Safety', updated_at='2026-01-01T00:00:00+00:00' WHERE id=?",
+                (entry_id,),
+            )
+        cloned_scenario_id = store.clone_planning_scenario(
+            self.project_id, self.scenario_id, "Alternate", "B", 55
+        )
+        cloned_entry = pfmea_store.pfmea_entries(self.project_id, cloned_scenario_id).iloc[0]
+        cloned_entry_id = str(cloned_entry["id"])
+        self.assertEqual(cloned_entry["class_code"], "Safety")
+        with store.connection() as conn:
+            conn.execute(
+                """UPDATE pfmea_entries SET updated_at='2026-01-01T00:00:00+00:00'
+                   WHERE project_id=? AND class_code='Safety'""",
+                (self.project_id,),
+            )
+
+        before = {
+            table: [tuple(row) for row in self.conn.execute(
+                f"SELECT * FROM {table} ORDER BY id"
+            ).fetchall()]
+            for table in ("pfmea_effects", "pfmea_causes", "pfmea_risk_rows", "pfmea_actions")
+        }
+        before_entries = {
+            str(row["id"]): dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM pfmea_entries WHERE project_id=? ORDER BY id",
+                (self.project_id,),
+            ).fetchall()
+        }
+        with self.assertRaisesRegex(ValueError, "Current editor"):
+            pfmea_store.migrate_pfmea_safety_classification(self.project_id, "")
+        result = pfmea_store.migrate_pfmea_safety_classification(
+            self.project_id, "Nicole Ervin"
+        )
+        self.assertEqual(result["row_count"], 2)
+        self.assertEqual(set(result["entry_ids"]), {entry_id, cloned_entry_id})
+
+        after_entries = {
+            str(row["id"]): dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM pfmea_entries WHERE project_id=? ORDER BY id",
+                (self.project_id,),
+            ).fetchall()
+        }
+        for migrated_id in (entry_id, cloned_entry_id):
+            self.assertEqual(after_entries[migrated_id]["class_code"], "Product Safety")
+            self.assertNotEqual(
+                after_entries[migrated_id]["updated_at"],
+                before_entries[migrated_id]["updated_at"],
+            )
+            unchanged_before = dict(before_entries[migrated_id])
+            unchanged_after = dict(after_entries[migrated_id])
+            for field in ("class_code", "updated_at"):
+                unchanged_before.pop(field)
+                unchanged_after.pop(field)
+            self.assertEqual(unchanged_after, unchanged_before)
+        after = {
+            table: [tuple(row) for row in self.conn.execute(
+                f"SELECT * FROM {table} ORDER BY id"
+            ).fetchall()]
+            for table in ("pfmea_effects", "pfmea_causes", "pfmea_risk_rows", "pfmea_actions")
+        }
+        self.assertEqual(after, before)
+        audit = self.conn.execute(
+            """SELECT action, row_count, editor_name, details FROM audit_log
+               WHERE project_id=? AND table_name='PFMEA'
+                 AND action='Migrate Classification'""",
+            (self.project_id,),
+        ).fetchall()
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["row_count"], 2)
+        self.assertEqual(audit[0]["editor_name"], "Nicole Ervin")
+        self.assertIn('"old_value": "Safety"', audit[0]["details"])
+        self.assertIn('"new_value": "Product Safety"', audit[0]["details"])
+        self.assertIn('"store_timestamp":', audit[0]["details"])
+        repeated = pfmea_store.migrate_pfmea_safety_classification(
+            self.project_id, "Nicole Ervin"
+        )
+        self.assertEqual(repeated["row_count"], 0)
+        self.assertEqual(self.conn.execute(
+            """SELECT COUNT(*) FROM audit_log WHERE project_id=? AND table_name='PFMEA'
+               AND action='Migrate Classification'""",
+            (self.project_id,),
+        ).fetchone()[0], 1)
+        post_migration_clone = store.clone_planning_scenario(
+            self.project_id, self.scenario_id, "Post-migration clone", "C", 50
+        )
+        self.assertEqual(
+            pfmea_store.pfmea_entries(self.project_id, post_migration_clone).iloc[0][
+                "class_code"
+            ],
+            "Product Safety",
+        )
 
     def test_process_step_deletion_is_restricted_until_pfmea_is_removed(self) -> None:
         entry_id = self.create_entry()
@@ -937,7 +1078,7 @@ class PfmeaStoreTests(unittest.TestCase):
             )
         requirement_id = quality_store.save_quality_requirement(
             self.project_id,
-            {"requirement_type": "Vision validation", "description": "Other check",
+            {"requirement_type": "Vision system", "description": "Other check",
              "unique_identifier": "VS-002", "pass_fail": True,
              "target_value": None, "tolerances": "", "unit": ""},
         )
@@ -971,7 +1112,7 @@ class PfmeaStoreTests(unittest.TestCase):
             )
         requirement_id = quality_store.save_quality_requirement(
             self.project_id,
-            {"requirement_type": "Dimension", "description": "Wrong-step check",
+            {"requirement_type": "Dimensional", "description": "Wrong-step check",
              "unique_identifier": "DIM-OTHER", "pass_fail": False,
              "target_value": 1, "tolerances": "+/- 0.1", "unit": "in"},
         )

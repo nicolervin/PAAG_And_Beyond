@@ -85,6 +85,7 @@ class QualityStoreTests(unittest.TestCase):
                 "quality_requirements",
                 "quality_requirement_assignments",
                 "quality_requirement_torque_details",
+                "quality_requirement_types",
             },
         )
 
@@ -128,7 +129,7 @@ class QualityStoreTests(unittest.TestCase):
         non_torque_id = quality_store.save_quality_requirement(
             self.project_id,
             self.requirement_values(
-                requirement_type="Vision", unique_identifier="VS-001"
+                requirement_type="Vision system", unique_identifier="VS-001"
             ),
         )
         with self.assertRaisesRegex(ValueError, "only be saved for a Torque"):
@@ -174,14 +175,14 @@ class QualityStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "before changing this requirement's Type"):
             quality_store.save_quality_requirement(
                 self.project_id,
-                self.requirement_values(requirement_type="Vision"),
+                self.requirement_values(requirement_type="Vision system"),
                 requirement_id,
             )
         edited_repository = quality_store.quality_requirements(self.project_id)
         edited_repository.loc[
             edited_repository["id"].astype(str).eq(requirement_id),
             "requirement_type",
-        ] = "Vision"
+        ] = "Vision system"
         with self.assertRaisesRegex(ValueError, "before changing this requirement's Type"):
             quality_store.save_quality_requirement_rows(
                 self.project_id,
@@ -410,7 +411,7 @@ class QualityStoreTests(unittest.TestCase):
         second_requirement_id = quality_store.save_quality_requirement(
             self.project_id,
             self.requirement_values(
-                requirement_type="Vision",
+                requirement_type="Vision system",
                 description="Confirm the screw is fully seated",
                 unique_identifier="VS-001",
                 target_value=None,
@@ -641,6 +642,158 @@ class QualityStoreTests(unittest.TestCase):
         self.assertEqual(cloned.iloc[0]["quality_requirement_id"], requirement_id)
         self.assertNotEqual(cloned.iloc[0]["work_element_id"], self.work_element_id)
         self.assertEqual(cloned.iloc[0]["scenario_id"], new_scenario_id)
+
+    def test_type_catalog_seeds_defaults_and_exact_legacy_values_idempotently(self) -> None:
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO quality_requirements
+                   (id, project_id, requirement_type, description, unique_identifier,
+                    pass_fail, target_value, tolerances, unit, created_at, updated_at)
+                   VALUES ('legacy-quality', ?, 'Legacy Custom', 'Legacy check',
+                           'LEG-001', 0, NULL, '', '', ?, ?)""",
+                (self.project_id, timestamp, timestamp),
+            )
+
+        first = quality_store.quality_requirement_types(self.project_id)
+        second = quality_store.quality_requirement_types(self.project_id)
+
+        self.assertEqual(
+            set(first["label"]),
+            {
+                "Dimensional",
+                "Present and fully seated",
+                "Torque",
+                "Vision system",
+                "Legacy Custom",
+            },
+        )
+        self.assertEqual(first["id"].tolist(), second["id"].tolist())
+        legacy = first.loc[first["label"].eq("Legacy Custom")].iloc[0]
+        self.assertEqual(int(legacy["requirement_count"]), 1)
+
+    def test_type_catalog_rejects_case_insensitive_duplicates(self) -> None:
+        catalog = quality_store.quality_requirement_types(self.project_id)
+        duplicate = pd.concat(
+            [
+                catalog[["id", "label", "active"]],
+                pd.DataFrame([{"id": "", "label": "torque", "active": True}]),
+            ],
+            ignore_index=True,
+        )
+        with self.assertRaisesRegex(ValueError, "unique within the project"):
+            quality_store.save_quality_requirement_type_rows(
+                self.project_id, duplicate
+            )
+
+    def test_inactive_type_is_preserved_but_cannot_be_newly_assigned(self) -> None:
+        requirement_id = quality_store.save_quality_requirement(
+            self.project_id,
+            self.requirement_values(
+                requirement_type="Vision system", unique_identifier="VS-001"
+            ),
+        )
+        catalog = quality_store.quality_requirement_types(self.project_id)
+        catalog.loc[catalog["label"].eq("Vision system"), "active"] = 0
+        quality_store.save_quality_requirement_type_rows(
+            self.project_id, catalog[["id", "label", "active"]]
+        )
+
+        quality_store.save_quality_requirement(
+            self.project_id,
+            self.requirement_values(
+                requirement_type="Vision system",
+                unique_identifier="VS-001",
+                description="Updated existing vision check",
+            ),
+            requirement_id,
+        )
+        with self.assertRaisesRegex(ValueError, "Choose an active Type"):
+            quality_store.save_quality_requirement(
+                self.project_id,
+                self.requirement_values(
+                    requirement_type="Vision system", unique_identifier="VS-002"
+                ),
+            )
+
+    def test_confirmed_in_use_type_rename_marks_assignments_pending(self) -> None:
+        requirement_id = quality_store.save_quality_requirement(
+            self.project_id,
+            self.requirement_values(
+                requirement_type="Vision system", unique_identifier="VS-001"
+            ),
+        )
+        quality_store.assign_quality_requirement(
+            self.project_id,
+            self.scenario_id,
+            self.work_element_id,
+            requirement_id,
+        )
+        catalog = quality_store.quality_requirement_types(self.project_id)
+        catalog.loc[catalog["label"].eq("Vision system"), "label"] = "Machine vision"
+        edited = catalog[["id", "label", "active"]]
+
+        impact = quality_store.quality_requirement_type_rename_impact(
+            self.project_id, edited
+        )
+        self.assertEqual(impact[0]["requirement_count"], 1)
+        with self.assertRaisesRegex(ValueError, "Confirm the in-use Type rename"):
+            quality_store.save_quality_requirement_type_rows(self.project_id, edited)
+
+        result = quality_store.save_quality_requirement_type_rows(
+            self.project_id, edited, confirm_in_use_renames=True
+        )
+        requirement = quality_store.quality_requirements(self.project_id).iloc[0]
+        assignment = quality_store.quality_requirement_assignments(
+            self.project_id, self.scenario_id
+        ).iloc[0]
+        self.assertEqual(requirement["requirement_type"], "Machine vision")
+        self.assertEqual(assignment["requirement_type"], "Vision system")
+        self.assertEqual(int(assignment["repository_update_pending"]), 1)
+        self.assertEqual(result["renamed_requirement_ids"], [requirement_id])
+
+    def test_torque_is_protected_and_used_or_unused_deletion_is_safe(self) -> None:
+        catalog = quality_store.quality_requirement_types(self.project_id)
+        torque_id = str(catalog.loc[catalog["label"].eq("Torque"), "id"].iloc[0])
+        torque_edit = catalog[["id", "label", "active"]].copy()
+        torque_edit.loc[torque_edit["id"].eq(torque_id), "active"] = 0
+        with self.assertRaisesRegex(ValueError, "permanent"):
+            quality_store.save_quality_requirement_type_rows(
+                self.project_id, torque_edit
+            )
+        with self.assertRaisesRegex(ValueError, "permanent"):
+            quality_store.delete_quality_requirement_types(
+                self.project_id, [torque_id]
+            )
+
+        used_id = quality_store.save_quality_requirement(
+            self.project_id,
+            self.requirement_values(
+                requirement_type="Vision system", unique_identifier="VS-001"
+            ),
+        )
+        self.assertTrue(used_id)
+        refreshed = quality_store.quality_requirement_types(self.project_id)
+        vision_id = str(
+            refreshed.loc[refreshed["label"].eq("Vision system"), "id"].iloc[0]
+        )
+        unused_id = str(
+            refreshed.loc[
+                refreshed["label"].eq("Present and fully seated"), "id"
+            ].iloc[0]
+        )
+        with self.assertRaisesRegex(ValueError, "while Quality requirements use"):
+            quality_store.delete_quality_requirement_types(
+                self.project_id, [vision_id]
+            )
+        result = quality_store.delete_quality_requirement_types(
+            self.project_id, [unused_id]
+        )
+        self.assertEqual(result["deleted_ids"], [unused_id])
+        self.assertNotIn(
+            "Present and fully seated",
+            quality_store.quality_requirement_types(self.project_id)["label"].tolist(),
+        )
 
 
 if __name__ == "__main__":

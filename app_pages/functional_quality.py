@@ -3,12 +3,14 @@ import streamlit as st
 
 from utils.pfmea_ui import render_pfmea_tab
 from utils.quality_store import (
+    PROTECTED_QUALITY_REQUIREMENT_TYPE,
     TORQUE_TOOL_ORIENTATIONS,
     TORQUE_TOOL_TYPES,
     assign_quality_requirement,
     bulk_update_quality_requirement_pass_fail,
     delete_quality_requirement_assignments,
     delete_quality_requirement_torque_details,
+    delete_quality_requirement_types,
     delete_quality_requirements,
     push_quality_requirements,
     quality_assignment_pfmea_impact,
@@ -16,12 +18,15 @@ from utils.quality_store import (
     quality_requirement_assignment,
     quality_requirement_links,
     quality_requirement_torque_details,
+    quality_requirement_type_rename_impact,
+    quality_requirement_types,
     quality_requirements,
     save_quality_requirement_torque_detail,
+    save_quality_requirement_type_rows,
     save_quality_requirement_rows,
     torque_screw_bit_types,
 )
-from utils.scope_ui import page_title_with_scope, section_heading_with_scope
+from utils.scope_ui import page_title_with_scope, scope_badge, section_heading_with_scope
 from utils.store import audit_history, planning_scenarios, record_audit_event
 from utils.table_filters import (
     apply_pending_table_editor_reset,
@@ -37,6 +42,7 @@ from utils.table_ui import (
     editable_table_heading,
     native_selected_rows,
     required_field_errors,
+    selected_dataframe_rows,
     selected_rows_action_bar,
     selectable_dataframe,
     stage_native_delete_confirmation,
@@ -51,7 +57,23 @@ def render_quality_history(project_id: str) -> None:
             ["Requirements", "PFMEA"], key=f"quality_history_tabs_{project_id}"
         )
         with requirements_history_tab:
-            history = audit_history(project_id, "Quality requirements", limit=50)
+            history_groups: list[pd.DataFrame] = []
+            for table_name, workflow in [
+                ("Quality requirements", "Quality requirements"),
+                ("Quality requirement types", "Quality requirement types"),
+            ]:
+                table_history = audit_history(project_id, table_name, limit=50)
+                if not table_history.empty:
+                    table_history = table_history.copy()
+                    table_history.insert(0, "workflow", workflow)
+                    history_groups.append(table_history)
+            history = (
+                pd.concat(history_groups, ignore_index=True)
+                .sort_values("created_at", ascending=False, kind="stable")
+                .head(50)
+                if history_groups
+                else pd.DataFrame()
+            )
             if history.empty:
                 st.caption("No Quality requirement changes have been recorded yet.")
             else:
@@ -60,6 +82,7 @@ def render_quality_history(project_id: str) -> None:
                     key=f"quality_requirements_history_{project_id}",
                     hide_index=True,
                     column_config={
+                        "workflow": "Workflow",
                         "action": "Action",
                         "row_count": "Rows",
                         "editor_name": "Editor",
@@ -88,6 +111,316 @@ def render_quality_history(project_id: str) -> None:
                 )
 
 
+def render_quality_requirement_type_catalog(
+    project_id: str,
+    *,
+    repository_editor_key: str,
+    repository_busy: bool,
+) -> None:
+    """Render the project-wide controlled Type catalog and confirmed workflows."""
+    types = quality_requirement_types(project_id)
+    if types.empty:
+        types = pd.DataFrame(
+            {
+                "id": pd.Series(dtype="string"),
+                "project_id": pd.Series(dtype="string"),
+                "label": pd.Series(dtype="string"),
+                "active": pd.Series(dtype="bool"),
+                "requirement_count": pd.Series(dtype="int64"),
+                "created_at": pd.Series(dtype="string"),
+                "updated_at": pd.Series(dtype="string"),
+            }
+        )
+    else:
+        types = types.copy()
+        types["active"] = types["active"].fillna(0).astype(bool)
+        types["requirement_count"] = (
+            pd.to_numeric(types["requirement_count"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+
+    logical_key = f"quality_requirement_types_editor_{project_id}"
+    type_editor_key = apply_pending_table_editor_reset(logical_key)
+    pending_rename_key = f"quality_requirement_types_pending_rename_{project_id}"
+    pending_delete_key = f"quality_requirement_types_pending_delete_{project_id}"
+
+    def save_types(edited_rows: pd.DataFrame, *, confirm_renames: bool) -> None:
+        result = save_quality_requirement_type_rows(
+            project_id,
+            edited_rows.reindex(columns=["id", "label", "active"]),
+            confirm_in_use_renames=confirm_renames,
+        )
+        changed_count = int(result["row_count"])
+        affected_requirements = list(result["renamed_requirement_ids"])
+        if changed_count or affected_requirements:
+            record_audit_event(
+                project_id,
+                "Quality requirement types",
+                "Save & Refresh",
+                changed_count + len(affected_requirements),
+                st.session_state.get("current_editor", ""),
+                {
+                    "created_ids": result["created_ids"],
+                    "updated_ids": result["updated_ids"],
+                    "renamed_requirement_ids": affected_requirements,
+                    "rename_mapping": result["rename_mapping"],
+                    "store_timestamp": result["timestamp"],
+                },
+            )
+        request_table_editor_reset(type_editor_key)
+        request_table_editor_reset(repository_editor_key)
+        st.toast(
+            (
+                "Saved Quality requirement Types"
+                if changed_count or affected_requirements
+                else "Quality requirement Types are already up to date"
+            ),
+            icon=":material/check_circle:",
+        )
+        st.rerun()
+
+    with st.expander("Manage Quality requirement types", icon=":material/settings:"):
+        badge_row = st.container(horizontal=True, vertical_alignment="center")
+        badge_row.caption(
+            "Maintain the reusable Type choices offered by the Quality requirements table."
+        )
+        scope_badge(badge_row, scope="project")
+        visible_types = filter_table(
+            types,
+            key=f"quality_requirement_types_filters_{project_id}",
+            dropdown_columns=["active"],
+            search_columns=["label"],
+            labels={"label": "Label", "active": "Active"},
+            reset_widget_keys=[type_editor_key],
+        )
+        type_editor_rows = direct_entry_editor_rows(
+            visible_types,
+            editor_key=type_editor_key,
+            sort_columns=["label", "active", "requirement_count"],
+            labels={
+                "label": "Label",
+                "active": "Active",
+                "requirement_count": "Quality requirements",
+            },
+        )
+        new_rows = type_editor_rows["id"].fillna("").astype(str).str.strip().eq("")
+        type_editor_rows.loc[new_rows, "active"] = True
+        edited_types = st.data_editor(
+            type_editor_rows,
+            key=type_editor_key,
+            num_rows="dynamic",
+            hide_index=True,
+            column_order=["label", "active", "requirement_count"],
+            disabled=["requirement_count"],
+            column_config={
+                "id": None,
+                "project_id": None,
+                "created_at": None,
+                "updated_at": None,
+                "label": st.column_config.TextColumn(
+                    "Label",
+                    required=True,
+                    help=(
+                        "This text appears in the Quality requirement Type dropdown. "
+                        "Renaming an in-use label requires confirmation."
+                    ),
+                ),
+                "active": st.column_config.CheckboxColumn(
+                    "Active",
+                    help=(
+                        "Inactive Types remain on existing requirements but cannot be "
+                        "assigned to new or changed requirements."
+                    ),
+                ),
+                "requirement_count": st.column_config.NumberColumn(
+                    "Quality requirements",
+                    disabled=True,
+                    help="Number of repository requirements currently using this Type.",
+                ),
+            },
+        )
+        footer = editable_table_footer(
+            editor_key=type_editor_key,
+            key_prefix=f"quality_requirement_types_{project_id}",
+            native_row_selection=True,
+        )
+        if footer.undo:
+            st.session_state.pop(pending_rename_key, None)
+            request_table_editor_reset(type_editor_key)
+            st.toast("Discarded the unsaved Type catalog edits", icon=":material/undo:")
+            st.rerun()
+
+        st.download_button(
+            "Export filtered rows",
+            data=dataframe_to_excel(
+                visible_types[["label", "active", "requirement_count"]],
+                "Quality requirement types",
+            ),
+            file_name="quality_requirement_types.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            icon=":material/download:",
+            key=f"quality_requirement_types_export_{project_id}",
+        )
+
+        selected_types = native_selected_rows(
+            type_editor_rows, editor_key=type_editor_key
+        )
+        if not selected_types.empty:
+            if repository_busy or table_has_unsaved_changes(
+                type_editor_key, native_row_selection=True
+            ):
+                st.warning(
+                    "Save or undo other repository and Type catalog edits before deleting "
+                    "selected Types."
+                )
+            elif not st.session_state.get(pending_delete_key):
+                st.session_state[pending_delete_key] = [
+                    {
+                        "id": str(row["id"]),
+                        "label": str(row["label"]),
+                        "requirement_count": int(row.get("requirement_count") or 0),
+                        "protected": str(row["label"]).casefold()
+                        == PROTECTED_QUALITY_REQUIREMENT_TYPE.casefold(),
+                    }
+                    for _, row in selected_types.iterrows()
+                ]
+                stage_native_delete_confirmation(type_editor_key)
+
+        if footer.save_and_refresh:
+            if repository_busy:
+                st.warning(
+                    "Save or undo Quality requirement edits and clear repository row "
+                    "selections before changing the Type catalog."
+                )
+            elif not selected_types.empty:
+                st.warning("Clear selected Type rows before saving catalog edits.")
+            else:
+                try:
+                    cleaned_types = drop_untouched_new_rows(
+                        edited_types, identifying_columns=["label"]
+                    )
+                    validation_errors = required_field_errors(
+                        cleaned_types, {"label": "Label"}
+                    )
+                    if validation_errors:
+                        raise ValueError(" ".join(validation_errors))
+                    complete_types = merge_filtered_edits(
+                        types, visible_types, cleaned_types
+                    )
+                    rename_impact = quality_requirement_type_rename_impact(
+                        project_id,
+                        complete_types.reindex(columns=["id", "label", "active"]),
+                    )
+                    if rename_impact:
+                        st.session_state[pending_rename_key] = {
+                            "rows": complete_types[
+                                ["id", "label", "active"]
+                            ].to_dict("records"),
+                            "impact": rename_impact,
+                        }
+                    else:
+                        save_types(complete_types, confirm_renames=False)
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    @st.dialog("Rename in-use Quality requirement Types?", dismissible=False)
+    def confirm_type_renames() -> None:
+        pending = st.session_state.get(pending_rename_key) or {}
+        impact = list(pending.get("impact") or [])
+        st.warning(
+            "Confirm these Type renames. Matching repository requirements will change, "
+            "but linked Process-step copies will wait for the existing push action."
+        )
+        for item in impact:
+            st.write(
+                f"- {item['old_label']} → {item['new_label']} — "
+                f"{item['requirement_count']} Quality requirement(s)"
+            )
+        actions = st.container(horizontal=True)
+        if actions.button(
+            "Cancel", key=f"cancel_quality_requirement_type_rename_{project_id}"
+        ):
+            st.session_state.pop(pending_rename_key, None)
+            st.rerun()
+        if actions.button(
+            "Confirm rename",
+            type="primary",
+            icon=":material/edit:",
+            key=f"confirm_quality_requirement_type_rename_{project_id}",
+        ):
+            try:
+                pending_rows = pd.DataFrame(pending.get("rows") or [])
+                save_types(pending_rows, confirm_renames=True)
+            except ValueError as exc:
+                st.error(str(exc))
+
+    @st.dialog("Delete selected Quality requirement Types?", dismissible=False)
+    def confirm_type_delete() -> None:
+        pending = list(st.session_state.get(pending_delete_key) or [])
+        st.warning(
+            f"Delete {len(pending)} selected Type catalog entry or entries? "
+            "Quality requirements are preserved."
+        )
+        for item in pending:
+            st.write(
+                f"- {item['label']} — {item['requirement_count']} Quality requirement(s)"
+            )
+        blocked = any(
+            bool(item["protected"]) or int(item["requirement_count"]) > 0
+            for item in pending
+        )
+        if any(bool(item["protected"]) for item in pending):
+            st.error("Torque is permanent and cannot be deleted.")
+        if any(int(item["requirement_count"]) > 0 for item in pending):
+            st.error("A Type cannot be deleted while Quality requirements use it.")
+        actions = st.container(horizontal=True)
+        if actions.button(
+            "Cancel", key=f"cancel_quality_requirement_type_delete_{project_id}"
+        ):
+            st.session_state.pop(pending_delete_key, None)
+            request_table_editor_reset(type_editor_key)
+            st.rerun()
+        if actions.button(
+            "Delete",
+            type="primary",
+            icon=":material/delete:",
+            disabled=blocked,
+            key=f"destructive_confirm_quality_requirement_type_delete_{project_id}",
+        ):
+            try:
+                result = delete_quality_requirement_types(
+                    project_id, [str(item["id"]) for item in pending]
+                )
+                record_audit_event(
+                    project_id,
+                    "Quality requirement types",
+                    "Bulk delete",
+                    int(result["row_count"]),
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "deleted_ids": result["deleted_ids"],
+                        "labels": [item["label"] for item in pending],
+                        "store_timestamp": result["timestamp"],
+                    },
+                )
+                st.session_state.pop(pending_delete_key, None)
+                request_table_editor_reset(type_editor_key)
+                request_table_editor_reset(repository_editor_key)
+                st.toast(
+                    f"Deleted {result['row_count']} Quality requirement Type(s)",
+                    icon=":material/delete:",
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    if st.session_state.get(pending_rename_key):
+        confirm_type_renames()
+    elif st.session_state.get(pending_delete_key):
+        confirm_type_delete()
+
+
 project_id = st.session_state.get("project_id")
 page_title_with_scope(
     "Quality",
@@ -106,6 +439,8 @@ if not project_id:
 
 logical_editor_key = f"quality_requirements_editor_{project_id}"
 editor_key = apply_pending_table_editor_reset(logical_editor_key)
+logical_bulk_selector_key = f"quality_requirements_bulk_selector_{project_id}"
+bulk_selector_key = apply_pending_table_editor_reset(logical_bulk_selector_key)
 pending_delete_key = f"quality_requirements_pending_delete_{project_id}"
 pending_push_key = f"quality_requirements_pending_push_{project_id}"
 pending_unlink_key = f"quality_requirement_pending_unlink_{project_id}"
@@ -149,6 +484,7 @@ table_columns = [
     "torque_detail_count",
 ]
 requirements = quality_requirements(project_id)
+requirement_type_catalog = quality_requirement_types(project_id)
 if requirements.empty:
     requirements = pd.DataFrame(
         {
@@ -181,7 +517,40 @@ else:
             .astype(int)
         )
 
+catalog_by_key = {
+    str(row["label"]).strip().casefold(): row
+    for _, row in requirement_type_catalog.iterrows()
+}
+active_type_labels = [
+    str(row["label"])
+    for _, row in requirement_type_catalog.iterrows()
+    if bool(row.get("active"))
+]
+preserved_type_labels = [
+    str(value).strip()
+    for value in requirements.get("requirement_type", pd.Series(dtype="string"))
+    if str(value).strip()
+]
+type_options = list(dict.fromkeys([*active_type_labels, *preserved_type_labels]))
+type_status_warnings: list[str] = []
+for _, row in requirements.iterrows():
+    current_type = str(row.get("requirement_type") or "").strip()
+    catalog_row = catalog_by_key.get(current_type.casefold())
+    if catalog_row is not None and bool(catalog_row.get("active")):
+        continue
+    status = "inactive" if catalog_row is not None else "not in the Type catalog"
+    type_status_warnings.append(
+        f"{row.get('unique_identifier') or 'No identifier'} — {current_type or 'Blank'} "
+        f"({status})"
+    )
+
 editable_table_heading("Quality requirements")
+if type_status_warnings:
+    st.warning(
+        "These saved requirements retain Types that cannot be newly assigned. Choose an "
+        "active Type when deliberately reconciling them:\n\n"
+        + "\n".join(f"- {warning}" for warning in type_status_warnings)
+    )
 visible_requirements = filter_table(
     requirements,
     key=f"quality_requirements_filters_{project_id}",
@@ -190,7 +559,7 @@ visible_requirements = filter_table(
         "requirement_type", "description", "unique_identifier", "tolerances", "unit",
     ],
     labels={"requirement_type": "Type", "unit": "Unit"},
-    reset_widget_keys=[editor_key],
+    reset_widget_keys=[editor_key, bulk_selector_key],
 )
 editor_rows = direct_entry_editor_rows(
     visible_requirements,
@@ -224,11 +593,11 @@ edited_requirements = st.data_editor(
     ],
     column_config={
         "id": None,
-        "requirement_type": st.column_config.TextColumn(
-            "Type", required=True, pinned=True,
+        "requirement_type": st.column_config.SelectboxColumn(
+            "Type", options=type_options, required=True, pinned=True,
             help=(
-                "Describe the kind of check, such as dimensional, torque, present and "
-                "fully seated, or vision-system validation."
+                "Choose an active project Type. Existing inactive or unmatched values "
+                "remain visible but cannot be assigned to another requirement."
             ),
         ),
         "description": st.column_config.TextColumn(
@@ -305,60 +674,103 @@ st.download_button(
     icon=":material/download:",
 )
 
-selected_requirements = native_selected_rows(editor_rows, editor_key=editor_key)
-bulk_controls = selected_rows_action_bar()
-bulk_pass_fail = bulk_controls.selectbox(
-    "Pass/fail setting for selected requirements",
-    options=["Keep current", "Pass/fail check", "Measured value"],
-    key=f"quality_requirements_bulk_pass_fail_{project_id}",
-    help="Apply one Pass/fail setting to every selected Quality requirement.",
+selected_requirements_for_deletion = native_selected_rows(
+    editor_rows, editor_key=editor_key
 )
-apply_bulk_pass_fail = bulk_controls.button(
-    f"Apply to selected ({len(selected_requirements)})",
-    type="primary",
-    icon=":material/checklist:",
-    disabled=selected_requirements.empty or bulk_pass_fail == "Keep current",
-    key=f"quality_requirements_apply_bulk_pass_fail_{project_id}",
+repository_has_unsaved_edits = table_has_unsaved_changes(
+    editor_key, native_row_selection=True
 )
+with st.expander("Bulk edit Pass/fail"):
+    st.caption(
+        "Select saved requirements from this read-only list, then apply one "
+        "Pass/fail setting to all selected rows."
+    )
+    bulk_selector_rows = visible_requirements.reset_index(drop=True).copy()
+    bulk_selection_event = selectable_dataframe(
+        bulk_selector_rows,
+        key=bulk_selector_key,
+        hide_index=True,
+        column_order=[
+            "unique_identifier", "description", "requirement_type", "pass_fail",
+        ],
+        column_config={
+            "id": None,
+            "unique_identifier": st.column_config.TextColumn("Unique identifier"),
+            "description": st.column_config.TextColumn("Description", width="large"),
+            "requirement_type": st.column_config.TextColumn("Type"),
+            "pass_fail": st.column_config.CheckboxColumn("Pass/fail"),
+        },
+    )
+    bulk_selected_requirements = selected_dataframe_rows(
+        bulk_selector_rows, bulk_selection_event
+    )
+    bulk_controls = selected_rows_action_bar()
+    bulk_pass_fail = bulk_controls.selectbox(
+        "Pass/fail setting for selected requirements",
+        options=["Keep current", "Pass/fail check", "Measured value"],
+        key=f"quality_requirements_bulk_pass_fail_{project_id}",
+        help="Apply one Pass/fail setting to every selected Quality requirement.",
+    )
+    bulk_action_blocked = (
+        repository_has_unsaved_edits
+        or not selected_requirements_for_deletion.empty
+    )
+    apply_bulk_pass_fail = bulk_controls.button(
+        f"Apply to selected ({len(bulk_selected_requirements)})",
+        type="primary",
+        icon=":material/checklist:",
+        disabled=(
+            bulk_selected_requirements.empty
+            or bulk_pass_fail == "Keep current"
+            or bulk_action_blocked
+        ),
+        key=f"quality_requirements_apply_bulk_pass_fail_{project_id}",
+    )
+    if repository_has_unsaved_edits:
+        st.info("Save or undo repository table edits before applying a bulk change.")
+    elif not selected_requirements_for_deletion.empty:
+        st.info(
+            "Cancel or finish the pending repository row deletion before applying "
+            "a bulk change."
+        )
 
 if apply_bulk_pass_fail:
-    if table_has_unsaved_changes(editor_key, native_row_selection=True):
-        st.warning("Save or undo other table edits before applying a bulk change.")
-    else:
-        try:
-            selected_ids = selected_requirements["id"].astype(str).tolist()
-            result = bulk_update_quality_requirement_pass_fail(
+    try:
+        selected_ids = bulk_selected_requirements["id"].astype(str).tolist()
+        result = bulk_update_quality_requirement_pass_fail(
+            project_id,
+            selected_ids,
+            pass_fail=bulk_pass_fail == "Pass/fail check",
+        )
+        changed_count = int(result["row_count"])
+        if changed_count:
+            record_audit_event(
                 project_id,
-                selected_ids,
-                pass_fail=bulk_pass_fail == "Pass/fail check",
+                "Quality requirements",
+                "Bulk edit",
+                changed_count,
+                st.session_state.get("current_editor", ""),
+                {
+                    "requirement_ids": result["updated_ids"],
+                    "pass_fail": bulk_pass_fail == "Pass/fail check",
+                    "store_timestamp": result["timestamp"],
+                },
             )
-            changed_count = int(result["row_count"])
-            if changed_count:
-                record_audit_event(
-                    project_id,
-                    "Quality requirements",
-                    "Bulk edit",
-                    changed_count,
-                    st.session_state.get("current_editor", ""),
-                    {
-                        "requirement_ids": result["updated_ids"],
-                        "pass_fail": bulk_pass_fail == "Pass/fail check",
-                        "store_timestamp": result["timestamp"],
-                    },
-                )
-            request_table_editor_reset(editor_key)
-            st.toast(
-                (
-                    f"Updated {changed_count} Quality requirement(s)"
-                    if changed_count
-                    else "Selected Quality requirements are already up to date"
-                ),
-                icon=":material/check_circle:",
-            )
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
-elif not selected_requirements.empty:
+        request_table_editor_reset(editor_key)
+        request_table_editor_reset(bulk_selector_key)
+        st.toast(
+            (
+                f"Updated {changed_count} Quality requirement(s)"
+                if changed_count
+                else "Selected Quality requirements are already up to date"
+            ),
+            icon=":material/check_circle:",
+        )
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
+
+if not selected_requirements_for_deletion.empty:
     if table_has_unsaved_changes(editor_key, native_row_selection=True):
         st.warning(
             "Save or undo other table edits before deleting selected Quality requirements."
@@ -372,7 +784,7 @@ elif not selected_requirements.empty:
                 "assignment_count": int(row.get("assignment_count") or 0),
                 "torque_detail_count": int(row.get("torque_detail_count") or 0),
             }
-            for _, row in selected_requirements.iterrows()
+            for _, row in selected_requirements_for_deletion.iterrows()
         ]
         stage_native_delete_confirmation(editor_key)
 
@@ -438,7 +850,7 @@ if st.session_state.get(pending_delete_key):
 
 if footer_actions.save_and_refresh:
     try:
-        if not selected_requirements.empty:
+        if not selected_requirements_for_deletion.empty:
             raise ValueError(
                 "Clear selected rows before saving table edits. Selection is reserved "
                 "for the confirmed deletion workflow."
@@ -494,6 +906,14 @@ if footer_actions.save_and_refresh:
 
 has_unsaved_edits = table_has_unsaved_changes(
     editor_key, native_row_selection=True
+)
+
+render_quality_requirement_type_catalog(
+    project_id,
+    repository_editor_key=editor_key,
+    repository_busy=(
+        has_unsaved_edits or not selected_requirements_for_deletion.empty
+    ),
 )
 
 st.divider()

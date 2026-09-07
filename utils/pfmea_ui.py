@@ -16,6 +16,7 @@ from utils.pfmea_store import (
     delete_pfmea_records,
     delete_pfmea_control_options,
     migrate_legacy_pfmea_controls,
+    migrate_pfmea_safety_classification,
     pfmea_actions,
     pfmea_causes,
     pfmea_effects,
@@ -1909,8 +1910,8 @@ def _pfmea_export_bytes(dataframe: pd.DataFrame) -> bytes:
 def _high_risk_pfmea_rows(rows: pd.DataFrame, threshold: int) -> pd.DataFrame:
     """Return current flat PFMEA lines whose initial or resulting RPN exceeds the filter."""
     display_columns = [
-        "item_number", "potential_failure_mode", "classification", "severity",
-        "occurrence", "detection", "rpn", "resulting_rpn",
+        "item_number", "process_function", "potential_failure_mode", "classification",
+        "severity", "occurrence", "detection", "rpn", "resulting_rpn",
     ]
     if rows.empty:
         return pd.DataFrame({column: pd.Series(dtype="object") for column in display_columns})
@@ -1932,7 +1933,10 @@ def _high_risk_pfmea_rows(rows: pd.DataFrame, threshold: int) -> pd.DataFrame:
 
 
 def _render_high_risk_pfmea_view(
-    project_id: str, scenario_id: str, flat_rows: pd.DataFrame
+    project_id: str,
+    scenario_id: str,
+    flat_rows: pd.DataFrame,
+    steps: pd.DataFrame,
 ) -> None:
     with st.container(border=True):
         st.subheader("High-risk PFMEA lines")
@@ -1951,7 +1955,16 @@ def _render_high_risk_pfmea_view(
                 ),
             )
         )
-        high_risk = _high_risk_pfmea_rows(flat_rows, threshold)
+        current_rows = flat_rows.copy()
+        step_by_id = {str(row["id"]): row for _, row in steps.iterrows()}
+        current_rows["process_function"] = current_rows.get(
+            "work_element_id", pd.Series(index=current_rows.index, dtype="string")
+        ).map(
+            lambda work_element_id: _process_step_option_label(
+                step_by_id.get(_plain_text(work_element_id), {})
+            )
+        )
+        high_risk = _high_risk_pfmea_rows(current_rows, threshold)
         if high_risk.empty:
             st.caption(
                 f"No PFMEA lines have RPN or Resulting RPN greater than {threshold}."
@@ -1961,6 +1974,7 @@ def _render_high_risk_pfmea_view(
             high_risk.rename(
                 columns={
                     "item_number": "Item #",
+                    "process_function": "Process Function",
                     "potential_failure_mode": "Potential Failure Mode",
                     "classification": "Classification",
                     "severity": "Severity",
@@ -1975,6 +1989,9 @@ def _render_high_risk_pfmea_view(
             row_height=96,
             column_config={
                 "Item #": st.column_config.TextColumn("Item #", pinned=True),
+                "Process Function": st.column_config.TextColumn(
+                    "Process Function", width="large"
+                ),
                 "RPN": st.column_config.NumberColumn("RPN", format="%d"),
                 "Resulting RPN": st.column_config.NumberColumn(
                     "Resulting RPN", format="%d"
@@ -2286,7 +2303,7 @@ def _render_flat_pfmea_table(
     if invalid_classes:
         st.warning(
             "Saved legacy Class values are outside the approved Classification choices. "
-            "Choose blank, Safety, or Critical Quality before Save & Refresh."
+            "Choose blank, Product Safety, or Critical Quality before Save & Refresh."
         )
         rows.loc[rows["classification"].isin(invalid_classes), "classification"] = ""
 
@@ -2354,7 +2371,10 @@ def _render_flat_pfmea_table(
             ),
             "classification": st.column_config.SelectboxColumn(
                 "Classification", options=PFMEA_CLASSIFICATIONS,
-                help="Choose blank, Safety, or Critical Quality. This replaces the former free-text Class field.",
+                help=(
+                    "Choose blank, Product Safety, or Critical Quality. This replaces the "
+                    "former free-text Class field."
+                ),
             ),
             "potential_causes": st.column_config.TextColumn(
                 "Potential Causes(s) of Failure", width="large",
@@ -2697,13 +2717,23 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         "1 through 10; this module does not define company Severity, Occurrence, or Detection scales."
     )
     try:
+        classification_migration = migrate_pfmea_safety_classification(
+            project_id, st.session_state.get("current_editor", "")
+        )
         migration = migrate_legacy_pfmea_controls(
             project_id, st.session_state.get("current_editor", "")
         )
     except ValueError as exc:
         st.error(str(exc))
-        st.info("Enter Current editor to complete the one-time PFMEA controls migration.")
+        st.info("Enter Current editor to complete the pending one-time PFMEA migration.")
         return
+    if classification_migration.get("row_count"):
+        st.toast(
+            "Updated "
+            f"{classification_migration['row_count']} PFMEA Classification record(s) "
+            "to Product Safety",
+            icon=":material/check_circle:",
+        )
     if migration.get("row_count"):
         st.toast(
             f"Completed PFMEA control migration for {migration['row_count']} legacy record(s)",
@@ -2744,7 +2774,9 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
             )
             st.bar_chart(chart_rows, x="PFMEA line", y="RPN", horizontal=True)
 
-    _render_high_risk_pfmea_view(project_id, scenario_id, current_flat_rows)
+    _render_high_risk_pfmea_view(
+        project_id, scenario_id, current_flat_rows, steps
+    )
 
     entries = pfmea_entries(project_id, scenario_id)
     review_entries = entries.loc[
