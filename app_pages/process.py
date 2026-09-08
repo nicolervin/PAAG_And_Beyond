@@ -13,6 +13,7 @@ from utils.store import (
     move_fishbone_part_assignment,
     parse_yamazumi_model_variants,
     process_element_id_for_yamazumi,
+    process_part_placement_options,
     process_part_groups,
     process_section_for_step,
     project_models,
@@ -115,25 +116,24 @@ else:
         yamazumi_rows = yamazumi_rows.loc[~reflected_in_process].copy()
     section_has_available_yamazumi_work = not yamazumi_rows.empty
 
-    scenario_part_groups = process_part_groups(
-        project_id, scenario_id, active_only=True
-    )
-    paired_part_ids = {
-        str(part_id)
-        for group in scenario_part_groups
-        if str(group.get("section_id") or "") == str(section_id)
-        for part_id in group.get("part_ids", [])
-    }
-    available_parts = fishbone_part_assignments(project_id, scenario_id)
-    if not available_parts.empty:
-        available_parts = available_parts.loc[
-            available_parts["section_id"].astype(str) == section_id
+    section_placements = fishbone_part_assignments(project_id, scenario_id)
+    if not section_placements.empty:
+        section_placements = section_placements.loc[
+            section_placements["section_id"].astype(str) == section_id
         ].copy()
-    section_has_fishbone_parts = not available_parts.empty
-    if paired_part_ids and not available_parts.empty:
-        available_parts = available_parts.loc[
-            ~available_parts["part_id"].astype(str).isin(paired_part_ids)
-        ].copy()
+    section_has_fishbone_parts = not section_placements.empty
+    if section_placements.empty:
+        available_parts = section_placements.copy()
+    else:
+        available_parts = (
+            section_placements.sort_values(["part_number", "sequence", "id"])
+            .drop_duplicates(subset=["part_id"], keep="first")
+            .copy()
+        )
+        placement_counts = section_placements.groupby("part_id").size()
+        available_parts["fishbone_use_count"] = (
+            available_parts["part_id"].map(placement_counts).astype(int)
+        )
     section_has_available_fishbone_parts = not available_parts.empty
 
     if pairing_search and not yamazumi_rows.empty:
@@ -143,13 +143,18 @@ else:
                 pairing_search, regex=False
             )
         yamazumi_rows = yamazumi_rows.loc[yam_mask].copy()
-    if pairing_search and not available_parts.empty:
-        part_mask = pd.Series(False, index=available_parts.index)
+    if pairing_search and not section_placements.empty:
+        placement_mask = pd.Series(False, index=section_placements.index)
         for column in ["part_number", "description", "use_description", "model_applicability"]:
-            part_mask |= available_parts[column].fillna("").astype(str).str.casefold().str.contains(
+            placement_mask |= section_placements[column].fillna("").astype(str).str.casefold().str.contains(
                 pairing_search, regex=False
             )
-        available_parts = available_parts.loc[part_mask].copy()
+        matching_part_ids = set(
+            section_placements.loc[placement_mask, "part_id"].astype(str)
+        )
+        available_parts = available_parts.loc[
+            available_parts["part_id"].astype(str).isin(matching_part_ids)
+        ].copy()
 
     work_column, part_column = st.columns(2, vertical_alignment="top")
     work_source_key = apply_pending_table_editor_reset(
@@ -226,9 +231,7 @@ else:
         if available_parts.empty:
             if pairing_search and section_has_available_fishbone_parts:
                 st.info("No available fishbone parts match this filter.")
-            elif section_has_fishbone_parts:
-                st.info("All fishbone parts in this section are already included in Part requirements below.")
-            else:
+            elif not section_has_fishbone_parts:
                 st.info("No catalog parts are placed in this fishbone section.")
             selected_parts = available_parts
         else:
@@ -239,17 +242,14 @@ else:
                 on_select="rerun",
                 selection_mode="multi-row",
                 column_order=[
-                    "part_number", "description", "quantity", "use_description",
+                    "part_number", "description", "fishbone_use_count",
                     "model_applicability",
                 ],
                 column_config={
                     "part_number": st.column_config.TextColumn("Part number", pinned=True),
                     "description": st.column_config.TextColumn("Part Name", width="large"),
-                    "quantity": st.column_config.NumberColumn(
-                        "Fishbone quantity", format="%g"
-                    ),
-                    "use_description": st.column_config.TextColumn(
-                        "Use / installation location", width="medium"
+                    "fishbone_use_count": st.column_config.NumberColumn(
+                        "Fishbone uses", format="%d"
                     ),
                     "model_applicability": "Models",
                 },
@@ -605,6 +605,126 @@ else:
         selected_description = str(selected_yamazumi.iloc[0]["description"])
         pair_controls = st.container(border=True)
         pair_controls.markdown(f"**Selected work:** {selected_description}")
+        handling_types_by_part: dict[str, str] = {}
+        fishbone_assignment_ids_by_part: dict[str, str | None] = {}
+        selected_pairing_details: list[dict] = []
+        if not selected_parts.empty:
+            pair_controls.markdown("##### Classify selected parts")
+            pair_controls.caption(
+                "Each selected part needs a handling type and an exact "
+                "Use / installation location before it can be paired."
+            )
+            for _, selected_part in selected_parts.iterrows():
+                selected_part_id = str(selected_part["part_id"])
+                selected_part_number = str(selected_part["part_number"])
+                raw_part_name = selected_part.get("description")
+                selected_part_name = (
+                    "" if pd.isna(raw_part_name) else str(raw_part_name or "")
+                )
+                placement_options = process_part_placement_options(
+                    project_id, scenario_id, section_id, selected_part_id
+                )
+                with pair_controls.container(border=True):
+                    st.markdown(
+                        f"**{selected_part_number}**"
+                        + (f" — {selected_part_name}" if selected_part_name else "")
+                    )
+                    handling_type = st.selectbox(
+                        "Handling type",
+                        ["Consume", "Handle"],
+                        index=0,
+                        help=(
+                            "Consume means one unit is removed from its container and placed "
+                            "on the line for the first time. Handle means that same Fishbone "
+                            "use is manipulated again after at least one unit has been consumed."
+                        ),
+                        key=(
+                            f"process_pairing_handling_{scenario_id}_{section_id}_"
+                            f"{selected_yamazumi_id}_{selected_part_id}"
+                        ),
+                    )
+                    handling_types_by_part[selected_part_id] = handling_type
+                    placement_labels: dict[str, str] = {}
+                    for _, placement in placement_options.iterrows():
+                        assignment_id = str(placement["fishbone_assignment_id"])
+                        raw_use_description = placement.get("use_description")
+                        use_description = (
+                            "No location recorded"
+                            if pd.isna(raw_use_description)
+                            or not str(raw_use_description or "").strip()
+                            else str(raw_use_description).strip()
+                        )
+                        quantity_label = format_clean_number(
+                            placement["fishbone_quantity"]
+                        )
+                        remaining_label = format_clean_number(
+                            placement["remaining_consume_allowance"]
+                        )
+                        if handling_type == "Consume":
+                            availability = (
+                                f"Remaining Consume allowance {remaining_label}"
+                                if bool(placement["can_consume"])
+                                else "Unavailable for Consume — allowance fully used"
+                            )
+                        else:
+                            availability = (
+                                "Available for Handle"
+                                if bool(placement["can_handle"])
+                                else "Unavailable for Handle — Consume first"
+                            )
+                        placement_labels[assignment_id] = (
+                            f"{use_description} · Fishbone quantity {quantity_label} · "
+                            f"{availability}"
+                        )
+                    placement_ids = list(placement_labels)
+                    placement_key = (
+                        f"process_pairing_location_{scenario_id}_{section_id}_"
+                        f"{selected_yamazumi_id}_{selected_part_id}"
+                    )
+                    if len(placement_ids) == 1:
+                        selected_assignment_id = st.selectbox(
+                            "Use / installation location",
+                            placement_ids,
+                            format_func=lambda value, labels=placement_labels: labels.get(
+                                value, value
+                            ),
+                            disabled=True,
+                            help=(
+                                "This part has one Fishbone use in the selected section, so "
+                                "it is selected automatically."
+                            ),
+                            key=placement_key,
+                        )
+                    else:
+                        selected_assignment_id = st.selectbox(
+                            "Use / installation location",
+                            placement_ids,
+                            index=None,
+                            placeholder="Choose a Use / installation location",
+                            format_func=lambda value, labels=placement_labels: labels.get(
+                                value, value
+                            ),
+                            help=(
+                                "Choose the exact Fishbone use represented by this Process "
+                                "part pairing."
+                            ),
+                            key=placement_key,
+                        )
+                    fishbone_assignment_ids_by_part[selected_part_id] = (
+                        str(selected_assignment_id) if selected_assignment_id else None
+                    )
+                    selected_pairing_details.append(
+                        {
+                            "part_id": selected_part_id,
+                            "part_number": selected_part_number,
+                            "handling_type": handling_type,
+                            "fishbone_assignment_id": (
+                                str(selected_assignment_id)
+                                if selected_assignment_id
+                                else None
+                            ),
+                        }
+                    )
         with pair_controls.form(
             f"pair_parts_{scenario_id}_{section_id}_{selected_yamazumi_id}", border=False
         ):
@@ -617,20 +737,46 @@ else:
                     "requirements, such as a control panel color; for a single Use all requirement, use a short "
                     "installation label."
                 ),
+                key=(
+                    f"process_pairing_requirement_{scenario_id}_{section_id}_"
+                    f"{selected_yamazumi_id}"
+                ),
             )
             selection_rule = form_row.selectbox(
-                "Selection rule", ["Use all", "Choose one", "Optional"]
+                "Selection rule",
+                ["Use all", "Choose one", "Optional"],
+                key=(
+                    f"process_pairing_rule_{scenario_id}_{section_id}_"
+                    f"{selected_yamazumi_id}"
+                ),
             )
-            quantity = form_row.number_input("Quantity", min_value=0.01, value=1.0, step=1.0)
+            quantity = form_row.number_input(
+                "Quantity",
+                min_value=0.01,
+                value=1.0,
+                step=1.0,
+                key=(
+                    f"process_pairing_quantity_{scenario_id}_{section_id}_"
+                    f"{selected_yamazumi_id}"
+                ),
+            )
             notes = st.text_input(
                 "Part requirement notes",
                 placeholder="Model choice, installation intent, or other IE guidance",
+                key=(
+                    f"process_pairing_notes_{scenario_id}_{section_id}_"
+                    f"{selected_yamazumi_id}"
+                ),
             )
             pair_parts = st.form_submit_button(
                 f"Create Part requirement ({len(selected_parts)} parts)",
                 type="primary",
                 icon=":material/link:",
                 disabled=selected_parts.empty,
+                key=(
+                    f"process_pairing_submit_{scenario_id}_{section_id}_"
+                    f"{selected_yamazumi_id}"
+                ),
             )
         add_without_parts = st.button(
             "Add selected work to Process at a Glance without parts",
@@ -643,6 +789,17 @@ else:
                     raise ValueError("Part requirement name is required.")
                 if selected_parts.empty:
                     raise ValueError("Select at least one fishbone part.")
+                missing_locations = [
+                    detail["part_number"]
+                    for detail in selected_pairing_details
+                    if not detail["fishbone_assignment_id"]
+                ]
+                if missing_locations:
+                    raise ValueError(
+                        "Choose a Use / installation location for: "
+                        + ", ".join(missing_locations)
+                        + "."
+                    )
                 reconcile_yamazumi_to_process(
                     project_id, scenario_id, [selected_yamazumi_id]
                 )
@@ -664,6 +821,10 @@ else:
                     quantity,
                     selected_parts["part_id"].astype(str).tolist(),
                     notes,
+                    handling_types_by_part=handling_types_by_part,
+                    fishbone_assignment_ids_by_part=(
+                        fishbone_assignment_ids_by_part
+                    ),
                 )
                 request_table_editor_reset(work_source_key)
                 request_table_editor_reset(part_source_key)
@@ -678,6 +839,7 @@ else:
                         "work_element": selected_description,
                         "requirement": group_name,
                         "section": section_labels.get(section_id, section_id),
+                        "part_uses": selected_pairing_details,
                     },
                 )
                 st.toast("Part requirement added to the process work element", icon=":material/check_circle:")

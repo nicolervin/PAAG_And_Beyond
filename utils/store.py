@@ -23,6 +23,16 @@ DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "paag.db"
 
+HANDLING_TYPES = ("Handle", "Consume")
+ERGONOMICS_REVIEW_STATUSES = (
+    "Started",
+    "Open",
+    "Pending",
+    "Validation",
+    "Closed (admin)",
+    "Closed (engineering)",
+)
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -94,7 +104,8 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_number TEXT NOT NULL, description TEXT DEFAULT '', quantity REAL DEFAULT 1,
                 revision TEXT DEFAULT '0', source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
-                model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', updated_at TEXT NOT NULL,
+                model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', weight_lb REAL,
+                updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
             );
             CREATE TABLE IF NOT EXISTS part_scenario_activity (
@@ -360,9 +371,58 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 group_id TEXT NOT NULL REFERENCES process_part_groups(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                handling_type TEXT
+                    CHECK (handling_type IS NULL OR handling_type IN ('Handle', 'Consume')),
+                fishbone_assignment_id TEXT
+                    REFERENCES fishbone_part_assignments(id),
                 updated_at TEXT NOT NULL,
                 UNIQUE(group_id, part_id)
             );
+            CREATE TABLE IF NOT EXISTS ergonomic_hazard_options (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ergonomics_reviews (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE RESTRICT,
+                process_part_option_id TEXT
+                    REFERENCES process_part_options(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'Started'
+                    CHECK (status IN ('Started', 'Open', 'Pending', 'Validation',
+                                      'Closed (admin)', 'Closed (engineering)')),
+                reviewer TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                requested_due_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ergonomics_review_hazard_selections (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                ergonomics_review_id TEXT NOT NULL
+                    REFERENCES ergonomics_reviews(id) ON DELETE CASCADE,
+                hazard_option_id TEXT NOT NULL
+                    REFERENCES ergonomic_hazard_options(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL DEFAULT 10,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(ergonomics_review_id, hazard_option_id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_ergonomic_hazard_option_label
+                ON ergonomic_hazard_options(project_id, label COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_ergonomics_reviews_scenario
+                ON ergonomics_reviews(project_id, scenario_id, work_element_id);
+            CREATE INDEX IF NOT EXISTS idx_ergonomics_review_hazards
+                ON ergonomics_review_hazard_selections(
+                    project_id, scenario_id, ergonomics_review_id, sequence
+                );
             """
         )
         init_quality_schema(conn)
@@ -370,6 +430,23 @@ def init_db() -> None:
         project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "product_line" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
+        part_columns = {row[1] for row in conn.execute("PRAGMA table_info(parts)").fetchall()}
+        if "weight_lb" not in part_columns:
+            conn.execute("ALTER TABLE parts ADD COLUMN weight_lb REAL")
+        process_option_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(process_part_options)").fetchall()
+        }
+        if "handling_type" not in process_option_columns:
+            conn.execute(
+                """ALTER TABLE process_part_options ADD COLUMN handling_type TEXT
+                   CHECK (handling_type IS NULL OR handling_type IN ('Handle', 'Consume'))"""
+            )
+        if "fishbone_assignment_id" not in process_option_columns:
+            conn.execute(
+                """ALTER TABLE process_part_options
+                   ADD COLUMN fishbone_assignment_id TEXT
+                   REFERENCES fishbone_part_assignments(id)"""
+            )
         manufacturing_assembly_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(manufacturing_assemblies)").fetchall()
         }
@@ -624,7 +701,10 @@ def init_db() -> None:
             ]
             for pn, desc, qty, rev in sample_parts:
                 conn.execute(
-                    "INSERT INTO parts VALUES (?, ?, ?, ?, ?, ?, 'Sample', '', 'All', '', ?)",
+                    """INSERT INTO parts
+                       (id, project_id, part_number, description, quantity, revision,
+                        source, image_path, model_applicability, notes, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'Sample', '', 'All', '', ?)""",
                     (str(uuid4()), project_id, pn, desc, qty, rev, timestamp),
                 )
             sample_steps = [
@@ -3910,6 +3990,179 @@ ASSEMBLY_BUFFER_POLICIES = {"None", "WIP buffer", "Safety stock"}
 MATERIAL_SELECTION_RULES = {"Choose one", "Use all", "Optional"}
 
 
+def _normalize_handling_type(value) -> str | None:
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return None
+    handling_type = str(value).strip()
+    if handling_type not in HANDLING_TYPES:
+        raise ValueError("Handling type must be Handle or Consume.")
+    return handling_type
+
+
+def _normalize_fishbone_assignment_id(value) -> str | None:
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return None
+    return str(value).strip()
+
+
+def _process_part_assignment_consume_count(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    fishbone_assignment_id: str,
+    *,
+    exclude_process_part_option_id: str | None = None,
+) -> int:
+    exclude_clause = " AND option.id<>?" if exclude_process_part_option_id else ""
+    params: tuple = (project_id, scenario_id, fishbone_assignment_id)
+    if exclude_process_part_option_id:
+        params += (exclude_process_part_option_id,)
+    return int(
+        conn.execute(
+            f"""SELECT COUNT(*)
+                FROM process_part_options option
+                JOIN process_part_groups group_row ON group_row.id=option.group_id
+                WHERE group_row.project_id=? AND group_row.scenario_id=?
+                  AND option.fishbone_assignment_id=?
+                  AND option.handling_type='Consume'{exclude_clause}""",
+            params,
+        ).fetchone()[0]
+    )
+
+
+def _validate_process_part_option_handling(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    scenario_id: str,
+    section_id: str,
+    process_part_option_id: str,
+    part_id: str,
+    handling_type: str | None,
+    fishbone_assignment_id: str | None,
+) -> None:
+    if handling_type is None and fishbone_assignment_id is None:
+        return
+    if handling_type is not None and fishbone_assignment_id is None:
+        raise ValueError(
+            f"A Fishbone placement is required before this part can be {handling_type.lower()}d."
+        )
+    if fishbone_assignment_id is None:
+        return
+
+    assignment = conn.execute(
+        """SELECT assignment.id, assignment.quantity, assignment.use_description,
+                  part.part_number, section.name AS section_name
+           FROM fishbone_part_assignments assignment
+           JOIN parts part ON part.id=assignment.part_id
+           JOIN assembly_sections section ON section.id=assignment.section_id
+           WHERE assignment.id=? AND assignment.project_id=?
+             AND assignment.part_id=? AND assignment.section_id=?""",
+        (fishbone_assignment_id, project_id, part_id, section_id),
+    ).fetchone()
+    if not assignment:
+        raise ValueError(
+            "Choose a Fishbone placement for the same part in this part requirement's "
+            "Fishbone section."
+        )
+    if handling_type is None:
+        return
+
+    other_consume_count = _process_part_assignment_consume_count(
+        conn,
+        project_id,
+        scenario_id,
+        fishbone_assignment_id,
+        exclude_process_part_option_id=process_part_option_id,
+    )
+    placement_label = str(assignment["part_number"])
+    use_description = str(assignment["use_description"] or "").strip()
+    if use_description:
+        placement_label = f"{placement_label} — {use_description}"
+    placement_label = f"{placement_label} [{assignment['id']}]"
+
+    if handling_type == "Consume":
+        recorded_quantity = float(assignment["quantity"])
+        if other_consume_count + 1 > recorded_quantity:
+            raise ValueError(
+                f"Fishbone placement {placement_label} has a recorded quantity of "
+                f"{recorded_quantity:g}, which has already been fully consumed elsewhere "
+                "in this scenario."
+            )
+        return
+
+    if other_consume_count < 1:
+        raise ValueError(
+            f"Fishbone placement {placement_label} must be Consumed before it can be Handled "
+            "in this scenario."
+        )
+
+
+def process_part_placement_options(
+    project_id: str,
+    scenario_id: str,
+    section_id: str,
+    part_id: str,
+) -> pd.DataFrame:
+    """Return exact Fishbone uses with scenario-specific Consume availability."""
+    columns = [
+        "fishbone_assignment_id",
+        "part_id",
+        "part_number",
+        "section_id",
+        "section_name",
+        "use_description",
+        "fishbone_quantity",
+        "consumed_count",
+        "remaining_consume_allowance",
+        "can_consume",
+        "can_handle",
+    ]
+    with connection() as conn:
+        if not conn.execute(
+            """SELECT 1 FROM planning_scenarios
+               WHERE id=? AND project_id=?""",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        assignments = conn.execute(
+            """SELECT assignment.id AS fishbone_assignment_id,
+                      assignment.part_id, part.part_number,
+                      assignment.section_id, section.name AS section_name,
+                      assignment.use_description,
+                      assignment.quantity AS fishbone_quantity
+               FROM fishbone_part_assignments assignment
+               JOIN parts part ON part.id=assignment.part_id
+               JOIN assembly_sections section ON section.id=assignment.section_id
+               LEFT JOIN part_scenario_activity activity
+                 ON activity.project_id=assignment.project_id
+                AND activity.scenario_id=? AND activity.part_id=assignment.part_id
+               WHERE assignment.project_id=? AND assignment.section_id=?
+                 AND assignment.part_id=? AND COALESCE(activity.active, 1)=1
+               ORDER BY assignment.sequence, assignment.id""",
+            (scenario_id, project_id, section_id, part_id),
+        ).fetchall()
+        rows: list[dict] = []
+        for assignment in assignments:
+            assignment_id = str(assignment["fishbone_assignment_id"])
+            consumed_count = _process_part_assignment_consume_count(
+                conn, project_id, scenario_id, assignment_id
+            )
+            fishbone_quantity = float(assignment["fishbone_quantity"])
+            remaining = max(fishbone_quantity - consumed_count, 0.0)
+            row = dict(assignment)
+            row.update(
+                consumed_count=consumed_count,
+                remaining_consume_allowance=remaining,
+                can_consume=(consumed_count + 1 <= fishbone_quantity),
+                can_handle=(consumed_count >= 1),
+            )
+            rows.append(row)
+    if not rows:
+        return pd.DataFrame({column: pd.Series(dtype="object") for column in columns})
+    return pd.DataFrame(rows, columns=columns)
+
+
 def manufacturing_assemblies(project_id: str, scenario_id: str) -> pd.DataFrame:
     return pd.DataFrame(query(
         """SELECT a.*, parent.assembly_number AS parent_assembly_number,
@@ -4279,6 +4532,7 @@ def material_consumption_for_scenario(project_id: str, scenario_id: str) -> pd.D
                   group_row.name AS requirement,
                   group_row.selection_rule, group_row.quantity,
                   part.part_number, part.description AS part_description,
+                  option.handling_type, option.fishbone_assignment_id, part.weight_lb,
                   group_row.notes
            FROM process_part_groups group_row
            JOIN work_elements element ON element.id=group_row.work_element_id
@@ -4384,8 +4638,10 @@ def process_part_groups(
             if active_only else (group["id"],)
         )
         options = query(
-            f"""SELECT option.id, option.part_id, part.part_number,
-                      part.description AS part_description, part.model_applicability
+            f"""SELECT option.id, option.part_id, option.handling_type,
+                      option.fishbone_assignment_id,
+                      part.part_number, part.description AS part_description,
+                      part.model_applicability, part.weight_lb
                FROM process_part_options option
                JOIN parts part ON part.id=option.part_id
                {activity_join}
@@ -4408,6 +4664,8 @@ def save_process_part_group(
     quantity: float,
     part_ids: list[str],
     notes: str = "",
+    handling_types_by_part: dict[str, str | None] | None = None,
+    fishbone_assignment_ids_by_part: dict[str, str | None] | None = None,
 ) -> str:
     name = str(name or "").strip()
     if not name:
@@ -4420,6 +4678,20 @@ def save_process_part_group(
     selected_part_ids = list(dict.fromkeys(str(part_id) for part_id in part_ids if str(part_id)))
     if not selected_part_ids:
         raise ValueError("Select at least one fishbone part.")
+    normalized_handling_types: dict[str, str | None] = {}
+    if handling_types_by_part is not None:
+        unknown_part_ids = set(handling_types_by_part) - set(selected_part_ids)
+        if unknown_part_ids:
+            raise ValueError("Handling types may only be supplied for selected parts.")
+        for part_id, value in handling_types_by_part.items():
+            normalized_handling_types[str(part_id)] = _normalize_handling_type(value)
+    normalized_assignment_ids: dict[str, str | None] = {}
+    if fishbone_assignment_ids_by_part is not None:
+        unknown_part_ids = set(fishbone_assignment_ids_by_part) - set(selected_part_ids)
+        if unknown_part_ids:
+            raise ValueError("Fishbone placements may only be supplied for selected parts.")
+        for part_id, value in fishbone_assignment_ids_by_part.items():
+            normalized_assignment_ids[str(part_id)] = _normalize_fishbone_assignment_id(value)
     group_id = str(group_id or "").strip() or str(uuid4())
     timestamp = now_iso()
     try:
@@ -4435,6 +4707,17 @@ def save_process_part_group(
                 (section_id, project_id),
             ).fetchone():
                 raise ValueError("Choose an active fishbone section.")
+            existing_group = conn.execute(
+                """SELECT project_id, scenario_id, work_element_id
+                   FROM process_part_groups WHERE id=?""",
+                (group_id,),
+            ).fetchone()
+            if existing_group and (
+                str(existing_group["project_id"]) != project_id
+                or str(existing_group["scenario_id"]) != scenario_id
+                or str(existing_group["work_element_id"]) != work_element_id
+            ):
+                raise ValueError("That part requirement no longer belongs to this process step.")
             placeholders = ",".join("?" for _ in selected_part_ids)
             available = {
                 str(row[0]) for row in conn.execute(
@@ -4459,16 +4742,551 @@ def save_process_part_group(
                     name, selection_rule, quantity, str(notes or "").strip(), timestamp,
                 ),
             )
-            conn.execute("DELETE FROM process_part_options WHERE group_id=?", (group_id,))
+            existing_options = {
+                str(row["part_id"]): dict(row)
+                for row in conn.execute(
+                    """SELECT id, part_id, handling_type, fishbone_assignment_id
+                       FROM process_part_options WHERE group_id=?""",
+                    (group_id,),
+                ).fetchall()
+            }
+            conn.execute(
+                f"""DELETE FROM process_part_options
+                    WHERE group_id=? AND part_id NOT IN ({placeholders})""",
+                (group_id, *selected_part_ids),
+            )
             for part_id in selected_part_ids:
-                conn.execute(
-                    """INSERT INTO process_part_options
-                       (id, group_id, part_id, updated_at) VALUES (?, ?, ?, ?)""",
-                    (str(uuid4()), group_id, part_id, timestamp),
+                existing_option = existing_options.get(part_id)
+                handling_type = normalized_handling_types.get(
+                    part_id,
+                    existing_option.get("handling_type") if existing_option else None,
                 )
+                fishbone_assignment_id = normalized_assignment_ids.get(
+                    part_id,
+                    existing_option.get("fishbone_assignment_id") if existing_option else None,
+                )
+                option_id = (
+                    str(existing_option["id"]) if existing_option else str(uuid4())
+                )
+                _validate_process_part_option_handling(
+                    conn,
+                    project_id=project_id,
+                    scenario_id=scenario_id,
+                    section_id=section_id,
+                    process_part_option_id=option_id,
+                    part_id=part_id,
+                    handling_type=handling_type,
+                    fishbone_assignment_id=fishbone_assignment_id,
+                )
+                if existing_option:
+                    conn.execute(
+                        """UPDATE process_part_options
+                           SET handling_type=?, fishbone_assignment_id=?, updated_at=?
+                           WHERE id=? AND group_id=?""",
+                        (
+                            handling_type,
+                            fishbone_assignment_id,
+                            timestamp,
+                            option_id,
+                            group_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO process_part_options
+                           (id, group_id, part_id, handling_type,
+                            fishbone_assignment_id, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            option_id,
+                            group_id,
+                            part_id,
+                            handling_type,
+                            fishbone_assignment_id,
+                            timestamp,
+                        ),
+                    )
     except sqlite3.IntegrityError as exc:
         raise ValueError("Part requirement names must be unique within a process step.") from exc
     return group_id
+
+
+def set_part_weight_lb(project_id: str, part_id: str, weight_lb) -> str:
+    """Set or clear a project-wide Parts Catalog weight in pounds."""
+    weight = _optional_nonnegative_number(weight_lb, "Part weight")
+    if weight is not None and not math.isfinite(weight):
+        raise ValueError("Part weight must be a finite number.")
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM parts WHERE id=? AND project_id=?",
+            (part_id, project_id),
+        ).fetchone():
+            raise ValueError("That part no longer exists in this project.")
+        conn.execute(
+            "UPDATE parts SET weight_lb=?, updated_at=? WHERE id=? AND project_id=?",
+            (weight, timestamp, part_id, project_id),
+        )
+    return timestamp
+
+
+def set_process_part_option_handling_type(
+    project_id: str,
+    scenario_id: str,
+    process_part_option_id: str,
+    handling_type: str | None,
+    fishbone_assignment_id: str | None = None,
+) -> str:
+    """Classify one scenario-specific Process part-use, or restore compatibility NULL."""
+    normalized = _normalize_handling_type(handling_type)
+    timestamp = now_iso()
+    with connection() as conn:
+        option = conn.execute(
+            """SELECT option.id, option.part_id, group_row.section_id
+               FROM process_part_options option
+               JOIN process_part_groups group_row ON group_row.id=option.group_id
+               WHERE option.id=? AND group_row.project_id=? AND group_row.scenario_id=?""",
+            (process_part_option_id, project_id, scenario_id),
+        ).fetchone()
+        if not option:
+            raise ValueError("That Process part-use no longer exists in this scenario.")
+        normalized_assignment_id = _normalize_fishbone_assignment_id(
+            fishbone_assignment_id
+        )
+        _validate_process_part_option_handling(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            section_id=str(option["section_id"] or ""),
+            process_part_option_id=process_part_option_id,
+            part_id=str(option["part_id"]),
+            handling_type=normalized,
+            fishbone_assignment_id=normalized_assignment_id,
+        )
+        conn.execute(
+            """UPDATE process_part_options
+               SET handling_type=?, fishbone_assignment_id=?, updated_at=?
+               WHERE id=?""",
+            (
+                normalized,
+                normalized_assignment_id,
+                timestamp,
+                process_part_option_id,
+            ),
+        )
+    return timestamp
+
+
+def ergonomic_hazard_options(project_id: str) -> pd.DataFrame:
+    columns = [
+        "id",
+        "project_id",
+        "label",
+        "active",
+        "created_at",
+        "updated_at",
+        "selection_count",
+    ]
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise ValueError("The selected project no longer exists.")
+        rows = conn.execute(
+            """SELECT option.*,
+                      COUNT(selection.id) AS selection_count
+               FROM ergonomic_hazard_options option
+               LEFT JOIN ergonomics_review_hazard_selections selection
+                 ON selection.hazard_option_id=option.id
+               WHERE option.project_id=?
+               GROUP BY option.id
+               ORDER BY option.active DESC, option.label COLLATE NOCASE, option.id""",
+            (project_id,),
+        ).fetchall()
+    return pd.DataFrame([dict(row) for row in rows], columns=columns)
+
+
+def save_ergonomic_hazard_option_rows(project_id: str, edited: pd.DataFrame) -> dict:
+    rows = edited.to_dict("records")
+    labels = [str(row.get("label") or "").strip() for row in rows]
+    if any(not label for label in labels):
+        raise ValueError("Every Ergonomics hazard option requires a Label.")
+    if len({label.casefold() for label in labels}) != len(labels):
+        raise ValueError("Ergonomics hazard option labels must be unique within this project.")
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise ValueError("The selected project no longer exists.")
+        existing = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM ergonomic_hazard_options WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        supplied_ids = {
+            str(row.get("id") or "").strip()
+            for row in rows
+            if str(row.get("id") or "").strip()
+        }
+        if set(existing) - supplied_ids:
+            raise ValueError(
+                "Remove Ergonomics hazard options through the confirmed deletion workflow."
+            )
+        created_ids: list[str] = []
+        updated_ids: list[str] = []
+        try:
+            for row, label in zip(rows, labels):
+                option_id = str(row.get("id") or "").strip()
+                active = 1 if bool(row.get("active", True)) else 0
+                if option_id:
+                    if option_id not in existing:
+                        raise ValueError(
+                            "An Ergonomics hazard option changed or no longer exists. "
+                            "Refresh and try again."
+                        )
+                    conn.execute(
+                        """UPDATE ergonomic_hazard_options
+                           SET label=?, active=?, updated_at=?
+                           WHERE id=? AND project_id=?""",
+                        (label, active, timestamp, option_id, project_id),
+                    )
+                    updated_ids.append(option_id)
+                else:
+                    option_id = str(uuid4())
+                    conn.execute(
+                        """INSERT INTO ergonomic_hazard_options
+                           (id, project_id, label, active, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (option_id, project_id, label, active, timestamp, timestamp),
+                    )
+                    created_ids.append(option_id)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(
+                "Ergonomics hazard option labels must be unique within this project."
+            ) from exc
+    return {
+        "row_count": len(created_ids) + len(updated_ids),
+        "created_ids": created_ids,
+        "updated_ids": updated_ids,
+        "timestamp": timestamp,
+    }
+
+
+def ergonomic_hazard_option_delete_impact(
+    project_id: str, option_ids: list[str]
+) -> dict:
+    ids = list(dict.fromkeys(str(value).strip() for value in option_ids if str(value).strip()))
+    if not ids:
+        return {"option_count": 0, "selection_count": 0, "review_count": 0, "labels": []}
+    placeholders = ",".join("?" for _ in ids)
+    with connection() as conn:
+        options = conn.execute(
+            f"""SELECT id, label FROM ergonomic_hazard_options
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *ids),
+        ).fetchall()
+        if len(options) != len(ids):
+            raise ValueError(
+                "One or more Ergonomics hazard options changed. Refresh and try again."
+            )
+        selections = conn.execute(
+            f"""SELECT ergonomics_review_id
+                FROM ergonomics_review_hazard_selections
+                WHERE project_id=? AND hazard_option_id IN ({placeholders})""",
+            (project_id, *ids),
+        ).fetchall()
+    return {
+        "option_count": len(ids),
+        "selection_count": len(selections),
+        "review_count": len({str(row["ergonomics_review_id"]) for row in selections}),
+        "labels": [str(row["label"]) for row in options],
+    }
+
+
+def delete_ergonomic_hazard_options(project_id: str, option_ids: list[str]) -> dict:
+    ids = list(dict.fromkeys(str(value).strip() for value in option_ids if str(value).strip()))
+    impact = ergonomic_hazard_option_delete_impact(project_id, ids)
+    timestamp = now_iso()
+    if not ids:
+        return impact | {"row_count": 0, "timestamp": timestamp}
+    placeholders = ",".join("?" for _ in ids)
+    with connection() as conn:
+        cursor = conn.execute(
+            f"""DELETE FROM ergonomic_hazard_options
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *ids),
+        )
+        if int(cursor.rowcount) != len(ids):
+            raise ValueError(
+                "One or more Ergonomics hazard options changed. Refresh and try again."
+            )
+    return impact | {"row_count": len(ids), "timestamp": timestamp}
+
+
+def ergonomics_reviews(
+    project_id: str,
+    scenario_id: str,
+    work_element_id: str | None = None,
+) -> pd.DataFrame:
+    columns = [
+        "id",
+        "project_id",
+        "scenario_id",
+        "work_element_id",
+        "process_part_option_id",
+        "status",
+        "reviewer",
+        "notes",
+        "requested_due_date",
+        "created_at",
+        "updated_at",
+        "hazard_option_ids",
+        "hazard_labels",
+    ]
+    params: tuple = (project_id, scenario_id)
+    work_clause = ""
+    if work_element_id:
+        work_clause = " AND review.work_element_id=?"
+        params = (*params, work_element_id)
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        review_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT review.* FROM ergonomics_reviews review
+                    WHERE review.project_id=? AND review.scenario_id=?{work_clause}
+                    ORDER BY review.requested_due_date, review.created_at, review.id""",
+                params,
+            ).fetchall()
+        ]
+        review_ids = [str(row["id"]) for row in review_rows]
+        selections_by_review: dict[str, list[dict]] = {review_id: [] for review_id in review_ids}
+        if review_ids:
+            placeholders = ",".join("?" for _ in review_ids)
+            for selection in conn.execute(
+                f"""SELECT selection.ergonomics_review_id, selection.hazard_option_id,
+                            option.label
+                     FROM ergonomics_review_hazard_selections selection
+                     JOIN ergonomic_hazard_options option
+                       ON option.id=selection.hazard_option_id
+                     WHERE selection.ergonomics_review_id IN ({placeholders})
+                     ORDER BY selection.sequence, option.label COLLATE NOCASE, selection.id""",
+                tuple(review_ids),
+            ).fetchall():
+                selections_by_review[str(selection["ergonomics_review_id"])].append(
+                    dict(selection)
+                )
+    for row in review_rows:
+        selections = selections_by_review[str(row["id"])]
+        row["hazard_option_ids"] = [str(item["hazard_option_id"]) for item in selections]
+        row["hazard_labels"] = [str(item["label"]) for item in selections]
+    return pd.DataFrame(review_rows, columns=columns)
+
+
+def save_ergonomics_review(
+    project_id: str,
+    scenario_id: str,
+    values: dict,
+) -> dict:
+    review_id = str(values.get("id") or "").strip() or str(uuid4())
+    work_element_id = str(values.get("work_element_id") or "").strip()
+    if not work_element_id:
+        raise ValueError("A Process at a Glance Work Element is required.")
+    process_part_option_id = str(values.get("process_part_option_id") or "").strip() or None
+    status = str(values.get("status") or "Started").strip()
+    if status not in ERGONOMICS_REVIEW_STATUSES:
+        raise ValueError("Choose a valid Ergonomics review status.")
+    reviewer = str(values.get("reviewer") or "").strip()
+    notes = str(values.get("notes") or "").strip()
+    requested_due_date = str(values.get("requested_due_date") or "").strip() or None
+    hazard_option_ids = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in values.get("hazard_option_ids", [])
+            if str(value).strip()
+        )
+    )
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        if not conn.execute(
+            """SELECT 1 FROM work_elements
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (work_element_id, project_id, scenario_id),
+        ).fetchone():
+            raise ValueError("That Process at a Glance Work Element no longer exists.")
+        if process_part_option_id and not conn.execute(
+            """SELECT 1
+               FROM process_part_options option
+               JOIN process_part_groups group_row ON group_row.id=option.group_id
+               WHERE option.id=? AND group_row.project_id=?
+                 AND group_row.scenario_id=? AND group_row.work_element_id=?""",
+            (process_part_option_id, project_id, scenario_id, work_element_id),
+        ).fetchone():
+            raise ValueError(
+                "The selected Process part-use does not belong to this Work Element and scenario."
+            )
+        existing_review = conn.execute(
+            """SELECT * FROM ergonomics_reviews
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (review_id, project_id, scenario_id),
+        ).fetchone()
+        existing_hazard_ids = {
+            str(row["hazard_option_id"])
+            for row in conn.execute(
+                """SELECT hazard_option_id
+                   FROM ergonomics_review_hazard_selections
+                   WHERE ergonomics_review_id=?""",
+                (review_id,),
+            ).fetchall()
+        }
+        if hazard_option_ids:
+            placeholders = ",".join("?" for _ in hazard_option_ids)
+            options = {
+                str(row["id"]): int(row["active"])
+                for row in conn.execute(
+                    f"""SELECT id, active FROM ergonomic_hazard_options
+                        WHERE project_id=? AND id IN ({placeholders})""",
+                    (project_id, *hazard_option_ids),
+                ).fetchall()
+            }
+            if set(options) != set(hazard_option_ids):
+                raise ValueError("One or more selected Ergonomics hazards no longer exist.")
+            inactive_new = {
+                option_id
+                for option_id, active in options.items()
+                if not active and option_id not in existing_hazard_ids
+            }
+            if inactive_new:
+                raise ValueError("Inactive Ergonomics hazards cannot be newly selected.")
+        if existing_review:
+            conn.execute(
+                """UPDATE ergonomics_reviews
+                   SET work_element_id=?, process_part_option_id=?, status=?, reviewer=?,
+                       notes=?, requested_due_date=?, updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (
+                    work_element_id,
+                    process_part_option_id,
+                    status,
+                    reviewer,
+                    notes,
+                    requested_due_date,
+                    timestamp,
+                    review_id,
+                    project_id,
+                    scenario_id,
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO ergonomics_reviews
+                   (id, project_id, scenario_id, work_element_id,
+                    process_part_option_id, status, reviewer, notes,
+                    requested_due_date, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    review_id,
+                    project_id,
+                    scenario_id,
+                    work_element_id,
+                    process_part_option_id,
+                    status,
+                    reviewer,
+                    notes,
+                    requested_due_date,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        existing_selections = {
+            str(row["hazard_option_id"]): str(row["id"])
+            for row in conn.execute(
+                """SELECT id, hazard_option_id
+                   FROM ergonomics_review_hazard_selections
+                   WHERE ergonomics_review_id=?""",
+                (review_id,),
+            ).fetchall()
+        }
+        if hazard_option_ids:
+            placeholders = ",".join("?" for _ in hazard_option_ids)
+            conn.execute(
+                f"""DELETE FROM ergonomics_review_hazard_selections
+                    WHERE ergonomics_review_id=?
+                      AND hazard_option_id NOT IN ({placeholders})""",
+                (review_id, *hazard_option_ids),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM ergonomics_review_hazard_selections WHERE ergonomics_review_id=?",
+                (review_id,),
+            )
+        for index, hazard_option_id in enumerate(hazard_option_ids, start=1):
+            selection_id = existing_selections.get(hazard_option_id, str(uuid4()))
+            conn.execute(
+                """INSERT INTO ergonomics_review_hazard_selections
+                   (id, project_id, scenario_id, ergonomics_review_id,
+                    hazard_option_id, sequence, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(ergonomics_review_id, hazard_option_id) DO UPDATE SET
+                     sequence=excluded.sequence, updated_at=excluded.updated_at""",
+                (
+                    selection_id,
+                    project_id,
+                    scenario_id,
+                    review_id,
+                    hazard_option_id,
+                    index * 10,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+    return {"id": review_id, "row_count": 1, "timestamp": timestamp}
+
+
+def delete_ergonomics_reviews(
+    project_id: str, scenario_id: str, review_ids: list[str]
+) -> dict:
+    ids = list(dict.fromkeys(str(value).strip() for value in review_ids if str(value).strip()))
+    timestamp = now_iso()
+    if not ids:
+        return {"row_count": 0, "hazard_selection_count": 0, "timestamp": timestamp}
+    placeholders = ",".join("?" for _ in ids)
+    with connection() as conn:
+        reviews = conn.execute(
+            f"""SELECT id FROM ergonomics_reviews
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        ).fetchall()
+        if len(reviews) != len(ids):
+            raise ValueError("One or more Ergonomics reviews changed. Refresh and try again.")
+        selection_count = int(
+            conn.execute(
+                f"""SELECT COUNT(*) FROM ergonomics_review_hazard_selections
+                    WHERE project_id=? AND scenario_id=?
+                      AND ergonomics_review_id IN ({placeholders})""",
+                (project_id, scenario_id, *ids),
+            ).fetchone()[0]
+        )
+        cursor = conn.execute(
+            f"""DELETE FROM ergonomics_reviews
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        )
+        if int(cursor.rowcount) != len(ids):
+            raise ValueError("One or more Ergonomics reviews changed. Refresh and try again.")
+    return {
+        "row_count": len(ids),
+        "hazard_selection_count": selection_count,
+        "timestamp": timestamp,
+    }
 
 
 def delete_process_part_groups(

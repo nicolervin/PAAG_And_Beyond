@@ -66,9 +66,10 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `parts`
 
-- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, and the primary CAD image path.
+- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, the primary CAD image path, and optional project-wide physical weight in `weight_lb`.
 - **Key relationships:** Belongs to `projects`. Parent of `part_images`, `part_scenario_activity`, `part_feature_rules`, `fishbone_part_assignments`, and `process_part_options`. A completed `manufacturing_assemblies` record may reference one catalog row through `catalog_part_id`, allowing the built subassembly to return to the normal Parts Catalog → Fishbone-use → downstream-planning flow.
 - **Scope:** Project-wide master data.
+- **Weight:** `weight_lb` is a nullable `REAL` value storing physical part weight in pounds. It has no inferred or automatic source in Phase 1. The future Ergonomics trigger may evaluate deliberately entered values greater than 33 pounds, regardless of Handle/Consume classification.
 
 ### `part_scenario_activity`
 
@@ -97,7 +98,7 @@ This file is the authoritative reference for every Process at a Glance database 
 ### `fishbone_part_assignments`
 
 - **Purpose:** Represents one placed occurrence or use of a catalog part in a fishbone section, with a strictly positive decimal occurrence quantity, use or installation description, notes, and order. One part may have multiple assignments.
-- **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section, but does not save the specific assignment ID.
+- **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section and may save the exact placement through `process_part_options.fishbone_assignment_id`.
 - **Scope:** Project-wide; scenario views filter these assignments using `part_scenario_activity`.
 
 ### `manufacturing_assemblies`
@@ -168,9 +169,41 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `process_part_options`
 
-- **Purpose:** Lists the catalog parts allowed or required by a process part group.
-- **Key relationships:** Belongs to `process_part_groups` and references `parts`. It records the catalog part, not a specific `fishbone_part_assignments` occurrence.
+- **Purpose:** Lists the catalog parts allowed or required by a process part group and optionally classifies each exact Process part-use as `Handle` or `Consume` through `handling_type`.
+- **Key relationships:** Belongs to `process_part_groups`, references `parts`, and may reference the exact `fishbone_part_assignments` occurrence through nullable `fishbone_assignment_id`.
 - **Scope:** Scenario-specific through the parent process part group.
+- **Handle/Consume compatibility:** `handling_type` is nullable, has no default, and accepts only `Handle`, `Consume`, or compatibility `NULL`. `Consume` means the part is removed from its container and placed on the line for the first time; `Handle` means it is manipulated again after it is already on the line. The field belongs to this part-use rather than the project-wide Part or whole Process step because the same Part number may be consumed once and handled later. The 16 rows present when Phase 1 was approved remain `NULL`; no value is inferred or backfilled. New rows created before Phase 2 also remain `NULL`. Ordinary Part-requirement saves preserve stable option IDs and any saved classification. A Phase 2 editor is required before contributors can classify these compatibility-null rows.
+
+#### Fishbone placement traceability and Consume allowance — amendment proposed September 8, 2026
+
+Add nullable `process_part_options.fishbone_assignment_id TEXT REFERENCES fishbone_part_assignments(id)` to identify the exact project-wide Fishbone placement represented by a scenario-specific Process part pairing. The relationship is placement-specific rather than part-number-specific because one catalog part may have multiple unrelated Fishbone placements, each with an independent recorded quantity and Consume allowance.
+
+The field remains nullable for compatibility with existing unclassified `process_part_options` rows. Those rows retain both `handling_type = NULL` and `fishbone_assignment_id = NULL`; no placement is inferred or backfilled. In the Phase 2 Process at a Glance part-pairing workflow, any pairing explicitly classified as `Handle` or `Consume` must reference a valid Fishbone placement for the same catalog part and applicable Fishbone section.
+
+When saving a pairing with `handling_type = 'Consume'`, validation counts existing Consume-classified `process_part_options` rows in the same planning scenario that reference the same `fishbone_part_assignments.id`, excluding the row currently being updated. Each pairing counts as one consumed unit. The proposed total after the save must not exceed `fishbone_part_assignments.quantity`. If the allowance has been reached, the complete save is blocked with a clear message that the specific Fishbone placement’s recorded quantity has already been fully consumed elsewhere in the scenario. This is a hard validation block with no override.
+
+A pairing with `handling_type = 'Handle'` is permitted only after at least one Consume-classified pairing exists in the same scenario for that exact Fishbone placement. After that prerequisite is satisfied, the number of Handle pairings referencing the placement is unrestricted and does not reduce or otherwise affect its Consume allowance.
+
+This relationship and validation belong exclusively to the Process at a Glance part-pairing workflow, where `process_part_options.handling_type` is classified. They do not aggregate by `parts.part_number`, alter the project-wide Fishbone quantity, or modify another scenario’s independent Consume count. No Process-step sequence or ordering comparison is required between a placement's Consume pairing and its Handle pairings; this is a deliberate simplification for this phase.
+
+### `ergonomic_hazard_options`
+
+- **Purpose:** Stores reusable Ergonomics hazard tags with a required Label and Active state, following the project-wide PFMEA manual-option catalog pattern. Labels are case-insensitively unique within a project.
+- **Key relationships:** Belongs to `projects` and is referenced by `ergonomics_review_hazard_selections`. Deleting an option removes its dependent selection rows but does not delete an Ergonomics review.
+- **Scope:** Project-wide. Inactive options remain available to existing saved selections but cannot be newly selected.
+
+### `ergonomics_reviews`
+
+- **Purpose:** Stores scenario-specific Ergonomics reviews for Process at a Glance work, including controlled status, reviewer attribution, notes, requested due date, and standard timestamps. New rows default to `Started`; allowed statuses are `Started`, `Open`, `Pending`, `Validation`, `Closed (admin)`, and `Closed (engineering)`.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`; requires `work_element_id` referencing a same-project, same-scenario `work_elements` row with deletion restricted; and may reference the exact triggering `process_part_options` row through nullable `process_part_option_id`. Removing that part-use sets the optional link to null while preserving the step-level review. Parent of `ergonomics_review_hazard_selections`.
+- **Scope:** Scenario-specific. Phase 1 does not clone these rows or calculate production readiness. Scenario cloning, source-change re-review behavior, automatic weight-based review creation, audit-integrated editing, and visible Process/Ergonomics presentation are Phase 2 follow-up work.
+- **Approval status:** Nicole Ervin, project owner, approved the module proposal on September 8, 2026 and approved the Phase 1 compatibility-null handling decision the same day.
+
+### `ergonomics_review_hazard_selections`
+
+- **Purpose:** Stores ordered, multiple hazard-tag selections for one Ergonomics review using stable normalized rows rather than embedded label text.
+- **Key relationships:** Belongs to one `ergonomics_reviews` row and references one `ergonomic_hazard_options` row. `UNIQUE(ergonomics_review_id, hazard_option_id)` prevents the same hazard from being selected twice for one review. Store validation enforces matching project and scenario boundaries.
+- **Scope:** Scenario-specific through the parent Ergonomics review. New selections require an active project-wide hazard option; an inactive option may remain on an existing review until deliberately removed.
 
 ## Module proposals and decision records
 
