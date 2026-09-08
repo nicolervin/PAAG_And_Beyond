@@ -18,7 +18,32 @@ Every approved destructive confirmation or standalone destructive action must us
 
 This standard is **locked** and replaces prior inconsistent patterns, including globally hiding Streamlit's native deletion action, Yamazumi's typed-`CLEAR` dialogs, Process at a Glance's single-click **Remove pairing** action, and delete-on-save behavior in Questions and concerns and Feature definitions.
 
+A Parts Catalog row linked from `manufacturing_assemblies.catalog_part_id` cannot be deleted directly. The relationship-aware Parts deletion dialog must identify every selected linked Part number and assembly number, keep confirmation unavailable while any such link exists, and instruct the contributor to delete or merge the assembly first. Deleting an assembly preserves its completed-subassembly Parts Catalog row and every downstream relationship owned by that part.
+
 Retrofitting existing screens to this standard is a separate future task and is not part of this documentation update. Do not modify screen code as part of documenting this standard.
+
+### Approved Task 09 Components v2 exception
+
+**Implementation status:** Active on `Nicole_assembly_grid_editor` as of September 3, 2026.
+
+The project-wide Task 09 assembly grid is the only approved exception to the native-toolbar entry-point requirement in items 1, 2, and 4 above and to the native row-selection checkbox requirement in the Universal Table Row Selection Standard below. Its integrated category, model, assembly, and nested mini-BOM layout requires a Components v2 grid that Streamlit's native table editor cannot represent. The component may therefore use its own selection and deletion controls for assembly-grid categories, direct model mappings, and nested mini-BOM component rows.
+
+The same exception covers the approved multi-section Assembly grid. Selected Fishbone sections appear as separate labeled groups in one workspace with shared model and active-feature filters and one atomic **Save & Refresh** footer. The component must always show the owning Fishbone section for each category group and distinguish completed-subassembly component choices from ordinary Fishbone parts. Multi-section display does not weaken the existing confirmation, deletion disclosure, audit, Undo, or preservation requirements.
+
+The Assembly grid begins with one protected **Top-level packaged unit** row immediately below the active feature headers and before all Fishbone-section headings. It remains visible regardless of the section filter, exposes a required final Built-section selector and optional Installed-section selector, and provides one Part number cell per visible official model. Its mini-BOM may select completed subassemblies from any active Fishbone section; ordinary parts remain limited to exact uses in the selected final Built section. The structural row has no category-delete control, although its model mappings and mini-BOM rows retain the approved confirmation behavior below.
+
+This exception changes only where the deletion request begins. The component must never write to the database or remove a row by itself. It sends stable record identifiers to Python, which resets and reruns the draft as needed and opens the same non-dismissible, relationship-aware Streamlit confirmation required everywhere else. The dialog must list or summarize the selected records and disclose what will be deleted, preserved, or otherwise affected. Cancel preserves the records and clears the pending request. Confirmation validates the complete action, performs one atomic store-layer write, records Current editor history, resets the component, shows a toast, and reruns.
+
+For Task 09 specifically:
+
+- Clearing a direct model mapping deletes only the mapping row. The real `manufacturing_assemblies` record and its mini-BOM, rules, images, nesting, and uploaded files remain unchanged.
+- Deleting an assembly-grid category deletes its mapping rows but preserves every mapped assembly and all assembly-owned data.
+- Deleting a nested mini-BOM component removes only the selected `manufacturing_assembly_components` row; its Fishbone use and Parts Catalog record remain.
+- Reassigning a blank mapping cell to an existing assembly, or renaming a mapped assembly to an unused number, is an ordinary edit and does not require deletion confirmation.
+- Editing a mapped cell to a number already owned by another same-category assembly is a narrowly scoped merge action because it deletes the superseded old assembly. **Save & Refresh** must open a non-dismissible dialog that names the old and target numbers, states that the old assembly record will be deleted, discloses every affected relationship and dependent-record count, and explains that the target assembly's existing mini-BOM will appear in the redirected cells. Cancel preserves the draft and both records. Confirmation performs the mapping redirection and old-record deletion atomically, records Current editor history under both the grid mapping and Assemblies catalog categories, resets the grid, shows a toast, and reruns.
+- Outside that confirmed same-category merge, deleting a real assembly remains available only through the existing full Task 04 assembly-deletion workflow.
+
+All destructive confirmation widget keys still begin with `destructive_`. No other custom component or screen inherits this exception; every other table continues to require the native Streamlit deletion entry point.
 
 ## Universal Table Row Selection Standard
 

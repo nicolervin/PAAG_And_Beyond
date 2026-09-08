@@ -8,9 +8,11 @@ import streamlit as st
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.store import (
     add_part_image,
+    assembly_bom_components,
     audit_history,
     complexity_features,
     delete_project_part,
+    part_delete_impact,
     get_planning_scenario,
     part_feature_rules,
     part_images,
@@ -143,9 +145,27 @@ def readable_feature_applicability(part_id: str, legacy_value) -> str:
 
 
 editable_table_heading("All parts")
-st.caption("Edit catalog fields directly, then save. Select View details on a row to open its photos and full information below.")
-editable_columns = ["id", "part_number", "description", "quantity", "revision", "model_applicability", "notes", "source", "image_path", "updated_at"]
+st.caption(
+    "Edit catalog fields directly, then save. Select View details on a row to open its "
+    "photos, full information, and completed-subassembly mini-BOM below."
+)
+editable_columns = ["id", "part_number", "description", "quantity", "revision", "model_applicability", "notes", "source", "image_path", "updated_at", "assembly_id", "assembly_number"]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
+linked_assembly_by_part = {
+    str(row["id"]): str(row.get("assembly_number") or "")
+    for _, row in parts_for_editing.iterrows()
+    if str(row.get("assembly_id") or "").strip()
+}
+
+
+def assembly_grid_applicability_status(part_id: str, value) -> str:
+    if part_id not in linked_assembly_by_part:
+        return readable_feature_applicability(part_id, value)
+    model_numbers = split_model_applicability(value) if str(value or "").strip() else []
+    return (
+        f"Assembly grid · {', '.join(model_numbers)}"
+        if model_numbers else "Assembly grid · No active mapped models"
+    )
 parts_for_editing["active"] = parts_for_editing["id"].apply(
     lambda part_id: activity_by_part.get(str(part_id), True)
 ).astype(bool)
@@ -157,7 +177,10 @@ parts_for_editing["feature_applicability"] = parts_for_editing.apply(
     axis=1,
 )
 parts_for_editing["applicability_status"] = parts_for_editing.apply(
-    lambda row: readable_feature_applicability(str(row["id"]), row["model_applicability"]), axis=1
+    lambda row: assembly_grid_applicability_status(
+        str(row["id"]), row["model_applicability"]
+    ),
+    axis=1,
 )
 parts_for_editing["view_details"] = ":material/visibility: View details"
 parts_for_editing["photo_status"] = parts_for_editing["image_path"].apply(
@@ -204,10 +227,12 @@ edited_parts = st.data_editor(
     hide_index=True,
     num_rows="dynamic",
     height=430,
-    disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at"],
+    disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "assembly_id", "assembly_number"],
     column_order=["view_details", "active", "photo_status", "part_number", "description", "revision", "feature_applicability", "applicability_status", "notes", "source", "updated_at"],
     column_config={
         "id": None,
+        "assembly_id": None,
+        "assembly_number": None,
         "view_details": standard_details_column_config(on_click=open_part_details, key="parts_view_details"),
         "active": st.column_config.CheckboxColumn(
             "Active",
@@ -323,9 +348,25 @@ if request_delete_bulk_parts:
 @st.dialog("Delete selected parts?", dismissible=False)
 def confirm_bulk_part_delete() -> None:
     pending_ids = st.session_state.get("parts_pending_bulk_delete", [])
+    try:
+        impact = part_delete_impact(project_id, pending_ids)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
     st.warning(
         f"This will permanently delete {len(pending_ids)} part(s), their photos, and their fishbone uses."
     )
+    if impact["linked_assemblies"]:
+        st.error(
+            "These Parts Catalog rows represent current manufacturing assemblies and cannot "
+            "be deleted here:"
+        )
+        for linked in impact["linked_assemblies"]:
+            st.write(
+                f"- Part number **{linked['assembly_number']}** is linked to assembly "
+                f"**{linked['assembly_number']}** ({linked['assembly_name']})."
+            )
+        st.caption("Delete or merge the linked assembly first, then retry the Parts deletion.")
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_bulk_part_delete"):
         st.session_state.pop("parts_pending_bulk_delete", None)
@@ -336,6 +377,7 @@ def confirm_bulk_part_delete() -> None:
         type="primary",
         icon=":material/delete:",
         key="destructive_confirm_bulk_part_delete",
+        disabled=bool(impact["linked_assemblies"]),
     ):
         deleted_labels = [
             delete_project_part(project_id, str(part_id))
@@ -372,11 +414,17 @@ if save_part_table:
         )
         if invalid_all.any():
             raise ValueError("Choose All models by itself, or choose feature values.")
-        missing_rule = edited_parts["feature_applicability"].apply(lambda selected: not (selected or []))
+        missing_rule = edited_parts.apply(
+            lambda row: (
+                str(row.get("id") or "") not in linked_assembly_by_part
+                and not (row.get("feature_applicability") or [])
+            ),
+            axis=1,
+        )
         if missing_rule.any():
             raise ValueError("Every part needs All models or at least one feature choice.")
         parts_to_save = edited_parts.drop(
-            columns=["view_details", "active", "photo_status", "feature_applicability", "applicability_status"]
+            columns=["view_details", "active", "photo_status", "feature_applicability", "applicability_status", "assembly_id", "assembly_number"]
         ).copy()
         new_row_mask = parts_to_save["id"].isna() | parts_to_save["id"].astype(str).str.strip().eq("")
         parts_to_save.loc[new_row_mask, "id"] = [str(uuid4()) for _ in range(int(new_row_mask.sum()))]
@@ -549,8 +597,58 @@ with details_col.container(border=True):
     detail_cols = st.columns(2)
     detail_cols[0].metric("Revision", part["revision"] or "—")
     detail_cols[1].metric("Source", part["source"])
-    st.markdown(f"**Feature applicability:** {readable_feature_applicability(part['id'], part['model_applicability'])}")
+    st.markdown(
+        f"**Feature applicability:** "
+        f"{assembly_grid_applicability_status(str(part['id']), part['model_applicability'])}"
+    )
     if part["notes"]:
         st.write(part["notes"])
+
+    raw_assembly_id = part.get("assembly_id")
+    assembly_id = (
+        ""
+        if raw_assembly_id is None or pd.isna(raw_assembly_id)
+        else str(raw_assembly_id).strip()
+    )
+    st.subheader("Mini-BOM")
+    if not assembly_id:
+        st.caption(
+            "This catalog part is not linked to a completed manufacturing assembly, "
+            "so it does not have an assembly mini-BOM."
+        )
+    else:
+        st.caption(
+            "Read-only completed-subassembly structure. Edit it from Assembly grid "
+            "Details → Mini-BOM."
+        )
+        mini_bom = assembly_bom_components(project_id, assembly_id)
+        if mini_bom.empty:
+            st.caption("No components listed for this assembly yet.")
+        else:
+            mini_bom_view = mini_bom[
+                ["part_number", "part_name", "quantity", "use_description"]
+            ].rename(
+                columns={
+                    "part_number": "Part number",
+                    "part_name": "Part name",
+                    "quantity": "Quantity",
+                    "use_description": "Fishbone use",
+                }
+            )
+            st.dataframe(
+                mini_bom_view,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Part number": st.column_config.TextColumn(
+                        "Part number", pinned=True
+                    ),
+                    "Part name": st.column_config.TextColumn("Part name"),
+                    "Quantity": st.column_config.NumberColumn(
+                        "Quantity", format="%g"
+                    ),
+                    "Fishbone use": st.column_config.TextColumn("Fishbone use"),
+                },
+            )
 
 render_parts_history()

@@ -60,7 +60,7 @@ pages = {
         st.Page("app_pages/exchange.py", title="Import PITS and export", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
         st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
-        st.Page("app_pages/assemblies.py", title="Assemblies", icon=":material/account_tree:"),
+        st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
         st.Page("app_pages/fishbone.py", title="Parts to fishbone", icon=":material/device_hub:"),
     ],
     "Process planning": [
