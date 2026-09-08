@@ -8,6 +8,7 @@ Read this file before changing the application. Then read the applicable authori
 
 - **Database schema, persisted fields, relationships, scope, or a new screen/module:** read `DATA_DICTIONARY.md`.
 - **Tables, forms, page layout, deletion, save behavior, audit/history, scenario badges, help text, or UI terminology:** read `DESIGN_SYSTEM.md`.
+- **Quality-scoped tasks:** read `QUALITY_MODULE.md`.
 - **Incomplete, deferred, dormant, blocked, or legacy behavior:** read `PROJECT_STATUS.md` and the applicable `DATA_DICTIONARY.md` section.
 - **Product scope, navigation, repository map, technology, startup, or domain terminology:** read `README.md`.
 
@@ -32,7 +33,7 @@ If it is unclear whether a rule is general or role-specific, or whether a change
 - Preserve the critical thread documented in `DATA_DICTIONARY.md`: Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> derived Pin Map. Imported evidence must never silently replace collaborator-reviewed planning decisions.
 - A planning scenario owns its Yamazumi areas and Process plan work. Never read or write scenario-owned records by project ID alone where that could mix scenarios.
 - The Parts Catalog and Fishbone structure are project-wide, with scenario-dependent downstream visibility documented in `DATA_DICTIONARY.md`.
-- The five Functional Reviews pages are approved non-persistent shells. Do not add persisted fields, relationships, ownership, or storage until the applicable proposal passes the New Module Proposal Gate.
+- Functional Reviews must remain within the scope approved for each review in `DATA_DICTIONARY.md`. Reviews without separately approved persisted behavior remain non-persistent shells.
 - `app_pages/assembly_sequence.py` is legacy and unlinked. Do not add features to it unless the requester explicitly asks to revive it.
 - Dormant and hidden tables have distinct restrictions in `DATA_DICTIONARY.md`. Do not modify or build against them without the documented approval.
 
