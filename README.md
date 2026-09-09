@@ -85,7 +85,8 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, ordered process requirements, bulk actions, export, and workload chart.
 - `app_pages/pin_map.py` — Scenario-specific read-only line visualization of pitches and explicitly linked Process work.
 - `app_pages/functional_quality.py` — Scenario-aware Quality page with the project-wide Requirements repository, scenario-specific PFMEA tab, and Control Plan placeholder.
-- `app_pages/functional_equipment.py`, `functional_ergonomics.py`, `functional_materials.py`, and `functional_safety.py` — Non-persistent Functional Reviews shells.
+- `app_pages/functional_ergonomics.py` — Scenario-specific Ergonomics review editor with linked/unlinked tracking, hazard tags, confirmed merging, deletion, and history.
+- `app_pages/functional_equipment.py`, `functional_materials.py`, and `functional_safety.py` — Non-persistent Functional Reviews shells.
 - `app_pages/assembly_sequence.py` — Legacy, unlinked assembly-Fishbone implementation; do not extend unless explicitly revived.
 
 ### Shared utility files
@@ -101,7 +102,7 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `utils/yamazumi_board.py` — Components v2 balancing board.
 - `utils/fishbone_visual.py` — Components v2 interactive assembly Fishbone.
 - `utils/clipboard_image.py` — Components v2 clipboard capture and server-side image normalization.
-- `utils/functional_review_ui.py` — Shared shell for Equipment, Ergonomics, Materials, and Safety.
+- `utils/functional_review_ui.py` — Shared shell for Equipment, Materials, and Safety.
 
 ## Navigation and screens
 
@@ -128,7 +129,7 @@ Navigation is defined in `streamlit_app.py`.
 
 ### Functional Reviews
 
-**Quality** is Scenario-aware: its Requirements repository is project-wide, while PFMEA belongs to the active scenario and links failure modes, Effects, Causes, explicitly classified published Quality controls, saved RPN calculations, and Recommended Actions to Process at a Glance steps. The Control Plan tab is a placeholder and does not generate or store Control Plan data. **Equipment**, **Ergonomics**, **Materials**, and **Safety** remain project-wide, non-persistent shells; their persisted relationships, ownership, scope, and storage require proposal and owner review before implementation.
+**Quality** is Scenario-aware: its Requirements repository is project-wide, while PFMEA belongs to the active scenario and links failure modes, Effects, Causes, explicitly classified published Quality controls, saved RPN calculations, and Recommended Actions to Process at a Glance steps. The Control Plan tab is a placeholder and does not generate or store Control Plan data. **Ergonomics** is scenario-specific and maintains linked or Unlinked reviews, project-wide hazard tags, status, reviewer, notes, requested due dates, automatic starting reviews for new Process steps, and relationship-aware merges. **Equipment**, **Materials**, and **Safety** remain project-wide, non-persistent shells; their persisted relationships, ownership, scope, and storage require proposal and owner review before implementation.
 
 ## Domain glossary
 

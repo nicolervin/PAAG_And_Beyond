@@ -363,6 +363,56 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app = self.run_page("app_pages/process.py")
         self.assertTrue(any(title.value == "Process at a Glance" for title in app.title))
 
+    def test_process_at_a_glance_displays_live_ergonomics_risk_tag(self) -> None:
+        work_element_id = "process-ergo-risk-step"
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, updated_at)
+                   VALUES (?, ?, ?, 950, 'P-950', 'Lift risk item', ?)""",
+                (work_element_id, self.project_id, self.scenario_id, timestamp),
+            )
+        review_id = store.save_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            {
+                "work_element_id": work_element_id,
+                "status": "Open",
+                "risk_classification": "Red",
+            },
+        )["id"]
+
+        app = self.run_page("app_pages/process.py")
+        process_table = next(
+            editor.value
+            for editor in app.dataframe
+            if "ergonomics_risk" in editor.value.columns
+        )
+        risk_row = process_table.loc[process_table["id"].eq(work_element_id)].iloc[0]
+        self.assertEqual(
+            list(risk_row["ergonomics_risk"]), ["Ergo Risk"]
+        )
+
+        store.save_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            {
+                "id": review_id,
+                "work_element_id": work_element_id,
+                "status": "Validation",
+                "risk_classification": "Red",
+            },
+        )
+        app = self.run_page("app_pages/process.py")
+        process_table = next(
+            editor.value
+            for editor in app.dataframe
+            if "ergonomics_risk" in editor.value.columns
+        )
+        risk_row = process_table.loc[process_table["id"].eq(work_element_id)].iloc[0]
+        self.assertEqual(list(risk_row["ergonomics_risk"]), [])
+
     def test_process_pairing_single_use_defaults_consume_and_auto_selects(self) -> None:
         self.add_process_pairing_source()
         app = self.run_process_pairing_page()

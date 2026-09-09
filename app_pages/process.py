@@ -13,6 +13,7 @@ from utils.store import (
     move_fishbone_part_assignment,
     parse_yamazumi_model_variants,
     process_element_id_for_yamazumi,
+    process_ergonomics_risk_work_element_ids,
     process_part_placement_options,
     process_part_groups,
     process_section_for_step,
@@ -961,13 +962,14 @@ columns = [
     "assigned_parts", "part_number", "output_assembly_number", "output_assembly_name",
     "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
     "conveyor_height_in", "platform_height_in", "pit_depth_in",
-    "model_applicability", "status", "details",
+    "model_applicability", "ergonomics_risk", "status", "details",
 ]
 compact_columns = [
     "station",
     "pitch_name",
     "work_element",
     "assigned_parts",
+    "ergonomics_risk",
     "model_applicability",
     "cycle_time_s",
     "details",
@@ -999,6 +1001,7 @@ if elements.empty:
             "platform_height_in": pd.Series(dtype="float64"),
             "pit_depth_in": pd.Series(dtype="float64"),
             "model_applicability": pd.Series(dtype="object"),
+            "ergonomics_risk": pd.Series(dtype="object"),
             "status": pd.Series(dtype="string"),
             "details": pd.Series(dtype="string"),
         }
@@ -1036,6 +1039,15 @@ else:
         )
     elements["details"] = ":material/info: Details"
     elements = elements.reindex(columns=columns)
+
+ergonomics_risk_ids = process_ergonomics_risk_work_element_ids(
+    project_id, scenario_id
+)
+elements["ergonomics_risk"] = elements["id"].astype(str).map(
+    lambda work_element_id: (
+        ["Ergo Risk"] if work_element_id in ergonomics_risk_ids else []
+    )
+)
 
 elements["model_applicability"] = elements["model_applicability"].apply(
     lambda value: [
@@ -1092,7 +1104,13 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="delete",
     height=470,
-    disabled=["id", "pitch_name", "work_element", "assigned_parts"],
+    disabled=[
+        "id",
+        "pitch_name",
+        "work_element",
+        "assigned_parts",
+        "ergonomics_risk",
+    ],
     column_order=compact_columns,
     column_config={
         "id": None,
@@ -1108,6 +1126,18 @@ edited = st.data_editor(
         ),
         "assigned_parts": st.column_config.TextColumn(
             "Part requirements", width="large"
+        ),
+        "ergonomics_risk": st.column_config.MultiselectColumn(
+            "Ergonomics",
+            options=["Ergo Risk"],
+            color="red",
+            disabled=True,
+            width="medium",
+            help=(
+                "Shown when this step has an Open or Pending Ergonomics review "
+                "classified as Red or Favorable Red. Review details on the "
+                "Ergonomics page."
+            ),
         ),
         "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
         "model_applicability": st.column_config.MultiselectColumn(
