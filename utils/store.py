@@ -4163,6 +4163,37 @@ def process_part_placement_options(
     return pd.DataFrame(rows, columns=columns)
 
 
+def validate_process_part_option_pairings(
+    project_id: str,
+    scenario_id: str,
+    section_id: str,
+    pairings: list[dict],
+) -> None:
+    """Validate new Process part pairings before any surrounding workflow writes."""
+    with connection() as conn:
+        if not conn.execute(
+            """SELECT 1 FROM planning_scenarios
+               WHERE id=? AND project_id=?""",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        for pairing in pairings:
+            _validate_process_part_option_handling(
+                conn,
+                project_id=project_id,
+                scenario_id=scenario_id,
+                section_id=section_id,
+                process_part_option_id=str(pairing.get("id") or uuid4()),
+                part_id=str(pairing.get("part_id") or ""),
+                handling_type=_normalize_handling_type(
+                    pairing.get("handling_type")
+                ),
+                fishbone_assignment_id=_normalize_fishbone_assignment_id(
+                    pairing.get("fishbone_assignment_id")
+                ),
+            )
+
+
 def manufacturing_assemblies(project_id: str, scenario_id: str) -> pd.DataFrame:
     return pd.DataFrame(query(
         """SELECT a.*, parent.assembly_number AS parent_assembly_number,

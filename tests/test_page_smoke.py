@@ -144,7 +144,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             )
         return yamazumi_element_id
 
-    def run_process_pairing_page(self) -> AppTest:
+    def run_process_pairing_page(self, *, select_part: bool = True) -> AppTest:
         app = AppTest.from_file(
             str(store.ROOT / "app_pages/process.py"), default_timeout=30
         )
@@ -155,10 +155,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             f"process_yamazumi_source_{self.scenario_id}_{self.section_id}"
             "__editor_instance_0"
         ] = {"selection": {"rows": [0], "columns": [], "cells": []}}
-        app.session_state[
-            f"process_part_source_{self.scenario_id}_{self.section_id}"
-            "__editor_instance_0"
-        ] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        if select_part:
+            app.session_state[
+                f"process_part_source_{self.scenario_id}_{self.section_id}"
+                "__editor_instance_0"
+            ] = {"selection": {"rows": [0], "columns": [], "cells": []}}
         app.run(timeout=30)
         self.assertEqual(list(app.exception), [])
         return app
@@ -384,6 +385,34 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertEqual(location.value, self.assignment_id)
         self.assertTrue(location.disabled)
 
+    def test_process_pairing_without_parts_remains_unclassified(self) -> None:
+        self.add_process_pairing_source()
+        app = self.run_process_pairing_page(select_part=False)
+        add_without_parts = next(
+            button
+            for button in app.button
+            if str(button.key).startswith(
+                f"add_work_only_{self.scenario_id}_"
+            )
+        )
+        app = add_without_parts.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        process_step = store.query(
+            """SELECT id FROM work_elements
+               WHERE project_id=? AND scenario_id=? AND operation='Pair smoke component'""",
+            (self.project_id, self.scenario_id),
+        )
+        self.assertEqual(len(process_step), 1)
+        option_count = store.query(
+            """SELECT COUNT(*) AS count
+               FROM process_part_options option
+               JOIN process_part_groups group_row ON group_row.id=option.group_id
+               WHERE group_row.project_id=? AND group_row.scenario_id=?
+                 AND group_row.work_element_id=?""",
+            (self.project_id, self.scenario_id, process_step[0]["id"]),
+        )[0]["count"]
+        self.assertEqual(option_count, 0)
+
     def test_process_pairing_multiple_uses_requires_explicit_location(self) -> None:
         self.add_process_pairing_source()
         store.assign_parts_to_section(
@@ -481,6 +510,12 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 for error in app.error
             )
         )
+        source = store.query(
+            """SELECT process_element_id, process_sync_status
+               FROM yamazumi_elements WHERE description='Pair smoke component'"""
+        )[0]
+        self.assertIsNone(source["process_element_id"])
+        self.assertNotEqual(source["process_sync_status"], "Synced")
 
     def test_process_pairing_surfaces_handle_prerequisite_error(self) -> None:
         self.add_process_pairing_source()
@@ -494,6 +529,12 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 for error in app.error
             )
         )
+        source = store.query(
+            """SELECT process_element_id, process_sync_status
+               FROM yamazumi_elements WHERE description='Pair smoke component'"""
+        )[0]
+        self.assertIsNone(source["process_element_id"])
+        self.assertNotEqual(source["process_sync_status"], "Synced")
 
 
 if __name__ == "__main__":

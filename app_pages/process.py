@@ -24,6 +24,7 @@ from utils.store import (
     save_process_part_group,
     search_parts_and_fishbone,
     update_process_step_details,
+    validate_process_part_option_pairings,
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
 )
@@ -66,8 +67,9 @@ page_title_with_scope(
     "Process at a Glance", scope="scenario", scenario_name=scenario["name"]
 )
 st.caption(
-    "Create Part requirements for Yamazumi work elements section by section, then complete the ordered "
-    "Process at a Glance by pitch. A purchased assembly is handled as one catalog part."
+    "Create Part requirements for Yamazumi work elements section by section, classify each selected "
+    "part as Consume or Handle, then complete the ordered Process at a Glance by pitch. A purchased "
+    "assembly is handled as one catalog part."
 )
 st.caption(f"Rev {scenario['revision_label']} · {scenario['name']} · {scenario['status']}")
 
@@ -167,7 +169,7 @@ else:
     part_selection_expired = False
     with work_column.container(border=True, height="stretch"):
         st.markdown("#### Yamazumi work elements")
-        st.caption("Select the work element that consumes the parts.")
+        st.caption("Select the work element that uses the parts.")
         if yamazumi_rows.empty:
             if pairing_search and section_has_available_yamazumi_work:
                 st.info("No available Yamazumi work matches this filter.")
@@ -800,6 +802,12 @@ else:
                         + ", ".join(missing_locations)
                         + "."
                     )
+                validate_process_part_option_pairings(
+                    project_id,
+                    scenario_id,
+                    section_id,
+                    selected_pairing_details,
+                )
                 reconcile_yamazumi_to_process(
                     project_id, scenario_id, [selected_yamazumi_id]
                 )
