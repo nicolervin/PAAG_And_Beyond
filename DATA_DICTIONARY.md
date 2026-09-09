@@ -66,9 +66,10 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `parts`
 
-- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, and the primary CAD image path.
+- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, the primary CAD image path, and optional project-wide physical weight in `weight_lb`.
 - **Key relationships:** Belongs to `projects`. Parent of `part_images`, `part_scenario_activity`, `part_feature_rules`, `fishbone_part_assignments`, and `process_part_options`. A completed `manufacturing_assemblies` record may reference one catalog row through `catalog_part_id`, allowing the built subassembly to return to the normal Parts Catalog → Fishbone-use → downstream-planning flow.
 - **Scope:** Project-wide master data.
+- **Weight:** `weight_lb` is a nullable `REAL` value storing physical part weight in pounds. It has no inferred or automatic source in Phase 1. The future Ergonomics trigger may evaluate deliberately entered values greater than 33 pounds, regardless of Handle/Consume classification.
 
 ### `part_scenario_activity`
 
@@ -97,7 +98,7 @@ This file is the authoritative reference for every Process at a Glance database 
 ### `fishbone_part_assignments`
 
 - **Purpose:** Represents one placed occurrence or use of a catalog part in a fishbone section, with a strictly positive decimal occurrence quantity, use or installation description, notes, and order. One part may have multiple assignments.
-- **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section, but does not save the specific assignment ID.
+- **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section and may save the exact placement through `process_part_options.fishbone_assignment_id`.
 - **Scope:** Project-wide; scenario views filter these assignments using `part_scenario_activity`.
 
 ### `manufacturing_assemblies`
@@ -168,9 +169,99 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `process_part_options`
 
-- **Purpose:** Lists the catalog parts allowed or required by a process part group.
-- **Key relationships:** Belongs to `process_part_groups` and references `parts`. It records the catalog part, not a specific `fishbone_part_assignments` occurrence.
+- **Purpose:** Lists the catalog parts allowed or required by a process part group and optionally classifies each exact Process part-use as `Handle` or `Consume` through `handling_type`.
+- **Key relationships:** Belongs to `process_part_groups`, references `parts`, and may reference the exact `fishbone_part_assignments` occurrence through nullable `fishbone_assignment_id`.
 - **Scope:** Scenario-specific through the parent process part group.
+- **Handle/Consume compatibility:** `handling_type` is nullable, has no default, and accepts only `Handle`, `Consume`, or compatibility `NULL`. `Consume` means the part is removed from its container and placed on the line for the first time; `Handle` means it is manipulated again after it is already on the line. The field belongs to this part-use rather than the project-wide Part or whole Process step because the same Part number may be consumed once and handled later. The 16 rows present when Phase 1 was approved remain `NULL`; no value is inferred or backfilled. Rows created before the Phase 2A picker also remain `NULL`. Ordinary Part-requirement saves preserve stable option IDs and any saved classification. Phase 2A requires an explicit classification and exact placement for every newly selected catalog part, while compatibility-null saved rows remain unchanged unless a future approved editing workflow explicitly classifies them.
+
+#### Fishbone placement traceability and Consume allowance — amendment approved September 8, 2026
+
+Add nullable `process_part_options.fishbone_assignment_id TEXT REFERENCES fishbone_part_assignments(id)` to identify the exact project-wide Fishbone placement represented by a scenario-specific Process part pairing. The relationship is placement-specific rather than part-number-specific because one catalog part may have multiple unrelated Fishbone placements, each with an independent recorded quantity and Consume allowance.
+
+The field remains nullable for compatibility with existing unclassified `process_part_options` rows. Those rows retain both `handling_type = NULL` and `fishbone_assignment_id = NULL`; no placement is inferred or backfilled. In the Phase 2 Process at a Glance part-pairing workflow, any pairing explicitly classified as `Handle` or `Consume` must reference a valid Fishbone placement for the same catalog part and applicable Fishbone section.
+
+When saving a pairing with `handling_type = 'Consume'`, validation counts existing Consume-classified `process_part_options` rows in the same planning scenario that reference the same `fishbone_part_assignments.id`, excluding the row currently being updated. Each pairing counts as one consumed unit. The proposed total after the save must not exceed `fishbone_part_assignments.quantity`. If the allowance has been reached, the complete save is blocked with a clear message that the specific Fishbone placement’s recorded quantity has already been fully consumed elsewhere in the scenario. This is a hard validation block with no override.
+
+A pairing with `handling_type = 'Handle'` is permitted only after at least one Consume-classified pairing exists in the same scenario for that exact Fishbone placement. After that prerequisite is satisfied, the number of Handle pairings referencing the placement is unrestricted and does not reduce or otherwise affect its Consume allowance.
+
+This relationship and validation belong exclusively to the Process at a Glance part-pairing workflow, where `process_part_options.handling_type` is classified. They do not aggregate by `parts.part_number`, alter the project-wide Fishbone quantity, or modify another scenario’s independent Consume count. No Process-step sequence or ordering comparison is required between a placement's Consume pairing and its Handle pairings; this is a deliberate simplification for this phase.
+
+The Phase 2A Process at a Glance picker defaults each newly selected catalog part to `Consume` and allows the contributor to switch it to `Handle`. It automatically selects `fishbone_assignment_id` when the part has exactly one Use / installation location in the applicable Fishbone section; when several exist, the contributor must choose the exact location before saving. Location options show the scenario-specific remaining Consume allowance derived by the store layer. An unavailable Consume or Handle choice remains subject to the same hard store validation and its user-readable blocking message. Pairing Yamazumi work without a part does not create a `process_part_options` row and does not involve either field.
+
+### `ergonomic_hazard_options`
+
+- **Purpose:** Stores reusable Ergonomics hazard tags with a required Label and Active state, following the project-wide PFMEA manual-option catalog pattern. Labels are case-insensitively unique within a project.
+- **Key relationships:** Belongs to `projects` and is referenced by `ergonomics_review_hazard_selections`. Deleting an option removes its dependent selection rows but does not delete an Ergonomics review.
+- **Scope:** Project-wide. Inactive options remain available to existing saved selections but cannot be newly selected.
+
+### `ergonomics_reviews`
+
+- **Purpose:** Stores scenario-specific Ergonomics reviews, including independently controlled status and risk classification, reviewer attribution, notes, requested due date, and standard timestamps. A review may be linked to Process at a Glance work or may begin as an unlinked legacy item or pre-PAAG concern before a corresponding Process step exists. New rows default to status `Started` and risk classification `Not yet assessed`; allowed statuses remain `Started`, `Open`, `Pending`, `Validation`, `Closed (admin)`, and `Closed (engineering)`.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`; optionally references a same-project, same-scenario `work_elements` row through nullable `work_element_id`. Deleting a `work_element` does not delete or block deletion of its linked `ergonomics_reviews` row; instead, `work_element_id` is set to `NULL` on the affected review, preserving all reviewer-entered content. The review then reappears in the **Unlinked** filtered view, following the same pattern already used for `process_part_option_id` nulling on deletion of its linked part-use. The review may reference the exact triggering `process_part_options` row through nullable `process_part_option_id`; removing that part-use sets the optional link to null while preserving the review. Parent of `ergonomics_review_hazard_selections`.
+- **Scope:** Scenario-specific. An unlinked review still belongs to one project and planning scenario even while `work_element_id` is `NULL`. Phase 2B provides the scenario-specific editable Ergonomics review table, automatic starting reviews for newly created Process steps, relationship-aware linking/merge behavior, and confirmed deletion. The approved scenario-cloning behavior and active-scenario takt-time display below are implemented. Weight-based automatic review triggers, source-change re-review behavior, inline 16:9 Standard Work presentation, and production-readiness calculation remain follow-up work.
+- **Approval status:** Nicole Ervin, project owner, approved the original module proposal and Phase 1 compatibility-null handling decision on September 8, 2026. The nullable Work Element relationship, automatic review creation, and explicit linking/merge workflow below were approved as an amendment on September 9, 2026. The independent risk classification and derived Process at a Glance cross-reference below were approved as a further amendment on September 9, 2026. Scenario cloning and active-scenario takt-time visibility were approved as a further amendment on September 9, 2026.
+
+#### Nullable Work Element relationship and automatic review creation — amendment approved September 9, 2026
+
+`ergonomics_reviews.work_element_id` is nullable. A `NULL` value supports **legacy items**, meaning known ergonomic issues from current production entered at the start of a program, and **pre-PAAG concerns**, meaning issues identified before parts have been paired to time elements. Both use the existing `ergonomics_reviews` table; no separate holding or staging table is introduced.
+
+Every review with `work_element_id = NULL` must display a clear **Unlinked** badge or tag in the Ergonomics UI rather than relying on a blank Work Element cell. The review table must support filtering between linked and unlinked records.
+
+Whenever a new `work_elements` Process at a Glance step is created, the system automatically creates one `ergonomics_reviews` row in the same project and planning scenario. The generated review has `status = 'Started'`, references the new step through `work_element_id`, has no hazard selections, and leaves every other contributor-editable field blank. The work-element creation path must guarantee that the starting review is present for every newly created Process step.
+
+An ergonomist may explicitly link an existing unlinked review to a same-project, same-scenario Work Element that already has its automatically generated review. Exactly one of the two reviews survives:
+
+1. A review has **real content** when its status differs from the default `Started`, or when it has any selected hazard tag, nonblank notes, nonblank reviewer attribution, or a requested due date.
+2. If exactly one review has real content and the other is an empty, untouched automatically generated placeholder, the review with real content survives. Its `work_element_id` is set or retained as the target Work Element, and the empty placeholder is removed without a confirmation dialog because no real review content is discarded.
+3. If both reviews have real content, a non-dismissible relationship-aware confirmation dialog displays both reviews' complete content side by side. The ergonomist must explicitly select which review survives before the merge can proceed. The selected survivor is linked to the target Work Element, and the other review is fully removed.
+4. The merge is one atomic store-layer write. Removing the discarded review also removes its owned hazard-selection rows through the established relationship. The merge records one `record_audit_event()` entry with Current editor attribution and includes both the surviving and discarded `ergonomics_reviews.id` values in the audit details.
+
+This amendment does not change the approved status list, `requested_due_date`, reviewer pattern, notes, project-wide `ergonomic_hazard_options` catalog, or normalized multiple-selection structure in `ergonomics_review_hazard_selections`.
+
+#### Risk classification and Process at a Glance cross-reference — amendment approved September 9, 2026
+
+Add `ergonomics_reviews.risk_classification` as a controlled field independent of `status`. Its allowed values are `Not yet assessed`, `Favorable Red`, `Favorable Green`, `Red`, and `Green`. Every newly created review, including an automatically generated review for a new Process at a Glance Work Element, defaults to `Not yet assessed`.
+
+`risk_classification` is non-nullable and has a database-enforced default of `Not yet assessed`. Unlike the `handling_type` compatibility-null decision, initializing existing rows is a one-time factual backfill rather than an inferred guess: every existing `ergonomics_reviews` row genuinely has not yet had a risk classification recorded. The migration therefore sets every existing review to `Not yet assessed`, accurately representing the known state and ensuring that the field never has two representations of the same outcome through both `NULL` and the literal `Not yet assessed`. Future filters, reports, and displays may consequently treat the literal controlled value as the sole representation of a review that has not yet been assessed.
+
+`status` and `risk_classification` represent separate dimensions of the review. Either field may hold any of its allowed values regardless of the other field's value; they do not form a linked or linear progression.
+
+- `Favorable Red` and `Favorable Green` indicate that an assessment was performed using a non-production-intent part, such as a 3D-printed prototype, and remains subject to confirmation using the production-intent part. These classifications will typically be used during `Validation` around pilot launch, but they are not restricted to that status.
+- `Red` and `Green` indicate that the assessment outcome was confirmed using the production-intent part.
+
+Process at a Glance must derive a read-only informational tag for each `work_elements` row from its scenario-specific linked `ergonomics_reviews` rows. The tag appears when at least one individual linked review simultaneously has `status` equal to `Open` or `Pending` and `risk_classification` equal to `Red` or `Favorable Red`.
+
+When multiple reviews reference the same Work Element, one qualifying review is sufficient to display the tag; other linked reviews do not need to agree. The tag is calculated at display time and is not persisted on `work_elements`. It is non-interactive and cannot be edited from Process at a Glance; contributors use the normal navigation to the Ergonomics page for review details. This follows the established derived-view approach used by Pin Map and does not duplicate Ergonomics state.
+
+The previously contemplated acknowledgeable **weight review needed** flag is withdrawn. No acknowledgment field, persisted dismissal state, or dismiss control is introduced. This amendment adds no weight-trigger implementation.
+
+This amendment does not change the existing Ergonomics status list, automatic review-creation trigger, nullable `work_element_id` and **Unlinked** behavior, or relationship-aware link and merge workflow.
+
+#### Scenario cloning and current takt visibility — amendment approved September 9, 2026
+
+When `clone_planning_scenario()` clones a planning scenario, every `ergonomics_reviews` row belonging to the source scenario is copied into the new scenario with a new `ergonomics_reviews.id`. The cloned review retains the source review’s status, risk classification, reviewer attribution, hazard selections, notes, and requested due date. Hazard-selection rows receive new IDs and continue referencing the same project-wide `ergonomic_hazard_options` records.
+
+A source review with `work_element_id = NULL` is copied with `work_element_id = NULL` and remains **Unlinked** in the new scenario. This carries legacy items and pre-PAAG concerns forward as ongoing awareness items without assigning them to a Process step.
+
+A source review with a non-null `work_element_id` is copied with that relationship remapped to the corresponding cloned `work_elements` row in the new scenario. The source scenario’s Work Element ID must never be retained on the cloned review.
+
+A source review with a non-null `process_part_option_id` is copied with that relationship remapped to the corresponding cloned `process_part_options` row in the new scenario. If no corresponding cloned Process part-use can be identified, the cloned review stores `process_part_option_id = NULL`; it must never reference a Process part-use belonging to the source scenario.
+
+Creating the cloned Work Elements invokes the existing automatic review-creation behavior, which initially creates a blank `Started` / `Not yet assessed` review for each cloned step. When a copied source review is remapped to that step, the automatically generated blank placeholder is discarded and the copied source review survives. This applies the established silent-merge principle automatically during the atomic scenario-cloning transaction, with no confirmation dialog because no contributor-entered content is discarded.
+
+If the source scenario contains the edge case of multiple reviews linked to one Work Element, every source review is still copied and remapped as required; the single automatically generated blank placeholder is removed once. Under the normal one-review-per-step flow, the copied review is therefore the sole review linked to the cloned step. A copied source review survives even when it is itself still an untouched default review, preserving the requirement that every source review receives a corresponding new row while avoiding two blank reviews for the cloned step.
+
+Scenario cloning does not set or trigger a re-review flag on any copied review. This remains true when the cloned scenario’s takt time differs from the source scenario’s takt time, even though frequency-driven ergonomic risk factors may need reconsideration. No automatic takt-difference detection, stored comparison, or derived re-review state is introduced.
+
+The Ergonomics page must display the active planning scenario’s current takt time, sourced from `planning_scenarios.takt_time_s`, in a clearly visible location. This display allows contributors to judge manually whether carried-forward frequency-driven assessments remain applicable under the active scenario’s timing. It displays only the current scenario’s value and does not store or calculate a comparison with the source scenario’s takt time.
+
+This amendment does not change the approved status list, the controlled `risk_classification` field, automatic review creation for new Work Elements, nullable `work_element_id` and **Unlinked** behavior, or the manual relationship-aware link/merge workflow, except that the empty-placeholder removal principle is applied automatically during scenario cloning as described above.
+
+### `ergonomics_review_hazard_selections`
+
+- **Purpose:** Stores ordered, multiple hazard-tag selections for one Ergonomics review using stable normalized rows rather than embedded label text.
+- **Key relationships:** Belongs to one `ergonomics_reviews` row and references one `ergonomic_hazard_options` row. `UNIQUE(ergonomics_review_id, hazard_option_id)` prevents the same hazard from being selected twice for one review. Store validation enforces matching project and scenario boundaries.
+- **Scope:** Scenario-specific through the parent Ergonomics review. New selections require an active project-wide hazard option; an inactive option may remain on an existing review until deliberately removed.
 
 ## Module proposals and decision records
 
@@ -606,13 +697,13 @@ All writes validate project ownership, complete input sets, required fields, uni
 
 - **Proposed by:** Nicole Ervin, project owner
 - **Date proposed:** August 21, 2026
-- **Purpose:** Add project-wide navigation shells for Equipment, Ergonomics, Quality, Materials, and Safety functional reviews. Quality later received the separate, approved Quality requirements scope documented below.
+- **Purpose:** Originally added project-wide navigation shells for Equipment, Ergonomics, Quality, Materials, and Safety functional reviews. Quality and Ergonomics later received the separate approved scopes documented in their authoritative schema sections.
 - **Potential connections:** Future review records may connect to Parts, Fishbone sections, Yamazumi records, Process at a Glance steps, planning scenarios, or other approved critical-thread entities.
 - **Relationship to the critical thread:** Exact relationships and foreign keys are intentionally not defined in this shell phase. The project owner approved navigation-only, non-persistent shells before those relationships are designed. No persisted review fields may be added until each relationship is approved.
-- **Scope:** The Functional Reviews navigation group and its four remaining shell pages are project-wide. Quality follows the separately approved scope below. Future review content may be project-wide or scenario-specific, but every persisted record type must receive one explicit scope before implementation.
-- **Storage:** No database table or field was added in this shell phase. Equipment, Ergonomics, Materials, and Safety contain only browser-session description state and an empty, schema-free table. Quality follows the separately approved storage design below. Existing tables cannot be selected or ruled out for the remaining reviews until their fields and relationships are defined.
+- **Scope:** The Functional Reviews navigation group remains shared navigation. Equipment, Materials, and Safety remain project-wide shells. Quality follows its separately approved scenario-aware scope, and Ergonomics follows the scenario-specific scope in the authoritative `ergonomics_reviews` section. Future review content must receive one explicit scope before implementation.
+- **Storage:** No database table or field was added in the original shell phase. Equipment, Materials, and Safety still contain only browser-session description state and an empty, schema-free table. Quality and Ergonomics now use their separately approved storage designs. Existing tables cannot be selected or ruled out for the remaining reviews until their fields and relationships are defined.
 - **Applicable standards:** All locked standards in `DESIGN_SYSTEM.md` apply, including table row selection, deletion safety, Save & Refresh, audit logging for persisted changes, History placement, Scenario Boundary badges, help text, canonical terminology, stable identifiers, and imperial units where relevant.
-- **Approval status:** Nicole Ervin approved this shell-only exception. Equipment, Ergonomics, Materials, and Safety remain shells whose data model, ownership, relationships, and persisted fields are pending owner review. Quality follows the separate approval below.
+- **Approval status:** Nicole Ervin approved this shell-only exception. Equipment, Materials, and Safety remain shells whose data model, ownership, relationships, and persisted fields are pending owner review. Quality and Ergonomics follow their later separate approvals.
 
 ### Quality requirements
 
