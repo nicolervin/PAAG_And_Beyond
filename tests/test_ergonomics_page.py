@@ -107,6 +107,24 @@ class ErgonomicsPageTests(unittest.TestCase):
         self.assertIn('st.column_config.SelectboxColumn(\n            "Risk classification"', page_source)
         self.assertIn("options=list(ERGONOMICS_RISK_CLASSIFICATIONS)", page_source)
 
+    def test_page_displays_active_scenario_takt_time_with_frequency_help(self) -> None:
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE planning_scenarios SET takt_time_s=? WHERE id=?",
+                (47.5, self.scenario_id),
+            )
+
+        app = self.run_page()
+
+        takt_metric = next(
+            metric
+            for metric in app.metric
+            if metric.label == "Current scenario takt time"
+        )
+        self.assertEqual(takt_metric.value, "47.5 seconds")
+        page_source = PAGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("frequency-driven ergonomic risk", page_source)
+
     def test_manual_unlinked_row_saves_with_current_editor_audit(self) -> None:
         app = self.run_page(
             {

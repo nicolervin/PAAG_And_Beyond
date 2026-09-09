@@ -79,6 +79,15 @@ page_title_with_scope(
     scope="scenario",
     scenario_name=_clean_text((scenario or {}).get("name")),
 )
+if scenario:
+    st.metric(
+        "Current scenario takt time",
+        f"{float(scenario['takt_time_s']):g} seconds",
+        help=(
+            "Use the active scenario's takt time to judge whether a previously "
+            "assessed frequency-driven ergonomic risk still applies under this timing."
+        ),
+    )
 st.caption(
     "Review ergonomic concerns for the active planning scenario, including concerns "
     "captured before a Process at a Glance step is available."

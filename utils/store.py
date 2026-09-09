@@ -278,6 +278,99 @@ def _backfill_missing_ergonomics_reviews(conn: sqlite3.Connection) -> int:
     return len(missing)
 
 
+def _clone_ergonomics_reviews(
+    conn: sqlite3.Connection,
+    project_id: str,
+    source_scenario_id: str,
+    new_scenario_id: str,
+    work_element_id_map: dict[str, str],
+    process_part_option_id_map: dict[str, str],
+    timestamp: str,
+) -> int:
+    """Clone every scenario review and replace generated Work Element placeholders."""
+    source_reviews = conn.execute(
+        """SELECT * FROM ergonomics_reviews
+           WHERE project_id=? AND scenario_id=?
+           ORDER BY created_at, id""",
+        (project_id, source_scenario_id),
+    ).fetchall()
+    cloned_work_element_ids = {
+        work_element_id_map[str(review["work_element_id"])]
+        for review in source_reviews
+        if review["work_element_id"] is not None
+        and str(review["work_element_id"]) in work_element_id_map
+    }
+    for work_element_id in cloned_work_element_ids:
+        # The new scenario cannot contain contributor-authored reviews yet. These
+        # are the baseline rows created atomically with the cloned Process steps.
+        conn.execute(
+            """DELETE FROM ergonomics_reviews
+               WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
+            (project_id, new_scenario_id, work_element_id),
+        )
+
+    for source_review in source_reviews:
+        source_review_id = str(source_review["id"])
+        source_work_element_id = source_review["work_element_id"]
+        source_process_part_option_id = source_review["process_part_option_id"]
+        cloned_review_id = str(uuid4())
+        cloned_work_element_id = (
+            work_element_id_map.get(str(source_work_element_id))
+            if source_work_element_id is not None
+            else None
+        )
+        cloned_process_part_option_id = (
+            process_part_option_id_map.get(str(source_process_part_option_id))
+            if source_process_part_option_id is not None
+            else None
+        )
+        conn.execute(
+            """INSERT INTO ergonomics_reviews
+               (id, project_id, scenario_id, work_element_id,
+                process_part_option_id, status, risk_classification, reviewer,
+                notes, requested_due_date, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                cloned_review_id,
+                project_id,
+                new_scenario_id,
+                cloned_work_element_id,
+                cloned_process_part_option_id,
+                source_review["status"],
+                source_review["risk_classification"],
+                source_review["reviewer"],
+                source_review["notes"],
+                source_review["requested_due_date"],
+                timestamp,
+                timestamp,
+            ),
+        )
+        for selection in conn.execute(
+            """SELECT hazard_option_id, sequence
+               FROM ergonomics_review_hazard_selections
+               WHERE project_id=? AND scenario_id=? AND ergonomics_review_id=?
+               ORDER BY sequence, id""",
+            (project_id, source_scenario_id, source_review_id),
+        ).fetchall():
+            conn.execute(
+                """INSERT INTO ergonomics_review_hazard_selections
+                   (id, project_id, scenario_id, ergonomics_review_id,
+                    hazard_option_id, sequence, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()),
+                    project_id,
+                    new_scenario_id,
+                    cloned_review_id,
+                    selection["hazard_option_id"],
+                    selection["sequence"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+    return len(source_reviews)
+
+
 def parse_yamazumi_model_variants(value, fallback: str | None = "Base") -> list[str]:
     """Return a clean model-variant list from stored JSON, a list, or legacy text."""
     if isinstance(value, str):
@@ -1362,6 +1455,7 @@ def clone_planning_scenario(
                     work_element_id=new_id,
                 )
 
+            process_part_option_id_map: dict[str, str] = {}
             for source_group in conn.execute(
                 """SELECT * FROM process_part_groups
                    WHERE project_id=? AND scenario_id=? ORDER BY name""",
@@ -1388,12 +1482,25 @@ def clone_planning_scenario(
                     "SELECT * FROM process_part_options WHERE group_id=?", (old_group_id,)
                 ).fetchall():
                     option = dict(source_option)
-                    option.update(id=str(uuid4()), group_id=new_group_id, updated_at=timestamp)
+                    old_option_id = str(option["id"])
+                    new_option_id = str(uuid4())
+                    process_part_option_id_map[old_option_id] = new_option_id
+                    option.update(id=new_option_id, group_id=new_group_id, updated_at=timestamp)
                     option_columns = list(option)
                     conn.execute(
                         f"INSERT INTO process_part_options ({', '.join(option_columns)}) VALUES ({', '.join('?' for _ in option_columns)})",
                         tuple(option[column] for column in option_columns),
                     )
+
+            _clone_ergonomics_reviews(
+                conn,
+                project_id,
+                source_scenario_id,
+                new_scenario_id,
+                process_id_map,
+                process_part_option_id_map,
+                timestamp,
+            )
 
             quality_assignment_id_map: dict[str, str] = {}
             clone_quality_requirement_assignments(

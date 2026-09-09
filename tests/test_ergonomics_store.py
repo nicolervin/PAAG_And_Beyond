@@ -906,6 +906,198 @@ class ErgonomicsStoreTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "Started")
         self.assertEqual(rows[0]["risk_classification"], "Not yet assessed")
 
+    def test_scenario_clone_copies_linked_unlinked_and_hazard_review_content(self) -> None:
+        hazard_id = self._create_hazards()[0]
+        linked_review_id = store.save_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            {
+                "work_element_id": self.work_element_id,
+                "process_part_option_id": self.option_id,
+                "status": "Pending",
+                "risk_classification": "Favorable Red",
+                "reviewer": "Alex Ergonomist",
+                "notes": "Carry forward lift assessment",
+                "requested_due_date": "2026-10-01",
+                "hazard_option_ids": [hazard_id],
+            },
+        )["id"]
+        unlinked_review_id = store.save_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            {"status": "Open", "notes": "Legacy production concern"},
+        )["id"]
+        source_selection_id = store.query(
+            """SELECT id FROM ergonomics_review_hazard_selections
+               WHERE ergonomics_review_id=?""",
+            (linked_review_id,),
+        )[0]["id"]
+
+        cloned_scenario_id = store.clone_planning_scenario(
+            self.project_id, self.scenario_id, "Review clone", "C", 48
+        )
+        cloned_work = store.query(
+            """SELECT id FROM work_elements
+               WHERE project_id=? AND scenario_id=? AND operation='Lift bracket'""",
+            (self.project_id, cloned_scenario_id),
+        )[0]
+        cloned_option = store.query(
+            """SELECT option.id
+               FROM process_part_options option
+               JOIN process_part_groups group_row ON group_row.id=option.group_id
+               WHERE group_row.project_id=? AND group_row.scenario_id=?
+                 AND group_row.work_element_id=?""",
+            (self.project_id, cloned_scenario_id, cloned_work["id"]),
+        )[0]
+        cloned_reviews = store.ergonomics_reviews(
+            self.project_id, cloned_scenario_id
+        )
+
+        self.assertEqual(len(cloned_reviews), 2)
+        linked = cloned_reviews.loc[
+            cloned_reviews["notes"].eq("Carry forward lift assessment")
+        ].iloc[0]
+        unlinked = cloned_reviews.loc[
+            cloned_reviews["notes"].eq("Legacy production concern")
+        ].iloc[0]
+        self.assertNotIn(linked["id"], {linked_review_id, unlinked_review_id})
+        self.assertNotIn(unlinked["id"], {linked_review_id, unlinked_review_id})
+        self.assertEqual(linked["work_element_id"], cloned_work["id"])
+        self.assertEqual(linked["process_part_option_id"], cloned_option["id"])
+        self.assertEqual(linked["status"], "Pending")
+        self.assertEqual(linked["risk_classification"], "Favorable Red")
+        self.assertEqual(linked["reviewer"], "Alex Ergonomist")
+        self.assertEqual(linked["requested_due_date"], "2026-10-01")
+        self.assertEqual(linked["hazard_option_ids"], [hazard_id])
+        self.assertTrue(pd.isna(unlinked["work_element_id"]))
+        cloned_selection = store.query(
+            """SELECT id, hazard_option_id
+               FROM ergonomics_review_hazard_selections
+               WHERE ergonomics_review_id=?""",
+            (linked["id"],),
+        )[0]
+        self.assertNotEqual(cloned_selection["id"], source_selection_id)
+        self.assertEqual(cloned_selection["hazard_option_id"], hazard_id)
+
+    def test_scenario_clone_nulls_unmapped_process_part_option(self) -> None:
+        skipped_group_id = "unmapped-source-group"
+        skipped_option_id = "unmapped-source-option"
+        source_review_id = "unmapped-option-review"
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO process_part_groups
+                   (id, project_id, scenario_id, work_element_id, section_id,
+                    name, selection_rule, quantity, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'Unmapped requirement', 'Use all', 1, ?)""",
+                (
+                    skipped_group_id,
+                    self.project_id,
+                    self.scenario_id,
+                    self.other_work_element_id,
+                    self.section_id,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO process_part_options
+                   (id, group_id, part_id, updated_at) VALUES (?, ?, ?, ?)""",
+                (skipped_option_id, skipped_group_id, self.part_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO ergonomics_reviews
+                   (id, project_id, scenario_id, work_element_id,
+                    process_part_option_id, status, risk_classification,
+                    reviewer, notes, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'Open', 'Red', '',
+                           'Option cannot be cloned', ?, ?)""",
+                (
+                    source_review_id,
+                    self.project_id,
+                    self.scenario_id,
+                    self.work_element_id,
+                    skipped_option_id,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        cloned_scenario_id = store.clone_planning_scenario(
+            self.project_id, self.scenario_id, "Unmapped option clone", "C", 60
+        )
+        cloned = store.ergonomics_reviews(
+            self.project_id, cloned_scenario_id
+        ).loc[lambda frame: frame["notes"].eq("Option cannot be cloned")].iloc[0]
+        self.assertNotEqual(cloned["id"], source_review_id)
+        self.assertFalse(pd.isna(cloned["work_element_id"]))
+        self.assertTrue(pd.isna(cloned["process_part_option_id"]))
+
+    def test_scenario_clone_copies_multiple_reviews_and_removes_only_placeholder(self) -> None:
+        edited_review_id = store.save_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            {
+                "work_element_id": self.work_element_id,
+                "status": "Open",
+                "notes": "Edited source review",
+            },
+        )["id"]
+        blank_review_id = store.save_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            {"work_element_id": self.work_element_id},
+        )["id"]
+
+        cloned_scenario_id = store.clone_planning_scenario(
+            self.project_id, self.scenario_id, "Multiple review clone", "C", 60
+        )
+        cloned_work_id = store.query(
+            """SELECT id FROM work_elements
+               WHERE project_id=? AND scenario_id=? AND operation='Lift bracket'""",
+            (self.project_id, cloned_scenario_id),
+        )[0]["id"]
+        cloned_reviews = store.ergonomics_reviews(
+            self.project_id, cloned_scenario_id, cloned_work_id
+        )
+
+        self.assertEqual(len(cloned_reviews), 2)
+        self.assertTrue(
+            {edited_review_id, blank_review_id}.isdisjoint(set(cloned_reviews["id"]))
+        )
+        self.assertEqual(
+            len(cloned_reviews.loc[cloned_reviews["notes"].eq("Edited source review")]),
+            1,
+        )
+        blank_rows = cloned_reviews.loc[
+            cloned_reviews["status"].eq("Started")
+            & cloned_reviews["risk_classification"].eq("Not yet assessed")
+            & cloned_reviews["reviewer"].eq("")
+            & cloned_reviews["notes"].eq("")
+        ]
+        self.assertEqual(len(blank_rows), 1)
+
+    def test_ergonomics_schema_has_no_clone_rereview_or_takt_comparison_fields(self) -> None:
+        with store.connection() as conn:
+            columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(ergonomics_reviews)"
+                ).fetchall()
+            }
+        self.assertFalse(
+            any(
+                fragment in column.casefold()
+                for column in columns
+                for fragment in (
+                    "re_review",
+                    "rereview",
+                    "source_takt",
+                    "takt_difference",
+                    "takt_comparison",
+                )
+            )
+        )
+
     def test_new_database_sample_steps_each_receive_exactly_one_review(self) -> None:
         with store.connection() as conn:
             rows = conn.execute(
