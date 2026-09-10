@@ -133,9 +133,19 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `yamazumi_pitches`
 
-- **Purpose:** Stores physical pitch addresses within a Yamazumi area, including pitch name, type, status, supported model variants, and display order.
-- **Key relationships:** Belongs to `yamazumi_areas` and `projects`. Referenced by `yamazumi_elements`; deleting a pitch through the supported workflow moves its work elements to Unassigned before deletion.
+- **Purpose:** Stores physical pitch addresses within a Yamazumi area, including pitch name, type, status, supported model variants, display order, and an optional directed feed target.
+- **Key relationships:** Belongs to `yamazumi_areas` and `projects`. Referenced by `yamazumi_elements`; deleting a pitch through the supported workflow moves its work elements to Unassigned before deletion. `feeds_into_pitch_id` is a nullable self-reference to `yamazumi_pitches.id` with `ON DELETE RESTRICT`.
 - **Scope:** Scenario-specific through the parent area.
+
+#### Yamazumi pitch feeds-into relationship — approved September 10, 2026
+
+`yamazumi_pitches.feeds_into_pitch_id` identifies the other pitch that receives material from a `Subassembly` or `Kitter` pitch. The field applies only to those two `pitch_type` values and must be `NULL` for `Pitch`, `Waterspider`, and `Repacker`. New pitches and every contributor edit that saves a pitch as `Subassembly` or `Kitter` require a valid target. Existing feeder pitches remain compatibility-`NULL` without inferred backfill until a contributor manually edits them; the Yamazumi editor displays **Feed target required** on every such row.
+
+The target must be a different pitch in the same `yamazumi_areas` row, which guarantees the same project and planning scenario. Any pitch type may be a target, allowing multi-step feeder chains. Every single-row, bulk, range-generation, and import save validates the complete resulting area graph before commit. Direct and indirect cycles are hard-blocked without override using directed depth-first traversal and an error that identifies every pitch in the loop by `pitch_number` and `pitch_name` when present.
+
+Scenario cloning remaps populated targets through the cloned pitch-ID map; compatibility-`NULL` values remain `NULL`. A pitch referenced as a feed target cannot be deleted until every referring feeder is re-pointed or changed to a non-feeder type. Deleting a feeder removes its outgoing relationship and retains the established behavior that moves its `yamazumi_elements` to Unassigned. Successful UI saves use Current editor attribution, relationship-specific audit details containing source and old/new target IDs and addresses, Undo/Save & Refresh behavior, and the Yamazumi History expander.
+
+This relationship is a prerequisite for the separately pending deterministic stack-position and automatic human-readable Op ID sequencing features. It does not implement either sequencing feature.
 
 ### `yamazumi_elements`
 
@@ -158,7 +168,7 @@ This file is the authoritative reference for every Process at a Glance database 
 ### `work_elements`
 
 - **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, location, unit orientation, and geometry or requirement fields. Conveyor height, platform height, and pit depth are stored directly in inches as `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
-- **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. Some requirement fields are retained by the schema but are not editable in the current Process dialog.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. Detailed requirement fields remain retained by the schema, but the former Process step Details dialog has been removed pending a redesigned Phase 3 view.
 - **Scope:** Scenario-specific.
 
 ### `process_part_groups`
