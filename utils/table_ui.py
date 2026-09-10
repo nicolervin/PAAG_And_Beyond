@@ -324,6 +324,31 @@ def selected_rows_action_bar(
     )
 
 
+def stable_id_from_button_click(
+    source_dataframe: pd.DataFrame,
+    click_state,
+    *,
+    id_column: str = "id",
+) -> str:
+    """Resolve a ButtonColumn click through its rendered row to a hidden stable ID."""
+    if not click_state:
+        return ""
+    try:
+        row_index = int(click_state.get("row", -1))
+    except (AttributeError, TypeError, ValueError):
+        return ""
+    if (
+        row_index < 0
+        or row_index >= len(source_dataframe)
+        or id_column not in source_dataframe
+    ):
+        return ""
+    stable_id = source_dataframe.iloc[row_index].get(id_column)
+    if stable_id is None or pd.isna(stable_id):
+        return ""
+    return str(stable_id).strip()
+
+
 def editable_table_heading(title: str) -> None:
     """Render the section heading above an editable table and its filters."""
     st.subheader(title)

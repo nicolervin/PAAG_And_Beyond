@@ -26,6 +26,8 @@ class QualityPageSmokeTests(unittest.TestCase):
         torque_details: pd.DataFrame | None = None,
         screw_bit_types: list[str] | None = None,
         selected_torque_requirement_id: str | None = None,
+        focused_link_requirement_id: str | None = None,
+        dialog_link_requirement_id: str | None = None,
     ) -> AppTest:
         if requirement_types is None:
             requirement_types = pd.DataFrame(
@@ -100,6 +102,14 @@ class QualityPageSmokeTests(unittest.TestCase):
                 app.session_state[
                     "quality_torque_detail_requirement_project-1"
                 ] = selected_torque_requirement_id
+            if focused_link_requirement_id:
+                app.session_state[
+                    "quality_requirement_linked_steps_focus_project-1"
+                ] = focused_link_requirement_id
+            if dialog_link_requirement_id:
+                app.session_state[
+                    "quality_requirement_linked_steps_dialog_project-1"
+                ] = dialog_link_requirement_id
             app.run(timeout=10)
         return app
 
@@ -248,6 +258,199 @@ class QualityPageSmokeTests(unittest.TestCase):
         self.assertIn('"Tool type"', page_source)
         self.assertIn('"Tool orientation"', page_source)
         self.assertNotIn('"Type",\n                options=TORQUE_TOOL_TYPES', page_source)
+
+    def test_link_count_click_resolves_saved_row_identity_and_ignores_blank_row(self) -> None:
+        editor_rows = pd.DataFrame(
+            [
+                {"id": "quality-1", "description": "Similar requirement"},
+                {"id": "quality-2", "description": "Similar requirement"},
+                {"id": pd.NA, "description": ""},
+            ]
+        )
+        self.assertEqual(
+            table_ui.stable_id_from_button_click(
+                editor_rows, {"row": 1, "label": "2"}
+            ),
+            "quality-2",
+        )
+        self.assertEqual(
+            table_ui.stable_id_from_button_click(
+                editor_rows, {"row": 2, "label": "0"}
+            ),
+            "",
+        )
+        self.assertEqual(
+            table_ui.stable_id_from_button_click(
+                editor_rows, {"row": 99, "label": "0"}
+            ),
+            "",
+        )
+
+    def test_linked_steps_focus_uses_hidden_id_and_keeps_published_values(self) -> None:
+        requirements = pd.DataFrame(
+            [
+                {
+                    "id": "quality-1", "project_id": "project-1",
+                    "requirement_type": "Torque", "description": "Similar check",
+                    "unique_identifier": "CURRENT-1", "pass_fail": 1,
+                    "target_value": 10.0, "tolerances": "+/- 1", "unit": "N·m",
+                    "created_at": "2026-09-01T12:00:00+00:00",
+                    "updated_at": "2026-09-01T12:00:00+00:00",
+                    "assignment_count": 0, "pending_assignment_count": 0,
+                },
+                {
+                    "id": "quality-2", "project_id": "project-1",
+                    "requirement_type": "Torque", "description": "Similar check",
+                    "unique_identifier": "CURRENT-2", "pass_fail": 1,
+                    "target_value": 20.0, "tolerances": "+/- 2", "unit": "N·m",
+                    "created_at": "2026-09-01T12:00:00+00:00",
+                    "updated_at": "2026-09-02T12:00:00+00:00",
+                    "assignment_count": 1, "pending_assignment_count": 1,
+                },
+            ]
+        )
+        links = pd.DataFrame(
+            [
+                {
+                    "assignment_id": "assignment-2",
+                    "quality_requirement_id": "quality-2",
+                    "scenario_id": "scenario-1", "work_element_id": "step-1",
+                    "scenario_revision": "A", "scenario_name": "Current plan",
+                    "sequence": 10, "pitch": "ST-010", "pitch_name": "Assembly",
+                    "work_element": "Install bracket", "status": "Draft",
+                    "requirement_type": "Torque",
+                    "description": "Previously published description",
+                    "unique_identifier": "PUBLISHED-OLD", "pass_fail": 1,
+                    "target_value": 18.0, "tolerances": "+/- 2", "unit": "N·m",
+                    "repository_update_pending": 1,
+                }
+            ]
+        )
+        app = self.run_page(
+            requirements,
+            links=links,
+            focused_link_requirement_id="quality-2",
+        )
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn(
+            "Show all linked Process steps", [button.label for button in app.button]
+        )
+        linked_tables = [
+            table.value
+            for table in app.dataframe
+            if "Quality requirement Unique identifier" in table.value.columns
+        ]
+        self.assertEqual(len(linked_tables), 1)
+        self.assertEqual(len(linked_tables[0]), 1)
+        self.assertEqual(
+            linked_tables[0].iloc[0]["Quality requirement Unique identifier"],
+            "PUBLISHED-OLD",
+        )
+        self.assertEqual(
+            linked_tables[0].iloc[0]["Description"],
+            "Previously published description",
+        )
+
+    def test_link_count_dialog_shows_concise_published_process_context(self) -> None:
+        requirements = pd.DataFrame(
+            [
+                {
+                    "id": "quality-2", "project_id": "project-1",
+                    "requirement_type": "Torque", "description": "Clamp check",
+                    "unique_identifier": "CURRENT-2", "pass_fail": 1,
+                    "target_value": 20.0, "tolerances": "+/- 2", "unit": "N·m",
+                    "created_at": "2026-09-01T12:00:00+00:00",
+                    "updated_at": "2026-09-02T12:00:00+00:00",
+                    "assignment_count": 2, "pending_assignment_count": 1,
+                }
+            ]
+        )
+        links = pd.DataFrame(
+            [
+                {
+                    "assignment_id": "assignment-1",
+                    "quality_requirement_id": "quality-2",
+                    "scenario_id": "scenario-1", "work_element_id": "step-1",
+                    "scenario_revision": "A", "scenario_name": "Current plan",
+                    "sequence": 10, "pitch": "ST-010", "pitch_name": "Assembly",
+                    "work_element": "Load housing", "status": "Draft",
+                    "requirement_type": "Torque", "description": "Published check",
+                    "unique_identifier": "PUBLISHED-OLD", "pass_fail": 1,
+                    "target_value": 18.0, "tolerances": "+/- 2", "unit": "N·m",
+                    "repository_update_pending": 1,
+                },
+                {
+                    "assignment_id": "assignment-2",
+                    "quality_requirement_id": "quality-2",
+                    "scenario_id": "scenario-2", "work_element_id": "step-2",
+                    "scenario_revision": "B", "scenario_name": "Alternate",
+                    "sequence": 20, "pitch": "ST-020", "pitch_name": "Finish",
+                    "work_element": "Verify assembly", "status": "Released",
+                    "requirement_type": "Torque", "description": "Published check",
+                    "unique_identifier": "PUBLISHED-OLD", "pass_fail": 1,
+                    "target_value": 18.0, "tolerances": "+/- 2", "unit": "N·m",
+                    "repository_update_pending": 0,
+                },
+            ]
+        )
+        app = self.run_page(
+            requirements,
+            links=links,
+            focused_link_requirement_id="quality-2",
+            dialog_link_requirement_id="quality-2",
+        )
+
+        self.assertEqual(len(app.exception), 0)
+        concise_tables = [
+            table.value
+            for table in app.dataframe
+            if list(table.value.columns)
+            == [
+                "Scenario", "Pitch", "Pitch Name", "Work Element",
+                "Status", "Seq", "Repository update pending",
+            ]
+        ]
+        self.assertEqual(len(concise_tables), 1)
+        self.assertEqual(len(concise_tables[0]), 2)
+        self.assertEqual(
+            concise_tables[0]["Work Element"].tolist(),
+            ["Load housing", "Verify assembly"],
+        )
+        self.assertEqual(
+            concise_tables[0]["Repository update pending"].tolist(),
+            [True, False],
+        )
+        self.assertNotIn("quality_requirement_id", concise_tables[0].columns)
+        self.assertIn("Close", [button.label for button in app.button])
+
+    def test_zero_link_focus_reports_no_linked_process_steps(self) -> None:
+        requirements = pd.DataFrame(
+            [
+                {
+                    "id": "quality-1", "project_id": "project-1",
+                    "requirement_type": "Torque", "description": "Unlinked check",
+                    "unique_identifier": "TQ-EMPTY", "pass_fail": 1,
+                    "target_value": 10.0, "tolerances": "+/- 1", "unit": "N·m",
+                    "created_at": "2026-09-01T12:00:00+00:00",
+                    "updated_at": "2026-09-01T12:00:00+00:00",
+                    "assignment_count": 0, "pending_assignment_count": 0,
+                }
+            ]
+        )
+        app = self.run_page(
+            requirements,
+            links=pd.DataFrame(),
+            focused_link_requirement_id="quality-1",
+            dialog_link_requirement_id="quality-1",
+        )
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn(
+            "No linked Process steps were found for this Quality requirement.",
+            [caption.value for caption in app.caption],
+        )
+        self.assertIn("No linked Process steps", [info.value for info in app.info])
 
     def test_populated_repository_renders_without_exception(self) -> None:
         app = self.run_page(

@@ -2,6 +2,13 @@ import pandas as pd
 import streamlit as st
 
 from utils.pfmea_ui import render_pfmea_tab
+from utils.control_plan_store import control_plan_assignment_impact
+from utils.control_plan_ui import render_control_plan_tab
+from utils.quality_help import (
+    CONTROL_PLAN_HELP,
+    PFMEA_HELP,
+    REQUIREMENTS_REPOSITORY_HELP,
+)
 from utils.quality_store import (
     PROTECTED_QUALITY_REQUIREMENT_TYPE,
     TORQUE_TOOL_ORIENTATIONS,
@@ -45,16 +52,140 @@ from utils.table_ui import (
     selected_dataframe_rows,
     selected_rows_action_bar,
     selectable_dataframe,
+    stable_id_from_button_click,
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
 )
 
 
+LINKED_STEP_FILTER_COLUMNS = [
+    "Scenario",
+    "Pitch",
+    "Work Element",
+    "Quality requirement Unique identifier",
+    "Type",
+    "Status",
+    "Repository update pending",
+]
+LINKED_STEP_VISIBLE_COLUMNS = [
+    "Scenario",
+    "Pitch",
+    "Pitch Name",
+    "Work Element",
+    "Status",
+    "Seq",
+    "Quality requirement Unique identifier",
+    "Type",
+    "Description",
+    "Pass/fail",
+    "Target value",
+    "Tolerances",
+    "Unit",
+    "Repository update pending",
+]
+LINKED_STEP_DIALOG_COLUMNS = [
+    "Scenario",
+    "Pitch",
+    "Pitch Name",
+    "Work Element",
+    "Status",
+    "Seq",
+    "Repository update pending",
+]
+
+
+@st.dialog(
+    "How to use the Quality page",
+    width="large",
+    icon=":material/help:",
+)
+def show_quality_page_help() -> None:
+    """Show static, read-only instructions for the three Quality workflows."""
+    requirements_help_tab, pfmea_help_tab, control_plan_help_tab = st.tabs(
+        ["Requirements repository", "PFMEA", "Control Plan"],
+        key="quality_page_help_tabs",
+    )
+    with requirements_help_tab:
+        st.markdown(REQUIREMENTS_REPOSITORY_HELP)
+    with pfmea_help_tab:
+        st.markdown(PFMEA_HELP)
+    with control_plan_help_tab:
+        st.markdown(CONTROL_PLAN_HELP)
+
+    actions = st.container(horizontal=True, horizontal_alignment="right")
+    if actions.button(
+        "Close",
+        icon=":material/close:",
+        key="close_quality_page_help",
+    ):
+        st.rerun()
+
+
+def _clear_linked_step_filters(project_id: str) -> None:
+    """Clear only the existing linked-step panel's transient filter widgets."""
+    filter_key = f"quality_requirement_linked_step_filters_{project_id}"
+    st.session_state.pop(f"{filter_key}_keyword", None)
+    for column in LINKED_STEP_FILTER_COLUMNS:
+        st.session_state.pop(f"{filter_key}_{column}", None)
+
+
+def _linked_step_display_rows(source: pd.DataFrame) -> pd.DataFrame:
+    """Return the shared friendly, published linked-step display rows."""
+    if source.empty:
+        return pd.DataFrame(columns=LINKED_STEP_VISIBLE_COLUMNS)
+
+    linked_steps = source.copy()
+    linked_steps["scenario"] = linked_steps.apply(
+        lambda row: f"Rev {row['scenario_revision']} · {row['scenario_name']}",
+        axis=1,
+    )
+    linked_steps = linked_steps.rename(
+        columns={
+            "pitch": "Pitch",
+            "pitch_name": "Pitch Name",
+            "work_element": "Work Element",
+            "status": "Status",
+            "sequence": "Seq",
+            "scenario": "Scenario",
+            "unique_identifier": "Quality requirement Unique identifier",
+            "requirement_type": "Type",
+            "description": "Description",
+            "pass_fail": "Pass/fail",
+            "target_value": "Target value",
+            "tolerances": "Tolerances",
+            "unit": "Unit",
+            "repository_update_pending": "Repository update pending",
+        }
+    )
+    linked_steps["Pass/fail"] = linked_steps["Pass/fail"].fillna(0).astype(bool)
+    linked_steps["Repository update pending"] = (
+        linked_steps["Repository update pending"].fillna(0).astype(bool)
+    )
+    return linked_steps.reindex(columns=LINKED_STEP_VISIBLE_COLUMNS)
+
+
+def _requirement_friendly_values(requirement: pd.Series) -> tuple[str, str]:
+    """Return safe current repository text for linked-step view headings."""
+    identifier_value = requirement.get("unique_identifier")
+    description_value = requirement.get("description")
+    identifier = (
+        str(identifier_value).strip()
+        if identifier_value is not None and not pd.isna(identifier_value)
+        else ""
+    )
+    description = (
+        str(description_value).strip()
+        if description_value is not None and not pd.isna(description_value)
+        else ""
+    )
+    return identifier or "No identifier", description or "No description"
+
+
 def render_quality_history(project_id: str) -> None:
     """Render the page's one bottom History expander with workflow tabs."""
     with st.expander("History", icon=":material/history:"):
-        requirements_history_tab, pfmea_history_tab = st.tabs(
-            ["Requirements", "PFMEA"], key=f"quality_history_tabs_{project_id}"
+        requirements_history_tab, pfmea_history_tab, control_plan_history_tab = st.tabs(
+            ["Requirements", "PFMEA", "Control Plan"], key=f"quality_history_tabs_{project_id}"
         )
         with requirements_history_tab:
             history_groups: list[pd.DataFrame] = []
@@ -103,6 +234,23 @@ def render_quality_history(project_id: str) -> None:
                     column_config={
                         "action": "Action",
                         "row_count": "Rows",
+                        "editor_name": "Editor",
+                        "created_at": st.column_config.DatetimeColumn(
+                            "When", format="MMM DD, YYYY HH:mm"
+                        ),
+                    },
+                )
+        with control_plan_history_tab:
+            history = audit_history(project_id, "Control Plan", limit=50)
+            if history.empty:
+                st.caption("No Control Plan changes have been recorded yet.")
+            else:
+                selectable_dataframe(
+                    history.drop(columns=["details"], errors="ignore"),
+                    key=f"control_plan_history_{project_id}",
+                    hide_index=True,
+                    column_config={
+                        "action": "Action", "row_count": "Rows",
                         "editor_name": "Editor",
                         "created_at": st.column_config.DatetimeColumn(
                             "When", format="MMM DD, YYYY HH:mm"
@@ -430,6 +578,13 @@ page_title_with_scope(
         "PFMEA records belong only to the currently selected scenario."
     ),
 )
+if st.button(
+    "How to use this page",
+    icon=":material/help:",
+    key="quality_page_help",
+    help="Open instructions for the Requirements repository, PFMEA, and Control Plan.",
+):
+    show_quality_page_help()
 st.caption(
     "Maintain reusable checks and specifications, then deliberately publish saved "
     "updates to linked Process at a Glance steps."
@@ -444,6 +599,9 @@ bulk_selector_key = apply_pending_table_editor_reset(logical_bulk_selector_key)
 pending_delete_key = f"quality_requirements_pending_delete_{project_id}"
 pending_push_key = f"quality_requirements_pending_push_{project_id}"
 pending_unlink_key = f"quality_requirement_pending_unlink_{project_id}"
+linked_steps_focus_key = f"quality_requirement_linked_steps_focus_{project_id}"
+linked_steps_dialog_key = f"quality_requirement_linked_steps_dialog_{project_id}"
+linked_steps_click_key = f"quality_requirement_linked_steps_click_{project_id}"
 
 scenarios = planning_scenarios(project_id)
 scenario_by_id = {str(scenario["id"]): scenario for scenario in scenarios}
@@ -465,11 +623,10 @@ if pfmea_tab.open:
     st.stop()
 if control_plan_tab.open:
     with control_plan_tab:
-        st.subheader("Control Plan")
-        st.info(
-            "Control Plan generation is reserved for a later approved phase. "
-            "No Control Plan records or automatic PFMEA action dispositions are created here."
-        )
+        if not active_scenario:
+            st.info("Select an active planning scenario before opening Control Plan.")
+        else:
+            render_control_plan_tab(project_id, scenario_id, str(active_scenario["name"]))
     render_quality_history(project_id)
     st.stop()
 
@@ -579,6 +736,22 @@ editor_rows = direct_entry_editor_rows(
         "updated_at": "Updated",
     },
 )
+editor_rows["assignment_count"] = editor_rows["assignment_count"].apply(
+    lambda value: "" if pd.isna(value) else str(int(value))
+)
+
+
+def show_linked_steps_for_clicked_requirement() -> None:
+    requirement_id = stable_id_from_button_click(
+        editor_rows, st.session_state.get(linked_steps_click_key)
+    )
+    if not requirement_id:
+        return
+    st.session_state[linked_steps_focus_key] = requirement_id
+    st.session_state[linked_steps_dialog_key] = requirement_id
+    _clear_linked_step_filters(project_id)
+
+
 edited_requirements = st.data_editor(
     editor_rows,
     key=editor_key,
@@ -628,8 +801,11 @@ edited_requirements = st.data_editor(
                 "dimensions must use inches."
             ),
         ),
-        "assignment_count": st.column_config.NumberColumn(
+        "assignment_count": st.column_config.ButtonColumn(
             "Linked Process steps",
+            type="tertiary",
+            on_click=show_linked_steps_for_clicked_requirement,
+            key=linked_steps_click_key,
             help="Number of Process at a Glance steps currently using this requirement.",
         ),
         "pending_assignment_count": st.column_config.NumberColumn(
@@ -1410,6 +1586,11 @@ if active_scenario and selected_requirement_id:
                     str(selected_assignment["scenario_id"]),
                     [selected_assignment_id],
                 ),
+                "control_plan_impact": control_plan_assignment_impact(
+                    project_id,
+                    str(selected_assignment["scenario_id"]),
+                    [selected_assignment_id],
+                ),
             }
         except ValueError as exc:
             st.error(str(exc))
@@ -1427,11 +1608,17 @@ def confirm_quality_requirement_unlink() -> None:
         "and Process at a Glance step will be preserved."
     )
     pfmea_impact = pending.get("pfmea_impact") or {}
+    control_plan_impact = pending.get("control_plan_impact") or {}
     if int(pfmea_impact.get("selection_count", 0)):
         st.warning(
             f"This also removes {pfmea_impact['selection_count']} dependent structured "
             f"PFMEA control selection(s) from {pfmea_impact.get('cause_count', 0)} Cause(s). "
             "Those Causes will be marked Review required; Detection ratings are preserved."
+        )
+    if int(control_plan_impact.get("item_count", 0)):
+        st.warning(
+            f"This also preserves {control_plan_impact['item_count']} dependent Control "
+            "Plan working-draft item(s) as orphaned records for explicit review and relinking."
         )
     scenario_changed = str(pending.get("scenario_id") or "") != scenario_id
     if scenario_changed:
@@ -1459,6 +1646,7 @@ def confirm_quality_requirement_unlink() -> None:
                 project_id,
                 str(pending["scenario_id"]),
                 [str(pending["assignment_id"])],
+                st.session_state.get("current_editor", ""),
             )
             record_audit_event(
                 project_id,
@@ -1494,61 +1682,166 @@ def confirm_quality_requirement_unlink() -> None:
 if st.session_state.get(pending_unlink_key):
     confirm_quality_requirement_unlink()
 
+focused_requirement_id = str(
+    st.session_state.get(linked_steps_focus_key) or ""
+).strip()
+dialog_requirement_id = str(
+    st.session_state.get(linked_steps_dialog_key) or ""
+).strip()
+requirement_ids = set(
+    requirements.get("id", pd.Series(dtype="string")).dropna().astype(str)
+)
+if focused_requirement_id and focused_requirement_id not in requirement_ids:
+    st.session_state.pop(linked_steps_focus_key, None)
+    focused_requirement_id = ""
+if dialog_requirement_id and dialog_requirement_id not in requirement_ids:
+    st.session_state.pop(linked_steps_dialog_key, None)
+    dialog_requirement_id = ""
+
+
+def clear_linked_steps_dialog_request() -> None:
+    st.session_state.pop(linked_steps_dialog_key, None)
+
+
+@st.dialog(
+    "Linked Process steps",
+    width="large",
+    icon=":material/account_tree:",
+    on_dismiss=clear_linked_steps_dialog_request,
+)
+def show_linked_steps_dialog() -> None:
+    requirement_id = str(
+        st.session_state.get(linked_steps_dialog_key) or ""
+    ).strip()
+    requirement_rows = requirements.loc[
+        requirements["id"].astype(str).eq(requirement_id)
+    ]
+    if requirement_rows.empty:
+        st.error("This Quality requirement is no longer available in this project.")
+    else:
+        identifier, description = _requirement_friendly_values(
+            requirement_rows.iloc[0]
+        )
+        st.markdown(f"**{identifier}** — {description}")
+        st.caption(
+            "These are the published links currently attached across this project's "
+            "planning scenarios."
+        )
+        if "quality_requirement_id" in all_requirement_links:
+            dialog_source = all_requirement_links.loc[
+                all_requirement_links["quality_requirement_id"]
+                .astype(str)
+                .eq(requirement_id)
+            ].copy()
+        else:
+            dialog_source = all_requirement_links.iloc[0:0].copy()
+        dialog_rows = _linked_step_display_rows(dialog_source).reindex(
+            columns=LINKED_STEP_DIALOG_COLUMNS
+        )
+        if dialog_rows.empty:
+            st.info("No linked Process steps")
+        else:
+            st.caption(
+                f"{len(dialog_rows)} linked Process step"
+                f"{'s' if len(dialog_rows) != 1 else ''}"
+            )
+            dialog_table_key = (
+                "quality_requirement_linked_steps_dialog_table_"
+                f"{project_id}_{requirement_id}"
+            )
+            selectable_dataframe(
+                dialog_rows,
+                key=dialog_table_key,
+                hide_index=True,
+                column_config={
+                    "Scenario": st.column_config.TextColumn("Scenario", pinned=True),
+                    "Pitch": st.column_config.TextColumn("Pitch", pinned=True),
+                    "Pitch Name": st.column_config.TextColumn("Pitch Name"),
+                    "Work Element": st.column_config.TextColumn(
+                        "Work Element", width="large"
+                    ),
+                    "Status": st.column_config.TextColumn("Status"),
+                    "Seq": st.column_config.NumberColumn("Seq", format="%d"),
+                    "Repository update pending": st.column_config.CheckboxColumn(
+                        "Repository update pending",
+                        help=(
+                            "Shows that the saved repository definition differs from "
+                            "the published values attached to this Process step."
+                        ),
+                    ),
+                },
+            )
+
+    dialog_actions = st.container(
+        horizontal=True,
+        horizontal_alignment="right",
+    )
+    if dialog_actions.button(
+        "Close",
+        icon=":material/close:",
+        key=f"close_quality_requirement_linked_steps_{project_id}",
+    ):
+        clear_linked_steps_dialog_request()
+        st.rerun()
+
+
+if dialog_requirement_id and not any(
+    st.session_state.get(key)
+    for key in (pending_delete_key, pending_push_key, pending_unlink_key)
+):
+    show_linked_steps_dialog()
+
 with st.expander(
     "View Quality requirements linked to Process steps",
     icon=":material/account_tree:",
+    expanded=bool(focused_requirement_id),
 ):
     st.caption(
         "Each row shows the published requirement values attached to one Process at a "
         "Glance step across every planning scenario in this project."
     )
-    if all_requirement_links.empty:
+    linked_steps_source = all_requirement_links.copy()
+    if focused_requirement_id:
+        focused_requirement = requirements.loc[
+            requirements["id"].astype(str).eq(focused_requirement_id)
+        ].iloc[0]
+        focused_identifier, focused_description = _requirement_friendly_values(
+            focused_requirement
+        )
+        st.caption(f"Showing links for {focused_identifier} — {focused_description}")
+        if "quality_requirement_id" in linked_steps_source:
+            linked_steps_source = linked_steps_source.loc[
+                linked_steps_source["quality_requirement_id"]
+                .astype(str)
+                .eq(focused_requirement_id)
+            ].copy()
+        else:
+            linked_steps_source = linked_steps_source.iloc[0:0].copy()
+        if st.button(
+            "Show all linked Process steps",
+            icon=":material/select_all:",
+            key=f"quality_requirement_show_all_linked_steps_{project_id}",
+        ):
+            st.session_state.pop(linked_steps_focus_key, None)
+            st.session_state.pop(linked_steps_dialog_key, None)
+            _clear_linked_step_filters(project_id)
+            st.rerun()
+
+    if linked_steps_source.empty:
         st.caption(
-            "No Quality requirements are linked to Process at a Glance steps in this project."
+            (
+                "No linked Process steps were found for this Quality requirement."
+                if focused_requirement_id
+                else "No Quality requirements are linked to Process at a Glance steps "
+                "in this project."
+            )
         )
     else:
-        linked_steps = all_requirement_links.copy()
-        linked_steps["scenario"] = linked_steps.apply(
-            lambda row: f"Rev {row['scenario_revision']} · {row['scenario_name']}",
-            axis=1,
-        )
-        linked_steps = linked_steps.rename(
-            columns={
-                "pitch": "Pitch",
-                "pitch_name": "Pitch Name",
-                "work_element": "Work Element",
-                "status": "Status",
-                "sequence": "Seq",
-                "scenario": "Scenario",
-                "unique_identifier": "Quality requirement Unique identifier",
-                "requirement_type": "Type",
-                "description": "Description",
-                "pass_fail": "Pass/fail",
-                "target_value": "Target value",
-                "tolerances": "Tolerances",
-                "unit": "Unit",
-                "repository_update_pending": "Repository update pending",
-            }
-        )
-        linked_steps["Pass/fail"] = linked_steps["Pass/fail"].fillna(0).astype(bool)
-        linked_steps["Repository update pending"] = (
-            linked_steps["Repository update pending"].fillna(0).astype(bool)
-        )
-        linked_step_rows = linked_steps.reindex(
-            columns=[
-                "Scenario", "Pitch", "Pitch Name", "Work Element", "Status", "Seq",
-                "Quality requirement Unique identifier", "Type", "Description", "Pass/fail",
-                "Target value", "Tolerances", "Unit", "Repository update pending",
-            ]
-        )
+        linked_step_rows = _linked_step_display_rows(linked_steps_source)
         visible_linked_steps = filter_table(
             linked_step_rows,
             key=f"quality_requirement_linked_step_filters_{project_id}",
-            dropdown_columns=[
-                "Scenario", "Pitch", "Work Element",
-                "Quality requirement Unique identifier", "Type",
-                "Status", "Repository update pending",
-            ],
+            dropdown_columns=LINKED_STEP_FILTER_COLUMNS,
             search_columns=[
                 "Scenario", "Pitch", "Pitch Name", "Work Element", "Status",
                 "Quality requirement Unique identifier", "Type", "Description",

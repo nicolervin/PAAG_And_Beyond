@@ -186,6 +186,28 @@
 
 ---
 
+## Phase 10 — Manufacturing Control Plan Process Flow Map
+
+**Goal:** Provide a read-only Process Flow Map presentation generated one-way from approved planning and saved Manufacturing Control Plan working-draft data.
+
+**Status: Not started — deferred.**
+
+**Proposed inputs:**
+
+- Process at a Glance Pitch and sequence;
+- Fishbone section structure; and
+- saved Control Plan **Characteristic placement** values distinguishing Product / Part from Process characteristics.
+
+The future map is presentation only. It cannot update or influence Process at a Glance, `work_elements`, Yamazumi, Fishbone, PFMEA, Quality requirements, or Control Plan numbering. Collaborator-curated **Pr. Nº** remains independent document numbering and has no role in the diagram's sequence, grouping, connectors, or identity.
+
+**Open questions — preserve for project-owner review:**
+
+- How does Fishbone structure determine Process Flow Map box grouping and branching?
+- Whether and how PFMEA or Quality evidence identifies inspection or reject paths?
+- Does the diagram render in the app, in an exported document, or both?
+
+---
+
 ## Deferred / pending separate decision (not part of this roadmap's build order)
 
 **Torque and quality-owned requirement fields:**
