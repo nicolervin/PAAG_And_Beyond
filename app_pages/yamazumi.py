@@ -15,7 +15,6 @@ from utils.store import (
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
-    move_yamazumi_element,
     parse_yamazumi_model_variants,
     record_audit_event,
     rename_yamazumi_variants,
@@ -23,6 +22,7 @@ from utils.store import (
     replace_yamazumi_flag_definitions,
     replace_yamazumi_pitches,
     replace_yamazumi_work_regions,
+    save_yamazumi_stack_draft,
     update_yamazumi_area,
     update_yamazumi_element,
     update_yamazumi_pitch,
@@ -60,6 +60,12 @@ from utils.table_ui import (
     table_has_unsaved_changes,
 )
 from utils.yamazumi_board import yamazumi_board
+from utils.yamazumi_stack import (
+    apply_stack_draft_to_elements,
+    apply_stack_drop,
+    build_stack_draft,
+    draft_differs,
+)
 
 
 project_id = st.session_state.get("project_id")
@@ -942,6 +948,8 @@ metrics.metric("Bottleneck pitch", bottleneck, border=True)
 metrics.metric("Takt", f"{takt:.1f} s", border=True)
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
+board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
+board_draft_error_key = f"yamazumi_board_draft_error_{project_id}_{scenario_id}_{area_id}"
 add_pitch_dialog_key = f"yamazumi_show_add_pitch_{project_id}_{area_id}"
 add_element_dialog_key = f"yamazumi_add_element_target_{project_id}_{area_id}"
 edit_pitch_dialog_key = f"yamazumi_edit_pitch_target_{project_id}_{area_id}"
@@ -967,16 +975,26 @@ def handle_yamazumi_move() -> None:
         move = state.get("move")
     if not move:
         return
-    enabled_variants = move_yamazumi_element(
-        project_id, str(move.get("element_id")), move.get("pitch_id")
-    )
-    details = {**move, "variants_added_to_pitch": enabled_variants}
-    record_audit_event(
-        project_id, "Yamazumi", "Move work element", 1,
-        st.session_state.get("current_editor", ""), details,
-    )
-    if enabled_variants:
-        request_table_editor_reset(pitch_editor_key)
+    persisted_elements = elements.to_dict("records")
+    current_draft = st.session_state.get(board_draft_key)
+    if not isinstance(current_draft, dict):
+        current_draft = build_stack_draft(persisted_elements)
+    try:
+        updated_draft = apply_stack_drop(
+            current_draft,
+            element_id=str(move.get("element_id") or ""),
+            pitch_id=move.get("pitch_id"),
+            before_element_id=move.get("before_element_id"),
+            after_element_id=move.get("after_element_id"),
+            insert_index=move.get("insert_index"),
+        )
+        st.session_state.pop(board_draft_error_key, None)
+        if draft_differs(persisted_elements, updated_draft):
+            st.session_state[board_draft_key] = updated_draft
+        else:
+            st.session_state.pop(board_draft_key, None)
+    except ValueError as exc:
+        st.session_state[board_draft_error_key] = str(exc)
 
 
 def handle_add_pitch_request() -> None:
@@ -1315,11 +1333,21 @@ if len(defined_variant_options) == 1:
         "Only Base is available. Add active feature definitions and allowed choices on Model Definitions to create additional Yamazumi variants."
     )
 st.caption(
-    "Drag work between pitch addresses. Odd-numbered pitches appear north/top; even-numbered pitches appear south/bottom."
+    "Drag work within or between pitch stacks. Order is measured outward from the assembly-flow centerline and remains a draft until Save & Refresh."
+)
+persisted_board_elements = elements.to_dict("records")
+board_draft = st.session_state.get(board_draft_key)
+has_board_draft = (
+    isinstance(board_draft, dict)
+    and draft_differs(persisted_board_elements, board_draft)
+)
+board_elements = (
+    apply_stack_draft_to_elements(persisted_board_elements, board_draft)
+    if has_board_draft else persisted_board_elements
 )
 yamazumi_board(
     pitches.to_dict("records"),
-    elements.to_dict("records"),
+    board_elements,
     variants,
     takt,
     key=board_key,
@@ -1329,6 +1357,48 @@ yamazumi_board(
     on_edit_pitch=handle_edit_pitch_request,
     on_edit_element=handle_edit_element_request,
 )
+if draft_error := st.session_state.pop(board_draft_error_key, None):
+    st.error(str(draft_error))
+board_actions = editable_table_footer(
+    editor_key=f"yamazumi_board_footer_{project_id}_{scenario_id}_{area_id}",
+    key_prefix=f"yamazumi_board_{project_id}_{scenario_id}_{area_id}",
+    additional_unsaved_changes=has_board_draft,
+)
+if board_actions.undo:
+    st.session_state.pop(board_draft_key, None)
+    st.session_state.pop(board_draft_error_key, None)
+    st.toast("Restored the last-saved Yamazumi stack order", icon=":material/undo:")
+    st.rerun()
+if board_actions.save_and_refresh:
+    try:
+        if not has_board_draft:
+            raise ValueError("There are no unsaved Yamazumi stack changes to save.")
+        result = save_yamazumi_stack_draft(
+            project_id, scenario_id, area_id, board_draft
+        )
+        record_audit_event(
+            project_id,
+            "Yamazumi",
+            "Save stack order",
+            len(result["changed_element_ids"]),
+            st.session_state.get("current_editor", ""),
+            {
+                "area_id": result["area_id"],
+                "area_name": result["area_name"],
+                "centerline_outward_stacks": result["affected_stacks"],
+            },
+        )
+        st.session_state.pop(board_draft_key, None)
+        if result["enabled_variants"]:
+            request_table_editor_reset(pitch_editor_key)
+        request_table_editor_reset(element_editor_key)
+        st.toast(
+            f"Saved {len(result['affected_stacks'])} Yamazumi stack(s)",
+            icon=":material/check_circle:",
+        )
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
 if st.session_state.get(add_pitch_dialog_key):
     add_pitch_dialog()
 elif st.session_state.get(add_element_dialog_key):

@@ -16,6 +16,7 @@ from utils.quality_store import (
     init_quality_schema,
 )
 from utils.pfmea_store import clone_pfmea_scenario, init_pfmea_schema
+from utils.yamazumi_stack import UNASSIGNED_STACK_ID, build_stack_draft
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8071,6 +8072,188 @@ def move_yamazumi_element(
     return enabled_variants
 
 
+def save_yamazumi_stack_draft(
+    project_id: str,
+    scenario_id: str,
+    area_id: str,
+    stacks: dict[str, list[str]],
+) -> dict:
+    """Validate and atomically persist complete centerline-outward stack order."""
+    if not isinstance(stacks, dict):
+        raise ValueError("The Yamazumi board draft is invalid. Undo it and try again.")
+    normalized: dict[str, list[str]] = {}
+    for raw_stack_id, raw_element_ids in stacks.items():
+        stack_key = str(raw_stack_id or "").strip()
+        if not stack_key or not isinstance(raw_element_ids, list):
+            raise ValueError("Every Yamazumi draft stack needs a stable destination and order.")
+        normalized[stack_key] = [str(value or "").strip() for value in raw_element_ids]
+        if any(not value for value in normalized[stack_key]):
+            raise ValueError("Every Yamazumi draft element needs a stable ID.")
+
+    timestamp = now_iso()
+    with connection() as conn:
+        area = conn.execute(
+            """SELECT id, name FROM yamazumi_areas
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (area_id, project_id, scenario_id),
+        ).fetchone()
+        if not area:
+            raise ValueError("That Yamazumi area is not in the active planning scenario.")
+
+        pitch_rows = conn.execute(
+            """SELECT id, pitch_number, pitch_name, status, pitch_type,
+                      feeds_into_pitch_id, model_variants
+               FROM yamazumi_pitches
+               WHERE project_id=? AND area_id=?""",
+            (project_id, area_id),
+        ).fetchall()
+        pitches = {str(row["id"]): row for row in pitch_rows}
+        element_rows = conn.execute(
+            """SELECT id, pitch_id, model_variant, model_variants, description,
+                      sequence, process_sync_status
+               FROM yamazumi_elements
+               WHERE project_id=? AND area_id=?
+               ORDER BY sequence, description COLLATE NOCASE, id""",
+            (project_id, area_id),
+        ).fetchall()
+        elements = {str(row["id"]): row for row in element_rows}
+
+        submitted_ids = [element_id for values in normalized.values() for element_id in values]
+        if len(submitted_ids) != len(set(submitted_ids)):
+            raise ValueError("A Yamazumi work element appears more than once in the board draft.")
+        submitted_set = set(submitted_ids)
+        existing_set = set(elements)
+        missing = existing_set - submitted_set
+        stale = submitted_set - existing_set
+        if missing or stale:
+            parts = []
+            if missing:
+                parts.append(f"missing {len(missing)} current element(s)")
+            if stale:
+                parts.append(f"containing {len(stale)} stale or foreign element(s)")
+            raise ValueError(
+                "The Yamazumi board draft is incomplete or out of date ("
+                + " and ".join(parts)
+                + "). Undo it and try again."
+            )
+
+        for stack_key, element_ids in normalized.items():
+            if stack_key == UNASSIGNED_STACK_ID:
+                continue
+            pitch = pitches.get(stack_key)
+            if not pitch:
+                raise ValueError(
+                    "A Yamazumi draft destination is missing or belongs to another area or scenario."
+                )
+            if element_ids and str(pitch["status"]) != "Active":
+                label = yamazumi_pitch_label(pitch["pitch_number"], pitch["pitch_name"])
+                raise ValueError(f"Work can only be saved into an Active pitch; {label} is not Active.")
+
+        current = build_stack_draft(dict(row) for row in element_rows)
+        affected_stack_ids = sorted(
+            stack_key
+            for stack_key in set(current) | set(normalized)
+            if current.get(stack_key, []) != normalized.get(stack_key, [])
+        )
+        desired: dict[str, tuple[str | None, int]] = {}
+        for stack_key in affected_stack_ids:
+            pitch_id = None if stack_key == UNASSIGNED_STACK_ID else stack_key
+            for position, element_id in enumerate(normalized.get(stack_key, []), start=1):
+                desired[element_id] = (pitch_id, position * 10)
+
+        enabled_variants: dict[str, list[str]] = {}
+        for stack_key in affected_stack_ids:
+            if stack_key == UNASSIGNED_STACK_ID or stack_key not in pitches:
+                continue
+            destination = pitches[stack_key]
+            destination_variants = parse_yamazumi_model_variants(
+                destination["model_variants"], fallback=None
+            )
+            required_variants = list(dict.fromkeys(
+                variant
+                for element_id in normalized.get(stack_key, [])
+                for variant in parse_yamazumi_model_variants(
+                    elements[element_id]["model_variants"],
+                    elements[element_id]["model_variant"],
+                )
+            ))
+            missing_variants = [
+                variant for variant in required_variants
+                if variant not in destination_variants
+            ]
+            if missing_variants:
+                _require_yamazumi_feed_target_for_pitch_write(
+                    conn, project_id, destination
+                )
+                conn.execute(
+                    """UPDATE yamazumi_pitches SET model_variants=?, updated_at=?
+                       WHERE id=? AND project_id=? AND area_id=?""",
+                    (
+                        json.dumps([*destination_variants, *missing_variants]),
+                        timestamp,
+                        stack_key,
+                        project_id,
+                        area_id,
+                    ),
+                )
+                enabled_variants[stack_key] = missing_variants
+
+        changed_element_ids: list[str] = []
+        for element_id, (pitch_id, sequence) in desired.items():
+            existing = elements[element_id]
+            old_pitch_id = str(existing["pitch_id"] or "").strip() or None
+            if old_pitch_id == pitch_id and int(existing["sequence"]) == sequence:
+                continue
+            sync_status = (
+                "Needs IE review"
+                if old_pitch_id != pitch_id
+                else str(existing["process_sync_status"] or "Needs IE review")
+            )
+            cursor = conn.execute(
+                """UPDATE yamazumi_elements
+                   SET pitch_id=?, sequence=?, process_sync_status=?, updated_at=?
+                   WHERE id=? AND project_id=? AND area_id=?""",
+                (
+                    pitch_id, sequence, sync_status, timestamp,
+                    element_id, project_id, area_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    "A Yamazumi work element changed while the draft was being saved. No changes were applied."
+                )
+            changed_element_ids.append(element_id)
+
+        affected_stacks = []
+        for stack_key in affected_stack_ids:
+            pitch = pitches.get(stack_key)
+            affected_stacks.append({
+                "pitch_id": stack_key,
+                "pitch_address": (
+                    str(pitch["pitch_number"] or "") if pitch else "Unassigned"
+                ),
+                "pitch_name": str(pitch["pitch_name"] or "") if pitch else "Unassigned",
+                "elements": [
+                    {
+                        "element_id": element_id,
+                        "description": str(elements[element_id]["description"] or ""),
+                        "sequence": position * 10,
+                    }
+                    for position, element_id in enumerate(
+                        normalized.get(stack_key, []), start=1
+                    )
+                ],
+            })
+
+    return {
+        "area_id": area_id,
+        "area_name": str(area["name"] or ""),
+        "affected_stacks": affected_stacks,
+        "enabled_variants": enabled_variants,
+        "changed_element_ids": changed_element_ids,
+    }
+
+
 def import_yamazumi_rows(
     project_id: str,
     scenario_id: str,
@@ -8654,6 +8837,71 @@ def assembly_sections(project_id: str) -> pd.DataFrame:
         "SELECT * FROM assembly_sections WHERE project_id = ? ORDER BY sequence, name",
         (project_id,),
     ))
+
+
+def assembly_section_walk_order(project_id: str) -> pd.DataFrame:
+    """Return Fishbone sections in deterministic depth-first framework order."""
+    sections = assembly_sections(project_id)
+    if sections.empty:
+        result = sections.copy()
+        result["depth"] = pd.Series(dtype="Int64")
+        return result
+
+    def normalized_parent_id(value) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        return str(value).strip()
+
+    records = {
+        str(row["id"]): row.to_dict() for _, row in sections.iterrows()
+    }
+    children: dict[str, list[str]] = {}
+    for section_id, row in records.items():
+        parent_id = normalized_parent_id(row.get("parent_id"))
+        children.setdefault(parent_id, []).append(section_id)
+    for child_ids in children.values():
+        child_ids.sort(
+            key=lambda child_id: (
+                int(records[child_id]["sequence"]),
+                records[child_id]["name"],
+            )
+        )
+
+    order: list[str] = []
+    depth_by_id: dict[str, int] = {}
+
+    def add_branch(section_id: str, depth: int) -> None:
+        if section_id in depth_by_id:
+            return
+        depth_by_id[section_id] = depth
+        order.append(section_id)
+        for child_id in children.get(section_id, []):
+            add_branch(child_id, depth + 1)
+
+    root_ids = [
+        section_id
+        for section_id, row in records.items()
+        if not normalized_parent_id(row.get("parent_id"))
+        or row["section_type"] == "Main spine"
+    ]
+    root_ids.sort(
+        key=lambda section_id: (
+            int(records[section_id]["sequence"]),
+            records[section_id]["name"],
+        )
+    )
+    for root_id in root_ids:
+        add_branch(root_id, 0)
+    for section_id in records:
+        add_branch(section_id, 0)
+
+    result = (
+        sections.set_index(sections["id"].astype(str), drop=False)
+        .loc[order]
+        .reset_index(drop=True)
+    )
+    result["depth"] = result["id"].astype(str).map(depth_by_id).astype("Int64")
+    return result
 
 
 

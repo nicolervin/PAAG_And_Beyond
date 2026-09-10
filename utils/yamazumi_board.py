@@ -12,6 +12,7 @@ _HTML = """
 <div class="board">
   <div class="board-actions"><button id="add-pitch" type="button">＋ Add pitch</button></div>
   <div class="legend" id="legend"></div>
+  <div class="unassigned-lane" id="unassigned"></div>
   <div class="lane-label">North side · odd pitches</div>
   <div class="lane north" id="north"></div>
   <div class="line"><span>Assembly flow →</span></div>
@@ -56,6 +57,8 @@ _CSS = """
 .variant { flex:1 0 155px; border-top:2px solid var(--st-border-color); margin-top:8px; padding-top:6px; }
 .variant-title { display:flex; justify-content:space-between; gap:5px; font-size:.78rem; font-weight:750; margin-bottom:4px; }
 .stack { min-height:120px; border:1px solid var(--st-border-color); display:flex; flex-direction:column; background:color-mix(in srgb, var(--st-secondary-background-color) 45%, transparent); }
+.drop-slot { flex:0 0 8px; min-height:8px; margin:-4px 0; position:relative; z-index:3; }
+.drop-slot.dragover { min-height:14px; flex-basis:14px; margin:-7px 0; background:color-mix(in srgb, var(--st-primary-color) 28%, transparent); outline:2px dashed var(--st-primary-color); }
 .element { position:relative; box-sizing:border-box; min-height:34px; padding:5px 31px 5px 6px; border-top:1px solid rgba(0,0,0,.14); font-size:.72rem; cursor:grab; overflow:hidden; }
 .element strong { position:absolute; top:4px; right:31px; margin-left:5px; }
 .element-description { display:block; height:100%; padding-right:30px; overflow:hidden; line-height:1.2; overflow-wrap:anywhere; }
@@ -63,6 +66,8 @@ _CSS = """
 .flags { position:absolute; left:3px; bottom:3px; z-index:2; max-width:calc(100% - 43px); box-sizing:border-box; padding:1px 4px; border:1px solid #8b0000; border-radius:3px; background:#fff3cd; color:#8b0000; font-weight:900; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
 .legend { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:4px; font-size:.8rem; }
 .swatch { width:12px; height:12px; display:inline-block; border-radius:2px; margin-right:4px; }
+.unassigned-lane { display:flex; margin:8px 2px 12px; }
+.pitch.unassigned { flex-basis:240px; border-style:dashed; }
 """
 
 _JS = r"""
@@ -74,14 +79,15 @@ export default function(component) {
   )
   const north = parentElement.querySelector('#north')
   const south = parentElement.querySelector('#south')
+  const unassigned = parentElement.querySelector('#unassigned')
   const legend = parentElement.querySelector('#legend')
   const addPitch = parentElement.querySelector('#add-pitch')
-  if (!north || !south || !legend || !addPitch) return
+  if (!north || !south || !unassigned || !legend || !addPitch) return
   addPitch.onclick = () => setTriggerValue('add_pitch', { requested: true })
   legend.innerHTML = `<span><i class="swatch" style="background:#35c84a"></i>Cycle</span>`
     + `<span><i class="swatch" style="background:#ffd54f"></i>Periodic</span>`
     + `<span><i class="swatch" style="background:#ef5350"></i>Fluctuation</span>`
-  north.innerHTML = ''; south.innerHTML = ''
+  north.innerHTML = ''; south.innerHTML = ''; unassigned.innerHTML = ''
   const grouped = {}
   for (const element of (data.elements || [])) {
     const pitch = element.pitch_id || '__unassigned__'
@@ -121,7 +127,30 @@ export default function(component) {
       block.className = 'variant'
       block.innerHTML = `<div class="variant-title"><span>${variant}</span><span>${total.toFixed(1)}s / ${Number(data.takt || 0).toFixed(1)}s</span></div><div class="stack"></div>`
       const stack = block.querySelector('.stack')
+      const appendDropSlot = logicalIndex => {
+        const slot = document.createElement('div')
+        slot.className = 'drop-slot'
+        slot.dataset.insertIndex = String(logicalIndex)
+        slot.ondragover = event => {
+          event.preventDefault(); event.stopPropagation(); slot.classList.add('dragover')
+        }
+        slot.ondragleave = () => slot.classList.remove('dragover')
+        slot.ondrop = event => {
+          event.preventDefault(); event.stopPropagation(); slot.classList.remove('dragover')
+          setTriggerValue('move', {
+            element_id: event.dataTransfer.getData('text/plain'),
+            pitch_id: pitch.id || null,
+            insert_index: logicalIndex,
+            before_element_id: items[logicalIndex]?.id || null,
+            after_element_id: logicalIndex > 0 ? items[logicalIndex - 1]?.id || null : null,
+          })
+        }
+        stack.appendChild(slot)
+      }
+      if (side !== 'north') appendDropSlot(0)
       for (const item of displayItems) {
+        const logicalIndex = items.findIndex(candidate => candidate.id === item.id)
+        if (side === 'north') appendDropSlot(logicalIndex + 1)
         const el = document.createElement('div')
         const color = item.work_type === 'Periodic'
           ? '#ffd54f'
@@ -151,7 +180,9 @@ export default function(component) {
           setTriggerValue('edit_element', { element_id: item.id })
         }
         stack.appendChild(el)
+        if (side !== 'north') appendDropSlot(logicalIndex + 1)
       }
+      if (side === 'north') appendDropSlot(0)
       variantWrap.appendChild(block)
     }
     const acceptsWork = !pitch.id || pitch.status === 'Active'
@@ -177,7 +208,12 @@ export default function(component) {
       card.ondragleave = () => card.classList.remove('dragover')
       card.ondrop = event => {
         event.preventDefault(); card.classList.remove('dragover')
-        setTriggerValue('move', { element_id: event.dataTransfer.getData('text/plain'), pitch_id: pitch.id || null })
+        setTriggerValue('move', {
+          element_id: event.dataTransfer.getData('text/plain'),
+          pitch_id: pitch.id || null,
+          before_element_id: null,
+          after_element_id: null,
+        })
       }
     } else {
       card.title = `${pitch.status} pitches must be changed to Active before work can be assigned.`
@@ -185,6 +221,13 @@ export default function(component) {
     return card
   }
   const numberFrom = value => { const found = String(value || '').match(/(\d+)(?!.*\d)/); return found ? Number(found[1]) : 0 }
+  unassigned.appendChild(makePitch({
+    id: null,
+    pitch_number: 'Unassigned',
+    pitch_name: 'Drop work here',
+    status: 'Active',
+    model_variants: ['Base'],
+  }, 'unassigned'))
   for (const pitch of (data.pitches || [])) {
     const lane = numberFrom(pitch.pitch_number) % 2 ? north : south
     lane.appendChild(makePitch(pitch, lane === north ? 'north' : 'south'))
@@ -208,7 +251,7 @@ export default function(component) {
 """
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v15",
+    "paag_yamazumi_drag_board_v17",
     html=_HTML,
     css=_CSS,
     js=_JS,

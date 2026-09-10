@@ -352,8 +352,61 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
 
     def test_parts_to_fishbone_smoke(self) -> None:
-        app = self.run_page("app_pages/fishbone.py")
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+            app = self.run_page("app_pages/fishbone.py")
         self.assertTrue(any(title.value == "Parts to fishbone" for title in app.title))
+
+    def test_fishbone_framework_walk_order_and_indentation_are_unchanged(self) -> None:
+        child_id = store.add_assembly_section(
+            self.project_id,
+            "Smoke child",
+            "Subassembly",
+            self.section_id,
+            "",
+        )
+        store.add_assembly_section(
+            self.project_id,
+            "Smoke grandchild",
+            "Subassembly",
+            child_id,
+            "",
+        )
+        store.add_assembly_section(
+            self.project_id,
+            "Smoke second main",
+            "Main spine",
+            None,
+            "",
+        )
+
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+            app = self.run_page("app_pages/fishbone.py")
+        framework = next(
+            table.value
+            for table in app.dataframe
+            if "hierarchy" in table.value.columns
+        )
+        self.assertEqual(
+            list(framework.columns),
+            [
+                "id", "project_id", "name", "section_type", "parent_id",
+                "sequence", "description", "active", "created_at", "updated_at",
+                "hierarchy", "parent_assembly", "order_actions", "assemblies_action",
+            ],
+        )
+        visible_bytes = framework[["name", "hierarchy"]].to_csv(
+            index=False, lineterminator="\n"
+        ).encode("utf-8")
+        self.assertEqual(
+            visible_bytes,
+            (
+                "name,hierarchy\n"
+                "Smoke assembly,🟦  Smoke assembly\n"
+                "Smoke child, └─ 🟧  Smoke child\n"
+                "Smoke grandchild,  └─ 🟧  Smoke grandchild\n"
+                "Smoke second main,🟦  Smoke second main\n"
+            ).encode("utf-8"),
+        )
 
     def test_yamazumi_smoke(self) -> None:
         app = self.run_page("app_pages/yamazumi.py")
