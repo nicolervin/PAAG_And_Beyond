@@ -8904,6 +8904,204 @@ def assembly_section_walk_order(project_id: str) -> pd.DataFrame:
     return result
 
 
+def _op_id_depth_letter(depth: int) -> str:
+    """Return a lowercase spreadsheet-style letter for a zero-based depth."""
+    value = depth + 1
+    letters = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters = chr(ord("a") + remainder) + letters
+    return letters
+
+
+def work_element_op_ids(
+    project_id: str,
+    scenario_id: str,
+    work_element_ids: list[str] | None = None,
+) -> dict[str, str]:
+    """Compute scenario-scoped, human-readable Op IDs without persisting them."""
+    requested_ids = None
+    if work_element_ids is not None:
+        requested_ids = list(dict.fromkeys(
+            str(value or "").strip() for value in work_element_ids
+            if str(value or "").strip()
+        ))
+        if not requested_ids:
+            return {}
+
+    with connection() as conn:
+        scenario = conn.execute(
+            "SELECT id FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone()
+        if not scenario:
+            raise ValueError("The active planning scenario no longer exists in this project.")
+
+        parameters: list[object] = [project_id, scenario_id]
+        work_filter = ""
+        if requested_ids is not None:
+            placeholders = ",".join("?" for _ in requested_ids)
+            work_filter = f" AND id IN ({placeholders})"
+            parameters.extend(requested_ids)
+        work_rows = conn.execute(
+            f"""SELECT id FROM work_elements
+                WHERE project_id=? AND scenario_id=?{work_filter}
+                ORDER BY sequence, id""",
+            tuple(parameters),
+        ).fetchall()
+        work_ids = [str(row["id"]) for row in work_rows]
+        if requested_ids is not None and set(work_ids) != set(requested_ids):
+            raise ValueError(
+                "One or more Process at a Glance Work Elements are missing or belong to "
+                "another planning scenario."
+            )
+        if not work_ids:
+            return {}
+
+        yamazumi_rows = conn.execute(
+            """SELECT element.id AS yamazumi_element_id,
+                      element.process_element_id, element.pitch_id,
+                      element.sequence, element.description,
+                      area.id AS area_id, area.section_id,
+                      pitch.id AS resolved_pitch_id, pitch.pitch_number
+               FROM yamazumi_elements element
+               JOIN yamazumi_areas area
+                 ON area.id=element.area_id
+                AND area.project_id=element.project_id
+                AND area.scenario_id=?
+               LEFT JOIN yamazumi_pitches pitch
+                 ON pitch.id=element.pitch_id
+                AND pitch.project_id=element.project_id
+                AND pitch.area_id=area.id
+               WHERE element.project_id=?
+               ORDER BY element.sequence,
+                        element.description COLLATE NOCASE,
+                        element.id""",
+            (scenario_id, project_id),
+        ).fetchall()
+
+    links_by_work: dict[str, list[sqlite3.Row]] = {}
+    stack_rows: dict[str, list[sqlite3.Row]] = {}
+    for row in yamazumi_rows:
+        process_id = str(row["process_element_id"] or "").strip()
+        if process_id:
+            links_by_work.setdefault(process_id, []).append(row)
+        pitch_id = str(row["resolved_pitch_id"] or "").strip()
+        if pitch_id:
+            stack_rows.setdefault(pitch_id, []).append(row)
+    stack_positions = {
+        str(row["yamazumi_element_id"]): position
+        for rows in stack_rows.values()
+        for position, row in enumerate(rows, start=1)
+    }
+
+    walk = assembly_section_walk_order(project_id)
+    section_by_id = {
+        str(row["id"]): row.to_dict() for _, row in walk.iterrows()
+    } if not walk.empty else {}
+    mainline_numbers = {
+        str(row["id"]): position
+        for position, (_, row) in enumerate(
+            walk.loc[walk["section_type"].eq("Main spine")].iterrows(), start=1
+        )
+    } if not walk.empty else {}
+    subassembly_children: dict[str, list[str]] = {}
+    for section_id, section in section_by_id.items():
+        if str(section.get("section_type") or "") != "Subassembly":
+            continue
+        parent_id = str(section.get("parent_id") or "").strip()
+        subassembly_children.setdefault(parent_id, []).append(section_id)
+    for child_ids in subassembly_children.values():
+        child_ids.sort(
+            key=lambda child_id: (
+                int(section_by_id[child_id]["sequence"]),
+                str(section_by_id[child_id]["name"]),
+            )
+        )
+
+    def fishbone_prefix(section_id: str) -> str | None:
+        section = section_by_id.get(section_id)
+        if not section:
+            return None
+        if str(section.get("section_type") or "") == "Main spine":
+            number = mainline_numbers.get(section_id)
+            return f"M{number}" if number else None
+
+        reverse_path: list[str] = []
+        visited: set[str] = set()
+        current_id = section_id
+        mainline_id = ""
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            current = section_by_id.get(current_id)
+            if not current:
+                return None
+            section_type = str(current.get("section_type") or "")
+            if section_type == "Main spine":
+                mainline_id = current_id
+                break
+            if section_type != "Subassembly":
+                return None
+            reverse_path.append(current_id)
+            current_id = str(current.get("parent_id") or "").strip()
+        if not mainline_id or mainline_id not in mainline_numbers:
+            return None
+
+        path = list(reversed(reverse_path))
+        lineages = subassembly_children.get(mainline_id, [])
+        if not path or path[0] not in lineages:
+            return None
+        lineage_number = lineages.index(path[0]) + 1
+        branch_path: list[str] = []
+        for depth, path_section_id in enumerate(path):
+            if depth:
+                parent_id = path[depth - 1]
+                siblings = subassembly_children.get(parent_id, [])
+                if path_section_id not in siblings:
+                    return None
+                if len(siblings) > 1:
+                    branch_path.append(str(siblings.index(path_section_id) + 1))
+            depth_designator = _op_id_depth_letter(depth) + "".join(branch_path)
+        return f"M{mainline_numbers[mainline_id]}S{lineage_number}{depth_designator}"
+
+    result: dict[str, str] = {}
+    for work_id in work_ids:
+        links = links_by_work.get(work_id, [])
+        if not links:
+            result[work_id] = "Yamazumi link required"
+            continue
+        if len(links) != 1:
+            result[work_id] = "Unique Yamazumi link required"
+            continue
+        link = links[0]
+        pitch_id = str(link["resolved_pitch_id"] or "").strip()
+        if not pitch_id:
+            result[work_id] = "Yamazumi pitch required"
+            continue
+        section_id = str(link["section_id"] or "").strip()
+        if not section_id:
+            result[work_id] = "Fishbone link required"
+            continue
+        prefix = fishbone_prefix(section_id)
+        if not prefix:
+            result[work_id] = "Fishbone hierarchy required"
+            continue
+        position = stack_positions.get(str(link["yamazumi_element_id"]))
+        if position is None:
+            result[work_id] = "Yamazumi link required"
+            continue
+        result[work_id] = f"{prefix}.{link['pitch_number']}.{position}"
+    return result
+
+
+def work_element_op_id(project_id: str, scenario_id: str, work_element_id: str) -> str:
+    """Compute one Op ID through the shared batch implementation."""
+    normalized_id = str(work_element_id or "").strip()
+    if not normalized_id:
+        raise ValueError("Choose a Process at a Glance Work Element.")
+    return work_element_op_ids(project_id, scenario_id, [normalized_id])[normalized_id]
+
+
 
 
 def _assembly_section_delete_rows(

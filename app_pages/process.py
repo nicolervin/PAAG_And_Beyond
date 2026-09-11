@@ -24,6 +24,7 @@ from utils.store import (
     save_process_part_group,
     search_parts_and_fishbone,
     validate_process_part_option_pairings,
+    work_element_op_ids,
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
 )
@@ -952,13 +953,14 @@ model_labels = {
 }
 model_numbers_by_label = {label: number for number, label in model_labels.items()}
 columns = [
-    "id", "sequence", "station", "pitch_name", "work_element", "operation", "description", "cycle_time_s",
+    "id", "op_id", "sequence", "station", "pitch_name", "work_element", "operation", "description", "cycle_time_s",
     "assigned_parts", "part_number", "output_assembly_number", "output_assembly_name",
     "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
     "conveyor_height_in", "platform_height_in", "pit_depth_in",
     "model_applicability", "ergonomics_risk", "status",
 ]
 compact_columns = [
+    "op_id",
     "station",
     "pitch_name",
     "work_element",
@@ -973,6 +975,7 @@ if elements.empty:
     elements = pd.DataFrame(
         {
             "id": pd.Series(dtype="string"),
+            "op_id": pd.Series(dtype="string"),
             "sequence": pd.Series(dtype="int64"),
             "station": pd.Series(dtype="string"),
             "pitch_name": pd.Series(dtype="string"),
@@ -1000,6 +1003,12 @@ if elements.empty:
     )
 else:
     elements = elements.copy()
+    op_ids = work_element_op_ids(
+        project_id, scenario_id, elements["id"].astype(str).tolist()
+    )
+    elements["op_id"] = elements["id"].astype(str).map(op_ids).fillna(
+        "Yamazumi link required"
+    )
     pairing_summary: dict[str, list[str]] = {}
     for group in process_part_groups(project_id, scenario_id, active_only=True):
         option_numbers = [str(option["part_number"]) for option in group["options"]]
@@ -1053,7 +1062,7 @@ visible_elements = filter_table(
     key=f"process_filters_{scenario_id}",
     dropdown_columns=["station", "status", "model_applicability"],
     search_columns=[
-        "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
+        "op_id", "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
         "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
     ],
     reset_widget_keys=[process_editor_key],
@@ -1069,6 +1078,7 @@ edited = st.data_editor(
     height=470,
     disabled=[
         "id",
+        "op_id",
         "pitch_name",
         "work_element",
         "assigned_parts",
@@ -1078,6 +1088,15 @@ edited = st.data_editor(
     column_config={
         "id": None,
         "part_number": None,
+        "op_id": st.column_config.TextColumn(
+            "Op ID",
+            pinned=True,
+            help=(
+                "Identifies this Work Element's current Fishbone lineage, Pitch, and "
+                "centerline-outward stack position. It may change if the Fishbone "
+                "structure or Yamazumi assignments change."
+            ),
+        ),
         "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
         "station": st.column_config.TextColumn("Pitch", pinned=True),
         "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),

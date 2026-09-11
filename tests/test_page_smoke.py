@@ -489,6 +489,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertNotIn("details", process_table.columns)
         self.assertTrue(
             {
+                "op_id",
                 "description",
                 "output_assembly_number",
                 "tool",
