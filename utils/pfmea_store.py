@@ -17,9 +17,20 @@ from uuid import uuid4
 import pandas as pd
 
 
-PFMEA_CLASSIFICATIONS = ["", "Product Safety", "Critical Quality"]
-LEGACY_PFMEA_SAFETY_CLASSIFICATION = "Safety"
-PRODUCT_SAFETY_CLASSIFICATION = "Product Safety"
+PFMEA_CLASSIFICATION_MEANINGS = {
+    "": "Unclassified",
+    "S": "Critical to Product Safety",
+    "R": "Regulatory",
+    "E": "Engineering CTQ",
+    "P": "Process CTQ",
+    "P-": "Process CTQ done at qualification",
+    "Q": "Quality Specific",
+    "E-": "Engineering CTQ at qualification",
+    "M": "Maintain Control",
+    "PM": "Preventative Maintenance",
+}
+PFMEA_CLASSIFICATIONS = list(PFMEA_CLASSIFICATION_MEANINGS)
+LEGACY_PFMEA_CLASSIFICATIONS = {"Safety", "Product Safety", "Critical Quality"}
 PFMEA_RATINGS = list(range(1, 11))
 
 
@@ -216,6 +227,11 @@ def init_pfmea_schema(conn: sqlite3.Connection) -> None:
                ADD COLUMN control_source_review_required INTEGER NOT NULL DEFAULT 0
                CHECK (control_source_review_required IN (0, 1))"""
         )
+    entry_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(pfmea_entries)").fetchall()
+    }
+    if "legacy_class_code" not in entry_columns:
+        conn.execute("ALTER TABLE pfmea_entries ADD COLUMN legacy_class_code TEXT")
 
 
 def _store():
@@ -250,7 +266,8 @@ def _rating(value, label: str) -> int | None:
 def _classification(value) -> str:
     classification = _text(value)
     if classification not in PFMEA_CLASSIFICATIONS:
-        raise ValueError("Classification must be Product Safety, Critical Quality, or blank.")
+        allowed = ", ".join(code for code in PFMEA_CLASSIFICATIONS if code)
+        raise ValueError(f"Classification must be one of {allowed}, or blank.")
     return classification
 
 
@@ -406,32 +423,38 @@ def migrate_legacy_pfmea_controls(project_id: str, editor_name: str) -> dict:
         }
 
 
-def migrate_pfmea_safety_classification(project_id: str, editor_name: str) -> dict:
-    """Rename the legacy PFMEA Safety classification once, with atomic audit evidence."""
+def migrate_pfmea_classifications(project_id: str, editor_name: str) -> dict:
+    """Convert retired PFMEA labels to approved short codes with one atomic audit."""
     timestamp = _store().now_iso()
     with _store().connection() as conn:
         rows = conn.execute(
-            "SELECT id FROM pfmea_entries WHERE project_id=? AND class_code=? ORDER BY id",
-            (project_id, LEGACY_PFMEA_SAFETY_CLASSIFICATION),
+            """SELECT id, class_code, legacy_class_code FROM pfmea_entries
+               WHERE project_id=? AND class_code IN ('Safety','Product Safety','Critical Quality')
+               ORDER BY id""",
+            (project_id,),
         ).fetchall()
         if not rows:
             return {"row_count": 0, "entry_ids": [], "timestamp": timestamp}
         if not _text(editor_name):
             raise ValueError(
-                "Enter Current editor before opening PFMEA so the Product Safety "
+                "Enter Current editor before opening PFMEA so the Classification "
                 "classification migration can be recorded in History."
             )
         entry_ids = [str(row["id"]) for row in rows]
         conn.execute(
             """UPDATE pfmea_entries
-               SET class_code=?, updated_at=?
-               WHERE project_id=? AND class_code=?""",
-            (
-                PRODUCT_SAFETY_CLASSIFICATION,
-                timestamp,
-                project_id,
-                LEGACY_PFMEA_SAFETY_CLASSIFICATION,
-            ),
+               SET class_code='S', updated_at=?
+               WHERE project_id=? AND class_code IN ('Safety','Product Safety')""",
+            (timestamp, project_id),
+        )
+        conn.execute(
+            """UPDATE pfmea_entries
+               SET legacy_class_code=CASE
+                       WHEN TRIM(COALESCE(legacy_class_code,''))='' THEN class_code
+                       ELSE legacy_class_code END,
+                   class_code='', updated_at=?
+               WHERE project_id=? AND class_code='Critical Quality'""",
+            (timestamp, project_id),
         )
         _store().record_audit_event(
             project_id,
@@ -442,13 +465,21 @@ def migrate_pfmea_safety_classification(project_id: str, editor_name: str) -> di
             {
                 "affected_entry_count": len(entry_ids),
                 "affected_entry_ids": entry_ids,
-                "old_value": LEGACY_PFMEA_SAFETY_CLASSIFICATION,
-                "new_value": PRODUCT_SAFETY_CLASSIFICATION,
+                "mappings": {
+                    "Safety": "S",
+                    "Product Safety": "S",
+                    "Critical Quality": "blank; retained in legacy_class_code",
+                },
                 "store_timestamp": timestamp,
             },
             _conn=conn,
         )
         return {"row_count": len(entry_ids), "entry_ids": entry_ids, "timestamp": timestamp}
+
+
+def migrate_pfmea_safety_classification(project_id: str, editor_name: str) -> dict:
+    """Backward-compatible name for the consolidated Classification migration."""
+    return migrate_pfmea_classifications(project_id, editor_name)
 
 
 def pfmea_control_options(project_id: str, control_type: str) -> pd.DataFrame:
@@ -1141,6 +1172,7 @@ def _pfmea_flat_rows_conn(
                             "potential_effects": effect.get("effect_description") if effect else "",
                             "severity": effect.get("severity") if effect else None,
                             "classification": entry.get("class_code"),
+                            "legacy_classification": entry.get("legacy_class_code") or "",
                             "potential_causes": cause.get("cause_description") if cause else "",
                             "occurrence": cause.get("occurrence") if cause else None,
                             "prevention_controls": prevention,
@@ -2165,7 +2197,7 @@ def review_pfmea_sources(project_id: str, scenario_id: str, entry_id: str) -> di
 
 
 def delete_pfmea_records(project_id: str, scenario_id: str, table: str,
-                         record_ids: list[str]) -> int:
+                         record_ids: list[str], editor_name: str = "") -> int:
     allowed = {
         "pfmea_entries": None,
         "pfmea_effects": "pfmea_entry_id",
@@ -2193,6 +2225,22 @@ def delete_pfmea_records(project_id: str, scenario_id: str, table: str,
             entry_ids = {str(row[0]) for row in conn.execute(
                 f"SELECT DISTINCT pfmea_entry_id FROM {table} WHERE id IN ({placeholders})", tuple(ids)
             ).fetchall()}
+        control_plan_item_ids: list[str] = []
+        if table == "pfmea_entries" and _table_exists(conn, "control_plan_items"):
+            control_plan_item_ids = [
+                str(row["id"])
+                for row in conn.execute(
+                    f"""SELECT id FROM control_plan_items
+                        WHERE project_id=? AND scenario_id=?
+                          AND pfmea_entry_id IN ({placeholders}) ORDER BY id""",
+                    (project_id, scenario_id, *ids),
+                ).fetchall()
+            ]
+            if control_plan_item_ids and not _text(editor_name):
+                raise ValueError(
+                    "Enter Current editor before deleting PFMEA entries used by the "
+                    "Control Plan working draft."
+                )
         cursor = conn.execute(
             f"DELETE FROM {table} WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
             (project_id, scenario_id, *ids),
@@ -2201,13 +2249,29 @@ def delete_pfmea_records(project_id: str, scenario_id: str, table: str,
         for entry_id in entry_ids:
             if conn.execute("SELECT 1 FROM pfmea_entries WHERE id=?", (entry_id,)).fetchone():
                 _rebuild_risk_rows(conn, project_id, scenario_id, entry_id, timestamp)
+        if control_plan_item_ids:
+            _store().record_audit_event(
+                project_id,
+                "Control Plan",
+                "PFMEA parent deletion cascade",
+                len(control_plan_item_ids),
+                editor_name,
+                {
+                    "scenario_id": scenario_id,
+                    "pfmea_entry_ids": ids,
+                    "affected_control_plan_item_ids": control_plan_item_ids,
+                    "store_timestamp": timestamp,
+                },
+                _conn=conn,
+            )
         return int(cursor.rowcount)
 
 
 def clone_pfmea_scenario(conn: sqlite3.Connection, project_id: str,
                          source_scenario_id: str, new_scenario_id: str,
                          process_id_map: dict[str, str],
-                         assignment_id_map: dict[str, str], timestamp: str) -> int:
+                         assignment_id_map: dict[str, str], timestamp: str,
+                         entry_id_map: dict[str, str] | None = None) -> int:
     entry_map: dict[str, str] = {}
     effect_map: dict[str, str] = {}
     cause_map: dict[str, str] = {}
@@ -2309,4 +2373,6 @@ def clone_pfmea_scenario(conn: sqlite3.Connection, project_id: str,
              timestamp, entry_id),
         )
         _rebuild_risk_rows(conn, project_id, new_scenario_id, entry_id, timestamp)
+    if entry_id_map is not None:
+        entry_id_map.update(entry_map)
     return cloned

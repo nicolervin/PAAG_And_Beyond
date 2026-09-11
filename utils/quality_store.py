@@ -1279,7 +1279,8 @@ def quality_requirement_assignment(
 
 
 def delete_quality_requirement_assignments(
-    project_id: str, scenario_id: str, assignment_ids: list[str]
+    project_id: str, scenario_id: str, assignment_ids: list[str],
+    editor_name: str = "",
 ) -> int:
     """Delete a validated set of scenario-owned Process requirement assignments."""
     store = _store_module()
@@ -1299,6 +1300,11 @@ def delete_quality_requirement_assignments(
                 "Refresh and try again."
             )
         timestamp = store.now_iso()
+        from utils.control_plan_store import orphan_control_plan_assignments_conn
+
+        orphaned_control_plan_ids = orphan_control_plan_assignments_conn(
+            conn, project_id, scenario_id, normalized_ids, timestamp
+        )
         for table, detection in (
             ("pfmea_prevention_selections", False),
             ("pfmea_detection_selections", True),
@@ -1325,6 +1331,26 @@ def delete_quality_requirement_assignments(
                 WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
             (project_id, scenario_id, *normalized_ids),
         )
+        if orphaned_control_plan_ids:
+            if not str(editor_name or "").strip():
+                raise ValueError(
+                    "Enter Current editor before unlinking a Quality requirement used by "
+                    "the Control Plan working draft."
+                )
+            store.record_audit_event(
+                project_id,
+                "Control Plan",
+                "Quality assignment orphaned",
+                len(orphaned_control_plan_ids),
+                editor_name,
+                {
+                    "scenario_id": scenario_id,
+                    "quality_requirement_assignment_ids": normalized_ids,
+                    "affected_control_plan_item_ids": orphaned_control_plan_ids,
+                    "store_timestamp": timestamp,
+                },
+                _conn=conn,
+            )
         return int(cursor.rowcount)
 
 
