@@ -721,7 +721,8 @@ else:
     if save_tree:
         try:
             if not selected_tree_rows.empty:
-                raise ValueError("Clear selected rows before saving complexity-tree edits.")             existing_tree_by_model = {
+                raise ValueError("Clear selected rows before saving complexity-tree edits.")
+            existing_tree_by_model = {
                 str(row["model_id"]): row for _, row in tree.iterrows()
             }
             changed_assignment_count = 0

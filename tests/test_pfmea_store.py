@@ -624,7 +624,7 @@ class PfmeaStoreTests(unittest.TestCase):
             }]),
         )
         flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.loc[:, "classification"] = "Critical Quality"
+        flat.loc[:, "classification"] = "Q"
         flat.loc[:, "severity"] = 9
         flat.loc[:, "occurrence"] = 4
         flat.loc[:, "detection"] = 5
@@ -633,7 +633,7 @@ class PfmeaStoreTests(unittest.TestCase):
         flat.loc[:, "resulting_detection"] = 2
         pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         saved = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id).iloc[0]
-        self.assertEqual(saved["classification"], "Critical Quality")
+        self.assertEqual(saved["classification"], "Q")
         self.assertEqual(saved["rpn"], 180)
         self.assertEqual(saved["resulting_rpn"], 48)
 
@@ -669,7 +669,7 @@ class PfmeaStoreTests(unittest.TestCase):
         entries = pfmea_store.pfmea_entries(
             self.project_id, self.scenario_id, self.work_element_id
         )[["id", "potential_failure_mode", "class_code"]]
-        entries.loc[0, "class_code"] = "Product Safety"
+        entries.loc[0, "class_code"] = "S"
         pfmea_store.save_pfmea_entry_rows(
             self.project_id, self.scenario_id, self.work_element_id, entries
         )
@@ -677,15 +677,15 @@ class PfmeaStoreTests(unittest.TestCase):
             pfmea_store.pfmea_entries(
                 self.project_id, self.scenario_id, self.work_element_id
             ).iloc[0]["class_code"],
-            "Product Safety",
+            "S",
         )
         entries.loc[0, "class_code"] = "Safety"
-        with self.assertRaisesRegex(ValueError, "Product Safety, Critical Quality, or blank"):
+        with self.assertRaisesRegex(ValueError, "Classification must be one of"):
             pfmea_store.save_pfmea_entry_rows(
                 self.project_id, self.scenario_id, self.work_element_id, entries
             )
         entries.loc[0, "class_code"] = "Legacy class"
-        with self.assertRaisesRegex(ValueError, "Product Safety, Critical Quality, or blank"):
+        with self.assertRaisesRegex(ValueError, "Classification must be one of"):
             pfmea_store.save_pfmea_entry_rows(
                 self.project_id, self.scenario_id, self.work_element_id, entries
             )
@@ -767,7 +767,7 @@ class PfmeaStoreTests(unittest.TestCase):
             ).fetchall()
         }
         for migrated_id in (entry_id, cloned_entry_id):
-            self.assertEqual(after_entries[migrated_id]["class_code"], "Product Safety")
+            self.assertEqual(after_entries[migrated_id]["class_code"], "S")
             self.assertNotEqual(
                 after_entries[migrated_id]["updated_at"],
                 before_entries[migrated_id]["updated_at"],
@@ -794,8 +794,7 @@ class PfmeaStoreTests(unittest.TestCase):
         self.assertEqual(len(audit), 1)
         self.assertEqual(audit[0]["row_count"], 2)
         self.assertEqual(audit[0]["editor_name"], "Nicole Ervin")
-        self.assertIn('"old_value": "Safety"', audit[0]["details"])
-        self.assertIn('"new_value": "Product Safety"', audit[0]["details"])
+        self.assertIn('"Safety": "S"', audit[0]["details"])
         self.assertIn('"store_timestamp":', audit[0]["details"])
         repeated = pfmea_store.migrate_pfmea_safety_classification(
             self.project_id, "Nicole Ervin"
@@ -813,7 +812,32 @@ class PfmeaStoreTests(unittest.TestCase):
             pfmea_store.pfmea_entries(self.project_id, post_migration_clone).iloc[0][
                 "class_code"
             ],
-            "Product Safety",
+            "S",
+        )
+
+    def test_critical_quality_migrates_to_legacy_and_blank_once(self) -> None:
+        entry_id = self.create_entry()
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE pfmea_entries SET class_code='Critical Quality' WHERE id=?",
+                (entry_id,),
+            )
+        result = pfmea_store.migrate_pfmea_classifications(
+            self.project_id, "Nicole Ervin"
+        )
+        self.assertEqual(result["row_count"], 1)
+        row = self.conn.execute(
+            "SELECT id, class_code, legacy_class_code FROM pfmea_entries WHERE id=?",
+            (entry_id,),
+        ).fetchone()
+        self.assertEqual(row["id"], entry_id)
+        self.assertEqual(row["class_code"], "")
+        self.assertEqual(row["legacy_class_code"], "Critical Quality")
+        self.assertEqual(
+            pfmea_store.migrate_pfmea_classifications(self.project_id, "Nicole Ervin")[
+                "row_count"
+            ],
+            0,
         )
 
     def test_process_step_deletion_is_restricted_until_pfmea_is_removed(self) -> None:

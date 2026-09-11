@@ -20,7 +20,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
     def test_pfmea_classification_choices_use_product_safety(self) -> None:
         self.assertEqual(
             pfmea_ui.PFMEA_CLASSIFICATIONS,
-            ["", "Product Safety", "Critical Quality"],
+            ["", "S", "R", "E", "P", "P-", "Q", "E-", "M", "PM"],
         )
         self.assertNotIn("Safety", pfmea_ui.PFMEA_CLASSIFICATIONS)
 
@@ -231,7 +231,11 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         ):
             pfmea_ui._confirm_pfmea_delete.__wrapped__()
         delete.assert_called_once_with(
-            "project", "scenario", "pfmea_entries", ["entry-1", "entry-2"]
+            "project",
+            "scenario",
+            "pfmea_entries",
+            ["entry-1", "entry-2"],
+            "Nicole Ervin",
         )
         self.assertEqual(audit.call_args.args[4], "Nicole Ervin")
         reset.assert_called_once_with(
@@ -269,10 +273,10 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         rows = pd.DataFrame(
             [
                 {"item_number": "Pitch A", "potential_failure_mode": "Initial risk",
-                 "classification": "Product Safety", "severity": 10, "occurrence": 5,
+                 "classification": "S", "severity": 10, "occurrence": 5,
                  "detection": 3, "rpn": 150, "resulting_rpn": 80},
                 {"item_number": "Pitch B", "potential_failure_mode": "Resulting risk",
-                 "classification": "Critical Quality", "severity": 8, "occurrence": 4,
+                 "classification": "Q", "severity": 8, "occurrence": 4,
                  "detection": 3, "rpn": 96, "resulting_rpn": 180},
                 {"item_number": "Pitch C", "potential_failure_mode": "At threshold",
                  "classification": "", "severity": 10, "occurrence": 5,
@@ -578,7 +582,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                 "potential_failure_mode": "Housing loose",
                 "potential_effects": "Noise",
                 "severity": 8,
-                "classification": "Product Safety",
+                "classification": "S",
                 "potential_causes": "Fastener loose",
                 "occurrence": 3,
                 "prevention_controls": ["quality:q-1", "manual:m-active", "manual:m-old"],
@@ -622,7 +626,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             duplicate["prevention_controls"], ["quality:q-1", "manual:m-active"]
         )
         self.assertEqual(duplicate["detection_controls"], ["quality:q-1"])
-        self.assertEqual(duplicate["classification"], "Product Safety")
+        self.assertEqual(duplicate["classification"], "S")
         self.assertEqual(omitted, ["manual:m-old"])
         self.assertEqual(duplicate["actions_taken"], "")
         self.assertTrue(pd.isna(duplicate["resulting_rpn"]))
@@ -1070,6 +1074,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         )
         with (
             patch.object(store, "planning_scenarios", return_value=scenarios),
+            patch("utils.scope_ui.planning_scenarios", return_value=scenarios),
             patch.object(store, "audit_history", return_value=pd.DataFrame()),
             patch.object(quality_store, "quality_requirements", return_value=pd.DataFrame()),
             patch.object(pfmea_ui, "pfmea_process_steps", return_value=steps),
@@ -1081,7 +1086,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             patch.object(pfmea_ui, "migrate_legacy_pfmea_controls", return_value={"row_count": 0}),
             patch.object(
                 pfmea_ui,
-                "migrate_pfmea_safety_classification",
+                "migrate_pfmea_classifications",
                 return_value={"row_count": 0},
             ),
             patch.object(pfmea_ui, "pfmea_control_selections", return_value=pd.DataFrame()),

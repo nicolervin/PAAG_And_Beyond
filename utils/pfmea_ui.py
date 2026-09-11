@@ -10,13 +10,16 @@ import pandas as pd
 import streamlit as st
 from openpyxl.styles import Alignment
 
+from utils.control_plan_store import control_plan_pfmea_delete_impact
+
 from utils.pfmea_store import (
     PFMEA_CLASSIFICATIONS,
+    PFMEA_CLASSIFICATION_MEANINGS,
     PFMEA_RATINGS,
     delete_pfmea_records,
     delete_pfmea_control_options,
     migrate_legacy_pfmea_controls,
-    migrate_pfmea_safety_classification,
+    migrate_pfmea_classifications,
     pfmea_actions,
     pfmea_causes,
     pfmea_effects,
@@ -94,6 +97,7 @@ PFMEA_FLAT_COLUMNS = {
     "process_function": "string", "potential_failure_mode": "string",
     "potential_effects": "string", "severity": "float64",
     "classification": "string", "potential_causes": "string",
+    "legacy_classification": "string",
     "occurrence": "float64", "prevention_controls": "list",
     "detection_controls": "list", "detection": "float64", "rpn": "float64",
     "recommended_action": "string", "responsibility_target": "string",
@@ -106,11 +110,26 @@ PFMEA_FLAT_COLUMNS = {
 
 PFMEA_VISIBLE_COLUMNS = [
     "item_number", "process_function", "potential_failure_mode", "potential_effects",
-    "severity", "classification", "potential_causes", "occurrence",
+    "severity", "classification", "legacy_classification", "potential_causes", "occurrence",
     "prevention_controls", "detection_controls", "detection", "rpn",
     "recommended_action", "responsibility_target", "actions_taken",
     "resulting_severity", "resulting_occurrence", "resulting_detection", "resulting_rpn",
 ]
+
+
+def render_pfmea_classification_legend() -> None:
+    """Display the approved PFMEA short-code meanings."""
+    with st.expander("PFMEA Classification legend"):
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Code": code, "Meaning": meaning}
+                    for code, meaning in PFMEA_CLASSIFICATION_MEANINGS.items()
+                    if code
+                ]
+            ),
+            hide_index=True,
+        )
 
 
 def _frame(data: pd.DataFrame, columns: dict[str, str]) -> pd.DataFrame:
@@ -166,6 +185,18 @@ def _rpn_value(severity, occurrence, detection) -> float | None:
             return None
         ratings.append(rating)
     return math.prod(ratings)
+
+
+def render_pfmea_classification_legend() -> None:
+    """Show the approved PFMEA short-code meanings without embedding scoring guidance."""
+    with st.expander("PFMEA Classification legend", icon=":material/info:"):
+        st.markdown(
+            "  \n".join(
+                f"**{code}** — {meaning}"
+                for code, meaning in PFMEA_CLASSIFICATION_MEANINGS.items()
+                if code
+            )
+        )
 
 
 def _plain_text(value) -> str:
@@ -1143,6 +1174,7 @@ def _confirm_pfmea_delete() -> None:
                 str(pending["scenario_id"]),
                 str(pending["table"]),
                 list(pending["record_ids"]),
+                st.session_state.get("current_editor", ""),
             )
             record_audit_event(
                 str(pending["project_id"]),
@@ -2303,7 +2335,7 @@ def _render_flat_pfmea_table(
     if invalid_classes:
         st.warning(
             "Saved legacy Class values are outside the approved Classification choices. "
-            "Choose blank, Product Safety, or Critical Quality before Save & Refresh."
+            "Complete the approved Classification migration before Save & Refresh."
         )
         rows.loc[rows["classification"].isin(invalid_classes), "classification"] = ""
 
@@ -2371,10 +2403,15 @@ def _render_flat_pfmea_table(
             ),
             "classification": st.column_config.SelectboxColumn(
                 "Classification", options=PFMEA_CLASSIFICATIONS,
-                help=(
-                    "Choose blank, Product Safety, or Critical Quality. This replaces the "
-                    "former free-text Class field."
+                format_func=lambda code: (
+                    "Unclassified" if not code else
+                    f"{code} — {PFMEA_CLASSIFICATION_MEANINGS.get(code, 'Unknown')}"
                 ),
+                help="Choose an approved short code. The code alone is persisted.",
+            ),
+            "legacy_classification": st.column_config.TextColumn(
+                "Legacy Classification", disabled=True,
+                help="Retained read-only evidence from a retired PFMEA Classification.",
             ),
             "potential_causes": st.column_config.TextColumn(
                 "Potential Causes(s) of Failure", width="large",
@@ -2449,7 +2486,7 @@ def _render_flat_pfmea_table(
         hide_index=True,
         height=470,
         row_height=96,
-        disabled=["item_number", "rpn", "resulting_rpn"],
+        disabled=["item_number", "legacy_classification", "rpn", "resulting_rpn"],
         column_order=PFMEA_VISIBLE_COLUMNS,
         column_config=column_config,
     )
@@ -2670,6 +2707,9 @@ def _render_flat_pfmea_table(
         st.warning("Save or undo other PFMEA edits before deleting selected lines.")
     elif not selected.empty:
         selected_entries = selected.drop_duplicates(subset=["entry_id"])
+        control_plan_impact = control_plan_pfmea_delete_impact(
+            project_id, scenario_id, selected_entries["entry_id"].astype(str).tolist()
+        )
         selected_labels = selected_entries.apply(
             lambda row: (
                 f"{_plain_text(row.get('item_number')) or 'Unassigned'} — "
@@ -2698,7 +2738,14 @@ def _render_flat_pfmea_table(
             impact_message=(
                 f"This removes {len(delete_rows)} parent PFMEA failure mode record(s), "
                 "including their Effects, Causes, Controls, RPN records, and Recommended "
-                "Actions. Process at a Glance and Quality records remain unchanged."
+                "Actions. "
+                + (
+                    f"It also permanently removes {control_plan_impact['item_count']} dependent "
+                    "Control Plan working-draft item(s), as their authoritative PFMEA parent "
+                    "will no longer exist. "
+                    if control_plan_impact.get("item_count") else ""
+                )
+                + "Process at a Glance and Quality records remain unchanged."
             ),
         )
     return stored, complete
@@ -2717,7 +2764,7 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         "1 through 10; this module does not define company Severity, Occurrence, or Detection scales."
     )
     try:
-        classification_migration = migrate_pfmea_safety_classification(
+        classification_migration = migrate_pfmea_classifications(
             project_id, st.session_state.get("current_editor", "")
         )
         migration = migrate_legacy_pfmea_controls(
@@ -2731,7 +2778,7 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         st.toast(
             "Updated "
             f"{classification_migration['row_count']} PFMEA Classification record(s) "
-            "to Product Safety",
+            "to the approved short-code set",
             icon=":material/check_circle:",
         )
     if migration.get("row_count"):
@@ -2751,6 +2798,7 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         stored_flat_rows, current_flat_rows = _render_flat_pfmea_table(
             project_id, scenario_id, steps
         )
+        render_pfmea_classification_legend()
 
     _render_control_catalogs(project_id)
 
