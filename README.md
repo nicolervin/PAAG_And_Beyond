@@ -53,7 +53,7 @@ PAAG currently supports:
 - a station-independent assembly Fishbone with main-spine sections, nested subassemblies, and placed part uses;
 - Yamazumi balancing areas, pitch addresses, model variants, work regions, flags, takt comparison, and drag-and-drop work assignment;
 - an ordered Process at a Glance plan reconciled from Yamazumi work and paired to Fishbone parts;
-- process tools, locations, unit orientation, dimensional geometry, and other requirements retained by the current schema;
+- process tools, locations, unit orientation, dimensional geometry, and other requirements retained by the current schema while their redesigned Details/summary presentation awaits Phase 3;
 - a scenario-specific, derived Pin Map of pitches and reconciled Process work;
 - questions, concerns, decisions, and assumptions; and
 - a multi-sheet Excel snapshot with a flat `Lucid Data Link` worksheet.
@@ -82,7 +82,7 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `utils/assembly_grid.py` — Components v2 category/model grid renderer and its narrow interaction event contract.
 - `app_pages/fishbone.py` — Assembly framework, nested subassemblies, part placement, occurrence ordering, and the interactive Fishbone.
 - `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, flags, model variants, visual board, and work tables.
-- `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, ordered process requirements, bulk actions, export, and workload chart.
+- `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, compact pitch planning, bulk actions, export, and history. The former Details dialog and workload summary/chart are removed pending Phase 3 redesign.
 - `app_pages/pin_map.py` — Scenario-specific read-only line visualization of pitches and explicitly linked Process work.
 - `app_pages/functional_quality.py` — Scenario-aware Quality page with the project-wide Requirements repository, scenario-specific PFMEA tab, and Control Plan placeholder.
 - `app_pages/functional_ergonomics.py` — Scenario-specific Ergonomics review editor with linked/unlinked tracking, hazard tags, confirmed merging, deletion, and history.
@@ -124,7 +124,7 @@ Navigation is defined in `streamlit_app.py`.
 ### Process planning
 
 - **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. It supports scenario branching, takt, work regions, flags, model-variant stacks, and visual work balancing.
-- **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, orders it by pitch, and captures detailed execution requirements and output-assembly milestones.
+- **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, and orders it by pitch. Its former tabbed Details dialog and workload summary/chart have been removed; the underlying saved detail fields remain intact, and a redesigned Details/summary view is planned for Phase 3 but is not yet implemented.
 - **Pin Map** derives a scenario-specific read-only line view from existing pitches, Yamazumi elements, and explicitly linked Process work. It stores no separate layout data.
 
 ### Functional Reviews

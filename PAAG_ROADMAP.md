@@ -14,7 +14,7 @@
 
 **Status: Complete.**
 
-**Interim section behavior:** The detail dialog can copy unit orientation and conveyor height to every existing Process at a Glance step tied to the same Fishbone section in the active scenario. This is a one-time fill, not the persistent section-level inheritance planned for Phase 3.
+**Interim section behavior:** Removed September 9, 2026. The former Details dialog and its one-time section-wide orientation/conveyor-height copy no longer exist. The underlying saved fields remain intact pending the Phase 3 redesign.
 
 ---
 
@@ -36,7 +36,7 @@
 - Fields shown in the dialog are edited only there, not duplicated in the main table.
 - Follows existing editable-table and dialog/state-reset conventions in AGENTS.md (unsaved-edit detection, editor reset after save, audit history).
 
-**Status: Complete.**
+**Status: Retired September 9, 2026.** The completed Phase 1 tabbed Details dialog was deliberately removed in preparation for a fresh Phase 3 design. No replacement Details UI is currently implemented.
 
 ---
 
@@ -74,6 +74,8 @@
 ## Phase 3 — Section-level physical line dimensions
 
 **Goal:** Move conveyor geometry from per-step entry to per-Fishbone-main-spine-section entry, since it is physically consistent across a section in most cases. Platform height and pit depth belong in a future ergonomics workflow rather than this line-setup phase.
+
+**Upcoming redesign note:** Phase 3 is also expected to introduce redesigned Process at a Glance Details and summary presentation to replace the retired Phase 1 dialog and workload metrics/chart. That presentation is planned only; it is not implemented in the current removal step.
 
 **Data model:**
 - One record per Fishbone main-spine section, per scenario, holding: conveyor height (in), conveyor width (in), conveyor length (ft), and unit orientation.
@@ -189,7 +191,7 @@
 ## Deferred / pending separate decision (not part of this roadmap's build order)
 
 **Torque and quality-owned requirement fields:**
-- Torque, quality, and ergonomics entry has been removed from the IE-owned Process at a Glance detail dialog. Existing saved values are preserved and remain visible in the read-only Requirements view.
+- Torque, quality, and ergonomics entry was removed from the former IE-owned Process at a Glance detail dialog. The entire dialog has since been retired; existing saved values remain preserved and visible in the read-only Requirements view.
 - Torque and other quality-owned specifications belong with Quality Engineers in a future editable Requirements workflow that can feed PFMEA/control-plan work.
 - Platform height and pit depth belong in a future ergonomics workflow. Existing saved values are preserved until that workflow is designed.
 - Status: the Process at a Glance removal is complete; ownership and editing design for the future Requirements and ergonomics workflows remains a separate phase.

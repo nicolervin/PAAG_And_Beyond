@@ -7,6 +7,7 @@ from utils.store import (
     assemblies_for_section,
     assembly_section_delete_impact,
     assembly_section_delete_target_validation,
+    assembly_section_walk_order,
     assembly_sections,
     assign_parts_to_section,
     audit_history,
@@ -219,36 +220,12 @@ with st.expander(
     if sections.empty:
         st.info("Add at least one main-spine Fishbone section to begin the Fishbone framework.")
     else:
-        framework_records = {str(row["id"]): row.to_dict() for _, row in sections.iterrows()}
-        framework_children: dict[str, list[str]] = {}
-        for section_id, row in framework_records.items():
-            parent_id = normalized_parent_id(row.get("parent_id"))
-            framework_children.setdefault(parent_id, []).append(section_id)
-        for child_ids in framework_children.values():
-            child_ids.sort(key=lambda child_id: (int(framework_records[child_id]["sequence"]), framework_records[child_id]["name"]))
-
-        framework_order: list[str] = []
-        framework_depth: dict[str, int] = {}
-
-        def add_framework_branch(section_id: str, depth: int) -> None:
-            if section_id in framework_depth:
-                return
-            framework_depth[section_id] = depth
-            framework_order.append(section_id)
-            for child_id in framework_children.get(section_id, []):
-                add_framework_branch(child_id, depth + 1)
-
-        root_ids = [
-            section_id for section_id, row in framework_records.items()
-            if not normalized_parent_id(row.get("parent_id")) or row["section_type"] == "Main spine"
-        ]
-        root_ids.sort(key=lambda section_id: (int(framework_records[section_id]["sequence"]), framework_records[section_id]["name"]))
-        for root_id in root_ids:
-            add_framework_branch(root_id, 0)
-        for section_id in framework_records:
-            add_framework_branch(section_id, 0)
-
-        framework = sections.set_index(sections["id"].astype(str), drop=False).loc[framework_order].reset_index(drop=True)
+        framework_walk = assembly_section_walk_order(project_id)
+        framework_depth = dict(zip(
+            framework_walk["id"].astype(str),
+            framework_walk["depth"].astype(int),
+        ))
+        framework = framework_walk.drop(columns=["depth"])
         framework["hierarchy"] = framework.apply(
             lambda row: (
                 f"🟦  {row['name']}"

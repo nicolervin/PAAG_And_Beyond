@@ -15,7 +15,6 @@ from utils.store import (
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
-    move_yamazumi_element,
     parse_yamazumi_model_variants,
     record_audit_event,
     rename_yamazumi_variants,
@@ -23,6 +22,7 @@ from utils.store import (
     replace_yamazumi_flag_definitions,
     replace_yamazumi_pitches,
     replace_yamazumi_work_regions,
+    save_yamazumi_stack_draft,
     update_yamazumi_area,
     update_yamazumi_element,
     update_yamazumi_pitch,
@@ -32,6 +32,9 @@ from utils.store import (
     yamazumi_elements,
     yamazumi_elements_for_scenario,
     yamazumi_flag_definitions,
+    yamazumi_pitch_delete_blockers,
+    yamazumi_pitch_feed_target_status,
+    yamazumi_pitch_label,
     yamazumi_pitches,
     yamazumi_pitches_for_scenario,
     yamazumi_work_regions,
@@ -57,6 +60,12 @@ from utils.table_ui import (
     table_has_unsaved_changes,
 )
 from utils.yamazumi_board import yamazumi_board
+from utils.yamazumi_stack import (
+    apply_stack_draft_to_elements,
+    apply_stack_drop,
+    build_stack_draft,
+    draft_differs,
+)
 
 
 project_id = st.session_state.get("project_id")
@@ -411,6 +420,39 @@ pitch_variants_by_id = {
     str(row["id"]): list(row["model_variants"] or ["Base"])
     for _, row in pitches.iterrows()
 }
+feed_target_label_by_id = {
+    str(row["id"]): yamazumi_pitch_label(row["pitch_number"], row["pitch_name"])
+    for _, row in pitches.iterrows()
+}
+
+
+def feed_target_picker(
+    label: str,
+    *,
+    source_pitch_id: str | None,
+    current_target_id: str | None,
+    key: str,
+):
+    target_ids = [
+        pitch_id for pitch_id in feed_target_label_by_id
+        if pitch_id != str(source_pitch_id or "")
+    ]
+    options = [None, *target_ids]
+    current_value = (
+        current_target_id if current_target_id in target_ids else None
+    )
+    return st.selectbox(
+        label,
+        options=options,
+        index=options.index(current_value),
+        format_func=lambda value: (
+            "Select a feed target"
+            if value is None
+            else feed_target_label_by_id[value]
+        ),
+        help="Required for Subassembly and Kitter pitches. Targets are limited to this Yamazumi area.",
+        key=key,
+    )
 
 setup_columns = st.columns(3)
 with setup_columns[0].expander("Generate pitch addresses", icon=":material/format_list_numbered:", expanded=pitches.empty):
@@ -427,6 +469,14 @@ with setup_columns[0].expander("Generate pitch addresses", icon=":material/forma
         help="Open and Blocked addresses cannot receive work until changed to Active.",
     )
     generated_pitch_type = range_controls.selectbox("Pitch type", PITCH_TYPES, index=0)
+    generated_feed_target_id = None
+    if generated_pitch_type in {"Subassembly", "Kitter"}:
+        generated_feed_target_id = feed_target_picker(
+            "Feeds into pitch",
+            source_pitch_id=None,
+            current_target_id=None,
+            key=f"generated_feed_target_{scenario_id}_{area_id}",
+        )
     generated_variants = st.multiselect(
         "Model variants shown on generated pitches",
         options=variant_options,
@@ -435,14 +485,46 @@ with setup_columns[0].expander("Generate pitch addresses", icon=":material/forma
     )
     if range_controls.button("Generate pitches", type="primary", icon=":material/add:"):
         try:
+            before_generated_ids = set(pitches["id"].astype(str))
             created = generate_yamazumi_pitch_range(
                 project_id, area_id, first_pitch, last_pitch, number_mode, generated_status, generated_variants,
                 generated_pitch_type,
+                generated_feed_target_id,
             )
+            generated_rows = yamazumi_pitches(project_id, area_id)
+            generated_rows = generated_rows.loc[
+                ~generated_rows["id"].astype(str).isin(before_generated_ids)
+            ]
+            feed_relationship_changes = [
+                {
+                    "source_pitch_id": str(row["id"]),
+                    "source_pitch_address": str(row["pitch_number"]),
+                    "old_feeds_into_pitch_id": None,
+                    "old_feed_target": None,
+                    "new_feeds_into_pitch_id": generated_feed_target_id,
+                    "new_feed_target": feed_target_label_by_id.get(
+                        str(generated_feed_target_id), ""
+                    ),
+                }
+                for _, row in generated_rows.iterrows()
+                if generated_feed_target_id
+            ]
             record_audit_event(
                 project_id, "Yamazumi pitches", "Generate range", created,
                 st.session_state.get("current_editor", ""),
-                {"first": first_pitch, "last": last_pitch, "number_mode": number_mode, "status": generated_status, "pitch_type": generated_pitch_type, "variants": generated_variants},
+                {
+                    "first": first_pitch,
+                    "last": last_pitch,
+                    "number_mode": number_mode,
+                    "status": generated_status,
+                    "pitch_type": generated_pitch_type,
+                    "variants": generated_variants,
+                    "new_feeds_into_pitch_id": generated_feed_target_id,
+                    "new_feed_target": feed_target_label_by_id.get(
+                        str(generated_feed_target_id), ""
+                    ),
+                    "feed_relationship_changes": feed_relationship_changes,
+                },
             )
             st.toast(f"Generated {created} new pitch addresses", icon=":material/check_circle:")
             st.rerun()
@@ -866,6 +948,8 @@ metrics.metric("Bottleneck pitch", bottleneck, border=True)
 metrics.metric("Takt", f"{takt:.1f} s", border=True)
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
+board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
+board_draft_error_key = f"yamazumi_board_draft_error_{project_id}_{scenario_id}_{area_id}"
 add_pitch_dialog_key = f"yamazumi_show_add_pitch_{project_id}_{area_id}"
 add_element_dialog_key = f"yamazumi_add_element_target_{project_id}_{area_id}"
 edit_pitch_dialog_key = f"yamazumi_edit_pitch_target_{project_id}_{area_id}"
@@ -891,16 +975,26 @@ def handle_yamazumi_move() -> None:
         move = state.get("move")
     if not move:
         return
-    enabled_variants = move_yamazumi_element(
-        project_id, str(move.get("element_id")), move.get("pitch_id")
-    )
-    details = {**move, "variants_added_to_pitch": enabled_variants}
-    record_audit_event(
-        project_id, "Yamazumi", "Move work element", 1,
-        st.session_state.get("current_editor", ""), details,
-    )
-    if enabled_variants:
-        request_table_editor_reset(pitch_editor_key)
+    persisted_elements = elements.to_dict("records")
+    current_draft = st.session_state.get(board_draft_key)
+    if not isinstance(current_draft, dict):
+        current_draft = build_stack_draft(persisted_elements)
+    try:
+        updated_draft = apply_stack_drop(
+            current_draft,
+            element_id=str(move.get("element_id") or ""),
+            pitch_id=move.get("pitch_id"),
+            before_element_id=move.get("before_element_id"),
+            after_element_id=move.get("after_element_id"),
+            insert_index=move.get("insert_index"),
+        )
+        st.session_state.pop(board_draft_error_key, None)
+        if draft_differs(persisted_elements, updated_draft):
+            st.session_state[board_draft_key] = updated_draft
+        else:
+            st.session_state.pop(board_draft_key, None)
+    except ValueError as exc:
+        st.session_state[board_draft_error_key] = str(exc)
 
 
 def handle_add_pitch_request() -> None:
@@ -947,6 +1041,14 @@ def add_pitch_dialog() -> None:
     pitch_name = st.text_input("Pitch name")
     status = st.selectbox("Status", ["Active", "Open", "Blocked"], index=0)
     pitch_type = st.selectbox("Pitch type", PITCH_TYPES, index=0)
+    feed_target_id = None
+    if pitch_type in {"Subassembly", "Kitter"}:
+        feed_target_id = feed_target_picker(
+            "Feeds into pitch",
+            source_pitch_id=None,
+            current_target_id=None,
+            key=f"add_pitch_feed_target_{project_id}_{area_id}",
+        )
     selected_pitch_variants = st.multiselect(
         "Model variants shown on this pitch",
         options=variant_options,
@@ -959,12 +1061,24 @@ def add_pitch_dialog() -> None:
         st.rerun()
     if actions.button("Add pitch", type="primary", icon=":material/add:", key="save_interactive_pitch"):
         try:
-            add_yamazumi_pitch(
-                project_id, area_id, pitch_number, pitch_name, status, selected_pitch_variants, pitch_type
+            new_pitch_id = add_yamazumi_pitch(
+                project_id, area_id, pitch_number, pitch_name, status,
+                selected_pitch_variants, pitch_type, feed_target_id,
             )
             record_audit_event(
                 project_id, "Yamazumi pitches", "Add from interactive board", 1,
-                st.session_state.get("current_editor", ""), {"pitch_number": pitch_number, "status": status, "pitch_type": pitch_type},
+                st.session_state.get("current_editor", ""),
+                {
+                    "source_pitch_id": new_pitch_id,
+                    "source_pitch_address": pitch_number,
+                    "pitch_type": pitch_type,
+                    "old_feeds_into_pitch_id": None,
+                    "old_feed_target": None,
+                    "new_feeds_into_pitch_id": feed_target_id,
+                    "new_feed_target": feed_target_label_by_id.get(
+                        str(feed_target_id), ""
+                    ),
+                },
             )
             st.session_state.pop(f"yamazumi_show_add_pitch_{project_id}_{area_id}", None)
             request_table_editor_reset(pitch_editor_key)
@@ -1074,6 +1188,17 @@ def edit_pitch_dialog() -> None:
         index=PITCH_TYPES.index(current_pitch_type) if current_pitch_type in PITCH_TYPES else 0,
         key=f"edit_pitch_type_{pitch_id}",
     )
+    current_feed_target_id = str(current.get("feeds_into_pitch_id") or "").strip() or None
+    feed_target_id = None
+    if pitch_type in {"Subassembly", "Kitter"}:
+        if not current_feed_target_id:
+            st.warning("Feed target required", icon=":material/link_off:")
+        feed_target_id = feed_target_picker(
+            "Feeds into pitch",
+            source_pitch_id=str(pitch_id),
+            current_target_id=current_feed_target_id,
+            key=f"edit_pitch_feed_target_{pitch_id}",
+        )
     selected_variants = st.multiselect(
         "Model variants shown on this pitch",
         options=list(dict.fromkeys([*variant_options, *current_variants])),
@@ -1089,11 +1214,30 @@ def edit_pitch_dialog() -> None:
         try:
             update_yamazumi_pitch(
                 project_id, area_id, str(pitch_id),
-                {"pitch_number": pitch_number, "pitch_name": pitch_name, "status": status, "model_variants": selected_variants, "pitch_type": pitch_type},
+                {
+                    "pitch_number": pitch_number,
+                    "pitch_name": pitch_name,
+                    "status": status,
+                    "model_variants": selected_variants,
+                    "pitch_type": pitch_type,
+                    "feeds_into_pitch_id": feed_target_id,
+                },
             )
             record_audit_event(
                 project_id, "Yamazumi pitches", "Edit from interactive board", 1,
-                st.session_state.get("current_editor", ""), {"pitch_id": pitch_id, "pitch_number": pitch_number},
+                st.session_state.get("current_editor", ""),
+                {
+                    "source_pitch_id": pitch_id,
+                    "source_pitch_address": pitch_number,
+                    "old_feeds_into_pitch_id": current_feed_target_id,
+                    "old_feed_target": feed_target_label_by_id.get(
+                        str(current_feed_target_id), ""
+                    ),
+                    "new_feeds_into_pitch_id": feed_target_id,
+                    "new_feed_target": feed_target_label_by_id.get(
+                        str(feed_target_id), ""
+                    ),
+                },
             )
             st.session_state.pop(state_key, None)
             request_table_editor_reset(pitch_editor_key)
@@ -1189,11 +1333,21 @@ if len(defined_variant_options) == 1:
         "Only Base is available. Add active feature definitions and allowed choices on Model Definitions to create additional Yamazumi variants."
     )
 st.caption(
-    "Drag work between pitch addresses. Odd-numbered pitches appear north/top; even-numbered pitches appear south/bottom."
+    "Drag work within or between pitch stacks. Order is measured outward from the assembly-flow centerline and remains a draft until Save & Refresh."
+)
+persisted_board_elements = elements.to_dict("records")
+board_draft = st.session_state.get(board_draft_key)
+has_board_draft = (
+    isinstance(board_draft, dict)
+    and draft_differs(persisted_board_elements, board_draft)
+)
+board_elements = (
+    apply_stack_draft_to_elements(persisted_board_elements, board_draft)
+    if has_board_draft else persisted_board_elements
 )
 yamazumi_board(
     pitches.to_dict("records"),
-    elements.to_dict("records"),
+    board_elements,
     variants,
     takt,
     key=board_key,
@@ -1203,6 +1357,48 @@ yamazumi_board(
     on_edit_pitch=handle_edit_pitch_request,
     on_edit_element=handle_edit_element_request,
 )
+if draft_error := st.session_state.pop(board_draft_error_key, None):
+    st.error(str(draft_error))
+board_actions = editable_table_footer(
+    editor_key=f"yamazumi_board_footer_{project_id}_{scenario_id}_{area_id}",
+    key_prefix=f"yamazumi_board_{project_id}_{scenario_id}_{area_id}",
+    additional_unsaved_changes=has_board_draft,
+)
+if board_actions.undo:
+    st.session_state.pop(board_draft_key, None)
+    st.session_state.pop(board_draft_error_key, None)
+    st.toast("Restored the last-saved Yamazumi stack order", icon=":material/undo:")
+    st.rerun()
+if board_actions.save_and_refresh:
+    try:
+        if not has_board_draft:
+            raise ValueError("There are no unsaved Yamazumi stack changes to save.")
+        result = save_yamazumi_stack_draft(
+            project_id, scenario_id, area_id, board_draft
+        )
+        record_audit_event(
+            project_id,
+            "Yamazumi",
+            "Save stack order",
+            len(result["changed_element_ids"]),
+            st.session_state.get("current_editor", ""),
+            {
+                "area_id": result["area_id"],
+                "area_name": result["area_name"],
+                "centerline_outward_stacks": result["affected_stacks"],
+            },
+        )
+        st.session_state.pop(board_draft_key, None)
+        if result["enabled_variants"]:
+            request_table_editor_reset(pitch_editor_key)
+        request_table_editor_reset(element_editor_key)
+        st.toast(
+            f"Saved {len(result['affected_stacks'])} Yamazumi stack(s)",
+            icon=":material/check_circle:",
+        )
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
 if st.session_state.get(add_pitch_dialog_key):
     add_pitch_dialog()
 elif st.session_state.get(add_element_dialog_key):
@@ -1311,6 +1507,7 @@ else:
     pitch_table_source["area_name"] = str(area["name"])
 pitch_columns = [
     "id", "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
+    "feeds_into_pitch_id", "feed_target", "feed_target_status",
     "model_variants", "sequence", "updated_at",
 ]
 if pitch_table_source.empty:
@@ -1321,6 +1518,9 @@ if pitch_table_source.empty:
         "pitch_name": pd.Series(dtype="string"),
         "pitch_type": pd.Series(dtype="string"),
         "status": pd.Series(dtype="string"),
+        "feeds_into_pitch_id": pd.Series(dtype="string"),
+        "feed_target": pd.Series(dtype="string"),
+        "feed_target_status": pd.Series(dtype="string"),
         # MultiselectColumn values are lists, so this column deliberately uses object dtype.
         "model_variants": pd.Series(dtype="object"),
         "sequence": pd.Series(dtype="Int64"),
@@ -1328,12 +1528,26 @@ if pitch_table_source.empty:
     })
 else:
     pitch_rows = pitch_table_source.reindex(columns=pitch_columns).copy()
+    table_pitch_label_by_id = {
+        str(row["id"]): yamazumi_pitch_label(row["pitch_number"], row["pitch_name"])
+        for _, row in pitch_table_source.iterrows()
+    }
+    pitch_rows["feed_target"] = pitch_rows["feeds_into_pitch_id"].apply(
+        lambda value: table_pitch_label_by_id.get(str(value), "")
+        if value is not None and not pd.isna(value) else ""
+    )
+    pitch_rows["feed_target_status"] = pitch_rows.apply(
+        lambda row: yamazumi_pitch_feed_target_status(
+            row.get("pitch_type"), row.get("feeds_into_pitch_id")
+        ),
+        axis=1,
+    )
 pitch_filter_scope = "combined" if pitch_combined_view else str(area_id)
 visible_pitches = filter_table(
     pitch_rows,
     key=f"yamazumi_pitch_filters_{scenario_id}_{pitch_filter_scope}",
     dropdown_columns=["area_name", "pitch_type", "status", "model_variants"],
-    search_columns=["area_name", "pitch_number", "pitch_name", "pitch_type", "status", "model_variants"],
+    search_columns=["area_name", "pitch_number", "pitch_name", "pitch_type", "status", "feed_target", "feed_target_status", "model_variants"],
     labels={
         "area_name": "Yamazumi area",
         "pitch_type": "Pitch type",
@@ -1345,7 +1559,7 @@ visible_pitches = filter_table(
 )
 pitch_column_order = [
     "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
-    "model_variants", "sequence",
+    "feed_target", "feed_target_status", "model_variants", "sequence",
 ]
 pitch_column_config = {
     "id": None,
@@ -1354,6 +1568,15 @@ pitch_column_config = {
     "pitch_name": st.column_config.TextColumn("Pitch name"),
     "pitch_type": st.column_config.SelectboxColumn("Pitch type", options=PITCH_TYPES, required=True, default="Pitch"),
     "status": st.column_config.SelectboxColumn("Status", options=["Active", "Blocked", "Open"], required=True, default="Active"),
+    "feeds_into_pitch_id": None,
+    "feed_target": st.column_config.TextColumn(
+        "Feeds into pitch",
+        help="Shown for Subassembly and Kitter pitches. Use the pitch-card editor to choose a same-area target.",
+    ),
+    "feed_target_status": st.column_config.TextColumn(
+        "Feed target status",
+        help="Compatibility-null feeder pitches remain visibly unclassified until manually edited.",
+    ),
     "model_variants": st.column_config.MultiselectColumn(
         "Model variants",
         options=variant_options,
@@ -1368,6 +1591,7 @@ if pitch_combined_view:
     pitch_read_only_config = {
         **pitch_column_config,
         "model_variants": st.column_config.ListColumn("Model variants"),
+        "feed_target": st.column_config.TextColumn("Feeds into pitch"),
     }
     selectable_dataframe(
         visible_pitches,
@@ -1398,7 +1622,7 @@ else:
         hide_index=True,
         num_rows="dynamic",
         height=280,
-        disabled=["id", "area_name", "updated_at"],
+        disabled=["id", "area_name", "feeds_into_pitch_id", "feed_target", "feed_target_status", "updated_at"],
         column_order=pitch_column_order,
         column_config=pitch_column_config,
     )
@@ -1422,8 +1646,21 @@ else:
             "pitches": [
                 {
                     "id": str(row["id"]),
+                    "source_pitch_id": str(row["id"]),
                     "pitch_number": str(row.get("pitch_number") or ""),
+                    "source_pitch_address": str(row.get("pitch_number") or ""),
                     "pitch_name": str(row.get("pitch_name") or ""),
+                    "old_feeds_into_pitch_id": (
+                        str(row.get("feeds_into_pitch_id"))
+                        if row.get("feeds_into_pitch_id") is not None
+                        and not pd.isna(row.get("feeds_into_pitch_id"))
+                        else None
+                    ),
+                    "old_feed_target": feed_target_label_by_id.get(
+                        str(row.get("feeds_into_pitch_id")), ""
+                    ),
+                    "new_feeds_into_pitch_id": None,
+                    "new_feed_target": None,
                     "assigned_element_count": int(
                         elements["pitch_id"].fillna("").astype(str).eq(str(row["id"])).sum()
                     ) if not elements.empty else 0,
@@ -1438,6 +1675,9 @@ else:
                 pitch_editor_key, native_row_selection=True
             ),
             "pitch_edit_count": editor_edit_count(pitch_editor_key),
+            "feed_reference_blockers": yamazumi_pitch_delete_blockers(
+                project_id, area_id, list(selected_pitch_ids)
+            ),
         }
         stage_native_delete_confirmation(pitch_editor_key)
 st.download_button(
@@ -1465,8 +1705,53 @@ if not pitch_combined_view and pitch_actions.save_and_refresh:
         if errors:
             raise ValueError(" ".join(errors))
         to_save = merge_filtered_edits(pitch_rows, visible_pitches, edited_pitches)
+        feed_target_id_by_label = {
+            label: pitch_id for pitch_id, label in feed_target_label_by_id.items()
+        }
+        to_save["feeds_into_pitch_id"] = to_save["feed_target"].map(
+            feed_target_id_by_label
+        )
+        before_pitch_rows = yamazumi_pitches(project_id, area_id)
         count = replace_yamazumi_pitches(project_id, area_id, to_save)
-        record_audit_event(project_id, "Yamazumi pitches", "Save & Refresh", count, st.session_state.get("current_editor", ""))
+        after_pitch_rows = yamazumi_pitches(project_id, area_id)
+        before_by_id = {
+            str(row["id"]): row for _, row in before_pitch_rows.iterrows()
+        }
+        all_labels = {
+            str(row["id"]): yamazumi_pitch_label(
+                row["pitch_number"], row["pitch_name"]
+            )
+            for frame in (before_pitch_rows, after_pitch_rows)
+            for _, row in frame.iterrows()
+        }
+        feed_changes = []
+        for _, row in after_pitch_rows.iterrows():
+            source_id = str(row["id"])
+            old_row = before_by_id.get(source_id)
+            old_target_id = (
+                str(old_row.get("feeds_into_pitch_id") or "").strip() or None
+                if old_row is not None else None
+            )
+            new_target_id = str(row.get("feeds_into_pitch_id") or "").strip() or None
+            if old_target_id != new_target_id:
+                feed_changes.append(
+                    {
+                        "source_pitch_id": source_id,
+                        "source_pitch_address": str(row["pitch_number"]),
+                        "old_feeds_into_pitch_id": old_target_id,
+                        "old_feed_target": all_labels.get(str(old_target_id), ""),
+                        "new_feeds_into_pitch_id": new_target_id,
+                        "new_feed_target": all_labels.get(str(new_target_id), ""),
+                    }
+                )
+        record_audit_event(
+            project_id,
+            "Yamazumi pitches",
+            "Save & Refresh",
+            count,
+            st.session_state.get("current_editor", ""),
+            {"area_id": area_id, "feed_relationship_changes": feed_changes},
+        )
         request_table_editor_reset(pitch_editor_key)
         st.rerun()
     except ValueError as exc:
@@ -1760,7 +2045,14 @@ def prepared_pitch_rows(
     )
     if errors:
         raise ValueError(" ".join(errors))
-    return merge_filtered_edits(pitch_rows, visible_pitches, draft)
+    to_save = merge_filtered_edits(pitch_rows, visible_pitches, draft)
+    feed_target_id_by_label = {
+        label: pitch_id for pitch_id, label in feed_target_label_by_id.items()
+    }
+    to_save["feeds_into_pitch_id"] = to_save["feed_target"].map(
+        feed_target_id_by_label
+    )
+    return to_save
 
 
 def prepared_element_rows(
@@ -1852,6 +2144,18 @@ def confirm_pitch_bulk_delete() -> None:
         st.write(
             f"- {label}: {pitch.get('assigned_element_count', 0)} assigned work "
             "element(s) will move to Unassigned"
+        )
+    blockers = pending.get("feed_reference_blockers", [])
+    if blockers:
+        relationships = ", ".join(
+            f"{yamazumi_pitch_label(row['source_pitch_number'], row['source_pitch_name'])} → "
+            f"{yamazumi_pitch_label(row['target_pitch_number'], row['target_pitch_name'])}"
+            for row in blockers
+        )
+        st.error(
+            "Deletion is blocked while these feed relationships remain: "
+            + relationships
+            + ". Re-point the source pitches or change their type before deleting the targets."
         )
     if pending.get("other_pitch_edits") or pending.get("other_element_edits"):
         st.info(

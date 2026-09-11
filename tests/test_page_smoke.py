@@ -352,16 +352,166 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
 
     def test_parts_to_fishbone_smoke(self) -> None:
-        app = self.run_page("app_pages/fishbone.py")
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+            app = self.run_page("app_pages/fishbone.py")
         self.assertTrue(any(title.value == "Parts to fishbone" for title in app.title))
+
+    def test_fishbone_framework_walk_order_and_indentation_are_unchanged(self) -> None:
+        child_id = store.add_assembly_section(
+            self.project_id,
+            "Smoke child",
+            "Subassembly",
+            self.section_id,
+            "",
+        )
+        store.add_assembly_section(
+            self.project_id,
+            "Smoke grandchild",
+            "Subassembly",
+            child_id,
+            "",
+        )
+        store.add_assembly_section(
+            self.project_id,
+            "Smoke second main",
+            "Main spine",
+            None,
+            "",
+        )
+
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+            app = self.run_page("app_pages/fishbone.py")
+        framework = next(
+            table.value
+            for table in app.dataframe
+            if "hierarchy" in table.value.columns
+        )
+        self.assertEqual(
+            list(framework.columns),
+            [
+                "id", "project_id", "name", "section_type", "parent_id",
+                "sequence", "description", "active", "created_at", "updated_at",
+                "hierarchy", "parent_assembly", "order_actions", "assemblies_action",
+            ],
+        )
+        visible_bytes = framework[["name", "hierarchy"]].to_csv(
+            index=False, lineterminator="\n"
+        ).encode("utf-8")
+        self.assertEqual(
+            visible_bytes,
+            (
+                "name,hierarchy\n"
+                "Smoke assembly,🟦  Smoke assembly\n"
+                "Smoke child, └─ 🟧  Smoke child\n"
+                "Smoke grandchild,  └─ 🟧  Smoke grandchild\n"
+                "Smoke second main,🟦  Smoke second main\n"
+            ).encode("utf-8"),
+        )
 
     def test_yamazumi_smoke(self) -> None:
         app = self.run_page("app_pages/yamazumi.py")
         self.assertTrue(any(title.value == "Yamazumi" for title in app.title))
 
+    def test_yamazumi_feed_target_required_indicator_tracks_classification(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id,
+            self.scenario_id,
+            "Feed indicator area",
+            self.section_id,
+        )
+        target_id = store.add_yamazumi_pitch(
+            self.project_id, area_id, "P-1", "Receiving pitch"
+        )
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, status,
+                    sequence, model_variants, pitch_type, feeds_into_pitch_id, updated_at)
+                   VALUES ('compat-sub', ?, ?, 'SUB-1', 'Legacy feeder', 'Active',
+                           20, '["Base"]', 'Subassembly', NULL, ?)""",
+                (self.project_id, area_id, timestamp),
+            )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        pitch_table = next(
+            table.value
+            for table in app.dataframe
+            if "feed_target_status" in table.value.columns
+        )
+        status = pitch_table.loc[
+            pitch_table["pitch_number"] == "SUB-1", "feed_target_status"
+        ].iloc[0]
+        self.assertEqual(status, "Feed target required")
+
+        store.update_yamazumi_pitch(
+            self.project_id,
+            area_id,
+            "compat-sub",
+            {
+                "pitch_number": "SUB-1",
+                "pitch_name": "Legacy feeder",
+                "status": "Active",
+                "model_variants": ["Base"],
+                "pitch_type": "Subassembly",
+                "feeds_into_pitch_id": target_id,
+            },
+        )
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        pitch_table = next(
+            table.value
+            for table in app.dataframe
+            if "feed_target_status" in table.value.columns
+        )
+        status = pitch_table.loc[
+            pitch_table["pitch_number"] == "SUB-1", "feed_target_status"
+        ].iloc[0]
+        self.assertEqual(status, "")
+
     def test_process_at_a_glance_smoke(self) -> None:
         app = self.run_page("app_pages/process.py")
         self.assertTrue(any(title.value == "Process at a Glance" for title in app.title))
+        process_table = next(
+            editor.value
+            for editor in app.dataframe
+            if "ergonomics_risk" in editor.value.columns
+        )
+        self.assertNotIn("details", process_table.columns)
+        self.assertTrue(
+            {
+                "op_id",
+                "description",
+                "output_assembly_number",
+                "tool",
+                "location",
+                "unit_orientation",
+                "conveyor_height_in",
+            }.issubset(process_table.columns)
+        )
+        self.assertFalse(
+            {
+                "Total work content",
+                "Target takt",
+                "Pitches represented",
+            }
+            & {metric.label for metric in app.metric}
+        )
+        self.assertFalse(
+            any(
+                subheader.value == "Draft Yamazumi by pitch"
+                for subheader in app.subheader
+            )
+        )
 
     def test_process_at_a_glance_displays_live_ergonomics_risk_tag(self) -> None:
         work_element_id = "process-ergo-risk-step"
