@@ -486,7 +486,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             for editor in app.dataframe
             if "ergonomics_risk" in editor.value.columns
         )
-        self.assertNotIn("details", process_table.columns)
+        self.assertIn("details", process_table.columns)
         self.assertTrue(
             {
                 "op_id",

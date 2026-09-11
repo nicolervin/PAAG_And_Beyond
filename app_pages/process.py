@@ -16,6 +16,7 @@ from utils.store import (
     process_ergonomics_risk_work_element_ids,
     process_part_placement_options,
     process_part_groups,
+    process_pitch_visual_summary,
     project_models,
     project_table,
     reconcile_yamazumi_to_process,
@@ -29,6 +30,13 @@ from utils.store import (
     yamazumi_elements_for_section,
 )
 from utils.scope_ui import page_title_with_scope
+from utils.process_pitch_visual import (
+    clamp_page,
+    page_count,
+    page_elements,
+    page_for_element,
+    render_pitch_canvas,
+)
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -46,6 +54,7 @@ from utils.table_ui import (
     selectable_dataframe,
     selected_rows_action_bar,
     stage_native_delete_confirmation,
+    standard_details_column_config,
     table_has_unsaved_changes,
 )
 project_id = st.session_state.get("project_id")
@@ -60,6 +69,10 @@ scenario = get_planning_scenario(project_id, scenario_id)
 if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
+if st.session_state.get("selected_pitch_scenario_id") not in {None, scenario_id}:
+    st.session_state.pop("selected_pitch_id", None)
+    st.session_state.pop("pitch_page_num", None)
+st.session_state["selected_pitch_scenario_id"] = scenario_id
 page_title_with_scope(
     "Process at a Glance", scope="scenario", scenario_name=scenario["name"]
 )
@@ -108,10 +121,7 @@ else:
             ),
             axis=1,
         )
-        reflected_in_process = (
-            yamazumi_rows["process_element_id"].fillna("").astype(str).str.strip().ne("")
-            & yamazumi_rows["process_sync_status"].fillna("").astype(str).eq("Synced")
-        )
+        reflected_in_process = yamazumi_rows["process_reflected"].fillna(0).astype(bool)
         yamazumi_rows = yamazumi_rows.loc[~reflected_in_process].copy()
     section_has_available_yamazumi_work = not yamazumi_rows.empty
 
@@ -171,7 +181,7 @@ else:
             if pairing_search and section_has_available_yamazumi_work:
                 st.info("No available Yamazumi work matches this filter.")
             elif section_has_yamazumi_work:
-                st.info("All synced Yamazumi work in this section is already reflected below.")
+                st.info("All Yamazumi work in this section is already reflected below.")
             else:
                 st.info("No Yamazumi work is linked to this fishbone section.")
             selected_yamazumi = yamazumi_rows
@@ -957,10 +967,11 @@ columns = [
     "assigned_parts", "part_number", "output_assembly_number", "output_assembly_name",
     "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
     "conveyor_height_in", "platform_height_in", "pit_depth_in",
-    "model_applicability", "ergonomics_risk", "status",
+    "model_applicability", "ergonomics_risk", "status", "details",
 ]
 compact_columns = [
     "op_id",
+    "details",
     "station",
     "pitch_name",
     "work_element",
@@ -971,6 +982,7 @@ compact_columns = [
     "status",
     "sequence",
 ]
+yamazumi_context = pd.DataFrame()
 if elements.empty:
     elements = pd.DataFrame(
         {
@@ -999,6 +1011,7 @@ if elements.empty:
             "model_applicability": pd.Series(dtype="object"),
             "ergonomics_risk": pd.Series(dtype="object"),
             "status": pd.Series(dtype="string"),
+            "details": pd.Series(dtype="string"),
         }
     )
 else:
@@ -1038,7 +1051,11 @@ else:
             yamazumi_descriptions.str.strip().ne(""),
             elements["operation"].fillna("").astype(str),
         )
+    elements["details"] = ":material/info: Details"
     elements = elements.reindex(columns=columns)
+
+if "details" not in elements:
+    elements["details"] = pd.Series(dtype="string")
 
 ergonomics_risk_ids = process_ergonomics_risk_work_element_ids(
     project_id, scenario_id
@@ -1057,6 +1074,9 @@ elements["model_applicability"] = elements["model_applicability"].apply(
 )
 
 editable_table_heading("Process at a Glance by pitch")
+st.caption(
+    "Select **Details** beside any Op ID to open that Work Element's pitch-level visual summary below the table."
+)
 visible_elements = filter_table(
     elements,
     key=f"process_filters_{scenario_id}",
@@ -1070,6 +1090,47 @@ visible_elements = filter_table(
     universal_values={"model_applicability": ["All", "All models", ""]},
 )
 process_action_slot = st.empty()
+
+
+def open_pitch_visual_summary() -> None:
+    blocked_key = f"process_pitch_visual_blocked_{scenario_id}"
+    if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+        st.session_state[blocked_key] = (
+            "Save or undo table edits before opening the pitch visual summary."
+        )
+        return
+    click = st.session_state.get(f"process_details_action_{scenario_id}") or {}
+    position = click.get("row")
+    if position is None or not 0 <= int(position) < len(visible_elements):
+        return
+    clicked = visible_elements.iloc[int(position)]
+    work_element_id = str(clicked["id"])
+    current_context = yamazumi_context_for_process(project_id, scenario_id)
+    context_rows = (
+        current_context.loc[
+            current_context["process_element_id"].astype(str).eq(work_element_id)
+        ]
+        if not current_context.empty and "process_element_id" in current_context
+        else pd.DataFrame()
+    )
+    pitch_ids = context_rows.get("pitch_id", pd.Series(dtype="string")).dropna().astype(str).unique()
+    if len(pitch_ids) != 1 or not pitch_ids[0].strip():
+        st.session_state[blocked_key] = (
+            "This Work Element needs one current Yamazumi pitch before its visual summary can open."
+        )
+        return
+    try:
+        summary = process_pitch_visual_summary(project_id, scenario_id, pitch_ids[0])
+        selected_page = page_for_element(summary["elements"], work_element_id)
+    except ValueError as exc:
+        st.session_state[blocked_key] = str(exc)
+        return
+    st.session_state.pop(blocked_key, None)
+    st.session_state["selected_pitch_id"] = pitch_ids[0]
+    st.session_state["pitch_page_num"] = selected_page
+    st.session_state[f"pitch_visual_scroll_{scenario_id}"] = True
+
+
 edited = st.data_editor(
     visible_elements,
     key=process_editor_key,
@@ -1088,6 +1149,10 @@ edited = st.data_editor(
     column_config={
         "id": None,
         "part_number": None,
+        "details": standard_details_column_config(
+            on_click=open_pitch_visual_summary,
+            key=f"process_details_action_{scenario_id}",
+        ),
         "op_id": st.column_config.TextColumn(
             "Op ID",
             pinned=True,
@@ -1098,7 +1163,7 @@ edited = st.data_editor(
             ),
         ),
         "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
-        "station": st.column_config.TextColumn("Pitch", pinned=True),
+        "station": None,
         "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),
         "work_element": st.column_config.TextColumn(
             "Work Element", required=True, pinned=True, width="large"
@@ -1133,10 +1198,86 @@ footer_actions = editable_table_footer(
     native_row_selection=True,
 )
 
+pitch_visual_blocked = st.session_state.pop(
+    f"process_pitch_visual_blocked_{scenario_id}", None
+)
+if pitch_visual_blocked:
+    st.warning(pitch_visual_blocked)
+
+selected_pitch_key = "selected_pitch_id"
+pitch_page_key = "pitch_page_num"
+selected_pitch_id = str(st.session_state.get(selected_pitch_key) or "").strip()
+if selected_pitch_id:
+    try:
+        pitch_summary = process_pitch_visual_summary(
+            project_id, scenario_id, selected_pitch_id
+        )
+    except ValueError as exc:
+        st.session_state.pop(selected_pitch_key, None)
+        st.session_state.pop(pitch_page_key, None)
+        st.warning(str(exc))
+    else:
+        pitch_rows = pitch_summary["elements"]
+        current_page = clamp_page(
+            st.session_state.get(pitch_page_key, 1), len(pitch_rows)
+        )
+        st.session_state[pitch_page_key] = current_page
+        total_pages = page_count(len(pitch_rows))
+        st.html('<div id="process-pitch-visual-summary"></div>')
+        navigation = st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            horizontal_alignment="distribute",
+        )
+        navigation.markdown(
+            f"**{pitch_summary['pitch_number']} — "
+            f"{pitch_summary['pitch_name'] or 'Unnamed pitch'} — Page {current_page} of {total_pages}**"
+        )
+        controls = navigation.container(horizontal=True, gap="small")
+        if controls.button(
+            "Back",
+            icon=":material/arrow_back:",
+            disabled=current_page <= 1,
+            key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
+        ):
+            st.session_state[pitch_page_key] = current_page - 1
+            st.rerun()
+        if controls.button(
+            "Next",
+            icon=":material/arrow_forward:",
+            disabled=current_page >= total_pages,
+            key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
+        ):
+            st.session_state[pitch_page_key] = current_page + 1
+            st.rerun()
+
+        active_page_rows = page_elements(pitch_rows, current_page)
+        for row in active_page_rows:
+            row["models"] = [
+                "All models" if model.casefold() in {"all", "all models"}
+                else model_labels.get(model, model)
+                for model in (split_filter_values(row.get("model_applicability")) or ["All"])
+            ]
+        st.html(
+            render_pitch_canvas(
+                pitch_summary,
+                active_page_rows,
+                scenario_name=str(scenario["name"]),
+            )
+        )
+        if st.session_state.pop(f"pitch_visual_scroll_{scenario_id}", False):
+            st.html(
+                """<script>
+                const target = window.parent.document.getElementById('process-pitch-visual-summary');
+                if (target) target.scrollIntoView({behavior: 'smooth', block: 'start'});
+                </script>""",
+                unsafe_allow_javascript=True,
+            )
+
 st.download_button(
     "Export filtered Process at a Glance",
     data=dataframe_to_excel(
-        visible_elements.drop(columns=["id"], errors="ignore"),
+        visible_elements.drop(columns=["id", "details"], errors="ignore"),
         "Process plan",
     ),
     file_name="process_plan_filtered.xlsx",

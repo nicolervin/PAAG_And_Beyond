@@ -5020,14 +5020,19 @@ def yamazumi_elements_for_section(
 ) -> pd.DataFrame:
     return pd.DataFrame(query(
         """SELECT element.id, element.process_element_id, element.description,
-                  element.time_s, element.model_variant, element.model_variants, element.work_type,
-                  element.process_sync_status, area.id AS area_id, area.name AS area_name,
-                  pitch.pitch_number, pitch.pitch_name,
-                  COUNT(DISTINCT group_row.id) AS material_group_count
+                   element.time_s, element.model_variant, element.model_variants, element.work_type,
+                   element.process_sync_status, area.id AS area_id, area.name AS area_name,
+                   pitch.pitch_number, pitch.pitch_name,
+                   CASE WHEN process.id IS NULL THEN 0 ELSE 1 END AS process_reflected,
+                   COUNT(DISTINCT group_row.id) AS material_group_count
            FROM yamazumi_elements element
-           JOIN yamazumi_areas area ON area.id=element.area_id
-           LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
-           LEFT JOIN process_part_groups group_row
+            JOIN yamazumi_areas area ON area.id=element.area_id
+            LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
+            LEFT JOIN work_elements process
+              ON process.id=element.process_element_id
+             AND process.project_id=element.project_id
+             AND process.scenario_id=area.scenario_id
+            LEFT JOIN process_part_groups group_row
              ON group_row.work_element_id=element.process_element_id
             AND group_row.scenario_id=area.scenario_id
            WHERE element.project_id=? AND area.scenario_id=? AND area.section_id=?
@@ -5041,9 +5046,9 @@ def yamazumi_context_for_process(project_id: str, scenario_id: str) -> pd.DataFr
     """Return Yamazumi source labels linked to Process at a Glance rows."""
     rows = query(
         """SELECT element.process_element_id, element.id AS yamazumi_element_id,
-                  element.description AS yamazumi_description,
-                  element.time_s AS yamazumi_time_s,
-                  pitch.pitch_number, pitch.pitch_name
+                   element.description AS yamazumi_description,
+                   element.time_s AS yamazumi_time_s,
+                   pitch.id AS pitch_id, pitch.pitch_number, pitch.pitch_name
            FROM yamazumi_elements element
            JOIN yamazumi_areas area ON area.id=element.area_id
            LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
@@ -9113,6 +9118,146 @@ def work_element_op_id(project_id: str, scenario_id: str, work_element_id: str) 
     if not normalized_id:
         raise ValueError("Choose a Process at a Glance Work Element.")
     return work_element_op_ids(project_id, scenario_id, [normalized_id])[normalized_id]
+
+
+def process_pitch_visual_summary(
+    project_id: str, scenario_id: str, pitch_id: str
+) -> dict:
+    """Return one scenario-owned pitch and its Process-linked visual-summary rows."""
+    normalized_pitch_id = str(pitch_id or "").strip()
+    if not normalized_pitch_id:
+        raise ValueError("Choose a Yamazumi pitch.")
+
+    with connection() as conn:
+        scenario = conn.execute(
+            "SELECT id FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone()
+        if not scenario:
+            raise ValueError("The active planning scenario no longer exists in this project.")
+        pitch = conn.execute(
+            """SELECT pitch.id, pitch.pitch_number, pitch.pitch_name, pitch.sequence,
+                      area.id AS area_id, area.section_id, area.name AS area_name
+               FROM yamazumi_pitches pitch
+               JOIN yamazumi_areas area
+                 ON area.id=pitch.area_id AND area.project_id=pitch.project_id
+               WHERE pitch.id=? AND pitch.project_id=? AND area.scenario_id=?""",
+            (normalized_pitch_id, project_id, scenario_id),
+        ).fetchone()
+        if not pitch:
+            raise ValueError("The selected pitch no longer exists in the active planning scenario.")
+
+        rows = conn.execute(
+            """SELECT work.id AS work_element_id, work.operation,
+                      work.model_applicability, work.sequence AS process_sequence,
+                      yamazumi.id AS yamazumi_element_id,
+                      yamazumi.description AS yamazumi_description,
+                      yamazumi.time_s, yamazumi.sequence AS stack_sequence
+               FROM yamazumi_elements yamazumi
+               JOIN yamazumi_areas area
+                 ON area.id=yamazumi.area_id
+                AND area.project_id=yamazumi.project_id
+                AND area.scenario_id=?
+               JOIN work_elements work
+                 ON work.id=yamazumi.process_element_id
+                AND work.project_id=yamazumi.project_id
+                AND work.scenario_id=area.scenario_id
+               WHERE yamazumi.project_id=? AND yamazumi.pitch_id=?
+               ORDER BY yamazumi.sequence,
+                        yamazumi.description COLLATE NOCASE,
+                        yamazumi.id""",
+            (scenario_id, project_id, normalized_pitch_id),
+        ).fetchall()
+        work_ids = [str(row["work_element_id"]) for row in rows]
+        cards = [dict(row) for row in rows]
+
+        parts_by_work: dict[str, list[dict]] = {work_id: [] for work_id in work_ids}
+        handling_by_work: dict[str, list[str | None]] = {
+            work_id: [] for work_id in work_ids
+        }
+        torque_by_work: dict[str, list[dict]] = {work_id: [] for work_id in work_ids}
+        if work_ids:
+            placeholders = ",".join("?" for _ in work_ids)
+            part_rows = conn.execute(
+                f"""SELECT group_row.work_element_id, option.handling_type,
+                           part.id AS part_id, part.part_number,
+                           part.description AS part_description,
+                           COALESCE(NULLIF(TRIM(part.image_path), ''), (
+                               SELECT image.image_path FROM part_images image
+                               WHERE image.part_id=part.id
+                               ORDER BY image.created_at, image.id LIMIT 1
+                           ), '') AS image_path
+                    FROM process_part_groups group_row
+                    JOIN process_part_options option ON option.group_id=group_row.id
+                    JOIN parts part
+                      ON part.id=option.part_id AND part.project_id=group_row.project_id
+                    LEFT JOIN part_scenario_activity activity
+                      ON activity.project_id=group_row.project_id
+                     AND activity.scenario_id=group_row.scenario_id
+                     AND activity.part_id=part.id
+                    WHERE group_row.project_id=? AND group_row.scenario_id=?
+                      AND group_row.work_element_id IN ({placeholders})
+                      AND COALESCE(activity.active, 1)=1
+                    ORDER BY group_row.work_element_id, group_row.name,
+                             part.part_number""",
+                (project_id, scenario_id, *work_ids),
+            ).fetchall()
+            for row in part_rows:
+                work_id = str(row["work_element_id"])
+                part = dict(row)
+                handling_by_work[work_id].append(part.pop("handling_type"))
+                part.pop("work_element_id", None)
+                parts_by_work[work_id].append(part)
+
+            torque_rows = conn.execute(
+                f"""SELECT assignment.work_element_id, assignment.unique_identifier,
+                           assignment.target_value, assignment.tolerances,
+                           assignment.unit
+                    FROM quality_requirement_assignments assignment
+                    JOIN quality_requirement_torque_details detail
+                      ON detail.quality_requirement_id=assignment.quality_requirement_id
+                     AND detail.project_id=assignment.project_id
+                    WHERE assignment.project_id=? AND assignment.scenario_id=?
+                      AND assignment.requirement_type='Torque'
+                      AND assignment.work_element_id IN ({placeholders})
+                    ORDER BY assignment.work_element_id,
+                             assignment.unique_identifier COLLATE NOCASE,
+                             assignment.id""",
+                (project_id, scenario_id, *work_ids),
+            ).fetchall()
+            for row in torque_rows:
+                torque = dict(row)
+                work_id = str(torque.pop("work_element_id"))
+                torque_by_work[work_id].append(torque)
+
+    op_ids = work_element_op_ids(project_id, scenario_id, work_ids) if work_ids else {}
+    risk_ids = process_ergonomics_risk_work_element_ids(project_id, scenario_id)
+    for card in cards:
+        work_id = str(card["work_element_id"])
+        handling_values = handling_by_work.get(work_id, [])
+        normalized_handling = {
+            str(value).strip() for value in handling_values if str(value or "").strip()
+        }
+        has_null = any(not str(value or "").strip() for value in handling_values)
+        if normalized_handling == {"Consume"} and not has_null:
+            classification = "Value-Added (VA)"
+            color = "green"
+        elif normalized_handling == {"Handle"} and not has_null:
+            classification = "Non-Value-Added but Necessary (NVAN)"
+            color = "orange"
+        else:
+            classification = "Unclassified"
+            color = "gray"
+        card.update(
+            op_id=op_ids.get(work_id, "Yamazumi link required"),
+            parts=parts_by_work.get(work_id, []),
+            motion_classification=classification,
+            motion_color=color,
+            ergonomics_risk=work_id in risk_ids,
+            torque_requirements=torque_by_work.get(work_id, []),
+        )
+
+    return {**dict(pitch), "elements": cards}
 
 
 
