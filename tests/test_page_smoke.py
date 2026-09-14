@@ -218,14 +218,15 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
 
     def submit_part_pairing(self, app: AppTest, requirement: str) -> AppTest:
-        requirement_input = next(
+        requirement_inputs = [
             text_input
             for text_input in app.text_input
             if str(text_input.key).startswith(
                 f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
             )
-        )
-        requirement_input.set_value(requirement)
+        ]
+        if requirement_inputs:
+            requirement_inputs[0].set_value(requirement)
         submit = next(
             button
             for button in app.button
@@ -487,6 +488,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             if "ergonomics_risk" in editor.value.columns
         )
         self.assertIn("details", process_table.columns)
+        self.assertNotIn(
+            "Status for selected",
+            {widget.label for widget in app.selectbox},
+        )
+        self.assertNotIn("Status", {widget.label for widget in app.multiselect})
         self.assertTrue(
             {
                 "op_id",
@@ -584,6 +590,19 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertEqual(handling.value, "Consume")
         self.assertEqual(location.value, self.assignment_id)
         self.assertTrue(location.disabled)
+        self.assertFalse(any(
+            str(text_input.key).startswith(
+                f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
+            )
+            for text_input in app.text_input
+        ))
+        app = self.pairing_selectbox(app, "rule").select("Optional").run(timeout=30)
+        self.assertTrue(any(
+            str(text_input.key).startswith(
+                f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
+            )
+            for text_input in app.text_input
+        ))
 
     def test_process_pairing_without_parts_remains_unclassified(self) -> None:
         self.add_process_pairing_source()
@@ -668,11 +687,20 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                FROM process_part_options option
                JOIN process_part_groups group_row ON group_row.id=option.group_id
                WHERE group_row.project_id=? AND group_row.scenario_id=?
-                 AND group_row.name='Explicit placement'""",
+                  AND group_row.name='Smoke component'""",
             (self.project_id, self.scenario_id),
         )
         self.assertEqual(saved[0]["handling_type"], "Consume")
         self.assertEqual(saved[0]["fishbone_assignment_id"], second_assignment_id)
+        process_table = next(
+            editor.value
+            for editor in app.dataframe
+            if "ergonomics_risk" in editor.value.columns
+        )
+        handling = process_table.loc[
+            process_table["work_element"].eq("Pair smoke component"), "handling"
+        ].iloc[0]
+        self.assertEqual(list(handling), ["Consume"])
         audit = store.query(
             """SELECT editor_name, details FROM audit_log
                WHERE project_id=? AND table_name='Process part pairings'

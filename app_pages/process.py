@@ -194,7 +194,7 @@ else:
                 selection_mode="multi-row",
                 column_order=[
                     "pitch_number", "description", "time_s", "model_variants",
-                    "material_group_count", "process_sync_status",
+                    "material_group_count",
                 ],
                 column_config={
                     "pitch_number": st.column_config.TextColumn("Pitch", pinned=True),
@@ -202,7 +202,7 @@ else:
                     "time_s": st.column_config.NumberColumn("Time (s)", format="%.1f"),
                     "model_variants": st.column_config.ListColumn("Models"),
                     "material_group_count": st.column_config.NumberColumn("Part requirements"),
-                    "process_sync_status": "Plan status",
+                    "process_sync_status": None,
                 },
             )
             work_selection_rows = list(work_event.selection.rows)
@@ -737,19 +737,6 @@ else:
             f"pair_parts_{scenario_id}_{section_id}_{selected_yamazumi_id}", border=False
         ):
             form_row = st.container(horizontal=True, vertical_alignment="bottom")
-            group_name = form_row.text_input(
-                "Part requirement",
-                placeholder="Example: Control panel color",
-                help=(
-                    "Names this Part requirement. It distinguishes alternatives or optional "
-                    "requirements, such as a control panel color; for a single Use all requirement, use a short "
-                    "installation label."
-                ),
-                key=(
-                    f"process_pairing_requirement_{scenario_id}_{section_id}_"
-                    f"{selected_yamazumi_id}"
-                ),
-            )
             selection_rule = form_row.selectbox(
                 "Selection rule",
                 ["Use all", "Choose one", "Optional"],
@@ -758,6 +745,28 @@ else:
                     f"{selected_yamazumi_id}"
                 ),
             )
+            automatic_requirement_name = len(selected_parts) == 1 and selection_rule == "Use all"
+            if automatic_requirement_name:
+                selected_part = selected_parts.iloc[0]
+                raw_part_name = selected_part.get("description")
+                part_name = (
+                    "" if pd.isna(raw_part_name) else str(raw_part_name or "").strip()
+                )
+                group_name = part_name or str(selected_part.get("part_number") or "").strip()
+                form_row.markdown(f"**Part requirement**  \n{group_name}")
+            else:
+                group_name = form_row.text_input(
+                    "Part requirement",
+                    placeholder="Example: Control panel color",
+                    help=(
+                        "Name the shared requirement when parts are alternatives, optional, "
+                        "or grouped together. A single Use all part is named automatically."
+                    ),
+                    key=(
+                        f"process_pairing_requirement_{scenario_id}_{section_id}_"
+                        f"{selected_yamazumi_id}"
+                    ),
+                )
             quantity = form_row.number_input(
                 "Quantity",
                 min_value=0.01,
@@ -964,7 +973,7 @@ model_labels = {
 model_numbers_by_label = {label: number for number, label in model_labels.items()}
 columns = [
     "id", "op_id", "sequence", "station", "pitch_name", "work_element", "operation", "description", "cycle_time_s",
-    "assigned_parts", "part_number", "output_assembly_number", "output_assembly_name",
+    "assigned_parts", "handling", "part_number", "output_assembly_number", "output_assembly_name",
     "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
     "conveyor_height_in", "platform_height_in", "pit_depth_in",
     "model_applicability", "ergonomics_risk", "status", "details",
@@ -976,10 +985,10 @@ compact_columns = [
     "pitch_name",
     "work_element",
     "assigned_parts",
+    "handling",
     "ergonomics_risk",
     "model_applicability",
     "cycle_time_s",
-    "status",
     "sequence",
 ]
 yamazumi_context = pd.DataFrame()
@@ -996,6 +1005,7 @@ if elements.empty:
             "description": pd.Series(dtype="string"),
             "cycle_time_s": pd.Series(dtype="float64"),
             "assigned_parts": pd.Series(dtype="string"),
+            "handling": pd.Series(dtype="object"),
             "part_number": pd.Series(dtype="string"),
             "output_assembly_number": pd.Series(dtype="string"),
             "output_assembly_name": pd.Series(dtype="string"),
@@ -1023,14 +1033,27 @@ else:
         "Yamazumi link required"
     )
     pairing_summary: dict[str, list[str]] = {}
+    handling_summary: dict[str, set[str]] = {}
     for group in process_part_groups(project_id, scenario_id, active_only=True):
         option_numbers = [str(option["part_number"]) for option in group["options"]]
         suffix = " / ".join(option_numbers) if group["selection_rule"] == "Choose one" else ", ".join(option_numbers)
-        pairing_summary.setdefault(str(group["work_element_id"]), []).append(
+        work_element_id = str(group["work_element_id"])
+        pairing_summary.setdefault(work_element_id, []).append(
             f"{group['name']}: {suffix}"
+        )
+        handling_summary.setdefault(work_element_id, set()).update(
+            str(option.get("handling_type") or "Unclassified")
+            for option in group["options"]
         )
     elements["assigned_parts"] = elements["id"].astype(str).map(
         lambda element_id: " | ".join(pairing_summary.get(element_id, []))
+    )
+    handling_order = {"Consume": 0, "Handle": 1, "Unclassified": 2}
+    elements["handling"] = elements["id"].astype(str).map(
+        lambda element_id: sorted(
+            handling_summary.get(element_id, set()),
+            key=lambda value: (handling_order.get(value, 99), value),
+        )
     )
     yamazumi_context = yamazumi_context_for_process(project_id, scenario_id)
     if yamazumi_context.empty:
@@ -1080,13 +1103,13 @@ st.caption(
 visible_elements = filter_table(
     elements,
     key=f"process_filters_{scenario_id}",
-    dropdown_columns=["station", "status", "model_applicability"],
+    dropdown_columns=["station", "handling", "model_applicability"],
     search_columns=[
         "op_id", "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
         "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
     ],
     reset_widget_keys=[process_editor_key],
-    multi_value_columns=["model_applicability"],
+    multi_value_columns=["handling", "model_applicability"],
     universal_values={"model_applicability": ["All", "All models", ""]},
 )
 process_action_slot = st.empty()
@@ -1143,6 +1166,7 @@ edited = st.data_editor(
         "pitch_name",
         "work_element",
         "assigned_parts",
+        "handling",
         "ergonomics_risk",
     ],
     column_order=compact_columns,
@@ -1171,6 +1195,14 @@ edited = st.data_editor(
         "assigned_parts": st.column_config.TextColumn(
             "Part requirements", width="large"
         ),
+        "handling": st.column_config.ListColumn(
+            "Handling",
+            help=(
+                "Shows whether the parts paired to this Work Element are first consumed "
+                "or subsequently handled. Compatibility-null pairings appear as Unclassified."
+            ),
+            width="medium",
+        ),
         "ergonomics_risk": st.column_config.MultiselectColumn(
             "Ergonomics",
             options=["Ergo Risk"],
@@ -1186,9 +1218,6 @@ edited = st.data_editor(
         "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
         "model_applicability": st.column_config.MultiselectColumn(
             "Models", options=["All models", *model_labels.values()]
-        ),
-        "status": st.column_config.SelectboxColumn(
-            "Status", options=["Draft", "In review", "Released"]
         ),
     },
 )
@@ -1341,12 +1370,6 @@ bulk = selected_rows_action_bar(
     parent=process_action_slot,
 )
 bulk_station = bulk.text_input("Pitch for selected", key=f"process_bulk_pitch_{scenario_id}")
-bulk_status = bulk.selectbox(
-    "Status for selected",
-    [None, "Draft", "In review", "Released"],
-    format_func=lambda value: "No change" if value is None else value,
-    key=f"process_bulk_status_{scenario_id}",
-)
 apply_bulk = bulk.button(
     f"Apply to selected ({len(selected)})",
     type="primary",
@@ -1358,16 +1381,14 @@ request_bulk_delete = not selected.empty
 if apply_bulk:
     if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
         st.warning("Save or undo other edits before applying a bulk change.")
-    elif not bulk_station.strip() and bulk_status is None:
-        st.warning("Enter a pitch or choose a status to apply.")
+    elif not bulk_station.strip():
+        st.warning("Enter a pitch to apply.")
     else:
         updated = elements.copy()
         selected_ids = set(selected["id"].astype(str))
         mask = updated["id"].astype(str).isin(selected_ids)
         if bulk_station.strip():
             updated.loc[mask, "station"] = bulk_station.strip()
-        if bulk_status:
-            updated.loc[mask, "status"] = bulk_status
         updated["model_applicability"] = updated["model_applicability"].apply(
             lambda assigned: ", ".join(
                 "All" if label == "All models" else model_numbers_by_label.get(label, label)
@@ -1381,7 +1402,7 @@ if apply_bulk:
             "Bulk edit",
             len(selected_ids),
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id, "pitch": bulk_station, "status": bulk_status},
+            {"scenario_id": scenario_id, "pitch": bulk_station},
         )
         request_table_editor_reset(process_editor_key)
         st.rerun()

@@ -168,7 +168,7 @@ This relationship is a prerequisite for the separately pending deterministic sta
 ### `work_elements`
 
 - **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, location, unit orientation, and geometry or requirement fields. Conveyor height, platform height, and pit depth are stored directly in inches as `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
-- **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. Detailed requirement fields remain retained by the schema, but the former Process step Details dialog has been removed pending a redesigned Phase 3 view.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. Detailed requirement fields remain retained by the schema, but the former Process step Details dialog has been replaced by the read-only Phase 3 inline pitch viewer. The legacy `status` value remains stored for compatibility but is no longer displayed, filtered, or edited by the Process at a Glance by pitch table.
 - **Scope:** Scenario-specific.
 
 ### `process_part_groups`
