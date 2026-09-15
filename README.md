@@ -109,6 +109,8 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 
 Navigation is defined in `streamlit_app.py`.
 
+On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone view** and offers the page-valid sections in framework order. Nested subassemblies use ancestry breadcrumbs. An exact section carries between linked screens when valid; Assembly grid and Pin Map may also show all active sections or a concise multi-selection summary.
+
 ### Project
 
 - **Overview** creates and edits the project identity and active planning scenario, and shows project-level counts and takt comparisons.
@@ -120,12 +122,12 @@ Navigation is defined in `streamlit_app.py`.
 - **Model definitions** maintains official model numbers, common names, descriptions, annual usage, manufacturing features, allowed feature choices, and model-to-feature mappings.
 - **Parts Catalog** maintains one approved record per official part number. Catalog data is project-wide while Active state is scenario-specific. Completed manufacturing assemblies are linked catalog parts so a built subassembly can be placed on the Fishbone and handled again downstream; their model applicability comes from Assembly grid mappings. The page supports primary and supplemental images, including direct Windows screenshot paste.
 - **Assembly grid** begins with one protected Top-level packaged unit row immediately below the active feature headers, followed by one or more selected Fishbone sections as labeled grid groups. The top row maps one final warehouse-handoff assembly per active official model, has a selectable final Built section and optional Installed section, and can nest completed subassemblies from every active Fishbone section. Section categories map their own real assembly numbers per model. Creating an assembly creates or reuses its linked completed-subassembly Parts Catalog row in the same save. Quantity-bearing mini-BOM links use automatic Fishbone-use placement, model-coverage validation, and cycle prevention. Category section values continuously synchronize mapped assemblies. Changing a saved cell to another same-category assembly's existing number opens a confirmed merge that redirects the old mappings, reuses the target mini-BOM and catalog part, and deletes the disclosed superseded assembly. Details opens with Images first, Mini-BOM second, and retains catalog editing for Make / buy, optional legacy parent grouping, and full deletion. Legacy assembly feature rules are not shown or evaluated.
-- **Parts to fishbone** defines the station-independent assembly sequence through ordered main-spine sections, nested subassemblies, and one or more placed uses of approved catalog parts.
+- **Parts to fishbone** defines the station-independent assembly sequence through ordered main-spine sections, nested subassemblies, and one or more placed uses of approved catalog parts. Fishbone-section selectors throughout the app follow this same depth-first sequence.
 
 ### Process planning
 
-- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. It supports scenario branching, takt, work regions, model-variant stacks, visual work balancing, and live read-only CTQ/Safety tags for linked Process work.
-- **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, and orders it by pitch. Its former tabbed Details dialog and workload summary/chart have been removed; the underlying saved detail fields remain intact, and a redesigned Details/summary view is planned for Phase 3 but is not yet implemented.
+- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. Empty areas open a guided range dialog using the saved project line code and an editable Fishbone-derived section abbreviation; these are suggestions and never rename legacy addresses. Pitch addresses are trimmed and case-insensitively unique across all areas in that scenario, while alternative scenarios may reuse the same physical addresses. Each scenario saves a Yamazumi display/input unit of Seconds, Minutes, or Hours while all timing data remains stored in seconds; board labels, editors, metrics, and workbook time values follow that selection. Its board follows numeric-aware Op ID pitch-address order, places Subassembly/Kitter feeder chains immediately before their receiving pitch, hides the Unassigned lane when it contains no work, and shows live read-only CTQ/Safety tags for linked Process work. It supports scenario branching, takt, work regions, model-variant stacks, and visual work balancing.
+- **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, and orders it by pitch. The editable tabbed Details dialog and workload summary/chart remain retired; the row Details action now opens the read-only pitch-level visual summary beneath the table.
 - **Pin Map** derives a scenario-specific read-only line view from existing pitches, Yamazumi elements, and explicitly linked Process work. It stores no separate layout data.
 
 ### Functional Reviews
@@ -151,7 +153,7 @@ Navigation is defined in `streamlit_app.py`.
 - **Pitch** — A physical work position or address. Odd addresses render north/top and even addresses south/bottom on the visual board.
 - **Pitch type** — Pitch, Waterspider, Subassembly, Kitter, or Repacker.
 - **Pitch status** — Active pitches accept work; Open and Blocked pitches remain visible but cannot receive work.
-- **Takt time** — Target seconds available per completed unit based on demand.
+- **Takt time** — Target time available per completed unit based on demand. Yamazumi may present it in the scenario's saved Seconds, Minutes, or Hours unit; canonical storage remains seconds.
 - **Planning scenario** — A named branch of Yamazumi and Process data with its own revision, takt, and lineage.
 - **Model** — An official product/model number. A separate common name can change without replacing the stable identifier.
 - **Complexity feature** — A manufacturing-relevant product characteristic with controlled choices.

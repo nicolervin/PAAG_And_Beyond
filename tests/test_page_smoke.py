@@ -220,14 +220,15 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
 
     def submit_part_pairing(self, app: AppTest, requirement: str) -> AppTest:
-        requirement_input = next(
+        requirement_inputs = [
             text_input
             for text_input in app.text_input
             if str(text_input.key).startswith(
                 f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
             )
-        )
-        requirement_input.set_value(requirement)
+        ]
+        if requirement_inputs:
+            requirement_inputs[0].set_value(requirement)
         submit = next(
             button
             for button in app.button
@@ -368,10 +369,146 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
         self.assertEqual(list(app.exception), [])
 
+    def test_sidebar_fishbone_selector_changes_view_without_audit(self) -> None:
+        app = AppTest.from_file(
+            str(store.ROOT / "streamlit_app.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.run(timeout=30)
+        with (
+            patch("utils.assembly_grid.assembly_grid", return_value=None),
+            patch("utils.clipboard_image._CLIPBOARD_IMAGE", return_value=None),
+        ):
+            app.switch_page("app_pages/assemblies.py").run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            before_count = len(store.audit_history(self.project_id))
+
+            sidebar_selector = next(
+                widget
+                for widget in app.selectbox
+                if widget.label == "Change Fishbone view"
+            )
+            sidebar_selector.set_value(self.section_id).run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            section_filter = next(
+                widget for widget in app.multiselect
+                if widget.label == "Fishbone sections"
+            )
+            self.assertEqual(section_filter.value, [self.section_id])
+            self.assertEqual(len(store.audit_history(self.project_id)), before_count)
+
+        app.switch_page("app_pages/process.py").run(timeout=30)
+        process_section = next(
+            widget for widget in app.selectbox
+            if widget.label == "Fishbone section"
+        )
+        self.assertEqual(process_section.value, self.section_id)
+
     def test_parts_to_fishbone_smoke(self) -> None:
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
             app = self.run_page("app_pages/fishbone.py")
         self.assertTrue(any(title.value == "Parts to fishbone" for title in app.title))
+
+    def test_fishbone_selectors_and_areas_follow_depth_first_order(self) -> None:
+        child_id = store.add_assembly_section(
+            self.project_id, "Smoke child", "Subassembly", self.section_id, ""
+        )
+        grandchild_id = store.add_assembly_section(
+            self.project_id, "Smoke grandchild", "Subassembly", child_id, ""
+        )
+        second_main_id = store.add_assembly_section(
+            self.project_id, "Smoke second main", "Main spine", None, ""
+        )
+        expected = [
+            "Smoke assembly",
+            "Smoke assembly › Smoke child",
+            "Smoke assembly › Smoke child › Smoke grandchild",
+            "Smoke second main",
+        ]
+
+        areas = store.yamazumi_areas(self.project_id, self.scenario_id)
+        area_by_section = (
+            {
+                str(row["section_id"]): str(row["id"])
+                for _, row in areas.dropna(subset=["section_id"]).iterrows()
+            }
+            if "section_id" in areas.columns else {}
+        )
+        for index, section_id in enumerate(
+            [self.section_id, child_id, grandchild_id, second_main_id], start=1
+        ):
+            area_id = area_by_section.get(section_id)
+            if not area_id:
+                area_id = store.upsert_yamazumi_area(
+                    self.project_id,
+                    self.scenario_id,
+                    f"Ordered area {index}",
+                    section_id,
+                )
+            if store.yamazumi_pitches(self.project_id, area_id).empty:
+                store.add_yamazumi_pitch(
+                    self.project_id, area_id, f"P-ORDER-{index}", "Order check"
+                )
+
+        with (
+            patch("utils.assembly_grid.assembly_grid", return_value=None),
+            patch("utils.clipboard_image._CLIPBOARD_IMAGE", return_value=None),
+        ):
+            assembly_app = self.run_page("app_pages/assemblies.py")
+        assembly_sections = next(
+            widget
+            for widget in assembly_app.multiselect
+            if widget.label == "Fishbone sections"
+        )
+        self.assertEqual(assembly_sections.options, ["All active sections", *expected])
+
+        process_app = self.run_page("app_pages/process.py")
+        process_sections = next(
+            widget
+            for widget in process_app.selectbox
+            if widget.label == "Fishbone section"
+        )
+        self.assertEqual(process_sections.options, expected)
+
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+            fishbone_app = self.run_page("app_pages/fishbone.py")
+        parent_sections = next(
+            widget
+            for widget in fishbone_app.selectbox
+            if widget.label == "Parent assembly"
+        )
+        self.assertEqual(
+            parent_sections.options, ["Product / main assembly", *expected]
+        )
+
+        with patch("utils.yamazumi_board._YAMAZUMI_BOARD", return_value=None):
+            yamazumi_app = self.run_page("app_pages/yamazumi.py")
+        yamazumi_areas = next(
+            widget
+            for widget in yamazumi_app.selectbox
+            if widget.label == "Yamazumi area"
+        )
+        linked_labels = [
+            option.split("Fishbone: ", 1)[1]
+            for option in yamazumi_areas.options
+            if "Fishbone: " in option
+        ]
+        self.assertEqual(linked_labels[:4], expected)
+
+        pin_map_app = self.run_page("app_pages/pin_map.py")
+        pin_map_areas = next(
+            widget
+            for widget in pin_map_app.multiselect
+            if widget.label == "Yamazumi areas"
+        )
+        linked_labels = [
+            option.split("Fishbone: ", 1)[1]
+            for option in pin_map_areas.options
+            if "Fishbone: " in option
+        ]
+        self.assertEqual(linked_labels[:4], expected)
 
     def test_fishbone_framework_walk_order_and_indentation_are_unchanged(self) -> None:
         child_id = store.add_assembly_section(
@@ -551,6 +688,385 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ["Safety"],
         )
 
+    def test_empty_yamazumi_area_prompts_once_per_area_visit(self) -> None:
+        first_area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Empty prompt one"
+        )
+        second_area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Empty prompt two"
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        area_key = f"yamazumi_area_{self.scenario_id}"
+        app.session_state[area_key] = first_area_id
+
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+            cancel_key = (
+                f"cancel_empty_pitch_setup_{self.project_id}_{self.scenario_id}_"
+                f"{first_area_id}"
+            )
+            self.assertTrue(any(button.key == cancel_key for button in app.button))
+            next(button for button in app.button if button.key == cancel_key).click()
+            app.run(timeout=30)
+            self.assertFalse(any(button.key == cancel_key for button in app.button))
+
+            app.session_state[area_key] = second_area_id
+            app.run(timeout=30)
+            second_cancel_key = (
+                f"cancel_empty_pitch_setup_{self.project_id}_{self.scenario_id}_"
+                f"{second_area_id}"
+            )
+            self.assertTrue(
+                any(button.key == second_cancel_key for button in app.button)
+            )
+
+            app.session_state[area_key] = first_area_id
+            app.run(timeout=30)
+            self.assertTrue(any(button.key == cancel_key for button in app.button))
+
+        self.assertEqual(list(app.exception), [])
+
+    def test_empty_yamazumi_prompt_generates_guided_range_and_audit(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Guided range area"
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        surface = "empty_dialog"
+
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+            next(
+                item for item in app.text_input
+                if item.key == f"yamazumi_line_code_{surface}_{self.project_id}_{area_id}"
+            ).set_value("A1")
+            next(
+                item for item in app.number_input
+                if item.key == f"yamazumi_range_stop_{surface}_{self.project_id}_{area_id}"
+            ).set_value(3)
+            next(
+                button for button in app.button
+                if button.key == f"generate_yamazumi_range_{surface}_{self.project_id}_{area_id}"
+            ).click()
+            app.run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        saved = store.yamazumi_pitches(self.project_id, area_id)
+        self.assertEqual(len(saved), 3)
+        self.assertTrue(all(str(value).startswith("A1-") for value in saved["pitch_number"]))
+        project = next(
+            row for row in store.projects() if str(row["id"]) == self.project_id
+        )
+        self.assertEqual(project["yamazumi_line_code"], "A1")
+        history = store.audit_history(self.project_id, "Yamazumi pitches", limit=1)
+        self.assertEqual(history.iloc[0]["action"], "Generate range")
+        self.assertIn('"new_project_line_code": "A1"', history.iloc[0]["details"])
+
+    def test_yamazumi_board_receives_op_id_and_feed_ordered_pitches(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id,
+            self.scenario_id,
+            "Board order area",
+            self.section_id,
+        )
+        target_id = store.add_yamazumi_pitch(
+            self.project_id, area_id, "OP-4", "Receiving pitch"
+        )
+        store.add_yamazumi_pitch(
+            self.project_id, area_id, "OP-1", "First pitch"
+        )
+        store.add_yamazumi_pitch(
+            self.project_id,
+            area_id,
+            "SA-100",
+            "Subassembly feeder",
+            pitch_type="Subassembly",
+            feeds_into_pitch_id=target_id,
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        before_audit_count = len(store.audit_history(self.project_id))
+
+        with patch(
+            "utils.yamazumi_board.yamazumi_board", return_value=None
+        ) as board:
+            app.run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(
+            [row["pitch_number"] for row in board.call_args.args[0]],
+            ["OP-1", "SA-100", "OP-4"],
+        )
+        self.assertEqual(len(store.audit_history(self.project_id)), before_audit_count)
+
+    def test_yamazumi_time_unit_save_converts_display_without_rewriting_times(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id,
+            self.scenario_id,
+            "Minute display area",
+            self.section_id,
+            90,
+        )
+        pitch_id = store.add_yamazumi_pitch(
+            self.project_id, area_id, "TIME-001", "Minute pitch"
+        )
+        element_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {"description": "Thirty second task", "time_s": 30},
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        exported_frames = []
+
+        def capture_export(dataframe, sheet_name="Filtered rows"):
+            exported_frames.append((sheet_name, dataframe.copy()))
+            return b"test workbook"
+
+        with (
+            patch(
+                "utils.yamazumi_board.yamazumi_board", return_value=None
+            ) as board,
+            patch(
+                "utils.table_ui.dataframe_to_excel",
+                side_effect=capture_export,
+            ),
+        ):
+            app.run(timeout=30)
+            selector = next(
+                widget
+                for widget in app.segmented_control
+                if widget.label == "Yamazumi time unit"
+            )
+            selector.set_value("minutes").run(timeout=30)
+            save = next(
+                button
+                for button in app.button
+                if button.key == f"save_yamazumi_time_unit_{self.scenario_id}"
+            )
+            save.click().run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(
+            store.get_planning_scenario(
+                self.project_id, self.scenario_id
+            )["yamazumi_time_unit"],
+            "minutes",
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT takt_override_s FROM yamazumi_areas WHERE id=?",
+                (area_id,),
+            )[0]["takt_override_s"],
+            90,
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT time_s FROM yamazumi_elements WHERE id=?", (element_id,)
+            )[0]["time_s"],
+            30,
+        )
+        takt_input = next(
+            widget
+            for widget in app.number_input
+            if widget.label == "Yamazumi takt time (minutes)"
+        )
+        self.assertEqual(takt_input.value, 1.5)
+        element_table = next(
+            table.value
+            for table in app.dataframe
+            if "time_s" in table.value.columns
+            and "Thirty second task" in set(table.value.get("description", []))
+        )
+        self.assertEqual(float(element_table.iloc[0]["time_s"]), 0.5)
+        self.assertEqual(board.call_args.kwargs["time_unit"], "minutes")
+        work_exports = [
+            frame
+            for sheet_name, frame in exported_frames
+            if sheet_name == "Yamazumi work elements"
+            and "Time (minutes)" in frame.columns
+        ]
+        self.assertTrue(work_exports)
+        self.assertEqual(
+            float(work_exports[-1].iloc[0]["Time (minutes)"]), 0.5
+        )
+        history = store.audit_history(self.project_id, "Yamazumi")
+        self.assertTrue(
+            any(
+                '"old_unit": "seconds"' in str(details)
+                and '"new_unit": "minutes"' in str(details)
+                for details in history["details"]
+            )
+        )
+
+    def test_yamazumi_unit_change_waits_for_unsaved_element_edits(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id,
+            self.scenario_id,
+            "Unit draft area",
+            self.section_id,
+            60,
+        )
+        pitch_id = store.add_yamazumi_pitch(
+            self.project_id, area_id, "TIME-002", "Draft pitch"
+        )
+        store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {"description": "Editable minute task", "time_s": 30},
+        )
+        store.update_yamazumi_time_unit(
+            self.project_id, self.scenario_id, "minutes"
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+
+        with (
+            patch("utils.yamazumi_board.yamazumi_board", return_value=None),
+            patch("utils.table_ui.table_has_unsaved_changes", return_value=True),
+        ):
+            app.run(timeout=30)
+            selector = next(
+                widget
+                for widget in app.segmented_control
+                if widget.label == "Yamazumi time unit"
+            )
+            selector.set_value("hours").run(timeout=30)
+            unit_save = next(
+                button
+                for button in app.button
+                if button.key == f"save_yamazumi_time_unit_{self.scenario_id}"
+            )
+            unit_save.click().run(timeout=30)
+
+            self.assertEqual(
+                store.get_planning_scenario(
+                    self.project_id, self.scenario_id
+                )["yamazumi_time_unit"],
+                "minutes",
+            )
+            self.assertTrue(
+                any(
+                    "Save or undo Yamazumi work-element edits" in error.value
+                    for error in app.error
+                )
+            )
+        self.assertEqual(list(app.exception), [])
+
+    def test_yamazumi_reports_legacy_pitch_address_conflicts_until_corrected(self) -> None:
+        first_area_id = store.upsert_yamazumi_area(
+            self.project_id,
+            self.scenario_id,
+            "Pitch conflict first area",
+            None,
+        )
+        second_area_id = store.upsert_yamazumi_area(
+            self.project_id,
+            self.scenario_id,
+            "Pitch conflict second area",
+            None,
+        )
+        store.add_yamazumi_pitch(
+            self.project_id, first_area_id, "P-CONFLICT", "First pitch"
+        )
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_insert"
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_update"
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                   VALUES ('page-legacy-conflict', ?, ?, 'p-conflict',
+                           'Second pitch', ?)""",
+                (self.project_id, second_area_id, timestamp),
+            )
+        store.init_db()
+        before_audit_count = len(store.audit_history(self.project_id))
+
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = first_area_id
+        with patch("utils.yamazumi_board._YAMAZUMI_BOARD", return_value=None):
+            app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(
+            any(
+                "Duplicate pitch addresses must be corrected" in error.value
+                for error in app.error
+            )
+        )
+        conflict_table = next(
+            table.value
+            for table in app.dataframe
+            if {"pitch_number", "pitch_name", "area_name"}.issubset(
+                table.value.columns
+            )
+            and len(table.value) == 2
+        )
+        self.assertEqual(
+            set(conflict_table["area_name"]),
+            {"Pitch conflict first area", "Pitch conflict second area"},
+        )
+        self.assertEqual(len(store.audit_history(self.project_id)), before_audit_count)
+
+        store.update_yamazumi_pitch(
+            self.project_id,
+            second_area_id,
+            "page-legacy-conflict",
+            {
+                "pitch_number": "P-CORRECTED",
+                "pitch_name": "Second pitch",
+                "status": "Active",
+                "model_variants": ["Base"],
+                "pitch_type": "Pitch",
+                "feeds_into_pitch_id": None,
+            },
+        )
+        with patch("utils.yamazumi_board._YAMAZUMI_BOARD", return_value=None):
+            app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertFalse(
+            any(
+                "Duplicate pitch addresses must be corrected" in error.value
+                for error in app.error
+            )
+        )
+
     def test_yamazumi_feed_target_required_indicator_tracks_classification(self) -> None:
         area_id = store.upsert_yamazumi_area(
             self.project_id,
@@ -630,18 +1146,20 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             list(process_editor.proto.column_order),
             [
                 "op_id",
+                "details",
+                "station",
                 "pitch_name",
                 "work_element",
                 "assigned_parts",
+                "handling",
                 "ergonomics_risk",
                 "criticality",
                 "model_applicability",
                 "cycle_time_s",
+                "sequence",
             ],
         )
-        self.assertNotIn("station", process_editor.proto.column_order)
         self.assertNotIn("status", process_editor.proto.column_order)
-        self.assertNotIn("sequence", process_editor.proto.column_order)
         self.assertEqual(
             [
                 button.label
@@ -650,7 +1168,12 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ],
             ["Export filtered table view", "Export filtered full data"],
         )
-        self.assertNotIn("details", process_table.columns)
+        self.assertIn("details", process_table.columns)
+        self.assertNotIn(
+            "Status for selected",
+            {widget.label for widget in app.selectbox},
+        )
+        self.assertNotIn("Status", {widget.label for widget in app.multiselect})
         self.assertTrue(
             {
                 "op_id",
@@ -692,13 +1215,17 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             compact.columns.tolist(),
             [
                 "op_id",
+                "details",
+                "station",
                 "pitch_name",
                 "work_element",
                 "assigned_parts",
+                "handling",
                 "ergonomics_risk",
                 "criticality",
                 "model_applicability",
                 "cycle_time_s",
+                "sequence",
             ],
         )
         self.assertNotIn("id", compact.columns)
@@ -777,6 +1304,19 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertEqual(handling.value, "Consume")
         self.assertEqual(location.value, self.assignment_id)
         self.assertTrue(location.disabled)
+        self.assertFalse(any(
+            str(text_input.key).startswith(
+                f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
+            )
+            for text_input in app.text_input
+        ))
+        app = self.pairing_selectbox(app, "rule").select("Optional").run(timeout=30)
+        self.assertTrue(any(
+            str(text_input.key).startswith(
+                f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
+            )
+            for text_input in app.text_input
+        ))
 
     def test_process_pairing_without_parts_remains_unclassified(self) -> None:
         self.add_process_pairing_source()
@@ -861,11 +1401,20 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                FROM process_part_options option
                JOIN process_part_groups group_row ON group_row.id=option.group_id
                WHERE group_row.project_id=? AND group_row.scenario_id=?
-                 AND group_row.name='Explicit placement'""",
+                  AND group_row.name='Smoke component'""",
             (self.project_id, self.scenario_id),
         )
         self.assertEqual(saved[0]["handling_type"], "Consume")
         self.assertEqual(saved[0]["fishbone_assignment_id"], second_assignment_id)
+        process_table = next(
+            editor.value
+            for editor in app.dataframe
+            if "ergonomics_risk" in editor.value.columns
+        )
+        handling = process_table.loc[
+            process_table["work_element"].eq("Pair smoke component"), "handling"
+        ].iloc[0]
+        self.assertEqual(list(handling), ["Consume"])
         audit = store.query(
             """SELECT editor_name, details FROM audit_log
                WHERE project_id=? AND table_name='Process part pairings'

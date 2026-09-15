@@ -6,6 +6,7 @@ from collections.abc import Callable
 import streamlit as st
 
 from utils.component_payload import json_safe
+from utils.time_units import time_unit as time_unit_config
 
 
 _HTML = """
@@ -92,6 +93,11 @@ export default function(component) {
     + `<span><i class="swatch" style="background:#ef5350"></i>Fluctuation</span>`
   north.innerHTML = ''; south.innerHTML = ''; unassigned.innerHTML = ''
   const grouped = {}
+  const secondsPerUnit = Math.max(Number(data.seconds_per_unit || 1), Number.EPSILON)
+  const timeDecimals = Math.max(0, Number(data.time_decimals || 0))
+  const timeSuffix = String(data.time_suffix || 's')
+  const displayTime = value => Number(value || 0) / secondsPerUnit
+  const formatTime = value => `${displayTime(value).toFixed(timeDecimals)} ${timeSuffix}`
   for (const element of (data.elements || [])) {
     const pitch = element.pitch_id || '__unassigned__'
     grouped[pitch] ||= {}
@@ -128,7 +134,7 @@ export default function(component) {
       const displayItems = side === 'north' ? [...items].reverse() : items
       const block = document.createElement('div')
       block.className = 'variant'
-      block.innerHTML = `<div class="variant-title"><span>${variant}</span><span>${total.toFixed(1)}s / ${Number(data.takt || 0).toFixed(1)}s</span></div><div class="stack"></div>`
+      block.innerHTML = `<div class="variant-title"><span>${variant}</span><span>${formatTime(total)} / ${formatTime(data.takt)}</span></div><div class="stack"></div>`
       const stack = block.querySelector('.stack')
       const appendDropSlot = logicalIndex => {
         const slot = document.createElement('div')
@@ -160,12 +166,12 @@ export default function(component) {
           : item.work_type === 'Fluctuation'
             ? '#ef5350'
             : '#35c84a'
-        const takt = Math.max(Number(data.takt || 1), 1)
+        const displayTakt = Math.max(displayTime(data.takt), Number.EPSILON)
         el.className = 'element'
         el.draggable = true
         el.dataset.id = item.id
         el.style.background = color
-        const elementHeight = Math.max(34, Number(item.time_s || 0) / takt * 155)
+        const elementHeight = Math.max(34, displayTime(item.time_s) / displayTakt * 155)
         el.style.height = `${elementHeight}px`
         el.style.flex = `0 0 ${elementHeight}px`
         const criticality = (item.criticality || []).map(tag => {
@@ -175,8 +181,8 @@ export default function(component) {
             : 'Derived from an active Safety requirement'
           return `<span class="criticality-tag ${normalized}" title="${source}">${escapeHtml(tag)}</span>`
         }).join('')
-        el.innerHTML = `<strong>${Number(item.time_s || 0).toFixed(1)}s</strong><span class="element-description">${item.description}</span>${criticality ? `<span class="criticality">${criticality}</span>` : ''}<button type="button" class="edit-element" title="Edit work element">Edit</button>`
-        el.title = `${item.description} · ${Number(item.time_s || 0).toFixed(1)}s · ${item.work_region || 'None'}`
+        el.innerHTML = `<strong>${formatTime(item.time_s)}</strong><span class="element-description">${item.description}</span>${criticality ? `<span class="criticality">${criticality}</span>` : ''}<button type="button" class="edit-element" title="Edit work element">Edit</button>`
+        el.title = `${item.description} · ${formatTime(item.time_s)} · ${item.work_region || 'None'}`
         el.ondragstart = event => event.dataTransfer.setData('text/plain', item.id)
         el.querySelector('.edit-element').onclick = event => {
           event.preventDefault(); event.stopPropagation()
@@ -224,13 +230,15 @@ export default function(component) {
     return card
   }
   const numberFrom = value => { const found = String(value || '').match(/(\d+)(?!.*\d)/); return found ? Number(found[1]) : 0 }
-  unassigned.appendChild(makePitch({
-    id: null,
-    pitch_number: 'Unassigned',
-    pitch_name: 'Drop work here',
-    status: 'Active',
-    model_variants: ['Base'],
-  }, 'unassigned'))
+  if (data.show_unassigned && Object.keys(grouped.__unassigned__ || {}).length) {
+    unassigned.appendChild(makePitch({
+      id: null,
+      pitch_number: 'Unassigned',
+      pitch_name: 'Drop work here',
+      status: 'Active',
+      model_variants: ['Base'],
+    }, 'unassigned'))
+  }
   for (const pitch of (data.pitches || [])) {
     const lane = numberFrom(pitch.pitch_number) % 2 ? north : south
     lane.appendChild(makePitch(pitch, lane === north ? 'north' : 'south'))
@@ -254,7 +262,7 @@ export default function(component) {
 """
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v18",
+    "paag_yamazumi_drag_board_v20",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -267,6 +275,7 @@ def yamazumi_board(
     variants: list[str],
     takt: float,
     *,
+    time_unit: str,
     key: str,
     on_move: Callable[[], None],
     on_add_pitch: Callable[[], None],
@@ -277,14 +286,23 @@ def yamazumi_board(
     safe_takt = float(takt)
     if not math.isfinite(safe_takt):
         safe_takt = 0.0
+    unit = time_unit_config(time_unit)
+    safe_elements = json_safe(elements)
     return _YAMAZUMI_BOARD(
         key=key,
         data=json_safe(
             {
                 "pitches": pitches,
-                "elements": elements,
+                "elements": safe_elements,
+                "show_unassigned": any(
+                    not element.get("pitch_id") for element in safe_elements
+                ),
                 "variants": variants,
                 "takt": safe_takt,
+                "time_unit": unit.key,
+                "seconds_per_unit": unit.seconds_per_unit,
+                "time_decimals": unit.decimals,
+                "time_suffix": unit.suffix,
             }
         ),
         on_move_change=on_move,

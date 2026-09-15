@@ -447,7 +447,7 @@ class YamazumiCopyPageTests(unittest.TestCase):
                 "pitch_ids": [self.pitch_id],
                 "element_ids": [],
                 "standalone_target_pitch_id": None,
-                "pitch_number_overrides": {},
+                "pitch_number_overrides": {self.pitch_id: "P-COPY"},
                 "feed_target_overrides": {},
             }
         with patch("utils.yamazumi_board.yamazumi_board", return_value=None):

@@ -2,9 +2,10 @@ import pandas as pd
 #test
 import streamlit as st
 
+from utils.fishbone_ui import section_breadcrumb_labels
 from utils.store import (
     assign_parts_to_section,
-    assembly_sections,
+    assembly_section_walk_order,
     audit_history,
     create_part_and_assign_to_section,
     delete_process_part_groups,
@@ -17,6 +18,7 @@ from utils.store import (
     work_element_criticality,
     process_part_placement_options,
     process_part_groups,
+    process_pitch_visual_summary,
     project_models,
     project_table,
     reconcile_yamazumi_to_process,
@@ -31,6 +33,13 @@ from utils.store import (
     yamazumi_elements_for_section,
 )
 from utils.scope_ui import page_title_with_scope
+from utils.process_pitch_visual import (
+    clamp_page,
+    page_count,
+    page_elements,
+    page_for_element,
+    render_pitch_canvas,
+)
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -48,6 +57,7 @@ from utils.table_ui import (
     selectable_dataframe,
     selected_rows_action_bar,
     stage_native_delete_confirmation,
+    standard_details_column_config,
     table_has_unsaved_changes,
 )
 project_id = st.session_state.get("project_id")
@@ -62,6 +72,10 @@ scenario = get_planning_scenario(project_id, scenario_id)
 if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
+if st.session_state.get("selected_pitch_scenario_id") not in {None, scenario_id}:
+    st.session_state.pop("selected_pitch_id", None)
+    st.session_state.pop("pitch_page_num", None)
+st.session_state["selected_pitch_scenario_id"] = scenario_id
 page_title_with_scope(
     "Process at a Glance", scope="scenario", scenario_name=scenario["name"]
 )
@@ -72,14 +86,11 @@ st.caption(
 )
 st.caption(f"Rev {scenario['revision_label']} · {scenario['name']} · {scenario['status']}")
 
-sections = assembly_sections(project_id)
+sections = assembly_section_walk_order(project_id)
 if not sections.empty:
     sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
 section_ids = sections["id"].astype(str).tolist() if not sections.empty else []
-section_labels = {
-    str(row["id"]): f"{row['name']} ({row['section_type']})"
-    for _, row in sections.iterrows()
-}
+section_labels = section_breadcrumb_labels(sections)
 
 st.subheader("Create Part requirements")
 st.caption(
@@ -89,11 +100,13 @@ st.caption(
 if not section_ids:
     st.info("Create and populate the Fishbone framework before adding Part requirements to process work.")
 else:
+    process_section_key = f"process_pairing_section_{scenario_id}"
     section_id = st.selectbox(
         "Fishbone section",
         section_ids,
+        index=None if process_section_key in st.session_state else 0,
         format_func=lambda value: section_labels.get(value, value),
-        key=f"process_pairing_section_{scenario_id}",
+        key=process_section_key,
     )
     pairing_search = st.text_input(
         "Filter work elements or parts",
@@ -110,10 +123,7 @@ else:
             ),
             axis=1,
         )
-        reflected_in_process = (
-            yamazumi_rows["process_element_id"].fillna("").astype(str).str.strip().ne("")
-            & yamazumi_rows["process_sync_status"].fillna("").astype(str).eq("Synced")
-        )
+        reflected_in_process = yamazumi_rows["process_reflected"].fillna(0).astype(bool)
         yamazumi_rows = yamazumi_rows.loc[~reflected_in_process].copy()
     section_has_available_yamazumi_work = not yamazumi_rows.empty
 
@@ -173,7 +183,7 @@ else:
             if pairing_search and section_has_available_yamazumi_work:
                 st.info("No available Yamazumi work matches this filter.")
             elif section_has_yamazumi_work:
-                st.info("All synced Yamazumi work in this section is already reflected below.")
+                st.info("All Yamazumi work in this section is already reflected below.")
             else:
                 st.info("No Yamazumi work is linked to this fishbone section.")
             selected_yamazumi = yamazumi_rows
@@ -186,7 +196,7 @@ else:
                 selection_mode="multi-row",
                 column_order=[
                     "pitch_number", "description", "time_s", "model_variants",
-                    "material_group_count", "process_sync_status",
+                    "material_group_count",
                 ],
                 column_config={
                     "pitch_number": st.column_config.TextColumn("Pitch", pinned=True),
@@ -194,7 +204,7 @@ else:
                     "time_s": st.column_config.NumberColumn("Time (s)", format="%.1f"),
                     "model_variants": st.column_config.ListColumn("Models"),
                     "material_group_count": st.column_config.NumberColumn("Part requirements"),
-                    "process_sync_status": "Plan status",
+                    "process_sync_status": None,
                 },
             )
             work_selection_rows = list(work_event.selection.rows)
@@ -398,9 +408,27 @@ else:
                     )
                     selected_assignment_id = None
                     if placement_action == "Move an existing use":
+                        section_position = {
+                            section_id: index
+                            for index, section_id in enumerate(section_ids)
+                        }
+                        other_placements = (
+                            other_placements.assign(
+                                _section_position=other_placements["section_id"]
+                                .astype(str)
+                                .map(section_position)
+                                .fillna(len(section_position))
+                            )
+                            .sort_values(
+                                ["_section_position", "assignment_id"],
+                                kind="stable",
+                            )
+                            .drop(columns=["_section_position"])
+                        )
                         assignment_labels = {
                             str(row["assignment_id"]): (
-                                f"{row.get('section_name') or 'Unknown section'} — "
+                                f"{section_labels.get(str(row.get('section_id')), row.get('section_name') or 'Unknown section')} "
+                                "— "
                                 f"Fishbone quantity {format_clean_number(row.get('quantity'))} — "
                                 f"{row.get('use_description') or 'No use description'}"
                             )
@@ -729,19 +757,6 @@ else:
             f"pair_parts_{scenario_id}_{section_id}_{selected_yamazumi_id}", border=False
         ):
             form_row = st.container(horizontal=True, vertical_alignment="bottom")
-            group_name = form_row.text_input(
-                "Part requirement",
-                placeholder="Example: Control panel color",
-                help=(
-                    "Names this Part requirement. It distinguishes alternatives or optional "
-                    "requirements, such as a control panel color; for a single Use all requirement, use a short "
-                    "installation label."
-                ),
-                key=(
-                    f"process_pairing_requirement_{scenario_id}_{section_id}_"
-                    f"{selected_yamazumi_id}"
-                ),
-            )
             selection_rule = form_row.selectbox(
                 "Selection rule",
                 ["Use all", "Choose one", "Optional"],
@@ -750,6 +765,28 @@ else:
                     f"{selected_yamazumi_id}"
                 ),
             )
+            automatic_requirement_name = len(selected_parts) == 1 and selection_rule == "Use all"
+            if automatic_requirement_name:
+                selected_part = selected_parts.iloc[0]
+                raw_part_name = selected_part.get("description")
+                part_name = (
+                    "" if pd.isna(raw_part_name) else str(raw_part_name or "").strip()
+                )
+                group_name = part_name or str(selected_part.get("part_number") or "").strip()
+                form_row.markdown(f"**Part requirement**  \n{group_name}")
+            else:
+                group_name = form_row.text_input(
+                    "Part requirement",
+                    placeholder="Example: Control panel color",
+                    help=(
+                        "Name the shared requirement when parts are alternatives, optional, "
+                        "or grouped together. A single Use all part is named automatically."
+                    ),
+                    key=(
+                        f"process_pairing_requirement_{scenario_id}_{section_id}_"
+                        f"{selected_yamazumi_id}"
+                    ),
+                )
             quantity = form_row.number_input(
                 "Quantity",
                 min_value=0.01,
@@ -956,21 +993,26 @@ model_labels = {
 model_numbers_by_label = {label: number for number, label in model_labels.items()}
 columns = [
     "id", "op_id", "sequence", "station", "pitch_name", "work_element", "operation", "description", "cycle_time_s",
-    "assigned_parts", "part_number", "output_assembly_number", "output_assembly_name",
+    "assigned_parts", "handling", "part_number", "output_assembly_number", "output_assembly_name",
     "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
     "conveyor_height_in", "platform_height_in", "pit_depth_in",
-    "model_applicability", "ergonomics_risk", "criticality", "status",
+    "model_applicability", "ergonomics_risk", "criticality", "status", "details",
 ]
 compact_columns = [
     "op_id",
+    "details",
+    "station",
     "pitch_name",
     "work_element",
     "assigned_parts",
+    "handling",
     "ergonomics_risk",
     "criticality",
     "model_applicability",
     "cycle_time_s",
+    "sequence",
 ]
+yamazumi_context = pd.DataFrame()
 if elements.empty:
     elements = pd.DataFrame(
         {
@@ -984,6 +1026,7 @@ if elements.empty:
             "description": pd.Series(dtype="string"),
             "cycle_time_s": pd.Series(dtype="float64"),
             "assigned_parts": pd.Series(dtype="string"),
+            "handling": pd.Series(dtype="object"),
             "part_number": pd.Series(dtype="string"),
             "output_assembly_number": pd.Series(dtype="string"),
             "output_assembly_name": pd.Series(dtype="string"),
@@ -1000,6 +1043,7 @@ if elements.empty:
             "ergonomics_risk": pd.Series(dtype="object"),
             "criticality": pd.Series(dtype="object"),
             "status": pd.Series(dtype="string"),
+            "details": pd.Series(dtype="string"),
         }
     )
 else:
@@ -1011,14 +1055,27 @@ else:
         "Yamazumi link required"
     )
     pairing_summary: dict[str, list[str]] = {}
+    handling_summary: dict[str, set[str]] = {}
     for group in process_part_groups(project_id, scenario_id, active_only=True):
         option_numbers = [str(option["part_number"]) for option in group["options"]]
         suffix = " / ".join(option_numbers) if group["selection_rule"] == "Choose one" else ", ".join(option_numbers)
-        pairing_summary.setdefault(str(group["work_element_id"]), []).append(
+        work_element_id = str(group["work_element_id"])
+        pairing_summary.setdefault(work_element_id, []).append(
             f"{group['name']}: {suffix}"
+        )
+        handling_summary.setdefault(work_element_id, set()).update(
+            str(option.get("handling_type") or "Unclassified")
+            for option in group["options"]
         )
     elements["assigned_parts"] = elements["id"].astype(str).map(
         lambda element_id: " | ".join(pairing_summary.get(element_id, []))
+    )
+    handling_order = {"Consume": 0, "Handle": 1, "Unclassified": 2}
+    elements["handling"] = elements["id"].astype(str).map(
+        lambda element_id: sorted(
+            handling_summary.get(element_id, set()),
+            key=lambda value: (handling_order.get(value, 99), value),
+        )
     )
     yamazumi_context = yamazumi_context_for_process(project_id, scenario_id)
     if yamazumi_context.empty:
@@ -1039,7 +1096,11 @@ else:
             yamazumi_descriptions.str.strip().ne(""),
             elements["operation"].fillna("").astype(str),
         )
+    elements["details"] = ":material/info: Details"
     elements = elements.reindex(columns=columns)
+
+if "details" not in elements:
+    elements["details"] = pd.Series(dtype="string")
 
 ergonomics_risk_ids = process_ergonomics_risk_work_element_ids(
     project_id, scenario_id
@@ -1062,19 +1123,63 @@ elements["model_applicability"] = elements["model_applicability"].apply(
 )
 
 editable_table_heading("Process at a Glance by pitch")
+st.caption(
+    "Select **Details** beside any Op ID to open that Work Element's pitch-level visual summary below the table."
+)
 visible_elements = filter_table(
     elements,
     key=f"process_filters_{scenario_id}",
-    dropdown_columns=["station", "status", "model_applicability"],
+    dropdown_columns=["station", "handling", "model_applicability"],
     search_columns=[
         "op_id", "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
         "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
     ],
     reset_widget_keys=[process_editor_key],
-    multi_value_columns=["model_applicability"],
+    multi_value_columns=["handling", "model_applicability"],
     universal_values={"model_applicability": ["All", "All models", ""]},
 )
 process_action_slot = st.empty()
+
+
+def open_pitch_visual_summary() -> None:
+    blocked_key = f"process_pitch_visual_blocked_{scenario_id}"
+    if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+        st.session_state[blocked_key] = (
+            "Save or undo table edits before opening the pitch visual summary."
+        )
+        return
+    click = st.session_state.get(f"process_details_action_{scenario_id}") or {}
+    position = click.get("row")
+    if position is None or not 0 <= int(position) < len(visible_elements):
+        return
+    clicked = visible_elements.iloc[int(position)]
+    work_element_id = str(clicked["id"])
+    current_context = yamazumi_context_for_process(project_id, scenario_id)
+    context_rows = (
+        current_context.loc[
+            current_context["process_element_id"].astype(str).eq(work_element_id)
+        ]
+        if not current_context.empty and "process_element_id" in current_context
+        else pd.DataFrame()
+    )
+    pitch_ids = context_rows.get("pitch_id", pd.Series(dtype="string")).dropna().astype(str).unique()
+    if len(pitch_ids) != 1 or not pitch_ids[0].strip():
+        st.session_state[blocked_key] = (
+            "This Work Element needs one current Yamazumi pitch before its visual summary can open."
+        )
+        return
+    try:
+        summary = process_pitch_visual_summary(project_id, scenario_id, pitch_ids[0])
+        selected_page = page_for_element(summary["elements"], work_element_id)
+    except ValueError as exc:
+        st.session_state[blocked_key] = str(exc)
+        return
+    st.session_state.pop(blocked_key, None)
+    st.session_state["selected_pitch_id"] = pitch_ids[0]
+    st.session_state["pitch_page_num"] = selected_page
+    st.session_state[f"pitch_visual_scroll_{scenario_id}"] = True
+
+
 edited = st.data_editor(
     visible_elements,
     key=process_editor_key,
@@ -1087,6 +1192,7 @@ edited = st.data_editor(
         "pitch_name",
         "work_element",
         "assigned_parts",
+        "handling",
         "ergonomics_risk",
         "criticality",
     ],
@@ -1094,6 +1200,10 @@ edited = st.data_editor(
     column_config={
         "id": None,
         "part_number": None,
+        "details": standard_details_column_config(
+            on_click=open_pitch_visual_summary,
+            key=f"process_details_action_{scenario_id}",
+        ),
         "op_id": st.column_config.TextColumn(
             "Op ID",
             pinned=True,
@@ -1104,13 +1214,21 @@ edited = st.data_editor(
             ),
         ),
         "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
-        "station": st.column_config.TextColumn("Pitch", pinned=True),
+        "station": None,
         "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),
         "work_element": st.column_config.TextColumn(
             "Work Element", required=True, pinned=True, width="large"
         ),
         "assigned_parts": st.column_config.TextColumn(
             "Part requirements", width="large"
+        ),
+        "handling": st.column_config.ListColumn(
+            "Handling",
+            help=(
+                "Shows whether the parts paired to this Work Element are first consumed "
+                "or subsequently handled. Compatibility-null pairings appear as Unclassified."
+            ),
+            width="medium",
         ),
         "ergonomics_risk": st.column_config.MultiselectColumn(
             "Ergonomics",
@@ -1139,9 +1257,6 @@ edited = st.data_editor(
         "model_applicability": st.column_config.MultiselectColumn(
             "Models", options=["All models", *model_labels.values()]
         ),
-        "status": st.column_config.SelectboxColumn(
-            "Status", options=["Draft", "In review", "Released"]
-        ),
     },
 )
 footer_actions = editable_table_footer(
@@ -1149,6 +1264,82 @@ footer_actions = editable_table_footer(
     key_prefix=f"process_plan_{scenario_id}",
     native_row_selection=True,
 )
+
+pitch_visual_blocked = st.session_state.pop(
+    f"process_pitch_visual_blocked_{scenario_id}", None
+)
+if pitch_visual_blocked:
+    st.warning(pitch_visual_blocked)
+
+selected_pitch_key = "selected_pitch_id"
+pitch_page_key = "pitch_page_num"
+selected_pitch_id = str(st.session_state.get(selected_pitch_key) or "").strip()
+if selected_pitch_id:
+    try:
+        pitch_summary = process_pitch_visual_summary(
+            project_id, scenario_id, selected_pitch_id
+        )
+    except ValueError as exc:
+        st.session_state.pop(selected_pitch_key, None)
+        st.session_state.pop(pitch_page_key, None)
+        st.warning(str(exc))
+    else:
+        pitch_rows = pitch_summary["elements"]
+        current_page = clamp_page(
+            st.session_state.get(pitch_page_key, 1), len(pitch_rows)
+        )
+        st.session_state[pitch_page_key] = current_page
+        total_pages = page_count(len(pitch_rows))
+        st.html('<div id="process-pitch-visual-summary"></div>')
+        navigation = st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            horizontal_alignment="distribute",
+        )
+        navigation.markdown(
+            f"**{pitch_summary['pitch_number']} — "
+            f"{pitch_summary['pitch_name'] or 'Unnamed pitch'} — Page {current_page} of {total_pages}**"
+        )
+        controls = navigation.container(horizontal=True, gap="small")
+        if controls.button(
+            "Back",
+            icon=":material/arrow_back:",
+            disabled=current_page <= 1,
+            key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
+        ):
+            st.session_state[pitch_page_key] = current_page - 1
+            st.rerun()
+        if controls.button(
+            "Next",
+            icon=":material/arrow_forward:",
+            disabled=current_page >= total_pages,
+            key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
+        ):
+            st.session_state[pitch_page_key] = current_page + 1
+            st.rerun()
+
+        active_page_rows = page_elements(pitch_rows, current_page)
+        for row in active_page_rows:
+            row["models"] = [
+                "All models" if model.casefold() in {"all", "all models"}
+                else model_labels.get(model, model)
+                for model in (split_filter_values(row.get("model_applicability")) or ["All"])
+            ]
+        st.html(
+            render_pitch_canvas(
+                pitch_summary,
+                active_page_rows,
+                scenario_name=str(scenario["name"]),
+            )
+        )
+        if st.session_state.pop(f"pitch_visual_scroll_{scenario_id}", False):
+            st.html(
+                """<script>
+                const target = window.parent.document.getElementById('process-pitch-visual-summary');
+                if (target) target.scrollIntoView({behavior: 'smooth', block: 'start'});
+                </script>""",
+                unsafe_allow_javascript=True,
+            )
 
 export_actions = st.container(horizontal=True)
 export_actions.download_button(
@@ -1165,7 +1356,7 @@ export_actions.download_button(
 export_actions.download_button(
     "Export filtered full data",
     data=dataframe_to_excel(
-        visible_elements.drop(columns=["id"], errors="ignore"),
+        visible_elements.drop(columns=["id", "details"], errors="ignore"),
         "Process plan",
     ),
     file_name="process_plan_filtered_full.xlsx",
@@ -1230,12 +1421,6 @@ bulk = selected_rows_action_bar(
     parent=process_action_slot,
 )
 bulk_station = bulk.text_input("Pitch for selected", key=f"process_bulk_pitch_{scenario_id}")
-bulk_status = bulk.selectbox(
-    "Status for selected",
-    [None, "Draft", "In review", "Released"],
-    format_func=lambda value: "No change" if value is None else value,
-    key=f"process_bulk_status_{scenario_id}",
-)
 apply_bulk = bulk.button(
     f"Apply to selected ({len(selected)})",
     type="primary",
@@ -1247,16 +1432,14 @@ request_bulk_delete = not selected.empty
 if apply_bulk:
     if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
         st.warning("Save or undo other edits before applying a bulk change.")
-    elif not bulk_station.strip() and bulk_status is None:
-        st.warning("Enter a pitch or choose a status to apply.")
+    elif not bulk_station.strip():
+        st.warning("Enter a pitch to apply.")
     else:
         updated = elements.copy()
         selected_ids = set(selected["id"].astype(str))
         mask = updated["id"].astype(str).isin(selected_ids)
         if bulk_station.strip():
             updated.loc[mask, "station"] = bulk_station.strip()
-        if bulk_status:
-            updated.loc[mask, "status"] = bulk_status
         updated["model_applicability"] = updated["model_applicability"].apply(
             lambda assigned: ", ".join(
                 "All" if label == "All models" else model_numbers_by_label.get(label, label)
@@ -1270,7 +1453,7 @@ if apply_bulk:
             "Bulk edit",
             len(selected_ids),
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id, "pitch": bulk_station, "status": bulk_status},
+            {"scenario_id": scenario_id, "pitch": bulk_station},
         )
         request_table_editor_reset(process_editor_key)
         st.rerun()

@@ -9,12 +9,13 @@ from utils import yamazumi_board as board_module
 
 
 class YamazumiComponentTests(unittest.TestCase):
-    def test_unassigned_card_is_always_rendered_and_accepts_drops(self) -> None:
+    def test_unassigned_card_is_only_rendered_for_unassigned_work(self) -> None:
         self.assertIn('id="unassigned"', board_module._HTML)
         self.assertIn(
-            "unassigned.appendChild(makePitch({",
+            "data.show_unassigned && Object.keys(grouped.__unassigned__ || {}).length",
             board_module._JS,
         )
+        self.assertIn("unassigned.appendChild(makePitch({", board_module._JS)
         self.assertIn("pitch_number: 'Unassigned'", board_module._JS)
         self.assertIn(
             "const acceptsWork = !pitch.id || pitch.status === 'Active'",
@@ -28,7 +29,7 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v18", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v20", inspect.getsource(board_module))
 
     def test_board_renders_separate_read_only_criticality_tags(self) -> None:
         self.assertIn("item.criticality || []", board_module._JS)
@@ -36,6 +37,12 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("Derived from PFMEA Classification", board_module._JS)
         self.assertIn("Derived from an active Safety requirement", board_module._JS)
         self.assertNotIn("item.flags", board_module._JS)
+    def test_selected_time_unit_scales_labels_and_preserves_height_ratio(self) -> None:
+        self.assertIn("const displayTime = value =>", board_module._JS)
+        self.assertIn("${formatTime(total)} / ${formatTime(data.takt)}", board_module._JS)
+        self.assertIn(
+            "displayTime(item.time_s) / displayTakt * 155", board_module._JS
+        )
 
     def test_nullable_link_fields_are_strict_json_at_component_boundary(self) -> None:
         with patch.object(
@@ -52,6 +59,7 @@ class YamazumiComponentTests(unittest.TestCase):
                 ],
                 ["Base"],
                 float("nan"),
+                time_unit="minutes",
                 key="yamazumi-test",
                 on_move=lambda: None,
                 on_add_pitch=lambda: None,
@@ -65,8 +73,42 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIsNone(payload["elements"][0]["assignment_id"])
         self.assertIsNone(payload["elements"][0]["process_element_id"])
         self.assertEqual(payload["takt"], 0.0)
+        self.assertEqual(payload["time_unit"], "minutes")
+        self.assertEqual(payload["seconds_per_unit"], 60.0)
+        self.assertEqual(payload["time_decimals"], 3)
+        self.assertEqual(payload["time_suffix"], "min")
+        self.assertTrue(payload["show_unassigned"])
         encoded = json.dumps(payload, allow_nan=False)
         self.assertNotIn("NaN", encoded)
+
+    def test_payload_hides_and_shows_unassigned_from_current_elements(self) -> None:
+        callbacks = {
+            "on_move": lambda: None,
+            "on_add_pitch": lambda: None,
+            "on_add_element": lambda: None,
+            "on_edit_pitch": lambda: None,
+            "on_edit_element": lambda: None,
+        }
+        with patch.object(board_module, "_YAMAZUMI_BOARD", return_value=object()) as mount:
+            board_module.yamazumi_board(
+                [], [{"id": "assigned", "pitch_id": "pitch-1"}], ["Base"], 60,
+                time_unit="seconds", key="assigned-only", **callbacks,
+            )
+            self.assertFalse(mount.call_args.kwargs["data"]["show_unassigned"])
+            board_module.yamazumi_board(
+                [],
+                [
+                    {"id": "assigned", "pitch_id": "pitch-1"},
+                    {"id": "unassigned-one", "pitch_id": None},
+                    {"id": "unassigned-two", "pitch_id": None},
+                ],
+                ["Base"],
+                60,
+                time_unit="seconds",
+                key="with-unassigned",
+                **callbacks,
+            )
+            self.assertTrue(mount.call_args.kwargs["data"]["show_unassigned"])
 
 
 if __name__ == "__main__":
