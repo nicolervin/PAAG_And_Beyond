@@ -4,10 +4,15 @@ import math
 import pandas as pd
 import streamlit as st
 
+from utils.fishbone_ui import (
+    normalized_id,
+    ordered_yamazumi_area_ids,
+    section_breadcrumb_labels,
+)
 from utils.store import (
     add_yamazumi_element,
     add_yamazumi_pitch,
-    assembly_sections,
+    assembly_section_walk_order,
     audit_history,
     clear_yamazumi_data,
     complexity_features,
@@ -121,7 +126,7 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
     )
 
 area_selector_key = f"yamazumi_area_{scenario_id}"
-sections = assembly_sections(project_id)
+sections = assembly_section_walk_order(project_id)
 features = complexity_features(project_id)
 flag_definitions = yamazumi_flag_definitions(project_id)
 active_flag_options = (
@@ -162,7 +167,23 @@ if variant_rename_result["changed_count"]:
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
 fishbone_sections = active_sections
 section_name_by_id = dict(zip(active_sections["id"].astype(str), active_sections["name"].astype(str))) if not active_sections.empty else {}
+section_option_labels = section_breadcrumb_labels(sections)
 section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
+
+
+def order_areas_by_fishbone(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return rows
+    area_ids = ordered_yamazumi_area_ids(
+        rows, sections["id"].astype(str).tolist()
+    )
+    return (
+        rows.assign(_area_id=rows["id"].astype(str))
+        .set_index("_area_id", drop=False)
+        .loc[area_ids]
+        .drop(columns=["_area_id"])
+        .reset_index(drop=True)
+    )
 
 with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
     uploaded = st.file_uploader(
@@ -187,7 +208,7 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
         except (ValueError, TypeError) as exc:
             st.error(str(exc))
 
-areas = yamazumi_areas(project_id, scenario_id)
+areas = order_areas_by_fishbone(yamazumi_areas(project_id, scenario_id))
 if fishbone_sections.empty and areas.empty:
     st.info("Build an active Fishbone section first, or import a Yamazumi workbook to create an unlinked Yamazumi area.")
     st.stop()
@@ -218,25 +239,28 @@ if not fishbone_sections.empty:
         except ValueError as exc:
             st.error(str(exc))
 
-areas = yamazumi_areas(project_id, scenario_id)
+areas = order_areas_by_fishbone(yamazumi_areas(project_id, scenario_id))
 if areas.empty:
     st.info("Create an area from the Fishbone or import a workbook to begin.")
     st.stop()
 
 area_labels = {}
 for _, row in areas.iterrows():
+    section_id = normalized_id(row.get("section_id"))
     section_name_value = row.get("section_name")
     section_name = (
         "" if section_name_value is None or pd.isna(section_name_value)
         else str(section_name_value).strip()
     )
+    fishbone_label = section_option_labels.get(section_id, section_name)
     area_labels[str(row["id"])] = (
-        f"{row['name']} · Fishbone: {section_name}" if section_name
+        f"{row['name']} · Fishbone: {fishbone_label}" if section_name
         else f"{row['name']} · Unlinked"
     )
 area_id = st.selectbox(
     "Yamazumi area",
     options=list(area_labels),
+    index=None if area_selector_key in st.session_state else 0,
     format_func=lambda value: area_labels[value],
     key=area_selector_key,
 )
@@ -318,7 +342,10 @@ if current_section_id:
     linked_section = current_section_id
     area_controls.text_input(
         "Linked Fishbone section",
-        value=str(area.get("section_name") or section_name_by_id.get(current_section_id, "Linked section")),
+        value=section_option_labels.get(
+            current_section_id,
+            str(area.get("section_name") or "Linked section"),
+        ),
         disabled=True,
         help="This link is fixed because the area is already matched to the Fishbone.",
         key=f"linked_fishbone_read_only_{area_id}",
@@ -335,7 +362,9 @@ else:
     linked_section = area_controls.selectbox(
         "Linked Fishbone section",
         options=[None, *available_sections],
-        format_func=lambda value: "Unlinked" if value is None else section_name_by_id[value],
+        format_func=lambda value: (
+            "Unlinked" if value is None else section_option_labels.get(value, value)
+        ),
         help="Manual matching is available only for imported areas that could not be matched by name.",
         key=f"linked_fishbone_for_import_{area_id}",
     )

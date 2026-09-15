@@ -1,5 +1,6 @@
 import streamlit as st
 
+from utils.fishbone_ui import render_fishbone_sidebar_context
 from utils.scope_ui import scenario_view_selector
 from utils.store import get_project, init_db, projects
 
@@ -132,6 +133,12 @@ with st.sidebar:
                 f"{active_scenario['status']} · "
                 f"{float(active_scenario['takt_time_s']):.1f} s takt"
             )
+        render_fishbone_sidebar_context(
+            st,
+            page_title=navigation.title,
+            project_id=st.session_state.project_id,
+            scenario_id=(active_scenario or {}).get("id"),
+        )
         st.divider()
         st.subheader("Application")
         for section, section_pages in pages.items():

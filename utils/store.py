@@ -6460,6 +6460,7 @@ def pin_map_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load pitches and their explicitly linked Process work for one scenario."""
     rows = pd.DataFrame(query(
         """SELECT p.id AS pitch_id, p.area_id, a.name AS area_name,
+                  a.section_id,
                   p.pitch_number, p.pitch_name, p.pitch_type,
                   p.status AS pitch_status, p.sequence AS pitch_sequence,
                   work.id AS process_element_id,
@@ -6489,6 +6490,7 @@ def pin_map_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
             "pitch_id": pd.Series(dtype="string"),
             "area_id": pd.Series(dtype="string"),
             "area_name": pd.Series(dtype="string"),
+            "section_id": pd.Series(dtype="string"),
             "pitch_number": pd.Series(dtype="string"),
             "pitch_name": pd.Series(dtype="string"),
             "pitch_type": pd.Series(dtype="string"),

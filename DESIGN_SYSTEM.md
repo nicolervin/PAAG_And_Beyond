@@ -223,6 +223,16 @@ Content rules for help text:
 - Explain what the field/control means and, if relevant, why it matters or how it's used downstream
 - Do not restate the field's label; add real explanatory value
 
+## Fishbone Section Ordering and Sidebar Context Standard
+
+Every Fishbone-section option list must follow the deterministic depth-first order returned by `assembly_section_walk_order()`: each main-spine section, its recursively nested subassemblies, then the next main-spine section. Siblings retain `(sequence, name)` ordering. Do not substitute alphabetical order or the flat raw `assembly_sections.sequence` order in a selector.
+
+Dropdowns use ancestry breadcrumbs such as **Main line 2 › Wheel Assembly** so nested sections remain understandable without relying on indentation alone. Stable section UUIDs remain the widget values. Special choices such as **All active sections**, **Unlinked**, **Not assigned**, and **Product / main assembly** appear before the ordered business choices. Each workflow retains its established eligibility rules: active-only controls remain active-only, while existing-record and continuity workflows may retain inactive current values.
+
+The upper-left sidebar shows **Fishbone view** only on Assembly grid, Parts to fishbone, Yamazumi, Process at a Glance, and Pin Map. It displays one breadcrumb, **All active sections**, a selected-section count, or **Unlinked**. The selector synchronizes only the page-level view; it must never change a placement destination, parent relationship, Built/Installed value, deletion target, or persisted record.
+
+One exact preferred section and its walk ordinal are browser-session state scoped to the project. Linked pages reuse that section when valid. If it is unavailable, choose the next page-valid section in walk order, then the previous valid section. Assembly grid and Pin Map support **All active sections**; Process at a Glance and Yamazumi require one exact editable context. Yamazumi and Pin Map areas follow their linked Fishbone-section order, with unlinked areas alphabetically last. This context is navigation state only and creates no audit event.
+
 ## Canonical Terminology Glossary
 
 Before adding any new label, caption, dialog, or button text, check this glossary first. If a new UI label describes a concept already listed here, use the canonical label exactly as written below.

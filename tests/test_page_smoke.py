@@ -352,10 +352,146 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             )
         )
 
+    def test_sidebar_fishbone_selector_changes_view_without_audit(self) -> None:
+        app = AppTest.from_file(
+            str(store.ROOT / "streamlit_app.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.run(timeout=30)
+        with (
+            patch("utils.assembly_grid.assembly_grid", return_value=None),
+            patch("utils.clipboard_image._CLIPBOARD_IMAGE", return_value=None),
+        ):
+            app.switch_page("app_pages/assemblies.py").run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            before_count = len(store.audit_history(self.project_id))
+
+            sidebar_selector = next(
+                widget
+                for widget in app.selectbox
+                if widget.label == "Change Fishbone view"
+            )
+            sidebar_selector.set_value(self.section_id).run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            section_filter = next(
+                widget for widget in app.multiselect
+                if widget.label == "Fishbone sections"
+            )
+            self.assertEqual(section_filter.value, [self.section_id])
+            self.assertEqual(len(store.audit_history(self.project_id)), before_count)
+
+        app.switch_page("app_pages/process.py").run(timeout=30)
+        process_section = next(
+            widget for widget in app.selectbox
+            if widget.label == "Fishbone section"
+        )
+        self.assertEqual(process_section.value, self.section_id)
+
     def test_parts_to_fishbone_smoke(self) -> None:
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
             app = self.run_page("app_pages/fishbone.py")
         self.assertTrue(any(title.value == "Parts to fishbone" for title in app.title))
+
+    def test_fishbone_selectors_and_areas_follow_depth_first_order(self) -> None:
+        child_id = store.add_assembly_section(
+            self.project_id, "Smoke child", "Subassembly", self.section_id, ""
+        )
+        grandchild_id = store.add_assembly_section(
+            self.project_id, "Smoke grandchild", "Subassembly", child_id, ""
+        )
+        second_main_id = store.add_assembly_section(
+            self.project_id, "Smoke second main", "Main spine", None, ""
+        )
+        expected = [
+            "Smoke assembly",
+            "Smoke assembly › Smoke child",
+            "Smoke assembly › Smoke child › Smoke grandchild",
+            "Smoke second main",
+        ]
+
+        areas = store.yamazumi_areas(self.project_id, self.scenario_id)
+        area_by_section = (
+            {
+                str(row["section_id"]): str(row["id"])
+                for _, row in areas.dropna(subset=["section_id"]).iterrows()
+            }
+            if "section_id" in areas.columns else {}
+        )
+        for index, section_id in enumerate(
+            [self.section_id, child_id, grandchild_id, second_main_id], start=1
+        ):
+            area_id = area_by_section.get(section_id)
+            if not area_id:
+                area_id = store.upsert_yamazumi_area(
+                    self.project_id,
+                    self.scenario_id,
+                    f"Ordered area {index}",
+                    section_id,
+                )
+            if store.yamazumi_pitches(self.project_id, area_id).empty:
+                store.add_yamazumi_pitch(
+                    self.project_id, area_id, f"P-ORDER-{index}", "Order check"
+                )
+
+        with (
+            patch("utils.assembly_grid.assembly_grid", return_value=None),
+            patch("utils.clipboard_image._CLIPBOARD_IMAGE", return_value=None),
+        ):
+            assembly_app = self.run_page("app_pages/assemblies.py")
+        assembly_sections = next(
+            widget
+            for widget in assembly_app.multiselect
+            if widget.label == "Fishbone sections"
+        )
+        self.assertEqual(assembly_sections.options, ["All active sections", *expected])
+
+        process_app = self.run_page("app_pages/process.py")
+        process_sections = next(
+            widget
+            for widget in process_app.selectbox
+            if widget.label == "Fishbone section"
+        )
+        self.assertEqual(process_sections.options, expected)
+
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+            fishbone_app = self.run_page("app_pages/fishbone.py")
+        parent_sections = next(
+            widget
+            for widget in fishbone_app.selectbox
+            if widget.label == "Parent assembly"
+        )
+        self.assertEqual(
+            parent_sections.options, ["Product / main assembly", *expected]
+        )
+
+        with patch("utils.yamazumi_board._YAMAZUMI_BOARD", return_value=None):
+            yamazumi_app = self.run_page("app_pages/yamazumi.py")
+        yamazumi_areas = next(
+            widget
+            for widget in yamazumi_app.selectbox
+            if widget.label == "Yamazumi area"
+        )
+        linked_labels = [
+            option.split("Fishbone: ", 1)[1]
+            for option in yamazumi_areas.options
+            if "Fishbone: " in option
+        ]
+        self.assertEqual(linked_labels[:4], expected)
+
+        pin_map_app = self.run_page("app_pages/pin_map.py")
+        pin_map_areas = next(
+            widget
+            for widget in pin_map_app.multiselect
+            if widget.label == "Yamazumi areas"
+        )
+        linked_labels = [
+            option.split("Fishbone: ", 1)[1]
+            for option in pin_map_areas.options
+            if "Fishbone: " in option
+        ]
+        self.assertEqual(linked_labels[:4], expected)
 
     def test_fishbone_framework_walk_order_and_indentation_are_unchanged(self) -> None:
         child_id = store.add_assembly_section(

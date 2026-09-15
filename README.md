@@ -108,6 +108,8 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 
 Navigation is defined in `streamlit_app.py`.
 
+On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone view** and offers the page-valid sections in framework order. Nested subassemblies use ancestry breadcrumbs. An exact section carries between linked screens when valid; Assembly grid and Pin Map may also show all active sections or a concise multi-selection summary.
+
 ### Project
 
 - **Overview** creates and edits the project identity and active planning scenario, and shows project-level counts and takt comparisons.
@@ -119,7 +121,7 @@ Navigation is defined in `streamlit_app.py`.
 - **Model definitions** maintains official model numbers, common names, descriptions, annual usage, manufacturing features, allowed feature choices, and model-to-feature mappings.
 - **Parts Catalog** maintains one approved record per official part number. Catalog data is project-wide while Active state is scenario-specific. Completed manufacturing assemblies are linked catalog parts so a built subassembly can be placed on the Fishbone and handled again downstream; their model applicability comes from Assembly grid mappings. The page supports primary and supplemental images, including direct Windows screenshot paste.
 - **Assembly grid** begins with one protected Top-level packaged unit row immediately below the active feature headers, followed by one or more selected Fishbone sections as labeled grid groups. The top row maps one final warehouse-handoff assembly per active official model, has a selectable final Built section and optional Installed section, and can nest completed subassemblies from every active Fishbone section. Section categories map their own real assembly numbers per model. Creating an assembly creates or reuses its linked completed-subassembly Parts Catalog row in the same save. Quantity-bearing mini-BOM links use automatic Fishbone-use placement, model-coverage validation, and cycle prevention. Category section values continuously synchronize mapped assemblies. Changing a saved cell to another same-category assembly's existing number opens a confirmed merge that redirects the old mappings, reuses the target mini-BOM and catalog part, and deletes the disclosed superseded assembly. Details opens with Images first, Mini-BOM second, and retains catalog editing for Make / buy, optional legacy parent grouping, and full deletion. Legacy assembly feature rules are not shown or evaluated.
-- **Parts to fishbone** defines the station-independent assembly sequence through ordered main-spine sections, nested subassemblies, and one or more placed uses of approved catalog parts.
+- **Parts to fishbone** defines the station-independent assembly sequence through ordered main-spine sections, nested subassemblies, and one or more placed uses of approved catalog parts. Fishbone-section selectors throughout the app follow this same depth-first sequence.
 
 ### Process planning
 
