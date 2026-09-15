@@ -36,6 +36,12 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 - **Key relationships:** Belongs to `projects`. It does not have a direct scenario foreign key; scenario identifiers may be included in the JSON details for scenario-specific events.
 - **Scope:** Project-wide history, with some entries describing scenario-specific work.
 
+### `project_transfer_events`
+
+- **Purpose:** Stores structured evidence for whole-project package exports and imports, including operation, package version, complete manifest JSON, source and target project identity, per-table record counts, detected import conflicts, Current editor attribution, and timestamp.
+- **Key relationships:** Belongs to `projects`. Each transfer also writes the required complementary `audit_log` entry under the dedicated `Project transfer` category; the structured row supports future transfer-history reporting and does not replace universal audit history.
+- **Scope:** Project-wide. Export rows describe a package containing the project and all of its planning scenarios. Import rows identify whether the package created a new project or replaced an explicitly selected project and retain the source/target evidence and validated package counts.
+
 ### `pits_records`
 
 - **Purpose:** Stores the latest imported PITS source record for each stable PITS ID, including source fields, a source hash, and the current source revision number.
@@ -741,6 +747,20 @@ All writes validate project ownership, complete input sets, required fields, uni
 In-house fabrication tagging for Fishbone sections: a future idea to mark a Subassembly-type Fishbone section as representing an in-house fabrication process (e.g., stamped metal, injection molding), for Quality's PFMEA and Control Plan tracking. Confirmed approach: an orthogonal flag added to an existing Subassembly section (not a new `section_type` value). The section remains structurally an ordinary Subassembly in every respect — walk order, nesting, parent/child rules, and all existing behavior are unaffected. The flag only changes its display designator in the Op ID naming scheme (an `F` instead of `S`) and will drive future Quality-tracked fields once scoped. Requires Quality's input on what specific data should be tracked (for example, tooling, material lot, process parameters) before a real proposal can be written and before the New Module Proposal Gate can be completed. Not yet approved, not yet scoped, no implementation should begin from this note alone.
 
 ## Proposed modules — pending owner review
+
+### Whole-project transfer
+
+- **Proposed by:** Codex
+- **Date proposed:** September 15, 2026
+- **Purpose:** Transfer a complete project between separate local PAAG installations.
+- **Connections:** Every project-wide table and every planning scenario's owned records under one `project_id`.
+- **Relationship to the critical thread:** Export the complete project graph as one unit and remap IDs during import using the same approach as scenario cloning, preserving Product Architecture → Parts → Fishbone → Yamazumi → Process at a Glance → Pin Map.
+- **Scope:** Project-wide. Every export package includes all planning scenarios belonging to the project.
+- **V1 import operations:** Support only **Create new** and **Replace**. **Create new** always generates a new project and freshly remaps every imported ID, so imported records cannot collide with existing local data. **Replace** requires the contributor to explicitly select an existing project to overwrite and then complete the standard non-dismissible confirmation workflow. Merge and conflict-resolution behavior for duplicate projects, records, IDs, or uploaded files is explicitly deferred to a future version and must not be implemented in V1.
+- **Replace-target safety:** A non-current project is any project other than the one open in the contributor's active browser session. The currently open project must never be pre-selected as a Replace target. Selecting that project requires an additional explicit step before the standard replacement confirmation so it cannot be overwritten accidentally.
+- **Storage decision:** Add one structured project-transfer table that records manifest contents, package version, source and target project identity, per-table record counts, timestamp, Current editor attribution, and any conflicts detected during import. Do not modify any existing business table. Every export and import must also call `record_audit_event()` to write a standard entry to the existing `audit_log`, using a dedicated project-transfer audit category separate from the PITS and Parts import categories. These records are complementary: `audit_log` satisfies the locked Universal Audit Trail Standard, while the structured transfer row supports future transfer-history reporting.
+- **Applicable standards:** Retain the **Project-wide** scope badge; show explicit **Creates a new project** or **Replaces an existing project** impact text before import; require the standard non-dismissible confirmation before replacement; record Current editor attribution in both audit records; and expose the dedicated project-transfer audit category in the page's bottom History section.
+- **Approval status:** Approved by the project owner on September 15, 2026; V1 export and import are implemented. Export uses the registry-driven `.paagproject` package, bundled owned uploads, and complementary audit records. Import revalidates the package at confirmation, remaps the complete graph and uploads for Create new or confirmed Replace, applies database changes atomically, and records structured and universal audit history. The V1 operation, Replace-target safety, deferred merge, and complementary audit-record clarifications were approved by the project owner on September 15, 2026.
 
 ### Scenario-saved Yamazumi time units
 
