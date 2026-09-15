@@ -3,8 +3,13 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from utils.fishbone_ui import ordered_yamazumi_area_ids, section_breadcrumb_labels
 from utils.scope_ui import page_title_with_scope
-from utils.store import get_planning_scenario, pin_map_for_scenario
+from utils.store import (
+    assembly_section_walk_order,
+    get_planning_scenario,
+    pin_map_for_scenario,
+)
 from utils.table_ui import dataframe_to_excel
 
 
@@ -63,12 +68,45 @@ if pin_map.empty:
 
 pitch_rows = pin_map.drop_duplicates(subset=["pitch_id"], keep="first").copy()
 controls = st.container(horizontal=True, vertical_alignment="bottom")
-area_options = pitch_rows["area_name"].dropna().astype(str).unique().tolist()
-selected_areas = controls.multiselect(
+sections = assembly_section_walk_order(project_id)
+section_labels = section_breadcrumb_labels(sections)
+area_rows = (
+    pitch_rows[["area_id", "area_name", "section_id"]]
+    .drop_duplicates(subset=["area_id"], keep="first")
+    .rename(columns={"area_id": "id", "area_name": "name"})
+)
+area_options = ordered_yamazumi_area_ids(
+    area_rows,
+    sections["id"].astype(str).tolist() if not sections.empty else [],
+)
+area_labels = {}
+for _, area_row in area_rows.iterrows():
+    area_id = str(area_row["id"])
+    area_name = str(area_row["name"])
+    section_id = clean_text(area_row.get("section_id"))
+    area_labels[area_id] = (
+        f"{area_name} · Fishbone: {section_labels[section_id]}"
+        if section_id in section_labels else f"{area_name} · Unlinked"
+    )
+area_filter_key = f"pin_map_areas_{scenario_id}"
+stored_areas = st.session_state.get(area_filter_key, [])
+if isinstance(stored_areas, (list, tuple)):
+    area_id_by_name = {
+        str(row["name"]): str(row["id"]) for _, row in area_rows.iterrows()
+    }
+    normalized_areas = [
+        str(value) if str(value) in area_labels else area_id_by_name.get(str(value), "")
+        for value in stored_areas
+    ]
+    st.session_state[area_filter_key] = [
+        area_id for area_id in normalized_areas if area_id in area_labels
+    ]
+selected_area_ids = controls.multiselect(
     "Yamazumi areas",
     options=area_options,
+    format_func=lambda value: area_labels.get(value, value),
     placeholder="All areas",
-    key=f"pin_map_areas_{scenario_id}",
+    key=area_filter_key,
 )
 status_options = pitch_rows["pitch_status"].dropna().astype(str).unique().tolist()
 selected_statuses = controls.multiselect(
@@ -92,8 +130,8 @@ keyword = controls.text_input(
 )
 
 visible = pin_map.copy()
-if selected_areas:
-    visible = visible[visible["area_name"].isin(selected_areas)]
+if selected_area_ids:
+    visible = visible[visible["area_id"].astype(str).isin(selected_area_ids)]
 if selected_statuses:
     visible = visible[visible["pitch_status"].isin(selected_statuses)]
 if selected_types:
@@ -126,10 +164,19 @@ else:
     st.caption(
         "Line flow runs left to right. Process work appears above its workstation or pitch."
     )
-    for area_name in visible_pitches["area_name"].drop_duplicates().tolist():
+    visible_area_ids = [
+        area_id for area_id in area_options
+        if area_id in set(visible_pitches["area_id"].astype(str))
+    ]
+    for area_id in visible_area_ids:
+        area_name = clean_text(
+            visible_pitches.loc[
+                visible_pitches["area_id"].astype(str).eq(area_id), "area_name"
+            ].iloc[0]
+        )
         st.subheader(str(area_name))
         area_pitches = visible_pitches.loc[
-            visible_pitches["area_name"] == area_name
+            visible_pitches["area_id"].astype(str) == area_id
         ].sort_values(["pitch_sequence", "pitch_number"], kind="stable")
         line = st.container(horizontal=True, vertical_alignment="top", gap="small")
         for _, pitch in area_pitches.iterrows():

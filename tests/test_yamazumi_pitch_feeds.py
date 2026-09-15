@@ -110,6 +110,274 @@ class YamazumiPitchFeedTests(unittest.TestCase):
             "feeds_into_pitch_id": target_id,
         }
 
+    def import_row(
+        self, area_name: str, pitch_number: str, description: str
+    ) -> dict:
+        return {
+            "Sub-Line": area_name,
+            "Pitch_number": pitch_number,
+            "Pitch_status": "Active",
+            "Pitch_name": f"Imported {pitch_number}",
+            "Pitch_Takt_time": 60,
+            "Model_variant": "Base",
+            "Work_Type": "Cycle",
+            "Work_Description": description,
+            "Work_Time_to_complete": 1,
+            "Work_region": "None",
+        }
+
+    def install_legacy_address_conflict(self, pitch_number: str) -> None:
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_insert"
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_update"
+            )
+            for pitch_id, area_id in (
+                ("legacy-main", self.area_id),
+                ("legacy-other", self.same_scenario_other_area_id),
+            ):
+                conn.execute(
+                    """INSERT INTO yamazumi_pitches
+                       (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                       VALUES (?, ?, ?, ?, 'Legacy duplicate', ?)""",
+                    (pitch_id, self.project_id, area_id, pitch_number, timestamp),
+                )
+        store.init_db()
+
+    def test_pitch_address_is_unique_across_scenario_areas_but_not_scenarios(self) -> None:
+        self.add_pitch("  P-UNIQUE  ")
+
+        with self.assertRaisesRegex(
+            ValueError, "Yamazumi area Main.*unique across the scenario"
+        ):
+            self.add_pitch("p-unique", area_id=self.same_scenario_other_area_id)
+
+        other_scenario_pitch = self.add_pitch(
+            "p-unique", area_id=self.other_area_id
+        )
+        self.assertTrue(other_scenario_pitch)
+
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "already exists in this planning scenario",
+        ):
+            with store.connection() as conn:
+                conn.execute(
+                    """INSERT INTO yamazumi_pitches
+                       (id, project_id, area_id, pitch_number, updated_at)
+                       VALUES ('direct-duplicate', ?, ?, ' P-UNIQUE ', ?)""",
+                    (
+                        self.project_id,
+                        self.same_scenario_other_area_id,
+                        store.now_iso(),
+                    ),
+                )
+
+    def test_update_and_bulk_replace_reject_cross_area_collision_atomically(self) -> None:
+        main_id = self.add_pitch("MAIN-1")
+        other_id = self.add_pitch(
+            "OTHER-1", area_id=self.same_scenario_other_area_id
+        )
+        with self.assertRaisesRegex(ValueError, "unique across the scenario"):
+            store.update_yamazumi_pitch(
+                self.project_id,
+                self.same_scenario_other_area_id,
+                other_id,
+                self.values(" main-1 ", "Pitch", None),
+            )
+        self.assertEqual(
+            store.query(
+                "SELECT pitch_number FROM yamazumi_pitches WHERE id=?",
+                (other_id,),
+            )[0]["pitch_number"],
+            "OTHER-1",
+        )
+
+        rows = store.yamazumi_pitches(self.project_id, self.area_id)
+        rows.loc[rows["id"].astype(str).eq(main_id), "pitch_number"] = "other-1"
+        with self.assertRaisesRegex(ValueError, "unique across the scenario"):
+            store.replace_yamazumi_pitches(
+                self.project_id, self.area_id, rows
+            )
+        self.assertEqual(
+            store.query(
+                "SELECT pitch_number FROM yamazumi_pitches WHERE id=?",
+                (main_id,),
+            )[0]["pitch_number"],
+            "MAIN-1",
+        )
+
+    def test_generated_range_skips_addresses_used_in_another_area(self) -> None:
+        self.add_pitch("R-002", area_id=self.same_scenario_other_area_id)
+        self.add_pitch("R-003", area_id=self.other_area_id)
+
+        created, skipped = store.generate_yamazumi_pitch_range(
+            self.project_id, self.area_id, "R-001", "R-003"
+        )
+
+        self.assertEqual(created, 2)
+        self.assertEqual(skipped, ["R-002"])
+        self.assertEqual(
+            set(
+                store.yamazumi_pitches(self.project_id, self.area_id)[
+                    "pitch_number"
+                ]
+            ),
+            {"R-001", "R-003"},
+        )
+
+    def test_import_reuses_same_area_address_case_insensitively(self) -> None:
+        existing_id = self.add_pitch("IMP-1")
+        counts = store.import_yamazumi_rows(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([self.import_row("Main", " imp-1 ", "Imported work")]),
+            {},
+        )
+
+        self.assertEqual(counts, (1, 1, 1))
+        saved = store.query(
+            "SELECT id, pitch_number FROM yamazumi_pitches WHERE area_id=?",
+            (self.area_id,),
+        )
+        self.assertEqual(saved, [{"id": existing_id, "pitch_number": "IMP-1"}])
+
+    def test_import_cross_area_collision_rolls_back_every_row(self) -> None:
+        self.add_pitch("IMP-TAKEN", area_id=self.same_scenario_other_area_id)
+        rows = pd.DataFrame(
+            [
+                self.import_row("Main", "IMP-NEW", "New work"),
+                self.import_row("Main", "imp-taken", "Conflicting work"),
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "unique across the scenario"):
+            store.import_yamazumi_rows(
+                self.project_id, self.scenario_id, rows, {}
+            )
+        self.assertEqual(
+            store.query(
+                """SELECT COUNT(*) AS count FROM yamazumi_pitches
+                   WHERE project_id=? AND pitch_number='IMP-NEW'""",
+                (self.project_id,),
+            )[0]["count"],
+            0,
+        )
+        self.assertEqual(
+            store.query(
+                """SELECT COUNT(*) AS count FROM yamazumi_elements
+                   WHERE project_id=? AND description IN ('New work', 'Conflicting work')""",
+                (self.project_id,),
+            )[0]["count"],
+            0,
+        )
+
+    def test_legacy_conflicts_are_reported_and_block_cloning_and_new_pitches(self) -> None:
+        self.install_legacy_address_conflict("LEGACY-1")
+
+        conflicts = store.yamazumi_pitch_address_conflicts(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(len(conflicts), 2)
+        self.assertEqual(set(conflicts["area_name"]), {"Main", "Same scenario other area"})
+
+        with self.assertRaisesRegex(ValueError, "Resolve duplicate pitch addresses"):
+            store.clone_planning_scenario(
+                self.project_id,
+                self.scenario_id,
+                "Blocked clone",
+                "BC",
+                60,
+            )
+        self.assertFalse(
+            any(
+                row["name"] == "Blocked clone"
+                for row in store.planning_scenarios(self.project_id, True)
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "Resolve duplicate pitch addresses"):
+            self.add_pitch("UNRELATED")
+        self.assertFalse(
+            store.query(
+                "SELECT id FROM yamazumi_pitches WHERE pitch_number='UNRELATED'"
+            )
+        )
+
+    def test_multiple_legacy_conflicts_can_be_corrected_incrementally(self) -> None:
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_insert"
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_update"
+            )
+            for suffix, address, area_id in (
+                ("a1", "LEGACY-A", self.area_id),
+                ("a2", "legacy-a", self.same_scenario_other_area_id),
+                ("b1", "LEGACY-B", self.area_id),
+                ("b2", "legacy-b", self.same_scenario_other_area_id),
+            ):
+                conn.execute(
+                    """INSERT INTO yamazumi_pitches
+                       (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                       VALUES (?, ?, ?, ?, 'Legacy duplicate', ?)""",
+                    (suffix, self.project_id, area_id, address, timestamp),
+                )
+        store.init_db()
+
+        store.update_yamazumi_pitch(
+            self.project_id,
+            self.area_id,
+            "a1",
+            self.values("LEGACY-A-FIXED", "Pitch", None),
+        )
+
+        remaining = store.yamazumi_pitch_address_conflicts(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(set(remaining["pitch_number"].str.casefold()), {"legacy-b"})
+        self.assertEqual(set(remaining["id"]), {"b1", "b2"})
+
+    def test_same_area_legacy_conflict_can_be_deleted_through_bulk_workflow(self) -> None:
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_insert"
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_yamazumi_pitch_address_scenario_update"
+            )
+            for pitch_id, address in (("same-a", "SAME-1"), ("same-b", "same-1")):
+                conn.execute(
+                    """INSERT INTO yamazumi_pitches
+                       (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                       VALUES (?, ?, ?, ?, 'Legacy duplicate', ?)""",
+                    (pitch_id, self.project_id, self.area_id, address, timestamp),
+                )
+        store.init_db()
+        rows = store.yamazumi_pitches(self.project_id, self.area_id)
+        rows = rows.loc[rows["id"].astype(str).ne("same-b")].copy()
+
+        store.replace_yamazumi_pitches(self.project_id, self.area_id, rows)
+
+        self.assertTrue(
+            store.yamazumi_pitch_address_conflicts(
+                self.project_id, self.scenario_id
+            ).empty
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT pitch_number FROM yamazumi_pitches WHERE area_id=?",
+                (self.area_id,),
+            ),
+            [{"pitch_number": "SAME-1"}],
+        )
+
     def test_target_is_required_for_new_and_edited_feeder_pitches(self) -> None:
         with self.assertRaisesRegex(ValueError, "Feeds into pitch is required"):
             self.add_pitch("SUB-1", pitch_type="Subassembly")

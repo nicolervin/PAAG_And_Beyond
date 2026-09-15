@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 
+from utils.fishbone_ui import section_breadcrumb_labels
 from utils.store import (
     active_part_ids,
     add_assembly_section,
@@ -8,7 +9,6 @@ from utils.store import (
     assembly_section_delete_impact,
     assembly_section_delete_target_validation,
     assembly_section_walk_order,
-    assembly_sections,
     assign_parts_to_section,
     audit_history,
     delete_assembly_sections,
@@ -71,7 +71,7 @@ scenario_active_part_ids = active_part_ids(project_id, scenario_id)
 parts = project_table("parts", project_id, "part_number")
 if not parts.empty:
     parts = parts.loc[parts["id"].astype(str).isin(scenario_active_part_ids)].copy()
-sections = assembly_sections(project_id)
+sections = assembly_section_walk_order(project_id)
 all_assignments = fishbone_part_assignments(project_id)
 if all_assignments.empty:
     assignments = all_assignments.copy()
@@ -169,6 +169,7 @@ with st.expander(
 
     active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
     section_name_by_id = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
+    section_option_labels = section_breadcrumb_labels(sections)
     parent_options = active_sections["id"].astype(str).tolist() if not active_sections.empty else []
 
     with st.container(border=True):
@@ -182,7 +183,10 @@ with st.expander(
             parent_id = section_row[2].selectbox(
                 "Parent assembly",
                 options=[None, *parent_options],
-                format_func=lambda value: "Product / main assembly" if value is None else section_name_by_id.get(value, value),
+                format_func=lambda value: (
+                    "Product / main assembly"
+                    if value is None else section_option_labels.get(value, value)
+                ),
                 help="Required for a subassembly. Main-spine sections attach directly to the product.",
             )
             section_description = st.text_area("Fishbone section description", placeholder="What is assembled in this section?")
@@ -220,7 +224,7 @@ with st.expander(
     if sections.empty:
         st.info("Add at least one main-spine Fishbone section to begin the Fishbone framework.")
     else:
-        framework_walk = assembly_section_walk_order(project_id)
+        framework_walk = sections
         framework_depth = dict(zip(
             framework_walk["id"].astype(str),
             framework_walk["depth"].astype(int),
@@ -238,7 +242,9 @@ with st.expander(
             lambda value: (
                 "Product / main assembly"
                 if not normalized_parent_id(value)
-                else section_name_by_id.get(normalized_parent_id(value), normalized_parent_id(value))
+                else section_option_labels.get(
+                    normalized_parent_id(value), normalized_parent_id(value)
+                )
             )
         )
         framework["order_actions"] = [[
@@ -275,7 +281,7 @@ with st.expander(
                 )
                 moved = reorder_assembly_section(project_id, section_id, action)
                 if moved:
-                    reordered_sections = assembly_sections(project_id)
+                    reordered_sections = assembly_section_walk_order(project_id)
                     reordered_parent_ids = reordered_sections["parent_id"].apply(
                         normalized_parent_id
                     )
@@ -351,7 +357,13 @@ with st.expander(
                 "section_type": st.column_config.SelectboxColumn("Type", options=["Main spine", "Subassembly"], required=True),
                 "parent_assembly": st.column_config.SelectboxColumn(
                     "Parent assembly",
-                    options=["Product / main assembly", *sections["name"].astype(str).tolist()],
+                    options=[
+                        "Product / main assembly",
+                        *[
+                            section_option_labels[str(section_id)]
+                            for section_id in sections["id"].astype(str)
+                        ],
+                    ],
                     required=True,
                     width="large",
                 ),
@@ -422,7 +434,9 @@ with st.expander(
             ].copy()
             replacement_ids = replacement_sections["id"].astype(str).tolist()
             replacement_labels = {
-                str(row["id"]): str(row["name"])
+                str(row["id"]): section_option_labels.get(
+                    str(row["id"]), str(row["name"])
+                )
                 for _, row in replacement_sections.iterrows()
             }
             target_section_id = None
@@ -556,10 +570,12 @@ with st.expander(
                 st.switch_page("app_pages/assemblies.py")
 
         st.caption("🟦 Main-spine section · 🟧 Subassembly · indentation shows the parent-child relationship.")
-        id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
+        id_by_label = {
+            label: section_id for section_id, label in section_option_labels.items()
+        }
         framework_to_save = merge_filtered_edits(full_framework, framework, framework_editor)
         framework_to_save["parent_id"] = framework_to_save["parent_assembly"].apply(
-            lambda name: None if name == "Product / main assembly" else id_by_name.get(name)
+            lambda name: None if name == "Product / main assembly" else id_by_label.get(name)
         )
         if refresh_framework:
             try:
@@ -923,7 +939,7 @@ else:
     target_section_id = placement_row.selectbox(
         "Place selected parts in",
         options=active_sections["id"].astype(str).tolist(),
-        format_func=lambda section_id: section_name_by_id.get(section_id, section_id),
+        format_func=lambda section_id: section_option_labels.get(section_id, section_id),
     )
     use_description_key = f"fishbone_new_use_description_{project_id}"
     clear_use_description_key = f"fishbone_clear_use_description_{project_id}"
@@ -1012,7 +1028,7 @@ if assignments.empty:
     st.caption("Assigned parts will appear here for ordering within each Fishbone section.")
 else:
     full_assignment_editor = assignments.copy()
-    full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_name_by_id)
+    full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_option_labels)
     full_assignment_editor["model_applicability"] = full_assignment_editor.apply(
         lambda row: feature_applicability(row["part_id"], row["model_applicability"]), axis=1
     )
@@ -1090,7 +1106,10 @@ else:
             ),
             "section": st.column_config.SelectboxColumn(
                 "Fishbone section",
-                options=active_sections["name"].astype(str).tolist(),
+                options=[
+                    section_option_labels[str(section_id)]
+                    for section_id in active_sections["id"].astype(str)
+                ],
                 required=True,
                 pinned=True,
                 width="medium",
@@ -1208,8 +1227,10 @@ else:
     assignments_to_save = assignments_to_save.drop(
         columns=["edit_part", "add_use"], errors="ignore"
     )
-    section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
-    assignments_to_save["section_id"] = assignments_to_save["section"].map(section_id_by_name)
+    section_id_by_label = {
+        label: section_id for section_id, label in section_option_labels.items()
+    }
+    assignments_to_save["section_id"] = assignments_to_save["section"].map(section_id_by_label)
     if not inactive_assignments.empty:
         assignments_to_save = pd.concat(
             [assignments_to_save, inactive_assignments], ignore_index=True, sort=False
