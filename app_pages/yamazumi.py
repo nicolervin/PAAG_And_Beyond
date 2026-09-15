@@ -31,6 +31,7 @@ from utils.store import (
     update_yamazumi_area,
     update_yamazumi_element,
     update_yamazumi_pitch,
+    update_yamazumi_time_unit,
     sync_yamazumi_areas_from_fishbone,
     yamazumi_area_link_status,
     yamazumi_areas,
@@ -38,7 +39,9 @@ from utils.store import (
     yamazumi_elements_for_scenario,
     yamazumi_flag_definitions,
     yamazumi_pitch_delete_blockers,
+    yamazumi_pitch_address_conflicts,
     yamazumi_pitch_feed_target_status,
+    yamazumi_pitch_address_suggestion,
     yamazumi_pitch_label,
     yamazumi_pitches,
     yamazumi_pitches_for_scenario,
@@ -65,6 +68,15 @@ from utils.table_ui import (
     table_has_unsaved_changes,
 )
 from utils.yamazumi_board import yamazumi_board
+from utils.yamazumi_order import order_yamazumi_pitches_for_board
+from utils.time_units import (
+    TIME_UNITS,
+    display_to_seconds,
+    format_seconds,
+    normalize_time_unit,
+    seconds_to_display,
+    time_unit,
+)
 from utils.yamazumi_stack import (
     apply_stack_draft_to_elements,
     apply_stack_drop,
@@ -93,6 +105,28 @@ if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
 
+yamazumi_time_unit = normalize_time_unit(
+    scenario.get("yamazumi_time_unit", "seconds")
+)
+from utils.yamazumi_naming import (
+    format_yamazumi_pitch_address,
+    normalize_yamazumi_line_code,
+    normalize_yamazumi_section_code,
+)
+time_config = time_unit(yamazumi_time_unit)
+time_column_label = f"Time ({time_config.label.lower()})"
+
+
+def element_times_to_seconds(rows: pd.DataFrame) -> pd.DataFrame:
+    converted = rows.copy()
+    numeric = pd.to_numeric(converted["time_s"], errors="coerce")
+    if numeric.isna().any() or (numeric < 0).any() or not numeric.map(math.isfinite).all():
+        raise ValueError(
+            "Time to complete must be a finite number that is zero or greater."
+        )
+    converted["time_s"] = numeric * time_config.seconds_per_unit
+    return converted
+
 page_title_with_scope(
     "Yamazumi", scope="scenario", scenario_name=scenario["name"]
 )
@@ -100,13 +134,39 @@ st.caption(
     "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating Process at a Glance."
 )
 
+pitch_address_conflicts = yamazumi_pitch_address_conflicts(
+    project_id, scenario_id
+)
+if not pitch_address_conflicts.empty:
+    st.error(
+        "Duplicate pitch addresses must be corrected before additional pitch "
+        "changes can be saved in this planning scenario."
+    )
+    st.caption(
+        "Choose one affected Yamazumi area at a time and rename or delete the "
+        "duplicate pitch. Existing records are never changed automatically."
+    )
+    selectable_dataframe(
+        pitch_address_conflicts,
+        key=f"yamazumi_pitch_address_conflicts_{scenario_id}",
+        hide_index=True,
+        column_order=["pitch_number", "pitch_name", "area_name"],
+        column_config={
+            "id": None,
+            "area_id": None,
+            "pitch_number": st.column_config.TextColumn("Pitch address"),
+            "pitch_name": st.column_config.TextColumn("Pitch name"),
+            "area_name": st.column_config.TextColumn("Yamazumi area"),
+        },
+    )
+
 has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
 
 
 with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
     st.caption(
         f"Rev {scenario['revision_label']} · {scenario['name']} · "
-        f"{float(scenario['takt_time_s']):.1f} s takt"
+        f"{format_seconds(scenario['takt_time_s'], yamazumi_time_unit)} takt"
     )
     request_clear_area = st.button(
         "Clear this Yamazumi Section",
@@ -190,7 +250,10 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
         "Yamazumi Excel file", type=["xlsx"], key=f"yamazumi_import_file_{scenario_id}"
     )
     st.caption(
-        "Imports the current system-style fields. Sub-Line is matched to a Fishbone section by name when possible; unmatched areas remain available to link manually."
+        "Imports the current system-style fields. Pitch_Takt_time and "
+        f"Work_Time_to_complete are interpreted as {time_config.label.lower()}. "
+        "Sub-Line is matched to a Fishbone section by name when possible; "
+        "unmatched areas remain available to link manually."
     )
     if st.button("Import workbook", type="primary", icon=":material/upload:", disabled=uploaded is None):
         try:
@@ -201,7 +264,12 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
             record_audit_event(
                 project_id, "Yamazumi", "Excel import", element_count,
                 st.session_state.get("current_editor", ""),
-                {"areas": area_count, "pitches": pitch_count, "file": uploaded.name},
+                {
+                    "areas": area_count,
+                    "pitches": pitch_count,
+                    "file": uploaded.name,
+                    "time_unit": yamazumi_time_unit,
+                },
             )
             st.toast(f"Imported {element_count} work elements into {pitch_count} pitches", icon=":material/check_circle:")
             st.rerun()
@@ -269,8 +337,71 @@ pitch_editor_key = f"yamazumi_pitch_editor_{scenario_id}_{area_id}"
 element_editor_key = f"yamazumi_element_editor_{scenario_id}_{area_id}"
 pitch_delete_key = f"yamazumi_pitches_pending_delete_{scenario_id}_{area_id}"
 element_delete_key = f"yamazumi_elements_pending_delete_{scenario_id}_{area_id}"
+empty_pitch_dialog_key = (
+    f"yamazumi_empty_pitch_prompt_{project_id}_{scenario_id}_{area_id}"
+)
 pitch_editor_key = apply_pending_table_editor_reset(pitch_editor_key)
 element_editor_key = apply_pending_table_editor_reset(element_editor_key)
+
+unit_controls = st.container(horizontal=True, vertical_alignment="bottom")
+selected_time_unit = unit_controls.segmented_control(
+    "Yamazumi time unit",
+    options=list(TIME_UNITS),
+    default=yamazumi_time_unit,
+    format_func=lambda value: TIME_UNITS[value].label,
+    help=(
+        "Controls Yamazumi time entry, board labels, and workbook values for this "
+        "planning scenario. Timing records continue to be stored in seconds."
+    ),
+    key=f"yamazumi_time_unit_{scenario_id}",
+)
+save_time_unit = unit_controls.button(
+    "Save & Refresh",
+    type="primary",
+    icon=":material/save:",
+    key=f"save_yamazumi_time_unit_{scenario_id}",
+)
+if save_time_unit:
+    try:
+        selected_time_unit = normalize_time_unit(selected_time_unit)
+        if selected_time_unit == yamazumi_time_unit:
+            raise ValueError("The Yamazumi time unit has not changed.")
+        has_pending_time_edits = (
+            table_has_unsaved_changes(
+                element_editor_key, native_row_selection=True
+            )
+            or bool(st.session_state.get(pitch_delete_key))
+            or bool(st.session_state.get(element_delete_key))
+            or bool(st.session_state.get(
+                f"yamazumi_add_element_target_{project_id}_{area_id}"
+            ))
+            or bool(st.session_state.get(
+                f"yamazumi_edit_element_target_{project_id}_{area_id}"
+            ))
+        )
+        if has_pending_time_edits:
+            raise ValueError(
+                "Save or undo Yamazumi work-element edits before changing the time unit."
+            )
+        unit_change = update_yamazumi_time_unit(
+            project_id, scenario_id, selected_time_unit
+        )
+        record_audit_event(
+            project_id,
+            "Yamazumi",
+            "Save & Refresh",
+            1,
+            st.session_state.get("current_editor", ""),
+            {"scenario_id": scenario_id, **unit_change},
+        )
+        request_table_editor_reset(element_editor_key)
+        st.toast(
+            f"Yamazumi time unit changed to {TIME_UNITS[selected_time_unit].label}",
+            icon=":material/check_circle:",
+        )
+        st.rerun()
+    except ValueError as exc:
+        st.error(str(exc))
 
 if request_clear_area:
     st.session_state["yamazumi_reset_scope"] = "area"
@@ -380,24 +511,42 @@ area_takt = (
 if not math.isfinite(area_takt):
     area_takt = default_takt
 takt_time = area_controls.number_input(
-    "Yamazumi takt time (seconds)",
+    f"Yamazumi takt time ({time_config.label.lower()})",
     min_value=0.0,
-    value=area_takt,
-    step=0.1,
+    value=seconds_to_display(area_takt, yamazumi_time_unit),
+    step=time_config.step,
+    format=f"%.{time_config.decimals}f",
     help="Enter an area-specific takt or use the active planning scenario's target takt.",
+    key=f"yamazumi_takt_{scenario_id}_{area_id}_{yamazumi_time_unit}",
 )
 if area_controls.button("Save area settings", type="primary", icon=":material/save:"):
     try:
-        update_yamazumi_area(project_id, area_id, linked_section, takt_time or None)
+        update_yamazumi_area(
+            project_id,
+            area_id,
+            linked_section,
+            display_to_seconds(takt_time, yamazumi_time_unit) if takt_time else None,
+        )
         record_audit_event(project_id, "Yamazumi", "Area settings", 1, st.session_state.get("current_editor", ""))
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
-takt = float(takt_time or default_takt)
+takt = (
+    display_to_seconds(takt_time, yamazumi_time_unit)
+    if takt_time else default_takt
+)
 if not math.isfinite(takt):
     takt = default_takt
 
 pitches = yamazumi_pitches(project_id, area_id)
+pitch_address_suggestion = yamazumi_pitch_address_suggestion(project_id, area_id)
+empty_pitch_visit_key = f"yamazumi_empty_pitch_visit_{project_id}_{scenario_id}"
+if st.session_state.get(empty_pitch_visit_key) != str(area_id):
+    st.session_state[empty_pitch_visit_key] = str(area_id)
+    if pitches.empty:
+        st.session_state[empty_pitch_dialog_key] = True
+if not pitches.empty:
+    st.session_state.pop(empty_pitch_dialog_key, None)
 if not pitches.empty:
     pitches["model_variants"] = pitches["model_variants"].apply(
         lambda value: [stored_variant_labels.get(item, item) for item in json.loads(value or '["Base"]')]
@@ -483,82 +632,218 @@ def feed_target_picker(
         key=key,
     )
 
-setup_columns = st.columns(3)
-with setup_columns[0].expander("Generate pitch addresses", icon=":material/format_list_numbered:", expanded=pitches.empty):
+def pitch_range_controls(surface: str) -> bool:
+    """Render the shared guided pitch-range workflow."""
     st.caption(
-        "Enter the first and last physical addresses. The ending numbers are generated inclusively while preserving the shared prefix and leading zeros."
+        "Addresses use the suggested project and Fishbone codes. Suggestions are "
+        "editable and do not restrict imported or existing addresses."
     )
-    range_controls = st.container(horizontal=True, vertical_alignment="bottom")
-    first_pitch = range_controls.text_input("First pitch", placeholder="01-ML1-001")
-    last_pitch = range_controls.text_input("Last pitch", placeholder="01-ML1-020")
-    number_mode = range_controls.selectbox("Numbers to create", ["All numbers", "Odd only", "Even only"])
-    generated_status = range_controls.selectbox(
+    code_controls = st.container(horizontal=True, vertical_alignment="bottom")
+    line_code = code_controls.text_input(
+        "Project line code",
+        value=pitch_address_suggestion["line_code"],
+        max_chars=2,
+        help="Saved project-wide for future Yamazumi address suggestions.",
+        key=f"yamazumi_line_code_{surface}_{project_id}_{area_id}",
+    )
+    section_code = code_controls.text_input(
+        "Fishbone section code",
+        value=pitch_address_suggestion["section_code"],
+        max_chars=3,
+        help="Suggested from the linked Fishbone section and editable before generation.",
+        key=f"yamazumi_section_code_{surface}_{project_id}_{area_id}",
+    )
+    sequence_controls = st.container(horizontal=True, vertical_alignment="bottom")
+    start_number = sequence_controls.number_input(
+        "Starting sequence",
+        min_value=1,
+        max_value=9999,
+        value=int(pitch_address_suggestion["next_number"]),
+        step=1,
+        key=f"yamazumi_range_start_{surface}_{project_id}_{area_id}",
+    )
+    stop_number = sequence_controls.number_input(
+        "Ending sequence",
+        min_value=1,
+        max_value=9999,
+        value=int(pitch_address_suggestion["next_number"]),
+        step=1,
+        key=f"yamazumi_range_stop_{surface}_{project_id}_{area_id}",
+    )
+    number_mode = sequence_controls.selectbox(
+        "Numbers to create",
+        ["All numbers", "Odd only", "Even only"],
+        key=f"yamazumi_range_mode_{surface}_{project_id}_{area_id}",
+    )
+    detail_controls = st.container(horizontal=True, vertical_alignment="bottom")
+    generated_status = detail_controls.selectbox(
         "Starting status",
         ["Active", "Open", "Blocked"],
         help="Open and Blocked addresses cannot receive work until changed to Active.",
+        key=f"yamazumi_range_status_{surface}_{project_id}_{area_id}",
     )
-    generated_pitch_type = range_controls.selectbox("Pitch type", PITCH_TYPES, index=0)
+    available_pitch_types = (
+        PITCH_TYPES
+        if not pitches.empty
+        else ["Pitch", "Waterspider", "Repacker"]
+    )
+    generated_pitch_type = detail_controls.selectbox(
+        "Pitch type",
+        available_pitch_types,
+        key=f"yamazumi_range_type_{surface}_{project_id}_{area_id}",
+    )
+    if pitches.empty:
+        st.caption(
+            "Create a receiving pitch first. Subassembly and Kitter become available "
+            "after this area has a valid feed target."
+        )
     generated_feed_target_id = None
     if generated_pitch_type in {"Subassembly", "Kitter"}:
         generated_feed_target_id = feed_target_picker(
             "Feeds into pitch",
             source_pitch_id=None,
             current_target_id=None,
-            key=f"generated_feed_target_{scenario_id}_{area_id}",
+            key=f"generated_feed_target_{surface}_{scenario_id}_{area_id}",
         )
     generated_variants = st.multiselect(
         "Model variants shown on generated pitches",
         options=variant_options,
         default=["Base"],
         help="Every generated pitch starts with these visible variant stacks.",
+        key=f"yamazumi_range_variants_{surface}_{project_id}_{area_id}",
     )
-    if range_controls.button("Generate pitches", type="primary", icon=":material/add:"):
-        try:
-            before_generated_ids = set(pitches["id"].astype(str))
-            created = generate_yamazumi_pitch_range(
-                project_id, area_id, first_pitch, last_pitch, number_mode, generated_status, generated_variants,
-                generated_pitch_type,
-                generated_feed_target_id,
+    try:
+        preview_first = format_yamazumi_pitch_address(
+            line_code, section_code, start_number
+        )
+        preview_last = format_yamazumi_pitch_address(
+            line_code, section_code, stop_number
+        )
+        st.caption(f"Preview: {preview_first} through {preview_last}")
+    except ValueError:
+        preview_first = preview_last = ""
+    address_controls = st.container(horizontal=True, vertical_alignment="bottom")
+    first_pitch = address_controls.text_input(
+        "First pitch address",
+        value=preview_first,
+        help="Prefilled from the naming suggestion and editable before generation.",
+        key=(
+            f"yamazumi_first_address_{surface}_{project_id}_{area_id}_"
+            f"{line_code}_{section_code}_{start_number}"
+        ),
+    )
+    last_pitch = address_controls.text_input(
+        "Last pitch address",
+        value=preview_last,
+        help="Uses the same editable prefix and an inclusive ending number.",
+        key=(
+            f"yamazumi_last_address_{surface}_{project_id}_{area_id}_"
+            f"{line_code}_{section_code}_{stop_number}"
+        ),
+    )
+
+    if not st.button(
+        "Generate pitches",
+        type="primary",
+        icon=":material/add:",
+        key=f"generate_yamazumi_range_{surface}_{project_id}_{area_id}",
+    ):
+        return False
+    try:
+        normalized_line_code = normalize_yamazumi_line_code(line_code)
+        normalize_yamazumi_section_code(section_code)
+        before_generated_ids = set(pitches["id"].astype(str))
+        created, skipped_addresses = generate_yamazumi_pitch_range(
+            project_id,
+            area_id,
+            first_pitch,
+            last_pitch,
+            number_mode,
+            generated_status,
+            generated_variants,
+            generated_pitch_type,
+            generated_feed_target_id,
+            project_line_code=normalized_line_code,
+        )
+        generated_rows = yamazumi_pitches(project_id, area_id)
+        generated_rows = generated_rows.loc[
+            ~generated_rows["id"].astype(str).isin(before_generated_ids)
+        ]
+        feed_relationship_changes = [
+            {
+                "source_pitch_id": str(row["id"]),
+                "source_pitch_address": str(row["pitch_number"]),
+                "old_feeds_into_pitch_id": None,
+                "old_feed_target": None,
+                "new_feeds_into_pitch_id": generated_feed_target_id,
+                "new_feed_target": feed_target_label_by_id.get(
+                    str(generated_feed_target_id), ""
+                ),
+            }
+            for _, row in generated_rows.iterrows()
+            if generated_feed_target_id
+        ]
+        old_line_code = pitch_address_suggestion["line_code"]
+        record_audit_event(
+            project_id,
+            "Yamazumi pitches",
+            "Generate range",
+            created,
+            st.session_state.get("current_editor", ""),
+            {
+                "area_id": area_id,
+                "first": first_pitch,
+                "last": last_pitch,
+                "number_mode": number_mode,
+                "status": generated_status,
+                "pitch_type": generated_pitch_type,
+                "variants": generated_variants,
+                "old_project_line_code": old_line_code,
+                "new_project_line_code": normalized_line_code,
+                "skipped_addresses": skipped_addresses,
+                "new_feeds_into_pitch_id": generated_feed_target_id,
+                "new_feed_target": feed_target_label_by_id.get(
+                    str(generated_feed_target_id), ""
+                ),
+                "feed_relationship_changes": feed_relationship_changes,
+            },
+        )
+        result_message = f"Generated {created} new pitch addresses"
+        if skipped_addresses:
+            result_message += (
+                f"; skipped {len(skipped_addresses)} existing address(es)"
             )
-            generated_rows = yamazumi_pitches(project_id, area_id)
-            generated_rows = generated_rows.loc[
-                ~generated_rows["id"].astype(str).isin(before_generated_ids)
-            ]
-            feed_relationship_changes = [
-                {
-                    "source_pitch_id": str(row["id"]),
-                    "source_pitch_address": str(row["pitch_number"]),
-                    "old_feeds_into_pitch_id": None,
-                    "old_feed_target": None,
-                    "new_feeds_into_pitch_id": generated_feed_target_id,
-                    "new_feed_target": feed_target_label_by_id.get(
-                        str(generated_feed_target_id), ""
-                    ),
-                }
-                for _, row in generated_rows.iterrows()
-                if generated_feed_target_id
-            ]
-            record_audit_event(
-                project_id, "Yamazumi pitches", "Generate range", created,
-                st.session_state.get("current_editor", ""),
-                {
-                    "first": first_pitch,
-                    "last": last_pitch,
-                    "number_mode": number_mode,
-                    "status": generated_status,
-                    "pitch_type": generated_pitch_type,
-                    "variants": generated_variants,
-                    "new_feeds_into_pitch_id": generated_feed_target_id,
-                    "new_feed_target": feed_target_label_by_id.get(
-                        str(generated_feed_target_id), ""
-                    ),
-                    "feed_relationship_changes": feed_relationship_changes,
-                },
-            )
-            st.toast(f"Generated {created} new pitch addresses", icon=":material/check_circle:")
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
+        st.toast(result_message, icon=":material/check_circle:")
+        return True
+    except ValueError as exc:
+        st.error(str(exc))
+        return False
+
+
+@st.dialog("Set up pitch addresses", dismissible=False)
+def empty_pitch_setup_dialog() -> None:
+    st.write("This Yamazumi area has no pitch addresses yet.")
+    if pitch_range_controls("empty_dialog"):
+        st.session_state.pop(empty_pitch_dialog_key, None)
+        request_table_editor_reset(pitch_editor_key)
+        st.rerun()
+    if st.button(
+        "Cancel",
+        key=f"cancel_empty_pitch_setup_{project_id}_{scenario_id}_{area_id}",
+    ):
+        st.session_state.pop(empty_pitch_dialog_key, None)
+        st.rerun()
+
+
+setup_columns = st.columns(3)
+with setup_columns[0].expander(
+    "Generate pitch addresses",
+    icon=":material/format_list_numbered:",
+    expanded=pitches.empty,
+):
+    if pitch_range_controls("expander"):
+        request_table_editor_reset(pitch_editor_key)
+        st.rerun()
 
 with setup_columns[1].expander("Define work regions", icon=":material/category:"):
     st.caption(
@@ -969,12 +1254,16 @@ pitch_totals = elements.assign(time_s=times).groupby("pitch_number", dropna=True
 bottleneck = str(pitch_totals.idxmax()) if not pitch_totals.empty else "—"
 
 metrics = st.container(horizontal=True)
-metrics.metric("Total work content", f"{total_work:.1f} s", border=True)
+metrics.metric(
+    "Total work content",
+    format_seconds(total_work, yamazumi_time_unit),
+    border=True,
+)
 metrics.metric("Theoretical operators", f"{theoretical:.2f}", border=True)
 metrics.metric("Active pitches / operators", active_pitch_count, border=True)
 metrics.metric("Line balance efficiency", f"{efficiency:.1f}%", border=True)
 metrics.metric("Bottleneck pitch", bottleneck, border=True)
-metrics.metric("Takt", f"{takt:.1f} s", border=True)
+metrics.metric("Takt", format_seconds(takt, yamazumi_time_unit), border=True)
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
@@ -988,6 +1277,7 @@ edit_element_dialog_key = f"yamazumi_edit_element_target_{project_id}_{area_id}"
 def close_other_yamazumi_dialogs(keep: str) -> None:
     """Guarantee that only one Streamlit dialog is eligible in a script run."""
     for dialog_key in (
+        empty_pitch_dialog_key,
         add_pitch_dialog_key,
         add_element_dialog_key,
         edit_pitch_dialog_key,
@@ -1066,7 +1356,13 @@ def handle_edit_element_request() -> None:
 @st.dialog("Add pitch")
 def add_pitch_dialog() -> None:
     st.caption("The new address will appear on the north/top or south/bottom side based on its ending number.")
-    pitch_number = st.text_input("Pitch address", placeholder="01-ML1-001")
+    pitch_number = st.text_input(
+        "Pitch address",
+        value=pitch_address_suggestion["suggested_address"],
+        placeholder="01-ML1-001",
+        help="Must be unique across every Yamazumi area in this planning scenario. Capitalization and surrounding spaces do not create a different address.",
+        key=f"add_pitch_number_{project_id}_{scenario_id}_{area_id}",
+    )
     pitch_name = st.text_input("Pitch name")
     status = st.selectbox("Status", ["Active", "Open", "Blocked"], index=0)
     pitch_type = st.selectbox("Pitch type", PITCH_TYPES, index=0)
@@ -1123,7 +1419,13 @@ def add_element_dialog() -> None:
     target_pitch_id = target.get("pitch_id")
     st.caption(f"Destination: {target.get('pitch_number') or 'Unassigned'}")
     description = st.text_area("Work description", placeholder="Describe one measurable element of work")
-    time_s = st.number_input("Time to complete (seconds)", min_value=0.0, value=0.0, step=0.1)
+    time_value = st.number_input(
+        f"Time to complete ({time_config.label.lower()})",
+        min_value=0.0,
+        value=0.0,
+        step=time_config.step,
+        format=f"%.{time_config.decimals}f",
+    )
     row = st.container(horizontal=True, vertical_alignment="bottom")
     work_type = row.selectbox("Work type", WORK_TYPES, index=0)
     work_region = row.selectbox("Work region", work_region_options, index=0)
@@ -1156,7 +1458,7 @@ def add_element_dialog() -> None:
                 target_pitch_id,
                 {
                     "description": description,
-                    "time_s": time_s,
+                    "time_s": display_to_seconds(time_value, yamazumi_time_unit),
                     "model_variants": model_variants,
                     "work_type": work_type,
                     "work_region": work_region,
@@ -1200,7 +1502,10 @@ def edit_pitch_dialog() -> None:
     current = matches.iloc[0]
     current_variants = list(current.get("model_variants") or ["Base"])
     pitch_number = st.text_input(
-        "Pitch address", value=str(current.get("pitch_number") or ""), key=f"edit_pitch_number_{pitch_id}"
+        "Pitch address",
+        value=str(current.get("pitch_number") or ""),
+        help="Must be unique across every Yamazumi area in this planning scenario. Capitalization and surrounding spaces do not create a different address.",
+        key=f"edit_pitch_number_{pitch_id}",
     )
     pitch_name = st.text_input(
         "Pitch name", value=str(current.get("pitch_name") or ""), key=f"edit_pitch_name_{pitch_id}"
@@ -1302,8 +1607,14 @@ def edit_element_dialog(element_id: str) -> None:
             format_func=lambda value: "Unassigned" if value is None else pitch_label_by_id[value],
         )
         description = st.text_area("Work description", value=str(current.get("description") or ""))
-        time_s = st.number_input(
-            "Time to complete (seconds)", min_value=0.0, value=float(current.get("time_s") or 0), step=0.1
+        time_value = st.number_input(
+            f"Time to complete ({time_config.label.lower()})",
+            min_value=0.0,
+            value=seconds_to_display(
+                current.get("time_s") or 0, yamazumi_time_unit
+            ),
+            step=time_config.step,
+            format=f"%.{time_config.decimals}f",
         )
         current_variants = list(current.get("model_variants") or ["Base"])
         available_variants = list(dict.fromkeys([*variant_options, *current_variants]))
@@ -1337,7 +1648,9 @@ def edit_element_dialog(element_id: str) -> None:
                 project_id, area_id, str(element_id),
                 {
                     "pitch_id": selected_pitch_id, "model_variants": model_variants, "work_type": work_type,
-                    "description": description, "time_s": time_s, "work_region": work_region, "flags": flags,
+                    "description": description,
+                    "time_s": display_to_seconds(time_value, yamazumi_time_unit),
+                    "work_region": work_region, "flags": flags,
                 },
             )
             record_audit_event(
@@ -1362,7 +1675,9 @@ if len(defined_variant_options) == 1:
         "Only Base is available. Add active feature definitions and allowed choices on Model Definitions to create additional Yamazumi variants."
     )
 st.caption(
-    "Drag work within or between pitch stacks. Order is measured outward from the assembly-flow centerline and remains a draft until Save & Refresh."
+    "Pitch stacks follow Op ID pitch-address order, with Subassembly and Kitter "
+    "feeders immediately before the pitch they feed. Work order is measured outward "
+    "from the assembly-flow centerline and remains a draft until Save & Refresh."
 )
 persisted_board_elements = elements.to_dict("records")
 board_draft = st.session_state.get(board_draft_key)
@@ -1374,11 +1689,13 @@ board_elements = (
     apply_stack_draft_to_elements(persisted_board_elements, board_draft)
     if has_board_draft else persisted_board_elements
 )
+board_pitches = order_yamazumi_pitches_for_board(pitches)
 yamazumi_board(
-    pitches.to_dict("records"),
+    board_pitches.to_dict("records"),
     board_elements,
     variants,
     takt,
+    time_unit=yamazumi_time_unit,
     key=board_key,
     on_move=handle_yamazumi_move,
     on_add_pitch=handle_add_pitch_request,
@@ -1428,7 +1745,10 @@ if board_actions.save_and_refresh:
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
-if st.session_state.get(add_pitch_dialog_key):
+if st.session_state.get(empty_pitch_dialog_key):
+    close_other_yamazumi_dialogs(empty_pitch_dialog_key)
+    empty_pitch_setup_dialog()
+elif st.session_state.get(add_pitch_dialog_key):
     add_pitch_dialog()
 elif st.session_state.get(add_element_dialog_key):
     add_element_dialog()
@@ -1593,7 +1913,11 @@ pitch_column_order = [
 pitch_column_config = {
     "id": None,
     "area_name": st.column_config.TextColumn("Yamazumi area"),
-    "pitch_number": st.column_config.TextColumn("Pitch address", required=True, help="Use the physical line address/nomenclature."),
+    "pitch_number": st.column_config.TextColumn(
+        "Pitch address",
+        required=True,
+        help="Use the physical line address/nomenclature. It must be unique across every Yamazumi area in this planning scenario; capitalization and surrounding spaces are ignored when checking duplicates.",
+    ),
     "pitch_name": st.column_config.TextColumn("Pitch name"),
     "pitch_type": st.column_config.SelectboxColumn("Pitch type", options=PITCH_TYPES, required=True, default="Pitch"),
     "status": st.column_config.SelectboxColumn("Status", options=["Active", "Blocked", "Open"], required=True, default="Active"),
@@ -1861,6 +2185,10 @@ else:
         element_rows["pitch"] = element_rows["pitch_id"].apply(
             lambda value: pitch_label_by_id.get(str(value), "Unassigned") if value is not None and not pd.isna(value) else "Unassigned"
         )
+element_rows["time_s"] = (
+    pd.to_numeric(element_rows["time_s"], errors="coerce")
+    / time_config.seconds_per_unit
+)
 element_filter_scope = "combined" if element_combined_view else str(area_id)
 visible_elements = filter_table(
     element_rows,
@@ -1894,7 +2222,13 @@ element_column_config = {
     ),
     "work_type": st.column_config.SelectboxColumn("Work type", options=WORK_TYPES, required=True, default="Cycle"),
     "description": st.column_config.TextColumn("Work description", required=True, width="large"),
-    "time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f", required=True),
+    "time_s": st.column_config.NumberColumn(
+        time_column_label,
+        min_value=0.0,
+        step=time_config.step,
+        format=f"%.{time_config.decimals}f",
+        required=True,
+    ),
     "work_region": st.column_config.SelectboxColumn(
         "Work region", options=work_region_options, required=True, default="None"
     ),
@@ -1943,7 +2277,8 @@ else:
         labels={
             "area_name": "Yamazumi area", "model_variants": "Model variants",
             "work_type": "Work type", "description": "Work description",
-            "time_s": "Time (s)", "work_region": "Work region", "sequence": "Order",
+            "time_s": time_column_label,
+            "work_region": "Work region", "sequence": "Order",
         },
     )
     edited_elements = st.data_editor(
@@ -2014,7 +2349,9 @@ else:
 st.download_button(
     "Export filtered work elements",
     data=dataframe_to_excel(
-        visible_elements.drop(
+        visible_elements.rename(
+            columns={"time_s": time_column_label}
+        ).drop(
             columns=["id", "pitch_id", "process_element_id", "updated_at"],
             errors="ignore",
         ),
@@ -2053,6 +2390,7 @@ if not element_combined_view and element_actions.save_and_refresh:
         if invalid_variant_rows.any():
             raise ValueError("A work element uses model variants that are not enabled for its selected pitch.")
         to_save = to_save.drop(columns=["pitch"], errors="ignore")
+        to_save = element_times_to_seconds(to_save)
         count = replace_yamazumi_elements(project_id, area_id, to_save)
         record_audit_event(project_id, "Yamazumi elements", "Save & Refresh", count, st.session_state.get("current_editor", ""))
         request_table_editor_reset(element_editor_key)
@@ -2120,7 +2458,8 @@ def prepared_element_rows(
         raise ValueError(
             "A work element uses model variants that are not enabled for its selected pitch."
         )
-    return to_save.drop(columns=["pitch"], errors="ignore")
+    to_save = to_save.drop(columns=["pitch"], errors="ignore")
+    return element_times_to_seconds(to_save)
 
 
 pending_pitch_delete = st.session_state.get(pitch_delete_key)

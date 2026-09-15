@@ -125,7 +125,7 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 
 ### Process planning
 
-- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. It supports scenario branching, takt, work regions, flags, model-variant stacks, and visual work balancing.
+- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. Empty areas open a guided range dialog using the saved project line code and an editable Fishbone-derived section abbreviation; these are suggestions and never rename legacy addresses. Pitch addresses are trimmed and case-insensitively unique across all areas in that scenario, while alternative scenarios may reuse the same physical addresses. Each scenario saves a Yamazumi display/input unit of Seconds, Minutes, or Hours while all timing data remains stored in seconds; board labels, editors, metrics, and workbook time values follow that selection. Its board follows numeric-aware Op ID pitch-address order, places Subassembly/Kitter feeder chains immediately before their receiving pitch, and hides the Unassigned lane when it contains no work. It supports scenario branching, takt, work regions, flags, model-variant stacks, and visual work balancing.
 - **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, and orders it by pitch. Its former tabbed Details dialog and workload summary/chart have been removed; the underlying saved detail fields remain intact, and a redesigned Details/summary view is planned for Phase 3 but is not yet implemented.
 - **Pin Map** derives a scenario-specific read-only line view from existing pitches, Yamazumi elements, and explicitly linked Process work. It stores no separate layout data.
 
@@ -152,7 +152,7 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 - **Pitch** — A physical work position or address. Odd addresses render north/top and even addresses south/bottom on the visual board.
 - **Pitch type** — Pitch, Waterspider, Subassembly, Kitter, or Repacker.
 - **Pitch status** — Active pitches accept work; Open and Blocked pitches remain visible but cannot receive work.
-- **Takt time** — Target seconds available per completed unit based on demand.
+- **Takt time** — Target time available per completed unit based on demand. Yamazumi may present it in the scenario's saved Seconds, Minutes, or Hours unit; canonical storage remains seconds.
 - **Planning scenario** — A named branch of Yamazumi and Process data with its own revision, takt, and lineage.
 - **Model** — An official product/model number. A separate common name can change without replacing the stable identifier.
 - **Complexity feature** — A manufacturing-relevant product characteristic with controlled choices.
