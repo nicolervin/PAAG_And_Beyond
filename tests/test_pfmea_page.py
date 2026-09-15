@@ -24,16 +24,20 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         )
         self.assertNotIn("Safety", pfmea_ui.PFMEA_CLASSIFICATIONS)
 
+    def test_legacy_classification_is_retained_internally_but_not_presented(self) -> None:
+        self.assertIn("legacy_classification", pfmea_ui.PFMEA_FLAT_COLUMNS)
+        self.assertNotIn("legacy_classification", pfmea_ui.PFMEA_VISIBLE_COLUMNS)
+
     @staticmethod
     def _process_steps() -> tuple[pd.DataFrame, dict[str, pd.Series]]:
         steps = pd.DataFrame(
             [
                 {"id": "step-1", "work_element": "Load housing", "pitch": "ST-010",
-                 "sequence": 10},
+                 "sequence": 10, "op_id": "M1.01-MAIN.1", "op_sort_order": 0},
                 {"id": "step-2", "work_element": "Install bracket", "pitch": "ST-010",
-                 "sequence": 20},
+                 "sequence": 20, "op_id": "M1.01-MAIN.2", "op_sort_order": 1},
                 {"id": "step-3", "work_element": "Verify assembly", "pitch": "ST-020",
-                 "sequence": 30},
+                 "sequence": 30, "op_id": "M1.02-MAIN.1", "op_sort_order": 2},
             ]
         )
         return steps, {str(row["id"]): row for _, row in steps.iterrows()}
@@ -42,11 +46,11 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         _, step_by_id = self._process_steps()
         self.assertEqual(
             pfmea_ui._process_step_option_label(step_by_id["step-1"]),
-            "Load housing — ST-010 — Seq 10",
+            "M1.01-MAIN.1 — Load housing",
         )
         self.assertEqual(
             pfmea_ui._process_step_option_label(step_by_id["step-2"]),
-            "Install bracket — ST-010 — Seq 20",
+            "M1.01-MAIN.2 — Install bracket",
         )
 
         original = pd.DataFrame(
@@ -99,7 +103,39 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         )
         request_reset.assert_called_once_with("editor")
 
-    def test_pfmea_control_columns_are_native_editable_multiselects(self) -> None:
+    def test_process_function_labels_distinguish_identical_work_element_names(self) -> None:
+        first = {
+            "id": "hidden-step-1",
+            "op_id": "M1.01-MAIN.2",
+            "work_element": "Install bracket",
+        }
+        second = {
+            "id": "hidden-step-2",
+            "op_id": "M1.01-MAIN.10",
+            "work_element": "Install bracket",
+        }
+
+        first_label = pfmea_ui._process_step_option_label(first)
+        second_label = pfmea_ui._process_step_option_label(second)
+
+        self.assertEqual(first_label, "M1.01-MAIN.2 — Install bracket")
+        self.assertEqual(second_label, "M1.01-MAIN.10 — Install bracket")
+        self.assertNotEqual(first_label, second_label)
+        self.assertNotIn("hidden-step-1", first_label)
+        self.assertNotIn("hidden-step-2", second_label)
+
+    def test_incomplete_op_id_remains_a_friendly_selectable_label(self) -> None:
+        step = {
+            "id": "hidden-step",
+            "op_id": "Fishbone link required",
+            "work_element": "Install bracket",
+        }
+        self.assertEqual(
+            pfmea_ui._process_step_option_label(step),
+            "Fishbone link required — Install bracket",
+        )
+
+    def test_pfmea_control_columns_are_read_only_multiselect_tags(self) -> None:
         source = inspect.getsource(pfmea_ui._render_flat_pfmea_table)
         prevention = source.split('"prevention_controls": st.column_config.MultiselectColumn(', 1)[1]
         prevention = prevention.split('"detection_controls": st.column_config.MultiselectColumn(', 1)[0]
@@ -107,9 +143,67 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         detection = detection.split('"rpn": st.column_config.NumberColumn', 1)[0]
         for configuration in (prevention, detection):
             self.assertIn("accept_new_options=False", configuration)
-            self.assertNotIn("disabled=True", configuration)
+            self.assertIn("disabled=True", configuration)
         self.assertIn("options=list(prevention_labels)", prevention)
         self.assertIn("options=list(detection_labels)", detection)
+        self.assertLess(
+            source.index("_render_control_selection_panel("),
+            source.index("edited = st.data_editor("),
+        )
+        self.assertFalse(hasattr(pfmea_ui, "_render_control_copy_workflow"))
+
+    def test_control_only_editor_change_does_not_reset_the_editor(self) -> None:
+        _, step_by_id = self._process_steps()
+        row = pd.DataFrame([{
+                "id": "line-1", "cause_id": "cause-1",
+                "work_element_id": "step-1", "prevention_controls": [],
+            }])
+        state = {
+            "editor": {
+                "edited_rows": {0: {"prevention_controls": ["manual:new"]}},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+        }
+        with (
+            patch.object(pfmea_ui.st, "session_state", state),
+            patch.object(pfmea_ui, "request_table_editor_reset") as request_reset,
+        ):
+            pfmea_ui._stage_pfmea_process_selection(
+                "editor", "draft", row, row, row, step_by_id
+            )
+        request_reset.assert_not_called()
+        self.assertNotIn("draft", state)
+
+    def test_above_table_panel_preserves_grid_edits_and_ignores_delete_intent(self) -> None:
+        _, step_by_id = self._process_steps()
+        rows = pd.DataFrame(
+            [
+                {
+                    "id": "line-1", "entry_id": "entry-1", "cause_id": "cause-1",
+                    "work_element_id": "step-1", "item_number": "ST-010",
+                    "process_function": "step-1", "potential_failure_mode": "Old",
+                    "potential_effects": "", "potential_causes": "Cause",
+                },
+                {
+                    "id": "line-2", "entry_id": "entry-2", "cause_id": "cause-2",
+                    "work_element_id": "step-2", "item_number": "ST-010",
+                    "process_function": "step-2", "potential_failure_mode": "Keep",
+                    "potential_effects": "", "potential_causes": "Cause 2",
+                },
+            ]
+        )
+        editor_state = {
+            "edited_rows": {0: {"potential_failure_mode": "Unsaved edit"}},
+            "added_rows": [],
+            "deleted_rows": [1],
+        }
+        panel_rows = pfmea_ui._pfmea_panel_rows_from_editor_state(
+            rows, rows, rows, editor_state, step_by_id
+        )
+        self.assertEqual(len(panel_rows), 2)
+        self.assertEqual(panel_rows.iloc[0]["potential_failure_mode"], "Unsaved edit")
+        self.assertEqual(panel_rows.iloc[1]["potential_failure_mode"], "Keep")
 
     def test_pfmea_delete_staging_preserves_multi_row_labels_and_parent_ids(self) -> None:
         selected = pd.DataFrame(
@@ -455,7 +549,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             "Unassigned — Unnamed Process Function — Blank Failure Mode — Blank Cause",
         )
 
-    def test_copy_and_duplicate_selectors_keep_hidden_keys_and_use_friendly_labels(self) -> None:
+    def test_control_clipboard_and_duplicate_selector_keep_hidden_keys(self) -> None:
         _, step_by_id = self._process_steps()
         rows = pd.DataFrame(
             [
@@ -476,12 +570,29 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                     "process_function": "Install bracket",
                     "potential_failure_mode": "Source failure",
                     "potential_causes": "Source cause",
+                    "prevention_controls": ["manual:p-2", "quality:q-1"],
+                    "detection_controls": ["manual:d-1"],
                 },
             ]
         )
-        targets = {
-            pfmea_ui._cause_target_key(row): row for _, row in rows.iterrows()
-        }
+        clipboard = pfmea_ui._control_clipboard_snapshot(
+            rows.iloc[1],
+            source_key="cause:cause-source",
+            source_label=pfmea_ui._pfmea_line_label(rows.iloc[1], step_by_id),
+            columns=["prevention_controls", "detection_controls"],
+        )
+        self.assertEqual(clipboard["source_key"], "cause:cause-source")
+        self.assertEqual(
+            clipboard["source_label"],
+            "ST-010 — Install bracket — Source failure — Source cause",
+        )
+        self.assertEqual(
+            clipboard["values"]["prevention_controls"],
+            ["manual:p-2", "quality:q-1"],
+        )
+        self.assertEqual(
+            clipboard["values"]["detection_controls"], ["manual:d-1"]
+        )
         captured: dict[str, dict[str, object]] = {}
 
         def selectbox(label, options, format_func=None, **_kwargs):
@@ -494,35 +605,15 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             return selected
 
         with (
-            patch.object(pfmea_ui.st, "expander", return_value=MagicMock()),
             patch.object(pfmea_ui.st, "container", return_value=MagicMock()),
             patch.object(pfmea_ui.st, "subheader"),
             patch.object(pfmea_ui.st, "selectbox", side_effect=selectbox),
-            patch.object(pfmea_ui.st, "multiselect", return_value=[]),
             patch.object(pfmea_ui.st, "button", return_value=False),
-            patch.object(pfmea_ui, "_control_label_map", return_value={}),
         ):
-            pfmea_ui._render_control_copy_workflow(
-                "project",
-                "scenario",
-                targets,
-                "cause:cause-target",
-                rows,
-                "draft",
-                "editor",
-                step_by_id,
-            )
             pfmea_ui._render_pfmea_duplicate_workflow(
                 "project", "scenario", rows, "draft", "editor", step_by_id
             )
 
-        self.assertEqual(
-            captured["Source PFMEA Cause"]["options"], ["cause:cause-source"]
-        )
-        self.assertEqual(
-            captured["Source PFMEA Cause"]["display"],
-            "ST-010 — Install bracket — Source failure — Source cause",
-        )
         self.assertEqual(
             captured["PFMEA line to duplicate"]["options"],
             ["saved:line-target", "saved:line-source"],
@@ -736,13 +827,16 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             "_valid_controls_for_step",
             return_value=(["quality:q-1", "manual:new"], []),
         ):
-            updated, pending, warnings, instructions, conflicts = (
-                pfmea_ui._apply_control_cell_edits(
+            updated, pending, warnings, instructions = (
+                pfmea_ui._apply_control_clipboard(
                     base,
-                    normalized,
-                    normalized,
-                    base,
-                    state,
+                    "cause:cause-1",
+                    {
+                        "columns": ["prevention_controls"],
+                        "values": {"prevention_controls": [
+                            "quality:q-1", "manual:new", "quality:q-1"
+                        ]},
+                    },
                     project_id="project",
                     scenario_id="scenario",
                     step_by_id=step_by_id,
@@ -754,7 +848,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             [["quality:q-1", "manual:new"], ["quality:q-1", "manual:new"]],
         )
         self.assertEqual(updated.iloc[2]["prevention_controls"], ["manual:other"])
-        self.assertEqual((pending, warnings, instructions, conflicts), ([], [], [], []))
+        self.assertEqual((pending, warnings, instructions), ([], [], []))
 
     def test_quality_mismatch_waits_for_compatible_only_confirmation(self) -> None:
         _, step_by_id = self._process_steps()
@@ -782,13 +876,16 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             "_valid_controls_for_step",
             return_value=(["manual:new"], ["quality:wrong-step"]),
         ):
-            updated, pending, warnings, instructions, conflicts = (
-                pfmea_ui._apply_control_cell_edits(
+            updated, pending, warnings, instructions = (
+                pfmea_ui._apply_control_clipboard(
                     base,
-                    normalized,
-                    normalized,
-                    base,
-                    state,
+                    "cause:cause-1",
+                    {
+                        "columns": ["prevention_controls"],
+                        "values": {"prevention_controls": [
+                            "quality:wrong-step", "manual:new"
+                        ]},
+                    },
                     project_id="project",
                     scenario_id="scenario",
                     step_by_id=step_by_id,
@@ -799,7 +896,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         self.assertEqual(pending[0]["replacement"], ["manual:new"])
         self.assertEqual(pending[0]["incompatible_labels"], ["Quality — Wrong step"])
         self.assertNotIn("quality:wrong-step", str(pending[0]["incompatible_labels"]))
-        self.assertEqual((warnings, instructions, conflicts), ([], [], []))
+        self.assertEqual((warnings, instructions), ([], []))
 
     def test_inactive_manual_control_is_omitted_without_dialog(self) -> None:
         _, step_by_id = self._process_steps()
@@ -826,13 +923,16 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             "_valid_controls_for_step",
             return_value=(["manual:active"], ["manual:inactive"]),
         ):
-            updated, pending, warnings, instructions, conflicts = (
-                pfmea_ui._apply_control_cell_edits(
+            updated, pending, warnings, instructions = (
+                pfmea_ui._apply_control_clipboard(
                     base,
-                    normalized,
-                    normalized,
-                    base,
-                    state,
+                    "cause:cause-1",
+                    {
+                        "columns": ["detection_controls"],
+                        "values": {"detection_controls": [
+                            "manual:active", "manual:inactive"
+                        ]},
+                    },
                     project_id="project",
                     scenario_id="scenario",
                     step_by_id=step_by_id,
@@ -844,7 +944,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         self.assertTrue(bool(updated.iloc[0]["detection_review_required"]))
         self.assertEqual(pending, [])
         self.assertIn("Manual — Retired check", warnings[0])
-        self.assertEqual((instructions, conflicts), ([], []))
+        self.assertEqual(instructions, [])
 
     def test_control_paste_without_process_function_leaves_target_unchanged(self) -> None:
         base = pfmea_ui._frame(
@@ -855,20 +955,14 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             }]),
             pfmea_ui.PFMEA_FLAT_COLUMNS,
         )
-        normalized = base.copy()
-        normalized.at[0, "prevention_controls"] = ["manual:new"]
-        state = {
-            "edited_rows": {0: {"prevention_controls": ["manual:new"]}},
-            "added_rows": [],
-            "deleted_rows": [],
-        }
-        updated, pending, warnings, instructions, conflicts = (
-            pfmea_ui._apply_control_cell_edits(
+        updated, pending, warnings, instructions = (
+            pfmea_ui._apply_control_clipboard(
                 base,
-                normalized,
-                normalized,
-                base,
-                state,
+                "draft:draft-1",
+                {
+                    "columns": ["prevention_controls"],
+                    "values": {"prevention_controls": ["manual:new"]},
+                },
                 project_id="project",
                 scenario_id="scenario",
                 step_by_id={},
@@ -877,7 +971,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         )
         self.assertEqual(updated.iloc[0]["prevention_controls"], [])
         self.assertIn("Choose Process Function", instructions[0])
-        self.assertEqual((pending, warnings, conflicts), ([], [], []))
+        self.assertEqual((pending, warnings), ([], []))
 
     def test_confirmed_compatible_paste_preserves_detection_rating(self) -> None:
         draft = pfmea_ui._frame(
@@ -1023,6 +1117,8 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                     "sequence": 10,
                     "pitch": "ST-010",
                     "work_element": "Install bracket",
+                    "op_id": "M1.01-MAIN.1",
+                    "op_sort_order": 0,
                     "description": "Install and secure the bracket",
                     "location": "LH front",
                     "status": "Draft",
@@ -1061,7 +1157,8 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                 "process_function": "Install bracket",
                 "potential_failure_mode": "Bracket is loose",
                 "potential_effects": "Bracket separates", "severity": 8,
-                "classification": "", "potential_causes": "Tool shuts off early",
+                "classification": "", "legacy_classification": "Critical Quality",
+                "potential_causes": "Tool shuts off early",
                 "occurrence": 3, "prevention_controls": [],
                 "detection_controls": [], "detection": 4,
                 "rpn": 96, "recommended_action": "", "responsibility_target": "",
@@ -1094,6 +1191,9 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                 columns=["source_key", "label", "active"]
             )),
             patch.object(pfmea_ui, "pfmea_control_options", return_value=pd.DataFrame()),
+            patch.object(
+                pfmea_ui, "_pfmea_export_bytes", return_value=b"workbook"
+            ) as export,
         ):
             app = AppTest.from_file(str(PAGE_PATH))
             app.session_state["project_id"] = "project-1"
@@ -1117,6 +1217,17 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                 high_risk_tables[0].iloc[0]["Process Function"],
                 pfmea_ui._process_step_option_label(steps.iloc[0]),
             )
+            line_items_editor = next(
+                widget
+                for widget in app.dataframe
+                if "potential_failure_mode" in widget.value.columns
+            )
+            self.assertNotIn(
+                "legacy_classification", line_items_editor.proto.column_order
+            )
+            exported_rows = export.call_args.args[0]
+            self.assertNotIn("Legacy Classification", exported_rows.columns)
+            self.assertNotIn("legacy_classification", exported_rows.columns)
             app.number_input[0].set_value(130).run(timeout=15)
 
         self.assertEqual(len(app.exception), 0)

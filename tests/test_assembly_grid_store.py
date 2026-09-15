@@ -147,6 +147,56 @@ class AssemblyGridStoreTests(unittest.TestCase):
         self.assertEqual(linked_part["source"], "Assembly grid")
         self.assertEqual(linked_part["model_applicability"], "GRID-MODEL-1")
 
+    def test_empty_categories_return_the_complete_typed_schema(self) -> None:
+        expected_columns = [
+            "id",
+            "project_id",
+            "section_id",
+            "ebom_name",
+            "display_name",
+            "root_number",
+            "is_top_level",
+            "installed_section_id",
+            "sequence",
+            "created_at",
+            "updated_at",
+            "section_name",
+            "installed_section_name",
+            "mapping_count",
+            "assembly_count",
+        ]
+        expected_dtypes = {
+            "id": "string",
+            "project_id": "string",
+            "section_id": "string",
+            "ebom_name": "string",
+            "display_name": "string",
+            "root_number": "string",
+            "is_top_level": "bool",
+            "installed_section_id": "string",
+            "sequence": "int64",
+            "created_at": "string",
+            "updated_at": "string",
+            "section_name": "string",
+            "installed_section_name": "string",
+            "mapping_count": "int64",
+            "assembly_count": "int64",
+        }
+
+        project_rows = store.assembly_grid_categories(self.project_id)
+        section_rows = store.assembly_grid_categories(
+            self.project_id, self.built_section_id
+        )
+
+        for rows in (project_rows, section_rows):
+            self.assertTrue(rows.empty)
+            self.assertEqual(rows.columns.tolist(), expected_columns)
+            self.assertEqual(
+                {column: str(dtype) for column, dtype in rows.dtypes.items()},
+                expected_dtypes,
+            )
+            self.assertTrue(rows["id"].empty)
+
     def test_top_level_packaged_unit_is_unique_protected_and_syncs_built_section(self) -> None:
         category_id = str(uuid4())
         saved = store.save_assembly_grid_sections(

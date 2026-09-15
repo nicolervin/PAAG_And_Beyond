@@ -110,7 +110,7 @@ PFMEA_FLAT_COLUMNS = {
 
 PFMEA_VISIBLE_COLUMNS = [
     "item_number", "process_function", "potential_failure_mode", "potential_effects",
-    "severity", "classification", "legacy_classification", "potential_causes", "occurrence",
+    "severity", "classification", "potential_causes", "occurrence",
     "prevention_controls", "detection_controls", "detection", "rpn",
     "recommended_action", "responsibility_target", "actions_taken",
     "resulting_severity", "resulting_occurrence", "resulting_detection", "resulting_rpn",
@@ -212,14 +212,9 @@ def _plain_text(value) -> str:
 
 def _process_step_option_label(step: dict | pd.Series) -> str:
     """Return the friendly PFMEA selector label without exposing the Process ID."""
+    op_id = _plain_text(step.get("op_id")) or "Yamazumi link required"
     work_element = _plain_text(step.get("work_element")) or "Unnamed Work Element"
-    pitch = _plain_text(step.get("pitch")) or "Unassigned"
-    sequence = step.get("sequence")
-    try:
-        sequence_label = str(int(float(sequence)))
-    except (TypeError, ValueError):
-        sequence_label = _plain_text(sequence) or "0"
-    return f"{work_element} — {pitch} — Seq {sequence_label}"
+    return f"{op_id} — {work_element}"
 
 
 def _resolve_process_step_id(
@@ -351,16 +346,6 @@ def _process_selection_changed_in_state(editor_state: dict) -> bool:
     )
 
 
-def _control_selection_changed_in_state(editor_state: dict) -> bool:
-    return any(
-        any(column in PFMEA_CONTROL_COLUMNS for column in (changes or {}))
-        for changes in (editor_state.get("edited_rows") or {}).values()
-    ) or any(
-        any(column in PFMEA_CONTROL_COLUMNS for column in (row or {}))
-        for row in (editor_state.get("added_rows") or [])
-    )
-
-
 def _stage_pfmea_process_selection(
     editor_key: str,
     draft_key: str,
@@ -376,8 +361,7 @@ def _stage_pfmea_process_selection(
     editor_state = st.session_state.get(editor_key, {}) or {}
     control_labels = control_labels or {}
     process_changed = _process_selection_changed_in_state(editor_state)
-    controls_changed = _control_selection_changed_in_state(editor_state)
-    if not process_changed and not controls_changed:
+    if not process_changed:
         return
     current = _editor_rows_from_state(editor_rows, editor_state)
     normalized, _, reassignment_attempted = _normalize_pfmea_process_selection(
@@ -458,71 +442,14 @@ def _stage_pfmea_process_selection(
             "Process Controls, Actions Taken, and resulting ratings. Use Duplicate PFMEA "
             "line when structured controls should be carried forward."
         )
-    if controls_changed:
-        merged, control_pending, warnings, instructions, conflicts = (
-            _apply_control_cell_edits(
-                rows,
-                merged,
-                normalized,
-                editor_rows,
-                editor_state,
-                project_id=project_id,
-                scenario_id=scenario_id,
-                step_by_id=step_by_id,
-                control_labels=control_labels,
+    if pasted_copy_ids:
+        pasted_mask = merged["draft_row_id"].map(_plain_text).isin(pasted_copy_ids)
+        for column in PFMEA_CONTROL_COLUMNS:
+            merged.loc[pasted_mask, column] = pd.Series(
+                [[] for _ in range(int(pasted_mask.sum()))],
+                index=merged.index[pasted_mask],
+                dtype="object",
             )
-        )
-        if control_pending and pending_changes:
-            control_pending = []
-            instructions.append(
-                "Finish or cancel the pending Process Function change, then paste the "
-                "affected controls again."
-            )
-        warning_key = _pfmea_copy_state_key(
-            "control_paste_warning", project_id, scenario_id
-        )
-        instruction_key = _pfmea_copy_state_key(
-            "control_paste_instruction", project_id, scenario_id
-        )
-        error_key = _pfmea_copy_state_key(
-            "control_paste_error", project_id, scenario_id
-        )
-        if warnings:
-            st.session_state[warning_key] = warnings
-        else:
-            st.session_state.pop(warning_key, None)
-        if instructions:
-            st.session_state[instruction_key] = instructions
-        else:
-            st.session_state.pop(instruction_key, None)
-        if conflicts:
-            st.session_state[error_key] = conflicts
-        else:
-            st.session_state.pop(error_key, None)
-        if control_pending and not st.session_state.get(PENDING_CONTROL_PASTE_KEY):
-            if pasted_copy_ids:
-                control_pending = [
-                    change
-                    for change in control_pending
-                    if change.get("target_key")
-                    not in {f"draft:{draft_id}" for draft_id in pasted_copy_ids}
-                ]
-        if pasted_copy_ids:
-            pasted_mask = merged["draft_row_id"].map(_plain_text).isin(pasted_copy_ids)
-            for column in PFMEA_CONTROL_COLUMNS:
-                merged.loc[pasted_mask, column] = pd.Series(
-                    [[] for _ in range(int(pasted_mask.sum()))],
-                    index=merged.index[pasted_mask],
-                    dtype="object",
-                )
-        if control_pending and not st.session_state.get(PENDING_CONTROL_PASTE_KEY):
-            st.session_state[PENDING_CONTROL_PASTE_KEY] = {
-                "project_id": project_id,
-                "scenario_id": scenario_id,
-                "draft_key": draft_key,
-                "editor_key": editor_key,
-                "changes": control_pending,
-            }
     st.session_state[draft_key] = merged
     if pending_changes and not st.session_state.get(PENDING_PROCESS_CHANGE_KEY):
         st.session_state[PENDING_PROCESS_CHANGE_KEY] = {
@@ -534,6 +461,7 @@ def _stage_pfmea_process_selection(
         }
     if reassignment_attempted:
         st.session_state[f"{draft_key}_locked_notice"] = True
+    _clear_control_clipboard(project_id, scenario_id)
     request_table_editor_reset(editor_key)
 
 
@@ -544,6 +472,34 @@ def _drop_untouched_rows(data: pd.DataFrame, identifying_columns: list[str]) -> 
         if column in normalized:
             normalized[column] = normalized[column].astype(object)
     return drop_untouched_new_rows(normalized, identifying_columns=identifying_columns)
+
+
+def _pfmea_panel_rows_from_editor_state(
+    rows: pd.DataFrame,
+    visible: pd.DataFrame,
+    editor_rows: pd.DataFrame,
+    editor_state: dict,
+    step_by_id: dict[str, dict | pd.Series],
+) -> pd.DataFrame:
+    """Include ordinary unsaved grid edits in the above-table control panel."""
+    state_without_delete_intent = dict(editor_state or {})
+    state_without_delete_intent["deleted_rows"] = []
+    current = _editor_rows_from_state(editor_rows, state_without_delete_intent)
+    normalized, _, _ = _normalize_pfmea_process_selection(
+        current, editor_rows, step_by_id
+    )
+    cleaned = _drop_untouched_rows(
+        normalized,
+        identifying_columns=[
+            "item_number", "potential_failure_mode", "potential_effects",
+            "potential_causes",
+        ],
+    )
+    complete = _merge_pfmea_filtered_edits(rows, visible, cleaned)
+    complete, _, _ = _propagate_shared_editor_changes(
+        complete, editor_rows, state_without_delete_intent
+    )
+    return complete
 
 
 def _pfmea_row_identity(row: pd.Series) -> str:
@@ -748,55 +704,6 @@ def _valid_controls_for_step(
     return kept, omitted
 
 
-def _control_editor_requests(
-    normalized_rows: pd.DataFrame,
-    editor_rows: pd.DataFrame,
-    editor_state: dict,
-) -> tuple[dict[tuple[str, str], dict], list[str]]:
-    """Collect one non-conflicting control replacement per Cause or draft row."""
-    raw_requests: dict[tuple[str, str], list[dict]] = {}
-
-    def collect(position: int, changes: dict) -> None:
-        if not 0 <= position < len(normalized_rows):
-            return
-        row = normalized_rows.iloc[position]
-        target_key = _cause_target_key(row)
-        if not target_key or target_key == "draft:":
-            return
-        for column, value in (changes or {}).items():
-            if column not in PFMEA_CONTROL_COLUMNS:
-                continue
-            raw_requests.setdefault((target_key, column), []).append(
-                {
-                    "row": row,
-                    "requested": _list_values(value),
-                }
-            )
-
-    for raw_position, changes in (editor_state.get("edited_rows") or {}).items():
-        try:
-            position = int(raw_position)
-        except (TypeError, ValueError):
-            continue
-        collect(position, changes or {})
-    for offset, changes in enumerate(editor_state.get("added_rows") or []):
-        collect(len(editor_rows) + offset, changes or {})
-
-    resolved: dict[tuple[str, str], dict] = {}
-    conflicts: list[str] = []
-    for key, requests in raw_requests.items():
-        distinct: list[list[str]] = []
-        for request in requests:
-            values = request["requested"]
-            if values not in distinct:
-                distinct.append(values)
-        if len(distinct) > 1:
-            conflicts.append(PFMEA_CONTROL_COLUMNS[key[1]])
-            continue
-        resolved[key] = requests[-1]
-    return resolved, sorted(set(conflicts))
-
-
 def _control_target_mask(rows: pd.DataFrame, target_key: str) -> pd.Series:
     return rows.apply(lambda row: _cause_target_key(row) == target_key, axis=1)
 
@@ -812,50 +719,67 @@ def _control_target_value(
     return _list_values(rows.loc[mask, column].iloc[0])
 
 
-def _apply_control_cell_edits(
-    base_rows: pd.DataFrame,
-    merged_rows: pd.DataFrame,
-    normalized_rows: pd.DataFrame,
-    editor_rows: pd.DataFrame,
-    editor_state: dict,
+def _control_clipboard_key(project_id: str, scenario_id: str) -> str:
+    return _pfmea_copy_state_key("control_clipboard", project_id, scenario_id)
+
+
+def _clear_control_clipboard(project_id: str, scenario_id: str) -> None:
+    st.session_state.pop(_control_clipboard_key(project_id, scenario_id), None)
+
+
+def _control_clipboard_snapshot(
+    row: pd.Series,
+    *,
+    source_key: str,
+    source_label: str,
+    columns: list[str],
+) -> dict:
+    """Capture ordered structured controls in browser-session state only."""
+    return {
+        "source_key": source_key,
+        "source_label": source_label,
+        "columns": [column for column in columns if column in PFMEA_CONTROL_COLUMNS],
+        "values": {
+            column: _list_values(row.get(column))
+            for column in columns
+            if column in PFMEA_CONTROL_COLUMNS
+        },
+    }
+
+
+def _apply_control_clipboard(
+    rows: pd.DataFrame,
+    target_key: str,
+    clipboard: dict,
     *,
     project_id: str,
     scenario_id: str,
     step_by_id: dict[str, dict | pd.Series],
     control_labels: dict[str, str],
-) -> tuple[pd.DataFrame, list[dict], list[str], list[str], list[str]]:
-    """Validate and stage native control-cell replacements without writing data."""
-    updated = merged_rows.copy()
-    requests, conflicts = _control_editor_requests(
-        normalized_rows, editor_rows, editor_state
-    )
-    if conflicts:
-        return updated, [], [], [], conflicts
+) -> tuple[pd.DataFrame, list[dict], list[str], list[str]]:
+    """Validate a panel clipboard and stage one Cause-level replacement."""
+    updated = rows.copy()
+    target_mask = _control_target_mask(rows, target_key)
+    if not bool(target_mask.any()):
+        return updated, [], [], ["The selected PFMEA Cause changed. Choose it again."]
+    target = rows.loc[target_mask].iloc[0]
+    work_element_id = _plain_text(target.get("work_element_id"))
+    line_label = _pfmea_line_label(target, step_by_id)
+    if not work_element_id:
+        return updated, [], [], [
+            f"Choose Process Function before pasting controls into {line_label}."
+        ]
 
-    pending: list[dict] = []
+    proposed: list[dict] = []
     warnings: list[str] = []
     instructions: list[str] = []
-    for (target_key, column), request in requests.items():
-        row = request["row"]
-        requested = _list_values(request["requested"])
-        original = _control_target_value(base_rows, target_key, column)
-        target_mask = _control_target_mask(updated, target_key)
-        if not bool(target_mask.any()):
+    has_quality_mismatch = False
+    for column in clipboard.get("columns") or []:
+        if column not in PFMEA_CONTROL_COLUMNS:
             continue
-        work_element_id = _plain_text(row.get("work_element_id"))
-        line_label = _pfmea_line_label(row, step_by_id)
-        if not work_element_id:
-            updated.loc[target_mask, column] = pd.Series(
-                [original] * int(target_mask.sum()),
-                index=updated.index[target_mask],
-                dtype="object",
-            )
-            instructions.append(
-                f"Choose Process Function before pasting controls into {line_label}."
-            )
-            continue
-
         control_type = PFMEA_CONTROL_COLUMNS[column]
+        requested = _list_values((clipboard.get("values") or {}).get(column))
+        original = _control_target_value(rows, target_key, column)
         try:
             compatible, omitted = _valid_controls_for_step(
                 project_id,
@@ -865,11 +789,6 @@ def _apply_control_cell_edits(
                 requested,
             )
         except ValueError:
-            updated.loc[target_mask, column] = pd.Series(
-                [original] * int(target_mask.sum()),
-                index=updated.index[target_mask],
-                dtype="object",
-            )
             instructions.append(
                 f"The Process Function or active scenario changed for {line_label}. "
                 "Refresh and paste the controls again."
@@ -889,31 +808,33 @@ def _apply_control_cell_edits(
                     for source_key in unavailable_manual
                 )
             )
+        # An intentionally copied empty list clears the target. If the source list was
+        # non-empty but nothing remains valid, preserve the target instead of clearing it.
+        replacement = compatible if compatible or not requested else original
+        has_quality_mismatch = has_quality_mismatch or bool(incompatible_quality)
+        proposed.append(
+            {
+                "target_key": target_key,
+                "column": column,
+                "control_type": control_type,
+                "line_label": line_label,
+                "original": original,
+                "replacement": replacement,
+                "incompatible_labels": [
+                    control_labels.get(source_key, "Linked Quality requirement")
+                    for source_key in incompatible_quality
+                ],
+            }
+        )
 
-        replacement = compatible
-        if incompatible_quality:
-            replacement = compatible if compatible else original
-            updated.loc[target_mask, column] = pd.Series(
-                [original] * int(target_mask.sum()),
-                index=updated.index[target_mask],
-                dtype="object",
-            )
-            pending.append(
-                {
-                    "target_key": target_key,
-                    "column": column,
-                    "control_type": control_type,
-                    "line_label": line_label,
-                    "original": original,
-                    "replacement": replacement,
-                    "incompatible_labels": [
-                        control_labels.get(source_key, "Linked Quality requirement")
-                        for source_key in incompatible_quality
-                    ],
-                }
-            )
-            continue
-
+    if instructions:
+        return updated, [], warnings, instructions
+    if has_quality_mismatch:
+        return updated, proposed, warnings, []
+    for change in proposed:
+        column = str(change["column"])
+        original = _list_values(change["original"])
+        replacement = _list_values(change["replacement"])
         updated.loc[target_mask, column] = pd.Series(
             [replacement] * int(target_mask.sum()),
             index=updated.index[target_mask],
@@ -921,7 +842,7 @@ def _apply_control_cell_edits(
         )
         if column == "detection_controls" and replacement != original:
             updated.loc[target_mask, "detection_review_required"] = True
-    return updated, pending, warnings, instructions, []
+    return updated, [], warnings, []
 
 
 def _duplicate_pfmea_line(
@@ -1083,6 +1004,7 @@ def _clear_pfmea_copy_state(project_id: str, scenario_id: str) -> None:
     for kind in (
         "force_new_drafts", "copy_notice", "shared_edit_notice", "shared_edit_error",
         "control_paste_warning", "control_paste_instruction", "control_paste_error",
+        "control_clipboard",
     ):
         st.session_state.pop(_pfmea_copy_state_key(kind, project_id, scenario_id), None)
     pending = st.session_state.get(PENDING_PROCESS_CHANGE_KEY) or {}
@@ -1394,6 +1316,8 @@ def _confirm_pfmea_control_paste() -> None:
                 updated.loc[target_mask, "detection_review_required"] = True
         st.session_state[draft_key] = updated
         st.session_state.pop(PENDING_CONTROL_PASTE_KEY, None)
+        _clear_control_clipboard(project_id, scenario_id)
+        _clear_control_picker_state(project_id, scenario_id)
         editor_key = str(pending.get("editor_key") or "")
         if editor_key:
             request_table_editor_reset(editor_key)
@@ -1590,7 +1514,7 @@ def _render_entries(project_id: str, scenario_id: str, work_element_id: str) -> 
                 help="Describe how this Process at a Glance step could fail to meet its requirements.",
             ),
             "class_code": st.column_config.TextColumn(
-                "Class", help="Enter the reviewed PFMEA classification. No value is inferred from Yamazumi flags."
+                "Class", help="Enter the reviewed PFMEA classification. No value is inferred from another page."
             ),
             "effect_count": st.column_config.NumberColumn("Potential Effects"),
             "cause_count": st.column_config.NumberColumn("Potential Causes"),
@@ -2099,93 +2023,6 @@ def _pfmea_line_label(
     )
 
 
-def _render_control_copy_workflow(
-    project_id: str,
-    scenario_id: str,
-    targets: dict[str, pd.Series],
-    target_key: str,
-    rows: pd.DataFrame,
-    draft_key: str,
-    editor_key: str,
-    step_by_id: dict[str, dict | pd.Series],
-) -> None:
-    sources = {key: row for key, row in targets.items() if key != target_key}
-    if not sources:
-        return
-    with st.expander("Copy controls from another PFMEA Cause"):
-        source_key = st.selectbox(
-            "Source PFMEA Cause",
-            options=list(sources),
-            format_func=lambda key: _pfmea_line_label(sources[key], step_by_id),
-            key=f"pfmea_control_copy_source_{project_id}_{scenario_id}_{target_key}",
-            help="Choose the PFMEA Cause whose Prevention or Detection selections you want to reuse.",
-        )
-        lists_to_copy = st.multiselect(
-            "Control lists to replace",
-            options=["Prevention", "Detection"],
-            default=["Prevention", "Detection"],
-            key=f"pfmea_control_copy_lists_{project_id}_{scenario_id}_{target_key}",
-            help="Only the chosen target lists are replaced. Other target controls remain unchanged.",
-        )
-        source = sources[source_key]
-        target = targets[target_key]
-        preview: dict[str, tuple[list[str], list[str]]] = {}
-        all_labels = _control_label_map(project_id, scenario_id, rows)
-        for control_type, column in (
-            ("Prevention", "prevention_controls"),
-            ("Detection", "detection_controls"),
-        ):
-            if control_type not in lists_to_copy:
-                continue
-            preview[control_type] = _valid_controls_for_step(
-                project_id,
-                scenario_id,
-                _plain_text(target.get("work_element_id")),
-                control_type,
-                _list_values(source.get(column)),
-            )
-        for control_type, (kept, omitted) in preview.items():
-            st.markdown(f"**{control_type} replacement**")
-            if kept:
-                for source_id in kept:
-                    st.write(f"- {all_labels.get(source_id, 'Unavailable control')}")
-            else:
-                st.caption("No valid controls will be copied to this list.")
-            if omitted:
-                st.warning(
-                    "These controls will be omitted because they are step-specific or inactive: "
-                    + "; ".join(
-                        all_labels.get(value, "Unavailable control") for value in omitted
-                    )
-                )
-        if st.button(
-            "Replace selected control lists",
-            icon=":material/content_copy:",
-            disabled=not bool(lists_to_copy),
-            key=f"pfmea_apply_control_copy_{project_id}_{scenario_id}_{target_key}",
-        ):
-            updated = rows.copy()
-            target_mask = updated.apply(
-                lambda row: _cause_target_key(row) == target_key, axis=1
-            )
-            for control_type, column in (
-                ("Prevention", "prevention_controls"),
-                ("Detection", "detection_controls"),
-            ):
-                if control_type not in preview:
-                    continue
-                replacement = list(preview[control_type][0])
-                updated.loc[target_mask, column] = pd.Series(
-                    [replacement] * int(target_mask.sum()),
-                    index=updated.index[target_mask],
-                    dtype="object",
-                )
-            st.session_state[draft_key] = updated
-            request_table_editor_reset(editor_key)
-            st.toast("Staged copied PFMEA controls", icon=":material/content_copy:")
-            st.rerun()
-
-
 def _render_control_selection_panel(
     project_id: str, scenario_id: str, rows: pd.DataFrame, draft_key: str, editor_key: str,
     step_by_id: dict[str, dict | pd.Series],
@@ -2195,66 +2032,198 @@ def _render_control_selection_panel(
         if _plain_text(row.get("work_element_id")):
             targets.setdefault(_cause_target_key(row), row)
     if not targets:
-        st.caption("Select a Process Function in a PFMEA line before choosing controls.")
+        with st.container(border=True):
+            st.subheader("Select Current Process Controls")
+            st.caption("Select a Process Function in a PFMEA line before choosing controls.")
         return rows
-    st.subheader("Select Current Process Controls")
-    target_key = st.selectbox(
-        "PFMEA Cause",
-        options=list(targets),
-        format_func=lambda key: " — ".join(
-            [
-                _plain_text(targets[key].get("item_number")) or "Unassigned",
-                _plain_text(
-                    step_by_id.get(_plain_text(targets[key].get("work_element_id")), {}).get("work_element")
-                ) or "Unnamed Process Function",
-                _plain_text(targets[key].get("potential_failure_mode")) or "Blank Failure Mode",
-                _plain_text(targets[key].get("potential_causes")) or "Blank Cause",
-            ]
-        ),
-        key=f"pfmea_control_cause_{project_id}_{scenario_id}",
-        help="Choose the saved or draft PFMEA Cause whose structured controls you want to edit.",
-    )
-    target = targets[target_key]
-    target_mask = rows.apply(lambda row: _cause_target_key(row) == target_key, axis=1)
-    updated = rows.copy()
-    changed = False
-    for control_type, column in (("Prevention", "prevention_controls"), ("Detection", "detection_controls")):
-        current = _list_values(target.get(column))
-        candidates = pfmea_control_candidates(
-            project_id, scenario_id, _plain_text(target.get("work_element_id")), control_type, current
+    with st.container(border=True):
+        st.subheader("Select Current Process Controls")
+        target_key = st.selectbox(
+            "PFMEA Cause",
+            options=list(targets),
+            format_func=lambda key: _pfmea_line_label(targets[key], step_by_id),
+            key=f"pfmea_control_cause_{project_id}_{scenario_id}",
+            help=(
+                "Choose the saved or draft PFMEA Cause whose structured controls you "
+                "want to edit or receive copied controls."
+            ),
         )
-        labels = {str(row["source_key"]): str(row["label"]) for _, row in candidates.iterrows()}
-        selected = st.multiselect(
-            f"{control_type} controls",
-            options=list(labels),
-            default=[value for value in current if value in labels],
-            format_func=lambda value, choices=labels: choices.get(value, value),
-            key=f"pfmea_{control_type.casefold()}_picker_{project_id}_{scenario_id}_{target_key}",
-            help=f"Choose linked published Quality requirements or project-wide manual {control_type} options.",
-        )
-        if selected != current:
-            updated.loc[target_mask, column] = pd.Series(
-                [list(selected)] * int(target_mask.sum()), index=updated.index[target_mask], dtype="object"
+        target = targets[target_key]
+        target_mask = _control_target_mask(rows, target_key)
+        updated = rows.copy()
+        changed = False
+        for control_type, column in (
+            ("Prevention", "prevention_controls"),
+            ("Detection", "detection_controls"),
+        ):
+            current = _list_values(target.get(column))
+            candidates = pfmea_control_candidates(
+                project_id,
+                scenario_id,
+                _plain_text(target.get("work_element_id")),
+                control_type,
+                current,
             )
-            changed = True
-    if changed:
-        st.session_state[draft_key] = updated
-        st.session_state.pop(
-            _pfmea_copy_state_key("control_paste_error", project_id, scenario_id),
+            labels = {
+                str(candidate["source_key"]): str(candidate["label"])
+                for _, candidate in candidates.iterrows()
+            }
+            selected = st.multiselect(
+                f"{control_type} controls",
+                options=list(labels),
+                default=[value for value in current if value in labels],
+                format_func=lambda value, choices=labels: choices.get(value, value),
+                key=(
+                    f"pfmea_{control_type.casefold()}_picker_"
+                    f"{project_id}_{scenario_id}_{target_key}"
+                ),
+                help=(
+                    "Choose linked published Quality requirements or project-wide "
+                    f"manual {control_type} options. Changes remain staged until "
+                    "Save & Refresh."
+                ),
+            )
+            if selected != current:
+                updated.loc[target_mask, column] = pd.Series(
+                    [list(selected)] * int(target_mask.sum()),
+                    index=updated.index[target_mask],
+                    dtype="object",
+                )
+                if column == "detection_controls":
+                    updated.loc[target_mask, "detection_review_required"] = True
+                changed = True
+        if changed:
+            st.session_state[draft_key] = updated
+            _clear_control_clipboard(project_id, scenario_id)
+            request_table_editor_reset(editor_key)
+            st.rerun()
+
+        source_label = _pfmea_line_label(target, step_by_id)
+        copy_actions = st.container(horizontal=True)
+        copied_columns: list[str] | None = None
+        if copy_actions.button(
+            "Copy Prevention",
+            icon=":material/content_copy:",
+            key=f"pfmea_copy_prevention_{project_id}_{scenario_id}_{target_key}",
+        ):
+            copied_columns = ["prevention_controls"]
+        if copy_actions.button(
+            "Copy Detection",
+            icon=":material/content_copy:",
+            key=f"pfmea_copy_detection_{project_id}_{scenario_id}_{target_key}",
+        ):
+            copied_columns = ["detection_controls"]
+        if copy_actions.button(
+            "Copy both",
+            icon=":material/content_copy:",
+            key=f"pfmea_copy_both_{project_id}_{scenario_id}_{target_key}",
+        ):
+            copied_columns = ["prevention_controls", "detection_controls"]
+        if copied_columns:
+            st.session_state[_control_clipboard_key(project_id, scenario_id)] = (
+                _control_clipboard_snapshot(
+                    target,
+                    source_key=target_key,
+                    source_label=source_label,
+                    columns=copied_columns,
+                )
+            )
+
+        clipboard = st.session_state.get(
+            _control_clipboard_key(project_id, scenario_id)
+        )
+        if isinstance(clipboard, dict):
+            copied_types = [
+                PFMEA_CONTROL_COLUMNS[column]
+                for column in clipboard.get("columns") or []
+                if column in PFMEA_CONTROL_COLUMNS
+            ]
+            st.caption(
+                f"Copied from {clipboard.get('source_label') or 'PFMEA Cause'}: "
+                + " and ".join(copied_types)
+                + " will replace the corresponding list on the selected Cause."
+            )
+        if st.button(
+            "Paste to selected Cause",
+            icon=":material/content_paste:",
+            disabled=not isinstance(clipboard, dict),
+            key=f"pfmea_paste_controls_{project_id}_{scenario_id}_{target_key}",
+        ):
+            all_labels = _control_label_map(project_id, scenario_id, rows)
+            pasted, pending, warnings, instructions = _apply_control_clipboard(
+                rows,
+                target_key,
+                clipboard or {},
+                project_id=project_id,
+                scenario_id=scenario_id,
+                step_by_id=step_by_id,
+                control_labels=all_labels,
+            )
+            warning_key = _pfmea_copy_state_key(
+                "control_paste_warning", project_id, scenario_id
+            )
+            instruction_key = _pfmea_copy_state_key(
+                "control_paste_instruction", project_id, scenario_id
+            )
+            if warnings:
+                st.session_state[warning_key] = warnings
+            else:
+                st.session_state.pop(warning_key, None)
+            if instructions:
+                st.session_state[instruction_key] = instructions
+            else:
+                st.session_state.pop(instruction_key, None)
+            controls_changed = any(
+                _control_target_value(pasted, target_key, column)
+                != _control_target_value(rows, target_key, column)
+                for column in PFMEA_CONTROL_COLUMNS
+            ) or (
+                bool(
+                    pasted.loc[
+                        _control_target_mask(pasted, target_key),
+                        "detection_review_required",
+                    ].fillna(False).any()
+                )
+                != bool(
+                    rows.loc[
+                        _control_target_mask(rows, target_key),
+                        "detection_review_required",
+                    ].fillna(False).any()
+                )
+            )
+            if pending:
+                # Preserve all current grid edits before the confirmation rerun.
+                st.session_state[draft_key] = pasted
+                st.session_state[PENDING_CONTROL_PASTE_KEY] = {
+                    "project_id": project_id,
+                    "scenario_id": scenario_id,
+                    "draft_key": draft_key,
+                    "editor_key": editor_key,
+                    "changes": pending,
+                }
+                request_table_editor_reset(editor_key)
+                st.rerun()
+            elif controls_changed:
+                st.session_state[draft_key] = pasted
+                _clear_control_clipboard(project_id, scenario_id)
+                _clear_control_picker_state(project_id, scenario_id)
+                request_table_editor_reset(editor_key)
+                st.rerun()
+
+        control_paste_instructions = st.session_state.pop(
+            _pfmea_copy_state_key(
+                "control_paste_instruction", project_id, scenario_id
+            ),
             None,
         )
-        request_table_editor_reset(editor_key)
-        st.rerun()
-    _render_control_copy_workflow(
-        project_id,
-        scenario_id,
-        targets,
-        target_key,
-        updated,
-        draft_key,
-        editor_key,
-        step_by_id,
-    )
+        for instruction in control_paste_instructions or []:
+            st.info(str(instruction))
+        control_paste_warnings = st.session_state.pop(
+            _pfmea_copy_state_key("control_paste_warning", project_id, scenario_id),
+            None,
+        )
+        for warning in control_paste_warnings or []:
+            st.warning(str(warning))
     return updated
 
 
@@ -2312,6 +2281,7 @@ def _render_pfmea_duplicate_workflow(
                         labels.get(value, "Unavailable control") for value in omitted
                     )
                 )
+            _clear_control_clipboard(project_id, scenario_id)
             request_table_editor_reset(editor_key)
             st.toast("Created an unsaved PFMEA line duplicate", icon=":material/content_copy:")
             st.rerun()
@@ -2373,6 +2343,16 @@ def _render_flat_pfmea_table(
         project_id, scenario_id, rows, "Detection"
     )
     control_labels = prevention_labels | detection_labels
+    panel_rows = _pfmea_panel_rows_from_editor_state(
+        rows,
+        visible,
+        editor_rows,
+        st.session_state.get(editor_key, {}) or {},
+        step_by_id,
+    )
+    _render_control_selection_panel(
+        project_id, scenario_id, panel_rows, draft_key, editor_key, step_by_id
+    )
     column_config = {
         column: None for column in PFMEA_FLAT_COLUMNS if column not in PFMEA_VISIBLE_COLUMNS
     }
@@ -2409,10 +2389,6 @@ def _render_flat_pfmea_table(
                 ),
                 help="Choose an approved short code. The code alone is persisted.",
             ),
-            "legacy_classification": st.column_config.TextColumn(
-                "Legacy Classification", disabled=True,
-                help="Retained read-only evidence from a retired PFMEA Classification.",
-            ),
             "potential_causes": st.column_config.TextColumn(
                 "Potential Causes(s) of Failure", width="large",
                 help="Free text preserves pasted or saved line breaks.",
@@ -2422,10 +2398,11 @@ def _render_flat_pfmea_table(
                 options=list(prevention_labels),
                 format_func=lambda value: prevention_labels.get(value, value),
                 accept_new_options=False,
+                disabled=True,
                 width="large",
                 help=(
-                    "Choose controls directly or use Ctrl+C and Ctrl+V to replace another "
-                    "Prevention cell. Changes remain unsaved until Save & Refresh."
+                    "This is a read-only summary. Edit or copy Prevention controls in "
+                    "Select Current Process Controls above the table."
                 ),
             ),
             "detection_controls": st.column_config.MultiselectColumn(
@@ -2433,10 +2410,11 @@ def _render_flat_pfmea_table(
                 options=list(detection_labels),
                 format_func=lambda value: detection_labels.get(value, value),
                 accept_new_options=False,
+                disabled=True,
                 width="large",
                 help=(
-                    "Choose controls directly or use Ctrl+C and Ctrl+V to replace another "
-                    "Detection cell. Changes remain unsaved until Save & Refresh."
+                    "This is a read-only summary. Edit or copy Detection controls in "
+                    "Select Current Process Controls above the table."
                 ),
             ),
             "rpn": st.column_config.NumberColumn("RPN", disabled=True, format="%d"),
@@ -2484,9 +2462,12 @@ def _render_flat_pfmea_table(
         ),
         num_rows="dynamic",
         hide_index=True,
-        height=470,
+        height=850,
         row_height=96,
-        disabled=["item_number", "legacy_classification", "rpn", "resulting_rpn"],
+        disabled=[
+            "item_number", "prevention_controls", "detection_controls", "rpn",
+            "resulting_rpn",
+        ],
         column_order=PFMEA_VISIBLE_COLUMNS,
         column_config=column_config,
     )
@@ -2511,6 +2492,7 @@ def _render_flat_pfmea_table(
         st.session_state[
             _pfmea_copy_state_key("shared_edit_error", project_id, scenario_id)
         ] = shared_conflicts
+        _clear_control_clipboard(project_id, scenario_id)
         request_table_editor_reset(editor_key)
         st.rerun()
     if propagated_columns:
@@ -2521,12 +2503,14 @@ def _render_flat_pfmea_table(
         st.session_state[
             _pfmea_copy_state_key("shared_edit_notice", project_id, scenario_id)
         ] = propagated_columns
+        _clear_control_clipboard(project_id, scenario_id)
         request_table_editor_reset(editor_key)
         st.rerun()
     if process_selection_changed:
         st.session_state[draft_key] = complete
         if reassignment_attempted:
             st.session_state[f"{draft_key}_locked_notice"] = True
+        _clear_control_clipboard(project_id, scenario_id)
         request_table_editor_reset(editor_key)
         st.rerun()
     if st.session_state.pop(f"{draft_key}_locked_notice", False):
@@ -2557,27 +2541,6 @@ def _render_flat_pfmea_table(
     )
     if copy_notice:
         st.warning(str(copy_notice))
-    control_paste_error = st.session_state.get(
-        _pfmea_copy_state_key("control_paste_error", project_id, scenario_id)
-    )
-    if control_paste_error:
-        st.error(
-            "Conflicting pasted values target the same PFMEA Cause: "
-            + ", ".join(str(value) for value in control_paste_error)
-            + ". Make the repeated control cells consistent before Save & Refresh."
-        )
-    control_paste_instructions = st.session_state.pop(
-        _pfmea_copy_state_key("control_paste_instruction", project_id, scenario_id),
-        None,
-    )
-    for instruction in control_paste_instructions or []:
-        st.info(str(instruction))
-    control_paste_warnings = st.session_state.pop(
-        _pfmea_copy_state_key("control_paste_warning", project_id, scenario_id),
-        None,
-    )
-    for warning in control_paste_warnings or []:
-        st.warning(str(warning))
     present_draft_ids = {
         _plain_text(value)
         for value in complete.get("draft_row_id", pd.Series(dtype="string"))
@@ -2587,9 +2550,6 @@ def _render_flat_pfmea_table(
         project_id,
         scenario_id,
         _forced_copy_ids(project_id, scenario_id) & present_draft_ids,
-    )
-    complete = _render_control_selection_panel(
-        project_id, scenario_id, complete, draft_key, editor_key, step_by_id
     )
     _render_pfmea_duplicate_workflow(
         project_id, scenario_id, complete, draft_key, editor_key, step_by_id
@@ -2613,6 +2573,7 @@ def _render_flat_pfmea_table(
     ):
         try:
             st.session_state[draft_key] = _stable_recalculated_draft(rows, complete)
+            _clear_control_clipboard(project_id, scenario_id)
             request_table_editor_reset(editor_key)
             st.rerun()
         except ValueError as exc:
@@ -2726,6 +2687,7 @@ def _render_flat_pfmea_table(
             selected_entries[["entry_id", "potential_failure_mode"]]
             .rename(columns={"entry_id": "id"})
         )
+        _clear_control_clipboard(project_id, scenario_id)
         _stage_delete(
             delete_rows,
             editor_key=editor_key,
@@ -2752,6 +2714,10 @@ def _render_flat_pfmea_table(
 
 
 def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> None:
+    current_clipboard_key = _control_clipboard_key(project_id, scenario_id)
+    for key in list(st.session_state):
+        if str(key).startswith("pfmea_control_clipboard_") and key != current_clipboard_key:
+            st.session_state.pop(key, None)
     pending_paste = st.session_state.get(PENDING_CONTROL_PASTE_KEY) or {}
     if pending_paste and (
         str(pending_paste.get("project_id") or "") != project_id
@@ -2793,7 +2759,8 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
     with st.container(border=True):
         st.caption(
             "Item # shows the Process at a Glance Pitch while the stable Process relationship "
-            "remains hidden. Process Function shows the Process at a Glance Work Element."
+            "remains hidden. Process Function shows the current derived Op ID and Process at "
+            "a Glance Work Element."
         )
         stored_flat_rows, current_flat_rows = _render_flat_pfmea_table(
             project_id, scenario_id, steps

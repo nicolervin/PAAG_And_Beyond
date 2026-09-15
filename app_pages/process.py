@@ -15,6 +15,7 @@ from utils.store import (
     parse_yamazumi_model_variants,
     process_element_id_for_yamazumi,
     process_ergonomics_risk_work_element_ids,
+    work_element_criticality,
     process_part_placement_options,
     process_part_groups,
     process_pitch_visual_summary,
@@ -25,6 +26,7 @@ from utils.store import (
     replace_work_elements,
     save_process_part_group,
     search_parts_and_fishbone,
+    safety_requirement_delete_impact,
     validate_process_part_option_pairings,
     work_element_op_ids,
     yamazumi_context_for_process,
@@ -994,7 +996,7 @@ columns = [
     "assigned_parts", "handling", "part_number", "output_assembly_number", "output_assembly_name",
     "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
     "conveyor_height_in", "platform_height_in", "pit_depth_in",
-    "model_applicability", "ergonomics_risk", "status", "details",
+    "model_applicability", "ergonomics_risk", "criticality", "status", "details",
 ]
 compact_columns = [
     "op_id",
@@ -1005,6 +1007,7 @@ compact_columns = [
     "assigned_parts",
     "handling",
     "ergonomics_risk",
+    "criticality",
     "model_applicability",
     "cycle_time_s",
     "sequence",
@@ -1038,6 +1041,7 @@ if elements.empty:
             "pit_depth_in": pd.Series(dtype="float64"),
             "model_applicability": pd.Series(dtype="object"),
             "ergonomics_risk": pd.Series(dtype="object"),
+            "criticality": pd.Series(dtype="object"),
             "status": pd.Series(dtype="string"),
             "details": pd.Series(dtype="string"),
         }
@@ -1105,6 +1109,10 @@ elements["ergonomics_risk"] = elements["id"].astype(str).map(
     lambda work_element_id: (
         ["Ergo Risk"] if work_element_id in ergonomics_risk_ids else []
     )
+)
+criticality_by_work_element = work_element_criticality(project_id, scenario_id)
+elements["criticality"] = elements["id"].astype(str).map(
+    lambda work_element_id: list(criticality_by_work_element.get(work_element_id, []))
 )
 
 elements["model_applicability"] = elements["model_applicability"].apply(
@@ -1186,6 +1194,7 @@ edited = st.data_editor(
         "assigned_parts",
         "handling",
         "ergonomics_risk",
+        "criticality",
     ],
     column_order=compact_columns,
     column_config={
@@ -1231,6 +1240,17 @@ edited = st.data_editor(
                 "Shown when this step has an Open or Pending Ergonomics review "
                 "classified as Red or Favorable Red. Review details on the "
                 "Ergonomics page."
+            ),
+        ),
+        "criticality": st.column_config.MultiselectColumn(
+            "Criticality",
+            options=["CTQ", "Safety"],
+            color=["orange", "red"],
+            disabled=True,
+            width="medium",
+            help=(
+                "CTQ comes from a linked PFMEA Classification of E, P, P-, Q, or E-. "
+                "Safety comes from an active Safety requirement linked to this Process step."
             ),
         ),
         "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
@@ -1321,15 +1341,28 @@ if selected_pitch_id:
                 unsafe_allow_javascript=True,
             )
 
-st.download_button(
-    "Export filtered Process at a Glance",
+export_actions = st.container(horizontal=True)
+export_actions.download_button(
+    "Export filtered table view",
+    data=dataframe_to_excel(
+        visible_elements.reindex(columns=compact_columns),
+        "Process plan",
+    ),
+    file_name="process_plan_filtered_view.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    icon=":material/download:",
+    key=f"process_compact_export_{scenario_id}",
+)
+export_actions.download_button(
+    "Export filtered full data",
     data=dataframe_to_excel(
         visible_elements.drop(columns=["id", "details"], errors="ignore"),
         "Process plan",
     ),
-    file_name="process_plan_filtered.xlsx",
+    file_name="process_plan_filtered_full.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     icon=":material/download:",
+    key=f"process_full_export_{scenario_id}",
 )
 
 selected = native_selected_rows(visible_elements, editor_key=process_editor_key)
@@ -1434,9 +1467,16 @@ if request_bulk_delete:
 def confirm_process_delete() -> None:
     pending_key = f"process_pending_delete_{scenario_id}"
     pending_ids = st.session_state.get(pending_key, [])
-    st.warning(
-        f"Delete {len(pending_ids)} process step(s)? Their Part requirements will also be deleted."
+    impact = safety_requirement_delete_impact(project_id, scenario_id, pending_ids)
+    warning = (
+        f"Delete {len(pending_ids)} Process step(s)? Their Part requirements will also be deleted."
     )
+    if impact["requirement_count"]:
+        warning += (
+            f" This will also delete {impact['requirement_count']} linked Safety "
+            "requirement(s)."
+        )
+    st.warning(warning)
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_process_delete_{scenario_id}"):
         st.session_state.pop(pending_key, None)
@@ -1460,7 +1500,10 @@ def confirm_process_delete() -> None:
             "Bulk delete" if len(pending_ids) > 1 else "Delete",
             len(pending_ids),
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id},
+            {
+                "scenario_id": scenario_id,
+                "safety_requirements_deleted": impact["requirement_count"],
+            },
         )
         st.session_state.pop(pending_key, None)
         request_table_editor_reset(process_editor_key)

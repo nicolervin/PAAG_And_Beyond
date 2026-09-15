@@ -91,10 +91,10 @@ class YamazumiStackOrderTests(unittest.TestCase):
             conn.execute(
                 """INSERT INTO yamazumi_elements
                    (id, project_id, area_id, pitch_id, model_variant, model_variants,
-                    work_type, description, time_s, work_region, flags, sequence,
+                    work_type, description, time_s, work_region, sequence,
                     source, process_sync_status, updated_at)
                    VALUES (?, ?, ?, ?, 'Base', '["Base"]', 'Cycle', ?, 1,
-                           'None', '[]', ?, 'Test', 'Synced', ?)""",
+                           'None', ?, 'Test', 'Synced', ?)""",
                 (
                     element_id, self.project_id, area_id, pitch_id,
                     f"Description {element_id}", sequence, timestamp,

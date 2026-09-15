@@ -568,6 +568,116 @@ class ControlPlanStoreTests(unittest.TestCase):
             {"b": 10.0},
         )
 
+    def test_projection_suggestions_follow_live_pfmea_process_order(self) -> None:
+        timestamp = store.now_iso()
+        address_rows = [
+            ("cp-work-wa10", "01-WA10-001", 10),
+            ("cp-work-wa2", "01-WA2-001", 20),
+            ("cp-work-wa1", "01-WA1-001", 30),
+        ]
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO assembly_sections
+                   (id, project_id, name, section_type, sequence, description,
+                    active, created_at, updated_at)
+                   VALUES ('cp-main', ?, 'Main', 'Main spine', 10, '', 1, ?, ?)""",
+                (self.project_id, timestamp, timestamp),
+            )
+            for position, (work_id, address, work_sequence) in enumerate(address_rows, start=1):
+                area_id = f"cp-area-{position}"
+                pitch_id = f"cp-pitch-{position}"
+                conn.execute(
+                    """INSERT INTO work_elements
+                       (id, project_id, scenario_id, sequence, station, operation,
+                        description, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        work_id, self.project_id, self.scenario_id, work_sequence,
+                        address, work_id, work_id, timestamp,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO yamazumi_areas
+                       (id, project_id, scenario_id, section_id, name, updated_at)
+                       VALUES (?, ?, ?, 'cp-main', ?, ?)""",
+                    (area_id, self.project_id, self.scenario_id, area_id, timestamp),
+                )
+                conn.execute(
+                    """INSERT INTO yamazumi_pitches
+                       (id, project_id, area_id, pitch_number, pitch_name, status,
+                        sequence, model_variants, pitch_type, updated_at)
+                       VALUES (?, ?, ?, ?, '', 'Active', ?, '["Base"]', 'Pitch', ?)""",
+                    (
+                        pitch_id, self.project_id, area_id, address,
+                        position * 10, timestamp,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO yamazumi_elements
+                       (id, project_id, area_id, pitch_id, description, time_s,
+                        sequence, process_element_id, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 1, 10, ?, ?)""",
+                    (
+                        f"cp-element-{position}", self.project_id, area_id,
+                        pitch_id, work_id, work_id, timestamp,
+                    ),
+                )
+
+        for work_id, _, _ in address_rows:
+            pfmea_store.save_pfmea_entry_rows(
+                self.project_id,
+                self.scenario_id,
+                work_id,
+                pd.DataFrame(
+                    [{"id": "", "potential_failure_mode": work_id, "class_code": "P"}]
+                ),
+            )
+
+        picker_order = pfmea_store.pfmea_process_steps(
+            self.project_id, self.scenario_id
+        )["id"].astype(str).tolist()
+        item_count_before = self.conn.execute(
+            "SELECT COUNT(*) FROM control_plan_items"
+        ).fetchone()[0]
+        projection = control_plan_store.control_plan_projection(
+            self.project_id, self.scenario_id
+        )
+        item_count_after = self.conn.execute(
+            "SELECT COUNT(*) FROM control_plan_items"
+        ).fetchone()[0]
+        projected_operations = projection.drop_duplicates("work_element_id")
+
+        self.assertEqual(
+            picker_order,
+            ["cp-work-wa1", "cp-work-wa2", "cp-work-wa10", self.work_id],
+        )
+        self.assertEqual(
+            projected_operations["work_element_id"].astype(str).tolist(),
+            picker_order,
+        )
+        self.assertEqual(
+            projected_operations["operation_pr_number"].tolist(),
+            [10.0, 20.0, 30.0, 40.0],
+        )
+        self.assertEqual(item_count_after, item_count_before)
+
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE yamazumi_pitches SET pitch_number='01-WA0-001' "
+                "WHERE id='cp-pitch-1'"
+            )
+        reordered = control_plan_store.control_plan_projection(
+            self.project_id, self.scenario_id
+        ).drop_duplicates("work_element_id")
+        self.assertEqual(
+            reordered["work_element_id"].astype(str).tolist(),
+            ["cp-work-wa10", "cp-work-wa1", "cp-work-wa2", self.work_id],
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM control_plan_items").fetchone()[0],
+            item_count_before,
+        )
+
     def test_projection_suggestions_do_not_write_until_save(self) -> None:
         before = self.conn.execute("SELECT COUNT(*) FROM control_plan_items").fetchone()[0]
         projection = control_plan_store.control_plan_projection(

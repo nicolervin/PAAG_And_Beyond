@@ -120,6 +120,29 @@ class QualityPageSmokeTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertIn("Quality requirements", [heading.value for heading in app.subheader])
 
+    def test_linked_process_workflow_renders_before_torque_and_publish_after(self) -> None:
+        active_scenario = [
+            {
+                "id": "scenario-1",
+                "name": "Current plan",
+                "revision_label": "A",
+            }
+        ]
+        for scenarios in (None, active_scenario):
+            with self.subTest(active_scenario=bool(scenarios)):
+                app = self.run_page(pd.DataFrame(), scenarios=scenarios)
+                headings = [heading.value for heading in app.subheader]
+
+                self.assertEqual(len(app.exception), 0)
+                self.assertLess(
+                    headings.index("Link to Process at a Glance"),
+                    headings.index("Torque tool details"),
+                )
+                self.assertLess(
+                    headings.index("Torque tool details"),
+                    headings.index("Publish saved updates"),
+                )
+
     def test_active_scenario_renders_attach_unlink_and_linked_step_controls(self) -> None:
         requirements = pd.DataFrame(
             [

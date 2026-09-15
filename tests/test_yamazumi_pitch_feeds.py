@@ -552,6 +552,163 @@ class YamazumiPitchFeedTests(unittest.TestCase):
             store.delete_yamazumi_pitch(self.project_id, self.area_id, target_id), 0
         )
 
+    def test_gui_pitch_delete_unassigns_elements_and_audits_atomically(self) -> None:
+        pitch_id = self.add_pitch("P-GUI")
+        element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            pitch_id,
+            {
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "description": "GUI pitch work",
+                "time_s": 3.5,
+                "work_region": "None",
+            },
+        )
+
+        moved = store.delete_yamazumi_pitch(
+            self.project_id,
+            self.area_id,
+            pitch_id,
+            scenario_id=self.scenario_id,
+            audit_editor_name="GUI tester",
+            audit_details={"source": "interactive_board_gui"},
+        )
+
+        self.assertEqual(moved, 1)
+        element = self.conn.execute(
+            "SELECT pitch_id, process_sync_status FROM yamazumi_elements WHERE id=?",
+            (element_id,),
+        ).fetchone()
+        self.assertIsNone(element["pitch_id"])
+        self.assertEqual(element["process_sync_status"], "Needs IE review")
+        event = self.conn.execute(
+            """SELECT action, row_count, editor_name, details
+               FROM audit_log WHERE table_name='Yamazumi pitches'"""
+        ).fetchone()
+        self.assertEqual(event["action"], "Delete from interactive board")
+        self.assertEqual(event["row_count"], 1)
+        self.assertEqual(event["editor_name"], "GUI tester")
+        self.assertIn('"elements_unassigned": 1', event["details"])
+
+    def test_gui_deletes_require_editor_and_active_scenario_match(self) -> None:
+        pitch_id = self.add_pitch("P-SAFE")
+        with self.assertRaisesRegex(ValueError, "Current editor"):
+            store.delete_yamazumi_pitch(
+                self.project_id,
+                self.area_id,
+                pitch_id,
+                scenario_id=self.scenario_id,
+                audit_editor_name="",
+            )
+        with self.assertRaisesRegex(ValueError, "active scenario"):
+            store.delete_yamazumi_pitch(
+                self.project_id,
+                self.area_id,
+                pitch_id,
+                scenario_id=self.other_scenario_id,
+                audit_editor_name="GUI tester",
+            )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT id FROM yamazumi_pitches WHERE id=?", (pitch_id,)
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0], 0
+        )
+
+    def test_gui_delete_rolls_back_when_atomic_audit_fails(self) -> None:
+        pitch_id = self.add_pitch("P-ROLLBACK")
+        element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            pitch_id,
+            {
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "description": "Rollback work",
+                "time_s": 2.0,
+                "work_region": "None",
+            },
+        )
+        with patch.object(
+            store, "record_audit_event", side_effect=RuntimeError("audit failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "audit failed"):
+                store.delete_yamazumi_pitch(
+                    self.project_id,
+                    self.area_id,
+                    pitch_id,
+                    scenario_id=self.scenario_id,
+                    audit_editor_name="GUI tester",
+                )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT id FROM yamazumi_pitches WHERE id=?", (pitch_id,)
+            ).fetchone()
+        )
+        saved_element = self.conn.execute(
+            "SELECT pitch_id, process_sync_status FROM yamazumi_elements WHERE id=?",
+            (element_id,),
+        ).fetchone()
+        self.assertEqual(saved_element["pitch_id"], pitch_id)
+
+    def test_gui_element_delete_preserves_linked_process_step_and_audits(self) -> None:
+        pitch_id = self.add_pitch("P-ELEMENT")
+        process_element_id = "linked-process-step"
+        timestamp = store.now_iso()
+        self.conn.execute(
+            """INSERT INTO work_elements
+               (id, project_id, scenario_id, sequence, operation, updated_at)
+               VALUES (?, ?, ?, 10, 'Linked operation', ?)""",
+            (process_element_id, self.project_id, self.scenario_id, timestamp),
+        )
+        element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            pitch_id,
+            {
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "description": "Linked GUI work",
+                "time_s": 4.0,
+                "work_region": "None",
+            },
+        )
+        self.conn.execute(
+            "UPDATE yamazumi_elements SET process_element_id=? WHERE id=?",
+            (process_element_id, element_id),
+        )
+
+        store.delete_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            element_id,
+            scenario_id=self.scenario_id,
+            audit_editor_name="GUI tester",
+            audit_details={"linked_process_step_preserved": True},
+        )
+
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT id FROM yamazumi_elements WHERE id=?", (element_id,)
+            ).fetchone()
+        )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT id FROM work_elements WHERE id=?", (process_element_id,)
+            ).fetchone()
+        )
+        event = self.conn.execute(
+            """SELECT action, editor_name, details FROM audit_log
+               WHERE table_name='Yamazumi elements'"""
+        ).fetchone()
+        self.assertEqual(event["action"], "Delete from interactive board")
+        self.assertEqual(event["editor_name"], "GUI tester")
+        self.assertIn('"linked_process_step_preserved": true', event["details"])
+
     def test_compatibility_null_status_appears_and_disappears(self) -> None:
         self.assertEqual(
             store.yamazumi_pitch_feed_target_status("Subassembly", None),
