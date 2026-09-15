@@ -189,12 +189,6 @@ area_selector_key = f"yamazumi_area_{scenario_id}"
 sections = assembly_section_walk_order(project_id)
 features = complexity_features(project_id)
 flag_definitions = yamazumi_flag_definitions(project_id)
-active_flag_options = (
-    flag_definitions.loc[
-        flag_definitions["active"].fillna(1).astype(bool), "name"
-    ].astype(str).tolist()
-    if not flag_definitions.empty else ["CTQ", "Safety"]
-)
 active_features = (
     features.loc[features["active"].fillna(1).astype(bool)].copy()
     if not features.empty else features
@@ -1445,7 +1439,6 @@ def add_element_dialog() -> None:
             f"{', '.join(variants_added_to_pitch)} will also be added to pitch "
             f"{target.get('pitch_number') or ''} as a new Yamazumi stack."
         )
-    flags = st.multiselect("Flags", active_flag_options)
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_interactive_element"):
         st.session_state.pop(f"yamazumi_add_element_target_{project_id}_{area_id}", None)
@@ -1462,7 +1455,7 @@ def add_element_dialog() -> None:
                     "model_variants": model_variants,
                     "work_type": work_type,
                     "work_region": work_region,
-                    "flags": flags,
+                    "flags": [],
                 },
             )
             record_audit_event(
@@ -1635,8 +1628,6 @@ def edit_element_dialog(element_id: str) -> None:
             index=edit_region_options.index(current_work_region),
         )
         current_flags = list(current.get("flags") or [])
-        edit_flag_options = list(dict.fromkeys([*active_flag_options, *current_flags]))
-        flags = st.multiselect("Flags", edit_flag_options, default=current_flags)
         actions = st.container(horizontal=True)
         # The first submit button is Streamlit's Ctrl+Enter target. Keep Save
         # first so the text-area keyboard hint performs the expected action.
@@ -1650,7 +1641,7 @@ def edit_element_dialog(element_id: str) -> None:
                     "pitch_id": selected_pitch_id, "model_variants": model_variants, "work_type": work_type,
                     "description": description,
                     "time_s": display_to_seconds(time_value, yamazumi_time_unit),
-                    "work_region": work_region, "flags": flags,
+                    "work_region": work_region, "flags": current_flags,
                 },
             )
             record_audit_event(
@@ -2193,10 +2184,10 @@ element_filter_scope = "combined" if element_combined_view else str(area_id)
 visible_elements = filter_table(
     element_rows,
     key=f"yamazumi_element_filters_{scenario_id}_{element_filter_scope}",
-    dropdown_columns=["area_name", "pitch", "model_variants", "work_type", "work_region", "flags"],
-    search_columns=["area_name", "description", "pitch", "model_variants", "work_region", "flags"],
-    labels={"area_name": "Yamazumi area", "model_variants": "Model variant", "flags": "Flag"},
-    multi_value_columns=["model_variants", "flags"],
+    dropdown_columns=["area_name", "pitch", "model_variants", "work_type", "work_region"],
+    search_columns=["area_name", "description", "pitch", "model_variants", "work_region"],
+    labels={"area_name": "Yamazumi area", "model_variants": "Model variant"},
+    multi_value_columns=["model_variants"],
     reset_widget_keys=[] if element_combined_view else [element_editor_key],
 )
 pitch_options = ["Unassigned", *pitch_label_by_id.values()]
@@ -2206,7 +2197,7 @@ variant_options_by_pitch_label = {
 }
 element_column_order = [
     "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
-    "work_region", "flags", "sequence",
+    "work_region", "sequence",
 ]
 element_column_config = {
     "id": None,
@@ -2232,17 +2223,7 @@ element_column_config = {
     "work_region": st.column_config.SelectboxColumn(
         "Work region", options=work_region_options, required=True, default="None"
     ),
-    "flags": st.column_config.MultiselectColumn(
-        "Flags",
-        options=list(dict.fromkeys([
-            *active_flag_options,
-            *[
-                str(flag)
-                for stored_flags in element_table_source.get("flags", pd.Series(dtype=object))
-                for flag in (stored_flags or [])
-            ],
-        ])),
-    ),
+    "flags": None,
     "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
     "source": None,
     "process_element_id": None,
@@ -2255,7 +2236,7 @@ if element_combined_view:
         "pitch": st.column_config.TextColumn("Pitch"),
         "model_variants": st.column_config.ListColumn("Model variants"),
         "work_region": st.column_config.TextColumn("Work region"),
-        "flags": st.column_config.ListColumn("Flags"),
+        "flags": None,
     }
     selectable_dataframe(
         visible_elements,
@@ -2272,7 +2253,7 @@ else:
         editor_key=element_editor_key,
         sort_columns=[
             "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
-            "work_region", "flags", "sequence",
+            "work_region", "sequence",
         ],
         labels={
             "area_name": "Yamazumi area", "model_variants": "Model variants",

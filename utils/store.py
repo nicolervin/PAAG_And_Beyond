@@ -569,6 +569,21 @@ def init_db() -> None:
                 table_name TEXT NOT NULL, action TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0,
                 editor_name TEXT DEFAULT '', details TEXT DEFAULT '{}', created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS project_transfer_events (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                operation TEXT NOT NULL CHECK(operation IN ('Export', 'Import')),
+                package_version INTEGER NOT NULL,
+                manifest_json TEXT NOT NULL,
+                source_project_id TEXT NOT NULL,
+                source_project_name TEXT NOT NULL DEFAULT '',
+                target_project_id TEXT,
+                target_project_name TEXT NOT NULL DEFAULT '',
+                record_counts_json TEXT NOT NULL DEFAULT '{}',
+                conflicts_json TEXT NOT NULL DEFAULT '[]',
+                editor_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS yamazumi_areas (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,

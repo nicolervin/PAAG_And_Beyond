@@ -204,7 +204,7 @@ Every screen must display a small, consistently placed badge next to the page ti
 
 Assign each active screen its correct badge state based on the scope definitions in `DATA_DICTIONARY.md`:
 
-- **Project-wide:** Overview project-identity fields, Questions and concerns, Import PITS and export, Model definitions, and Fishbone framework/structure.
+- **Project-wide:** Overview project-identity fields, Questions and concerns, Import/Export Projects, Model definitions, and Fishbone framework/structure.
 - **Scenario-specific:** Overview active-scenario fields, Yamazumi, Process at a Glance, and Pin Map.
 - **Scenario-aware:** Parts Catalog, where the catalog is project-wide but Active status is scenario-specific; and Parts to fishbone, where the structure is project-wide but visible and active parts depend on the scenario.
 
@@ -260,7 +260,7 @@ This glossary is active, locked policy, not merely informational, and must be ch
 | Concept | Canonical label | Applies to |
 | --- | --- | --- |
 | Questions page | **Questions and concerns** | Navigation and page title |
-| Import/export page | **Import PITS and export** | Navigation and page title |
+| Import/export page | **Import/Export Projects** | Navigation and page title |
 | Fishbone page | **Parts to fishbone** | Navigation and page title |
 | Pin Map page | **Pin Map** | Navigation and page title |
 | Parts master | **Parts Catalog** | Page title, captions, help text, dialogs, and cross-page references |
@@ -279,6 +279,7 @@ This glossary is active, locked policy, not merely informational, and must be ch
 
 The following terms remain contextual exceptions rather than globally unified labels:
 
+- **Import/Export Projects** deliberately uses title case and a slash as an approved exception to the general sentence-case convention.
 - **Subassembly** remains a valid Fishbone section type.
 - **Common name** and **Official model number** remain separate fields.
 - Compact scenario summaries may use **Rev** even though the editable field label is **Scenario revision**.

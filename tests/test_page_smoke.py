@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import json
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
+from zipfile import ZipFile
 
 from streamlit.testing.v1 import AppTest
 
 from utils import store
+from utils.project_transfer import (
+    AUDIT_CATEGORY,
+    export_project_package,
+    import_project_package,
+    preview_project_package,
+)
 
 
 class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
@@ -253,6 +262,122 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
     def test_model_definitions_smoke(self) -> None:
         app = self.run_page("app_pages/models.py")
         self.assertTrue(any(title.value == "Model definitions" for title in app.title))
+
+    def test_project_exchange_tabs_smoke(self) -> None:
+        app = self.run_page("app_pages/exchange.py")
+        self.assertTrue(any(title.value == "Import/Export Projects" for title in app.title))
+        self.assertIn("Part-data exchange", [tab.label for tab in app.tabs])
+        self.assertTrue(
+            any(
+                header.value.endswith("Whole-project transfer")
+                for header in app.subheader
+            )
+        )
+
+    def test_project_export_package_contains_complete_registry_and_audits(self) -> None:
+        package = export_project_package(self.project_id, "AppTest smoke")
+        self.assertTrue(package["file_name"].endswith(".paagproject"))
+        with ZipFile(BytesIO(package["data"])) as archive:
+            self.assertIn("manifest.json", archive.namelist())
+            self.assertIn("records.json", archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+            records = json.loads(archive.read("records.json"))
+        self.assertEqual(manifest["package_version"], 1)
+        self.assertEqual(len(records["projects"]), 1)
+        self.assertEqual(
+            len(records["planning_scenarios"]),
+            len(store.planning_scenarios(self.project_id, include_archived=True)),
+        )
+        self.assertTrue(
+            any(
+                row["action"] == "Export Project"
+                for row in store.audit_history(self.project_id, AUDIT_CATEGORY).to_dict("records")
+            )
+        )
+        transfer_rows = store.query(
+            "SELECT * FROM project_transfer_events WHERE project_id=? AND operation='Export'",
+            (self.project_id,),
+        )
+        self.assertEqual(len(transfer_rows), 1)
+        self.assertEqual(transfer_rows[0]["editor_name"], "AppTest smoke")
+
+        audit_count = len(store.audit_history(self.project_id))
+        transfer_count = len(transfer_rows)
+        preview = preview_project_package(package["data"])
+        self.assertEqual(preview["manifest"]["package_version"], 1)
+        self.assertEqual(len(preview["scenarios"]), len(records["planning_scenarios"]))
+        self.assertEqual(len(store.audit_history(self.project_id)), audit_count)
+        self.assertEqual(
+            len(store.query(
+                "SELECT id FROM project_transfer_events WHERE project_id=?",
+                (self.project_id,),
+            )),
+            transfer_count,
+        )
+
+    def test_project_export_ignores_empty_stale_unregistered_tables(self) -> None:
+        with store.connection() as conn:
+            conn.execute(
+                "CREATE TABLE safety_requirements (id TEXT PRIMARY KEY, project_id TEXT)"
+            )
+
+        package = export_project_package(self.project_id, "AppTest smoke")
+
+        self.assertTrue(package["file_name"].endswith(".paagproject"))
+
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO safety_requirements (id, project_id) VALUES (?, ?)",
+                ("safety-1", self.project_id),
+            )
+        with self.assertRaisesRegex(ValueError, "safety_requirements"):
+            export_project_package(self.project_id, "AppTest smoke")
+
+    def test_project_import_create_and_replace_remap_complete_graph(self) -> None:
+        package = export_project_package(self.project_id, "Export editor")
+        source_part_ids = {
+            row["id"]
+            for row in store.query("SELECT id FROM parts WHERE project_id=?", (self.project_id,))
+        }
+        created = import_project_package(
+            package["data"], "Create new", "Import editor",
+            current_project_id=self.project_id,
+        )
+        self.assertNotEqual(created["project_id"], self.project_id)
+        imported_part_ids = {
+            row["id"]
+            for row in store.query(
+                "SELECT id FROM parts WHERE project_id=?", (created["project_id"],)
+            )
+        }
+        self.assertTrue(imported_part_ids)
+        self.assertTrue(source_part_ids.isdisjoint(imported_part_ids))
+        self.assertEqual(
+            store.query("PRAGMA foreign_key_check"),
+            [],
+        )
+        self.assertTrue(
+            any(
+                row["action"] == "Import Project"
+                for row in store.audit_history(created["project_id"], AUDIT_CATEGORY).to_dict("records")
+            )
+        )
+
+        replace_target = store.create_project("Replace me", "Program", "Owner", 60)
+        with self.assertRaisesRegex(ValueError, "additional current-project"):
+            import_project_package(
+                package["data"], "Replace an existing project", "Import editor",
+                replace_project_id=self.project_id,
+                current_project_id=self.project_id,
+            )
+        replaced = import_project_package(
+            package["data"], "Replace an existing project", "Import editor",
+            replace_project_id=replace_target,
+            current_project_id=self.project_id,
+        )
+        self.assertFalse(store.query("SELECT id FROM projects WHERE id=?", (replace_target,)))
+        self.assertTrue(store.query("SELECT id FROM projects WHERE id=?", (replaced["project_id"],)))
+        self.assertEqual(store.query("PRAGMA foreign_key_check"), [])
 
     def test_parts_catalog_smoke_with_linked_assembly_part(self) -> None:
         with patch("utils.clipboard_image.clipboard_image", return_value=None):
