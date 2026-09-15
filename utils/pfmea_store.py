@@ -30,6 +30,7 @@ PFMEA_CLASSIFICATION_MEANINGS = {
     "PM": "Preventative Maintenance",
 }
 PFMEA_CLASSIFICATIONS = list(PFMEA_CLASSIFICATION_MEANINGS)
+PFMEA_CTQ_CLASSIFICATIONS = ("E", "P", "P-", "Q", "E-")
 LEGACY_PFMEA_CLASSIFICATIONS = {"Safety", "Product Safety", "Critical Quality"}
 PFMEA_RATINGS = list(range(1, 11))
 
@@ -959,11 +960,23 @@ def pfmea_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
         ).fetchall()
     result = pd.DataFrame([dict(row) for row in rows])
     if not result.empty:
+        op_contexts = _store().work_element_op_contexts(
+            project_id, scenario_id, result["id"].astype(str).tolist()
+        )
         result["work_element"] = result.apply(
             lambda row: work_element_labels.get(str(row["id"]))
             or _text(row.get("work_element")),
             axis=1,
         )
+        result["op_id"] = result["id"].astype(str).map(
+            lambda work_element_id: op_contexts[work_element_id]["op_id"]
+        )
+        result["op_sort_order"] = result["id"].astype(str).map(
+            lambda work_element_id: op_contexts[work_element_id]["sort_order"]
+        ).astype("int64")
+        result = result.sort_values(
+            ["op_sort_order", "sequence", "id"], kind="stable"
+        ).reset_index(drop=True)
     return result
 
 

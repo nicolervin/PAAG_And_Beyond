@@ -24,7 +24,7 @@ From the repository root in PowerShell, using the shared virtual environment:
 
 Then open `http://localhost:8501`. Streamlit normally reloads the app after a source file is saved.
 
-`streamlit_app.py` calls `init_db()` at startup. Initialization creates missing tables, applies safe in-place schema upgrades used by this prototype, installs required built-in Yamazumi flags, and seeds a sample project when appropriate.
+`streamlit_app.py` calls `init_db()` at startup. Initialization creates missing tables, applies safe in-place schema upgrades used by this prototype, and seeds a sample project when appropriate. Retired Yamazumi flag data is discarded through a one-time editor-attributed migration.
 
 ## Technology and local data
 
@@ -51,7 +51,7 @@ PAAG currently supports:
 - a project-wide Assembly grid with a protected packaged-unit row followed by Fishbone-section categories mapped to real assembly numbers by official model, with shared section controls, nested mini-BOMs, and access to the full catalog details workflow;
 - ordinary BOM imports, preferred ID-based PITS imports, conservative legacy PITS imports, source revisions, and reconciliation evidence;
 - a station-independent assembly Fishbone with main-spine sections, nested subassemblies, and placed part uses;
-- Yamazumi balancing areas, pitch addresses, model variants, work regions, flags, takt comparison, and drag-and-drop work assignment;
+- Yamazumi balancing areas, pitch addresses, model variants, work regions, takt comparison, drag-and-drop work assignment, and live read-only CTQ/Safety context;
 - an ordered Process at a Glance plan reconciled from Yamazumi work and paired to Fishbone parts;
 - process tools, locations, unit orientation, dimensional geometry, and other requirements retained by the current schema while their redesigned Details/summary presentation awaits Phase 3;
 - a scenario-specific, derived Pin Map of pitches and reconciled Process work;
@@ -81,12 +81,13 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/assemblies.py` — Project-wide multi-section assembly-to-model grid plus the shared full assembly catalog, operational mini-BOM nesting, image, deletion, and history workflows.
 - `utils/assembly_grid.py` — Components v2 category/model grid renderer and its narrow interaction event contract.
 - `app_pages/fishbone.py` — Assembly framework, nested subassemblies, part placement, occurrence ordering, and the interactive Fishbone.
-- `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, flags, model variants, visual board, and work tables.
+- `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, model variants, visual board, work tables, and derived CTQ/Safety context.
 - `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, compact pitch planning, bulk actions, export, and history. The former Details dialog and workload summary/chart are removed pending Phase 3 redesign.
 - `app_pages/pin_map.py` — Scenario-specific read-only line visualization of pitches and explicitly linked Process work.
 - `app_pages/functional_quality.py` — Scenario-aware Quality page with the project-wide Requirements repository, scenario-specific PFMEA tab, and Control Plan placeholder.
 - `app_pages/functional_ergonomics.py` — Scenario-specific Ergonomics review editor with linked/unlinked tracking, hazard tags, confirmed merging, deletion, and history.
-- `app_pages/functional_equipment.py`, `functional_materials.py`, and `functional_safety.py` — Non-persistent Functional Reviews shells.
+- `app_pages/functional_safety.py` — Scenario-specific Safety requirements linked to Process at a Glance steps.
+- `app_pages/functional_equipment.py` and `functional_materials.py` — Non-persistent Functional Reviews shells.
 - `app_pages/assembly_sequence.py` — Legacy, unlinked assembly-Fishbone implementation; do not extend unless explicitly revived.
 
 ### Shared utility files
@@ -123,13 +124,13 @@ Navigation is defined in `streamlit_app.py`.
 
 ### Process planning
 
-- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. It supports scenario branching, takt, work regions, flags, model-variant stacks, and visual work balancing.
+- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. It supports scenario branching, takt, work regions, model-variant stacks, visual work balancing, and live read-only CTQ/Safety tags for linked Process work.
 - **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, and orders it by pitch. Its former tabbed Details dialog and workload summary/chart have been removed; the underlying saved detail fields remain intact, and a redesigned Details/summary view is planned for Phase 3 but is not yet implemented.
 - **Pin Map** derives a scenario-specific read-only line view from existing pitches, Yamazumi elements, and explicitly linked Process work. It stores no separate layout data.
 
 ### Functional Reviews
 
-**Quality** is Scenario-aware: its Requirements repository is project-wide, while PFMEA belongs to the active scenario and links failure modes, Effects, Causes, explicitly classified published Quality controls, saved RPN calculations, and Recommended Actions to Process at a Glance steps. The Control Plan tab is a placeholder and does not generate or store Control Plan data. **Ergonomics** is scenario-specific and maintains linked or Unlinked reviews, project-wide hazard tags, status, reviewer, notes, requested due dates, automatic starting reviews for new Process steps, and relationship-aware merges. **Equipment**, **Materials**, and **Safety** remain project-wide, non-persistent shells; their persisted relationships, ownership, scope, and storage require proposal and owner review before implementation.
+**Quality** is Scenario-aware: its Requirements repository is project-wide, while PFMEA and the Manufacturing Control Plan working draft belong to the active scenario. **Ergonomics** is scenario-specific and maintains linked or Unlinked reviews, hazard tags, status, reviewer, notes, requested due dates, automatic starting reviews for new Process steps, and relationship-aware merges. **Safety** is scenario-specific and stores active requirements against Process at a Glance steps. Process at a Glance and Yamazumi derive CTQ from PFMEA Classification and Safety from those active requirements. **Equipment** and **Materials** remain non-persistent shells.
 
 ## Domain glossary
 
@@ -156,10 +157,10 @@ Navigation is defined in `streamlit_app.py`.
 - **Complexity feature** — A manufacturing-relevant product characteristic with controlled choices.
 - **Model variant** — A Yamazumi stack for Base work or a specific feature choice.
 - **Model applicability** — The rule identifying which configurations require a part or Process step.
-- **Work element** — One measurable item of work with description, time, type, region, flags, variant, and optional pitch.
+- **Work element** — One measurable item of work with description, time, type, region, variant, and optional pitch.
 - **Cycle / Periodic / Fluctuation work** — Work performed per unit, at a planned interval, or variably according to mix or conditions.
 - **Work region** — An area-specific category grouping the nature or location of Yamazumi work.
-- **Flag** — A visible Yamazumi tag; CTQ and Safety are built-in system flags.
+- **Criticality** — Read-only CTQ and Safety context derived from linked PFMEA and Safety records; it is not stored on Yamazumi or Process work.
 - **Process at a Glance** — The ordered scenario-specific manufacturing plan enriched with parts and execution requirements.
 - **Part requirement** — A group of parts paired to a Process step using `Use all`, `Choose one`, or `Optional` selection behavior.
 - **Output assembly milestone** — The exact Process step where a new made assembly becomes complete.

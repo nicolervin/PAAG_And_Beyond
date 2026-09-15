@@ -601,6 +601,72 @@ class PfmeaStoreTests(unittest.TestCase):
         self.assertEqual(flat.iloc[1]["item_number"], "ST-020")
         self.assertEqual(flat.iloc[1]["process_function"], "Verify assembly")
 
+    def test_pfmea_op_id_label_changes_live_without_changing_process_relationship(self) -> None:
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO assembly_sections
+                   (id, project_id, name, section_type, sequence, description,
+                    active, created_at, updated_at)
+                   VALUES ('pfmea-main', ?, 'PFMEA main', 'Main spine', 10, '', 1, ?, ?)""",
+                (self.project_id, timestamp, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_areas
+                   (id, project_id, scenario_id, section_id, name, updated_at)
+                   VALUES ('pfmea-area', ?, ?, 'pfmea-main', 'PFMEA area', ?)""",
+                (self.project_id, self.scenario_id, timestamp),
+            )
+            for pitch_id, pitch_number, sequence in (
+                ("pfmea-pitch-a", "ST-010", 10),
+                ("pfmea-pitch-b", "ST-020", 20),
+            ):
+                conn.execute(
+                    """INSERT INTO yamazumi_pitches
+                       (id, project_id, area_id, pitch_number, pitch_name, status,
+                        sequence, updated_at)
+                       VALUES (?, ?, 'pfmea-area', ?, '', 'Active', ?, ?)""",
+                    (pitch_id, self.project_id, pitch_number, sequence, timestamp),
+                )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, description, time_s,
+                    sequence, process_element_id, updated_at)
+                   VALUES ('pfmea-yamazumi', ?, 'pfmea-area', 'pfmea-pitch-a',
+                           'Install screw', 12, 10, ?, ?)""",
+                (self.project_id, self.work_element_id, timestamp),
+            )
+
+        entry_id = self.create_entry()
+        before = pfmea_store.pfmea_process_steps(
+            self.project_id, self.scenario_id
+        ).iloc[0]
+        self.assertEqual(before["op_id"], "M1.ST-010.1")
+
+        with store.connection() as conn:
+            conn.execute(
+                """UPDATE yamazumi_elements
+                   SET pitch_id='pfmea-pitch-b', sequence=20, updated_at=?
+                   WHERE id='pfmea-yamazumi'""",
+                (store.now_iso(),),
+            )
+            conn.execute(
+                """UPDATE work_elements SET station='ST-020', updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (store.now_iso(), self.work_element_id, self.project_id, self.scenario_id),
+            )
+
+        after = pfmea_store.pfmea_process_steps(
+            self.project_id, self.scenario_id
+        ).iloc[0]
+        saved_entry = pfmea_store.pfmea_entries(
+            self.project_id, self.scenario_id
+        ).iloc[0]
+        self.assertEqual(after["op_id"], "M1.ST-020.1")
+        self.assertEqual(after["pitch"], "ST-020")
+        self.assertEqual(saved_entry["id"], entry_id)
+        self.assertEqual(saved_entry["work_element_id"], self.work_element_id)
+
     def test_flat_save_recalculates_initial_and_resulting_rpn(self) -> None:
         entry_id = self.create_entry()
         pfmea_store.save_pfmea_effect_rows(

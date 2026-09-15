@@ -521,6 +521,19 @@ def _live_projection_conn(
             (project_id, scenario_id),
         ).fetchall()
     ]
+    operation_ids_for_order = list(
+        dict.fromkeys(str(entry["work_element_id"]) for entry in entries)
+    )
+    op_contexts = _store().work_element_op_contexts(
+        project_id, scenario_id, operation_ids_for_order
+    )
+    entries.sort(
+        key=lambda entry: (
+            int(op_contexts[str(entry["work_element_id"])]["sort_order"]),
+            _text(entry.get("created_at")),
+            str(entry["id"]),
+        )
+    )
     sources_by_entry: dict[str, list[dict]] = {}
     for source in _quality_sources(conn, project_id, scenario_id):
         sources_by_entry.setdefault(str(source["pfmea_entry_id"]), []).append(source)
