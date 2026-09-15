@@ -8,6 +8,7 @@ import streamlit as st
 from utils.assembly_grid import assembly_grid as render_assembly_grid
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.component_payload import is_empty_unsaved_grid_category
+from utils.fishbone_ui import ALL_ACTIVE_SECTIONS, section_breadcrumb_labels
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     add_assembly_image,
@@ -21,7 +22,7 @@ from utils.store import (
     assembly_grid_number_merge_impact,
     assembly_grid_part_relink_impact,
     assembly_images,
-    assembly_sections,
+    assembly_section_walk_order,
     audit_history,
     complexity_features,
     complexity_tree,
@@ -74,12 +75,15 @@ selected_assembly_key = f"assemblies_selected_id_{project_id}"
 apply_pending_table_editor_reset(catalog_editor_key)
 
 catalog = assembly_catalog_rows(project_id)
-sections = assembly_sections(project_id)
+sections = assembly_section_walk_order(project_id)
 section_name_by_id = (
     {str(row["id"]): str(row["name"]) for _, row in sections.iterrows()}
     if not sections.empty else {}
 )
-section_id_by_name = {name: section_id for section_id, name in section_name_by_id.items()}
+section_option_labels = section_breadcrumb_labels(sections)
+section_id_by_label = {
+    label: section_id for section_id, label in section_option_labels.items()
+}
 
 
 def _component_event(component_key: str, event_name: str) -> dict:
@@ -93,16 +97,20 @@ if sections.empty:
 else:
     active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
     active_section_ids = active_sections["id"].astype(str).tolist()
-    all_sections_token = "__all_active_sections__"
+    all_sections_token = ALL_ACTIVE_SECTIONS
+    section_selector_key = f"assembly_grid_sections_{project_id}"
     selected_section_values = st.multiselect(
         "Fishbone sections",
         [all_sections_token, *active_section_ids],
-        default=[all_sections_token],
+        default=(
+            None if section_selector_key in st.session_state
+            else [all_sections_token]
+        ),
         format_func=lambda value: (
             "All active sections"
-            if value == all_sections_token else section_name_by_id.get(value, value)
+            if value == all_sections_token else section_option_labels.get(value, value)
         ),
-        key=f"assembly_grid_sections_{project_id}",
+        key=section_selector_key,
         help="Selected sections appear together in Fishbone order and save atomically.",
     )
     selected_section_ids = (
@@ -191,7 +199,7 @@ else:
     part_target_section_id = st.selectbox(
         "Part placement section",
         selected_section_ids,
-        format_func=lambda value: section_name_by_id.get(value, value),
+        format_func=lambda value: section_option_labels.get(value, value),
         key=f"assembly_grid_part_target_section_{project_id}",
         help="Find/add part places ordinary component uses in this displayed section.",
     )
@@ -703,11 +711,14 @@ else:
             for feature_id in visible_feature_ids
         ],
         sections=[
-            {"id": str(row["id"]), "name": str(row["name"])}
+            {
+                "id": str(row["id"]),
+                "name": section_option_labels.get(str(row["id"]), str(row["name"])),
+            }
             for _, row in sections.iterrows()
         ],
         grid_sections=[
-            {"id": section_id, "name": section_name_by_id.get(section_id, section_id)}
+            {"id": section_id, "name": section_option_labels.get(section_id, section_id)}
             for section_id in selected_section_ids
         ],
         uses=grid_use_payload,
@@ -1415,10 +1426,10 @@ else:
     }
     catalog_source["built_section"] = catalog_source.get(
         "built_section_id", pd.Series(dtype="string")
-    ).map(section_name_by_id)
+    ).map(section_option_labels)
     catalog_source["installed_section"] = catalog_source.get(
         "installed_section_id", pd.Series(dtype="string")
-    ).map(section_name_by_id).fillna("Not assigned")
+    ).map(section_option_labels).fillna("Not assigned")
     catalog_source["parent_assembly"] = catalog_source.get(
         "parent_id", pd.Series(dtype="string")
     ).map(assembly_number_by_id).fillna("No parent")
@@ -1500,13 +1511,13 @@ else:
             ),
             "built_section": st.column_config.SelectboxColumn(
                 "Built section",
-                options=list(section_id_by_name),
+                options=list(section_id_by_label),
                 required=True,
                 help="The Fishbone section containing the part uses eligible for this assembly's mini-BOM.",
             ),
             "installed_section": st.column_config.SelectboxColumn(
                 "Installed section",
-                options=["Not assigned", *list(section_id_by_name)],
+                options=["Not assigned", *list(section_id_by_label)],
                 required=True,
                 help=(
                     "The Fishbone section where the completed assembly is installed. A mapped "
@@ -1645,8 +1656,8 @@ else:
                     "" if pd.isna(row.get("make_buy"))
                     else str(row.get("make_buy") or "").strip()
                 ),
-                "built_section_id": section_id_by_name.get(str(row.get("built_section") or "")),
-                "installed_section_id": section_id_by_name.get(
+                "built_section_id": section_id_by_label.get(str(row.get("built_section") or "")),
+                "installed_section_id": section_id_by_label.get(
                     str(row.get("installed_section") or "")
                 ),
                 "parent_id": assembly_id_by_number.get(

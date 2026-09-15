@@ -176,6 +176,20 @@ At this stage of the project, all linear dimensional measurements (e.g., height,
 
 This standard does not apply to non-dimensional measurements such as time, torque, weight, temperature, or pressure. Those measurements retain their own appropriate units and are unaffected by this standard.
 
+### Yamazumi time units
+
+Each planning scenario saves one Yamazumi-only time unit: **Seconds**, **Minutes**, or **Hours**. Use it consistently for Yamazumi takt controls, work-element entry and tables, metrics, board labels and tooltips, and workbook time values. Always convert back to the canonical seconds fields before persistence; changing the unit must never rewrite existing timing quantities or change relative board-stack heights.
+
+The unit control uses an explicit **Save & Refresh** action, records old/new values in Yamazumi History, and refuses to change units while the work-element editor has unsaved changes. Labels and workbook exports name the active unit. Other pages retain their established seconds presentation.
+
+### Guided Yamazumi pitch initialization
+
+Selecting a Yamazumi area with no pitch addresses opens one non-dismissible native setup dialog per area visit. The dialog and the persistent **Generate pitch addresses** expander share the same project line code, editable Fishbone-derived section code, inclusive numeric range, odd/even option, status, pitch type, feed target, and model-variant controls. Cancel suppresses the prompt until the contributor leaves and returns to that area. Subassembly and Kitter remain unavailable until the area has a receiving pitch.
+
+Generated address suggestions use `LL-SSS-NNN`: a saved two-character project line code, an editable three-character section abbreviation, and a minimum three-digit sequential suffix that expands naturally at 1000. This is guidance rather than a universal address validator; imports, existing values, and direct edits retain their established compatibility and scenario-wide uniqueness rules. A changed project line code affects future suggestions only and never rewrites saved addresses.
+
+The interactive board renders its **Unassigned** lane only while at least one persisted or drafted work element is unassigned. The regular work-element editor and Edit element dialog retain Unassigned as a destination even while that empty lane is hidden.
+
 Rule: any new linear dimensional field added to this app must store and display in inches by default. Do not introduce a metric storage column unless explicitly approved by the project owner.
 
 This standard is locked. It may be revisited in the future if the project requires metric-native data sources or equipment specs; until then, it remains imperial-only.
@@ -222,6 +236,20 @@ Content rules for help text:
 - Plain, non-technical language — avoid engineering jargon and internal database terminology
 - Explain what the field/control means and, if relevant, why it matters or how it's used downstream
 - Do not restate the field's label; add real explanatory value
+
+## Fishbone Section Ordering and Sidebar Context Standard
+
+Every Fishbone-section option list must follow the deterministic depth-first order returned by `assembly_section_walk_order()`: each main-spine section, its recursively nested subassemblies, then the next main-spine section. Siblings retain `(sequence, name)` ordering. Do not substitute alphabetical order or the flat raw `assembly_sections.sequence` order in a selector.
+
+Dropdowns use ancestry breadcrumbs such as **Main line 2 › Wheel Assembly** so nested sections remain understandable without relying on indentation alone. Stable section UUIDs remain the widget values. Special choices such as **All active sections**, **Unlinked**, **Not assigned**, and **Product / main assembly** appear before the ordered business choices. Each workflow retains its established eligibility rules: active-only controls remain active-only, while existing-record and continuity workflows may retain inactive current values.
+
+The upper-left sidebar shows **Fishbone view** only on Assembly grid, Parts to fishbone, Yamazumi, Process at a Glance, and Pin Map. It displays one breadcrumb, **All active sections**, a selected-section count, or **Unlinked**. The selector synchronizes only the page-level view; it must never change a placement destination, parent relationship, Built/Installed value, deletion target, or persisted record.
+
+One exact preferred section and its walk ordinal are browser-session state scoped to the project. Linked pages reuse that section when valid. If it is unavailable, choose the next page-valid section in walk order, then the previous valid section. Assembly grid and Pin Map support **All active sections**; Process at a Glance and Yamazumi require one exact editable context. Yamazumi and Pin Map areas follow their linked Fishbone-section order, with unlinked areas alphabetically last. This context is navigation state only and creates no audit event.
+
+## Yamazumi Board Pitch Order Standard
+
+The interactive board presents pitch stacks in numeric-aware, case-insensitive pitch-address order, which is the pitch tier of the area's Op ID sequence. A complete Subassembly or Kitter feed chain appears immediately before its receiving pitch; sibling feeders retain pitch-address order. This ordering is derived UI state only. It must not update `yamazumi_pitches.sequence`, addresses, feed targets, stack contents, audit history, or any other persisted record. The established north/top odd-address and south/bottom even-address rendering remains unchanged.
 
 ## Canonical Terminology Glossary
 

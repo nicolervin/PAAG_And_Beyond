@@ -2,9 +2,10 @@ import pandas as pd
 #test
 import streamlit as st
 
+from utils.fishbone_ui import section_breadcrumb_labels
 from utils.store import (
     assign_parts_to_section,
-    assembly_sections,
+    assembly_section_walk_order,
     audit_history,
     create_part_and_assign_to_section,
     delete_process_part_groups,
@@ -83,14 +84,11 @@ st.caption(
 )
 st.caption(f"Rev {scenario['revision_label']} · {scenario['name']} · {scenario['status']}")
 
-sections = assembly_sections(project_id)
+sections = assembly_section_walk_order(project_id)
 if not sections.empty:
     sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
 section_ids = sections["id"].astype(str).tolist() if not sections.empty else []
-section_labels = {
-    str(row["id"]): f"{row['name']} ({row['section_type']})"
-    for _, row in sections.iterrows()
-}
+section_labels = section_breadcrumb_labels(sections)
 
 st.subheader("Create Part requirements")
 st.caption(
@@ -100,11 +98,13 @@ st.caption(
 if not section_ids:
     st.info("Create and populate the Fishbone framework before adding Part requirements to process work.")
 else:
+    process_section_key = f"process_pairing_section_{scenario_id}"
     section_id = st.selectbox(
         "Fishbone section",
         section_ids,
+        index=None if process_section_key in st.session_state else 0,
         format_func=lambda value: section_labels.get(value, value),
-        key=f"process_pairing_section_{scenario_id}",
+        key=process_section_key,
     )
     pairing_search = st.text_input(
         "Filter work elements or parts",
@@ -406,9 +406,27 @@ else:
                     )
                     selected_assignment_id = None
                     if placement_action == "Move an existing use":
+                        section_position = {
+                            section_id: index
+                            for index, section_id in enumerate(section_ids)
+                        }
+                        other_placements = (
+                            other_placements.assign(
+                                _section_position=other_placements["section_id"]
+                                .astype(str)
+                                .map(section_position)
+                                .fillna(len(section_position))
+                            )
+                            .sort_values(
+                                ["_section_position", "assignment_id"],
+                                kind="stable",
+                            )
+                            .drop(columns=["_section_position"])
+                        )
                         assignment_labels = {
                             str(row["assignment_id"]): (
-                                f"{row.get('section_name') or 'Unknown section'} — "
+                                f"{section_labels.get(str(row.get('section_id')), row.get('section_name') or 'Unknown section')} "
+                                "— "
                                 f"Fishbone quantity {format_clean_number(row.get('quantity'))} — "
                                 f"{row.get('use_description') or 'No use description'}"
                             )

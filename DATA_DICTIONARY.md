@@ -6,15 +6,23 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `projects`
 
-- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, lead industrial engineer, baseline revision, status, default takt time, notes, and timestamps.
+- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, lead industrial engineer, baseline revision, status, default takt time, the project-wide Yamazumi line-code suggestion, notes, and timestamps.
 - **Key relationships:** Parent of `planning_scenarios`, `parts`, `project_models`, `complexity_features`, `assembly_sections`, `concerns`, source-import records, Yamazumi records, Process at a Glance records, and `audit_log` entries.
 - **Scope:** Project-wide; this is the root of all other business data.
 
 ### `planning_scenarios`
 
-- **Purpose:** A named planning branch used to compare alternative takt, balancing, and process plans without mixing their records.
+- **Purpose:** A named planning branch used to compare alternative takt, balancing, and process plans without mixing their records. `yamazumi_time_unit` stores the scenario's Yamazumi-only presentation and entry unit as `seconds`, `minutes`, or `hours`; it does not change the units of persisted timing quantities.
 - **Key relationships:** Belongs to `projects`. May reference another `planning_scenarios` row as its parent. Owns `part_scenario_activity`, `yamazumi_areas`, `work_elements`, and `process_part_groups`. Scenario cloning copies the applicable scenario-owned planning data.
 - **Scope:** Scenario-specific.
+
+#### Scenario-saved Yamazumi time unit — approved September 15, 2026
+
+The setting connects one `planning_scenarios` row to its scenario-owned `yamazumi_areas`, `yamazumi_pitches`, and `yamazumi_elements` presentation in the critical thread. A dedicated `yamazumi_time_unit` field is required because the existing `takt_time_s`, `takt_override_s`, `time_s`, and downstream `cycle_time_s` fields are canonical quantities in seconds rather than display preferences. Existing and newly initialized scenarios default to `seconds`; scenario cloning copies the source preference.
+
+Yamazumi accepts and displays Seconds, Minutes, or Hours using this scenario setting. Every entered takt or work duration is converted back to seconds before persistence, calculations remain in seconds, and changing the preference never rewrites existing timing records. The setting applies only to Yamazumi; Overview, Process at a Glance, Pin Map, Ergonomics, and the application sidebar retain their established seconds presentation.
+
+The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete` values are interpreted in the saved scenario unit. Filtered work-element exports use that unit and name it explicitly in the exported time header. The Yamazumi page exposes the setting through an explicit audited **Save & Refresh** action, blocks a unit change while the work-element editor has unsaved values, and reports the old and new units in Yamazumi History. No deletion behavior is introduced.
 
 ### `concerns`
 
@@ -137,6 +145,12 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Key relationships:** Belongs to `yamazumi_areas` and `projects`. Referenced by `yamazumi_elements`; deleting a pitch through the supported workflow moves its work elements to Unassigned before deletion. `feeds_into_pitch_id` is a nullable self-reference to `yamazumi_pitches.id` with `ON DELETE RESTRICT`.
 - **Scope:** Scenario-specific through the parent area.
 
+#### Scenario-wide pitch-address uniqueness — approved September 14, 2026
+
+Each trimmed pitch address is unique, case-insensitively, across every Yamazumi area in one planning scenario. The same physical address may be reused in another scenario of the project so alternative planning branches and scenario cloning retain their meaning. Idempotent SQLite insert/update triggers provide the final database safeguard without duplicating `scenario_id` on `yamazumi_pitches`; every supported add, edit, table replacement, range generation, import, and clone path also validates through the store layer and returns a contributor-readable error.
+
+Legacy conflicts are reported on the affected Yamazumi page and are never automatically renamed, merged, moved, or deleted. Contributors must deliberately rename or delete a conflicting pitch through an existing audited workflow before unrelated pitch changes can be saved. Same-area imports continue reusing an existing address, while an address already owned by another area rejects the complete import. Range generation skips addresses already used anywhere in the scenario, reports the skipped count, and creates the remaining addresses atomically. A scenario containing a legacy conflict cannot be cloned until the conflict is resolved.
+
 #### Yamazumi pitch feeds-into relationship — approved September 10, 2026
 
 `yamazumi_pitches.feeds_into_pitch_id` identifies the other pitch that receives material from a `Subassembly` or `Kitter` pitch. The field applies only to those two `pitch_type` values and must be `NULL` for `Pitch`, `Waterspider`, and `Repacker`. New pitches and every contributor edit that saves a pitch as `Subassembly` or `Kitter` require a valid target. Existing feeder pitches remain compatibility-`NULL` without inferred backfill until a contributor manually edits them; the Yamazumi editor displays **Feed target required** on every such row.
@@ -145,7 +159,13 @@ The target must be a different pitch in the same `yamazumi_areas` row, which gua
 
 Scenario cloning remaps populated targets through the cloned pitch-ID map; compatibility-`NULL` values remain `NULL`. A pitch referenced as a feed target cannot be deleted until every referring feeder is re-pointed or changed to a non-feeder type. Deleting a feeder removes its outgoing relationship and retains the established behavior that moves its `yamazumi_elements` to Unassigned. Successful UI saves use Current editor attribution, relationship-specific audit details containing source and old/new target IDs and addresses, Undo/Save & Refresh behavior, and the Yamazumi History expander.
 
-This relationship is a prerequisite for the separately pending deterministic stack-position and automatic human-readable Op ID sequencing features. It does not implement either sequencing feature.
+This relationship supplies physical-routing input to the derived Yamazumi board order. It remains separate from Fishbone lineage and does not change the `M` or `S` designators in a human-readable Op ID.
+
+#### Yamazumi board pitch order — approved September 15, 2026
+
+The interactive balancing board derives pitch-stack presentation order without changing `yamazumi_pitches.sequence` or any persisted relationship. Within the board's single Fishbone-linked Yamazumi area, pitch address is the pitch-level Op ID sequence and is compared case-insensitively with numeric address segments in numeric order. This prevents a newly created pitch from appearing last merely because its stored creation sequence is newest.
+
+Physical feed routing refines that address order. Each complete upstream Subassembly or Kitter chain is displayed immediately before the pitch it feeds; multiple feeders for one receiver use pitch-address order, and nested feeders are emitted upstream-to-downstream. Unlinked pitches and compatibility feeders without a target remain in address order. The board retains the established rule that odd ending addresses render north/top and even ending addresses render south/bottom. This is a read-only presentation transformation, creates no audit event, and does not renumber addresses, rewrite saved display sequence, change feed targets, or alter Op ID lineage.
 
 ### `yamazumi_elements`
 
@@ -722,6 +742,26 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### Scenario-saved Yamazumi time units
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** September 15, 2026
+- **Connections:** `planning_scenarios.yamazumi_time_unit` controls presentation for the scenario's existing Yamazumi areas, pitches, and elements; the critical-thread relationship remains Planning scenario → Yamazumi → Process at a Glance.
+- **Scope:** Scenario-specific and Yamazumi-only. Other modules retain seconds presentation.
+- **Storage decision:** Add one field to `planning_scenarios`; existing canonical seconds fields cannot represent a durable presentation preference without conflating units and quantities.
+- **Applicable standards:** Use the scenario badge, explicit Save & Refresh, store validation, Current editor audit attribution, Yamazumi History, and concise help. The preference has no deletion workflow.
+- **Approval status:** Approved by the project owner on September 15, 2026; implemented.
+
+### Guided Yamazumi pitch initialization
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** September 15, 2026
+- **Connections:** `projects.yamazumi_line_code` supplies the two-character project-wide default used when creating addresses for scenario-owned `yamazumi_pitches`; linked `yamazumi_areas.section_id` supplies the Fishbone section used for the editable middle-code suggestion. The critical thread remains Project → Fishbone → scenario Yamazumi → Process at a Glance.
+- **Scope:** The line code is project-wide so every scenario starts from the same naming default. Generated pitches and their addresses remain scenario-specific through their Yamazumi area.
+- **Storage decision:** Add one field to `projects` because a stable suggestion must exist before any pitch address exists and cannot be reliably inferred from an empty project. Fishbone section codes and numeric suffixes remain derived suggestions and are not persisted separately from `yamazumi_pitches.pitch_number`.
+- **Applicable standards:** Use native non-dismissible dialog behavior with an explicit Cancel action, store validation, Current editor audit attribution, Yamazumi History, stable session-state keys, and concise help. The setting and generated addresses introduce no deletion workflow.
+- **Approval status:** Approved by the project owner on September 15, 2026; implemented. The convention is advisory and never renames or rejects existing nonconforming pitch addresses.
+
 ### Automatic Op ID sequencing
 
 - **Proposed by:** Nicole Ervin, project owner
@@ -742,8 +782,8 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 - **Print and export drift:** Because Op IDs are live-derived, they may change after Fishbone reordering or reparenting, Yamazumi-area section reassignment, pitch reassignment, or stack reordering. Any future printed or exported presentation containing Op IDs must include a visible **Generated on [date]** stamp so the document is understood as a point-in-time snapshot. Print and export implementation remains deferred to `PAAG_ROADMAP.md` Phase 7.
 - **Future compatibility:** The calculation deliberately derives its result from the existing Fishbone and Yamazumi graph relationships rather than storing a flattened identifier. A separately proposed future Fishbone/Yamazumi flow visualization may reuse the same walk and relationship data as graph nodes and edges. This proposal does not approve, scope, or implement such a visualization.
 - **Applicable standards:** Op ID is read-only and introduces no Save & Refresh, Undo, deletion, audit-write, or History behavior of its own. Use the canonical labels **Op ID**, **Pitch**, **Work Element**, **Fishbone section**, and **Yamazumi area** consistently. Wherever Op ID is displayed, provide plain-language help explaining that it identifies the Work Element's current Fishbone lineage, Pitch, and centerline-outward stack position and may change when the Fishbone structure or Yamazumi assignments change.
-- **Out of scope:** Persisting or manually editing Op IDs, using raw database UUIDs as human-facing Op IDs, changing Fishbone or Yamazumi ordering, traversing `feeds_into_pitch_id` for Op ID lineage, print/export implementation, and building a Fishbone/Yamazumi flow visualization.
-- **Approval status:** **Approved by the project owner on September 11, 2026; implementation has not begun.**
+- **Out of scope:** Persisting or manually editing Op IDs, using raw database UUIDs as human-facing Op IDs, changing persisted Fishbone or Yamazumi ordering, traversing `feeds_into_pitch_id` for Op ID lineage, print/export implementation, and building a Fishbone/Yamazumi flow visualization. The approved Yamazumi board pitch presentation order may use physical feed routing without treating it as Fishbone lineage.
+- **Approval status:** **Approved by the project owner on September 11, 2026; implemented.**
 
 ### Yamazumi element persisted stack order
 
