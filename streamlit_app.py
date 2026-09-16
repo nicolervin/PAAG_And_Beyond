@@ -1,5 +1,6 @@
 import streamlit as st
 
+from utils.time_units import format_seconds
 from utils.fishbone_ui import render_fishbone_sidebar_context
 from utils.scope_ui import scenario_view_selector
 from utils.store import get_project, init_db, projects
@@ -131,7 +132,7 @@ with st.sidebar:
         if active_scenario:
             st.caption(
                 f"{active_scenario['status']} · "
-                f"{float(active_scenario['takt_time_s']):.1f} s takt"
+                f"{format_seconds(active_scenario['takt_time_s'], active_scenario['takt_time_unit'])} takt"
             )
         render_fishbone_sidebar_context(
             st,

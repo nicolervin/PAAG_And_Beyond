@@ -24,13 +24,21 @@ class SectionDeletionTests(unittest.TestCase):
             Path(f"{self.database_path}{suffix}").unlink(missing_ok=True)
 
     def add_section(self, name: str, parent_id: str | None = None) -> str:
-        return store.add_assembly_section(
+        section_id = store.add_assembly_section(
             self.project_id,
             name,
             "Subassembly" if parent_id else "Main spine",
             parent_id,
             "",
         )
+        # These tests construct their Yamazumi references explicitly. Remove
+        # the product behavior's automatic baseline so each impact fixture
+        # retains its intended reference counts.
+        store.execute(
+            "DELETE FROM yamazumi_areas WHERE project_id=? AND section_id=?",
+            (self.project_id, section_id),
+        )
+        return section_id
 
     def add_use(self, section_id: str, part_id: str | None = None) -> str:
         selected_part = part_id or self.part_ids[0]
@@ -56,6 +64,27 @@ class SectionDeletionTests(unittest.TestCase):
                 (area_id, self.project_id, scenario_id, section_id, name, store.now_iso()),
             )
         return area_id
+
+    def add_pitch(self, area_id: str, number: str) -> tuple[str, str]:
+        pitch_id, element_id = str(uuid4()), str(uuid4())
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (pitch_id, self.project_id, area_id, number, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, description, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    element_id, self.project_id, area_id, pitch_id,
+                    f"Work for {number}", timestamp,
+                ),
+            )
+        return pitch_id, element_id
 
     def add_process_group(self, section_id: str, scenario_id: str, name: str) -> str:
         work_id, group_id = str(uuid4()), str(uuid4())
@@ -321,42 +350,63 @@ class SectionDeletionTests(unittest.TestCase):
                 self.project_id, [source_id], other_section_id, self.scenario_id
             )
 
-    def test_cross_scenario_yamazumi_conflict_is_rejected(self) -> None:
+    def test_cross_scenario_yamazumi_areas_merge_into_existing_target(self) -> None:
         source_id = self.add_section("Cross-scenario source")
         target_id = self.add_section("Cross-scenario target")
         other_scenario_id = self.add_scenario("Other scenario", "B")
-        self.add_yamazumi_area(source_id, other_scenario_id, "Other source area")
-        self.add_yamazumi_area(target_id, other_scenario_id, "Other target area")
+        source_area_id = self.add_yamazumi_area(
+            source_id, other_scenario_id, "Other source area"
+        )
+        target_area_id = self.add_yamazumi_area(
+            target_id, other_scenario_id, "Other target area"
+        )
+        pitch_id, element_id = self.add_pitch(source_area_id, "MERGE-001")
 
         validation = store.assembly_section_delete_target_validation(
             self.project_id, [source_id], target_id, self.scenario_id
         )
 
-        self.assertFalse(validation["valid"])
-        self.assertEqual(validation["conflicts"][0]["scenario_id"], other_scenario_id)
-        self.assertIn("already has its own Yamazumi area", validation["message"])
-        self.assertIn("Other scenario", validation["message"])
-        with self.assertRaisesRegex(ValueError, "already has its own Yamazumi area"):
-            store.delete_assembly_sections(
-                self.project_id, [source_id], target_id, self.scenario_id
-            )
-        self.assertTrue(
-            store.assembly_sections(self.project_id)["id"].astype(str).eq(source_id).any()
+        self.assertTrue(validation["valid"])
+        result = store.delete_assembly_sections(
+            self.project_id, [source_id], target_id, self.scenario_id
         )
+        self.assertEqual(result["yamazumi_merged_count"], 1)
+        self.assertEqual(
+            store.query("SELECT area_id FROM yamazumi_pitches WHERE id=?", (pitch_id,))[0]["area_id"],
+            target_area_id,
+        )
+        self.assertEqual(
+            store.query("SELECT area_id FROM yamazumi_elements WHERE id=?", (element_id,))[0]["area_id"],
+            target_area_id,
+        )
+        self.assertEqual(store.query("SELECT id FROM yamazumi_areas WHERE id=?", (source_area_id,)), [])
 
-    def test_multiple_source_yamazumi_areas_cannot_share_one_target(self) -> None:
+    def test_multiple_source_yamazumi_areas_merge_under_one_target(self) -> None:
         parent_id = self.add_section("Multiple-area parent")
         child_id = self.add_section("Multiple-area child", parent_id)
         target_id = self.add_section("Multiple-area target")
-        self.add_yamazumi_area(parent_id, self.scenario_id, "Parent area")
-        self.add_yamazumi_area(child_id, self.scenario_id, "Child area")
+        parent_area_id = self.add_yamazumi_area(parent_id, self.scenario_id, "Parent area")
+        child_area_id = self.add_yamazumi_area(child_id, self.scenario_id, "Child area")
+        parent_pitch_id, _ = self.add_pitch(parent_area_id, "MERGE-010")
+        child_pitch_id, _ = self.add_pitch(child_area_id, "MERGE-020")
 
         validation = store.assembly_section_delete_target_validation(
             self.project_id, [parent_id], target_id, self.scenario_id
         )
 
-        self.assertFalse(validation["valid"])
-        self.assertIn("More than one Yamazumi area would be re-pointed", validation["message"])
+        self.assertTrue(validation["valid"])
+        result = store.delete_assembly_sections(
+            self.project_id, [parent_id], target_id, self.scenario_id
+        )
+        self.assertEqual(result["yamazumi_merged_count"], 1)
+        pitch_area_ids = {
+            row["area_id"]
+            for row in store.query(
+                "SELECT area_id FROM yamazumi_pitches WHERE id IN (?, ?)",
+                (parent_pitch_id, child_pitch_id),
+            )
+        }
+        self.assertEqual(pitch_area_ids, {parent_area_id})
 
     def test_non_component_part_use_returns_to_not_placed(self) -> None:
         source_id = self.add_section("Unassigned source")

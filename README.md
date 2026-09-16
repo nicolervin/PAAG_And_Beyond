@@ -153,7 +153,7 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 - **Pitch type** — Pitch, Waterspider, Subassembly, Kitter, or Repacker.
 - **Pitch status** — Active pitches accept work; Open and Blocked pitches remain visible but cannot receive work.
 - **Takt time** — Target time available per completed unit based on demand. Yamazumi may present it in the scenario's saved Seconds, Minutes, or Hours unit; canonical storage remains seconds.
-- **Planning scenario** — A named branch of Yamazumi and Process data with its own revision, takt, and lineage.
+- **Planning scenario** — A named branch of Yamazumi and Process data with its own revision, canonical takt in seconds, saved Seconds/Minutes/Hours takt display preference, and lineage. Its Yamazumi work-duration preference is separate.
 - **Model** — An official product/model number. A separate common name can change without replacing the stable identifier.
 - **Complexity feature** — A manufacturing-relevant product characteristic with controlled choices.
 - **Model variant** — A Yamazumi stack for Base work or a specific feature choice.

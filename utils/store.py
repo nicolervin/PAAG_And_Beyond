@@ -439,7 +439,10 @@ def init_db() -> None:
                         )
                     ),
                 owner TEXT DEFAULT '', revision TEXT DEFAULT 'A', status TEXT DEFAULT 'Draft',
-                takt_time_s REAL DEFAULT 60, notes TEXT DEFAULT '',
+                takt_time_s REAL DEFAULT 60,
+                takt_time_unit TEXT NOT NULL DEFAULT 'seconds'
+                    CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours')),
+                notes TEXT DEFAULT '',
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS planning_scenarios (
@@ -449,6 +452,8 @@ def init_db() -> None:
                 revision_sequence INTEGER NOT NULL DEFAULT 1,
                 parent_scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE SET NULL,
                 status TEXT NOT NULL DEFAULT 'Working', takt_time_s REAL NOT NULL DEFAULT 60,
+                takt_time_unit TEXT NOT NULL DEFAULT 'seconds'
+                    CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours')),
                 yamazumi_time_unit TEXT NOT NULL DEFAULT 'seconds'
                     CHECK(yamazumi_time_unit IN ('seconds', 'minutes', 'hours')),
                 change_summary TEXT DEFAULT '', created_by TEXT DEFAULT '',
@@ -834,7 +839,13 @@ def init_db() -> None:
                            AND yamazumi_line_code = upper(trim(yamazumi_line_code))
                            AND yamazumi_line_code NOT GLOB '*[^A-Z0-9]*'
                        )
-                   )"""
+                )"""
+            )
+        if "takt_time_unit" not in project_columns:
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN takt_time_unit "
+                "TEXT NOT NULL DEFAULT 'seconds' "
+                "CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours'))"
             )
         for project_row in conn.execute(
             "SELECT id FROM projects WHERE yamazumi_line_code=''"
@@ -1044,6 +1055,12 @@ def init_db() -> None:
                 "TEXT NOT NULL DEFAULT 'seconds' "
                 "CHECK(yamazumi_time_unit IN ('seconds', 'minutes', 'hours'))"
             )
+        if "takt_time_unit" not in scenario_columns:
+            conn.execute(
+                "ALTER TABLE planning_scenarios ADD COLUMN takt_time_unit "
+                "TEXT NOT NULL DEFAULT 'seconds' "
+                "CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours'))"
+            )
         model_columns = {row[1] for row in conn.execute("PRAGMA table_info(project_models)").fetchall()}
         for column, definition in {
             "display_name": "TEXT DEFAULT ''",
@@ -1196,12 +1213,15 @@ def init_db() -> None:
                 conn.execute(
                     """INSERT INTO planning_scenarios
                        (id, project_id, name, revision_label, revision_sequence, status,
-                        takt_time_s, change_summary, created_by, created_at, updated_at)
-                       VALUES (?, ?, 'Current plan', ?, 1, 'Working', ?,
+                        takt_time_s, takt_time_unit, change_summary, created_by,
+                        created_at, updated_at)
+                       VALUES (?, ?, 'Current plan', ?, 1, 'Working', ?, ?,
                                'Migrated from the original project plan', ?, ?, ?)""",
                     (
                         str(uuid4()), project["id"], str(project["revision"] or "A"),
-                        float(project["takt_time_s"] or 60), str(project["owner"] or ""),
+                        float(project["takt_time_s"] or 60),
+                        normalize_time_unit(project["takt_time_unit"]),
+                        str(project["owner"] or ""),
                         timestamp, timestamp,
                     ),
                 )
@@ -1437,6 +1457,7 @@ def update_planning_scenario(
         raise ValueError("Scenario name and revision label are required.")
     if status not in {"Working", "Frozen", "Released", "Archived"}:
         raise ValueError("Choose a valid scenario status.")
+    takt_unit = normalize_time_unit(values.get("takt_time_unit", "seconds"))
     try:
         takt = float(values.get("takt_time_s"))
     except (TypeError, ValueError) as exc:
@@ -1448,10 +1469,11 @@ def update_planning_scenario(
         with context as conn:
             cursor = conn.execute(
                 """UPDATE planning_scenarios
-                   SET name=?, revision_label=?, status=?, takt_time_s=?, change_summary=?, updated_at=?
+                   SET name=?, revision_label=?, status=?, takt_time_s=?, takt_time_unit=?,
+                       change_summary=?, updated_at=?
                    WHERE id=? AND project_id=?""",
                 (
-                    name, revision_label, status, takt,
+                    name, revision_label, status, takt, takt_unit,
                     str(values.get("change_summary") or "").strip(), now_iso(),
                     scenario_id, project_id,
                 ),
@@ -1494,6 +1516,7 @@ def clone_planning_scenario(
     change_summary: str = "",
     created_by: str = "",
     *,
+    takt_time_unit: str | None = None,
     _conn: sqlite3.Connection | None = None,
 ) -> str:
     """Clone a complete balancing branch and preserve its internal lineage links."""
@@ -1529,12 +1552,13 @@ def clone_planning_scenario(
             conn.execute(
                 """INSERT INTO planning_scenarios
                    (id, project_id, name, revision_label, revision_sequence, parent_scenario_id,
-                    status, takt_time_s, yamazumi_time_unit, change_summary,
-                    created_by, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'Working', ?, ?, ?, ?, ?, ?)""",
+                    status, takt_time_s, takt_time_unit, yamazumi_time_unit,
+                    change_summary, created_by, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'Working', ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     new_scenario_id, project_id, name, revision_label, sequence,
                     source_scenario_id, takt,
+                    normalize_time_unit(takt_time_unit or source["takt_time_unit"]),
                     normalize_time_unit(source["yamazumi_time_unit"]),
                     str(change_summary or "").strip(),
                     str(created_by or "").strip(), timestamp, timestamp,
@@ -1833,6 +1857,7 @@ def save_planning_scenario_rows(
             raise ValueError("Scenario name and revision label are required in every row.")
         if status not in valid_statuses:
             raise ValueError("Choose a valid scenario status in every row.")
+        takt_unit = normalize_time_unit(record.get("takt_time_unit", "seconds"))
         try:
             takt = float(record.get("takt_time_s"))
         except (TypeError, ValueError) as exc:
@@ -1852,6 +1877,7 @@ def save_planning_scenario_rows(
                 "revision_label": revision_label,
                 "status": status,
                 "takt_time_s": takt,
+                "takt_time_unit": takt_unit,
                 "change_summary": str(record.get("change_summary") or "").strip(),
             }
         )
@@ -1874,6 +1900,7 @@ def save_planning_scenario_rows(
                 float(record["takt_time_s"]),
                 str(record["change_summary"]),
                 created_by,
+                takt_time_unit=str(record["takt_time_unit"]),
                 _conn=conn,
             )
             if record["status"] != "Working":
@@ -8748,13 +8775,14 @@ def import_yamazumi_rows(
     }
     with connection() as conn:
         scenario = conn.execute(
-            "SELECT yamazumi_time_unit FROM planning_scenarios "
+            "SELECT takt_time_unit, yamazumi_time_unit FROM planning_scenarios "
             "WHERE id=? AND project_id=?",
             (scenario_id, project_id),
         ).fetchone()
         if not scenario:
             raise ValueError("The active planning scenario no longer exists in this project.")
-        import_time_unit = normalize_time_unit(scenario["yamazumi_time_unit"])
+        import_takt_unit = normalize_time_unit(scenario["takt_time_unit"])
+        import_work_unit = normalize_time_unit(scenario["yamazumi_time_unit"])
         _validate_yamazumi_scenario_pitch_addresses(
             conn, project_id, scenario_id
         )
@@ -8768,7 +8796,7 @@ def import_yamazumi_rows(
             takt = (
                 None
                 if pd.isna(takt_raw) or str(takt_raw).strip() == ""
-                else display_to_seconds(takt_raw, import_time_unit)
+                else display_to_seconds(takt_raw, import_takt_unit)
             )
             if area_name not in area_ids:
                 area_ids[area_name] = upsert_yamazumi_area(
@@ -8848,7 +8876,7 @@ def import_yamazumi_rows(
                  json.dumps([imported_variant]),
                  str(row.get("Work_Type") or "Cycle").strip().title(), description,
                  display_to_seconds(
-                     row.get("Work_Time_to_complete") or 0, import_time_unit
+                     row.get("Work_Time_to_complete") or 0, import_work_unit
                  ),
                  str(row.get("Work_region") or "None").strip(), json.dumps(flags),
                  (index + 1) * 10, timestamp),
@@ -9075,16 +9103,18 @@ def create_project(
     owner: str,
     takt_time_s: float,
     product_line: str = "",
+    takt_time_unit: str = "seconds",
 ) -> str:
     project_id, timestamp = str(uuid4()), now_iso()
+    takt_unit = normalize_time_unit(takt_time_unit)
     execute(
         """INSERT INTO projects
            (id, name, program, product_line, owner, revision, status,
-            takt_time_s, notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'A', 'Draft', ?, '', ?, ?)""",
+            takt_time_s, takt_time_unit, notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'A', 'Draft', ?, ?, '', ?, ?)""",
         (
             project_id, name.strip(), program.strip(), product_line.strip(),
-            owner.strip(), takt_time_s, timestamp, timestamp,
+            owner.strip(), takt_time_s, takt_unit, timestamp, timestamp,
         ),
     )
     return project_id
@@ -9113,9 +9143,11 @@ def update_project_yamazumi_line_code(project_id: str, value: object) -> dict:
 
 
 def update_project(project_id: str, values: dict) -> None:
+    takt_unit = normalize_time_unit(values.get("takt_time_unit", "seconds"))
+    values = {**values, "takt_time_unit": takt_unit}
     fields = [
         "name", "program", "product_line", "owner", "revision", "status",
-        "takt_time_s", "notes",
+        "takt_time_s", "takt_time_unit", "notes",
     ]
     execute(
         f"UPDATE projects SET {', '.join(f'{field} = ?' for field in fields)}, updated_at = ? WHERE id = ?",
@@ -9824,52 +9856,9 @@ def _assembly_section_target_validation(
         raise ValueError("The active planning scenario no longer exists in this project.")
 
     placeholders = ", ".join("?" for _ in affected_ids)
-    source_counts = {
-        str(row["scenario_id"]): int(row["area_count"])
-        for row in conn.execute(
-            f"""SELECT scenario_id, COUNT(*) AS area_count
-                FROM yamazumi_areas
-                WHERE project_id=? AND section_id IN ({placeholders})
-                GROUP BY scenario_id""",
-            (project_id, *affected_ids),
-        ).fetchall()
-    }
-    target_counts = {
-        str(row["scenario_id"]): int(row["area_count"])
-        for row in conn.execute(
-            """SELECT scenario_id, COUNT(*) AS area_count
-               FROM yamazumi_areas
-               WHERE project_id=? AND section_id=?
-               GROUP BY scenario_id""",
-            (project_id, target_id),
-        ).fetchall()
-    }
+    # Yamazumi areas may now converge on the selected target; deletion merges
+    # their contents per scenario instead of treating convergence as a conflict.
     conflicts: list[dict] = []
-    for scenario_id, source_count in source_counts.items():
-        target_count = target_counts.get(scenario_id, 0)
-        if source_count + target_count <= 1:
-            continue
-        scenario = conn.execute(
-            """SELECT name, revision_label FROM planning_scenarios
-               WHERE id=? AND project_id=?""",
-            (scenario_id, project_id),
-        ).fetchone()
-        conflicts.append(
-            {
-                "scenario_id": scenario_id,
-                "scenario_name": str(scenario["name"]) if scenario else "Unknown scenario",
-                "revision_label": str(scenario["revision_label"]) if scenario else "",
-                "source_area_count": source_count,
-                "target_area_count": target_count,
-            }
-        )
-    conflicts.sort(
-        key=lambda row: (
-            str(row["scenario_id"]) != str(active_scenario or ""),
-            str(row["revision_label"]),
-            str(row["scenario_name"]),
-        )
-    )
     category_conflicts: list[dict] = []
     incoming_categories = [
         dict(row)
@@ -9957,6 +9946,75 @@ def _assembly_section_target_validation(
         "conflicts": [*conflicts, *category_conflicts],
         "category_conflicts": category_conflicts,
     }
+
+
+def _merge_yamazumi_areas_for_section_delete(
+    conn: sqlite3.Connection,
+    project_id: str,
+    affected_ids: list[str],
+    target_section_id: str,
+    timestamp: str,
+) -> tuple[int, int]:
+    """Move affected area contents into one target-linked area per scenario."""
+    placeholders = ", ".join("?" for _ in affected_ids)
+    rows = conn.execute(
+        f"""SELECT id, scenario_id, section_id
+            FROM yamazumi_areas
+            WHERE project_id=?
+              AND (section_id=? OR section_id IN ({placeholders}))
+            ORDER BY CASE WHEN section_id=? THEN 0 ELSE 1 END, rowid""",
+        (project_id, target_section_id, *affected_ids, target_section_id),
+    ).fetchall()
+    by_scenario: dict[str | None, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_scenario.setdefault(row["scenario_id"], []).append(row)
+
+    moved_area_count = 0
+    merged_area_count = 0
+    for scenario_rows in by_scenario.values():
+        incoming = [
+            row for row in scenario_rows if str(row["section_id"]) in affected_ids
+        ]
+        if not incoming:
+            continue
+        survivor = scenario_rows[0]
+        survivor_id = str(survivor["id"])
+        if str(survivor["section_id"]) in affected_ids:
+            conn.execute(
+                "UPDATE yamazumi_areas SET section_id=?, updated_at=? WHERE id=?",
+                (target_section_id, timestamp, survivor_id),
+            )
+            moved_area_count += 1
+
+        for donor in scenario_rows[1:]:
+            donor_id = str(donor["id"])
+            if str(donor["section_id"]) not in affected_ids:
+                continue
+            conn.execute(
+                """DELETE FROM yamazumi_work_regions
+                   WHERE area_id=? AND EXISTS (
+                       SELECT 1 FROM yamazumi_work_regions target_region
+                       WHERE target_region.area_id=?
+                         AND target_region.name=yamazumi_work_regions.name
+                   )""",
+                (donor_id, survivor_id),
+            )
+            conn.execute(
+                "UPDATE yamazumi_work_regions SET area_id=?, updated_at=? WHERE area_id=?",
+                (survivor_id, timestamp, donor_id),
+            )
+            conn.execute(
+                "UPDATE yamazumi_elements SET area_id=?, updated_at=? WHERE area_id=?",
+                (survivor_id, timestamp, donor_id),
+            )
+            conn.execute(
+                "UPDATE yamazumi_pitches SET area_id=?, updated_at=? WHERE area_id=?",
+                (survivor_id, timestamp, donor_id),
+            )
+            conn.execute("DELETE FROM yamazumi_areas WHERE id=?", (donor_id,))
+            moved_area_count += 1
+            merged_area_count += 1
+    return moved_area_count, merged_area_count
 
 
 def assembly_section_delete_target_validation(
@@ -10079,6 +10137,7 @@ def delete_assembly_sections(
     target_id = _catalog_text(target_section_id) or None
     target_validation = None
     yamazumi_repointed = 0
+    yamazumi_merged = 0
     process_repointed = 0
     category_built_repointed = 0
     category_installed_repointed = 0
@@ -10135,11 +10194,11 @@ def delete_assembly_sections(
             )
             if not target_validation["valid"]:
                 raise ValueError(str(target_validation["message"]))
-            yamazumi_repointed = conn.execute(
-                f"""UPDATE yamazumi_areas SET section_id=?, updated_at=?
-                    WHERE project_id=? AND section_id IN ({placeholders})""",
-                (target_id, timestamp, project_id, *affected_ids),
-            ).rowcount
+            yamazumi_repointed, yamazumi_merged = (
+                _merge_yamazumi_areas_for_section_delete(
+                    conn, project_id, affected_ids, str(target_id), timestamp
+                )
+            )
             process_repointed = conn.execute(
                 f"""UPDATE process_part_groups SET section_id=?, updated_at=?
                     WHERE project_id=? AND section_id IN ({placeholders})""",
@@ -10197,6 +10256,7 @@ def delete_assembly_sections(
             str(target_validation["target_section_name"]) if target_validation else ""
         ),
         "yamazumi_repointed_count": int(yamazumi_repointed),
+        "yamazumi_merged_count": int(yamazumi_merged),
         "process_repointed_count": int(process_repointed),
         "assembly_replacement_count": len(assembly_replacements),
         "category_built_repointed_count": int(category_built_repointed),
@@ -10205,6 +10265,112 @@ def delete_assembly_sections(
     }
 
 
+
+
+def _create_yamazumi_areas_for_section(
+    conn: sqlite3.Connection,
+    project_id: str,
+    section_id: str,
+    section_name: str,
+    timestamp: str,
+) -> dict[str, object]:
+    """Create one linked area per existing scenario without altering conflicts."""
+    created: list[dict[str, str]] = []
+    conflicts: list[dict[str, str]] = []
+    scenarios = conn.execute(
+        """SELECT id, name, revision_label, status
+           FROM planning_scenarios WHERE project_id=?
+           ORDER BY revision_sequence, created_at, id""",
+        (project_id,),
+    ).fetchall()
+    for scenario in scenarios:
+        scenario_id = str(scenario["id"])
+        linked = conn.execute(
+            """SELECT id FROM yamazumi_areas
+               WHERE project_id=? AND scenario_id=? AND section_id=? LIMIT 1""",
+            (project_id, scenario_id, section_id),
+        ).fetchone()
+        if linked:
+            continue
+        same_name = conn.execute(
+            """SELECT id, section_id FROM yamazumi_areas
+               WHERE project_id=? AND scenario_id=? AND name=? COLLATE NOCASE
+               ORDER BY id LIMIT 1""",
+            (project_id, scenario_id, section_name),
+        ).fetchone()
+        if same_name:
+            conflicts.append(
+                {
+                    "scenario_id": scenario_id,
+                    "scenario_name": str(scenario["name"]),
+                    "revision_label": str(scenario["revision_label"]),
+                    "status": str(scenario["status"]),
+                    "area_id": str(same_name["id"]),
+                    "reason": "same_name_area",
+                }
+            )
+            continue
+        area_id = str(uuid4())
+        conn.execute(
+            """INSERT INTO yamazumi_areas
+               (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+               VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+            (area_id, project_id, scenario_id, section_id, section_name, timestamp),
+        )
+        created.append(
+            {
+                "area_id": area_id,
+                "scenario_id": scenario_id,
+                "scenario_name": str(scenario["name"]),
+                "revision_label": str(scenario["revision_label"]),
+                "status": str(scenario["status"]),
+            }
+        )
+    return {"created": created, "conflicts": conflicts}
+
+
+def yamazumi_area_creation_summary(
+    project_id: str, section_id: str
+) -> dict[str, object]:
+    """Describe linked areas and preserved name conflicts for one section."""
+    section_rows = query(
+        "SELECT name FROM assembly_sections WHERE id=? AND project_id=?",
+        (section_id, project_id),
+    )
+    if not section_rows:
+        raise ValueError("The Fishbone section no longer exists.")
+    section_name = str(section_rows[0]["name"])
+    linked = query(
+        """SELECT area.id AS area_id, scenario.id AS scenario_id,
+                  scenario.name AS scenario_name,
+                  scenario.revision_label, scenario.status
+           FROM planning_scenarios scenario
+           JOIN yamazumi_areas area
+             ON area.scenario_id=scenario.id AND area.project_id=scenario.project_id
+           WHERE scenario.project_id=? AND area.section_id=?
+           ORDER BY scenario.revision_sequence, scenario.created_at, scenario.id""",
+        (project_id, section_id),
+    )
+    conflicts = query(
+        """SELECT area.id AS area_id, scenario.id AS scenario_id,
+                  scenario.name AS scenario_name,
+                  scenario.revision_label, scenario.status
+           FROM planning_scenarios scenario
+           JOIN yamazumi_areas area
+             ON area.scenario_id=scenario.id AND area.project_id=scenario.project_id
+           WHERE scenario.project_id=? AND area.name=? COLLATE NOCASE
+             AND (area.section_id IS NULL OR area.section_id<>?)
+           ORDER BY scenario.revision_sequence, scenario.created_at, scenario.id""",
+        (project_id, section_name, section_id),
+    )
+    for row in conflicts:
+        row["reason"] = "same_name_area"
+    return {
+        "section_id": section_id,
+        "section_name": section_name,
+        "created": linked,
+        "conflicts": conflicts,
+    }
 
 
 def add_assembly_section(
@@ -10238,6 +10404,9 @@ def add_assembly_section(
                    (id, project_id, name, section_type, parent_id, sequence, description, active, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
                 (section_id, project_id, name, section_type, parent_id, next_sequence, description.strip(), timestamp, timestamp),
+            )
+            _create_yamazumi_areas_for_section(
+                conn, project_id, section_id, name, timestamp
             )
     except sqlite3.IntegrityError as exc:
         raise ValueError(f"A section named {name} already exists in this project.") from exc

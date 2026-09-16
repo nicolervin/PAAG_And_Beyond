@@ -1,6 +1,9 @@
 import pandas as pd
 import streamlit as st
 
+from utils.time_units import (
+    TIME_UNITS, display_to_seconds, format_seconds, seconds_to_display, time_unit,
+)
 from utils.scope_ui import page_title_with_scope, section_heading_with_scope
 from utils.table_filters import apply_pending_table_editor_reset, filter_table, merge_filtered_edits, request_table_editor_reset
 from utils.table_ui import (
@@ -35,14 +38,24 @@ def new_project_dialog():
         name = st.text_input("Project name")
         program = st.text_input("Program or product")
         product_line = st.text_input("Product line")
-        owner = st.text_input("Lead industrial engineer")
-        takt = st.number_input("Target takt time (seconds)", min_value=0.1, value=60.0)
+        takt_unit = st.selectbox(
+            "Target takt unit", list(TIME_UNITS), format_func=lambda value: TIME_UNITS[value].label
+        )
+        unit_config = time_unit(takt_unit)
+        takt = st.number_input(
+            f"Target takt time ({unit_config.label.lower()})",
+            min_value=unit_config.step,
+            value=seconds_to_display(60, takt_unit),
+            step=unit_config.step,
+            format=f"%.{unit_config.decimals}f",
+        )
         if st.form_submit_button("Create project", type="primary", icon=":material/add:"):
             if not name.strip():
                 st.error("Project name is required.")
             else:
                 created_project_id = create_project(
-                    name, program, owner, takt, product_line=product_line
+                    name, program, "", display_to_seconds(takt, takt_unit),
+                    product_line=product_line, takt_time_unit=takt_unit,
                 )
                 record_audit_event(
                     created_project_id,
@@ -79,9 +92,14 @@ metric_cols = st.columns(4)
 metric_cols[0].metric("Parts", len(parts), border=True)
 metric_cols[1].metric("Work elements", len(elements), border=True)
 active_takt = float((scenario or project)["takt_time_s"])
+active_takt_unit = str((scenario or project).get("takt_time_unit") or "seconds")
+active_unit_config = time_unit(active_takt_unit)
 metric_cols[2].metric(
-    "Draft cycle time", f"{total_cycle:.1f} s",
-    delta=f"{total_cycle - active_takt:+.1f} s vs takt",
+    "Draft cycle time", format_seconds(total_cycle, active_takt_unit),
+    delta=(
+        f"{seconds_to_display(total_cycle - active_takt, active_takt_unit):+.{active_unit_config.decimals}f} "
+        f"{active_unit_config.suffix} vs takt"
+    ),
     delta_color="inverse", border=True,
 )
 metric_cols[3].metric("Open concerns", open_concerns, border=True)
@@ -92,31 +110,46 @@ with st.container(border=True):
         identity_row = st.columns(2)
         name = identity_row[0].text_input("Project name", value=project["name"])
         program = identity_row[1].text_input("Program or product", value=project["program"])
-        ownership_row = st.columns(2)
-        product_line = ownership_row[0].text_input(
+        product_line = st.text_input(
             "Product line", value=project.get("product_line", "")
         )
-        owner = ownership_row[1].text_input("Lead industrial engineer", value=project["owner"])
         row = st.columns(3)
         revision = row[0].text_input("Product baseline revision", value=project["revision"])
-        project_statuses = ["Draft", "In review", "Released", "On hold"]
-        status = row[1].selectbox(
-            "Status", project_statuses,
-            index=project_statuses.index(project["status"]) if project["status"] in project_statuses else 0,
+        project_takt_unit = row[1].selectbox(
+            "Default takt unit",
+            list(TIME_UNITS),
+            index=list(TIME_UNITS).index(str(project.get("takt_time_unit") or "seconds")),
+            format_func=lambda value: TIME_UNITS[value].label,
+        )
+        project_unit_config = time_unit(project_takt_unit)
+        project_original_display = seconds_to_display(
+            project["takt_time_s"], project.get("takt_time_unit") or "seconds"
         )
         takt = row[2].number_input(
-            "Default takt for new scenarios", min_value=0.1,
-            value=float(project["takt_time_s"]),
+            f"Default takt ({project_unit_config.label.lower()})",
+            min_value=project_unit_config.step,
+            value=project_original_display,
+            step=project_unit_config.step,
+            format=f"%.{project_unit_config.decimals}f",
         )
         notes = st.text_area(
             "Planning notes", value=project["notes"],
             placeholder="Assumptions, scope, milestones, or known changes…",
         )
         if st.form_submit_button("Save project", type="primary", icon=":material/save:"):
+            project_takt_seconds = (
+                float(project["takt_time_s"])
+                if project_takt_unit != str(project.get("takt_time_unit") or "seconds")
+                and float(takt) == float(project_original_display)
+                else display_to_seconds(takt, project_takt_unit)
+            )
             project_values = {
                 "name": name, "program": program, "product_line": product_line,
-                "owner": owner, "revision": revision, "status": status,
-                "takt_time_s": takt, "notes": notes,
+                "owner": project.get("owner", ""), "revision": revision,
+                "status": project.get("status", "Draft"),
+                "takt_time_s": project_takt_seconds,
+                "takt_time_unit": project_takt_unit,
+                "notes": notes,
             }
             project_changed_fields = [
                 field for field, value in project_values.items()
@@ -144,13 +177,18 @@ if scenario:
     all_scenarios = planning_scenarios(project_id, include_archived=True)
     scenario_columns = [
         "id", "view_details", "current_view", "name", "revision_label", "status",
-        "takt_time_s", "change_summary", "parent_scenario_id", "parent_scenario",
+        "takt", "takt_time_unit", "takt_time_s", "change_summary",
+        "parent_scenario_id", "parent_scenario",
         "created_by", "created_at", "updated_at",
     ]
     scenario_rows = pd.DataFrame(all_scenarios)
     scenario_rows["view_details"] = ":material/visibility: View details"
     scenario_rows["current_view"] = scenario_rows["id"].astype(str).map(
         lambda value: "Current view" if value == str(scenario_id) else ""
+    )
+    scenario_rows["takt"] = scenario_rows.apply(
+        lambda row: seconds_to_display(row["takt_time_s"], row["takt_time_unit"]),
+        axis=1,
     )
     scenario_rows["parent_scenario"] = scenario_rows.apply(
         lambda row: (
@@ -161,10 +199,15 @@ if scenario:
         ), axis=1,
     )
     scenario_rows = scenario_rows.reindex(columns=scenario_columns)
-    for column in [column for column in scenario_columns if column != "takt_time_s"]:
+    for column in [
+        column for column in scenario_columns if column not in {"takt", "takt_time_s"}
+    ]:
         scenario_rows[column] = scenario_rows[column].astype("string").fillna("")
     scenario_rows["takt_time_s"] = pd.to_numeric(
         scenario_rows["takt_time_s"], errors="coerce"
+    ).astype("float64")
+    scenario_rows["takt"] = pd.to_numeric(
+        scenario_rows["takt"], errors="coerce"
     ).astype("float64")
     for column in ["created_at", "updated_at"]:
         scenario_rows[column] = pd.to_datetime(
@@ -216,12 +259,14 @@ if scenario:
         editor_rows = direct_entry_editor_rows(
             visible_scenarios, editor_key=scenario_editor_key,
             sort_columns=[
-                "current_view", "name", "revision_label", "status", "takt_time_s",
+                "current_view", "name", "revision_label", "takt",
+                "takt_time_unit",
                 "change_summary", "parent_scenario", "created_by", "updated_at",
             ],
             labels={
                 "current_view": "View", "name": "Scenario name",
-                "revision_label": "Scenario revision", "takt_time_s": "Takt (seconds)",
+                "revision_label": "Scenario revision", "takt": "Takt",
+                "takt_time_unit": "Takt unit",
                 "parent_scenario": "Source scenario", "created_by": "Created by",
                 "updated_at": "Updated",
             },
@@ -234,8 +279,9 @@ if scenario:
                 "parent_scenario", "created_by", "created_at", "updated_at",
             ],
             column_order=[
-                "view_details", "current_view", "name", "revision_label", "status",
-                "takt_time_s", "change_summary", "parent_scenario", "created_by", "updated_at",
+                "view_details", "current_view", "name", "revision_label",
+                "takt", "takt_time_unit", "change_summary", "parent_scenario",
+                "created_by", "updated_at",
             ],
             column_config={
                 "id": None,
@@ -248,14 +294,19 @@ if scenario:
                 "revision_label": st.column_config.TextColumn(
                     "Scenario revision", required=True, default=suggested_revision
                 ),
-                "status": st.column_config.SelectboxColumn(
-                    "Status", options=["Working", "Frozen", "Released", "Archived"],
-                    required=True, default="Working",
+                "status": None,
+                "takt": st.column_config.NumberColumn(
+                    "Takt", required=True, min_value=0.0001,
+                    step=0.0001, format="%.4f",
+                    default=seconds_to_display(
+                        project["takt_time_s"], project["takt_time_unit"]
+                    ),
                 ),
-                "takt_time_s": st.column_config.NumberColumn(
-                    "Takt (seconds)", required=True, min_value=0.1,
-                    step=0.1, format="%.1f", default=float(scenario["takt_time_s"]),
+                "takt_time_unit": st.column_config.SelectboxColumn(
+                    "Takt unit", options=list(TIME_UNITS), required=True,
+                    default=str(project["takt_time_unit"]),
                 ),
+                "takt_time_s": None,
                 "change_summary": st.column_config.TextColumn("Change summary", width="large"),
                 "parent_scenario_id": None,
                 "parent_scenario": st.column_config.TextColumn("Source scenario"),
@@ -280,8 +331,12 @@ if scenario:
             editor_rows, editor_key=scenario_editor_key
         )
         scenario_export = visible_scenarios.drop(
-            columns=["id", "view_details", "parent_scenario_id"], errors="ignore"
+            columns=["id", "view_details", "parent_scenario_id", "takt_time_s"],
+            errors="ignore"
         ).copy()
+        scenario_export["takt_time_unit"] = scenario_export["takt_time_unit"].map(
+            lambda value: TIME_UNITS[str(value)].label
+        )
         for column in ["created_at", "updated_at"]:
             if column in scenario_export:
                 scenario_export[column] = scenario_export[column].astype("string")
@@ -308,12 +363,42 @@ if scenario:
                     merged_scenarios,
                     {
                         "name": "Scenario name", "revision_label": "Scenario revision",
-                        "status": "Status", "takt_time_s": "Takt (seconds)",
+                        "takt": "Takt",
+                        "takt_time_unit": "Takt unit",
                     },
                 )
                 if errors:
                     raise ValueError(" ".join(errors))
-                active_scenario_row = merged_scenarios.loc[
+                original_scenarios = {
+                    str(row["id"]): row for row in all_scenarios
+                }
+                save_records = []
+                for record in merged_scenarios.to_dict("records"):
+                    record_id = str(record.get("id") or "")
+                    record["status"] = (
+                        str(original_scenarios[record_id].get("status") or "Working")
+                        if record_id in original_scenarios else "Working"
+                    )
+                    selected_unit = str(record.get("takt_time_unit") or "seconds")
+                    original = original_scenarios.get(record_id)
+                    original_display = (
+                        seconds_to_display(
+                            original["takt_time_s"], original["takt_time_unit"]
+                        )
+                        if original else None
+                    )
+                    if (
+                        original
+                        and selected_unit != str(original["takt_time_unit"])
+                        and float(record["takt"]) == float(original_display)
+                    ):
+                        record["takt_time_s"] = float(original["takt_time_s"])
+                    else:
+                        record["takt_time_s"] = display_to_seconds(
+                            record["takt"], selected_unit
+                        )
+                    save_records.append(record)
+                active_scenario_row = pd.DataFrame(save_records).loc[
                     merged_scenarios["id"].astype(str) == str(scenario_id)
                 ]
                 active_scenario_values = (
@@ -324,12 +409,13 @@ if scenario:
                     field
                     for field in [
                         "name", "revision_label", "status", "takt_time_s",
+                        "takt_time_unit",
                         "change_summary",
                     ]
                     if active_scenario_values.get(field) != scenario.get(field)
                 ]
                 result = save_planning_scenario_rows(
-                    project_id, str(scenario_id), merged_scenarios.to_dict("records"),
+                    project_id, str(scenario_id), save_records,
                     st.session_state.get("current_editor", ""),
                 )
                 record_audit_event(
@@ -365,7 +451,8 @@ if scenario:
             detail_metrics[0].metric("Revision", detail["revision_label"], border=True)
             detail_metrics[1].metric("Status", detail["status"], border=True)
             detail_metrics[2].metric(
-                "Takt", f"{float(detail['takt_time_s']):.1f} s", border=True
+                "Takt", format_seconds(detail["takt_time_s"], detail["takt_time_unit"]),
+                border=True
             )
             detail_metrics[3].metric(
                 "Current view", "Yes" if str(detail["id"]) == str(scenario_id) else "No",

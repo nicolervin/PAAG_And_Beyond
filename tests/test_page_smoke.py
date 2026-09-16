@@ -24,6 +24,12 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             )
         section_id = str(store.assembly_sections(self.project_id).iloc[0]["id"])
         self.section_id = section_id
+        # Page fixtures add their own Yamazumi areas where needed. Keep the
+        # shared baseline empty; automatic creation has dedicated coverage.
+        store.execute(
+            "DELETE FROM yamazumi_areas WHERE project_id=? AND section_id=?",
+            (self.project_id, self.section_id),
+        )
         assembly_id = str(uuid4())
         store.save_assembly_catalog_rows(
             self.project_id,
@@ -254,6 +260,21 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app = self.run_page("app_pages/models.py")
         self.assertTrue(any(title.value == "Model definitions" for title in app.title))
 
+    def test_overview_takt_unit_controls_smoke(self) -> None:
+        app = self.run_page("app_pages/overview.py")
+        self.assertTrue(
+            any(widget.label == "Default takt unit" for widget in app.selectbox)
+        )
+        self.assertNotIn("Status", {widget.label for widget in app.selectbox})
+        self.assertNotIn(
+            "Lead industrial engineer", {widget.label for widget in app.text_input}
+        )
+        scenario_tables = [
+            table.value for table in app.dataframe
+            if {"takt", "takt_time_unit"}.issubset(table.value.columns)
+        ]
+        self.assertTrue(scenario_tables)
+
     def test_parts_catalog_smoke_with_linked_assembly_part(self) -> None:
         with patch("utils.clipboard_image.clipboard_image", return_value=None):
             app = self.run_page("app_pages/parts.py")
@@ -393,6 +414,58 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
             app = self.run_page("app_pages/fishbone.py")
         self.assertTrue(any(title.value == "Parts to fishbone" for title in app.title))
+
+    def test_new_fishbone_section_audits_automatic_yamazumi_area(self) -> None:
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/fishbone.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Automatic area tester"
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+            app.run(timeout=30)
+            next(widget for widget in app.text_input if widget.label == "Name").set_value(
+                "Automatically linked section"
+            )
+            next(
+                button
+                for button in app.button
+                if button.label == "Add to Fishbone framework"
+            ).click().run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        section_id = str(
+            store.query(
+                "SELECT id FROM assembly_sections WHERE project_id=? AND name=?",
+                (self.project_id, "Automatically linked section"),
+            )[0]["id"]
+        )
+        areas = store.query(
+            "SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id=?",
+            (self.project_id, section_id),
+        )
+        self.assertEqual(len(areas), len(store.planning_scenarios(self.project_id, True)))
+        fishbone_history = store.audit_history(self.project_id, "Fishbone framework")
+        yamazumi_history = store.audit_history(self.project_id, "Yamazumi")
+        self.assertTrue(
+            any(
+                "automatic_yamazumi_areas" in str(details)
+                and "Automatically linked section" in str(details)
+                for details in fishbone_history["details"]
+            )
+        )
+        self.assertTrue(
+            any(
+                action == "Create areas from Fishbone"
+                and editor == "Automatic area tester"
+                and "Automatically linked section" in str(details)
+                for action, editor, details in zip(
+                    yamazumi_history["action"],
+                    yamazumi_history["editor_name"],
+                    yamazumi_history["details"],
+                )
+            )
+        )
 
     def test_fishbone_selectors_and_areas_follow_depth_first_order(self) -> None:
         child_id = store.add_assembly_section(
@@ -548,6 +621,74 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
     def test_yamazumi_smoke(self) -> None:
         app = self.run_page("app_pages/yamazumi.py")
         self.assertTrue(any(title.value == "Yamazumi" for title in app.title))
+
+    def test_yamazumi_fishbone_pairing_control_only_appears_when_unlinked(self) -> None:
+        linked_section_id = store.add_assembly_section(
+            self.project_id, "Automatically paired", "Main spine", None, ""
+        )
+        linked_area_id = str(
+            store.query(
+                """SELECT id FROM yamazumi_areas
+                   WHERE project_id=? AND scenario_id=? AND section_id=?""",
+                (self.project_id, self.scenario_id, linked_section_id),
+            )[0]["id"]
+        )
+        store.add_yamazumi_pitch(
+            self.project_id, linked_area_id, "PAIR-001", "Linked pitch"
+        )
+        unlinked_area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Imported unlinked area"
+        )
+        store.add_yamazumi_pitch(
+            self.project_id, unlinked_area_id, "PAIR-002", "Imported pitch"
+        )
+
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Pairing tester"
+        area_key = f"yamazumi_area_{self.scenario_id}"
+        app.session_state[area_key] = linked_area_id
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            self.assertNotIn(
+                "Linked Fishbone section",
+                {widget.label for widget in [*app.text_input, *app.selectbox]},
+            )
+            self.assertNotIn(
+                "Pair with Fishbone section",
+                {widget.label for widget in app.selectbox},
+            )
+
+            app.session_state[area_key] = unlinked_area_id
+            app.run(timeout=30)
+            pairing = next(
+                widget
+                for widget in app.selectbox
+                if widget.label == "Pair with Fishbone section"
+            )
+            pairing.set_value(self.section_id)
+            next(
+                button
+                for button in app.button
+                if button.label == "Save area settings"
+            ).click().run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(
+            store.query(
+                "SELECT section_id FROM yamazumi_areas WHERE id=?",
+                (unlinked_area_id,),
+            )[0]["section_id"],
+            self.section_id,
+        )
+        self.assertNotIn(
+            "Pair with Fishbone section",
+            {widget.label for widget in app.selectbox},
+        )
 
     def test_empty_yamazumi_area_prompts_once_per_area_visit(self) -> None:
         first_area_id = store.upsert_yamazumi_area(
@@ -751,9 +892,9 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         takt_input = next(
             widget
             for widget in app.number_input
-            if widget.label == "Yamazumi takt time (minutes)"
+            if widget.label == "Yamazumi takt time (seconds)"
         )
-        self.assertEqual(takt_input.value, 1.5)
+        self.assertEqual(takt_input.value, 90.0)
         element_table = next(
             table.value
             for table in app.dataframe
@@ -762,6 +903,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         self.assertEqual(float(element_table.iloc[0]["time_s"]), 0.5)
         self.assertEqual(board.call_args.kwargs["time_unit"], "minutes")
+        self.assertEqual(board.call_args.kwargs["takt_time_unit"], "seconds")
         work_exports = [
             frame
             for sheet_name, frame in exported_frames

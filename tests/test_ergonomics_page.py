@@ -121,7 +121,7 @@ class ErgonomicsPageTests(unittest.TestCase):
             for metric in app.metric
             if metric.label == "Current scenario takt time"
         )
-        self.assertEqual(takt_metric.value, "47.5 seconds")
+        self.assertEqual(takt_metric.value, "47.5 s")
         page_source = PAGE_PATH.read_text(encoding="utf-8")
         self.assertIn("frequency-driven ergonomic risk", page_source)
 

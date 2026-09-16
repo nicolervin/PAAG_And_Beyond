@@ -108,12 +108,14 @@ if not scenario:
 yamazumi_time_unit = normalize_time_unit(
     scenario.get("yamazumi_time_unit", "seconds")
 )
+takt_time_unit = normalize_time_unit(scenario.get("takt_time_unit", "seconds"))
 from utils.yamazumi_naming import (
     format_yamazumi_pitch_address,
     normalize_yamazumi_line_code,
     normalize_yamazumi_section_code,
 )
 time_config = time_unit(yamazumi_time_unit)
+takt_config = time_unit(takt_time_unit)
 time_column_label = f"Time ({time_config.label.lower()})"
 
 
@@ -166,7 +168,7 @@ has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
 with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
     st.caption(
         f"Rev {scenario['revision_label']} · {scenario['name']} · "
-        f"{format_seconds(scenario['takt_time_s'], yamazumi_time_unit)} takt"
+        f"{format_seconds(scenario['takt_time_s'], scenario['takt_time_unit'])} takt"
     )
     request_clear_area = st.button(
         "Clear this Yamazumi Section",
@@ -250,8 +252,8 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
         "Yamazumi Excel file", type=["xlsx"], key=f"yamazumi_import_file_{scenario_id}"
     )
     st.caption(
-        "Imports the current system-style fields. Pitch_Takt_time and "
-        f"Work_Time_to_complete are interpreted as {time_config.label.lower()}. "
+        f"Imports the current system-style fields. Pitch_Takt_time is interpreted as {takt_config.label.lower()}, "
+        f"and Work_Time_to_complete as {time_config.label.lower()}. "
         "Sub-Line is matched to a Fishbone section by name when possible; "
         "unmatched areas remain available to link manually."
     )
@@ -268,7 +270,8 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
                     "areas": area_count,
                     "pitches": pitch_count,
                     "file": uploaded.name,
-                    "time_unit": yamazumi_time_unit,
+                    "takt_time_unit": takt_time_unit,
+                    "work_time_unit": yamazumi_time_unit,
                 },
             )
             st.toast(f"Imported {element_count} work elements into {pitch_count} pitches", icon=":material/check_circle:")
@@ -284,9 +287,12 @@ if fishbone_sections.empty and areas.empty:
 if not fishbone_sections.empty:
     link_status = yamazumi_area_link_status(project_id, scenario_id)
     if link_status["needs_sync"] and st.button(
-        "Create Yamazumi areas from Fishbone",
-        icon=":material/account_tree:",
-        help="Creates or repairs one linked Yamazumi area for every active Fishbone section, including subassemblies with no assigned parts.",
+        "Repair Fishbone area links",
+        icon=":material/build:",
+        help=(
+            "Repairs legacy missing, mismatched, or duplicate Fishbone links in this scenario. "
+            "New Fishbone sections create their Yamazumi areas automatically."
+        ),
     ):
         try:
             summary = sync_yamazumi_areas_from_fishbone(project_id, scenario_id)
@@ -298,7 +304,7 @@ if not fishbone_sections.empty:
             record_audit_event(
                 project_id,
                 "Yamazumi",
-                "Synchronize Fishbone areas",
+                "Repair Fishbone area links",
                 summary["created"] + summary["relinked"] + summary["conflicts_cleared"],
                 st.session_state.get("current_editor", ""),
                 summary,
@@ -343,6 +349,18 @@ empty_pitch_dialog_key = (
 pitch_editor_key = apply_pending_table_editor_reset(pitch_editor_key)
 element_editor_key = apply_pending_table_editor_reset(element_editor_key)
 
+default_takt = float(scenario.get("takt_time_s") or 0)
+if not math.isfinite(default_takt):
+    default_takt = 0.0
+area_takt_value = area.get("takt_override_s")
+area_takt = (
+    default_takt
+    if area_takt_value is None or pd.isna(area_takt_value)
+    else float(area_takt_value)
+)
+if not math.isfinite(area_takt):
+    area_takt = default_takt
+
 unit_controls = st.container(horizontal=True, vertical_alignment="bottom")
 selected_time_unit = unit_controls.segmented_control(
     "Yamazumi time unit",
@@ -354,6 +372,15 @@ selected_time_unit = unit_controls.segmented_control(
         "planning scenario. Timing records continue to be stored in seconds."
     ),
     key=f"yamazumi_time_unit_{scenario_id}",
+)
+takt_time = unit_controls.number_input(
+    f"Yamazumi takt time ({takt_config.label.lower()})",
+    min_value=0.0,
+    value=seconds_to_display(area_takt, takt_time_unit),
+    step=takt_config.step,
+    format=f"%.{takt_config.decimals}f",
+    help="Enter an area-specific takt or use the active planning scenario's target takt.",
+    key=f"yamazumi_takt_{scenario_id}_{area_id}_{takt_time_unit}",
 )
 save_time_unit = unit_controls.button(
     "Save & Refresh",
@@ -471,16 +498,6 @@ current_section_id = (
 )
 if current_section_id:
     linked_section = current_section_id
-    area_controls.text_input(
-        "Linked Fishbone section",
-        value=section_option_labels.get(
-            current_section_id,
-            str(area.get("section_name") or "Linked section"),
-        ),
-        disabled=True,
-        help="This link is fixed because the area is already matched to the Fishbone.",
-        key=f"linked_fishbone_read_only_{area_id}",
-    )
 else:
     linked_elsewhere = {
         str(value) for value in areas["section_id"].dropna().astype(str).tolist()
@@ -491,7 +508,7 @@ else:
         if section_id not in linked_elsewhere
     ]
     linked_section = area_controls.selectbox(
-        "Linked Fishbone section",
+        "Pair with Fishbone section",
         options=[None, *available_sections],
         format_func=lambda value: (
             "Unlinked" if value is None else section_option_labels.get(value, value)
@@ -499,40 +516,20 @@ else:
         help="Manual matching is available only for imported areas that could not be matched by name.",
         key=f"linked_fishbone_for_import_{area_id}",
     )
-default_takt = float(scenario.get("takt_time_s") or 0)
-if not math.isfinite(default_takt):
-    default_takt = 0.0
-area_takt_value = area.get("takt_override_s")
-area_takt = (
-    default_takt
-    if area_takt_value is None or pd.isna(area_takt_value)
-    else float(area_takt_value)
-)
-if not math.isfinite(area_takt):
-    area_takt = default_takt
-takt_time = area_controls.number_input(
-    f"Yamazumi takt time ({time_config.label.lower()})",
-    min_value=0.0,
-    value=seconds_to_display(area_takt, yamazumi_time_unit),
-    step=time_config.step,
-    format=f"%.{time_config.decimals}f",
-    help="Enter an area-specific takt or use the active planning scenario's target takt.",
-    key=f"yamazumi_takt_{scenario_id}_{area_id}_{yamazumi_time_unit}",
-)
 if area_controls.button("Save area settings", type="primary", icon=":material/save:"):
     try:
         update_yamazumi_area(
             project_id,
             area_id,
             linked_section,
-            display_to_seconds(takt_time, yamazumi_time_unit) if takt_time else None,
+            display_to_seconds(takt_time, takt_time_unit) if takt_time else None,
         )
         record_audit_event(project_id, "Yamazumi", "Area settings", 1, st.session_state.get("current_editor", ""))
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
 takt = (
-    display_to_seconds(takt_time, yamazumi_time_unit)
+    display_to_seconds(takt_time, takt_time_unit)
     if takt_time else default_takt
 )
 if not math.isfinite(takt):
@@ -1263,7 +1260,7 @@ metrics.metric("Theoretical operators", f"{theoretical:.2f}", border=True)
 metrics.metric("Active pitches / operators", active_pitch_count, border=True)
 metrics.metric("Line balance efficiency", f"{efficiency:.1f}%", border=True)
 metrics.metric("Bottleneck pitch", bottleneck, border=True)
-metrics.metric("Takt", format_seconds(takt, yamazumi_time_unit), border=True)
+metrics.metric("Takt", format_seconds(takt, takt_time_unit), border=True)
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
@@ -1696,6 +1693,7 @@ yamazumi_board(
     variants,
     takt,
     time_unit=yamazumi_time_unit,
+    takt_time_unit=takt_time_unit,
     key=board_key,
     on_move=handle_yamazumi_move,
     on_add_pitch=handle_add_pitch_request,
