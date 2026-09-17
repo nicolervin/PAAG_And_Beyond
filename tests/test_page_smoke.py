@@ -627,6 +627,148 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         self.assertNotIn("Save area settings", [button.label for button in app.button])
 
+    def test_yamazumi_edit_dialog_restores_draft_and_confirms_single_delete(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Interactive delete area"
+        )
+        pitch_id = store.add_yamazumi_pitch(
+            self.project_id, area_id, "DELETE-001", "Interactive delete pitch"
+        )
+        delete_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {
+                "description": "Delete from dialog",
+                "time_s": 5,
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+        process_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, updated_at)
+                   VALUES (?, ?, ?, 10, 'DELETE-001', 'Preserved dialog step', ?)""",
+                (
+                    process_id,
+                    self.project_id,
+                    self.scenario_id,
+                    store.now_iso(),
+                ),
+            )
+            conn.execute(
+                """UPDATE yamazumi_elements
+                   SET process_element_id=?, process_sync_status='Synced'
+                   WHERE id=?""",
+                (process_id, delete_id),
+            )
+        keep_first_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {
+                "description": "Keep first",
+                "time_s": 6,
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+        keep_second_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {
+                "description": "Keep second",
+                "time_s": 7,
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Dialog delete tester"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        edit_key = f"yamazumi_edit_element_target_{self.project_id}_{area_id}"
+        delete_key = f"yamazumi_delete_element_target_{self.project_id}_{area_id}"
+        draft_key = f"yamazumi_board_draft_{self.project_id}_{self.scenario_id}_{area_id}"
+        app.session_state[edit_key] = delete_id
+        app.session_state[draft_key] = {
+            pitch_id: [keep_second_id, delete_id, keep_first_id]
+        }
+
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            self.assertTrue(
+                any(widget.label == "Model variants" for widget in app.multiselect)
+            )
+            self.assertFalse(any(button.label == "Cancel" for button in app.button))
+            description = next(
+                widget for widget in app.text_area
+                if widget.label == "Work description"
+            )
+            app = description.set_value("Edited but not saved").run(timeout=30)
+            app = next(
+                button for button in app.button
+                if button.key == f"destructive_request_edit_element_delete_{delete_id}"
+            ).click().run(timeout=30)
+
+            self.assertEqual(list(app.exception), [])
+            self.assertIn(delete_key, app.session_state)
+            self.assertTrue(
+                any("Delete **Delete from dialog**" in warning.value for warning in app.warning)
+            )
+            self.assertTrue(
+                any("will remain" in info.value for info in app.info)
+            )
+            app = next(
+                button for button in app.button
+                if button.key
+                == f"cancel_interactive_element_delete_{self.project_id}_{area_id}_{delete_id}"
+            ).click().run(timeout=30)
+
+            self.assertEqual(list(app.exception), [])
+            restored_description = next(
+                widget for widget in app.text_area
+                if widget.label == "Work description"
+            )
+            self.assertEqual(restored_description.value, "Edited but not saved")
+            app = next(
+                button for button in app.button
+                if button.key == f"destructive_request_edit_element_delete_{delete_id}"
+            ).click().run(timeout=30)
+            app = next(
+                button for button in app.button
+                if button.key
+                == f"destructive_confirm_interactive_element_delete_{delete_id}"
+            ).click().run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertFalse(
+            store.query("SELECT 1 FROM yamazumi_elements WHERE id=?", (delete_id,))
+        )
+        self.assertTrue(
+            store.query("SELECT 1 FROM work_elements WHERE id=?", (process_id,))
+        )
+        self.assertEqual(
+            app.session_state[draft_key],
+            {pitch_id: [keep_second_id, keep_first_id]},
+        )
+        history = store.audit_history(self.project_id, "Yamazumi elements")
+        deletion = history.loc[
+            history["action"] == "Delete from interactive board"
+        ]
+        self.assertEqual(len(deletion), 1)
+        self.assertEqual(deletion.iloc[0]["editor_name"], "Dialog delete tester")
+
     def test_yamazumi_fishbone_pairing_control_only_appears_when_unlinked(self) -> None:
         linked_section_id = store.add_assembly_section(
             self.project_id, "Automatically paired", "Main spine", None, ""

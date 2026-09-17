@@ -192,6 +192,8 @@ Generated address suggestions use `LL-SSS-NNN`: a saved two-character project li
 
 The interactive board renders its **Unassigned** lane only while at least one persisted or drafted work element is unassigned. The regular work-element editor and Edit element dialog retain Unassigned as a destination even while that empty lane is hidden.
 
+The **Edit Yamazumi work element** dialog uses its native X, outside-click, and Escape behavior instead of a redundant Cancel button. **Model variants** occupies its own line above the Work type and Work region row. Its red **Delete element** action is a standalone destructive workflow, not a second table-deletion control: it hands off to a non-dismissible confirmation with an explicit Cancel action, identifies the element, and discloses the preserved Process at a Glance step and the Yamazumi relationship and legacy-dependent effects. Cancel restores the edit dialog and its unsaved field values. Confirmation preserves other browser-session board moves, records Current editor history, resets the work-element editor, shows a toast, and reruns.
+
 Rule: any new linear dimensional field added to this app must store and display in inches by default. Do not introduce a metric storage column unless explicitly approved by the project owner.
 
 This standard is locked. It may be revisited in the future if the project requires metric-native data sources or equipment specs; until then, it remains imperial-only.

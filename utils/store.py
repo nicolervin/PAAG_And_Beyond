@@ -7875,15 +7875,75 @@ def update_yamazumi_element(project_id: str, area_id: str, element_id: str, valu
         )
 
 
-def delete_yamazumi_element(project_id: str, area_id: str, element_id: str) -> None:
-    """Delete one Yamazumi work element from the selected area."""
+def _yamazumi_element_delete_impact(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    area_id: str,
+    element_id: str,
+) -> dict[str, object]:
+    row = conn.execute(
+        """SELECT element.id AS element_id, element.description,
+                  element.pitch_id, pitch.pitch_number, pitch.pitch_name,
+                  element.process_element_id,
+                  process.operation AS process_operation,
+                  CASE WHEN process.id IS NULL THEN 0 ELSE 1 END AS process_step_exists,
+                  (SELECT COUNT(*) FROM work_element_material_groups material_group
+                   WHERE material_group.yamazumi_element_id=element.id)
+                    AS legacy_material_group_count,
+                  (SELECT COUNT(*)
+                   FROM work_element_material_options material_option
+                   JOIN work_element_material_groups material_group
+                     ON material_group.id=material_option.group_id
+                   WHERE material_group.yamazumi_element_id=element.id)
+                    AS legacy_material_option_count
+           FROM yamazumi_elements element
+           JOIN yamazumi_areas area ON area.id=element.area_id
+           LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
+           LEFT JOIN work_elements process
+             ON process.id=element.process_element_id
+            AND process.project_id=element.project_id
+            AND process.scenario_id=area.scenario_id
+           WHERE element.id=? AND element.project_id=? AND element.area_id=?
+             AND area.project_id=? AND area.scenario_id=?""",
+        (element_id, project_id, area_id, project_id, scenario_id),
+    ).fetchone()
+    if not row:
+        raise ValueError(
+            "That Yamazumi work element no longer exists in this planning scenario."
+        )
+    impact = dict(row)
+    impact["process_step_exists"] = bool(impact["process_step_exists"])
+    return impact
+
+
+def yamazumi_element_delete_impact(
+    project_id: str, scenario_id: str, area_id: str, element_id: str
+) -> dict[str, object]:
+    """Describe the persisted effects of deleting one scenario-owned work element."""
     with connection() as conn:
+        return _yamazumi_element_delete_impact(
+            conn, project_id, scenario_id, area_id, element_id
+        )
+
+
+def delete_yamazumi_element(
+    project_id: str, scenario_id: str, area_id: str, element_id: str
+) -> dict[str, object]:
+    """Delete one scenario-owned Yamazumi element and return its actual impact."""
+    with connection() as conn:
+        impact = _yamazumi_element_delete_impact(
+            conn, project_id, scenario_id, area_id, element_id
+        )
         deleted = conn.execute(
             "DELETE FROM yamazumi_elements WHERE id=? AND project_id=? AND area_id=?",
             (element_id, project_id, area_id),
         ).rowcount
-        if not deleted:
-            raise ValueError("That work element no longer exists.")
+        if deleted != 1:
+            raise ValueError(
+                "That Yamazumi work element changed before it could be deleted."
+            )
+        return impact
 
 
 def delete_yamazumi_pitch(project_id: str, area_id: str, pitch_id: str) -> int:

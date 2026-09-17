@@ -16,6 +16,7 @@ from utils.store import (
     audit_history,
     clear_yamazumi_data,
     complexity_features,
+    delete_yamazumi_element,
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
@@ -33,6 +34,7 @@ from utils.store import (
     yamazumi_area_link_status,
     yamazumi_areas,
     yamazumi_elements,
+    yamazumi_element_delete_impact,
     yamazumi_elements_for_scenario,
     yamazumi_pitch_delete_blockers,
     yamazumi_pitch_address_conflicts,
@@ -78,6 +80,7 @@ from utils.yamazumi_stack import (
     apply_stack_drop,
     build_stack_draft,
     draft_differs,
+    remove_element_from_stack_draft,
 )
 
 
@@ -1060,6 +1063,7 @@ add_pitch_dialog_key = f"yamazumi_show_add_pitch_{project_id}_{area_id}"
 add_element_dialog_key = f"yamazumi_add_element_target_{project_id}_{area_id}"
 edit_pitch_dialog_key = f"yamazumi_edit_pitch_target_{project_id}_{area_id}"
 edit_element_dialog_key = f"yamazumi_edit_element_target_{project_id}_{area_id}"
+delete_element_dialog_key = f"yamazumi_delete_element_target_{project_id}_{area_id}"
 
 
 def close_other_yamazumi_dialogs(keep: str) -> None:
@@ -1070,6 +1074,7 @@ def close_other_yamazumi_dialogs(keep: str) -> None:
         add_element_dialog_key,
         edit_pitch_dialog_key,
         edit_element_dialog_key,
+        delete_element_dialog_key,
     ):
         if dialog_key != keep:
             st.session_state.pop(dialog_key, None)
@@ -1367,8 +1372,14 @@ def edit_pitch_dialog() -> None:
             st.error(str(exc))
 
 
-@st.dialog("Edit Yamazumi work element")
-def edit_element_dialog(element_id: str) -> None:
+def close_edit_element_dialog() -> None:
+    st.session_state.pop(edit_element_dialog_key, None)
+
+
+@st.dialog("Edit Yamazumi work element", on_dismiss=close_edit_element_dialog)
+def edit_element_dialog(
+    element_id: str, restored_values: dict[str, object] | None = None
+) -> None:
     state_key = f"yamazumi_edit_element_target_{project_id}_{area_id}"
     matches = elements.loc[elements["id"].astype(str) == str(element_id)]
     if matches.empty:
@@ -1384,47 +1395,68 @@ def edit_element_dialog(element_id: str) -> None:
         for _, row in active_pitches.iterrows()
     }
     destinations = [None, *pitch_label_by_id]
-    current_pitch_id = str(current.get("pitch_id") or "") or None
-    with st.form(f"edit_element_form_{element_id}"):
-        selected_pitch_id = st.selectbox(
-            "Pitch",
-            options=destinations,
-            index=destinations.index(current_pitch_id) if current_pitch_id in destinations else 0,
-            format_func=lambda value: "Unassigned" if value is None else pitch_label_by_id[value],
-        )
-        description = st.text_area("Work description", value=str(current.get("description") or ""))
-        time_value = st.number_input(
-            f"Time to complete ({time_config.label.lower()})",
-            min_value=0.0,
-            value=seconds_to_display(
-                current.get("time_s") or 0, yamazumi_time_unit
-            ),
-            step=time_config.step,
-            format=f"%.{time_config.decimals}f",
-        )
-        current_variants = list(current.get("model_variants") or ["Base"])
-        available_variants = list(dict.fromkeys([*variant_options, *current_variants]))
-        row = st.container(horizontal=True, vertical_alignment="bottom")
-        model_variants = row.multiselect(
-            "Model variants", available_variants, default=current_variants,
-            help=ELEMENT_VARIANT_HELP,
-        )
-        current_work_type = str(current.get("work_type") or "Cycle").title()
-        work_type = row.selectbox(
-            "Work type", WORK_TYPES,
-            index=WORK_TYPES.index(current_work_type) if current_work_type in WORK_TYPES else 0,
-        )
-        current_work_region = str(current.get("work_region") or "None")
-        edit_region_options = list(dict.fromkeys([*work_region_options, current_work_region]))
-        work_region = row.selectbox(
-            "Work region", edit_region_options,
-            index=edit_region_options.index(current_work_region),
-        )
-        actions = st.container(horizontal=True)
-        # The first submit button is Streamlit's Ctrl+Enter target. Keep Save
-        # first so the text-area keyboard hint performs the expected action.
-        save_edit = actions.form_submit_button("Save element", type="primary", icon=":material/save:")
-        cancel_edit = actions.form_submit_button("Cancel", shortcut="Esc")
+    restored_values = restored_values or {}
+    current_pitch_id = str(
+        restored_values.get("pitch_id", current.get("pitch_id")) or ""
+    ) or None
+    selected_pitch_id = st.selectbox(
+        "Pitch",
+        options=destinations,
+        index=destinations.index(current_pitch_id) if current_pitch_id in destinations else 0,
+        format_func=lambda value: "Unassigned" if value is None else pitch_label_by_id[value],
+    )
+    description = st.text_area(
+        "Work description",
+        value=str(restored_values.get("description", current.get("description")) or ""),
+    )
+    time_value = st.number_input(
+        f"Time to complete ({time_config.label.lower()})",
+        min_value=0.0,
+        value=float(
+            restored_values.get(
+                "time_value",
+                seconds_to_display(current.get("time_s") or 0, yamazumi_time_unit),
+            )
+        ),
+        step=time_config.step,
+        format=f"%.{time_config.decimals}f",
+    )
+    current_variants = list(
+        restored_values.get("model_variants", current.get("model_variants") or ["Base"])
+    )
+    available_variants = list(dict.fromkeys([*variant_options, *current_variants]))
+    model_variants = st.multiselect(
+        "Model variants", available_variants, default=current_variants,
+        help=ELEMENT_VARIANT_HELP,
+    )
+    row = st.container(horizontal=True, vertical_alignment="bottom")
+    current_work_type = str(
+        restored_values.get("work_type", current.get("work_type")) or "Cycle"
+    ).title()
+    work_type = row.selectbox(
+        "Work type", WORK_TYPES,
+        index=WORK_TYPES.index(current_work_type) if current_work_type in WORK_TYPES else 0,
+    )
+    current_work_region = str(
+        restored_values.get("work_region", current.get("work_region")) or "None"
+    )
+    edit_region_options = list(dict.fromkeys([*work_region_options, current_work_region]))
+    work_region = row.selectbox(
+        "Work region", edit_region_options,
+        index=edit_region_options.index(current_work_region),
+    )
+    actions = st.container(horizontal=True, horizontal_alignment="right")
+    save_edit = actions.button(
+        "Save element",
+        type="primary",
+        icon=":material/save:",
+        key=f"save_edit_element_{element_id}",
+    )
+    delete_edit = actions.button(
+        "Delete element",
+        icon=":material/delete:",
+        key=f"destructive_request_edit_element_delete_{element_id}",
+    )
     if save_edit:
         try:
             update_yamazumi_element(
@@ -1446,9 +1478,122 @@ def edit_element_dialog(element_id: str) -> None:
             st.rerun(scope="app")
         except ValueError as exc:
             st.error(str(exc))
-    if cancel_edit:
-        st.session_state.pop(state_key, None)
+    if delete_edit:
+        close_other_yamazumi_dialogs(delete_element_dialog_key)
+        st.session_state[delete_element_dialog_key] = {
+            "element_id": str(element_id),
+            "draft": {
+                "pitch_id": selected_pitch_id,
+                "description": description,
+                "time_value": float(time_value),
+                "model_variants": list(model_variants),
+                "work_type": work_type,
+                "work_region": work_region,
+            },
+        }
         st.rerun(scope="app")
+
+
+@st.dialog("Delete Yamazumi work element?", dismissible=False)
+def confirm_interactive_element_delete() -> None:
+    pending = st.session_state.get(delete_element_dialog_key, {})
+    element_id = str(pending.get("element_id") or "")
+    try:
+        impact = yamazumi_element_delete_impact(
+            project_id, scenario_id, area_id, element_id
+        )
+    except ValueError as exc:
+        st.warning(str(exc))
+        if st.button(
+            "Close",
+            key=f"close_missing_interactive_element_{project_id}_{area_id}",
+        ):
+            st.session_state.pop(delete_element_dialog_key, None)
+            st.rerun()
+        return
+
+    pitch_label = yamazumi_pitch_label(
+        impact.get("pitch_number"), impact.get("pitch_name")
+    ) if impact.get("pitch_id") else "Unassigned"
+    st.warning(
+        f"Delete **{impact['description']}** from **{pitch_label}** in this planning scenario?"
+    )
+    st.write(
+        "This removes the element from the Yamazumi board, stack order, work totals, "
+        "and line-balance calculations. Changes made in the edit form will not be saved."
+    )
+    if impact["process_step_exists"]:
+        process_label = impact.get("process_operation") or "the linked Work Element"
+        st.info(
+            f"The Process at a Glance step **{process_label}** and its downstream part "
+            "pairings, reviews, Quality, PFMEA, and Control Plan data will remain. It will "
+            "lose its Yamazumi pitch, derived Op ID, and pitch-summary connection."
+        )
+    else:
+        st.info("No current Process at a Glance step is linked to this Yamazumi element.")
+    legacy_group_count = int(impact.get("legacy_material_group_count") or 0)
+    legacy_option_count = int(impact.get("legacy_material_option_count") or 0)
+    if legacy_group_count or legacy_option_count:
+        st.write(
+            f"This also removes {legacy_group_count} legacy Yamazumi-level material "
+            f"requirement(s) and {legacy_option_count} option(s) attached directly to the element."
+        )
+    st.caption(
+        "The pitch, Yamazumi area, Fishbone structure, work-region definition, and audit history remain."
+    )
+    actions = st.container(horizontal=True)
+    if actions.button(
+        "Cancel",
+        key=f"cancel_interactive_element_delete_{project_id}_{area_id}_{element_id}",
+    ):
+        st.session_state.pop(delete_element_dialog_key, None)
+        st.session_state[edit_element_dialog_key] = {
+            "element_id": element_id,
+            "draft": dict(pending.get("draft") or {}),
+        }
+        st.rerun()
+    if actions.button(
+        "Delete element",
+        type="primary",
+        icon=":material/delete:",
+        key=f"destructive_confirm_interactive_element_delete_{element_id}",
+    ):
+        try:
+            result = delete_yamazumi_element(
+                project_id, scenario_id, area_id, element_id
+            )
+            record_audit_event(
+                project_id,
+                "Yamazumi elements",
+                "Delete from interactive board",
+                1,
+                st.session_state.get("current_editor", ""),
+                {
+                    "scenario_id": scenario_id,
+                    "area_id": area_id,
+                    **result,
+                },
+            )
+            current_draft = st.session_state.get(board_draft_key)
+            if isinstance(current_draft, dict):
+                updated_draft = remove_element_from_stack_draft(
+                    current_draft, element_id
+                )
+                remaining_elements = [
+                    row for row in elements.to_dict("records")
+                    if str(row.get("id")) != element_id
+                ]
+                if draft_differs(remaining_elements, updated_draft):
+                    st.session_state[board_draft_key] = updated_draft
+                else:
+                    st.session_state.pop(board_draft_key, None)
+            st.session_state.pop(delete_element_dialog_key, None)
+            st.session_state.pop(edit_element_dialog_key, None)
+            request_table_editor_reset(element_editor_key)
+            st.toast("Deleted Yamazumi work element", icon=":material/delete:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 
 
@@ -1538,10 +1683,16 @@ elif st.session_state.get(add_element_dialog_key):
     add_element_dialog()
 elif st.session_state.get(edit_pitch_dialog_key):
     edit_pitch_dialog()
-elif edit_element_target := st.session_state.pop(edit_element_dialog_key, None):
-    # Treat a board click as a one-shot event. The dialog fragment retains its
-    # argument during interaction, while page navigation cannot replay it.
-    edit_element_dialog(str(edit_element_target))
+elif st.session_state.get(delete_element_dialog_key):
+    confirm_interactive_element_delete()
+elif edit_element_target := st.session_state.get(edit_element_dialog_key):
+    if isinstance(edit_element_target, dict):
+        edit_element_dialog(
+            str(edit_element_target.get("element_id") or ""),
+            dict(edit_element_target.get("draft") or {}),
+        )
+    else:
+        edit_element_dialog(str(edit_element_target))
 
 ALL_YAMAZUMI_AREAS = "__all_yamazumi_areas__"
 yamazumi_area_ids = list(area_labels)
