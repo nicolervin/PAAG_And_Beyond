@@ -120,16 +120,7 @@ These values are displayed live and are not replaced by unpushed repository edit
 
 ### Special Characteristic assessment
 
-No existing field is an authoritative PFMEA or Control Plan Special Characteristic flag/classification.
-
-Yamazumi supports project-wide flag definitions, including the protected CTQ and Safety names, while each `yamazumi_elements` row stores selected flag names as JSON text. A Yamazumi element can be soft-linked to a Process step through `yamazumi_elements.process_element_id`. This makes CTQ or Safety a possible **review signal**, but not a safe authoritative mapping, because:
-
-- the flag is stored on Yamazumi work rather than on the Quality assignment or PFMEA record;
-- the relationship to Process at a Glance is a soft link;
-- a generic CTQ flag does not define the required PFMEA Class or Control Plan symbol/classification; and
-- no approved rule says that every CTQ or Safety flag must become a special characteristic.
-
-Therefore Special Characteristic classification requires a new reviewed, persisted field unless the project owner separately approves a precise mapping from Yamazumi flags. Any suggested value derived from CTQ or Safety must remain visibly proposed until a collaborator approves it.
+No existing field is an authoritative PFMEA or Control Plan Special Characteristic flag/classification. Yamazumi element flags have been retired and provide no classification input. Special Characteristic classification therefore requires a reviewed, persisted field and an approved relationship to its source. Any future suggestion derived from Functional Reviews must remain visibly proposed until a collaborator approves it.
 
 ## Storage
 

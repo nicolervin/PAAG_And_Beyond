@@ -79,6 +79,18 @@ def draft_differs(
     return build_stack_draft(elements) != dict(stacks)
 
 
+def remove_element_from_stack_draft(
+    stacks: Mapping[str, list[str]], element_id: str
+) -> dict[str, list[str]]:
+    """Remove one deleted element while preserving every other drafted position."""
+    target_id = str(element_id or "").strip()
+    return {
+        key: [value for value in values if str(value) != target_id]
+        for key, values in stacks.items()
+        if any(str(value) != target_id for value in values)
+    }
+
+
 def apply_stack_draft_to_elements(
     elements: Iterable[Mapping[str, object]], stacks: Mapping[str, list[str]]
 ) -> list[dict]:

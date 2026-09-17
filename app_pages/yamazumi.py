@@ -16,7 +16,7 @@ from utils.store import (
     audit_history,
     clear_yamazumi_data,
     complexity_features,
-    delete_yamazumi_flag_definitions,
+    delete_yamazumi_element,
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
@@ -24,20 +24,18 @@ from utils.store import (
     record_audit_event,
     rename_yamazumi_variants,
     replace_yamazumi_elements,
-    replace_yamazumi_flag_definitions,
     replace_yamazumi_pitches,
     replace_yamazumi_work_regions,
     save_yamazumi_stack_draft,
-    update_yamazumi_area,
     update_yamazumi_element,
     update_yamazumi_pitch,
-    update_yamazumi_time_unit,
+    update_yamazumi_settings,
     sync_yamazumi_areas_from_fishbone,
     yamazumi_area_link_status,
     yamazumi_areas,
     yamazumi_elements,
+    yamazumi_element_delete_impact,
     yamazumi_elements_for_scenario,
-    yamazumi_flag_definitions,
     yamazumi_pitch_delete_blockers,
     yamazumi_pitch_address_conflicts,
     yamazumi_pitch_feed_target_status,
@@ -82,6 +80,7 @@ from utils.yamazumi_stack import (
     apply_stack_drop,
     build_stack_draft,
     draft_differs,
+    remove_element_from_stack_draft,
 )
 
 
@@ -108,12 +107,14 @@ if not scenario:
 yamazumi_time_unit = normalize_time_unit(
     scenario.get("yamazumi_time_unit", "seconds")
 )
+takt_time_unit = normalize_time_unit(scenario.get("takt_time_unit", "seconds"))
 from utils.yamazumi_naming import (
     format_yamazumi_pitch_address,
     normalize_yamazumi_line_code,
     normalize_yamazumi_section_code,
 )
 time_config = time_unit(yamazumi_time_unit)
+takt_config = time_unit(takt_time_unit)
 time_column_label = f"Time ({time_config.label.lower()})"
 
 
@@ -166,7 +167,7 @@ has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
 with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
     st.caption(
         f"Rev {scenario['revision_label']} · {scenario['name']} · "
-        f"{format_seconds(scenario['takt_time_s'], yamazumi_time_unit)} takt"
+        f"{format_seconds(scenario['takt_time_s'], scenario['takt_time_unit'])} takt"
     )
     request_clear_area = st.button(
         "Clear this Yamazumi Section",
@@ -188,7 +189,6 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
 area_selector_key = f"yamazumi_area_{scenario_id}"
 sections = assembly_section_walk_order(project_id)
 features = complexity_features(project_id)
-flag_definitions = yamazumi_flag_definitions(project_id)
 active_features = (
     features.loc[features["active"].fillna(1).astype(bool)].copy()
     if not features.empty else features
@@ -244,8 +244,8 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
         "Yamazumi Excel file", type=["xlsx"], key=f"yamazumi_import_file_{scenario_id}"
     )
     st.caption(
-        "Imports the current system-style fields. Pitch_Takt_time and "
-        f"Work_Time_to_complete are interpreted as {time_config.label.lower()}. "
+        f"Imports the current system-style fields. Pitch_Takt_time is interpreted as {takt_config.label.lower()}, "
+        f"and Work_Time_to_complete as {time_config.label.lower()}. "
         "Sub-Line is matched to a Fishbone section by name when possible; "
         "unmatched areas remain available to link manually."
     )
@@ -262,7 +262,8 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
                     "areas": area_count,
                     "pitches": pitch_count,
                     "file": uploaded.name,
-                    "time_unit": yamazumi_time_unit,
+                    "takt_time_unit": takt_time_unit,
+                    "work_time_unit": yamazumi_time_unit,
                 },
             )
             st.toast(f"Imported {element_count} work elements into {pitch_count} pitches", icon=":material/check_circle:")
@@ -278,9 +279,12 @@ if fishbone_sections.empty and areas.empty:
 if not fishbone_sections.empty:
     link_status = yamazumi_area_link_status(project_id, scenario_id)
     if link_status["needs_sync"] and st.button(
-        "Create Yamazumi areas from Fishbone",
-        icon=":material/account_tree:",
-        help="Creates or repairs one linked Yamazumi area for every active Fishbone section, including subassemblies with no assigned parts.",
+        "Repair Fishbone area links",
+        icon=":material/build:",
+        help=(
+            "Repairs legacy missing, mismatched, or duplicate Fishbone links in this scenario. "
+            "New Fishbone sections create their Yamazumi areas automatically."
+        ),
     ):
         try:
             summary = sync_yamazumi_areas_from_fishbone(project_id, scenario_id)
@@ -292,7 +296,7 @@ if not fishbone_sections.empty:
             record_audit_event(
                 project_id,
                 "Yamazumi",
-                "Synchronize Fishbone areas",
+                "Repair Fishbone area links",
                 summary["created"] + summary["relinked"] + summary["conflicts_cleared"],
                 st.session_state.get("current_editor", ""),
                 summary,
@@ -337,8 +341,34 @@ empty_pitch_dialog_key = (
 pitch_editor_key = apply_pending_table_editor_reset(pitch_editor_key)
 element_editor_key = apply_pending_table_editor_reset(element_editor_key)
 
-unit_controls = st.container(horizontal=True, vertical_alignment="bottom")
-selected_time_unit = unit_controls.segmented_control(
+default_takt = float(scenario.get("takt_time_s") or 0)
+if not math.isfinite(default_takt):
+    default_takt = 0.0
+area_takt_value = area.get("takt_override_s")
+area_takt = (
+    default_takt
+    if area_takt_value is None or pd.isna(area_takt_value)
+    else float(area_takt_value)
+)
+if not math.isfinite(area_takt):
+    area_takt = default_takt
+
+section_id_value = area.get("section_id")
+current_section_id = (
+    None if section_id_value is None or pd.isna(section_id_value)
+    else str(section_id_value).strip() or None
+)
+linked_elsewhere = {
+    str(value) for value in areas["section_id"].dropna().astype(str).tolist()
+    if str(value).strip()
+}
+available_sections = [
+    section_id for section_id in section_name_by_id
+    if section_id not in linked_elsewhere
+]
+
+settings_controls = st.container(horizontal=True, vertical_alignment="bottom")
+selected_time_unit = settings_controls.segmented_control(
     "Yamazumi time unit",
     options=list(TIME_UNITS),
     default=yamazumi_time_unit,
@@ -349,53 +379,93 @@ selected_time_unit = unit_controls.segmented_control(
     ),
     key=f"yamazumi_time_unit_{scenario_id}",
 )
-save_time_unit = unit_controls.button(
+takt_time = settings_controls.number_input(
+    f"Yamazumi takt time ({takt_config.label.lower()})",
+    min_value=0.0,
+    value=seconds_to_display(area_takt, takt_time_unit),
+    step=takt_config.step,
+    format=f"%.{takt_config.decimals}f",
+    help="Enter an area-specific takt or use the active planning scenario's target takt.",
+    key=f"yamazumi_takt_{scenario_id}_{area_id}_{takt_time_unit}",
+)
+if current_section_id:
+    linked_section = current_section_id
+else:
+    linked_section = settings_controls.selectbox(
+        "Pair with Fishbone section",
+        options=[None, *available_sections],
+        format_func=lambda value: (
+            "Unlinked" if value is None else section_option_labels.get(value, value)
+        ),
+        help="Manual matching is available only for imported areas that could not be matched by name.",
+        key=f"linked_fishbone_for_import_{area_id}",
+    )
+
+selected_time_unit = normalize_time_unit(selected_time_unit)
+entered_takt_s = (
+    display_to_seconds(takt_time, takt_time_unit)
+    if takt_time else default_takt
+)
+submitted_takt_override = (
+    None
+    if math.isclose(entered_takt_s, default_takt, rel_tol=1e-9, abs_tol=1e-9)
+    else entered_takt_s
+)
+stored_takt_override = (
+    None
+    if area_takt_value is None or pd.isna(area_takt_value)
+    else float(area_takt_value)
+)
+settings_changed = (
+    selected_time_unit != yamazumi_time_unit
+    or submitted_takt_override != stored_takt_override
+    or linked_section != current_section_id
+)
+save_settings = settings_controls.button(
     "Save & Refresh",
     type="primary",
     icon=":material/save:",
-    key=f"save_yamazumi_time_unit_{scenario_id}",
+    disabled=not settings_changed,
+    key=f"save_yamazumi_settings_{scenario_id}_{area_id}",
 )
-if save_time_unit:
+if save_settings:
     try:
-        selected_time_unit = normalize_time_unit(selected_time_unit)
-        if selected_time_unit == yamazumi_time_unit:
-            raise ValueError("The Yamazumi time unit has not changed.")
-        has_pending_time_edits = (
-            table_has_unsaved_changes(
-                element_editor_key, native_row_selection=True
+        time_unit_changed = selected_time_unit != yamazumi_time_unit
+        if time_unit_changed:
+            has_pending_time_edits = (
+                table_has_unsaved_changes(
+                    element_editor_key, native_row_selection=True
+                )
+                or bool(st.session_state.get(pitch_delete_key))
+                or bool(st.session_state.get(element_delete_key))
+                or bool(st.session_state.get(
+                    f"yamazumi_add_element_target_{project_id}_{area_id}"
+                ))
+                or bool(st.session_state.get(
+                    f"yamazumi_edit_element_target_{project_id}_{area_id}"
+                ))
             )
-            or bool(st.session_state.get(pitch_delete_key))
-            or bool(st.session_state.get(element_delete_key))
-            or bool(st.session_state.get(
-                f"yamazumi_add_element_target_{project_id}_{area_id}"
-            ))
-            or bool(st.session_state.get(
-                f"yamazumi_edit_element_target_{project_id}_{area_id}"
-            ))
-        )
-        if has_pending_time_edits:
-            raise ValueError(
-                "Save or undo Yamazumi work-element edits before changing the time unit."
-            )
-        unit_change = update_yamazumi_time_unit(
-            project_id, scenario_id, selected_time_unit
-        )
-        record_audit_event(
+            if has_pending_time_edits:
+                raise ValueError(
+                    "Save or undo Yamazumi work-element edits before changing the time unit."
+                )
+        result = update_yamazumi_settings(
             project_id,
-            "Yamazumi",
-            "Save & Refresh",
-            1,
+            scenario_id,
+            area_id,
+            selected_time_unit,
+            linked_section,
+            submitted_takt_override,
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id, **unit_change},
         )
-        request_table_editor_reset(element_editor_key)
-        st.toast(
-            f"Yamazumi time unit changed to {TIME_UNITS[selected_time_unit].label}",
-            icon=":material/check_circle:",
-        )
+        if result["time_unit_changed"]:
+            request_table_editor_reset(element_editor_key)
+        st.toast("Saved Yamazumi settings", icon=":material/check_circle:")
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
+
+takt = submitted_takt_override if submitted_takt_override is not None else default_takt
 
 if request_clear_area:
     st.session_state["yamazumi_reset_scope"] = "area"
@@ -457,81 +527,6 @@ def confirm_yamazumi_reset() -> None:
 if st.session_state.get("yamazumi_reset_scope") in {"area", "all"}:
     confirm_yamazumi_reset()
 
-area_controls = st.container(horizontal=True, vertical_alignment="bottom")
-section_id_value = area.get("section_id")
-current_section_id = (
-    None if section_id_value is None or pd.isna(section_id_value)
-    else str(section_id_value).strip() or None
-)
-if current_section_id:
-    linked_section = current_section_id
-    area_controls.text_input(
-        "Linked Fishbone section",
-        value=section_option_labels.get(
-            current_section_id,
-            str(area.get("section_name") or "Linked section"),
-        ),
-        disabled=True,
-        help="This link is fixed because the area is already matched to the Fishbone.",
-        key=f"linked_fishbone_read_only_{area_id}",
-    )
-else:
-    linked_elsewhere = {
-        str(value) for value in areas["section_id"].dropna().astype(str).tolist()
-        if str(value).strip()
-    }
-    available_sections = [
-        section_id for section_id in section_name_by_id
-        if section_id not in linked_elsewhere
-    ]
-    linked_section = area_controls.selectbox(
-        "Linked Fishbone section",
-        options=[None, *available_sections],
-        format_func=lambda value: (
-            "Unlinked" if value is None else section_option_labels.get(value, value)
-        ),
-        help="Manual matching is available only for imported areas that could not be matched by name.",
-        key=f"linked_fishbone_for_import_{area_id}",
-    )
-default_takt = float(scenario.get("takt_time_s") or 0)
-if not math.isfinite(default_takt):
-    default_takt = 0.0
-area_takt_value = area.get("takt_override_s")
-area_takt = (
-    default_takt
-    if area_takt_value is None or pd.isna(area_takt_value)
-    else float(area_takt_value)
-)
-if not math.isfinite(area_takt):
-    area_takt = default_takt
-takt_time = area_controls.number_input(
-    f"Yamazumi takt time ({time_config.label.lower()})",
-    min_value=0.0,
-    value=seconds_to_display(area_takt, yamazumi_time_unit),
-    step=time_config.step,
-    format=f"%.{time_config.decimals}f",
-    help="Enter an area-specific takt or use the active planning scenario's target takt.",
-    key=f"yamazumi_takt_{scenario_id}_{area_id}_{yamazumi_time_unit}",
-)
-if area_controls.button("Save area settings", type="primary", icon=":material/save:"):
-    try:
-        update_yamazumi_area(
-            project_id,
-            area_id,
-            linked_section,
-            display_to_seconds(takt_time, yamazumi_time_unit) if takt_time else None,
-        )
-        record_audit_event(project_id, "Yamazumi", "Area settings", 1, st.session_state.get("current_editor", ""))
-        st.rerun()
-    except ValueError as exc:
-        st.error(str(exc))
-takt = (
-    display_to_seconds(takt_time, yamazumi_time_unit)
-    if takt_time else default_takt
-)
-if not math.isfinite(takt):
-    takt = default_takt
-
 pitches = yamazumi_pitches(project_id, area_id)
 pitch_address_suggestion = yamazumi_pitch_address_suggestion(project_id, area_id)
 empty_pitch_visit_key = f"yamazumi_empty_pitch_visit_{project_id}_{scenario_id}"
@@ -547,9 +542,6 @@ if not pitches.empty:
     )
 elements = yamazumi_elements(project_id, area_id)
 if not elements.empty:
-    elements["flags"] = elements["flags"].apply(
-        lambda value: json.loads(value or "[]") if isinstance(value, str) else (value or [])
-    )
     elements["model_variants"] = elements.apply(
         lambda row: [
             stored_variant_labels.get(item, item)
@@ -829,7 +821,7 @@ def empty_pitch_setup_dialog() -> None:
         st.rerun()
 
 
-setup_columns = st.columns(3)
+setup_columns = st.columns(2)
 with setup_columns[0].expander(
     "Generate pitch addresses",
     icon=":material/format_list_numbered:",
@@ -1044,201 +1036,6 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         except ValueError as exc:
             st.error(str(exc))
 
-with setup_columns[2].expander("Define element flags", icon=":material/label:"):
-    st.caption(
-        "CTQ and Safety are permanent project flags. Add custom tags for other conditions that "
-        "should be visible to the IE when editing a work element."
-    )
-    flag_editor_key = f"yamazumi_flag_editor_{project_id}"
-    flag_editor_key = apply_pending_table_editor_reset(flag_editor_key)
-    flag_rows = flag_definitions.copy()
-    flag_rows["name"] = flag_rows["name"].astype("string").fillna("")
-    flag_rows["description"] = flag_rows["description"].astype("string").fillna("")
-    flag_rows["active"] = flag_rows["active"].fillna(1).astype(bool)
-    flag_rows["system_flag"] = flag_rows["system_flag"].fillna(0).astype(bool)
-
-    editable_table_heading("Flag definitions")
-    visible_flags = filter_table(
-        flag_rows,
-        key=f"yamazumi_flag_filters_{project_id}",
-        dropdown_columns=["active"],
-        search_columns=["name", "description"],
-        labels={"active": "Active"},
-        reset_widget_keys=[flag_editor_key],
-    )
-
-    flag_editor_rows = direct_entry_editor_rows(
-        visible_flags,
-        editor_key=flag_editor_key,
-        sort_columns=["name", "description", "active", "system_flag"],
-        labels={"name": "Flag name", "system_flag": "System flag"},
-    )
-    flag_action_slot = st.empty()
-    edited_flags = st.data_editor(
-        flag_editor_rows,
-        key=flag_editor_key,
-        hide_index=True,
-        num_rows="dynamic",
-        height=300,
-        disabled=["id", "system_flag", "sequence", "updated_at"],
-        column_order=["name", "description", "active"],
-        column_config={
-            "id": None,
-            "name": st.column_config.TextColumn("Flag name", required=True, pinned=True),
-            "description": st.column_config.TextColumn("Description", width="large"),
-            "active": st.column_config.CheckboxColumn(
-                "Active", default=True,
-                help="Inactive custom flags remain on existing work but cannot be added to new elements.",
-            ),
-            "system_flag": None,
-            "sequence": None,
-            "updated_at": None,
-        },
-    )
-    flag_actions = editable_table_footer(
-        editor_key=flag_editor_key,
-        key_prefix=f"yamazumi_flags_{project_id}",
-        native_row_selection=True,
-    )
-
-    selected_flags = native_selected_rows(flag_editor_rows, editor_key=flag_editor_key)
-    custom_selected_flags = selected_flags.loc[
-        ~selected_flags["system_flag"].fillna(False).astype(bool)
-    ] if not selected_flags.empty else selected_flags
-    flag_bulk = selected_rows_action_bar(
-        parent=flag_action_slot,
-    )
-    bulk_active = flag_bulk.selectbox(
-        "Active for selected custom flags",
-        [None, True, False],
-        format_func=lambda value: "No change" if value is None else ("Active" if value else "Inactive"),
-        key=f"yamazumi_flag_bulk_active_{project_id}",
-    )
-    apply_flag_bulk = flag_bulk.button(
-        f"Apply to selected ({len(custom_selected_flags)})",
-        type="primary",
-        icon=":material/checklist:",
-        disabled=custom_selected_flags.empty,
-        key=f"apply_yamazumi_flag_bulk_{project_id}",
-    )
-    request_flag_bulk_delete = not selected_flags.empty
-    flag_bulk.download_button(
-        "Export filtered",
-        data=dataframe_to_excel(
-            visible_flags[["name", "description", "active"]],
-            "Yamazumi flags",
-        ),
-        file_name="yamazumi_flags_filtered.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        icon=":material/download:",
-        key=f"export_yamazumi_flags_{project_id}",
-    )
-
-    if apply_flag_bulk:
-        if table_has_unsaved_changes(flag_editor_key, native_row_selection=True):
-            st.warning("Save or undo other flag edits before applying a bulk change.")
-        elif bulk_active is None:
-            st.warning("Choose Active or Inactive to apply.")
-        else:
-            updated_flags = flag_rows.copy()
-            selected_ids = set(custom_selected_flags["id"].astype(str))
-            updated_flags.loc[
-                updated_flags["id"].astype(str).isin(selected_ids), "active"
-            ] = bulk_active
-            count = replace_yamazumi_flag_definitions(project_id, updated_flags)
-            record_audit_event(
-                project_id,
-                "Yamazumi flag definitions",
-                "Bulk edit",
-                len(selected_ids),
-                st.session_state.get("current_editor", ""),
-                {"active": bulk_active},
-            )
-            request_table_editor_reset(flag_editor_key)
-            st.toast(f"Updated {len(selected_ids)} custom flags", icon=":material/check_circle:")
-            st.rerun()
-
-    if request_flag_bulk_delete:
-        if len(custom_selected_flags) != len(selected_flags):
-            request_table_editor_reset(flag_editor_key)
-            st.toast("CTQ and Safety are permanent system flags and cannot be deleted.")
-            st.rerun()
-        elif table_has_unsaved_changes(flag_editor_key, native_row_selection=True):
-            st.warning("Save or undo other flag edits before deleting selected flags.")
-        else:
-            st.session_state[f"yamazumi_flags_pending_delete_{project_id}"] = (
-                custom_selected_flags["id"].astype(str).tolist()
-            )
-            stage_native_delete_confirmation(flag_editor_key)
-
-    @st.dialog("Delete custom Yamazumi flags?", dismissible=False)
-    def confirm_flag_delete() -> None:
-        pending_key = f"yamazumi_flags_pending_delete_{project_id}"
-        pending_ids = st.session_state.get(pending_key, [])
-        st.warning(
-            f"Delete {len(pending_ids)} custom flag(s)? The deleted tags will be removed from "
-            "existing Yamazumi elements and those elements will return to IE review."
-        )
-        actions = st.container(horizontal=True)
-        if actions.button("Cancel", key=f"cancel_yamazumi_flag_delete_{project_id}"):
-            st.session_state.pop(pending_key, None)
-            request_table_editor_reset(flag_editor_key)
-            st.rerun()
-        if actions.button(
-            "Delete flags",
-            type="primary",
-            icon=":material/delete:",
-            key=f"destructive_confirm_yamazumi_flag_delete_{project_id}",
-        ):
-            try:
-                count = delete_yamazumi_flag_definitions(project_id, pending_ids)
-                record_audit_event(
-                    project_id,
-                    "Yamazumi flag definitions",
-                    "Bulk delete" if count > 1 else "Delete",
-                    count,
-                    st.session_state.get("current_editor", ""),
-                )
-                st.session_state.pop(pending_key, None)
-                request_table_editor_reset(flag_editor_key)
-                st.toast(f"Deleted {count} custom flags", icon=":material/delete:")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-    if st.session_state.get(f"yamazumi_flags_pending_delete_{project_id}"):
-        confirm_flag_delete()
-
-    if flag_actions.undo:
-        request_table_editor_reset(flag_editor_key)
-        st.rerun()
-
-    if flag_actions.save_and_refresh:
-        try:
-            if not selected_flags.empty:
-                raise ValueError("Clear selected rows before saving flag edits.")
-            edited_flags = drop_untouched_new_rows(
-                edited_flags, identifying_columns=["name"]
-            )
-            errors = required_field_errors(edited_flags, {"name": "Flag name"})
-            if errors:
-                raise ValueError(" ".join(errors))
-            combined_flags = merge_filtered_edits(flag_rows, visible_flags, edited_flags)
-            count = replace_yamazumi_flag_definitions(project_id, combined_flags)
-            record_audit_event(
-                project_id,
-                "Yamazumi flag definitions",
-                "Save & Refresh",
-                count,
-                st.session_state.get("current_editor", ""),
-            )
-            request_table_editor_reset(flag_editor_key)
-            request_table_editor_reset(element_editor_key)
-            st.toast(f"Saved {count} flag definitions", icon=":material/check_circle:")
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
-
 times = pd.to_numeric(elements.get("time_s", pd.Series(dtype=float)), errors="coerce").fillna(0)
 total_work = float(times.sum())
 active_pitch_count = int((pitches["status"] == "Active").sum()) if not pitches.empty else 0
@@ -1257,7 +1054,7 @@ metrics.metric("Theoretical operators", f"{theoretical:.2f}", border=True)
 metrics.metric("Active pitches / operators", active_pitch_count, border=True)
 metrics.metric("Line balance efficiency", f"{efficiency:.1f}%", border=True)
 metrics.metric("Bottleneck pitch", bottleneck, border=True)
-metrics.metric("Takt", format_seconds(takt, yamazumi_time_unit), border=True)
+metrics.metric("Takt", format_seconds(takt, takt_time_unit), border=True)
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
@@ -1266,6 +1063,7 @@ add_pitch_dialog_key = f"yamazumi_show_add_pitch_{project_id}_{area_id}"
 add_element_dialog_key = f"yamazumi_add_element_target_{project_id}_{area_id}"
 edit_pitch_dialog_key = f"yamazumi_edit_pitch_target_{project_id}_{area_id}"
 edit_element_dialog_key = f"yamazumi_edit_element_target_{project_id}_{area_id}"
+delete_element_dialog_key = f"yamazumi_delete_element_target_{project_id}_{area_id}"
 
 
 def close_other_yamazumi_dialogs(keep: str) -> None:
@@ -1276,6 +1074,7 @@ def close_other_yamazumi_dialogs(keep: str) -> None:
         add_element_dialog_key,
         edit_pitch_dialog_key,
         edit_element_dialog_key,
+        delete_element_dialog_key,
     ):
         if dialog_key != keep:
             st.session_state.pop(dialog_key, None)
@@ -1455,7 +1254,6 @@ def add_element_dialog() -> None:
                     "model_variants": model_variants,
                     "work_type": work_type,
                     "work_region": work_region,
-                    "flags": [],
                 },
             )
             record_audit_event(
@@ -1574,8 +1372,14 @@ def edit_pitch_dialog() -> None:
             st.error(str(exc))
 
 
-@st.dialog("Edit Yamazumi work element")
-def edit_element_dialog(element_id: str) -> None:
+def close_edit_element_dialog() -> None:
+    st.session_state.pop(edit_element_dialog_key, None)
+
+
+@st.dialog("Edit Yamazumi work element", on_dismiss=close_edit_element_dialog)
+def edit_element_dialog(
+    element_id: str, restored_values: dict[str, object] | None = None
+) -> None:
     state_key = f"yamazumi_edit_element_target_{project_id}_{area_id}"
     matches = elements.loc[elements["id"].astype(str) == str(element_id)]
     if matches.empty:
@@ -1591,48 +1395,68 @@ def edit_element_dialog(element_id: str) -> None:
         for _, row in active_pitches.iterrows()
     }
     destinations = [None, *pitch_label_by_id]
-    current_pitch_id = str(current.get("pitch_id") or "") or None
-    with st.form(f"edit_element_form_{element_id}"):
-        selected_pitch_id = st.selectbox(
-            "Pitch",
-            options=destinations,
-            index=destinations.index(current_pitch_id) if current_pitch_id in destinations else 0,
-            format_func=lambda value: "Unassigned" if value is None else pitch_label_by_id[value],
-        )
-        description = st.text_area("Work description", value=str(current.get("description") or ""))
-        time_value = st.number_input(
-            f"Time to complete ({time_config.label.lower()})",
-            min_value=0.0,
-            value=seconds_to_display(
-                current.get("time_s") or 0, yamazumi_time_unit
-            ),
-            step=time_config.step,
-            format=f"%.{time_config.decimals}f",
-        )
-        current_variants = list(current.get("model_variants") or ["Base"])
-        available_variants = list(dict.fromkeys([*variant_options, *current_variants]))
-        row = st.container(horizontal=True, vertical_alignment="bottom")
-        model_variants = row.multiselect(
-            "Model variants", available_variants, default=current_variants,
-            help=ELEMENT_VARIANT_HELP,
-        )
-        current_work_type = str(current.get("work_type") or "Cycle").title()
-        work_type = row.selectbox(
-            "Work type", WORK_TYPES,
-            index=WORK_TYPES.index(current_work_type) if current_work_type in WORK_TYPES else 0,
-        )
-        current_work_region = str(current.get("work_region") or "None")
-        edit_region_options = list(dict.fromkeys([*work_region_options, current_work_region]))
-        work_region = row.selectbox(
-            "Work region", edit_region_options,
-            index=edit_region_options.index(current_work_region),
-        )
-        current_flags = list(current.get("flags") or [])
-        actions = st.container(horizontal=True)
-        # The first submit button is Streamlit's Ctrl+Enter target. Keep Save
-        # first so the text-area keyboard hint performs the expected action.
-        save_edit = actions.form_submit_button("Save element", type="primary", icon=":material/save:")
-        cancel_edit = actions.form_submit_button("Cancel", shortcut="Esc")
+    restored_values = restored_values or {}
+    current_pitch_id = str(
+        restored_values.get("pitch_id", current.get("pitch_id")) or ""
+    ) or None
+    selected_pitch_id = st.selectbox(
+        "Pitch",
+        options=destinations,
+        index=destinations.index(current_pitch_id) if current_pitch_id in destinations else 0,
+        format_func=lambda value: "Unassigned" if value is None else pitch_label_by_id[value],
+    )
+    description = st.text_area(
+        "Work description",
+        value=str(restored_values.get("description", current.get("description")) or ""),
+    )
+    time_value = st.number_input(
+        f"Time to complete ({time_config.label.lower()})",
+        min_value=0.0,
+        value=float(
+            restored_values.get(
+                "time_value",
+                seconds_to_display(current.get("time_s") or 0, yamazumi_time_unit),
+            )
+        ),
+        step=time_config.step,
+        format=f"%.{time_config.decimals}f",
+    )
+    current_variants = list(
+        restored_values.get("model_variants", current.get("model_variants") or ["Base"])
+    )
+    available_variants = list(dict.fromkeys([*variant_options, *current_variants]))
+    model_variants = st.multiselect(
+        "Model variants", available_variants, default=current_variants,
+        help=ELEMENT_VARIANT_HELP,
+    )
+    row = st.container(horizontal=True, vertical_alignment="bottom")
+    current_work_type = str(
+        restored_values.get("work_type", current.get("work_type")) or "Cycle"
+    ).title()
+    work_type = row.selectbox(
+        "Work type", WORK_TYPES,
+        index=WORK_TYPES.index(current_work_type) if current_work_type in WORK_TYPES else 0,
+    )
+    current_work_region = str(
+        restored_values.get("work_region", current.get("work_region")) or "None"
+    )
+    edit_region_options = list(dict.fromkeys([*work_region_options, current_work_region]))
+    work_region = row.selectbox(
+        "Work region", edit_region_options,
+        index=edit_region_options.index(current_work_region),
+    )
+    actions = st.container(horizontal=True, horizontal_alignment="right")
+    save_edit = actions.button(
+        "Save element",
+        type="primary",
+        icon=":material/save:",
+        key=f"save_edit_element_{element_id}",
+    )
+    delete_edit = actions.button(
+        "Delete element",
+        icon=":material/delete:",
+        key=f"destructive_request_edit_element_delete_{element_id}",
+    )
     if save_edit:
         try:
             update_yamazumi_element(
@@ -1641,7 +1465,7 @@ def edit_element_dialog(element_id: str) -> None:
                     "pitch_id": selected_pitch_id, "model_variants": model_variants, "work_type": work_type,
                     "description": description,
                     "time_s": display_to_seconds(time_value, yamazumi_time_unit),
-                    "work_region": work_region, "flags": current_flags,
+                    "work_region": work_region,
                 },
             )
             record_audit_event(
@@ -1654,9 +1478,122 @@ def edit_element_dialog(element_id: str) -> None:
             st.rerun(scope="app")
         except ValueError as exc:
             st.error(str(exc))
-    if cancel_edit:
-        st.session_state.pop(state_key, None)
+    if delete_edit:
+        close_other_yamazumi_dialogs(delete_element_dialog_key)
+        st.session_state[delete_element_dialog_key] = {
+            "element_id": str(element_id),
+            "draft": {
+                "pitch_id": selected_pitch_id,
+                "description": description,
+                "time_value": float(time_value),
+                "model_variants": list(model_variants),
+                "work_type": work_type,
+                "work_region": work_region,
+            },
+        }
         st.rerun(scope="app")
+
+
+@st.dialog("Delete Yamazumi work element?", dismissible=False)
+def confirm_interactive_element_delete() -> None:
+    pending = st.session_state.get(delete_element_dialog_key, {})
+    element_id = str(pending.get("element_id") or "")
+    try:
+        impact = yamazumi_element_delete_impact(
+            project_id, scenario_id, area_id, element_id
+        )
+    except ValueError as exc:
+        st.warning(str(exc))
+        if st.button(
+            "Close",
+            key=f"close_missing_interactive_element_{project_id}_{area_id}",
+        ):
+            st.session_state.pop(delete_element_dialog_key, None)
+            st.rerun()
+        return
+
+    pitch_label = yamazumi_pitch_label(
+        impact.get("pitch_number"), impact.get("pitch_name")
+    ) if impact.get("pitch_id") else "Unassigned"
+    st.warning(
+        f"Delete **{impact['description']}** from **{pitch_label}** in this planning scenario?"
+    )
+    st.write(
+        "This removes the element from the Yamazumi board, stack order, work totals, "
+        "and line-balance calculations. Changes made in the edit form will not be saved."
+    )
+    if impact["process_step_exists"]:
+        process_label = impact.get("process_operation") or "the linked Work Element"
+        st.info(
+            f"The Process at a Glance step **{process_label}** and its downstream part "
+            "pairings, reviews, Quality, PFMEA, and Control Plan data will remain. It will "
+            "lose its Yamazumi pitch, derived Op ID, and pitch-summary connection."
+        )
+    else:
+        st.info("No current Process at a Glance step is linked to this Yamazumi element.")
+    legacy_group_count = int(impact.get("legacy_material_group_count") or 0)
+    legacy_option_count = int(impact.get("legacy_material_option_count") or 0)
+    if legacy_group_count or legacy_option_count:
+        st.write(
+            f"This also removes {legacy_group_count} legacy Yamazumi-level material "
+            f"requirement(s) and {legacy_option_count} option(s) attached directly to the element."
+        )
+    st.caption(
+        "The pitch, Yamazumi area, Fishbone structure, work-region definition, and audit history remain."
+    )
+    actions = st.container(horizontal=True)
+    if actions.button(
+        "Cancel",
+        key=f"cancel_interactive_element_delete_{project_id}_{area_id}_{element_id}",
+    ):
+        st.session_state.pop(delete_element_dialog_key, None)
+        st.session_state[edit_element_dialog_key] = {
+            "element_id": element_id,
+            "draft": dict(pending.get("draft") or {}),
+        }
+        st.rerun()
+    if actions.button(
+        "Delete element",
+        type="primary",
+        icon=":material/delete:",
+        key=f"destructive_confirm_interactive_element_delete_{element_id}",
+    ):
+        try:
+            result = delete_yamazumi_element(
+                project_id, scenario_id, area_id, element_id
+            )
+            record_audit_event(
+                project_id,
+                "Yamazumi elements",
+                "Delete from interactive board",
+                1,
+                st.session_state.get("current_editor", ""),
+                {
+                    "scenario_id": scenario_id,
+                    "area_id": area_id,
+                    **result,
+                },
+            )
+            current_draft = st.session_state.get(board_draft_key)
+            if isinstance(current_draft, dict):
+                updated_draft = remove_element_from_stack_draft(
+                    current_draft, element_id
+                )
+                remaining_elements = [
+                    row for row in elements.to_dict("records")
+                    if str(row.get("id")) != element_id
+                ]
+                if draft_differs(remaining_elements, updated_draft):
+                    st.session_state[board_draft_key] = updated_draft
+                else:
+                    st.session_state.pop(board_draft_key, None)
+            st.session_state.pop(delete_element_dialog_key, None)
+            st.session_state.pop(edit_element_dialog_key, None)
+            request_table_editor_reset(element_editor_key)
+            st.toast("Deleted Yamazumi work element", icon=":material/delete:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 
 
@@ -1687,6 +1624,7 @@ yamazumi_board(
     variants,
     takt,
     time_unit=yamazumi_time_unit,
+    takt_time_unit=takt_time_unit,
     key=board_key,
     on_move=handle_yamazumi_move,
     on_add_pitch=handle_add_pitch_request,
@@ -1745,10 +1683,16 @@ elif st.session_state.get(add_element_dialog_key):
     add_element_dialog()
 elif st.session_state.get(edit_pitch_dialog_key):
     edit_pitch_dialog()
-elif edit_element_target := st.session_state.pop(edit_element_dialog_key, None):
-    # Treat a board click as a one-shot event. The dialog fragment retains its
-    # argument during interaction, while page navigation cannot replay it.
-    edit_element_dialog(str(edit_element_target))
+elif st.session_state.get(delete_element_dialog_key):
+    confirm_interactive_element_delete()
+elif edit_element_target := st.session_state.get(edit_element_dialog_key):
+    if isinstance(edit_element_target, dict):
+        edit_element_dialog(
+            str(edit_element_target.get("element_id") or ""),
+            dict(edit_element_target.get("draft") or {}),
+        )
+    else:
+        edit_element_dialog(str(edit_element_target))
 
 ALL_YAMAZUMI_AREAS = "__all_yamazumi_areas__"
 yamazumi_area_ids = list(area_labels)
@@ -2125,9 +2069,6 @@ if element_combined_view:
         element_table_source["area_id"].astype(str).isin(effective_element_area_ids)
     ].copy()
     if not element_table_source.empty:
-        element_table_source["flags"] = element_table_source["flags"].apply(
-            lambda value: json.loads(value or "[]") if isinstance(value, str) else (value or [])
-        )
         element_table_source["model_variants"] = element_table_source.apply(
             lambda row: [
                 stored_variant_labels.get(item, item)
@@ -2146,7 +2087,7 @@ active_pitches = pitches.loc[pitches["status"] == "Active"].copy() if not pitche
 pitch_label_by_id = dict(zip(active_pitches["id"].astype(str), active_pitches["pitch_number"].astype(str))) if not active_pitches.empty else {}
 element_columns = [
     "id", "area_name", "pitch_id", "model_variants", "work_type", "description", "time_s", "work_region",
-    "flags", "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
+    "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
 ]
 if element_table_source.empty:
     element_rows = pd.DataFrame({
@@ -2159,8 +2100,6 @@ if element_table_source.empty:
         "description": pd.Series(dtype="string"),
         "time_s": pd.Series(dtype="Float64"),
         "work_region": pd.Series(dtype="string"),
-        # MultiselectColumn values are lists, so this column deliberately uses object dtype.
-        "flags": pd.Series(dtype="object"),
         "sequence": pd.Series(dtype="Int64"),
         "source": pd.Series(dtype="string"),
         "process_element_id": pd.Series(dtype="string"),
@@ -2223,7 +2162,6 @@ element_column_config = {
     "work_region": st.column_config.SelectboxColumn(
         "Work region", options=work_region_options, required=True, default="None"
     ),
-    "flags": None,
     "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
     "source": None,
     "process_element_id": None,
@@ -2236,7 +2174,6 @@ if element_combined_view:
         "pitch": st.column_config.TextColumn("Pitch"),
         "model_variants": st.column_config.ListColumn("Model variants"),
         "work_region": st.column_config.TextColumn("Work region"),
-        "flags": None,
     }
     selectable_dataframe(
         visible_elements,
@@ -2676,7 +2613,6 @@ with st.expander("Yamazumi history", icon=":material/history:"):
         element_history_tab,
         variant_history_tab,
         region_history_tab,
-        flag_history_tab,
     ) = st.tabs(
         [
             "Yamazumi actions",
@@ -2684,7 +2620,6 @@ with st.expander("Yamazumi history", icon=":material/history:"):
             "Work elements",
             "Variants",
             "Work regions",
-            "Element flags",
         ]
     )
     with yamazumi_history_tab:
@@ -2769,26 +2704,6 @@ with st.expander("Yamazumi history", icon=":material/history:"):
             selectable_dataframe(
                 region_history.drop(columns=["details"], errors="ignore"),
                 key=f"yamazumi_region_history_{project_id}_{scenario_id}",
-                hide_index=True,
-                column_config={
-                    "action": "Action",
-                    "row_count": "Rows",
-                    "editor_name": "Editor",
-                    "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
-                    ),
-                },
-            )
-    with flag_history_tab:
-        flag_history = audit_history(
-            project_id, "Yamazumi flag definitions", limit=50
-        )
-        if flag_history.empty:
-            st.caption("No standardized flag-definition changes have been recorded yet.")
-        else:
-            selectable_dataframe(
-                flag_history.drop(columns=["details"], errors="ignore"),
-                key=f"yamazumi_flag_history_{project_id}_{scenario_id}",
                 hide_index=True,
                 column_config={
                     "action": "Action",

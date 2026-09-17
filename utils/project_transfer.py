@@ -42,7 +42,7 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("assembly_sections"), TransferTable("fishbone_part_assignments"),
     TransferTable("audit_log"), TransferTable("yamazumi_areas"),
     TransferTable("yamazumi_pitches"), TransferTable("yamazumi_elements"),
-    TransferTable("yamazumi_work_regions"), TransferTable("yamazumi_flag_definitions"),
+    TransferTable("yamazumi_work_regions"),
     TransferTable("manufacturing_assemblies"),
     TransferTable("manufacturing_assembly_components"),
     TransferTable("manufacturing_assembly_feature_rules"),

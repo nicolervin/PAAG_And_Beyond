@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from utils.time_units import format_seconds
+
 from utils.fishbone_ui import ordered_yamazumi_area_ids, section_breadcrumb_labels
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
@@ -50,7 +52,7 @@ st.caption(
 )
 st.caption(
     f"Scenario revision {scenario['revision_label']} · "
-    f"{float(scenario['takt_time_s']):.1f} s takt"
+    f"{format_seconds(scenario['takt_time_s'], scenario['takt_time_unit'])} takt"
 )
 
 pin_map = pin_map_for_scenario(project_id, scenario_id)

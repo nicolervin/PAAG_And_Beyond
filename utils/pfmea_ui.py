@@ -1590,7 +1590,7 @@ def _render_entries(project_id: str, scenario_id: str, work_element_id: str) -> 
                 help="Describe how this Process at a Glance step could fail to meet its requirements.",
             ),
             "class_code": st.column_config.TextColumn(
-                "Class", help="Enter the reviewed PFMEA classification. No value is inferred from Yamazumi flags."
+                "Class", help="Enter the reviewed PFMEA classification. No value is inferred from upstream planning or review data."
             ),
             "effect_count": st.column_config.NumberColumn("Potential Effects"),
             "cause_count": st.column_config.NumberColumn("Potential Causes"),

@@ -180,7 +180,9 @@ This standard does not apply to non-dimensional measurements such as time, torqu
 
 Each planning scenario saves one Yamazumi-only time unit: **Seconds**, **Minutes**, or **Hours**. Use it consistently for Yamazumi takt controls, work-element entry and tables, metrics, board labels and tooltips, and workbook time values. Always convert back to the canonical seconds fields before persistence; changing the unit must never rewrite existing timing quantities or change relative board-stack heights.
 
-The unit control uses an explicit **Save & Refresh** action, records old/new values in Yamazumi History, and refuses to change units while the work-element editor has unsaved changes. Labels and workbook exports name the active unit. Other pages retain their established seconds presentation.
+The Yamazumi settings row uses one explicit **Save & Refresh** action for the scenario unit, selected area's takt override, and optional Fishbone pairing shown only for an unlinked imported area. It saves the complete change atomically, records only changed old/new values in Yamazumi History, and refuses a unit change while the work-element editor has unsaved changes. Takt-only and pairing-only changes remain available in that state. A takt matching the scenario target clears the area override. Labels and workbook exports name the active unit.
+
+Project and planning-scenario takt values have separate saved display-unit preferences of **Seconds**, **Minutes**, or **Hours**. Their canonical `takt_time_s` values and Yamazumi area `takt_override_s` values remain seconds. New projects default to Seconds, new scenarios inherit the project's preference, and scenario clones copy the source scenario preference. Every project/scenario takt input places its unit selector beside the value, converts to seconds before saving, and preserves the real duration when only the unit changes. Scenario takt displays use the scenario preference throughout the sidebar, Overview, Yamazumi, Pin Map, and Functional Ergonomics. When takt and Yamazumi work time appear together, label and format each with its own preference so the two units cannot be mistaken for one another.
 
 ### Guided Yamazumi pitch initialization
 
@@ -189,6 +191,8 @@ Selecting a Yamazumi area with no pitch addresses opens one non-dismissible nati
 Generated address suggestions use `LL-SSS-NNN`: a saved two-character project line code, an editable three-character section abbreviation, and a minimum three-digit sequential suffix that expands naturally at 1000. This is guidance rather than a universal address validator; imports, existing values, and direct edits retain their established compatibility and scenario-wide uniqueness rules. A changed project line code affects future suggestions only and never rewrites saved addresses.
 
 The interactive board renders its **Unassigned** lane only while at least one persisted or drafted work element is unassigned. The regular work-element editor and Edit element dialog retain Unassigned as a destination even while that empty lane is hidden.
+
+The **Edit Yamazumi work element** dialog uses its native X, outside-click, and Escape behavior instead of a redundant Cancel button. **Model variants** occupies its own line above the Work type and Work region row. Its red **Delete element** action is a standalone destructive workflow, not a second table-deletion control: it hands off to a non-dismissible confirmation with an explicit Cancel action, identifies the element, and discloses the preserved Process at a Glance step and the Yamazumi relationship and legacy-dependent effects. Cancel restores the edit dialog and its unsaved field values. Confirmation preserves other browser-session board moves, records Current editor history, resets the work-element editor, shows a toast, and reruns.
 
 Rule: any new linear dimensional field added to this app must store and display in inches by default. Do not introduce a metric storage column unless explicitly approved by the project owner.
 
@@ -247,9 +251,15 @@ The upper-left sidebar shows **Fishbone view** only on Assembly grid, Parts to f
 
 One exact preferred section and its walk ordinal are browser-session state scoped to the project. Linked pages reuse that section when valid. If it is unavailable, choose the next page-valid section in walk order, then the previous valid section. Assembly grid and Pin Map support **All active sections**; Process at a Glance and Yamazumi require one exact editable context. Yamazumi and Pin Map areas follow their linked Fishbone-section order, with unlinked areas alphabetically last. This context is navigation state only and creates no audit event.
 
+Adding a Fishbone section automatically creates its linked Yamazumi area in every existing planning scenario and records both Fishbone framework and Yamazumi audit history with Current editor attribution. This automatic path creates missing areas only. It must preserve same-name imports and conflicting links unchanged, disclose skipped scenarios, and leave relinking or duplicate cleanup behind the explicit **Repair Fishbone area links** action.
+
+An already linked Yamazumi area must not show a redundant read-only Fishbone field. An imported or legacy area that remains unlinked instead shows **Pair with Fishbone section** using the standard depth-first Fishbone option order; after a successful save and rerun, that control disappears because the relationship is fixed.
+
 ## Yamazumi Board Pitch Order Standard
 
 The interactive board presents pitch stacks in numeric-aware, case-insensitive pitch-address order, which is the pitch tier of the area's Op ID sequence. A complete Subassembly or Kitter feed chain appears immediately before its receiving pitch; sibling feeders retain pitch-address order. This ordering is derived UI state only. It must not update `yamazumi_pitches.sequence`, addresses, feed targets, stack contents, audit history, or any other persisted record. The established north/top odd-address and south/bottom even-address rendering remains unchanged.
+
+Draw one continuous red takt line across each assigned-pitch lane using the effective area takt. Element heights must be proportional to time so a stack crosses the line only when its model-variant total exceeds takt. Mirror the scale from the assembly-flow centerline: north grows upward and south grows downward. Hide the line for zero or invalid takt and on Unassigned work. The line is read-only derived presentation and must not add a saved over-takt status or audit event.
 
 ## Canonical Terminology Glossary
 
