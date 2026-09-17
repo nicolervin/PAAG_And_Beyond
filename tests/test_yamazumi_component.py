@@ -29,7 +29,37 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v20", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v24", inspect.getsource(board_module))
+
+    def test_full_screen_control_uses_browser_api_and_reflows_board(self) -> None:
+        self.assertIn('id="full-screen"', board_module._HTML)
+        self.assertIn(".board.fullscreen-board", board_module._CSS)
+        self.assertIn("await fullScreenTarget.requestFullscreen()", board_module._JS)
+        self.assertIn("await document.exitFullscreen()", board_module._JS)
+        self.assertIn("const fullScreenTarget = document.documentElement", board_module._JS)
+        self.assertIn("document.fullscreenElement === fullScreenTarget", board_module._JS)
+        self.assertIn("board.classList.toggle('fullscreen-board'", board_module._JS)
+        self.assertIn("'Exit full screen' : 'Full screen'", board_module._JS)
+        self.assertIn("fullScreen.setAttribute('aria-pressed'", board_module._JS)
+        self.assertIn("new ResizeObserver(scheduleLayout)", board_module._JS)
+        self.assertIn("document.addEventListener('fullscreenchange'", board_module._JS)
+        self.assertIn("document.removeEventListener('fullscreenchange'", board_module._JS)
+        self.assertIn("resizeObserver.disconnect()", board_module._JS)
+
+    def test_dialog_actions_keep_document_full_screen(self) -> None:
+        for trigger_name in ("add_pitch", "add_element", "edit_pitch", "edit_element"):
+            self.assertIn(
+                f"setTriggerValue('{trigger_name}'", board_module._JS
+            )
+        self.assertNotIn("triggerAfterFullScreenExit", board_module._JS)
+
+    def test_full_screen_board_has_explicit_two_axis_scrolling(self) -> None:
+        self.assertIn('class="board-content"', board_module._HTML)
+        self.assertIn("width:max-content", board_module._CSS)
+        self.assertIn("overflow:scroll", board_module._CSS)
+        self.assertIn("scrollbar-gutter:stable both-edges", board_module._CSS)
+        self.assertIn("::-webkit-scrollbar", board_module._CSS)
+        self.assertIn(".board.fullscreen-board .board-actions", board_module._CSS)
 
     def test_selected_time_unit_scales_labels_and_preserves_height_ratio(self) -> None:
         self.assertIn("const displayTime = value =>", board_module._JS)

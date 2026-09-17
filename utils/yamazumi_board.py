@@ -11,7 +11,11 @@ from utils.time_units import time_unit as time_unit_config
 
 _HTML = """
 <div class="board">
-  <div class="board-actions"><button id="add-pitch" type="button">＋ Add pitch</button></div>
+  <div class="board-actions">
+    <button id="add-pitch" type="button">＋ Add pitch</button>
+    <button id="full-screen" type="button" title="Open the Yamazumi board full screen" aria-pressed="false">Full screen</button>
+  </div>
+  <div class="board-content">
   <div class="legend" id="legend"></div>
   <div class="unassigned-lane" id="unassigned"></div>
   <div class="lane-label">North side · odd pitches</div>
@@ -19,14 +23,22 @@ _HTML = """
   <div class="line"><span>Assembly flow →</span></div>
   <div class="lane south" id="south"></div>
   <div class="lane-label">South side · even pitches</div>
+  </div>
 </div>
 """
 
 _CSS = """
 :host { color: var(--st-text-color); font-family: var(--st-font); }
-.board { min-width: 980px; padding: 4px 2px 16px; overflow-x: auto; }
+.board { box-sizing:border-box; min-width:980px; padding:4px 2px 16px; overflow-x:auto; background:var(--st-background-color); }
+.board.fullscreen-board { position:fixed; inset:0; z-index:900; width:100vw; height:100vh; min-width:0; padding:12px; overflow:scroll; overscroll-behavior:contain; scrollbar-gutter:stable both-edges; scrollbar-color:var(--st-secondary-text-color) var(--st-secondary-background-color); }
+.board.fullscreen-board::-webkit-scrollbar { width:14px; height:14px; }
+.board.fullscreen-board::-webkit-scrollbar-track { background:var(--st-secondary-background-color); }
+.board.fullscreen-board::-webkit-scrollbar-thumb { border:3px solid var(--st-secondary-background-color); border-radius:10px; background:var(--st-secondary-text-color); }
+.board-content { box-sizing:border-box; width:max-content; min-width:100%; }
 .board-actions { display:flex; gap:8px; margin:2px 0 10px; }
+.board.fullscreen-board .board-actions { position:sticky; top:0; left:0; z-index:30; width:max-content; padding:4px; border-radius:6px; background:var(--st-background-color); }
 .board-actions button, .add-element, .edit-pitch, .edit-element { border:1px solid var(--st-primary-color); border-radius:6px; padding:5px 9px; color:var(--st-primary-color); background:var(--st-background-color); cursor:pointer; font-weight:650; }
+.board-actions button:disabled { cursor:not-allowed; opacity:.55; }
 .lane { position:relative; display:flex; gap:10px; min-height:230px; padding:8px 2px; }
 .lane.north { align-items:flex-end; }
 .lane.south { align-items:flex-start; }
@@ -85,7 +97,11 @@ export default function(component) {
   const unassigned = parentElement.querySelector('#unassigned')
   const legend = parentElement.querySelector('#legend')
   const addPitch = parentElement.querySelector('#add-pitch')
-  if (!north || !south || !unassigned || !legend || !addPitch) return
+  const fullScreen = parentElement.querySelector('#full-screen')
+  const board = parentElement.querySelector('.board')
+  if (!north || !south || !unassigned || !legend || !addPitch || !fullScreen || !board) return
+  const fullScreenTarget = document.documentElement
+  const isBoardFullScreen = () => document.fullscreenElement === fullScreenTarget
   addPitch.onclick = () => setTriggerValue('add_pitch', { requested: true })
   legend.innerHTML = `<span><i class="swatch" style="background:#35c84a"></i>Cycle</span>`
     + `<span><i class="swatch" style="background:#ffd54f"></i>Periodic</span>`
@@ -276,19 +292,54 @@ export default function(component) {
     line.style.width = `${Math.max(0, lane.scrollWidth - 4)}px`
     lane.appendChild(line)
   }
-  // Normalize bands across all pitches after wrapping has been measured. This
-  // gives every stack in a lane one shared baseline beside the assembly flow.
-  requestAnimationFrame(() => {
+  const layoutBoard = () => {
     alignLaneBaselines(north)
     alignLaneBaselines(south)
     drawTaktLine(north, 'north')
     drawTaktLine(south, 'south')
-  })
+  }
+  const scheduleLayout = () => {
+    requestAnimationFrame(() => requestAnimationFrame(layoutBoard))
+  }
+  const updateFullScreenControl = () => {
+    const isFullScreen = isBoardFullScreen()
+    fullScreen.textContent = isFullScreen ? 'Exit full screen' : 'Full screen'
+    fullScreen.title = isFullScreen
+      ? 'Exit the full-screen Yamazumi board'
+      : 'Open the Yamazumi board full screen'
+    fullScreen.setAttribute('aria-pressed', String(isFullScreen))
+    board.classList.toggle('fullscreen-board', isFullScreen)
+    scheduleLayout()
+  }
+  if (typeof fullScreenTarget.requestFullscreen !== 'function') {
+    fullScreen.disabled = true
+    fullScreen.title = 'Full screen is not available in this browser'
+  } else {
+    fullScreen.onclick = async () => {
+      try {
+        if (isBoardFullScreen()) await document.exitFullscreen()
+        else await fullScreenTarget.requestFullscreen()
+      } catch {
+        updateFullScreenControl()
+      }
+    }
+  }
+  document.addEventListener('fullscreenchange', updateFullScreenControl)
+  const resizeObserver = new ResizeObserver(scheduleLayout)
+  resizeObserver.observe(board)
+  // Normalize bands across all pitches after wrapping has been measured. This
+  // gives every stack in a lane one shared baseline beside the assembly flow.
+  scheduleLayout()
+  updateFullScreenControl()
+  return () => {
+    document.removeEventListener('fullscreenchange', updateFullScreenControl)
+    resizeObserver.disconnect()
+  }
 }
 """
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v20",
+    "paag_yamazumi_drag_board_v24",
     html=_HTML,
     css=_CSS,
     js=_JS,
