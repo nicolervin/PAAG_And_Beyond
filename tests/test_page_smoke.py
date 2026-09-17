@@ -621,6 +621,10 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
     def test_yamazumi_smoke(self) -> None:
         app = self.run_page("app_pages/yamazumi.py")
         self.assertTrue(any(title.value == "Yamazumi" for title in app.title))
+        self.assertNotIn("Flags", [widget.label for widget in app.multiselect])
+        self.assertNotIn(
+            "Define element flags", [expander.label for expander in app.expander]
+        )
 
     def test_yamazumi_fishbone_pairing_control_only_appears_when_unlinked(self) -> None:
         linked_section_id = store.add_assembly_section(

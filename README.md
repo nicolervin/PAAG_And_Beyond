@@ -24,7 +24,7 @@ From the repository root in PowerShell, using the shared virtual environment:
 
 Then open `http://localhost:8501`. Streamlit normally reloads the app after a source file is saved.
 
-`streamlit_app.py` calls `init_db()` at startup. Initialization creates missing tables, applies safe in-place schema upgrades used by this prototype, installs required built-in Yamazumi flags, and seeds a sample project when appropriate.
+`streamlit_app.py` calls `init_db()` at startup. Initialization creates missing tables, applies safe in-place schema upgrades used by this prototype, and seeds a sample project when appropriate.
 
 ## Technology and local data
 
@@ -51,7 +51,7 @@ PAAG currently supports:
 - a project-wide Assembly grid with a protected packaged-unit row followed by Fishbone-section categories mapped to real assembly numbers by official model, with shared section controls, nested mini-BOMs, and access to the full catalog details workflow;
 - ordinary BOM imports, preferred ID-based PITS imports, conservative legacy PITS imports, source revisions, and reconciliation evidence;
 - a station-independent assembly Fishbone with main-spine sections, nested subassemblies, and placed part uses;
-- Yamazumi balancing areas, pitch addresses, model variants, work regions, flags, takt comparison, and drag-and-drop work assignment;
+- Yamazumi balancing areas, pitch addresses, model variants, work regions, takt comparison, and drag-and-drop work assignment;
 - an ordered Process at a Glance plan reconciled from Yamazumi work and paired to Fishbone parts;
 - process tools, locations, unit orientation, dimensional geometry, and other requirements retained by the current schema while their redesigned Details/summary presentation awaits Phase 3;
 - a scenario-specific, derived Pin Map of pitches and reconciled Process work;
@@ -81,7 +81,7 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/assemblies.py` — Project-wide multi-section assembly-to-model grid plus the shared full assembly catalog, operational mini-BOM nesting, image, deletion, and history workflows.
 - `utils/assembly_grid.py` — Components v2 category/model grid renderer and its narrow interaction event contract.
 - `app_pages/fishbone.py` — Assembly framework, nested subassemblies, part placement, occurrence ordering, and the interactive Fishbone.
-- `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, flags, model variants, visual board, and work tables.
+- `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, model variants, visual board, and work tables.
 - `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, compact pitch planning, bulk actions, export, and history. The former Details dialog and workload summary/chart are removed pending Phase 3 redesign.
 - `app_pages/pin_map.py` — Scenario-specific read-only line visualization of pitches and explicitly linked Process work.
 - `app_pages/functional_quality.py` — Scenario-aware Quality page with the project-wide Requirements repository, scenario-specific PFMEA tab, and Control Plan placeholder.
@@ -125,7 +125,7 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 
 ### Process planning
 
-- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. Empty areas open a guided range dialog using the saved project line code and an editable Fishbone-derived section abbreviation; these are suggestions and never rename legacy addresses. Pitch addresses are trimmed and case-insensitively unique across all areas in that scenario, while alternative scenarios may reuse the same physical addresses. Each scenario saves a Yamazumi display/input unit of Seconds, Minutes, or Hours while all timing data remains stored in seconds; board labels, editors, metrics, and workbook time values follow that selection. Its board follows numeric-aware Op ID pitch-address order, places Subassembly/Kitter feeder chains immediately before their receiving pitch, and hides the Unassigned lane when it contains no work. It supports scenario branching, takt, work regions, flags, model-variant stacks, and visual work balancing.
+- **Yamazumi** creates or imports areas, pitch addresses, and measurable work inside the active planning scenario. Empty areas open a guided range dialog using the saved project line code and an editable Fishbone-derived section abbreviation; these are suggestions and never rename legacy addresses. Pitch addresses are trimmed and case-insensitively unique across all areas in that scenario, while alternative scenarios may reuse the same physical addresses. Each scenario saves a Yamazumi display/input unit of Seconds, Minutes, or Hours while all timing data remains stored in seconds; board labels, editors, metrics, and workbook time values follow that selection. Its board follows numeric-aware Op ID pitch-address order, places Subassembly/Kitter feeder chains immediately before their receiving pitch, and hides the Unassigned lane when it contains no work. It supports scenario branching, takt, work regions, model-variant stacks, and visual work balancing. Yamazumi does not own element flags; future PAAG indicators derived from Functional Reviews remain separately scoped.
 - **Process at a Glance** starts from reconciled Yamazumi work, pairs it to Fishbone parts, and orders it by pitch. Its former tabbed Details dialog and workload summary/chart have been removed; the underlying saved detail fields remain intact, and a redesigned Details/summary view is planned for Phase 3 but is not yet implemented.
 - **Pin Map** derives a scenario-specific read-only line view from existing pitches, Yamazumi elements, and explicitly linked Process work. It stores no separate layout data.
 
@@ -158,10 +158,9 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 - **Complexity feature** — A manufacturing-relevant product characteristic with controlled choices.
 - **Model variant** — A Yamazumi stack for Base work or a specific feature choice.
 - **Model applicability** — The rule identifying which configurations require a part or Process step.
-- **Work element** — One measurable item of work with description, time, type, region, flags, variant, and optional pitch.
+- **Work element** — One measurable item of work with description, time, type, region, variant, and optional pitch.
 - **Cycle / Periodic / Fluctuation work** — Work performed per unit, at a planned interval, or variably according to mix or conditions.
 - **Work region** — An area-specific category grouping the nature or location of Yamazumi work.
-- **Flag** — A visible Yamazumi tag; CTQ and Safety are built-in system flags.
 - **Process at a Glance** — The ordered scenario-specific manufacturing plan enriched with parts and execution requirements.
 - **Part requirement** — A group of parts paired to a Process step using `Use all`, `Choose one`, or `Optional` selection behavior.
 - **Output assembly milestone** — The exact Process step where a new made assembly becomes complete.

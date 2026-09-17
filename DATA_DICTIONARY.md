@@ -173,21 +173,16 @@ Each assigned-pitch lane displays one continuous red takt line at the effective 
 
 ### `yamazumi_elements`
 
-- **Purpose:** Stores measurable work content for Yamazumi balancing: description, time, work type, pitch assignment, variants, work region, flags, source, order, and Process synchronization state.
+- **Purpose:** Stores measurable work content for Yamazumi balancing: description, time, work type, pitch assignment, variants, work region, source, order, and Process synchronization state.
 - **Key relationships:** Belongs to `yamazumi_areas` and `projects`; optionally references `yamazumi_pitches`. `process_element_id` is a soft text link to `work_elements`, not an enforced foreign key. Reconciliation creates or updates the linked Process step.
 - **Scope:** Scenario-specific through the parent area.
+- **Flag retirement:** Yamazumi does not own or display element flags. The former `flags` column and `yamazumi_flag_definitions` table are removed by an idempotent schema upgrade, and their legacy values are intentionally discarded. Reconciliation does not infer PAAG quality text from Yamazumi. Any future PAAG indicators generated from Functional Reviews require a separately approved design and must not be persisted on Yamazumi elements.
 
 ### `yamazumi_work_regions`
 
 - **Purpose:** Defines area-specific work-region labels and colors used to categorize Yamazumi work elements.
 - **Key relationships:** Belongs to `yamazumi_areas` and `projects`. Work elements store the selected region as text rather than by region ID, so rename and delete workflows must rewrite affected element values deliberately.
 - **Scope:** Scenario-specific through the parent area.
-
-### `yamazumi_flag_definitions`
-
-- **Purpose:** Defines project-wide tags that can be applied to Yamazumi work, including protected system flags such as CTQ and Safety.
-- **Key relationships:** Belongs to `projects`. Yamazumi elements store selected flag names as JSON text rather than foreign keys, so flag rename and delete workflows must rewrite affected element values deliberately.
-- **Scope:** Project-wide.
 
 ### `work_elements`
 

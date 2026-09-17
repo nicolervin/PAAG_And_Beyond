@@ -78,7 +78,6 @@ _CSS = """
 .element strong { position:absolute; top:4px; right:31px; margin-left:5px; }
 .element-description { display:block; height:100%; padding-right:30px; overflow:hidden; line-height:1.2; overflow-wrap:anywhere; }
 .edit-element { position:absolute; right:3px; bottom:3px; padding:1px 4px; border-color:rgba(0,0,0,.35); color:#111; font-size:.68rem; line-height:1.2; }
-.flags { position:absolute; left:3px; bottom:3px; z-index:2; max-width:calc(100% - 43px); box-sizing:border-box; padding:1px 4px; border:1px solid #8b0000; border-radius:3px; background:#fff3cd; color:#8b0000; font-weight:900; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
 .legend { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:4px; font-size:.8rem; }
 .swatch { width:12px; height:12px; display:inline-block; border-radius:2px; margin-right:4px; }
 .unassigned-lane { display:flex; margin:8px 2px 12px; }
@@ -198,14 +197,7 @@ export default function(component) {
           : 34
         el.style.height = `${elementHeight}px`
         el.style.flex = `0 0 ${elementHeight}px`
-        const rawFlags = item.flags || []
-        const flags = rawFlags.length > 2
-          ? '2+ Flags'
-          : rawFlags.map(flag => flag === 'Safety'
-              ? '⚠ Safety'
-              : `◆ ${escapeHtml(flag)}`
-            ).join(' ')
-        el.innerHTML = `<strong>${formatTime(item.time_s)}</strong><span class="element-description">${item.description}</span>${flags ? `<span class="flags">${flags}</span>` : ''}<button type="button" class="edit-element" title="Edit work element">Edit</button>`
+        el.innerHTML = `<strong>${formatTime(item.time_s)}</strong><span class="element-description">${item.description}</span><button type="button" class="edit-element" title="Edit work element">Edit</button>`
         el.title = `${item.description} · ${formatTime(item.time_s)} · ${item.work_region || 'None'}`
         el.ondragstart = event => event.dataTransfer.setData('text/plain', item.id)
         el.querySelector('.edit-element').onclick = event => {
@@ -339,7 +331,7 @@ export default function(component) {
 """
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v24",
+    "paag_yamazumi_drag_board_v25",
     html=_HTML,
     css=_CSS,
     js=_JS,

@@ -16,7 +16,6 @@ from utils.store import (
     audit_history,
     clear_yamazumi_data,
     complexity_features,
-    delete_yamazumi_flag_definitions,
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
@@ -24,7 +23,6 @@ from utils.store import (
     record_audit_event,
     rename_yamazumi_variants,
     replace_yamazumi_elements,
-    replace_yamazumi_flag_definitions,
     replace_yamazumi_pitches,
     replace_yamazumi_work_regions,
     save_yamazumi_stack_draft,
@@ -37,7 +35,6 @@ from utils.store import (
     yamazumi_areas,
     yamazumi_elements,
     yamazumi_elements_for_scenario,
-    yamazumi_flag_definitions,
     yamazumi_pitch_delete_blockers,
     yamazumi_pitch_address_conflicts,
     yamazumi_pitch_feed_target_status,
@@ -190,13 +187,6 @@ with st.container(horizontal=True, horizontal_alignment="right", vertical_alignm
 area_selector_key = f"yamazumi_area_{scenario_id}"
 sections = assembly_section_walk_order(project_id)
 features = complexity_features(project_id)
-flag_definitions = yamazumi_flag_definitions(project_id)
-active_flag_options = (
-    flag_definitions.loc[
-        flag_definitions["active"].fillna(1).astype(bool), "name"
-    ].astype(str).tolist()
-    if not flag_definitions.empty else ["CTQ", "Safety"]
-)
 active_features = (
     features.loc[features["active"].fillna(1).astype(bool)].copy()
     if not features.empty else features
@@ -550,9 +540,6 @@ if not pitches.empty:
     )
 elements = yamazumi_elements(project_id, area_id)
 if not elements.empty:
-    elements["flags"] = elements["flags"].apply(
-        lambda value: json.loads(value or "[]") if isinstance(value, str) else (value or [])
-    )
     elements["model_variants"] = elements.apply(
         lambda row: [
             stored_variant_labels.get(item, item)
@@ -832,7 +819,7 @@ def empty_pitch_setup_dialog() -> None:
         st.rerun()
 
 
-setup_columns = st.columns(3)
+setup_columns = st.columns(2)
 with setup_columns[0].expander(
     "Generate pitch addresses",
     icon=":material/format_list_numbered:",
@@ -1047,201 +1034,6 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         except ValueError as exc:
             st.error(str(exc))
 
-with setup_columns[2].expander("Define element flags", icon=":material/label:"):
-    st.caption(
-        "CTQ and Safety are permanent project flags. Add custom tags for other conditions that "
-        "should be visible to the IE when editing a work element."
-    )
-    flag_editor_key = f"yamazumi_flag_editor_{project_id}"
-    flag_editor_key = apply_pending_table_editor_reset(flag_editor_key)
-    flag_rows = flag_definitions.copy()
-    flag_rows["name"] = flag_rows["name"].astype("string").fillna("")
-    flag_rows["description"] = flag_rows["description"].astype("string").fillna("")
-    flag_rows["active"] = flag_rows["active"].fillna(1).astype(bool)
-    flag_rows["system_flag"] = flag_rows["system_flag"].fillna(0).astype(bool)
-
-    editable_table_heading("Flag definitions")
-    visible_flags = filter_table(
-        flag_rows,
-        key=f"yamazumi_flag_filters_{project_id}",
-        dropdown_columns=["active"],
-        search_columns=["name", "description"],
-        labels={"active": "Active"},
-        reset_widget_keys=[flag_editor_key],
-    )
-
-    flag_editor_rows = direct_entry_editor_rows(
-        visible_flags,
-        editor_key=flag_editor_key,
-        sort_columns=["name", "description", "active", "system_flag"],
-        labels={"name": "Flag name", "system_flag": "System flag"},
-    )
-    flag_action_slot = st.empty()
-    edited_flags = st.data_editor(
-        flag_editor_rows,
-        key=flag_editor_key,
-        hide_index=True,
-        num_rows="dynamic",
-        height=300,
-        disabled=["id", "system_flag", "sequence", "updated_at"],
-        column_order=["name", "description", "active"],
-        column_config={
-            "id": None,
-            "name": st.column_config.TextColumn("Flag name", required=True, pinned=True),
-            "description": st.column_config.TextColumn("Description", width="large"),
-            "active": st.column_config.CheckboxColumn(
-                "Active", default=True,
-                help="Inactive custom flags remain on existing work but cannot be added to new elements.",
-            ),
-            "system_flag": None,
-            "sequence": None,
-            "updated_at": None,
-        },
-    )
-    flag_actions = editable_table_footer(
-        editor_key=flag_editor_key,
-        key_prefix=f"yamazumi_flags_{project_id}",
-        native_row_selection=True,
-    )
-
-    selected_flags = native_selected_rows(flag_editor_rows, editor_key=flag_editor_key)
-    custom_selected_flags = selected_flags.loc[
-        ~selected_flags["system_flag"].fillna(False).astype(bool)
-    ] if not selected_flags.empty else selected_flags
-    flag_bulk = selected_rows_action_bar(
-        parent=flag_action_slot,
-    )
-    bulk_active = flag_bulk.selectbox(
-        "Active for selected custom flags",
-        [None, True, False],
-        format_func=lambda value: "No change" if value is None else ("Active" if value else "Inactive"),
-        key=f"yamazumi_flag_bulk_active_{project_id}",
-    )
-    apply_flag_bulk = flag_bulk.button(
-        f"Apply to selected ({len(custom_selected_flags)})",
-        type="primary",
-        icon=":material/checklist:",
-        disabled=custom_selected_flags.empty,
-        key=f"apply_yamazumi_flag_bulk_{project_id}",
-    )
-    request_flag_bulk_delete = not selected_flags.empty
-    flag_bulk.download_button(
-        "Export filtered",
-        data=dataframe_to_excel(
-            visible_flags[["name", "description", "active"]],
-            "Yamazumi flags",
-        ),
-        file_name="yamazumi_flags_filtered.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        icon=":material/download:",
-        key=f"export_yamazumi_flags_{project_id}",
-    )
-
-    if apply_flag_bulk:
-        if table_has_unsaved_changes(flag_editor_key, native_row_selection=True):
-            st.warning("Save or undo other flag edits before applying a bulk change.")
-        elif bulk_active is None:
-            st.warning("Choose Active or Inactive to apply.")
-        else:
-            updated_flags = flag_rows.copy()
-            selected_ids = set(custom_selected_flags["id"].astype(str))
-            updated_flags.loc[
-                updated_flags["id"].astype(str).isin(selected_ids), "active"
-            ] = bulk_active
-            count = replace_yamazumi_flag_definitions(project_id, updated_flags)
-            record_audit_event(
-                project_id,
-                "Yamazumi flag definitions",
-                "Bulk edit",
-                len(selected_ids),
-                st.session_state.get("current_editor", ""),
-                {"active": bulk_active},
-            )
-            request_table_editor_reset(flag_editor_key)
-            st.toast(f"Updated {len(selected_ids)} custom flags", icon=":material/check_circle:")
-            st.rerun()
-
-    if request_flag_bulk_delete:
-        if len(custom_selected_flags) != len(selected_flags):
-            request_table_editor_reset(flag_editor_key)
-            st.toast("CTQ and Safety are permanent system flags and cannot be deleted.")
-            st.rerun()
-        elif table_has_unsaved_changes(flag_editor_key, native_row_selection=True):
-            st.warning("Save or undo other flag edits before deleting selected flags.")
-        else:
-            st.session_state[f"yamazumi_flags_pending_delete_{project_id}"] = (
-                custom_selected_flags["id"].astype(str).tolist()
-            )
-            stage_native_delete_confirmation(flag_editor_key)
-
-    @st.dialog("Delete custom Yamazumi flags?", dismissible=False)
-    def confirm_flag_delete() -> None:
-        pending_key = f"yamazumi_flags_pending_delete_{project_id}"
-        pending_ids = st.session_state.get(pending_key, [])
-        st.warning(
-            f"Delete {len(pending_ids)} custom flag(s)? The deleted tags will be removed from "
-            "existing Yamazumi elements and those elements will return to IE review."
-        )
-        actions = st.container(horizontal=True)
-        if actions.button("Cancel", key=f"cancel_yamazumi_flag_delete_{project_id}"):
-            st.session_state.pop(pending_key, None)
-            request_table_editor_reset(flag_editor_key)
-            st.rerun()
-        if actions.button(
-            "Delete flags",
-            type="primary",
-            icon=":material/delete:",
-            key=f"destructive_confirm_yamazumi_flag_delete_{project_id}",
-        ):
-            try:
-                count = delete_yamazumi_flag_definitions(project_id, pending_ids)
-                record_audit_event(
-                    project_id,
-                    "Yamazumi flag definitions",
-                    "Bulk delete" if count > 1 else "Delete",
-                    count,
-                    st.session_state.get("current_editor", ""),
-                )
-                st.session_state.pop(pending_key, None)
-                request_table_editor_reset(flag_editor_key)
-                st.toast(f"Deleted {count} custom flags", icon=":material/delete:")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-    if st.session_state.get(f"yamazumi_flags_pending_delete_{project_id}"):
-        confirm_flag_delete()
-
-    if flag_actions.undo:
-        request_table_editor_reset(flag_editor_key)
-        st.rerun()
-
-    if flag_actions.save_and_refresh:
-        try:
-            if not selected_flags.empty:
-                raise ValueError("Clear selected rows before saving flag edits.")
-            edited_flags = drop_untouched_new_rows(
-                edited_flags, identifying_columns=["name"]
-            )
-            errors = required_field_errors(edited_flags, {"name": "Flag name"})
-            if errors:
-                raise ValueError(" ".join(errors))
-            combined_flags = merge_filtered_edits(flag_rows, visible_flags, edited_flags)
-            count = replace_yamazumi_flag_definitions(project_id, combined_flags)
-            record_audit_event(
-                project_id,
-                "Yamazumi flag definitions",
-                "Save & Refresh",
-                count,
-                st.session_state.get("current_editor", ""),
-            )
-            request_table_editor_reset(flag_editor_key)
-            request_table_editor_reset(element_editor_key)
-            st.toast(f"Saved {count} flag definitions", icon=":material/check_circle:")
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
-
 times = pd.to_numeric(elements.get("time_s", pd.Series(dtype=float)), errors="coerce").fillna(0)
 total_work = float(times.sum())
 active_pitch_count = int((pitches["status"] == "Active").sum()) if not pitches.empty else 0
@@ -1442,7 +1234,6 @@ def add_element_dialog() -> None:
             f"{', '.join(variants_added_to_pitch)} will also be added to pitch "
             f"{target.get('pitch_number') or ''} as a new Yamazumi stack."
         )
-    flags = st.multiselect("Flags", active_flag_options)
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_interactive_element"):
         st.session_state.pop(f"yamazumi_add_element_target_{project_id}_{area_id}", None)
@@ -1459,7 +1250,6 @@ def add_element_dialog() -> None:
                     "model_variants": model_variants,
                     "work_type": work_type,
                     "work_region": work_region,
-                    "flags": flags,
                 },
             )
             record_audit_event(
@@ -1631,9 +1421,6 @@ def edit_element_dialog(element_id: str) -> None:
             "Work region", edit_region_options,
             index=edit_region_options.index(current_work_region),
         )
-        current_flags = list(current.get("flags") or [])
-        edit_flag_options = list(dict.fromkeys([*active_flag_options, *current_flags]))
-        flags = st.multiselect("Flags", edit_flag_options, default=current_flags)
         actions = st.container(horizontal=True)
         # The first submit button is Streamlit's Ctrl+Enter target. Keep Save
         # first so the text-area keyboard hint performs the expected action.
@@ -1647,7 +1434,7 @@ def edit_element_dialog(element_id: str) -> None:
                     "pitch_id": selected_pitch_id, "model_variants": model_variants, "work_type": work_type,
                     "description": description,
                     "time_s": display_to_seconds(time_value, yamazumi_time_unit),
-                    "work_region": work_region, "flags": flags,
+                    "work_region": work_region,
                 },
             )
             record_audit_event(
@@ -2132,9 +1919,6 @@ if element_combined_view:
         element_table_source["area_id"].astype(str).isin(effective_element_area_ids)
     ].copy()
     if not element_table_source.empty:
-        element_table_source["flags"] = element_table_source["flags"].apply(
-            lambda value: json.loads(value or "[]") if isinstance(value, str) else (value or [])
-        )
         element_table_source["model_variants"] = element_table_source.apply(
             lambda row: [
                 stored_variant_labels.get(item, item)
@@ -2153,7 +1937,7 @@ active_pitches = pitches.loc[pitches["status"] == "Active"].copy() if not pitche
 pitch_label_by_id = dict(zip(active_pitches["id"].astype(str), active_pitches["pitch_number"].astype(str))) if not active_pitches.empty else {}
 element_columns = [
     "id", "area_name", "pitch_id", "model_variants", "work_type", "description", "time_s", "work_region",
-    "flags", "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
+    "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
 ]
 if element_table_source.empty:
     element_rows = pd.DataFrame({
@@ -2166,8 +1950,6 @@ if element_table_source.empty:
         "description": pd.Series(dtype="string"),
         "time_s": pd.Series(dtype="Float64"),
         "work_region": pd.Series(dtype="string"),
-        # MultiselectColumn values are lists, so this column deliberately uses object dtype.
-        "flags": pd.Series(dtype="object"),
         "sequence": pd.Series(dtype="Int64"),
         "source": pd.Series(dtype="string"),
         "process_element_id": pd.Series(dtype="string"),
@@ -2191,10 +1973,10 @@ element_filter_scope = "combined" if element_combined_view else str(area_id)
 visible_elements = filter_table(
     element_rows,
     key=f"yamazumi_element_filters_{scenario_id}_{element_filter_scope}",
-    dropdown_columns=["area_name", "pitch", "model_variants", "work_type", "work_region", "flags"],
-    search_columns=["area_name", "description", "pitch", "model_variants", "work_region", "flags"],
-    labels={"area_name": "Yamazumi area", "model_variants": "Model variant", "flags": "Flag"},
-    multi_value_columns=["model_variants", "flags"],
+    dropdown_columns=["area_name", "pitch", "model_variants", "work_type", "work_region"],
+    search_columns=["area_name", "description", "pitch", "model_variants", "work_region"],
+    labels={"area_name": "Yamazumi area", "model_variants": "Model variant"},
+    multi_value_columns=["model_variants"],
     reset_widget_keys=[] if element_combined_view else [element_editor_key],
 )
 pitch_options = ["Unassigned", *pitch_label_by_id.values()]
@@ -2204,7 +1986,7 @@ variant_options_by_pitch_label = {
 }
 element_column_order = [
     "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
-    "work_region", "flags", "sequence",
+    "work_region", "sequence",
 ]
 element_column_config = {
     "id": None,
@@ -2230,17 +2012,6 @@ element_column_config = {
     "work_region": st.column_config.SelectboxColumn(
         "Work region", options=work_region_options, required=True, default="None"
     ),
-    "flags": st.column_config.MultiselectColumn(
-        "Flags",
-        options=list(dict.fromkeys([
-            *active_flag_options,
-            *[
-                str(flag)
-                for stored_flags in element_table_source.get("flags", pd.Series(dtype=object))
-                for flag in (stored_flags or [])
-            ],
-        ])),
-    ),
     "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
     "source": None,
     "process_element_id": None,
@@ -2253,7 +2024,6 @@ if element_combined_view:
         "pitch": st.column_config.TextColumn("Pitch"),
         "model_variants": st.column_config.ListColumn("Model variants"),
         "work_region": st.column_config.TextColumn("Work region"),
-        "flags": st.column_config.ListColumn("Flags"),
     }
     selectable_dataframe(
         visible_elements,
@@ -2270,7 +2040,7 @@ else:
         editor_key=element_editor_key,
         sort_columns=[
             "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
-            "work_region", "flags", "sequence",
+            "work_region", "sequence",
         ],
         labels={
             "area_name": "Yamazumi area", "model_variants": "Model variants",
@@ -2693,7 +2463,6 @@ with st.expander("Yamazumi history", icon=":material/history:"):
         element_history_tab,
         variant_history_tab,
         region_history_tab,
-        flag_history_tab,
     ) = st.tabs(
         [
             "Yamazumi actions",
@@ -2701,7 +2470,6 @@ with st.expander("Yamazumi history", icon=":material/history:"):
             "Work elements",
             "Variants",
             "Work regions",
-            "Element flags",
         ]
     )
     with yamazumi_history_tab:
@@ -2786,26 +2554,6 @@ with st.expander("Yamazumi history", icon=":material/history:"):
             selectable_dataframe(
                 region_history.drop(columns=["details"], errors="ignore"),
                 key=f"yamazumi_region_history_{project_id}_{scenario_id}",
-                hide_index=True,
-                column_config={
-                    "action": "Action",
-                    "row_count": "Rows",
-                    "editor_name": "Editor",
-                    "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
-                    ),
-                },
-            )
-    with flag_history_tab:
-        flag_history = audit_history(
-            project_id, "Yamazumi flag definitions", limit=50
-        )
-        if flag_history.empty:
-            st.caption("No standardized flag-definition changes have been recorded yet.")
-        else:
-            selectable_dataframe(
-                flag_history.drop(columns=["details"], errors="ignore"),
-                key=f"yamazumi_flag_history_{project_id}_{scenario_id}",
                 hide_index=True,
                 column_config={
                     "action": "Action",

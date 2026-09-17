@@ -29,7 +29,12 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v24", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v25", inspect.getsource(board_module))
+
+    def test_element_flags_are_not_rendered_or_sent_to_card_markup(self) -> None:
+        self.assertNotIn(".flags", board_module._CSS)
+        self.assertNotIn("item.flags", board_module._JS)
+        self.assertNotIn('class="flags"', board_module._JS)
 
     def test_full_screen_control_uses_browser_api_and_reflows_board(self) -> None:
         self.assertIn('id="full-screen"', board_module._HTML)
