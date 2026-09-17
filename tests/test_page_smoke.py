@@ -625,6 +625,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertNotIn(
             "Define element flags", [expander.label for expander in app.expander]
         )
+        self.assertNotIn("Save area settings", [button.label for button in app.button])
 
     def test_yamazumi_fishbone_pairing_control_only_appears_when_unlinked(self) -> None:
         linked_section_id = store.add_assembly_section(
@@ -678,7 +679,8 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             next(
                 button
                 for button in app.button
-                if button.label == "Save area settings"
+                if button.key
+                == f"save_yamazumi_settings_{self.scenario_id}_{unlinked_area_id}"
             ).click().run(timeout=30)
 
         self.assertEqual(list(app.exception), [])
@@ -869,7 +871,8 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             save = next(
                 button
                 for button in app.button
-                if button.key == f"save_yamazumi_time_unit_{self.scenario_id}"
+                if button.key
+                == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
             )
             save.click().run(timeout=30)
 
@@ -921,8 +924,9 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         history = store.audit_history(self.project_id, "Yamazumi")
         self.assertTrue(
             any(
-                '"old_unit": "seconds"' in str(details)
-                and '"new_unit": "minutes"' in str(details)
+                '"yamazumi_time_unit"' in str(details)
+                and '"old": "seconds"' in str(details)
+                and '"new": "minutes"' in str(details)
                 for details in history["details"]
             )
         )
@@ -969,7 +973,8 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             unit_save = next(
                 button
                 for button in app.button
-                if button.key == f"save_yamazumi_time_unit_{self.scenario_id}"
+                if button.key
+                == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
             )
             unit_save.click().run(timeout=30)
 
@@ -986,6 +991,59 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 )
             )
         self.assertEqual(list(app.exception), [])
+
+    def test_yamazumi_takt_only_save_allows_pending_edits_and_clears_override(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id,
+            self.scenario_id,
+            "Takt settings area",
+            self.section_id,
+            90,
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Takt settings tester"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+
+        with (
+            patch("utils.yamazumi_board.yamazumi_board", return_value=None),
+            patch("utils.table_ui.table_has_unsaved_changes", return_value=True),
+        ):
+            app.run(timeout=30)
+            takt_input = next(
+                widget
+                for widget in app.number_input
+                if widget.label.startswith("Yamazumi takt time")
+            )
+            takt_input.set_value(60.0).run(timeout=30)
+            save = next(
+                button
+                for button in app.button
+                if button.key
+                == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
+            )
+            self.assertFalse(save.disabled)
+            save.click().run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertIsNone(
+            store.query(
+                "SELECT takt_override_s FROM yamazumi_areas WHERE id=?",
+                (area_id,),
+            )[0]["takt_override_s"]
+        )
+        saved_button = next(
+            button
+            for button in app.button
+            if button.key
+            == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
+        )
+        self.assertTrue(saved_button.disabled)
+        history = store.audit_history(self.project_id, "Yamazumi", limit=1)
+        self.assertIn('"takt_override_s"', str(history.iloc[0]["details"]))
 
     def test_yamazumi_reports_legacy_pitch_address_conflicts_until_corrected(self) -> None:
         first_area_id = store.upsert_yamazumi_area(

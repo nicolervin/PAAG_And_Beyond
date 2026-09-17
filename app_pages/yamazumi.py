@@ -26,10 +26,9 @@ from utils.store import (
     replace_yamazumi_pitches,
     replace_yamazumi_work_regions,
     save_yamazumi_stack_draft,
-    update_yamazumi_area,
     update_yamazumi_element,
     update_yamazumi_pitch,
-    update_yamazumi_time_unit,
+    update_yamazumi_settings,
     sync_yamazumi_areas_from_fishbone,
     yamazumi_area_link_status,
     yamazumi_areas,
@@ -351,8 +350,22 @@ area_takt = (
 if not math.isfinite(area_takt):
     area_takt = default_takt
 
-unit_controls = st.container(horizontal=True, vertical_alignment="bottom")
-selected_time_unit = unit_controls.segmented_control(
+section_id_value = area.get("section_id")
+current_section_id = (
+    None if section_id_value is None or pd.isna(section_id_value)
+    else str(section_id_value).strip() or None
+)
+linked_elsewhere = {
+    str(value) for value in areas["section_id"].dropna().astype(str).tolist()
+    if str(value).strip()
+}
+available_sections = [
+    section_id for section_id in section_name_by_id
+    if section_id not in linked_elsewhere
+]
+
+settings_controls = st.container(horizontal=True, vertical_alignment="bottom")
+selected_time_unit = settings_controls.segmented_control(
     "Yamazumi time unit",
     options=list(TIME_UNITS),
     default=yamazumi_time_unit,
@@ -363,7 +376,7 @@ selected_time_unit = unit_controls.segmented_control(
     ),
     key=f"yamazumi_time_unit_{scenario_id}",
 )
-takt_time = unit_controls.number_input(
+takt_time = settings_controls.number_input(
     f"Yamazumi takt time ({takt_config.label.lower()})",
     min_value=0.0,
     value=seconds_to_display(area_takt, takt_time_unit),
@@ -372,53 +385,84 @@ takt_time = unit_controls.number_input(
     help="Enter an area-specific takt or use the active planning scenario's target takt.",
     key=f"yamazumi_takt_{scenario_id}_{area_id}_{takt_time_unit}",
 )
-save_time_unit = unit_controls.button(
+if current_section_id:
+    linked_section = current_section_id
+else:
+    linked_section = settings_controls.selectbox(
+        "Pair with Fishbone section",
+        options=[None, *available_sections],
+        format_func=lambda value: (
+            "Unlinked" if value is None else section_option_labels.get(value, value)
+        ),
+        help="Manual matching is available only for imported areas that could not be matched by name.",
+        key=f"linked_fishbone_for_import_{area_id}",
+    )
+
+selected_time_unit = normalize_time_unit(selected_time_unit)
+entered_takt_s = (
+    display_to_seconds(takt_time, takt_time_unit)
+    if takt_time else default_takt
+)
+submitted_takt_override = (
+    None
+    if math.isclose(entered_takt_s, default_takt, rel_tol=1e-9, abs_tol=1e-9)
+    else entered_takt_s
+)
+stored_takt_override = (
+    None
+    if area_takt_value is None or pd.isna(area_takt_value)
+    else float(area_takt_value)
+)
+settings_changed = (
+    selected_time_unit != yamazumi_time_unit
+    or submitted_takt_override != stored_takt_override
+    or linked_section != current_section_id
+)
+save_settings = settings_controls.button(
     "Save & Refresh",
     type="primary",
     icon=":material/save:",
-    key=f"save_yamazumi_time_unit_{scenario_id}",
+    disabled=not settings_changed,
+    key=f"save_yamazumi_settings_{scenario_id}_{area_id}",
 )
-if save_time_unit:
+if save_settings:
     try:
-        selected_time_unit = normalize_time_unit(selected_time_unit)
-        if selected_time_unit == yamazumi_time_unit:
-            raise ValueError("The Yamazumi time unit has not changed.")
-        has_pending_time_edits = (
-            table_has_unsaved_changes(
-                element_editor_key, native_row_selection=True
+        time_unit_changed = selected_time_unit != yamazumi_time_unit
+        if time_unit_changed:
+            has_pending_time_edits = (
+                table_has_unsaved_changes(
+                    element_editor_key, native_row_selection=True
+                )
+                or bool(st.session_state.get(pitch_delete_key))
+                or bool(st.session_state.get(element_delete_key))
+                or bool(st.session_state.get(
+                    f"yamazumi_add_element_target_{project_id}_{area_id}"
+                ))
+                or bool(st.session_state.get(
+                    f"yamazumi_edit_element_target_{project_id}_{area_id}"
+                ))
             )
-            or bool(st.session_state.get(pitch_delete_key))
-            or bool(st.session_state.get(element_delete_key))
-            or bool(st.session_state.get(
-                f"yamazumi_add_element_target_{project_id}_{area_id}"
-            ))
-            or bool(st.session_state.get(
-                f"yamazumi_edit_element_target_{project_id}_{area_id}"
-            ))
-        )
-        if has_pending_time_edits:
-            raise ValueError(
-                "Save or undo Yamazumi work-element edits before changing the time unit."
-            )
-        unit_change = update_yamazumi_time_unit(
-            project_id, scenario_id, selected_time_unit
-        )
-        record_audit_event(
+            if has_pending_time_edits:
+                raise ValueError(
+                    "Save or undo Yamazumi work-element edits before changing the time unit."
+                )
+        result = update_yamazumi_settings(
             project_id,
-            "Yamazumi",
-            "Save & Refresh",
-            1,
+            scenario_id,
+            area_id,
+            selected_time_unit,
+            linked_section,
+            submitted_takt_override,
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id, **unit_change},
         )
-        request_table_editor_reset(element_editor_key)
-        st.toast(
-            f"Yamazumi time unit changed to {TIME_UNITS[selected_time_unit].label}",
-            icon=":material/check_circle:",
-        )
+        if result["time_unit_changed"]:
+            request_table_editor_reset(element_editor_key)
+        st.toast("Saved Yamazumi settings", icon=":material/check_circle:")
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
+
+takt = submitted_takt_override if submitted_takt_override is not None else default_takt
 
 if request_clear_area:
     st.session_state["yamazumi_reset_scope"] = "area"
@@ -479,51 +523,6 @@ def confirm_yamazumi_reset() -> None:
 
 if st.session_state.get("yamazumi_reset_scope") in {"area", "all"}:
     confirm_yamazumi_reset()
-
-area_controls = st.container(horizontal=True, vertical_alignment="bottom")
-section_id_value = area.get("section_id")
-current_section_id = (
-    None if section_id_value is None or pd.isna(section_id_value)
-    else str(section_id_value).strip() or None
-)
-if current_section_id:
-    linked_section = current_section_id
-else:
-    linked_elsewhere = {
-        str(value) for value in areas["section_id"].dropna().astype(str).tolist()
-        if str(value).strip()
-    }
-    available_sections = [
-        section_id for section_id in section_name_by_id
-        if section_id not in linked_elsewhere
-    ]
-    linked_section = area_controls.selectbox(
-        "Pair with Fishbone section",
-        options=[None, *available_sections],
-        format_func=lambda value: (
-            "Unlinked" if value is None else section_option_labels.get(value, value)
-        ),
-        help="Manual matching is available only for imported areas that could not be matched by name.",
-        key=f"linked_fishbone_for_import_{area_id}",
-    )
-if area_controls.button("Save area settings", type="primary", icon=":material/save:"):
-    try:
-        update_yamazumi_area(
-            project_id,
-            area_id,
-            linked_section,
-            display_to_seconds(takt_time, takt_time_unit) if takt_time else None,
-        )
-        record_audit_event(project_id, "Yamazumi", "Area settings", 1, st.session_state.get("current_editor", ""))
-        st.rerun()
-    except ValueError as exc:
-        st.error(str(exc))
-takt = (
-    display_to_seconds(takt_time, takt_time_unit)
-    if takt_time else default_takt
-)
-if not math.isfinite(takt):
-    takt = default_takt
 
 pitches = yamazumi_pitches(project_id, area_id)
 pitch_address_suggestion = yamazumi_pitch_address_suggestion(project_id, area_id)

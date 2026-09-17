@@ -24,7 +24,7 @@ The setting connects one `planning_scenarios` row to its scenario-owned `yamazum
 
 Yamazumi accepts and displays Seconds, Minutes, or Hours for work durations using this scenario setting. Every entered work duration is converted back to seconds before persistence, calculations remain in seconds, and changing the preference never rewrites existing timing records. Takt values use the separate scenario `takt_time_unit` preference described below.
 
-The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete` values are interpreted in the saved scenario unit. Filtered work-element exports use that unit and name it explicitly in the exported time header. The Yamazumi page exposes the setting through an explicit audited **Save & Refresh** action, blocks a unit change while the work-element editor has unsaved values, and reports the old and new units in Yamazumi History. No deletion behavior is introduced.
+The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete` values are interpreted in the saved scenario unit. Filtered work-element exports use that unit and name it explicitly in the exported time header. One explicit audited **Save & Refresh** action atomically saves the scenario unit, selected area's takt override, and optional Fishbone pairing for an unlinked imported area. A takt matching the scenario target is stored as no override. Unit changes remain blocked while the work-element editor has unsaved values, while takt-only and pairing-only saves remain available. No deletion behavior is introduced.
 
 ### `concerns`
 
@@ -758,7 +758,7 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 - **Connections:** `planning_scenarios.yamazumi_time_unit` controls presentation for the scenario's existing Yamazumi areas, pitches, and elements; the critical-thread relationship remains Planning scenario → Yamazumi → Process at a Glance.
 - **Scope:** Scenario-specific and Yamazumi-only for work durations. Takt presentation is governed independently by the approved takt display-unit preferences.
 - **Storage decision:** Add one field to `planning_scenarios`; existing canonical seconds fields cannot represent a durable presentation preference without conflating units and quantities.
-- **Applicable standards:** Use the scenario badge, explicit Save & Refresh, store validation, Current editor audit attribution, Yamazumi History, and concise help. The preference has no deletion workflow.
+- **Applicable standards:** Use the scenario badge and one explicit Save & Refresh action shared with the selected area's takt override and optional legacy/import pairing. Validate and persist the complete settings change atomically with Current editor audit attribution, Yamazumi History, and concise help. The preference has no deletion workflow.
 - **Approval status:** Approved by the project owner on September 15, 2026; implemented.
 
 ### Guided Yamazumi pitch initialization

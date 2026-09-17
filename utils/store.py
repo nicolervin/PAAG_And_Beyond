@@ -6979,6 +6979,112 @@ def _validate_yamazumi_area_link(
         )
 
 
+def update_yamazumi_settings(
+    project_id: str,
+    scenario_id: str,
+    area_id: str,
+    yamazumi_time_unit: object,
+    section_id: str | None,
+    takt_override_s: object,
+    editor_name: str,
+) -> dict[str, object]:
+    """Atomically save the scenario unit and selected area's editable settings."""
+    unit = normalize_time_unit(yamazumi_time_unit)
+    normalized_section_id = str(section_id or "").strip() or None
+    if takt_override_s is None or pd.isna(takt_override_s) or str(takt_override_s).strip() == "":
+        takt = None
+    else:
+        takt = float(takt_override_s)
+        if not math.isfinite(takt) or takt <= 0:
+            raise ValueError("Takt override must be a finite number greater than zero.")
+
+    timestamp = now_iso()
+    with connection() as conn:
+        scenario = conn.execute(
+            """SELECT yamazumi_time_unit FROM planning_scenarios
+               WHERE id=? AND project_id=?""",
+            (scenario_id, project_id),
+        ).fetchone()
+        if not scenario:
+            raise ValueError("The active planning scenario no longer exists in this project.")
+        area = conn.execute(
+            """SELECT scenario_id, section_id, takt_override_s FROM yamazumi_areas
+               WHERE id=? AND project_id=?""",
+            (area_id, project_id),
+        ).fetchone()
+        if not area or str(area["scenario_id"] or "") != scenario_id:
+            raise ValueError("That Yamazumi area no longer exists in the active planning scenario.")
+
+        existing_section_id = str(area["section_id"] or "").strip() or None
+        if existing_section_id and normalized_section_id != existing_section_id:
+            raise ValueError(
+                "This Yamazumi area is already linked from the Fishbone and cannot be relinked manually."
+            )
+        if normalized_section_id:
+            _validate_yamazumi_area_link(
+                conn, project_id, scenario_id, normalized_section_id, area_id
+            )
+
+        previous_unit = normalize_time_unit(scenario["yamazumi_time_unit"])
+        previous_takt = (
+            None
+            if area["takt_override_s"] is None
+            else float(area["takt_override_s"])
+        )
+        changes: dict[str, dict[str, object]] = {}
+        if previous_unit != unit:
+            changes["yamazumi_time_unit"] = {
+                "old": previous_unit,
+                "new": unit,
+            }
+        if previous_takt != takt:
+            changes["takt_override_s"] = {
+                "old": previous_takt,
+                "new": takt,
+            }
+        if existing_section_id != normalized_section_id:
+            changes["section_id"] = {
+                "old": existing_section_id,
+                "new": normalized_section_id,
+            }
+
+        if "yamazumi_time_unit" in changes:
+            conn.execute(
+                """UPDATE planning_scenarios
+                   SET yamazumi_time_unit=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (unit, timestamp, scenario_id, project_id),
+            )
+        if {"takt_override_s", "section_id"} & changes.keys():
+            conn.execute(
+                """UPDATE yamazumi_areas
+                   SET section_id=?, takt_override_s=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (normalized_section_id, takt, timestamp, area_id, project_id),
+            )
+        if changes:
+            record_audit_event(
+                project_id,
+                "Yamazumi",
+                "Save & Refresh",
+                1,
+                editor_name,
+                {
+                    "scenario_id": scenario_id,
+                    "area_id": area_id,
+                    "changes": changes,
+                },
+                _conn=conn,
+            )
+
+    return {
+        "changed": bool(changes),
+        "time_unit_changed": "yamazumi_time_unit" in changes,
+        "changes": changes,
+        "updated_at": timestamp,
+    }
+
+
 def sync_yamazumi_areas_from_fishbone(project_id: str, scenario_id: str) -> dict[str, int]:
     """Create and repair one linked area per active Fishbone section."""
     timestamp = now_iso()
@@ -7091,35 +7197,6 @@ def sync_yamazumi_areas_from_fishbone(project_id: str, scenario_id: str) -> dict
             if not changed:
                 return summary
         raise ValueError("Fishbone-to-Yamazumi links could not be repaired safely.")
-
-
-def update_yamazumi_area(project_id: str, area_id: str, section_id: str | None, takt_override_s) -> None:
-    takt = None if takt_override_s is None or pd.isna(takt_override_s) or str(takt_override_s).strip() == "" else float(takt_override_s)
-    if takt is not None and takt <= 0:
-        raise ValueError("Takt override must be greater than zero.")
-    normalized_section_id = str(section_id or "").strip() or None
-    with connection() as conn:
-        area = conn.execute(
-            """SELECT scenario_id, section_id FROM yamazumi_areas
-               WHERE id=? AND project_id=?""",
-            (area_id, project_id),
-        ).fetchone()
-        if not area:
-            raise ValueError("That Yamazumi area no longer exists.")
-        existing_section_id = str(area["section_id"] or "").strip() or None
-        if existing_section_id and normalized_section_id != existing_section_id:
-            raise ValueError(
-                "This Yamazumi area is already linked from the Fishbone and cannot be relinked manually."
-            )
-        if normalized_section_id:
-            _validate_yamazumi_area_link(
-                conn, project_id, str(area["scenario_id"]), normalized_section_id, area_id
-            )
-        conn.execute(
-            """UPDATE yamazumi_areas SET section_id=?, takt_override_s=?, updated_at=?
-               WHERE id=? AND project_id=?""",
-            (normalized_section_id, takt, now_iso(), area_id, project_id),
-        )
 
 
 def yamazumi_pitch_label(pitch_number: object, pitch_name: object = "") -> str:
