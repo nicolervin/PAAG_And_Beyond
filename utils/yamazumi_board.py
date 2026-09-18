@@ -11,7 +11,11 @@ from utils.time_units import time_unit as time_unit_config
 
 _HTML = """
 <div class="board">
-  <div class="board-actions"><button id="add-pitch" type="button">＋ Add pitch</button></div>
+  <div class="board-actions">
+    <button id="add-pitch" type="button">＋ Add pitch</button>
+    <button id="full-screen" type="button" title="Open the Yamazumi board full screen" aria-pressed="false">Full screen</button>
+  </div>
+  <div class="board-content">
   <div class="legend" id="legend"></div>
   <div class="unassigned-lane" id="unassigned"></div>
   <div class="lane-label">North side · odd pitches</div>
@@ -19,21 +23,30 @@ _HTML = """
   <div class="line"><span>Assembly flow →</span></div>
   <div class="lane south" id="south"></div>
   <div class="lane-label">South side · even pitches</div>
+  </div>
 </div>
 """
 
 _CSS = """
 :host { color: var(--st-text-color); font-family: var(--st-font); }
-.board { min-width: 980px; padding: 4px 2px 16px; overflow-x: auto; }
+.board { box-sizing:border-box; min-width:980px; padding:4px 2px 16px; overflow-x:auto; background:var(--st-background-color); }
+.board.fullscreen-board { position:fixed; inset:0; z-index:900; width:100vw; height:100vh; min-width:0; padding:12px; overflow:scroll; overscroll-behavior:contain; scrollbar-gutter:stable both-edges; scrollbar-color:var(--st-secondary-text-color) var(--st-secondary-background-color); }
+.board.fullscreen-board::-webkit-scrollbar { width:14px; height:14px; }
+.board.fullscreen-board::-webkit-scrollbar-track { background:var(--st-secondary-background-color); }
+.board.fullscreen-board::-webkit-scrollbar-thumb { border:3px solid var(--st-secondary-background-color); border-radius:10px; background:var(--st-secondary-text-color); }
+.board-content { box-sizing:border-box; width:max-content; min-width:100%; }
 .board-actions { display:flex; gap:8px; margin:2px 0 10px; }
+.board.fullscreen-board .board-actions { position:sticky; top:0; left:0; z-index:30; width:max-content; padding:4px; border-radius:6px; background:var(--st-background-color); }
 .board-actions button, .add-element, .edit-pitch, .edit-element { border:1px solid var(--st-primary-color); border-radius:6px; padding:5px 9px; color:var(--st-primary-color); background:var(--st-background-color); cursor:pointer; font-weight:650; }
-.lane { display:flex; gap:10px; min-height:230px; padding:8px 2px; }
+.board-actions button:disabled { cursor:not-allowed; opacity:.55; }
+.lane { position:relative; display:flex; gap:10px; min-height:230px; padding:8px 2px; }
 .lane.north { align-items:flex-end; }
 .lane.south { align-items:flex-start; }
+.takt-line { position:absolute; left:2px; z-index:10; height:0; border-top:2px solid #d32f2f; pointer-events:none; }
 .lane-label { margin:8px 2px 0; font-weight:700; color:var(--st-secondary-text-color); }
 .line { border-top:4px solid #c62828; margin:0; text-align:center; color:#c62828; font-weight:700; }
 .line span { position:relative; top:-13px; padding:0 10px; background:var(--st-background-color); }
-.pitch { flex:0 0 240px; display:flex; flex-direction:column; border:1px solid var(--st-border-color); border-radius:9px; background:var(--st-background-color); padding:9px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+.pitch { position:relative; z-index:1; flex:0 0 240px; display:flex; flex-direction:column; border:1px solid var(--st-border-color); border-radius:9px; background:var(--st-background-color); padding:9px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
 .pitch.north .variants { order:1; align-items:flex-end; }
 .pitch.north .pitch-info { order:2; margin-top:6px; }
 .pitch.south .pitch-info { order:1; margin-bottom:6px; }
@@ -58,9 +71,10 @@ _CSS = """
 .variant { flex:1 0 155px; border-top:2px solid var(--st-border-color); margin-top:8px; padding-top:6px; }
 .variant-title { display:flex; justify-content:space-between; gap:5px; font-size:.78rem; font-weight:750; margin-bottom:4px; }
 .stack { min-height:120px; border:1px solid var(--st-border-color); display:flex; flex-direction:column; background:color-mix(in srgb, var(--st-secondary-background-color) 45%, transparent); }
+.stack.takt-scale { min-height:155px; }
 .drop-slot { flex:0 0 8px; min-height:8px; margin:-4px 0; position:relative; z-index:3; }
 .drop-slot.dragover { min-height:14px; flex-basis:14px; margin:-7px 0; background:color-mix(in srgb, var(--st-primary-color) 28%, transparent); outline:2px dashed var(--st-primary-color); }
-.element { position:relative; box-sizing:border-box; min-height:34px; padding:5px 31px 5px 6px; border-top:1px solid rgba(0,0,0,.14); font-size:.72rem; cursor:grab; overflow:hidden; }
+.element { position:relative; box-sizing:border-box; min-height:0; padding:5px 31px 5px 6px; border-top:1px solid rgba(0,0,0,.14); font-size:.72rem; cursor:grab; overflow:hidden; }
 .element strong { position:absolute; top:4px; right:31px; margin-left:5px; }
 .element-description { display:block; height:100%; padding-right:30px; overflow:hidden; line-height:1.2; overflow-wrap:anywhere; }
 .edit-element { position:absolute; right:3px; bottom:3px; padding:1px 4px; border-color:rgba(0,0,0,.35); color:#111; font-size:.68rem; line-height:1.2; }
@@ -86,7 +100,11 @@ export default function(component) {
   const unassigned = parentElement.querySelector('#unassigned')
   const legend = parentElement.querySelector('#legend')
   const addPitch = parentElement.querySelector('#add-pitch')
-  if (!north || !south || !unassigned || !legend || !addPitch) return
+  const fullScreen = parentElement.querySelector('#full-screen')
+  const board = parentElement.querySelector('.board')
+  if (!north || !south || !unassigned || !legend || !addPitch || !fullScreen || !board) return
+  const fullScreenTarget = document.documentElement
+  const isBoardFullScreen = () => document.fullscreenElement === fullScreenTarget
   addPitch.onclick = () => setTriggerValue('add_pitch', { requested: true })
   legend.innerHTML = `<span><i class="swatch" style="background:#35c84a"></i>Cycle</span>`
     + `<span><i class="swatch" style="background:#ffd54f"></i>Periodic</span>`
@@ -96,8 +114,14 @@ export default function(component) {
   const secondsPerUnit = Math.max(Number(data.seconds_per_unit || 1), Number.EPSILON)
   const timeDecimals = Math.max(0, Number(data.time_decimals || 0))
   const timeSuffix = String(data.time_suffix || 's')
+  const taktSecondsPerUnit = Math.max(Number(data.takt_seconds_per_unit || 1), Number.EPSILON)
+  const taktDecimals = Math.max(0, Number(data.takt_decimals || 0))
+  const taktSuffix = String(data.takt_suffix || 's')
+  const taktPixels = 155
+  const hasTakt = Number.isFinite(Number(data.takt)) && Number(data.takt) > 0
   const displayTime = value => Number(value || 0) / secondsPerUnit
   const formatTime = value => `${displayTime(value).toFixed(timeDecimals)} ${timeSuffix}`
+  const formatTakt = value => `${(Number(value || 0) / taktSecondsPerUnit).toFixed(taktDecimals)} ${taktSuffix}`
   for (const element of (data.elements || [])) {
     const pitch = element.pitch_id || '__unassigned__'
     grouped[pitch] ||= {}
@@ -134,8 +158,9 @@ export default function(component) {
       const displayItems = side === 'north' ? [...items].reverse() : items
       const block = document.createElement('div')
       block.className = 'variant'
-      block.innerHTML = `<div class="variant-title"><span>${variant}</span><span>${formatTime(total)} / ${formatTime(data.takt)}</span></div><div class="stack"></div>`
+      block.innerHTML = `<div class="variant-title"><span>${variant}</span><span>${formatTime(total)} / ${formatTakt(data.takt)}</span></div><div class="stack"></div>`
       const stack = block.querySelector('.stack')
+      if (pitch.id && hasTakt) stack.classList.add('takt-scale')
       const appendDropSlot = logicalIndex => {
         const slot = document.createElement('div')
         slot.className = 'drop-slot'
@@ -171,7 +196,9 @@ export default function(component) {
         el.draggable = true
         el.dataset.id = item.id
         el.style.background = color
-        const elementHeight = Math.max(34, displayTime(item.time_s) / displayTakt * 155)
+        const elementHeight = hasTakt && pitch.id
+          ? Math.max(0, displayTime(item.time_s) / displayTakt * taktPixels)
+          : 34
         el.style.height = `${elementHeight}px`
         el.style.flex = `0 0 ${elementHeight}px`
         const criticality = (item.criticality || []).map(tag => {
@@ -252,17 +279,70 @@ export default function(component) {
     for (const element of pitchInfos) element.style.minHeight = `${infoBandHeight}px`
     for (const element of titles) element.style.minHeight = `${titleBandHeight}px`
   }
-  // Normalize bands across all pitches after wrapping has been measured. This
-  // gives every stack in a lane one shared baseline beside the assembly flow.
-  requestAnimationFrame(() => {
+  const drawTaktLine = (lane, side) => {
+    lane.querySelectorAll('.takt-line').forEach(line => line.remove())
+    if (!hasTakt) return
+    const stack = lane.querySelector('.stack.takt-scale')
+    if (!stack) return
+    const laneRect = lane.getBoundingClientRect()
+    const stackRect = stack.getBoundingClientRect()
+    const line = document.createElement('div')
+    line.className = 'takt-line'
+    line.setAttribute('aria-hidden', 'true')
+    line.style.top = `${side === 'north'
+      ? stackRect.bottom - laneRect.top - taktPixels
+      : stackRect.top - laneRect.top + taktPixels}px`
+    line.style.width = `${Math.max(0, lane.scrollWidth - 4)}px`
+    lane.appendChild(line)
+  }
+  const layoutBoard = () => {
     alignLaneBaselines(north)
     alignLaneBaselines(south)
-  })
+    drawTaktLine(north, 'north')
+    drawTaktLine(south, 'south')
+  }
+  const scheduleLayout = () => {
+    requestAnimationFrame(() => requestAnimationFrame(layoutBoard))
+  }
+  const updateFullScreenControl = () => {
+    const isFullScreen = isBoardFullScreen()
+    fullScreen.textContent = isFullScreen ? 'Exit full screen' : 'Full screen'
+    fullScreen.title = isFullScreen
+      ? 'Exit the full-screen Yamazumi board'
+      : 'Open the Yamazumi board full screen'
+    fullScreen.setAttribute('aria-pressed', String(isFullScreen))
+    board.classList.toggle('fullscreen-board', isFullScreen)
+    scheduleLayout()
+  }
+  if (typeof fullScreenTarget.requestFullscreen !== 'function') {
+    fullScreen.disabled = true
+    fullScreen.title = 'Full screen is not available in this browser'
+  } else {
+    fullScreen.onclick = async () => {
+      try {
+        if (isBoardFullScreen()) await document.exitFullscreen()
+        else await fullScreenTarget.requestFullscreen()
+      } catch {
+        updateFullScreenControl()
+      }
+    }
+  }
+  document.addEventListener('fullscreenchange', updateFullScreenControl)
+  const resizeObserver = new ResizeObserver(scheduleLayout)
+  resizeObserver.observe(board)
+  // Normalize bands across all pitches after wrapping has been measured. This
+  // gives every stack in a lane one shared baseline beside the assembly flow.
+  scheduleLayout()
+  updateFullScreenControl()
+  return () => {
+    document.removeEventListener('fullscreenchange', updateFullScreenControl)
+    resizeObserver.disconnect()
+  }
 }
 """
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v20",
+    "paag_yamazumi_drag_board_v26",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -276,6 +356,7 @@ def yamazumi_board(
     takt: float,
     *,
     time_unit: str,
+    takt_time_unit: str,
     key: str,
     on_move: Callable[[], None],
     on_add_pitch: Callable[[], None],
@@ -287,6 +368,7 @@ def yamazumi_board(
     if not math.isfinite(safe_takt):
         safe_takt = 0.0
     unit = time_unit_config(time_unit)
+    takt_unit = time_unit_config(takt_time_unit)
     safe_elements = json_safe(elements)
     return _YAMAZUMI_BOARD(
         key=key,
@@ -303,6 +385,10 @@ def yamazumi_board(
                 "seconds_per_unit": unit.seconds_per_unit,
                 "time_decimals": unit.decimals,
                 "time_suffix": unit.suffix,
+                "takt_time_unit": takt_unit.key,
+                "takt_seconds_per_unit": takt_unit.seconds_per_unit,
+                "takt_decimals": takt_unit.decimals,
+                "takt_suffix": takt_unit.suffix,
             }
         ),
         on_move_change=on_move,

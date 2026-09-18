@@ -12,6 +12,7 @@ from utils.yamazumi_stack import (
     apply_stack_draft_to_elements,
     apply_stack_drop,
     build_stack_draft,
+    remove_element_from_stack_draft,
 )
 
 
@@ -130,6 +131,23 @@ class YamazumiStackOrderTests(unittest.TestCase):
         saved = self.rows()
         self.assertEqual([row["id"] for row in saved], ["far", "near"])
         self.assertEqual([row["sequence"] for row in saved], [10, 20])
+
+    def test_deleted_element_is_removed_without_losing_other_draft_moves(self) -> None:
+        draft = {
+            self.north_id: ["delete-me", "keep-north"],
+            self.south_id: ["keep-south"],
+        }
+
+        updated = remove_element_from_stack_draft(draft, "delete-me")
+
+        self.assertEqual(
+            updated,
+            {
+                self.north_id: ["keep-north"],
+                self.south_id: ["keep-south"],
+            },
+        )
+        self.assertEqual(draft[self.north_id], ["delete-me", "keep-north"])
 
     def test_cross_pitch_and_unassigned_moves_persist_requested_positions(self) -> None:
         self.add_element("north", self.area_id, self.north_id, 10)

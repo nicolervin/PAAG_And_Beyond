@@ -6,23 +6,25 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `projects`
 
-- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, lead industrial engineer, baseline revision, status, default takt time, the project-wide Yamazumi line-code suggestion, notes, and timestamps.
+- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
 - **Key relationships:** Parent of `planning_scenarios`, `parts`, `project_models`, `complexity_features`, `assembly_sections`, `concerns`, source-import records, Yamazumi records, Process at a Glance records, and `audit_log` entries.
 - **Scope:** Project-wide; this is the root of all other business data.
 
 ### `planning_scenarios`
 
-- **Purpose:** A named planning branch used to compare alternative takt, balancing, and process plans without mixing their records. `yamazumi_time_unit` stores the scenario's Yamazumi-only presentation and entry unit as `seconds`, `minutes`, or `hours`; it does not change the units of persisted timing quantities.
+- **Purpose:** A named planning branch used to compare alternative takt, balancing, and process plans without mixing their records. `takt_time_s` remains canonical seconds while `takt_time_unit` stores the scenario's independent takt display preference. `yamazumi_time_unit` separately controls Yamazumi work-duration presentation and entry; neither preference changes persisted timing quantities.
 - **Key relationships:** Belongs to `projects`. May reference another `planning_scenarios` row as its parent. Owns `part_scenario_activity`, `yamazumi_areas`, `work_elements`, and `process_part_groups`. Scenario cloning copies the applicable scenario-owned planning data.
 - **Scope:** Scenario-specific.
+
+Creating a new active Fishbone section or subassembly atomically creates one linked Yamazumi area in every existing planning scenario, including archived scenarios. Automatic creation is idempotent and create-only: it uses a new UUID, the Fishbone section name, and no takt override, but never relinks, renames, detaches, or otherwise repairs an existing area. A same-name or conflicting area is preserved and reported for explicit repair; unaffected scenarios still receive their new areas. Later scenario clones retain the established behavior of copying the source scenario's linked areas. Yamazumi does not display the fixed Fishbone relationship for an already linked area; only an imported or legacy area with a null `section_id` exposes **Pair with Fishbone section**.
 
 #### Scenario-saved Yamazumi time unit — approved September 15, 2026
 
 The setting connects one `planning_scenarios` row to its scenario-owned `yamazumi_areas`, `yamazumi_pitches`, and `yamazumi_elements` presentation in the critical thread. A dedicated `yamazumi_time_unit` field is required because the existing `takt_time_s`, `takt_override_s`, `time_s`, and downstream `cycle_time_s` fields are canonical quantities in seconds rather than display preferences. Existing and newly initialized scenarios default to `seconds`; scenario cloning copies the source preference.
 
-Yamazumi accepts and displays Seconds, Minutes, or Hours using this scenario setting. Every entered takt or work duration is converted back to seconds before persistence, calculations remain in seconds, and changing the preference never rewrites existing timing records. The setting applies only to Yamazumi; Overview, Process at a Glance, Pin Map, Ergonomics, and the application sidebar retain their established seconds presentation.
+Yamazumi accepts and displays Seconds, Minutes, or Hours for work durations using this scenario setting. Every entered work duration is converted back to seconds before persistence, calculations remain in seconds, and changing the preference never rewrites existing timing records. Takt values use the separate scenario `takt_time_unit` preference described below.
 
-The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete` values are interpreted in the saved scenario unit. Filtered work-element exports use that unit and name it explicitly in the exported time header. The Yamazumi page exposes the setting through an explicit audited **Save & Refresh** action, blocks a unit change while the work-element editor has unsaved values, and reports the old and new units in Yamazumi History. No deletion behavior is introduced.
+The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete` values are interpreted in the saved scenario unit. Filtered work-element exports use that unit and name it explicitly in the exported time header. One explicit audited **Save & Refresh** action atomically saves the scenario unit, selected area's takt override, and optional Fishbone pairing for an unlinked imported area. A takt matching the scenario target is stored as no override. Unit changes remain blocked while the work-element editor has unsaved values, while takt-only and pairing-only saves remain available. No deletion behavior is introduced.
 
 ### `concerns`
 
@@ -35,6 +37,12 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 - **Purpose:** Stores lightweight history for supported saves and workflow actions, including the logical table or workflow name, action, row count, Current editor text, JSON details, and timestamp.
 - **Key relationships:** Belongs to `projects`. It does not have a direct scenario foreign key; scenario identifiers may be included in the JSON details for scenario-specific events.
 - **Scope:** Project-wide history, with some entries describing scenario-specific work.
+
+### `project_transfer_events`
+
+- **Purpose:** Stores structured evidence for whole-project package exports and imports, including operation, package version, complete manifest JSON, source and target project identity, per-table record counts, detected import conflicts, Current editor attribution, and timestamp.
+- **Key relationships:** Belongs to `projects`. Each transfer also writes the required complementary `audit_log` entry under the dedicated `Project transfer` category; the structured row supports future transfer-history reporting and does not replace universal audit history.
+- **Scope:** Project-wide. Export rows describe a package containing the project and all of its planning scenarios. Import rows identify whether the package created a new project or replaced an explicitly selected project and retain the source/target evidence and validated package counts.
 
 ### `pits_records`
 
@@ -74,10 +82,11 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 
 ### `parts`
 
-- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, the primary CAD image path, and optional project-wide physical weight in `weight_lb`.
+- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, the primary CAD image path, optional project-wide physical weight in `weight_lb`, and the collaborator-maintained Technology Engineer, unique PITS Tracker number, controlled Source Code, Official Windchill Part Name, and Make vs Buy fields described below.
 - **Key relationships:** Belongs to `projects`. Parent of `part_images`, `part_scenario_activity`, `part_feature_rules`, `fishbone_part_assignments`, and `process_part_options`. A completed `manufacturing_assemblies` record may reference one catalog row through `catalog_part_id`, allowing the built subassembly to return to the normal Parts Catalog → Fishbone-use → downstream-planning flow.
 - **Scope:** Project-wide master data.
 - **Weight:** `weight_lb` is a nullable `REAL` value storing physical part weight in pounds. It has no inferred or automatic source in Phase 1. The future Ergonomics trigger may evaluate deliberately entered values greater than 33 pounds, regardless of Handle/Consume classification.
+- **Catalog engineering fields:** `technology_engineer`, `pits_tracker_number`, `source_code`, `official_windchill_part_name`, and `make_buy` are optional project-wide text fields. Nonblank `pits_tracker_number` values are unique within one project and preserve leading zeros. `source_code` accepts only blank or `1` through `8`; `make_buy` accepts only blank, `Make`, or `Buy`. These fields remain independent from the legacy Part name and Source fields and from imported `pits_records`; imports never silently overwrite them.
 
 ### `part_scenario_activity`
 
@@ -167,11 +176,15 @@ The interactive balancing board derives pitch-stack presentation order without c
 
 Physical feed routing refines that address order. Each complete upstream Subassembly or Kitter chain is displayed immediately before the pitch it feeds; multiple feeders for one receiver use pitch-address order, and nested feeders are emitted upstream-to-downstream. Unlinked pitches and compatibility feeders without a target remain in address order. The board retains the established rule that odd ending addresses render north/top and even ending addresses render south/bottom. This is a read-only presentation transformation, creates no audit event, and does not renumber addresses, rewrite saved display sequence, change feed targets, or alter Op ID lineage.
 
+Each assigned-pitch lane displays one continuous red takt line at the effective Yamazumi-area takt: the area override when present, otherwise the active scenario takt. North stacks grow upward toward and beyond their line; south stacks grow downward. Work-element heights remain strictly proportional to canonical time so crossing the line accurately indicates that a model-variant stack exceeds takt. A zero or invalid takt hides both lines, and Unassigned work is not evaluated. This is derived presentation only and creates no persisted status or audit event.
+
 ### `yamazumi_elements`
 
 - **Purpose:** Stores measurable work content for Yamazumi balancing: description, time, work type, pitch assignment, variants, work region, source, order, and Process synchronization state. Yamazumi does not store collaborator-assigned CTQ or Safety flags.
 - **Key relationships:** Belongs to `yamazumi_areas` and `projects`; optionally references `yamazumi_pitches`. `process_element_id` is a soft text link to `work_elements`, not an enforced foreign key. Reconciliation creates or updates the linked Process step.
 - **Scope:** Scenario-specific through the parent area.
+- **Deletion:** The interactive-board editor may delete one element only after a non-dismissible, relationship-aware confirmation. Any linked Process at a Glance step and its downstream records remain, but lose the deleted Yamazumi source used for pitch context, derived Op ID, and the inline pitch summary. Existing locked `work_element_material_groups` and their options retain their schema-defined cascade behavior and are disclosed if present; the pitch, area, Fishbone structure, work-region definition, and audit history remain.
+- **Flag retirement:** Yamazumi does not own or display element flags. The former `flags` column and `yamazumi_flag_definitions` table are removed by an idempotent schema upgrade, and their legacy values are intentionally discarded. Reconciliation does not infer PAAG quality text from Yamazumi. Any future PAAG indicators generated from Functional Reviews require a separately approved design and must not be persisted on Yamazumi elements.
 
 #### Copy to another Yamazumi area — approved September 11, 2026
 
@@ -575,8 +588,8 @@ The master row's `image_path` holds one primary image; this child table holds un
 #### Section references, replacement, and assembly nesting/deletion
 
 - Fishbone section deletion evaluates the selected sections and every descendant included in the deletion. The current Task 03/04 workflow requires one same-project target outside the deletion set when it finds a linked `yamazumi_areas` row, `process_part_groups` row, or `manufacturing_assemblies` Built/Installed reference. The confirmed Task 09 extension adds `assembly_grid_categories.section_id` and `assembly_grid_categories.installed_section_id`, producing six continuity reference types under the same required target picker. The dialog separately discloses each count plus source-section feature-visibility preferences that will be removed, and keeps **Delete sections** disabled until a valid target is selected.
-- Target validation preserves the one-Yamazumi-area-per-section rule across every affected planning scenario. Re-pointing is rejected when the target already owns a Yamazumi area in a scenario that also has an affected source area, or when multiple affected source areas in one scenario would converge on the same target. The Task 09 extension also rejects final target-category collisions on trimmed, case-insensitive `ebom_name` or `display_name`. The error identifies the rejected target, incoming category, exact colliding field and value, and conflicting category, and instructs the contributor to choose a different target. It never merges Yamazumi areas or renames categories inline.
-- Confirmed deletion performs one atomic transaction: re-point affected Yamazumi, Process at a Glance, assembly Built/Installed, and Task 09 category Built/Installed references; delete source-section feature-visibility preferences; delete remaining Fishbone uses in the deleted sections; and delete the sections and descendants. A Built-section assembly re-point retains Task 04 behavior by relocating every Fishbone use referenced by that assembly's mini-BOM before remaining uses are removed. Those relocated uses survive under the target; every other removed placement returns its Parts Catalog record to **Not placed**. Fishbone saved-state Undo captures and restores Task 09 categories, mappings, and visibility preferences with the existing framework snapshot.
+- Target validation preserves one target-linked Yamazumi area per planning scenario by merging affected source areas into the target section's existing area when one exists. If the target has no area in that scenario, one affected area becomes the survivor. Pitches, work elements, and work-region definitions move with their stable IDs; identical work-region names reuse the target definition. Scenario-wide pitch-address validation remains the final safeguard. The Task 09 extension still rejects final target-category collisions on trimmed, case-insensitive `ebom_name` or `display_name`. The error identifies the rejected target, incoming category, exact colliding field and value, and conflicting category, and instructs the contributor to choose a different target. Categories are never renamed inline.
+- Confirmed deletion performs one atomic transaction: merge or re-point affected Yamazumi areas; re-point Process at a Glance, assembly Built/Installed, and Task 09 category Built/Installed references; delete source-section feature-visibility preferences; delete remaining Fishbone uses in the deleted sections; and delete the sections and descendants. A Built-section assembly re-point retains Task 04 behavior by relocating every Fishbone use referenced by that assembly's mini-BOM before remaining uses are removed. Those relocated uses survive under the target; every other removed placement returns its Parts Catalog record to **Not placed**. Fishbone saved-state Undo captures and restores Task 09 categories, mappings, and visibility preferences with the existing framework snapshot.
 - Parent-nesting validation compares a child's installed section with its parent's built section. A mismatch opens one save-time warning dialog describing every mismatch. It is never a validation block: dismissing or declining the warning leaves the selected parent valid and the save may proceed with that choice.
 - Direct assembly deletion uses the Universal Deletion Standard and one upfront dialog showing the complete affected descendant tree. For each child depth/level, the contributor selects one action for that whole level: **Move to grandparent**, **Delete entirely**, or **Become unassigned**. Every level is shown in the same dialog, including levels below a group marked Delete entirely; each deeper level still receives its own explicit destination choice rather than inheriting an unseen cascade decision.
 - **Move to grandparent** assigns that level's surviving assemblies to the next surviving parent level while retaining their built section, installed section, mini-BOM, rules, and images. **Become unassigned** clears `parent_id`, `built_section_id`, and `installed_section_id`, removing the assemblies from catalog nesting and Fishbone built/installed lists without deleting their records; their retained mini-BOM rows are visibly mismatched until deliberately reassigned. **Delete entirely** removes the chosen assembly rows and their owned mini-BOM rows, feature rules, images, and uploaded files after all deeper-level choices have been validated.
@@ -754,14 +767,47 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### Parts Catalog engineering fields
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** September 17, 2026
+- **Purpose and connection:** Extend each existing project-wide `parts` record with Technology Engineer, PITS Tracker number, Source Code, Official Windchill Part Name, and Make vs Buy. The fields add reviewed catalog context at the Parts stage of the Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance critical thread without replacing imported evidence or downstream planning decisions.
+- **Scope and storage:** Store all five fields directly on `parts`; no new table or relationship is introduced. Existing and newly migrated records default to blank. PITS Tracker number is trimmed text, preserves leading zeros, and is unique among nonblank values within a project. Source Code accepts blank or `1` through `8`. Make vs Buy accepts blank, `Make`, or `Buy`. Technology Engineer and Official Windchill Part Name are trimmed optional text.
+- **Applicable standards:** Edit the fields through the existing scenario-aware Parts Catalog table and its atomic **Save & Refresh** and Undo workflow. Include them in filters, search, and filtered Excel export. Record changed old/new values with Current editor attribution in the existing `Parts` audit category and retain the bottom Parts history. The existing relationship-aware deletion workflow and scenario-specific Active field are unchanged.
+- **Approval status:** Approved by the project owner on September 17, 2026; implemented on `NE_Parts_Catalog_Updates`.
+
+### Takt display-unit preferences
+
+- **Proposed by:** Codex
+- **Date proposed:** September 15, 2026
+- **Connections:** `projects.takt_time_unit` controls the project-default takt presentation and the default for newly created scenarios. `planning_scenarios.takt_time_unit` controls each scenario's takt presentation across Overview, the application sidebar, Yamazumi areas and boards, Pin Map, Functional Ergonomics, and other downstream takt displays. The critical thread remains Project → Planning scenario → Yamazumi → Process at a Glance.
+- **Scope:** The project preference is project-wide and each scenario preference is scenario-specific. New scenarios inherit the project preference; cloned scenarios copy their source scenario's preference. The preferences remain independent, and Yamazumi work-duration units remain controlled separately by `planning_scenarios.yamazumi_time_unit`.
+- **Storage decision:** Add validated `takt_time_unit` fields to `projects` and `planning_scenarios`, accepting only `seconds`, `minutes`, or `hours`. Existing and migrated rows default to `seconds`. Canonical `takt_time_s` and `takt_override_s` values remain seconds and are never rewritten merely because a display preference changes.
+- **Applicable standards:** Place an explicit unit selector beside takt inputs, show units wherever takt is displayed, convert to seconds before validation and persistence, preserve the real duration for unit-only changes, record changes through the existing Projects or Planning scenarios audit categories with Current editor attribution, and retain their existing History surfaces. No deletion behavior is introduced.
+- **Approval status:** Approved by the project owner on September 15, 2026; implemented.
+
+### Whole-project transfer
+
+- **Proposed by:** Codex
+- **Date proposed:** September 15, 2026
+- **Purpose:** Transfer a complete project between separate local PAAG installations.
+- **Connections:** Every project-wide table and every planning scenario's owned records under one `project_id`.
+- **Relationship to the critical thread:** Export the complete project graph as one unit and remap IDs during import using the same approach as scenario cloning, preserving Product Architecture → Parts → Fishbone → Yamazumi → Process at a Glance → Pin Map.
+- **Scope:** Project-wide. Every export package includes all planning scenarios belonging to the project.
+- **V1 import operations:** Support only **Create new** and **Replace**. **Create new** always generates a new project and freshly remaps every imported ID, so imported records cannot collide with existing local data. **Replace** requires the contributor to explicitly select an existing project to overwrite and then complete the standard non-dismissible confirmation workflow. Merge and conflict-resolution behavior for duplicate projects, records, IDs, or uploaded files is explicitly deferred to a future version and must not be implemented in V1.
+- **Replace-target safety:** A non-current project is any project other than the one open in the contributor's active browser session. The currently open project must never be pre-selected as a Replace target. Selecting that project requires an additional explicit step before the standard replacement confirmation so it cannot be overwritten accidentally.
+- **Storage decision:** Add one structured project-transfer table that records manifest contents, package version, source and target project identity, per-table record counts, timestamp, Current editor attribution, and any conflicts detected during import. Do not modify any existing business table. Every export and import must also call `record_audit_event()` to write a standard entry to the existing `audit_log`, using a dedicated project-transfer audit category separate from the PITS and Parts import categories. These records are complementary: `audit_log` satisfies the locked Universal Audit Trail Standard, while the structured transfer row supports future transfer-history reporting.
+- **Applicable standards:** Retain the **Project-wide** scope badge; show explicit **Creates a new project** or **Replaces an existing project** impact text before import; require the standard non-dismissible confirmation before replacement; record Current editor attribution in both audit records; and expose the dedicated project-transfer audit category in the page's bottom History section.
+- **Approval status:** Approved by the project owner on September 15, 2026; V1 export and import are implemented. Export uses the registry-driven `.paagproject` package, bundled owned uploads, and complementary audit records. Import revalidates the package at confirmation, remaps the complete graph and uploads for Create new or confirmed Replace, applies database changes atomically, and records structured and universal audit history. The V1 operation, Replace-target safety, deferred merge, and complementary audit-record clarifications were approved by the project owner on September 15, 2026.
+
 ### Scenario-saved Yamazumi time units
 
 - **Proposed by:** Nicole Ervin, project owner
 - **Date proposed:** September 15, 2026
 - **Connections:** `planning_scenarios.yamazumi_time_unit` controls presentation for the scenario's existing Yamazumi areas, pitches, and elements; the critical-thread relationship remains Planning scenario → Yamazumi → Process at a Glance.
-- **Scope:** Scenario-specific and Yamazumi-only. Other modules retain seconds presentation.
+- **Scope:** Scenario-specific and Yamazumi-only for work durations. Takt presentation is governed independently by the approved takt display-unit preferences.
 - **Storage decision:** Add one field to `planning_scenarios`; existing canonical seconds fields cannot represent a durable presentation preference without conflating units and quantities.
-- **Applicable standards:** Use the scenario badge, explicit Save & Refresh, store validation, Current editor audit attribution, Yamazumi History, and concise help. The preference has no deletion workflow.
+- **Applicable standards:** Use the scenario badge and one explicit Save & Refresh action shared with the selected area's takt override and optional legacy/import pairing. Validate and persist the complete settings change atomically with Current editor audit attribution, Yamazumi History, and concise help. The preference has no deletion workflow.
 - **Approval status:** Approved by the project owner on September 15, 2026; implemented.
 
 ### Guided Yamazumi pitch initialization

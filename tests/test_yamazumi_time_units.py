@@ -63,12 +63,54 @@ class YamazumiTimeUnitStoreTests(unittest.TestCase):
         scenario = store.get_planning_scenario(self.project_id, self.scenario_id)
 
         self.assertEqual(scenario["yamazumi_time_unit"], "seconds")
+        self.assertEqual(scenario["takt_time_unit"], "seconds")
+        self.assertEqual(store.get_project(self.project_id)["takt_time_unit"], "seconds")
         columns = {
             row[1] for row in self.conn.execute(
                 "PRAGMA table_info(planning_scenarios)"
             ).fetchall()
         }
         self.assertIn("yamazumi_time_unit", columns)
+        self.assertIn("takt_time_unit", columns)
+
+    def test_project_and_scenario_takt_units_are_independent(self) -> None:
+        project = store.get_project(self.project_id)
+        store.update_project(
+            self.project_id,
+            {
+                **project,
+                "takt_time_s": 90,
+                "takt_time_unit": "minutes",
+            },
+        )
+        scenario = store.get_planning_scenario(self.project_id, self.scenario_id)
+        store.update_planning_scenario(
+            self.project_id,
+            self.scenario_id,
+            {**scenario, "takt_time_s": 90, "takt_time_unit": "hours"},
+        )
+
+        self.assertEqual(store.get_project(self.project_id)["takt_time_unit"], "minutes")
+        saved_scenario = store.get_planning_scenario(self.project_id, self.scenario_id)
+        self.assertEqual(saved_scenario["takt_time_unit"], "hours")
+        self.assertEqual(saved_scenario["yamazumi_time_unit"], "seconds")
+        self.assertEqual(saved_scenario["takt_time_s"], 90)
+
+    def test_scenario_clone_preserves_source_takt_unit(self) -> None:
+        scenario = store.get_planning_scenario(self.project_id, self.scenario_id)
+        store.update_planning_scenario(
+            self.project_id,
+            self.scenario_id,
+            {**scenario, "takt_time_unit": "minutes"},
+        )
+
+        clone_id = store.clone_planning_scenario(
+            self.project_id, self.scenario_id, "Takt-unit clone", "TU-4", 120
+        )
+
+        clone = store.get_planning_scenario(self.project_id, clone_id)
+        self.assertEqual(clone["takt_time_unit"], "minutes")
+        self.assertEqual(clone["takt_time_s"], 120)
 
     def test_legacy_scenario_table_is_upgraded_in_place(self) -> None:
         legacy_conn = sqlite3.connect(":memory:")
@@ -195,7 +237,19 @@ class YamazumiTimeUnitStoreTests(unittest.TestCase):
             "hours",
         )
 
-    def test_import_interprets_takt_and_work_in_saved_unit(self) -> None:
+    def test_import_uses_independent_takt_and_work_units(self) -> None:
+        store.update_planning_scenario(
+            self.project_id,
+            self.scenario_id,
+            {
+                "name": "Primary",
+                "revision_label": "TU-1",
+                "status": "Working",
+                "takt_time_s": 90,
+                "takt_time_unit": "hours",
+                "change_summary": "",
+            },
+        )
         store.update_yamazumi_time_unit(
             self.project_id, self.scenario_id, "minutes"
         )
@@ -227,7 +281,7 @@ class YamazumiTimeUnitStoreTests(unittest.TestCase):
             "SELECT time_s FROM yamazumi_elements WHERE area_id=?",
             (area["id"],),
         )[0]
-        self.assertEqual(area["takt_override_s"], 90)
+        self.assertEqual(area["takt_override_s"], 5400)
         self.assertEqual(element["time_s"], 30)
 
     def test_invalid_import_time_rolls_back_complete_import(self) -> None:

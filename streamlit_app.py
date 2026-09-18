@@ -1,5 +1,6 @@
 import streamlit as st
 
+from utils.time_units import format_seconds
 from utils.fishbone_ui import render_fishbone_sidebar_context
 from utils.scope_ui import scenario_view_selector
 from utils.store import get_project, init_db, migrate_legacy_yamazumi_flags, projects
@@ -64,7 +65,7 @@ pages = {
         st.Page("app_pages/concerns.py", title="Questions and concerns", icon=":material/forum:"),
     ],
     "Product structure": [
-        st.Page("app_pages/exchange.py", title="Import PITS and export", icon=":material/sync_alt:"),
+        st.Page("app_pages/exchange.py", title="Import/Export Projects", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
         st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
         st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
@@ -131,7 +132,7 @@ with st.sidebar:
         if active_scenario:
             st.caption(
                 f"{active_scenario['status']} · "
-                f"{float(active_scenario['takt_time_s']):.1f} s takt"
+                f"{format_seconds(active_scenario['takt_time_s'], active_scenario['takt_time_unit'])} takt"
             )
         render_fishbone_sidebar_context(
             st,
