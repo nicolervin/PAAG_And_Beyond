@@ -5,7 +5,7 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from utils import store
+from utils import pfmea_store, store
 
 
 class WorkElementOpIdTests(unittest.TestCase):
@@ -93,6 +93,8 @@ class WorkElementOpIdTests(unittest.TestCase):
         section_id: str | None,
         *,
         scenario_id: str | None = None,
+        pitch_number: str | None = None,
+        pitch_sequence: int = 10,
     ) -> tuple[str, str]:
         scenario_id = scenario_id or self.scenario_id
         area_id = f"area-{scenario_id}-{key}"
@@ -109,8 +111,15 @@ class WorkElementOpIdTests(unittest.TestCase):
                 """INSERT INTO yamazumi_pitches
                    (id, project_id, area_id, pitch_number, pitch_name, status,
                     sequence, model_variants, pitch_type, updated_at)
-                   VALUES (?, ?, ?, ?, '', 'Active', 10, '["Base"]', 'Pitch', ?)""",
-                (pitch_id, self.project_id, area_id, f"01-{key.upper()}", timestamp),
+                   VALUES (?, ?, ?, ?, '', 'Active', ?, '["Base"]', 'Pitch', ?)""",
+                (
+                    pitch_id,
+                    self.project_id,
+                    area_id,
+                    pitch_number or f"01-{key.upper()}",
+                    pitch_sequence,
+                    timestamp,
+                ),
             )
         return area_id, pitch_id
 
@@ -215,6 +224,149 @@ class WorkElementOpIdTests(unittest.TestCase):
         self.assertEqual(values["work-no-fishbone"], "Fishbone link required")
         self.assertEqual(values["work-no-yamazumi"], "Yamazumi link required")
         self.assertEqual(values["work-no-pitch"], "Yamazumi pitch required")
+
+    def test_context_sort_uses_physical_hierarchy_and_numeric_stack_order(self) -> None:
+        area_id, pitch_id = self.add_area_pitch("stack", "main")
+        stack_work_ids = []
+        for position in range(1, 11):
+            work_id = f"work-stack-{position}"
+            stack_work_ids.append(work_id)
+            self.add_work(work_id)
+            self.add_yamazumi_element(
+                f"element-stack-{position}",
+                area_id,
+                pitch_id,
+                position * 10,
+                work_id,
+            )
+        self.linked_work("work-subassembly", "subassembly", "single")
+        self.add_work("work-incomplete")
+
+        requested = ["work-incomplete", "work-subassembly", *reversed(stack_work_ids)]
+        contexts = store.work_element_op_contexts(
+            self.project_id, self.scenario_id, requested
+        )
+        ordered = sorted(requested, key=lambda work_id: contexts[work_id]["sort_order"])
+
+        self.assertEqual(ordered[:10], stack_work_ids)
+        self.assertEqual(ordered[10], "work-subassembly")
+        self.assertEqual(ordered[-1], "work-incomplete")
+        self.assertTrue(contexts["work-stack-2"]["complete"])
+        self.assertLess(
+            contexts["work-stack-2"]["sort_order"],
+            contexts["work-stack-10"]["sort_order"],
+        )
+        self.assertTrue(contexts["work-stack-2"]["op_id"].endswith(".2"))
+        self.assertTrue(contexts["work-stack-10"]["op_id"].endswith(".10"))
+        self.assertFalse(contexts["work-incomplete"]["complete"])
+
+        picker_steps = pfmea_store.pfmea_process_steps(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(
+            picker_steps["id"].astype(str).tolist(),
+            [*stack_work_ids, "work-subassembly", "work-incomplete"],
+        )
+        self.assertEqual(
+            picker_steps.loc[
+                picker_steps["id"].eq("work-stack-10"), "op_id"
+            ].iloc[0],
+            contexts["work-stack-10"]["op_id"],
+        )
+
+    def test_pitch_address_components_use_natural_numeric_order(self) -> None:
+        expected = [
+            ("work-wa1-001", "01-WA1-001"),
+            ("work-wa1-010", "01-WA1-010"),
+            ("work-wa2-001", "01-WA2-001"),
+            ("work-wa10-001", "01-WA10-001"),
+        ]
+        for position, (work_id, address) in enumerate(reversed(expected), start=1):
+            self.add_work(work_id)
+            area_id, pitch_id = self.add_area_pitch(
+                f"address-{position}",
+                "main",
+                pitch_number=address,
+                pitch_sequence=position * 10,
+            )
+            self.add_yamazumi_element(
+                f"element-{work_id}", area_id, pitch_id, 10, work_id
+            )
+
+        requested = [work_id for work_id, _ in reversed(expected)]
+        contexts = store.work_element_op_contexts(
+            self.project_id, self.scenario_id, requested
+        )
+        ordered = sorted(requested, key=lambda work_id: contexts[work_id]["sort_order"])
+
+        self.assertEqual(ordered, [work_id for work_id, _ in expected])
+        self.assertEqual(
+            store.parse_yamazumi_pitch_address("01-WA10-001"),
+            {
+                "address": "01-WA10-001",
+                "parsed": True,
+                "subline_number": 1,
+                "work_area_letters": "wa",
+                "work_area_number": 10,
+                "position_number": 1,
+            },
+        )
+
+    def test_fishbone_traversal_remains_primary_over_parsed_address(self) -> None:
+        rows = [
+            ("work-main-before", "main-before", "01-WA10-001"),
+            ("work-main", "main", "01-WA1-001"),
+        ]
+        for work_id, section_id, address in rows:
+            self.add_work(work_id)
+            area_id, pitch_id = self.add_area_pitch(
+                work_id, section_id, pitch_number=address
+            )
+            self.add_yamazumi_element(
+                f"element-{work_id}", area_id, pitch_id, 10, work_id
+            )
+
+        contexts = store.work_element_op_contexts(
+            self.project_id,
+            self.scenario_id,
+            ["work-main", "work-main-before"],
+        )
+
+        self.assertLess(
+            contexts["work-main-before"]["sort_order"],
+            contexts["work-main"]["sort_order"],
+        )
+
+    def test_unparseable_pitch_addresses_follow_parsed_addresses_deterministically(self) -> None:
+        records = [
+            ("work-legacy-later", "Legacy pitch B", 20),
+            ("work-parsed", "01-WA1-001", 999),
+            ("work-legacy-first", "Legacy pitch A", 10),
+        ]
+        for work_id, address, pitch_sequence in records:
+            self.add_work(work_id)
+            area_id, pitch_id = self.add_area_pitch(
+                work_id,
+                "main",
+                pitch_number=address,
+                pitch_sequence=pitch_sequence,
+            )
+            self.add_yamazumi_element(
+                f"element-{work_id}", area_id, pitch_id, 10, work_id
+            )
+
+        requested = [work_id for work_id, _, _ in records]
+        contexts = store.work_element_op_contexts(
+            self.project_id, self.scenario_id, requested
+        )
+        ordered = sorted(requested, key=lambda work_id: contexts[work_id]["sort_order"])
+
+        self.assertEqual(
+            ordered,
+            ["work-parsed", "work-legacy-first", "work-legacy-later"],
+        )
+        self.assertTrue(all(contexts[work_id]["complete"] for work_id in requested))
+        self.assertFalse(store.parse_yamazumi_pitch_address("Legacy pitch A")["parsed"])
 
     def test_scenario_isolation_prevents_cross_scenario_resolution(self) -> None:
         self.add_work("work-primary")

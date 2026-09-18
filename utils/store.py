@@ -4,6 +4,7 @@ import sqlite3
 import json
 import hashlib
 import math
+import re
 from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,14 +16,18 @@ from utils.quality_store import (
     clone_quality_requirement_assignments,
     init_quality_schema,
 )
-from utils.pfmea_store import clone_pfmea_scenario, init_pfmea_schema
+from utils.pfmea_store import (
+    PFMEA_CTQ_CLASSIFICATIONS,
+    clone_pfmea_scenario,
+    init_pfmea_schema,
+)
 from utils.yamazumi_stack import UNASSIGNED_STACK_ID, build_stack_draft
 from utils.time_units import display_to_seconds, normalize_time_unit
 from utils.control_plan_store import clone_control_plan_scenario, init_control_plan_schema
 from utils.yamazumi_naming import (
     format_yamazumi_pitch_address,
     normalize_yamazumi_line_code,
-    parse_yamazumi_pitch_address,
+    parse_yamazumi_pitch_address as parse_guided_yamazumi_pitch_address,
     suggest_yamazumi_section_code,
     yamazumi_line_prefix,
 )
@@ -506,6 +511,18 @@ def init_db() -> None:
                 pit_depth_in REAL, model_applicability TEXT DEFAULT 'All', status TEXT DEFAULT 'Draft',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS safety_requirements (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE CASCADE,
+                requirement_description TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_safety_requirements_scenario
+                ON safety_requirements(project_id, scenario_id, work_element_id, active);
             CREATE TABLE IF NOT EXISTS concerns (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 category TEXT DEFAULT 'Question', subject TEXT NOT NULL, detail TEXT DEFAULT '',
@@ -1695,6 +1712,36 @@ def clone_planning_scenario(
                 timestamp,
             )
 
+            for source_requirement in conn.execute(
+                """SELECT * FROM safety_requirements
+                   WHERE project_id=? AND scenario_id=?
+                   ORDER BY created_at, id""",
+                (project_id, source_scenario_id),
+            ).fetchall():
+                requirement = dict(source_requirement)
+                new_work_element_id = process_id_map.get(
+                    str(requirement["work_element_id"])
+                )
+                if not new_work_element_id:
+                    raise ValueError(
+                        "A Safety requirement Process Function could not be remapped "
+                        "while cloning the scenario."
+                    )
+                requirement.update(
+                    id=str(uuid4()),
+                    scenario_id=new_scenario_id,
+                    work_element_id=new_work_element_id,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+                requirement_columns = list(requirement)
+                conn.execute(
+                    f"INSERT INTO safety_requirements "
+                    f"({', '.join(requirement_columns)}) VALUES "
+                    f"({', '.join('?' for _ in requirement_columns)})",
+                    tuple(requirement[column] for column in requirement_columns),
+                )
+
             quality_assignment_id_map: dict[str, str] = {}
             clone_quality_requirement_assignments(
                 conn,
@@ -2258,7 +2305,7 @@ def assembly_grid_categories(
     if _catalog_text(section_id):
         section_clause = " AND category.section_id=?"
         params.append(_catalog_text(section_id))
-    return pd.DataFrame(query(
+    rows = pd.DataFrame(query(
         f"""SELECT category.*, built.name AS section_name,
                    installed.name AS installed_section_name,
                    COUNT(DISTINCT mapping.id) AS mapping_count,
@@ -2274,6 +2321,25 @@ def assembly_grid_categories(
             ORDER BY built.sequence, category.sequence, category.display_name""",
         tuple(params),
     ))
+    if rows.empty:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "section_id": pd.Series(dtype="string"),
+            "ebom_name": pd.Series(dtype="string"),
+            "display_name": pd.Series(dtype="string"),
+            "root_number": pd.Series(dtype="string"),
+            "is_top_level": pd.Series(dtype="bool"),
+            "installed_section_id": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="int64"),
+            "created_at": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+            "section_name": pd.Series(dtype="string"),
+            "installed_section_name": pd.Series(dtype="string"),
+            "mapping_count": pd.Series(dtype="int64"),
+            "assembly_count": pd.Series(dtype="int64"),
+        })
+    return rows
 
 
 def assembly_grid_model_mappings(
@@ -5813,6 +5879,312 @@ def process_ergonomics_risk_work_element_ids(
     return {str(row["work_element_id"]) for row in rows}
 
 
+def work_element_criticality(
+    project_id: str, scenario_id: str
+) -> dict[str, list[str]]:
+    """Return live CTQ and Safety tags keyed by scenario-owned Process step."""
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        result: dict[str, list[str]] = {
+            str(row["id"]): []
+            for row in conn.execute(
+                """SELECT id FROM work_elements
+                   WHERE project_id=? AND scenario_id=?""",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
+        placeholders = ",".join("?" for _ in PFMEA_CTQ_CLASSIFICATIONS)
+        for row in conn.execute(
+            f"""SELECT DISTINCT entry.work_element_id
+                FROM pfmea_entries entry
+                JOIN work_elements work
+                  ON work.id=entry.work_element_id
+                 AND work.project_id=entry.project_id
+                 AND work.scenario_id=entry.scenario_id
+                WHERE entry.project_id=? AND entry.scenario_id=?
+                  AND entry.class_code IN ({placeholders})""",
+            (project_id, scenario_id, *PFMEA_CTQ_CLASSIFICATIONS),
+        ).fetchall():
+            work_element_id = str(row["work_element_id"])
+            if work_element_id in result:
+                result[work_element_id].append("CTQ")
+        for row in conn.execute(
+            """SELECT DISTINCT requirement.work_element_id
+               FROM safety_requirements requirement
+               JOIN work_elements work
+                 ON work.id=requirement.work_element_id
+                AND work.project_id=requirement.project_id
+                AND work.scenario_id=requirement.scenario_id
+               WHERE requirement.project_id=? AND requirement.scenario_id=?
+                 AND requirement.active=1""",
+            (project_id, scenario_id),
+        ).fetchall():
+            work_element_id = str(row["work_element_id"])
+            if work_element_id in result:
+                result[work_element_id].append("Safety")
+    return result
+
+
+def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Load scenario-specific Safety requirements with current Process labels."""
+    columns = [
+        "id", "project_id", "scenario_id", "work_element_id",
+        "requirement_description", "active", "created_at", "updated_at",
+        "work_element_label", "pitch",
+    ]
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        rows = conn.execute(
+            """SELECT requirement.*,
+                      COALESCE(
+                          (SELECT NULLIF(TRIM(yamazumi.description), '')
+                           FROM yamazumi_elements yamazumi
+                           WHERE yamazumi.project_id=requirement.project_id
+                             AND yamazumi.process_element_id=requirement.work_element_id
+                           ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                          NULLIF(TRIM(work.operation), ''), '') AS work_element_label,
+                      COALESCE(work.station, '') AS pitch
+               FROM safety_requirements requirement
+               JOIN work_elements work
+                 ON work.id=requirement.work_element_id
+                AND work.project_id=requirement.project_id
+                AND work.scenario_id=requirement.scenario_id
+               WHERE requirement.project_id=? AND requirement.scenario_id=?
+               ORDER BY work.sequence, requirement.created_at, requirement.id""",
+            (project_id, scenario_id),
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "scenario_id": pd.Series(dtype="string"),
+            "work_element_id": pd.Series(dtype="string"),
+            "requirement_description": pd.Series(dtype="string"),
+            "active": pd.Series(dtype="bool"),
+            "created_at": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+            "work_element_label": pd.Series(dtype="string"),
+            "pitch": pd.Series(dtype="string"),
+        })
+    return pd.DataFrame([dict(row) for row in rows], columns=columns)
+
+
+def save_safety_requirements(
+    project_id: str,
+    scenario_id: str,
+    edited: pd.DataFrame,
+    editor_name: str,
+) -> dict:
+    """Atomically validate and save Safety rows without deleting omitted rows."""
+    editor = str(editor_name or "").strip()
+    if not editor:
+        raise ValueError("Enter the Current editor before saving Safety requirements.")
+    timestamp = now_iso()
+    prepared: list[dict] = []
+    for _, row in edited.iterrows():
+        work_element_id = str(row.get("work_element_id") or "").strip()
+        description = str(row.get("requirement_description") or "").strip()
+        if not work_element_id and not description:
+            continue
+        if not work_element_id:
+            raise ValueError("Process Function is required for every Safety requirement.")
+        if not description:
+            raise ValueError("Requirement description is required for every Safety requirement.")
+        raw_id = row.get("id")
+        requirement_id = (
+            str(raw_id).strip()
+            if raw_id is not None and not pd.isna(raw_id) and str(raw_id).strip()
+            else str(uuid4())
+        )
+        raw_active = row.get("active", True)
+        active = 1 if raw_active is None or pd.isna(raw_active) else int(bool(raw_active))
+        prepared.append({
+            "id": requirement_id,
+            "work_element_id": work_element_id,
+            "requirement_description": description,
+            "active": active,
+        })
+    if len({row["id"] for row in prepared}) != len(prepared):
+        raise ValueError("Safety requirement identities must be unique.")
+    changed_ids: list[str] = []
+    created_ids: list[str] = []
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        valid_work_ids = {
+            str(row["id"])
+            for row in conn.execute(
+                """SELECT id FROM work_elements
+                   WHERE project_id=? AND scenario_id=?""",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
+        if any(row["work_element_id"] not in valid_work_ids for row in prepared):
+            raise ValueError(
+                "Every Process Function must belong to the active project and scenario."
+            )
+        existing = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                """SELECT * FROM safety_requirements
+                   WHERE project_id=? AND scenario_id=?""",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
+        for row in prepared:
+            previous = existing.get(row["id"])
+            if previous:
+                changed = any(
+                    previous[field] != row[field]
+                    for field in ("work_element_id", "requirement_description", "active")
+                )
+                if not changed:
+                    continue
+                conn.execute(
+                    """UPDATE safety_requirements
+                       SET work_element_id=?, requirement_description=?, active=?, updated_at=?
+                       WHERE id=? AND project_id=? AND scenario_id=?""",
+                    (
+                        row["work_element_id"], row["requirement_description"],
+                        row["active"], timestamp, row["id"], project_id, scenario_id,
+                    ),
+                )
+                changed_ids.append(row["id"])
+            else:
+                conn.execute(
+                    """INSERT INTO safety_requirements
+                       (id, project_id, scenario_id, work_element_id,
+                        requirement_description, active, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        row["id"], project_id, scenario_id, row["work_element_id"],
+                        row["requirement_description"], row["active"], timestamp, timestamp,
+                    ),
+                )
+                created_ids.append(row["id"])
+        row_count = len(created_ids) + len(changed_ids)
+        if row_count:
+            record_audit_event(
+                project_id,
+                "Safety requirements",
+                "Save & Refresh",
+                row_count,
+                editor,
+                {
+                    "scenario_id": scenario_id,
+                    "created_ids": created_ids,
+                    "updated_ids": changed_ids,
+                    "updated_at": timestamp,
+                },
+                _conn=conn,
+            )
+    return {
+        "row_count": len(created_ids) + len(changed_ids),
+        "created_ids": created_ids,
+        "updated_ids": changed_ids,
+        "timestamp": timestamp,
+    }
+
+
+def delete_safety_requirements(
+    project_id: str,
+    scenario_id: str,
+    requirement_ids: list[str],
+    editor_name: str,
+) -> dict:
+    """Delete selected Safety rows with boundary validation and one audit event."""
+    editor = str(editor_name or "").strip()
+    if not editor:
+        raise ValueError("Enter the Current editor before deleting Safety requirements.")
+    ids = list(dict.fromkeys(str(value).strip() for value in requirement_ids if str(value).strip()))
+    timestamp = now_iso()
+    if not ids:
+        return {"row_count": 0, "timestamp": timestamp}
+    placeholders = ",".join("?" for _ in ids)
+    with connection() as conn:
+        found = conn.execute(
+            f"""SELECT id FROM safety_requirements
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        ).fetchall()
+        if len(found) != len(ids):
+            raise ValueError(
+                "One or more Safety requirements changed or no longer belong to the active scenario."
+            )
+        conn.execute(
+            f"""DELETE FROM safety_requirements
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        )
+        record_audit_event(
+            project_id,
+            "Safety requirements",
+            "Delete" if len(ids) == 1 else "Bulk delete",
+            len(ids),
+            editor,
+            {"scenario_id": scenario_id, "requirement_ids": ids, "updated_at": timestamp},
+            _conn=conn,
+        )
+    return {"row_count": len(ids), "timestamp": timestamp}
+
+
+def safety_requirement_delete_impact(
+    project_id: str, scenario_id: str, work_element_ids: list[str]
+) -> dict:
+    """Describe Safety rows that would cascade with Process-step deletion."""
+    ids = list(dict.fromkeys(str(value).strip() for value in work_element_ids if str(value).strip()))
+    if not ids:
+        return {"requirement_count": 0, "work_element_count": 0}
+    placeholders = ",".join("?" for _ in ids)
+    with connection() as conn:
+        valid_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM work_elements
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        ).fetchone()[0])
+        if valid_count != len(ids):
+            raise ValueError(
+                "One or more Process steps changed or no longer belong to the active scenario."
+            )
+        row = conn.execute(
+            f"""SELECT COUNT(*) AS requirement_count,
+                       COUNT(DISTINCT work_element_id) AS work_element_count
+                FROM safety_requirements
+                WHERE project_id=? AND scenario_id=?
+                  AND work_element_id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        ).fetchone()
+    return {
+        "requirement_count": int(row["requirement_count"] or 0),
+        "work_element_count": int(row["work_element_count"] or 0),
+    }
+
+
+def safety_requirement_history(
+    project_id: str, scenario_id: str, limit: int = 50
+) -> pd.DataFrame:
+    rows = query(
+        """SELECT action, row_count, editor_name, details, created_at
+           FROM audit_log
+           WHERE project_id=? AND table_name='Safety requirements'
+             AND json_extract(details, '$.scenario_id')=?
+           ORDER BY created_at DESC LIMIT ?""",
+        (project_id, scenario_id, int(limit)),
+    )
+    return pd.DataFrame(rows)
+
+
 def ergonomics_review_audit_history(
     project_id: str, scenario_id: str, limit: int = 50
 ) -> pd.DataFrame:
@@ -6824,6 +7196,88 @@ def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[d
     return len(cleaned)
 
 
+def migrate_legacy_yamazumi_flags(project_id: str, editor_name: str) -> dict:
+    """Discard retired Yamazumi flags once per project and retire their schema."""
+    timestamp = now_iso()
+    editor = str(editor_name or "").strip()
+    with connection() as conn:
+        table_exists = conn.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='yamazumi_flag_definitions'"""
+        ).fetchone() is not None
+        element_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(yamazumi_elements)")
+        }
+        has_flags_column = "flags" in element_columns
+        definition_count = (
+            int(conn.execute(
+                "SELECT COUNT(*) FROM yamazumi_flag_definitions WHERE project_id=?",
+                (project_id,),
+            ).fetchone()[0])
+            if table_exists else 0
+        )
+        affected_element_count = (
+            int(conn.execute(
+                """SELECT COUNT(*) FROM yamazumi_elements
+                   WHERE project_id=? AND COALESCE(TRIM(flags), '') NOT IN ('', '[]')""",
+                (project_id,),
+            ).fetchone()[0])
+            if has_flags_column else 0
+        )
+        if (definition_count or affected_element_count) and not editor:
+            raise ValueError(
+                "Enter the Current editor to retire legacy Yamazumi flags for this project."
+            )
+        if has_flags_column and affected_element_count:
+            conn.execute(
+                "UPDATE yamazumi_elements SET flags='[]' WHERE project_id=?",
+                (project_id,),
+            )
+        if table_exists and definition_count:
+            conn.execute(
+                "DELETE FROM yamazumi_flag_definitions WHERE project_id=?",
+                (project_id,),
+            )
+        if definition_count or affected_element_count:
+            record_audit_event(
+                project_id,
+                "Yamazumi",
+                "Retire legacy flags",
+                affected_element_count,
+                editor,
+                {
+                    "definition_count": definition_count,
+                    "affected_element_count": affected_element_count,
+                    "updated_at": timestamp,
+                },
+                _conn=conn,
+            )
+
+        remaining_definitions = (
+            int(conn.execute(
+                "SELECT COUNT(*) FROM yamazumi_flag_definitions"
+            ).fetchone()[0])
+            if table_exists else 0
+        )
+        remaining_flag_values = (
+            int(conn.execute(
+                """SELECT COUNT(*) FROM yamazumi_elements
+                   WHERE COALESCE(TRIM(flags), '') NOT IN ('', '[]')"""
+            ).fetchone()[0])
+            if has_flags_column else 0
+        )
+        if not remaining_definitions and not remaining_flag_values:
+            if table_exists:
+                conn.execute("DROP TABLE yamazumi_flag_definitions")
+            if has_flags_column:
+                conn.execute("ALTER TABLE yamazumi_elements DROP COLUMN flags")
+    return {
+        "definition_count": definition_count,
+        "affected_element_count": affected_element_count,
+        "timestamp": timestamp,
+    }
+
+
 def rename_yamazumi_variants(
     project_id: str, scenario_id: str, label_mapping: dict[str, str]
 ) -> dict[str, object]:
@@ -7746,6 +8200,505 @@ def add_yamazumi_element(
     return element_id
 
 
+def _prepare_yamazumi_copy(
+    conn: sqlite3.Connection,
+    project_id: str,
+    source_scenario_id: str,
+    source_area_id: str,
+    target_scenario_id: str,
+    target_area_id: str,
+    pitch_ids: list[str],
+    element_ids: list[str],
+    *,
+    standalone_target_pitch_id: str | None = None,
+    pitch_number_overrides: dict[str, str] | None = None,
+    feed_target_overrides: dict[str, str] | None = None,
+) -> dict:
+    """Validate and describe one Yamazumi cross-area copy without writing."""
+    source = conn.execute(
+        """SELECT area.id, area.name, area.scenario_id, scenario.name AS scenario_name
+           FROM yamazumi_areas area
+           JOIN planning_scenarios scenario ON scenario.id=area.scenario_id
+           WHERE area.id=? AND area.project_id=? AND area.scenario_id=?
+             AND scenario.project_id=? AND scenario.status<>'Archived'""",
+        (source_area_id, project_id, source_scenario_id, project_id),
+    ).fetchone()
+    if not source:
+        raise ValueError("The source Yamazumi area is not available in that planning scenario.")
+    target = conn.execute(
+        """SELECT area.id, area.name, area.scenario_id, scenario.name AS scenario_name
+           FROM yamazumi_areas area
+           JOIN planning_scenarios scenario ON scenario.id=area.scenario_id
+           WHERE area.id=? AND area.project_id=? AND area.scenario_id=?
+             AND scenario.project_id=? AND scenario.status<>'Archived'""",
+        (target_area_id, project_id, target_scenario_id, project_id),
+    ).fetchone()
+    if not target:
+        raise ValueError("The target Yamazumi area is not available in that planning scenario.")
+    if source_area_id == target_area_id:
+        raise ValueError("Choose a different target Yamazumi area.")
+
+    normalized_pitch_ids = list(dict.fromkeys(
+        str(value or "").strip() for value in pitch_ids if str(value or "").strip()
+    ))
+    normalized_element_ids = list(dict.fromkeys(
+        str(value or "").strip() for value in element_ids if str(value or "").strip()
+    ))
+    if not normalized_pitch_ids and not normalized_element_ids:
+        raise ValueError("Select at least one saved pitch or Yamazumi work element to copy.")
+
+    source_pitches = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT * FROM yamazumi_pitches
+               WHERE project_id=? AND area_id=?
+               ORDER BY sequence, pitch_number COLLATE NOCASE, id""",
+            (project_id, source_area_id),
+        ).fetchall()
+    ]
+    source_pitch_by_id = {str(row["id"]): row for row in source_pitches}
+    missing_pitch_ids = set(normalized_pitch_ids) - set(source_pitch_by_id)
+    if missing_pitch_ids:
+        raise ValueError("A selected source pitch is stale or belongs to another Yamazumi area.")
+    selected_pitches = [
+        row for row in source_pitches if str(row["id"]) in set(normalized_pitch_ids)
+    ]
+
+    source_elements = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT * FROM yamazumi_elements
+               WHERE project_id=? AND area_id=?
+               ORDER BY COALESCE(pitch_id, ''), sequence, description COLLATE NOCASE, id""",
+            (project_id, source_area_id),
+        ).fetchall()
+    ]
+    source_element_by_id = {str(row["id"]): row for row in source_elements}
+    missing_element_ids = set(normalized_element_ids) - set(source_element_by_id)
+    if missing_element_ids:
+        raise ValueError(
+            "A selected source work element is stale or belongs to another Yamazumi area."
+        )
+    selected_pitch_id_set = set(normalized_pitch_ids)
+    pitch_elements = [
+        row
+        for row in source_elements
+        if str(row.get("pitch_id") or "") in selected_pitch_id_set
+    ]
+    pitch_element_ids = {str(row["id"]) for row in pitch_elements}
+    copied_element_pitch_ids = {
+        str(row.get("pitch_id") or "") for row in pitch_elements
+    }
+    for source_pitch in selected_pitches:
+        if (
+            str(source_pitch["id"]) in copied_element_pitch_ids
+            and str(source_pitch.get("status") or "") != "Active"
+        ):
+            raise ValueError(
+                "A pitch containing work must be Active before it can be copied with its work elements."
+            )
+    standalone_elements = [
+        row
+        for row in source_elements
+        if str(row["id"]) in set(normalized_element_ids)
+        and str(row["id"]) not in pitch_element_ids
+    ]
+    elements_to_copy = [*pitch_elements, *standalone_elements]
+
+    target_pitches = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT * FROM yamazumi_pitches
+               WHERE project_id=? AND area_id=?
+               ORDER BY sequence, pitch_number COLLATE NOCASE, id""",
+            (project_id, target_area_id),
+        ).fetchall()
+    ]
+    target_pitch_by_id = {str(row["id"]): row for row in target_pitches}
+    normalized_target_pitch_id = str(standalone_target_pitch_id or "").strip() or None
+    if standalone_elements and normalized_target_pitch_id:
+        destination = target_pitch_by_id.get(normalized_target_pitch_id)
+        if not destination or str(destination.get("status") or "") != "Active":
+            raise ValueError(
+                "Standalone work elements can only be copied to an Active pitch in the target area."
+            )
+
+    number_overrides = {
+        str(key): str(value or "").strip()
+        for key, value in (pitch_number_overrides or {}).items()
+    }
+    occupied_numbers = {
+        str(row["pitch_number"] or "").strip().casefold()
+        for row in conn.execute(
+            """SELECT pitch.pitch_number
+               FROM yamazumi_pitches pitch
+               JOIN yamazumi_areas area ON area.id=pitch.area_id
+               WHERE pitch.project_id=? AND area.scenario_id=?""",
+            (project_id, target_scenario_id),
+        ).fetchall()
+    }
+    proposed_numbers: dict[str, str] = {}
+    number_conflicts: list[dict] = []
+    proposed_casefold: dict[str, str] = {}
+    for row in selected_pitches:
+        source_id = str(row["id"])
+        number = number_overrides.get(source_id) or str(row.get("pitch_number") or "").strip()
+        proposed_numbers[source_id] = number
+        conflict_reason = ""
+        if not number:
+            conflict_reason = "A destination pitch address is required."
+        elif number.casefold() in occupied_numbers:
+            conflict_reason = "That pitch address already exists in the target scenario."
+        elif number.casefold() in proposed_casefold:
+            conflict_reason = "Another selected pitch uses the same destination address."
+        if conflict_reason:
+            number_conflicts.append(
+                {
+                    "source_pitch_id": source_id,
+                    "source_pitch_number": str(row.get("pitch_number") or ""),
+                    "source_pitch_name": str(row.get("pitch_name") or ""),
+                    "proposed_pitch_number": number,
+                    "reason": conflict_reason,
+                }
+            )
+        proposed_casefold[number.casefold()] = source_id
+
+    feed_overrides = {
+        str(key): str(value or "").strip()
+        for key, value in (feed_target_overrides or {}).items()
+        if str(value or "").strip()
+    }
+    feed_mappings: dict[str, dict] = {}
+    feed_mapping_required: list[dict] = []
+    for row in selected_pitches:
+        source_id = str(row["id"])
+        pitch_type = str(row.get("pitch_type") or "Pitch").strip().title()
+        if pitch_type not in YAMAZUMI_FEEDER_PITCH_TYPES:
+            continue
+        old_target_id = str(row.get("feeds_into_pitch_id") or "").strip()
+        if old_target_id and old_target_id in selected_pitch_id_set:
+            feed_mappings[source_id] = {
+                "kind": "copied",
+                "source_target_pitch_id": old_target_id,
+                "target_pitch_id": None,
+                "target_label": proposed_numbers.get(old_target_id, "Copied pitch"),
+            }
+            continue
+        target_pitch_id = feed_overrides.get(source_id)
+        destination = target_pitch_by_id.get(str(target_pitch_id or ""))
+        if not destination:
+            feed_mapping_required.append(
+                {
+                    "source_pitch_id": source_id,
+                    "source_pitch_number": str(row.get("pitch_number") or ""),
+                    "source_pitch_name": str(row.get("pitch_name") or ""),
+                }
+            )
+            continue
+        feed_mappings[source_id] = {
+            "kind": "existing",
+            "source_target_pitch_id": old_target_id or None,
+            "target_pitch_id": str(destination["id"]),
+            "target_label": yamazumi_pitch_label(
+                destination.get("pitch_number"), destination.get("pitch_name")
+            ),
+        }
+
+    variant_additions: dict[str, list[str]] = {}
+    if standalone_elements and normalized_target_pitch_id:
+        destination = target_pitch_by_id[normalized_target_pitch_id]
+        current_variants = parse_yamazumi_model_variants(
+            destination.get("model_variants"), fallback=None
+        )
+        required_variants = list(dict.fromkeys(
+            variant
+            for element in standalone_elements
+            for variant in parse_yamazumi_model_variants(
+                element.get("model_variants"), element.get("model_variant")
+            )
+        ))
+        missing_variants = [
+            variant for variant in required_variants if variant not in current_variants
+        ]
+        if missing_variants:
+            _require_yamazumi_feed_target_for_pitch_write(
+                conn, project_id, destination
+            )
+            variant_additions[normalized_target_pitch_id] = missing_variants
+
+    active_target_regions = {
+        str(row["name"]).strip().casefold()
+        for row in conn.execute(
+            """SELECT name FROM yamazumi_work_regions
+               WHERE project_id=? AND area_id=? AND active=1""",
+            (project_id, target_area_id),
+        ).fetchall()
+    }
+    legacy_work_regions = sorted({
+        str(row.get("work_region") or "None").strip()
+        for row in elements_to_copy
+        if str(row.get("work_region") or "None").strip()
+        and str(row.get("work_region") or "None").strip().casefold() != "none"
+        and str(row.get("work_region") or "None").strip().casefold()
+        not in active_target_regions
+    })
+
+    return {
+        "source": dict(source),
+        "target": dict(target),
+        "selected_pitches": selected_pitches,
+        "pitch_elements": pitch_elements,
+        "standalone_elements": standalone_elements,
+        "elements_to_copy": elements_to_copy,
+        "target_pitches": target_pitches,
+        "standalone_target_pitch_id": normalized_target_pitch_id,
+        "proposed_pitch_numbers": proposed_numbers,
+        "number_conflicts": number_conflicts,
+        "feed_mappings": feed_mappings,
+        "feed_mapping_required": feed_mapping_required,
+        "variant_additions": variant_additions,
+        "legacy_work_regions": legacy_work_regions,
+        "ready": not number_conflicts and not feed_mapping_required,
+    }
+
+
+def preview_yamazumi_copy(
+    project_id: str,
+    source_scenario_id: str,
+    source_area_id: str,
+    target_scenario_id: str,
+    target_area_id: str,
+    pitch_ids: list[str],
+    element_ids: list[str],
+    *,
+    standalone_target_pitch_id: str | None = None,
+    pitch_number_overrides: dict[str, str] | None = None,
+    feed_target_overrides: dict[str, str] | None = None,
+) -> dict:
+    """Return a no-write preflight for a Yamazumi cross-area copy."""
+    with connection() as conn:
+        return _prepare_yamazumi_copy(
+            conn,
+            project_id,
+            source_scenario_id,
+            source_area_id,
+            target_scenario_id,
+            target_area_id,
+            pitch_ids,
+            element_ids,
+            standalone_target_pitch_id=standalone_target_pitch_id,
+            pitch_number_overrides=pitch_number_overrides,
+            feed_target_overrides=feed_target_overrides,
+        )
+
+
+def copy_yamazumi_records(
+    project_id: str,
+    source_scenario_id: str,
+    source_area_id: str,
+    target_scenario_id: str,
+    target_area_id: str,
+    pitch_ids: list[str],
+    element_ids: list[str],
+    *,
+    standalone_target_pitch_id: str | None = None,
+    pitch_number_overrides: dict[str, str] | None = None,
+    feed_target_overrides: dict[str, str] | None = None,
+    editor_name: str,
+) -> dict:
+    """Atomically copy saved Yamazumi records into another area and audit once."""
+    normalized_editor = str(editor_name or "").strip()
+    if not normalized_editor:
+        raise ValueError("Enter the Current editor before copying Yamazumi records.")
+    timestamp = now_iso()
+    with connection() as conn:
+        plan = _prepare_yamazumi_copy(
+            conn,
+            project_id,
+            source_scenario_id,
+            source_area_id,
+            target_scenario_id,
+            target_area_id,
+            pitch_ids,
+            element_ids,
+            standalone_target_pitch_id=standalone_target_pitch_id,
+            pitch_number_overrides=pitch_number_overrides,
+            feed_target_overrides=feed_target_overrides,
+        )
+        if not plan["ready"]:
+            if plan["number_conflicts"]:
+                raise ValueError(
+                    "Resolve every destination pitch-address conflict before copying."
+                )
+            raise ValueError(
+                "Choose a destination feed target for every copied Subassembly or Kitter pitch."
+            )
+
+        next_pitch_sequence = int(conn.execute(
+            """SELECT COALESCE(MAX(sequence), 0) FROM yamazumi_pitches
+               WHERE project_id=? AND area_id=?""",
+            (project_id, target_area_id),
+        ).fetchone()[0] or 0)
+        pitch_id_map: dict[str, str] = {}
+        for offset, source_pitch in enumerate(plan["selected_pitches"], start=1):
+            old_id = str(source_pitch["id"])
+            new_id = str(uuid4())
+            pitch_id_map[old_id] = new_id
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, status,
+                    sequence, model_variants, pitch_type, feeds_into_pitch_id,
+                    updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                (
+                    new_id,
+                    project_id,
+                    target_area_id,
+                    plan["proposed_pitch_numbers"][old_id],
+                    str(source_pitch.get("pitch_name") or "").strip(),
+                    str(source_pitch.get("status") or "Active"),
+                    next_pitch_sequence + offset * 10,
+                    json.dumps(parse_yamazumi_model_variants(
+                        source_pitch.get("model_variants"), fallback=None
+                    )),
+                    str(source_pitch.get("pitch_type") or "Pitch"),
+                    timestamp,
+                ),
+            )
+
+        for source_pitch in plan["selected_pitches"]:
+            old_id = str(source_pitch["id"])
+            mapping = plan["feed_mappings"].get(old_id)
+            if not mapping:
+                continue
+            target_pitch_id = (
+                pitch_id_map[str(mapping["source_target_pitch_id"])]
+                if mapping["kind"] == "copied"
+                else str(mapping["target_pitch_id"])
+            )
+            conn.execute(
+                "UPDATE yamazumi_pitches SET feeds_into_pitch_id=? WHERE id=?",
+                (target_pitch_id, pitch_id_map[old_id]),
+            )
+
+        for destination_pitch_id, additions in plan["variant_additions"].items():
+            destination = conn.execute(
+                """SELECT id, area_id, pitch_number, pitch_name, pitch_type,
+                          feeds_into_pitch_id, model_variants
+                   FROM yamazumi_pitches
+                   WHERE id=? AND project_id=? AND area_id=? AND status='Active'""",
+                (destination_pitch_id, project_id, target_area_id),
+            ).fetchone()
+            if not destination:
+                raise ValueError("The destination pitch changed before the copy was confirmed.")
+            _require_yamazumi_feed_target_for_pitch_write(
+                conn, project_id, destination
+            )
+            current_variants = parse_yamazumi_model_variants(
+                destination["model_variants"], fallback=None
+            )
+            conn.execute(
+                """UPDATE yamazumi_pitches SET model_variants=?, updated_at=?
+                   WHERE id=? AND project_id=? AND area_id=?""",
+                (
+                    json.dumps(list(dict.fromkeys([*current_variants, *additions]))),
+                    timestamp,
+                    destination_pitch_id,
+                    project_id,
+                    target_area_id,
+                ),
+            )
+
+        next_sequence_by_pitch: dict[str | None, int] = {}
+        standalone_target = plan["standalone_target_pitch_id"]
+        if plan["standalone_elements"]:
+            next_sequence_by_pitch[standalone_target] = int(conn.execute(
+                """SELECT COALESCE(MAX(sequence), 0) FROM yamazumi_elements
+                   WHERE project_id=? AND area_id=? AND pitch_id IS ?""",
+                (project_id, target_area_id, standalone_target),
+            ).fetchone()[0] or 0)
+        element_id_map: dict[str, str] = {}
+        copied_pitch_positions: dict[str, int] = {}
+        pitch_element_ids = {str(row["id"]) for row in plan["pitch_elements"]}
+        for source_element in plan["elements_to_copy"]:
+            old_element_id = str(source_element["id"])
+            old_pitch_id = str(source_element.get("pitch_id") or "")
+            if old_element_id in pitch_element_ids:
+                destination_pitch_id = pitch_id_map[old_pitch_id]
+                copied_pitch_positions[destination_pitch_id] = (
+                    copied_pitch_positions.get(destination_pitch_id, 0) + 10
+                )
+                sequence = copied_pitch_positions[destination_pitch_id]
+            else:
+                destination_pitch_id = standalone_target
+                next_sequence_by_pitch[destination_pitch_id] = (
+                    next_sequence_by_pitch.get(destination_pitch_id, 0) + 10
+                )
+                sequence = next_sequence_by_pitch[destination_pitch_id]
+            variants = parse_yamazumi_model_variants(
+                source_element.get("model_variants"), source_element.get("model_variant")
+            )
+            new_element_id = str(uuid4())
+            element_id_map[old_element_id] = new_element_id
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                    work_type, description, time_s, work_region, sequence,
+                    source, process_element_id, process_sync_status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           'Yamazumi copy', NULL, 'Needs IE review', ?)""",
+                (
+                    new_element_id,
+                    project_id,
+                    target_area_id,
+                    destination_pitch_id,
+                    variants[0] if variants else "Base",
+                    json.dumps(variants or ["Base"]),
+                    str(source_element.get("work_type") or "Cycle"),
+                    str(source_element.get("description") or "").strip(),
+                    float(source_element.get("time_s") or 0),
+                    str(source_element.get("work_region") or "None").strip(),
+                    sequence,
+                    timestamp,
+                ),
+            )
+
+        _validate_yamazumi_pitch_feeds(conn, project_id, target_area_id)
+        details = {
+            "source_scenario_id": source_scenario_id,
+            "source_area_id": source_area_id,
+            "source_area": str(plan["source"].get("name") or ""),
+            "target_scenario_id": target_scenario_id,
+            "target_area_id": target_area_id,
+            "target_area": str(plan["target"].get("name") or ""),
+            "pitch_id_map": pitch_id_map,
+            "element_id_map": element_id_map,
+            "pitch_numbers": plan["proposed_pitch_numbers"],
+            "feed_mappings": plan["feed_mappings"],
+            "variant_additions": plan["variant_additions"],
+            "process_links_copied": False,
+            "created_at": timestamp,
+        }
+        record_audit_event(
+            project_id,
+            "Yamazumi",
+            "Copy to another area",
+            len(pitch_id_map) + len(element_id_map),
+            normalized_editor,
+            details,
+            _conn=conn,
+        )
+
+    return {
+        "pitches_created": len(pitch_id_map),
+        "elements_created": len(element_id_map),
+        "pitch_id_map": pitch_id_map,
+        "element_id_map": element_id_map,
+        "variant_additions": plan["variant_additions"],
+        "timestamp": timestamp,
+    }
+
+
 def update_yamazumi_pitch(project_id: str, area_id: str, pitch_id: str, values: dict) -> None:
     """Update one pitch from the interactive board without replacing the area table."""
     pitch_number = str(values.get("pitch_number") or "").strip()
@@ -7966,12 +8919,43 @@ def yamazumi_element_delete_impact(
 
 
 def delete_yamazumi_element(
-    project_id: str, scenario_id: str, area_id: str, element_id: str
+    project_id: str,
+    scenario_or_area_id: str,
+    area_or_element_id: str,
+    element_id: str | None = None,
+    *,
+    scenario_id: str | None = None,
+    audit_editor_name: str | None = None,
+    audit_details: dict | None = None,
 ) -> dict[str, object]:
-    """Delete one scenario-owned Yamazumi element and return its actual impact."""
+    """Delete one scenario-owned Yamazumi element and return its actual impact.
+
+    Accept both the scenario-first store API and the established interactive-board
+    call shape so the delete and its optional audit evidence share one transaction.
+    """
+    if element_id is None:
+        area_id = scenario_or_area_id
+        element_id = area_or_element_id
+        resolved_scenario_id = scenario_id
+    else:
+        resolved_scenario_id = scenario_or_area_id
+        area_id = area_or_element_id
+        if scenario_id is not None and scenario_id != resolved_scenario_id:
+            raise ValueError("The requested planning scenario does not match the delete target.")
+    editor_name = None if audit_editor_name is None else audit_editor_name.strip()
+    if audit_editor_name is not None and not editor_name:
+        raise ValueError("Enter the Current editor before deleting a work element.")
     with connection() as conn:
+        if resolved_scenario_id is None:
+            area = conn.execute(
+                "SELECT scenario_id FROM yamazumi_areas WHERE id=? AND project_id=?",
+                (area_id, project_id),
+            ).fetchone()
+            if not area:
+                raise ValueError("That Yamazumi area no longer exists in this project.")
+            resolved_scenario_id = str(area["scenario_id"])
         impact = _yamazumi_element_delete_impact(
-            conn, project_id, scenario_id, area_id, element_id
+            conn, project_id, resolved_scenario_id, area_id, element_id
         )
         deleted = conn.execute(
             "DELETE FROM yamazumi_elements WHERE id=? AND project_id=? AND area_id=?",
@@ -7981,19 +8965,54 @@ def delete_yamazumi_element(
             raise ValueError(
                 "That Yamazumi work element changed before it could be deleted."
             )
+        if editor_name is not None:
+            record_audit_event(
+                project_id,
+                "Yamazumi elements",
+                "Delete from interactive board",
+                1,
+                editor_name,
+                {
+                    **(audit_details or {}),
+                    "scenario_id": resolved_scenario_id,
+                    "area_id": area_id,
+                    **impact,
+                },
+                _conn=conn,
+            )
         return impact
 
 
-def delete_yamazumi_pitch(project_id: str, area_id: str, pitch_id: str) -> int:
+def delete_yamazumi_pitch(
+    project_id: str,
+    area_id: str,
+    pitch_id: str,
+    *,
+    scenario_id: str | None = None,
+    audit_editor_name: str | None = None,
+    audit_details: dict | None = None,
+) -> int:
     """Delete one pitch and return its work elements to the unassigned pool."""
+    editor_name = None if audit_editor_name is None else audit_editor_name.strip()
+    if audit_editor_name is not None and not editor_name:
+        raise ValueError("Enter the Current editor before deleting a pitch.")
     timestamp = now_iso()
     with connection() as conn:
+        params: list[object] = [pitch_id, project_id, area_id]
+        scenario_clause = ""
+        if scenario_id is not None:
+            scenario_clause = " AND area.scenario_id=?"
+            params.append(scenario_id)
         existing = conn.execute(
-            "SELECT 1 FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
-            (pitch_id, project_id, area_id),
+            f"""SELECT pitch.id, pitch.pitch_number, pitch.pitch_name, area.scenario_id
+                FROM yamazumi_pitches pitch
+                JOIN yamazumi_areas area ON area.id=pitch.area_id
+                WHERE pitch.id=? AND pitch.project_id=? AND pitch.area_id=?
+                {scenario_clause}""",
+            tuple(params),
         ).fetchone()
         if not existing:
-            raise ValueError("That pitch no longer exists.")
+            raise ValueError("That pitch is no longer available in the active scenario.")
         _raise_yamazumi_pitch_reference_blockers(
             _yamazumi_pitch_reference_blockers(
                 conn, project_id, area_id, {str(pitch_id)}
@@ -8012,6 +9031,25 @@ def delete_yamazumi_pitch(project_id: str, area_id: str, pitch_id: str) -> int:
             "DELETE FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
             (pitch_id, project_id, area_id),
         )
+        if editor_name is not None:
+            details = {
+                **(audit_details or {}),
+                "area_id": area_id,
+                "scenario_id": str(existing["scenario_id"]),
+                "pitch_id": pitch_id,
+                "pitch_number": str(existing["pitch_number"] or ""),
+                "pitch_name": str(existing["pitch_name"] or ""),
+                "elements_unassigned": int(moved),
+            }
+            record_audit_event(
+                project_id,
+                "Yamazumi pitches",
+                "Delete from interactive board",
+                1,
+                editor_name,
+                details,
+                _conn=conn,
+            )
     return int(moved)
 
 
@@ -8202,7 +9240,7 @@ def yamazumi_pitch_address_suggestion(project_id: str, area_id: str) -> dict:
         ).fetchall()
 
     parsed_rows = [
-        (row, parse_yamazumi_pitch_address(row["pitch_number"]))
+        (row, parse_guided_yamazumi_pitch_address(row["pitch_number"]))
         for row in pitch_rows
     ]
     parsed_rows = [(row, parsed) for row, parsed in parsed_rows if parsed]
@@ -9525,12 +10563,41 @@ def _op_id_depth_letter(depth: int) -> str:
     return letters
 
 
-def work_element_op_ids(
+_YAMAZUMI_PITCH_ADDRESS_PATTERN = re.compile(
+    r"^(?P<subline>\d+)-(?P<work_area_letters>[A-Za-z]+)"
+    r"(?P<work_area_number>\d+)-(?P<position>\d+)$"
+)
+
+
+def parse_yamazumi_pitch_address(value: object) -> dict[str, object]:
+    """Decode the approved Pitch convention into natural-order components."""
+    address = str(value or "").strip()
+    match = _YAMAZUMI_PITCH_ADDRESS_PATTERN.fullmatch(address)
+    if not match:
+        return {
+            "address": address,
+            "parsed": False,
+            "subline_number": 0,
+            "work_area_letters": "",
+            "work_area_number": 0,
+            "position_number": 0,
+        }
+    return {
+        "address": address,
+        "parsed": True,
+        "subline_number": int(match.group("subline")),
+        "work_area_letters": match.group("work_area_letters").casefold(),
+        "work_area_number": int(match.group("work_area_number")),
+        "position_number": int(match.group("position")),
+    }
+
+
+def work_element_op_contexts(
     project_id: str,
     scenario_id: str,
     work_element_ids: list[str] | None = None,
-) -> dict[str, str]:
-    """Compute scenario-scoped, human-readable Op IDs without persisting them."""
+) -> dict[str, dict]:
+    """Compute live Op ID labels and physical picker order without persisting them."""
     requested_ids = None
     if work_element_ids is not None:
         requested_ids = list(dict.fromkeys(
@@ -9555,12 +10622,15 @@ def work_element_op_ids(
             work_filter = f" AND id IN ({placeholders})"
             parameters.extend(requested_ids)
         work_rows = conn.execute(
-            f"""SELECT id FROM work_elements
+            f"""SELECT id, sequence AS work_sequence FROM work_elements
                 WHERE project_id=? AND scenario_id=?{work_filter}
                 ORDER BY sequence, id""",
             tuple(parameters),
         ).fetchall()
         work_ids = [str(row["id"]) for row in work_rows]
+        work_sequence_by_id = {
+            str(row["id"]): int(row["work_sequence"] or 0) for row in work_rows
+        }
         if requested_ids is not None and set(work_ids) != set(requested_ids):
             raise ValueError(
                 "One or more Process at a Glance Work Elements are missing or belong to "
@@ -9574,7 +10644,8 @@ def work_element_op_ids(
                       element.process_element_id, element.pitch_id,
                       element.sequence, element.description,
                       area.id AS area_id, area.section_id,
-                      pitch.id AS resolved_pitch_id, pitch.pitch_number
+                      pitch.id AS resolved_pitch_id, pitch.pitch_number,
+                      pitch.sequence AS pitch_sequence
                FROM yamazumi_elements element
                JOIN yamazumi_areas area
                  ON area.id=element.area_id
@@ -9675,34 +10746,82 @@ def work_element_op_ids(
             depth_designator = _op_id_depth_letter(depth) + "".join(branch_path)
         return f"M{mainline_numbers[mainline_id]}S{lineage_number}{depth_designator}"
 
-    result: dict[str, str] = {}
+    section_order = {
+        str(row["id"]): position
+        for position, (_, row) in enumerate(walk.iterrows())
+    } if not walk.empty else {}
+    result: dict[str, dict] = {}
+
+    def incomplete(work_id: str, label: str) -> None:
+        result[work_id] = {
+            "op_id": label,
+            "complete": False,
+            "sort_key": (
+                1,
+                work_sequence_by_id.get(work_id, 0),
+                work_id,
+            ),
+        }
+
     for work_id in work_ids:
         links = links_by_work.get(work_id, [])
         if not links:
-            result[work_id] = "Yamazumi link required"
+            incomplete(work_id, "Yamazumi link required")
             continue
         if len(links) != 1:
-            result[work_id] = "Unique Yamazumi link required"
+            incomplete(work_id, "Unique Yamazumi link required")
             continue
         link = links[0]
         pitch_id = str(link["resolved_pitch_id"] or "").strip()
         if not pitch_id:
-            result[work_id] = "Yamazumi pitch required"
+            incomplete(work_id, "Yamazumi pitch required")
             continue
         section_id = str(link["section_id"] or "").strip()
         if not section_id:
-            result[work_id] = "Fishbone link required"
+            incomplete(work_id, "Fishbone link required")
             continue
         prefix = fishbone_prefix(section_id)
         if not prefix:
-            result[work_id] = "Fishbone hierarchy required"
+            incomplete(work_id, "Fishbone hierarchy required")
             continue
         position = stack_positions.get(str(link["yamazumi_element_id"]))
         if position is None:
-            result[work_id] = "Yamazumi link required"
+            incomplete(work_id, "Yamazumi link required")
             continue
-        result[work_id] = f"{prefix}.{link['pitch_number']}.{position}"
+        pitch_address = parse_yamazumi_pitch_address(link["pitch_number"])
+        result[work_id] = {
+            "op_id": f"{prefix}.{link['pitch_number']}.{position}",
+            "complete": True,
+            "sort_key": (
+                0,
+                section_order.get(section_id, len(section_order)),
+                0 if pitch_address["parsed"] else 1,
+                int(pitch_address["subline_number"]),
+                str(pitch_address["work_area_letters"]),
+                int(pitch_address["work_area_number"]),
+                int(pitch_address["position_number"]),
+                int(link["pitch_sequence"] or 0),
+                int(link["sequence"] or 0),
+                position,
+                work_id,
+            ),
+        }
+
+    ordered_ids = sorted(result, key=lambda work_id: result[work_id]["sort_key"])
+    for sort_order, work_id in enumerate(ordered_ids):
+        result[work_id]["sort_order"] = sort_order
+        result[work_id].pop("sort_key", None)
     return result
+
+
+def work_element_op_ids(
+    project_id: str,
+    scenario_id: str,
+    work_element_ids: list[str] | None = None,
+) -> dict[str, str]:
+    """Compute scenario-scoped, human-readable Op IDs without persisting them."""
+    contexts = work_element_op_contexts(project_id, scenario_id, work_element_ids)
+    return {work_id: str(context["op_id"]) for work_id, context in contexts.items()}
 
 
 def work_element_op_id(project_id: str, scenario_id: str, work_element_id: str) -> str:

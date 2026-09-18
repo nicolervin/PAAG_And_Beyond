@@ -32,8 +32,10 @@ Use **PFMEA** to document scenario-specific failure analysis for Process at a
 Glance work.
 
 - For a new line, choose **Process Function** from the active scenario's Work
-  Elements. The friendly choice includes Work Element, Pitch, and Seq; the
-  internal relationship stays hidden. After the first **Save & Refresh**, the
+  Elements. The friendly choice shows the current derived Op ID followed by
+  the Work Element; the internal relationship stays hidden. Complete choices
+  follow the curated Fishbone and Yamazumi physical order, while incomplete
+  Op IDs remain selectable at the end. After the first **Save & Refresh**, the
   Process Function is locked in the normal editor.
 - **Item #** is read-only. It automatically shows the selected Process
   Function's current Pitch; it is not a separately entered identifier.

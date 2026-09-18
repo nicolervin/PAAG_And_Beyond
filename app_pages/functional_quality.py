@@ -1092,6 +1092,8 @@ render_quality_requirement_type_catalog(
     ),
 )
 
+linked_process_section = st.container()
+
 st.divider()
 section_heading_with_scope("Torque tool details", scope="project")
 st.caption(
@@ -1389,6 +1391,7 @@ if selected_torque_requirement_id and not has_unsaved_edits:
         except ValueError as exc:
             st.error(str(exc))
 
+linked_process_section.__enter__()
 st.divider()
 if active_scenario:
     section_heading_with_scope(
@@ -1882,6 +1885,8 @@ with st.expander(
                 ),
             },
         )
+
+linked_process_section.__exit__(None, None, None)
 
 pending_push = requirements.loc[
     requirements["pending_assignment_count"].fillna(0).astype(int) > 0

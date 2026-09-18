@@ -10,7 +10,9 @@ from zipfile import ZipFile
 
 from streamlit.testing.v1 import AppTest
 
-from utils import store
+import pandas as pd
+
+from utils import pfmea_store, store
 from utils.project_transfer import (
     AUDIT_CATEGORY,
     export_project_package,
@@ -339,7 +341,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
     def test_project_export_ignores_empty_stale_unregistered_tables(self) -> None:
         with store.connection() as conn:
             conn.execute(
-                "CREATE TABLE safety_requirements (id TEXT PRIMARY KEY, project_id TEXT)"
+                "CREATE TABLE stale_unregistered_records (id TEXT PRIMARY KEY, project_id TEXT)"
             )
 
         package = export_project_package(self.project_id, "AppTest smoke")
@@ -348,10 +350,10 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
 
         with store.connection() as conn:
             conn.execute(
-                "INSERT INTO safety_requirements (id, project_id) VALUES (?, ?)",
+                "INSERT INTO stale_unregistered_records (id, project_id) VALUES (?, ?)",
                 ("safety-1", self.project_id),
             )
-        with self.assertRaisesRegex(ValueError, "safety_requirements"):
+        with self.assertRaisesRegex(ValueError, "stale_unregistered_records"):
             export_project_package(self.project_id, "AppTest smoke")
 
     def test_project_import_create_and_replace_remap_complete_graph(self) -> None:
@@ -497,6 +499,21 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 for warning in app.warning
             )
         )
+        with store.connection() as conn:
+            conn.execute(
+                "DELETE FROM assembly_grid_model_mappings WHERE project_id=?",
+                (self.project_id,),
+            )
+            conn.execute(
+                "DELETE FROM assembly_grid_categories WHERE project_id=?",
+                (self.project_id,),
+            )
+
+        self.assertTrue(store.assembly_grid_categories(self.project_id).empty)
+        app.run(timeout=30)
+
+        self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
+        self.assertEqual(list(app.exception), [])
 
     def test_sidebar_fishbone_selector_changes_view_without_audit(self) -> None:
         app = AppTest.from_file(
@@ -961,6 +978,128 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertNotIn(
             "Pair with Fishbone section",
             {widget.label for widget in app.selectbox},
+        )
+
+    def test_safety_smoke_and_live_criticality_tags(self) -> None:
+        work_rows = store.query(
+            """SELECT id FROM work_elements
+               WHERE project_id=? AND scenario_id=? ORDER BY sequence, id LIMIT 2""",
+            (self.project_id, self.scenario_id),
+        )
+        self.assertGreaterEqual(len(work_rows), 2)
+        ctq_work_id = str(work_rows[0]["id"])
+        safety_work_id = str(work_rows[1]["id"])
+        area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Criticality smoke area"
+        )
+        pitch_id = store.add_yamazumi_pitch(
+            self.project_id, area_id, "P-CRIT", "Criticality smoke pitch"
+        )
+        ctq_element_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {"description": "CTQ smoke work", "time_s": 5, "model_variants": ["Base"]},
+        )
+        safety_element_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {"description": "Safety smoke work", "time_s": 5, "model_variants": ["Base"]},
+        )
+        with store.connection() as conn:
+            conn.execute(
+                """UPDATE yamazumi_elements
+                   SET process_element_id=?, process_sync_status='Synced'
+                   WHERE id=?""",
+                (ctq_work_id, ctq_element_id),
+            )
+            conn.execute(
+                """UPDATE yamazumi_elements
+                   SET process_element_id=?, process_sync_status='Synced'
+                   WHERE id=?""",
+                (safety_work_id, safety_element_id),
+            )
+        pfmea_store.save_pfmea_entry_rows(
+            self.project_id,
+            self.scenario_id,
+            ctq_work_id,
+            pd.DataFrame([
+                {
+                    "id": "",
+                    "potential_failure_mode": "CTQ smoke failure",
+                    "class_code": "E",
+                }
+            ]),
+        )
+        store.save_safety_requirements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([
+                {
+                    "id": "",
+                    "work_element_id": safety_work_id,
+                    "requirement_description": "Safety smoke requirement",
+                    "active": True,
+                }
+            ]),
+            "AppTest smoke",
+        )
+
+        safety_app = self.run_page("app_pages/functional_safety.py")
+        self.assertTrue(any(title.value == "Safety" for title in safety_app.title))
+        safety_editor = next(
+            table for table in safety_app.dataframe
+            if "requirement_description" in table.value.columns
+        )
+        self.assertEqual(
+            list(safety_editor.proto.column_order),
+            ["work_element_id", "requirement_description", "active"],
+        )
+
+        process_app = self.run_page("app_pages/process.py")
+        process_table = next(
+            table.value for table in process_app.dataframe
+            if "criticality" in table.value.columns and "op_id" in table.value.columns
+        )
+        self.assertEqual(
+            list(process_table.loc[process_table["id"].eq(ctq_work_id), "criticality"].iloc[0]),
+            ["CTQ"],
+        )
+        self.assertEqual(
+            list(process_table.loc[process_table["id"].eq(safety_work_id), "criticality"].iloc[0]),
+            ["Safety"],
+        )
+
+        yamazumi_app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        yamazumi_app.session_state["project_id"] = self.project_id
+        yamazumi_app.session_state["scenario_id"] = self.scenario_id
+        yamazumi_app.session_state["current_editor"] = "AppTest smoke"
+        yamazumi_app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            yamazumi_app.run(timeout=30)
+        self.assertEqual(list(yamazumi_app.exception), [])
+        yamazumi_tables = [
+            table.value for table in yamazumi_app.dataframe
+            if "criticality" in table.value.columns and "process_element_id" in table.value.columns
+        ]
+        self.assertTrue(yamazumi_tables)
+        linked_rows = pd.concat(yamazumi_tables, ignore_index=True).drop_duplicates(
+            subset=["process_element_id"]
+        )
+        self.assertEqual(
+            list(linked_rows.loc[
+                linked_rows["process_element_id"].astype(str).eq(ctq_work_id), "criticality"
+            ].iloc[0]),
+            ["CTQ"],
+        )
+        self.assertEqual(
+            list(linked_rows.loc[
+                linked_rows["process_element_id"].astype(str).eq(safety_work_id), "criticality"
+            ].iloc[0]),
+            ["Safety"],
         )
 
     def test_empty_yamazumi_area_prompts_once_per_area_visit(self) -> None:
@@ -1468,10 +1607,37 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
     def test_process_at_a_glance_smoke(self) -> None:
         app = self.run_page("app_pages/process.py")
         self.assertTrue(any(title.value == "Process at a Glance" for title in app.title))
-        process_table = next(
-            editor.value
+        process_editor = next(
+            editor
             for editor in app.dataframe
             if "ergonomics_risk" in editor.value.columns
+        )
+        process_table = process_editor.value
+        self.assertEqual(
+            list(process_editor.proto.column_order),
+            [
+                "op_id",
+                "details",
+                "station",
+                "pitch_name",
+                "work_element",
+                "assigned_parts",
+                "handling",
+                "ergonomics_risk",
+                "criticality",
+                "model_applicability",
+                "cycle_time_s",
+                "sequence",
+            ],
+        )
+        self.assertNotIn("status", process_editor.proto.column_order)
+        self.assertEqual(
+            [
+                button.label
+                for button in app.get("download_button")
+                if button.label.startswith("Export filtered")
+            ],
+            ["Export filtered table view", "Export filtered full data"],
         )
         self.assertIn("details", process_table.columns)
         self.assertNotIn(
@@ -1504,6 +1670,39 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 for subheader in app.subheader
             )
         )
+
+    def test_process_exports_compact_and_full_filtered_data_without_internal_ids(self) -> None:
+        with patch("utils.table_ui.dataframe_to_excel", return_value=b"workbook") as export:
+            app = self.run_page("app_pages/process.py")
+
+        process_calls = [
+            call for call in export.call_args_list
+            if len(call.args) > 1 and call.args[1] == "Process plan"
+        ]
+        self.assertEqual(len(process_calls), 2)
+        compact = process_calls[0].args[0]
+        full = process_calls[1].args[0]
+        self.assertEqual(
+            compact.columns.tolist(),
+            [
+                "op_id",
+                "details",
+                "station",
+                "pitch_name",
+                "work_element",
+                "assigned_parts",
+                "handling",
+                "ergonomics_risk",
+                "criticality",
+                "model_applicability",
+                "cycle_time_s",
+                "sequence",
+            ],
+        )
+        self.assertNotIn("id", compact.columns)
+        self.assertNotIn("id", full.columns)
+        self.assertTrue({"station", "status", "sequence"}.issubset(full.columns))
+        self.assertEqual(list(app.exception), [])
 
     def test_process_at_a_glance_displays_live_ergonomics_risk_tag(self) -> None:
         work_element_id = "process-ergo-risk-step"

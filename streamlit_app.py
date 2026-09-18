@@ -3,7 +3,7 @@ import streamlit as st
 from utils.time_units import format_seconds
 from utils.fishbone_ui import render_fishbone_sidebar_context
 from utils.scope_ui import scenario_view_selector
-from utils.store import get_project, init_db, projects
+from utils.store import get_project, init_db, migrate_legacy_yamazumi_flags, projects
 
 
 st.set_page_config(page_title="Process at a Glance", page_icon=":material/precision_manufacturing:", layout="wide")
@@ -37,9 +37,9 @@ st.html(
     div[class*="st-key-assembly_framework_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-fishbone_assignment_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-yamazumi_region_editor"] button[aria-label="Delete row(s)"],
-    div[class*="st-key-yamazumi_flag_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-yamazumi_pitch_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-yamazumi_element_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-safety_requirements_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-existing_process_pairings"] button[aria-label="Delete row(s)"],
     div[class*="st-key-process_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-pfmea_flat_editor"] button[aria-label="Delete row(s)"],
@@ -158,5 +158,15 @@ with st.sidebar:
             help="This name is recorded in table history for this browser session.",
         )
     st.caption("NPI process planning · local prototype")
+
+if st.session_state.get("project_id"):
+    try:
+        migrate_legacy_yamazumi_flags(
+            st.session_state["project_id"],
+            st.session_state.get("current_editor", ""),
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        st.stop()
 
 navigation.run()

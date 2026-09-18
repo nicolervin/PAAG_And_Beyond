@@ -29,7 +29,7 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v25", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v26", inspect.getsource(board_module))
 
     def test_element_flags_are_not_rendered_or_sent_to_card_markup(self) -> None:
         self.assertNotIn(".flags", board_module._CSS)
@@ -66,6 +66,12 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("::-webkit-scrollbar", board_module._CSS)
         self.assertIn(".board.fullscreen-board .board-actions", board_module._CSS)
 
+    def test_board_renders_separate_read_only_criticality_tags(self) -> None:
+        self.assertIn("item.criticality || []", board_module._JS)
+        self.assertIn("criticality-tag", board_module._JS)
+        self.assertIn("Derived from PFMEA Classification", board_module._JS)
+        self.assertIn("Derived from an active Safety requirement", board_module._JS)
+        self.assertNotIn("item.flags", board_module._JS)
     def test_selected_time_unit_scales_labels_and_preserves_height_ratio(self) -> None:
         self.assertIn("const displayTime = value =>", board_module._JS)
         self.assertIn("${formatTime(total)} / ${formatTakt(data.takt)}", board_module._JS)
