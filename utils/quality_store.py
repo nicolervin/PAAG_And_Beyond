@@ -619,7 +619,17 @@ def quality_requirements(project_id: str) -> pd.DataFrame:
                   (SELECT COUNT(*) FROM quality_requirement_torque_details detail
                    WHERE detail.project_id=requirement.project_id
                      AND detail.quality_requirement_id=requirement.id
-                  ) AS torque_detail_count
+                  ) AS torque_detail_count,
+                  ((SELECT COUNT(*) FROM pfmea_pattern_prevention_sources source
+                    JOIN pfmea_patterns pattern ON pattern.id=source.pattern_id
+                    WHERE pattern.project_id=requirement.project_id
+                      AND source.quality_requirement_id=requirement.id)
+                   +
+                   (SELECT COUNT(*) FROM pfmea_pattern_detection_sources source
+                    JOIN pfmea_patterns pattern ON pattern.id=source.pattern_id
+                    WHERE pattern.project_id=requirement.project_id
+                      AND source.quality_requirement_id=requirement.id)
+                  ) AS pfmea_pattern_reference_count
            FROM quality_requirements requirement
            LEFT JOIN quality_requirement_assignments assignment
              ON assignment.quality_requirement_id=requirement.id
@@ -636,6 +646,7 @@ def quality_requirements(project_id: str) -> pd.DataFrame:
             "assignment_count",
             "pending_assignment_count",
             "torque_detail_count",
+            "pfmea_pattern_reference_count",
         ],
     )
 
@@ -879,7 +890,17 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
                        (SELECT COUNT(*) FROM quality_requirement_torque_details detail
                         WHERE detail.project_id=requirement.project_id
                           AND detail.quality_requirement_id=requirement.id
-                       ) AS torque_detail_count
+                       ) AS torque_detail_count,
+                       ((SELECT COUNT(*) FROM pfmea_pattern_prevention_sources source
+                         JOIN pfmea_patterns pattern ON pattern.id=source.pattern_id
+                         WHERE pattern.project_id=requirement.project_id
+                           AND source.quality_requirement_id=requirement.id)
+                        +
+                        (SELECT COUNT(*) FROM pfmea_pattern_detection_sources source
+                         JOIN pfmea_patterns pattern ON pattern.id=source.pattern_id
+                         WHERE pattern.project_id=requirement.project_id
+                           AND source.quality_requirement_id=requirement.id)
+                       ) AS pfmea_pattern_reference_count
                 FROM quality_requirements requirement
                 LEFT JOIN quality_requirement_assignments assignment
                   ON assignment.quality_requirement_id=requirement.id
@@ -893,6 +914,9 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
             )
         linked_count = sum(int(row["assignment_count"]) for row in rows)
         torque_detail_count = sum(int(row["torque_detail_count"]) for row in rows)
+        pattern_reference_count = sum(
+            int(row["pfmea_pattern_reference_count"]) for row in rows
+        )
         if linked_count:
             raise ValueError(
                 f"Remove {linked_count} linked Process requirement assignment(s) before deleting."
@@ -900,6 +924,11 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
         if torque_detail_count:
             raise ValueError(
                 f"Delete {torque_detail_count} linked Torque tool detail record(s) before deleting."
+            )
+        if pattern_reference_count:
+            raise ValueError(
+                f"Remove {pattern_reference_count} PFMEA pattern control reference(s) "
+                "before deleting."
             )
         cursor = conn.execute(
             f"DELETE FROM quality_requirements WHERE project_id=? AND id IN ({placeholders})",

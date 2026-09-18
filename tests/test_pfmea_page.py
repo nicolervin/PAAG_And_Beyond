@@ -17,6 +17,94 @@ PAGE_PATH = Path(__file__).resolve().parents[1] / "app_pages" / "functional_qual
 
 
 class PfmeaPageSmokeTests(unittest.TestCase):
+    def test_pattern_draft_builds_one_graph_with_blank_ratings(self) -> None:
+        step = {
+            "id": "step-1", "pitch": "ST-010", "work_element": "Load housing",
+            "op_id": "M1.01-MAIN.1",
+        }
+        resolved = {
+            "pattern": {
+                "potential_failure_mode": "Part missing", "class_code": "Q"
+            },
+            "effects": [
+                {"id": "effect-1", "effect_description": "Assembly incomplete"},
+                {"id": "effect-2", "effect_description": "Customer complaint"},
+            ],
+            "causes": [{"id": "cause-1", "cause_description": "Part not loaded"}],
+            "actions": [
+                {
+                    "id": "action-1", "pattern_cause_id": "cause-1",
+                    "recommended_action": "Review presentation",
+                }
+            ],
+            "controls_by_cause": {
+                "cause-1": {
+                    "Prevention": ["manual:option-1"],
+                    "Detection": ["quality:assignment-1"],
+                }
+            },
+            "omitted_sources": [],
+        }
+        with patch.object(pfmea_ui, "resolve_pfmea_pattern", return_value=resolved):
+            rows, omitted = pfmea_ui._pattern_draft_rows(
+                "project-1", "scenario-1", "step-1", step, "pattern-1"
+            )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({row["draft_entry_key"] for row in rows}), 1)
+        self.assertEqual(len({row["draft_cause_key"] for row in rows}), 1)
+        self.assertEqual(len({row["draft_action_key"] for row in rows}), 1)
+        self.assertEqual(len({row["draft_effect_key"] for row in rows}), 2)
+        self.assertEqual(rows[0]["prevention_controls"], ["manual:option-1"])
+        self.assertEqual(rows[0]["detection_controls"], ["quality:assignment-1"])
+        for row in rows:
+            self.assertIsNone(row["severity"])
+            self.assertIsNone(row["occurrence"])
+            self.assertIsNone(row["detection"])
+            self.assertIsNone(row["rpn"])
+            self.assertEqual(row["actions_taken"], "")
+            self.assertIsNone(row["resulting_rpn"])
+        self.assertEqual(omitted, [])
+
+    def test_completion_assistant_remains_advisory(self) -> None:
+        row = pd.Series(
+            {
+                "potential_failure_mode": "",
+                "potential_effects": "",
+                "potential_causes": "",
+                "severity": None,
+                "occurrence": None,
+                "detection": None,
+                "classification": "",
+                "prevention_controls": [],
+                "detection_controls": [],
+                "recommended_action": "",
+            }
+        )
+        issues = pfmea_ui._completion_issues(row)
+        self.assertIn("Failure Mode", issues)
+        self.assertIn("Detection", issues)
+        self.assertIn("Recommended Action", issues)
+
+    def test_pfmea_context_columns_are_pinned_and_editor_is_one_row_shorter(self) -> None:
+        source = inspect.getsource(pfmea_ui._render_flat_pfmea_table)
+        process_function_config = source.split(
+            '"process_function": st.column_config.SelectboxColumn(', 1
+        )[1].split('"potential_failure_mode":', 1)[0]
+
+        self.assertIn("pinned=True", process_function_config)
+        self.assertIn("height=754", source)
+        self.assertIn("row_height=96", source)
+        self.assertLess(
+            source.index("_render_control_selection_panel("),
+            source.index("_render_pfmea_duplicate_workflow("),
+        )
+        self.assertLess(
+            source.index("_render_pfmea_duplicate_workflow("),
+            source.index("edited = st.data_editor("),
+        )
+        self.assertNotIn("Free text preserves pasted or saved line breaks.", source)
+        self.assertIn("closed table cell may", source)
+
     def test_pfmea_classification_choices_use_product_safety(self) -> None:
         self.assertEqual(
             pfmea_ui.PFMEA_CLASSIFICATIONS,
@@ -606,7 +694,8 @@ class PfmeaPageSmokeTests(unittest.TestCase):
 
         with (
             patch.object(pfmea_ui.st, "container", return_value=MagicMock()),
-            patch.object(pfmea_ui.st, "subheader"),
+            patch.object(pfmea_ui.st, "markdown"),
+            patch.object(pfmea_ui.st, "caption") as caption,
             patch.object(pfmea_ui.st, "selectbox", side_effect=selectbox),
             patch.object(pfmea_ui.st, "button", return_value=False),
         ):
@@ -625,6 +714,9 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         self.assertNotIn(
             "line-target", str(captured["PFMEA line to duplicate"]["display"])
         )
+        caption_text = " ".join(str(call.args[0]) for call in caption.call_args_list)
+        self.assertIn("Shift+Enter line breaks are preserved", caption_text)
+        self.assertIn("the table shows them as spaces", caption_text)
 
     def test_process_function_only_row_survives_editor_cleanup_and_save_preparation(self) -> None:
         _, step_by_id = self._process_steps()
@@ -722,6 +814,61 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         self.assertEqual(duplicate["actions_taken"], "")
         self.assertTrue(pd.isna(duplicate["resulting_rpn"]))
         self.assertEqual(duplicate["rpn"], 96)
+
+    def test_duplicate_lines_are_inserted_after_source_in_creation_order(self) -> None:
+        rows = pd.DataFrame(
+            [
+                {"id": "line-1", "draft_row_id": "", "potential_failure_mode": "Source"},
+                {"id": "line-2", "draft_row_id": "", "potential_failure_mode": "Next"},
+            ]
+        )
+        first = pd.Series(
+            {"id": "", "draft_row_id": "copy-1", "potential_failure_mode": "First copy"}
+        )
+        second = pd.Series(
+            {"id": "", "draft_row_id": "copy-2", "potential_failure_mode": "Second copy"}
+        )
+
+        updated, anchors = pfmea_ui._insert_pfmea_duplicate(
+            rows, "saved:line-1", first, {}
+        )
+        updated, anchors = pfmea_ui._insert_pfmea_duplicate(
+            updated, "saved:line-1", second, anchors
+        )
+
+        self.assertEqual(
+            updated["potential_failure_mode"].tolist(),
+            ["Source", "First copy", "Second copy", "Next"],
+        )
+        self.assertEqual(anchors["draft:copy-1"], "saved:line-1")
+        self.assertEqual(anchors["draft:copy-2"], "saved:line-1")
+
+    def test_duplicate_of_a_draft_copy_is_inserted_beside_that_copy(self) -> None:
+        rows = pd.DataFrame(
+            [
+                {"id": "line-1", "draft_row_id": "", "potential_failure_mode": "Source"},
+                {"id": "", "draft_row_id": "copy-1", "potential_failure_mode": "First copy"},
+                {"id": "", "draft_row_id": "copy-2", "potential_failure_mode": "Second copy"},
+                {"id": "line-2", "draft_row_id": "", "potential_failure_mode": "Next"},
+            ]
+        )
+        anchors = {
+            "draft:copy-1": "saved:line-1",
+            "draft:copy-2": "saved:line-1",
+        }
+        nested = pd.Series(
+            {"id": "", "draft_row_id": "copy-1a", "potential_failure_mode": "Nested copy"}
+        )
+
+        updated, anchors = pfmea_ui._insert_pfmea_duplicate(
+            rows, "draft:copy-1", nested, anchors
+        )
+
+        self.assertEqual(
+            updated["potential_failure_mode"].tolist(),
+            ["Source", "First copy", "Nested copy", "Second copy", "Next"],
+        )
+        self.assertEqual(anchors["draft:copy-1a"], "draft:copy-1")
 
     def test_recognized_pasted_row_copy_omits_controls_and_completion(self) -> None:
         base = pfmea_ui._frame(
@@ -1191,6 +1338,10 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                 columns=["source_key", "label", "active"]
             )),
             patch.object(pfmea_ui, "pfmea_control_options", return_value=pd.DataFrame()),
+            patch.object(pfmea_ui, "pfmea_patterns", return_value=pd.DataFrame()),
+            patch.object(
+                pfmea_ui, "pfmea_pattern_source_candidates", return_value=pd.DataFrame()
+            ),
             patch.object(
                 pfmea_ui, "_pfmea_export_bytes", return_value=b"workbook"
             ) as export,

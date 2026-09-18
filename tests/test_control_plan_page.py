@@ -14,6 +14,34 @@ PAGE_PATH = Path(__file__).resolve().parents[1] / "app_pages" / "functional_qual
 
 
 class ControlPlanPageTests(unittest.TestCase):
+    def test_flow_filters_keep_operations_and_prune_invalid_edges(self) -> None:
+        projection = {
+            "sections": [
+                {"key": "section:0", "name": "Main Line", "section_type": "Main spine", "depth": 0},
+                {"key": "section:1", "name": "Subassembly", "section_type": "Subassembly", "depth": 1},
+            ],
+            "pitches": [
+                {"key": "pitch:0", "section_key": "section:0", "number": "01-WA1-001"},
+                {"key": "pitch:1", "section_key": "section:1", "number": "02-SA1-001"},
+            ],
+            "operations": [
+                {"key": "operation:0", "section_key": "section:0", "pitch_key": "pitch:0", "op_id": "M1.01-WA1-001.1", "operation": "Load", "station_pitch": "01-WA1-001", "pitch": "01-WA1-001", "pr_number": 1.0},
+                {"key": "operation:1", "section_key": "section:1", "pitch_key": "pitch:1", "op_id": "M1S1a.02-SA1-001.1", "operation": "Build", "station_pitch": "02-SA1-001", "pitch": "02-SA1-001", "pr_number": 2.0},
+            ],
+            "characteristics": [
+                {"key": "characteristic:0", "operation_key": "operation:0", "placement": "product", "classification": "P", "description": "Housing seated"},
+            ],
+            "sequence_edges": [],
+            "feed_edges": [{"from": "operation:1", "to": "operation:0", "kind": "feed"}],
+            "unresolved_feeds": [],
+        }
+        filtered = control_plan_ui._filter_control_plan_flow(
+            projection, section="Main Line", keyword="housing"
+        )
+        self.assertEqual([row["key"] for row in filtered["operations"]], ["operation:0"])
+        self.assertEqual([row["key"] for row in filtered["characteristics"]], ["characteristic:0"])
+        self.assertEqual(filtered["feed_edges"], [])
+
     def test_characteristic_type_labels_preserve_storage_values(self) -> None:
         self.assertEqual(control_plan_ui._characteristic_type_label(""), "Not assigned")
         self.assertEqual(
@@ -78,7 +106,7 @@ class ControlPlanPageTests(unittest.TestCase):
             "source_fingerprint": "fingerprint", "pr_number": 10.0,
             "operation_pr_number": 10.0, "projection_order": 0,
             "characteristic_suffix": None,
-            "station_pitch": "ST-010",
+            "station_pitch": "ST-010", "op_id": "M1.01-ST-010.1",
             "operation": "Install bolt", "classification": "P",
             "characteristic_placement": "Process",
             "product_part_characteristic": "",
@@ -124,11 +152,13 @@ class ControlPlanPageTests(unittest.TestCase):
         )
         self.assertIn("Control Plan characteristics", [heading.value for heading in app.subheader])
         self.assertIn("Save & Refresh", [button.label for button in app.button])
+        self.assertIn("Renumber Pr. Nº by Op ID", [button.label for button in app.button])
         self.assertIn("Control Plan", [tab.label for tab in app.tabs])
-        self.assertEqual(control_plan_ui.VISIBLE_COLUMNS[:3], [
-            "pr_number", "station_pitch", "machine_fixture",
+        self.assertEqual(control_plan_ui.VISIBLE_COLUMNS[:4], [
+            "pr_number", "station_pitch", "op_id", "machine_fixture",
         ])
         self.assertNotIn("station_pitch", control_plan_ui.EDITABLE_COLUMNS)
+        self.assertNotIn("op_id", control_plan_ui.EDITABLE_COLUMNS)
         self.assertIn("characteristic_suffix", control_plan_ui.EDITABLE_COLUMNS)
         source = Path(
             Path(__file__).resolve().parents[1] / "utils" / "control_plan_ui.py"
@@ -182,6 +212,93 @@ class ControlPlanPageTests(unittest.TestCase):
         )
         self.assertEqual(updated.iloc[0]["process_characteristic"], "97.1 Check one")
         self.assertEqual(updated.iloc[1]["process_characteristic"], "97.2 Check two")
+
+    def test_op_id_renumbering_uses_full_projection_order_and_preserves_suffixes(self) -> None:
+        rows = pd.DataFrame(
+            [
+                {
+                    "projection_key": "b-1", "work_element_id": "work-b",
+                    "op_id": "M1.01-WA1-001.1", "projection_order": 0,
+                    "operation_pr_number": 20.0, "pr_number": 20.0,
+                    "operation": "First", "source_description_snapshot": "Check one",
+                    "characteristic_suffix": 4,
+                    "characteristic_placement": "Process",
+                },
+                {
+                    "projection_key": "b-2", "work_element_id": "work-b",
+                    "op_id": "M1.01-WA1-001.1", "projection_order": 1,
+                    "operation_pr_number": 20.0, "pr_number": None,
+                    "operation": "First", "source_description_snapshot": "Check two",
+                    "characteristic_suffix": None,
+                    "characteristic_placement": "Product / Part",
+                },
+                {
+                    "projection_key": "a-1", "work_element_id": "work-a",
+                    "op_id": "M1.01-WA1-001.2", "projection_order": 2,
+                    "operation_pr_number": 10.0, "pr_number": 10.0,
+                    "operation": "Second", "source_description_snapshot": "Check three",
+                    "characteristic_suffix": 2,
+                    "characteristic_placement": "Process",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            control_plan_ui._op_id_number_mismatches(rows),
+            ["work-b", "work-a"],
+        )
+        updated, operation_count = control_plan_ui._renumber_operations_by_op_id(rows)
+
+        self.assertEqual(operation_count, 2)
+        self.assertEqual(
+            updated.loc[updated["work_element_id"].eq("work-b"), "operation_pr_number"].tolist(),
+            [1.0, 1.0],
+        )
+        self.assertEqual(
+            updated.loc[updated["work_element_id"].eq("work-a"), "operation_pr_number"].tolist(),
+            [2.0],
+        )
+        self.assertEqual(float(updated.iloc[0]["characteristic_suffix"]), 4.0)
+        self.assertTrue(pd.isna(updated.iloc[1]["characteristic_suffix"]))
+        self.assertEqual(float(updated.iloc[2]["characteristic_suffix"]), 2.0)
+        self.assertEqual(updated.iloc[0]["process_characteristic"], "1.4 Check one")
+        self.assertEqual(updated.iloc[1]["product_part_characteristic"], "1.1 Check two")
+        self.assertEqual(updated.iloc[2]["process_characteristic"], "2.2 Check three")
+        self.assertEqual(control_plan_ui._op_id_number_mismatches(updated), [])
+
+    def test_op_id_renumber_save_records_one_detailed_audit_event(self) -> None:
+        pending = {
+            "project_id": "project-1", "scenario_id": "scenario-1",
+            "rows": [{"projection_key": "line-1"}],
+            "draft_key": "draft-key", "editor_key": "editor-key",
+            "renumbered_operation_count": 3,
+        }
+        session_state = {
+            "current_editor": "MCP tester",
+            "draft-key": pd.DataFrame(pending["rows"]),
+            "draft-key_op_id_renumber_count": 3,
+        }
+        result = {"row_count": 1, "affected_ids": ["cp-1"], "timestamp": "now"}
+        with (
+            patch.object(control_plan_ui.st, "session_state", session_state),
+            patch.object(
+                control_plan_ui, "save_control_plan_rows", return_value=result
+            ) as save,
+            patch.object(control_plan_ui, "record_audit_event") as audit,
+            patch.object(control_plan_ui, "request_table_editor_reset"),
+            patch.object(control_plan_ui.st, "toast"),
+            patch.object(control_plan_ui.st, "rerun", side_effect=RuntimeError("rerun")),
+            self.assertRaisesRegex(RuntimeError, "rerun"),
+        ):
+            control_plan_ui._persist_control_plan_draft(pending)
+
+        save.assert_called_once()
+        audit.assert_called_once()
+        details = audit.call_args.args[5]
+        self.assertTrue(details["renumbered_by_op_id"])
+        self.assertEqual(details["renumbered_operation_count"], 3)
+        self.assertNotIn("draft-key", session_state)
+        self.assertNotIn("draft-key_op_id_renumber_count", session_state)
 
     def test_grouped_display_blanks_only_repeated_operation_level_values(self) -> None:
         rows = pd.DataFrame(

@@ -27,6 +27,160 @@ types**.
 """
 
 
+PFMEA_QUICK_START = """
+Use **PFMEA** to document scenario-specific failure analysis for Process at a
+Glance work.
+
+1. Choose a **Process Function** for each new PFMEA line.
+2. Enter the Failure Mode, Effects, Causes, and initial ratings.
+3. Choose a Classification and applicable Prevention and Detection controls.
+4. Add Recommended Actions, responsibility, completion evidence, and resulting
+   ratings when they become available.
+5. Use **Recalculate RPN** to refresh the unsaved calculations, then use the
+   shared **Save & Refresh** action to persist the complete draft.
+
+Only Process Function is required to save. The completion assistant identifies
+recommended follow-up without blocking incomplete work.
+"""
+
+
+PFMEA_HELP_SECTIONS = (
+    (
+        "Process Function and table entry",
+        """
+- **Process Function** shows the current derived Op ID followed by the Process
+  at a Glance Work Element. The stable internal Process relationship stays
+  hidden. Complete choices follow Fishbone and Yamazumi physical order;
+  incomplete Op IDs remain selectable afterward.
+- **Item #** is read-only and shows the selected Process Function's current
+  Pitch. It is not a separately entered identifier.
+- Process Function locks after the line's first **Save & Refresh**. On an
+  unsaved draft, changing it recalculates Item # and requires confirmation
+  before incompatible Quality-backed controls are removed.
+- Ordinary editable cells support native spreadsheet copy and paste. Shared
+  Failure Mode, Effect, Cause, rating, or Action values synchronize across
+  repeated flat rows backed by the same PFMEA record.
+- Shift+Enter line breaks remain in saved text, but the closed grid cell may
+  display them as spaces. Use separate PFMEA lines when Failure Modes or Effects
+  need different ratings, controls, Causes, or Actions.
+""",
+    ),
+    (
+        "Ratings, RPN, and Classification",
+        """
+- **Severity**, **Occurrence**, and **Detection** accept whole-number ratings
+  from 1 through 10. The application does not define company scoring guidance.
+- Initial **RPN** is Severity x Occurrence x Detection. Resulting RPN uses the
+  three Resulting ratings. A calculation remains blank until all three inputs
+  exist.
+- **Recalculate RPN** updates the current unsaved display without writing.
+  **Save & Refresh** recalculates and persists the values atomically.
+
+| Code | Meaning |
+| --- | --- |
+| S | Critical to Product Safety |
+| R | Regulatory |
+| E | Engineering CTQ |
+| P | Process CTQ |
+| P- | Process CTQ done at qualification |
+| Q | Quality Specific |
+| E- | Engineering CTQ at qualification |
+| M | Maintain Control |
+| PM | Preventative Maintenance |
+
+Leave Classification blank when the line has not yet been classified.
+""",
+    ),
+    (
+        "Current Process Controls",
+        """
+- Prevention and Detection tags in the grid are read-only summaries. Edit them
+  in **Select Current Process Controls** by choosing the saved or draft Cause.
+- Choices combine published Quality requirements linked to that exact Process
+  Function with active project-wide manual Prevention or Detection options.
+- Use **Copy Prevention**, **Copy Detection**, or **Copy both**, select another
+  Cause, and use **Paste to selected Cause**. Paste replaces only the copied
+  list or lists while preserving source order.
+- Same-step Quality controls and active manual options apply directly.
+  Cross-Process Quality controls require compatible-only confirmation;
+  inactive or unavailable sources are disclosed and omitted.
+- A Detection-control change preserves the Detection rating and marks it for
+  review. All control edits stay in the PFMEA draft until Save & Refresh.
+""",
+    ),
+    (
+        "Patterns, duplication, and faster entry",
+        """
+- **Add PFMEA lines** can stage blank or patterned graphs for one or several
+  Process Functions. Its preview shows Item #, Process context, analysis counts,
+  compatible controls, and any omitted sources before staging.
+- A project-wide PFMEA pattern can suggest Failure Mode, Effects, Causes,
+  Recommended Actions, Classification, and ordered control sources. It never
+  supplies ratings, RPN, responsibility, completion evidence, or resulting
+  values, and generated PFMEA rows retain no pattern lineage.
+- **Duplicate selected PFMEA line** creates an independent unsaved line next to
+  the source. It copies approved analysis, initial ratings, Classification,
+  Actions, and compatible active controls while clearing Actions Taken and all
+  resulting ratings/RPN values.
+- **Save selected PFMEA line as pattern** captures one saved graph after a
+  preview. It excludes ratings, completion evidence, resulting values, and
+  inactive controls.
+""",
+    ),
+    (
+        "Review tools",
+        """
+- The read-only **PFMEA completion assistant** lists missing Failure Mode,
+  Effect, Cause, ratings, Classification, controls, and Recommended Action. Use
+  **Next incomplete line** to focus one result and **Show all lines** to clear
+  that focus.
+- **Saved RPN by PFMEA line** charts persisted Effect-Cause risk lines. It does
+  not apply approval thresholds or company risk colors.
+- **High-risk PFMEA lines** shows a line when either RPN or Resulting RPN is
+  greater than the entered threshold, ordered by the highest current value.
+  The threshold is a read-only view filter, not a stored approval limit.
+- **Process source review** appears when current Process information differs
+  from the reviewed PFMEA snapshot. Accepting current sources preserves the
+  PFMEA analysis and records the review in History.
+""",
+    ),
+    (
+        "Saving, deletion, export, and History",
+        """
+- **Undo** discards staged table, control, duplication, and pattern-generated
+  changes. **Save & Refresh** validates and saves the complete PFMEA draft in
+  one transaction with Current editor attribution.
+- **Export filtered rows** creates an Excel file from the current filtered
+  view with friendly control labels and no internal IDs.
+- Select saved rows with the native left-side checkboxes and use the native
+  **Delete row(s)** toolbar action. The confirmation explains that child
+  Effects, Causes, controls, risk rows, Actions, and dependent Control Plan
+  working-draft items will be removed; Process and Quality records remain.
+- Persistent saves, deletions, source reviews, pattern changes, and manual
+  control-catalog changes appear in the existing PFMEA History group. Filters,
+  previews, completion guidance, and other draft-only actions create no event.
+""",
+    ),
+    (
+        "Manage reusable options",
+        """
+- **Manage PFMEA control options** maintains the project-wide Prevention and
+  Detection manual catalogs. Options can be added, renamed, deactivated,
+  filtered, exported, saved, and relationship-safely deleted.
+- Deactivation preserves existing selections but prevents new use. Confirmed
+  deletion discloses affected selections and marks affected Causes for review.
+  An option referenced by a pattern cannot be deleted until that reference is
+  removed.
+- **Manage PFMEA patterns** maintains reusable pattern headers, Effects,
+  Causes, Recommended Actions, Classification suggestions, and ordered control
+  suggestions. It provides filtering, export, Undo, Save & Refresh, and
+  confirmed deletion. Deleting a pattern never deletes PFMEA rows previously
+  created from it.
+""",
+    ),
+)
+
+
 PFMEA_HELP = """
 Use **PFMEA** to document scenario-specific failure analysis for Process at a
 Glance work.
@@ -71,6 +225,12 @@ Glance work.
 
 Leave Classification blank when the line has not yet been classified.
 """
+
+# Backward-compatible combined content for read-only consumers outside the
+# dialog. The dialog itself renders the quick start and collapsed sections.
+PFMEA_HELP = PFMEA_QUICK_START + "\n\n" + "\n\n".join(
+    f"### {title}\n{content}" for title, content in PFMEA_HELP_SECTIONS
+)
 
 
 CONTROL_PLAN_HELP = """

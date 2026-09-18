@@ -100,6 +100,12 @@ class PfmeaStoreTests(unittest.TestCase):
                 "pfmea_detection_selections",
                 "pfmea_risk_rows",
                 "pfmea_actions",
+                "pfmea_patterns",
+                "pfmea_pattern_effects",
+                "pfmea_pattern_causes",
+                "pfmea_pattern_actions",
+                "pfmea_pattern_prevention_sources",
+                "pfmea_pattern_detection_sources",
             },
         )
 

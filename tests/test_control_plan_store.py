@@ -659,6 +659,14 @@ class ControlPlanStoreTests(unittest.TestCase):
             projected_operations["operation_pr_number"].tolist(),
             [10.0, 20.0, 30.0, 40.0],
         )
+        self.assertEqual(
+            projected_operations["op_id"].tolist()[:3],
+            [
+                "M1.01-WA1-001.1",
+                "M1.01-WA2-001.1",
+                "M1.01-WA10-001.1",
+            ],
+        )
         self.assertEqual(item_count_after, item_count_before)
 
         with store.connection() as conn:
@@ -686,6 +694,50 @@ class ControlPlanStoreTests(unittest.TestCase):
         self.assertEqual(projection.iloc[0]["operation_pr_number"], 10.0)
         after = self.conn.execute("SELECT COUNT(*) FROM control_plan_items").fetchone()[0]
         self.assertEqual(before, after)
+
+    def test_flow_projection_includes_every_process_step_and_active_characteristics(self) -> None:
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation,
+                    description, updated_at)
+                   VALUES ('plain-work', ?, ?, 30, 'ST-030', 'Pack unit',
+                           'Pack unit', ?)""",
+                (self.project_id, self.scenario_id, timestamp),
+            )
+        before = self.conn.total_changes
+        projection = control_plan_store.control_plan_flow_projection(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(len(projection["operations"]), 2)
+        self.assertEqual(
+            [row["operation"] for row in projection["operations"]],
+            ["Install pump", "Pack unit"],
+        )
+        self.assertEqual(len(projection["characteristics"]), 1)
+        characteristic = projection["characteristics"][0]
+        self.assertEqual(characteristic["classification"], "P")
+        self.assertEqual(characteristic["description"], "Pump bolt torque")
+        self.assertIn("Prevention", characteristic["source_evidence"])
+        self.assertEqual(before, self.conn.total_changes)
+
+        active = control_plan_store.control_plan_projection(
+            self.project_id, self.scenario_id
+        )
+        control_plan_store.save_control_plan_rows(
+            self.project_id, self.scenario_id, active
+        )
+        control_plan_store.exclude_control_plan_projection_keys(
+            self.project_id,
+            self.scenario_id,
+            active["projection_key"].astype(str).tolist(),
+        )
+        excluded = control_plan_store.control_plan_flow_projection(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(len(excluded["operations"]), 2)
+        self.assertEqual(excluded["characteristics"], [])
 
     def test_process_number_accepts_blank_and_negative_but_rejects_nonfinite(self) -> None:
         self.assertIsNone(control_plan_store.normalize_control_plan_pr_number(""))

@@ -38,6 +38,15 @@ from utils.pfmea_store import (
     save_pfmea_flat_rows,
     save_pfmea_control_option_rows,
 )
+from utils.pfmea_pattern_store import (
+    capture_pfmea_entry_as_pattern,
+    delete_pfmea_patterns,
+    pfmea_pattern_graph,
+    pfmea_pattern_source_candidates,
+    pfmea_patterns,
+    resolve_pfmea_pattern,
+    save_pfmea_pattern_graph,
+)
 from utils.scope_ui import scope_badge
 from utils.store import record_audit_event
 from utils.table_filters import (
@@ -64,6 +73,7 @@ PENDING_REVIEW_KEY = "pfmea_pending_source_review"
 PENDING_OPTION_DELETE_KEY = "pfmea_pending_option_delete"
 PENDING_PROCESS_CHANGE_KEY = "pfmea_pending_process_change"
 PENDING_CONTROL_PASTE_KEY = "pfmea_pending_control_paste"
+PENDING_PATTERN_DELETE_KEY = "pfmea_pending_pattern_delete"
 
 PFMEA_CONTROL_COLUMNS = {
     "prevention_controls": "Prevention",
@@ -93,6 +103,8 @@ PFMEA_FLAT_COLUMNS = {
     "id": "string", "entry_id": "string", "effect_id": "string",
     "cause_id": "string", "risk_row_id": "string", "action_id": "string",
     "draft_row_id": "string",
+    "draft_entry_key": "string", "draft_effect_key": "string",
+    "draft_cause_key": "string", "draft_action_key": "string",
     "work_element_id": "string", "item_number": "string",
     "process_function": "string", "potential_failure_mode": "string",
     "potential_effects": "string", "severity": "float64",
@@ -884,6 +896,53 @@ def _duplicate_pfmea_line(
     return duplicate, omitted
 
 
+def _insert_pfmea_duplicate(
+    rows: pd.DataFrame,
+    source_key: str,
+    duplicate: pd.Series,
+    duplicate_anchors: dict[str, str],
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Insert a draft copy after its source and any earlier session copies."""
+    identities = rows.apply(_pfmea_row_identity, axis=1).tolist()
+    try:
+        source_position = identities.index(source_key)
+    except ValueError as exc:
+        raise ValueError(
+            "The selected PFMEA line changed. Refresh and choose the line again."
+        ) from exc
+
+    def belongs_to_source(identity: str) -> bool:
+        visited: set[str] = set()
+        current = identity
+        while current and current not in visited:
+            visited.add(current)
+            current = duplicate_anchors.get(current, "")
+            if current == source_key:
+                return True
+        return False
+
+    insert_position = source_position + 1
+    while (
+        insert_position < len(identities)
+        and belongs_to_source(identities[insert_position])
+    ):
+        insert_position += 1
+
+    duplicate_frame = pd.DataFrame([duplicate]).reindex(columns=rows.columns)
+    updated = pd.concat(
+        [
+            rows.iloc[:insert_position],
+            duplicate_frame,
+            rows.iloc[insert_position:],
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    updated_anchors = dict(duplicate_anchors)
+    updated_anchors[_pfmea_row_identity(duplicate)] = source_key
+    return updated, updated_anchors
+
+
 def _initial_rpn_preview(effects: pd.DataFrame, causes: pd.DataFrame) -> pd.DataFrame:
     columns = {
         "effect_description": "string",
@@ -1000,13 +1059,44 @@ def _set_forced_copy_ids(
         st.session_state.pop(key, None)
 
 
+def _duplicate_anchors(project_id: str, scenario_id: str) -> dict[str, str]:
+    key = _pfmea_copy_state_key("duplicate_anchors", project_id, scenario_id)
+    value = st.session_state.get(key, {})
+    if not isinstance(value, dict):
+        return {}
+    return {
+        _plain_text(child): _plain_text(parent)
+        for child, parent in value.items()
+        if _plain_text(child) and _plain_text(parent)
+    }
+
+
+def _set_duplicate_anchors(
+    project_id: str, scenario_id: str, anchors: dict[str, str]
+) -> None:
+    key = _pfmea_copy_state_key("duplicate_anchors", project_id, scenario_id)
+    if anchors:
+        st.session_state[key] = dict(anchors)
+    else:
+        st.session_state.pop(key, None)
+
+
 def _clear_pfmea_copy_state(project_id: str, scenario_id: str) -> None:
     for kind in (
-        "force_new_drafts", "copy_notice", "shared_edit_notice", "shared_edit_error",
+        "force_new_drafts", "duplicate_anchors", "copy_notice", "shared_edit_notice",
+        "shared_edit_error",
         "control_paste_warning", "control_paste_instruction", "control_paste_error",
         "control_clipboard",
     ):
         st.session_state.pop(_pfmea_copy_state_key(kind, project_id, scenario_id), None)
+    staging_prefixes = (
+        f"pfmea_pattern_choice_{project_id}_{scenario_id}_",
+        f"pfmea_pattern_steps_{project_id}_{scenario_id}",
+        f"pfmea_completion_focus_{project_id}_{scenario_id}",
+    )
+    for key in list(st.session_state):
+        if any(str(key).startswith(prefix) for prefix in staging_prefixes):
+            st.session_state.pop(key, None)
     pending = st.session_state.get(PENDING_PROCESS_CHANGE_KEY) or {}
     if (
         str(pending.get("project_id") or "") == project_id
@@ -1337,6 +1427,12 @@ def _confirm_control_option_delete() -> None:
     )
     for label in impact.get("labels", []):
         st.write(f"- {label}")
+    pattern_reference_count = int(impact.get("pattern_reference_count", 0))
+    if pattern_reference_count:
+        st.error(
+            f"Remove {pattern_reference_count} PFMEA pattern control reference(s) "
+            "before deleting these options."
+        )
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_pfmea_control_option_delete"):
         editor_key = str(pending.get("editor_key") or "")
@@ -1348,6 +1444,7 @@ def _confirm_control_option_delete() -> None:
         "Delete",
         type="primary",
         icon=":material/delete:",
+        disabled=bool(pattern_reference_count),
         key="destructive_confirm_pfmea_control_option_delete",
     ):
         try:
@@ -2242,32 +2339,41 @@ def _render_pfmea_duplicate_workflow(
             sources.setdefault(identity, row)
     if not sources:
         return
-    with st.container(border=True):
-        st.subheader("Duplicate PFMEA line")
-        source_key = st.selectbox(
-            "PFMEA line to duplicate",
-            options=list(sources),
-            format_func=lambda key: _pfmea_line_label(sources[key], step_by_id),
-            key=f"pfmea_duplicate_source_{project_id}_{scenario_id}",
-            help=(
-                "Creates one independent unsaved line. Actions Taken and resulting ratings "
-                "are cleared; use Save & Refresh when the draft is ready."
-            ),
+    with st.container(border=True, gap="small"):
+        st.markdown("**Duplicate PFMEA line**")
+        st.caption(
+            "Use a separate PFMEA line when a distinct Failure Mode or Effect needs its "
+            "own rating, cause, controls, or actions. Shift+Enter line breaks are preserved "
+            "in saved text, but the table shows them as spaces after the cell editor closes."
         )
-        if st.button(
-            "Duplicate selected PFMEA line",
-            icon=":material/content_copy:",
-            key=f"pfmea_duplicate_line_{project_id}_{scenario_id}",
-        ):
+        with st.container(horizontal=True, vertical_alignment="bottom"):
+            source_key = st.selectbox(
+                "PFMEA line to duplicate",
+                options=list(sources),
+                format_func=lambda key: _pfmea_line_label(sources[key], step_by_id),
+                key=f"pfmea_duplicate_source_{project_id}_{scenario_id}",
+                help=(
+                    "Creates a separate, independent unsaved PFMEA line. "
+                    "It copies active controls but clears Actions Taken and resulting ratings."
+                ),
+            )
+            duplicate_clicked = st.button(
+                "Duplicate selected PFMEA line",
+                icon=":material/content_copy:",
+                key=f"pfmea_duplicate_line_{project_id}_{scenario_id}",
+            )
+        if duplicate_clicked:
             duplicate, omitted = _duplicate_pfmea_line(
                 sources[source_key], project_id, scenario_id
             )
-            updated = pd.concat(
-                [rows, pd.DataFrame([duplicate]).reindex(columns=rows.columns)],
-                ignore_index=True,
-                sort=False,
+            updated, anchors = _insert_pfmea_duplicate(
+                rows,
+                source_key,
+                duplicate,
+                _duplicate_anchors(project_id, scenario_id),
             )
             st.session_state[draft_key] = _recalculate_flat_rpn(updated)
+            _set_duplicate_anchors(project_id, scenario_id, anchors)
             forced = _forced_copy_ids(project_id, scenario_id)
             forced.add(_plain_text(duplicate.get("draft_row_id")))
             _set_forced_copy_ids(project_id, scenario_id, forced)
@@ -2285,6 +2391,845 @@ def _render_pfmea_duplicate_workflow(
             request_table_editor_reset(editor_key)
             st.toast("Created an unsaved PFMEA line duplicate", icon=":material/content_copy:")
             st.rerun()
+
+
+def _empty_pfmea_draft_row(work_element_id: str, step: dict | pd.Series) -> dict:
+    row = {column: None for column in PFMEA_FLAT_COLUMNS}
+    for column, dtype in PFMEA_FLAT_COLUMNS.items():
+        if dtype == "string":
+            row[column] = ""
+        elif dtype == "list":
+            row[column] = []
+        elif dtype == "bool":
+            row[column] = False
+    row.update(
+        draft_row_id=str(uuid4()),
+        work_element_id=work_element_id,
+        item_number=_plain_text(step.get("pitch")),
+        process_function=_process_step_option_label(step),
+    )
+    return row
+
+
+def _pattern_draft_rows(
+    project_id: str,
+    scenario_id: str,
+    work_element_id: str,
+    step: dict | pd.Series,
+    pattern_id: str,
+) -> tuple[list[dict], list[str]]:
+    resolved = resolve_pfmea_pattern(
+        project_id, scenario_id, work_element_id, pattern_id
+    )
+    pattern = resolved["pattern"]
+    effects = resolved["effects"] or [None]
+    causes = resolved["causes"] or [None]
+    actions = resolved["actions"]
+    actions_by_cause: dict[str, list[dict]] = {}
+    shared_actions: list[dict] = []
+    for action in actions:
+        cause_id = _plain_text(action.get("pattern_cause_id"))
+        if cause_id:
+            actions_by_cause.setdefault(cause_id, []).append(action)
+        else:
+            shared_actions.append(action)
+    graph_key = str(uuid4())
+    effect_keys = {
+        _plain_text(effect.get("id")): f"{graph_key}:effect:{uuid4()}"
+        for effect in effects if effect
+    }
+    cause_keys = {
+        _plain_text(cause.get("id")): f"{graph_key}:cause:{uuid4()}"
+        for cause in causes if cause
+    }
+    action_keys = {
+        _plain_text(action.get("id")): f"{graph_key}:action:{uuid4()}"
+        for action in actions
+    }
+    rows: list[dict] = []
+    for effect in effects:
+        effect_id = _plain_text(effect.get("id")) if effect else ""
+        for cause in causes:
+            cause_id = _plain_text(cause.get("id")) if cause else ""
+            applicable_actions = [
+                *shared_actions,
+                *actions_by_cause.get(cause_id, []),
+            ] or [None]
+            for action in applicable_actions:
+                row = _empty_pfmea_draft_row(work_element_id, step)
+                controls = (resolved["controls_by_cause"].get(cause_id) or {})
+                row.update(
+                    draft_entry_key=graph_key,
+                    draft_effect_key=effect_keys.get(effect_id, ""),
+                    draft_cause_key=cause_keys.get(cause_id, ""),
+                    draft_action_key=(
+                        action_keys.get(_plain_text(action.get("id")), "")
+                        if action else ""
+                    ),
+                    potential_failure_mode=_plain_text(
+                        pattern.get("potential_failure_mode")
+                    ),
+                    classification=_plain_text(pattern.get("class_code")),
+                    potential_effects=(
+                        _plain_text(effect.get("effect_description")) if effect else ""
+                    ),
+                    potential_causes=(
+                        _plain_text(cause.get("cause_description")) if cause else ""
+                    ),
+                    prevention_controls=_list_values(controls.get("Prevention")),
+                    detection_controls=_list_values(controls.get("Detection")),
+                    recommended_action=(
+                        _plain_text(action.get("recommended_action")) if action else ""
+                    ),
+                )
+                rows.append(row)
+    return rows, list(resolved["omitted_sources"])
+
+
+def _render_add_pfmea_lines(
+    project_id: str,
+    scenario_id: str,
+    rows: pd.DataFrame,
+    draft_key: str,
+    editor_key: str,
+    step_by_id: dict[str, dict | pd.Series],
+) -> None:
+    patterns = pfmea_patterns(project_id, active_only=True)
+    pattern_by_id = {
+        str(row["id"]): row for _, row in patterns.iterrows()
+    }
+    pattern_options = ["", *pattern_by_id]
+    with st.expander("Add PFMEA lines", icon=":material/add:"):
+        st.caption(
+            "Choose Process Functions in live Op ID order, then stage either a blank "
+            "line or a reviewed project pattern. Ratings always start blank."
+        )
+        selected_steps = st.multiselect(
+            "Process Functions",
+            options=list(step_by_id),
+            format_func=lambda value: _process_step_option_label(step_by_id[value]),
+            key=f"pfmea_pattern_steps_{project_id}_{scenario_id}",
+            help="Selecting a Process Function stages no data until you choose Stage PFMEA lines.",
+        )
+        selections: list[dict] = []
+        for work_element_id in selected_steps:
+            step = step_by_id[work_element_id]
+            pattern_id = st.selectbox(
+                _process_step_option_label(step),
+                options=pattern_options,
+                format_func=lambda value: (
+                    "Blank PFMEA line" if not value
+                    else str(pattern_by_id[value]["label"])
+                ),
+                key=f"pfmea_pattern_choice_{project_id}_{scenario_id}_{work_element_id}",
+                help="The selected pattern is previewed and remains unsaved until Save & Refresh.",
+            )
+            selections.append(
+                {"work_element_id": work_element_id, "pattern_id": pattern_id}
+            )
+
+        preview_rows: list[dict] = []
+        staged_groups: list[list[dict]] = []
+        omitted_messages: list[str] = []
+        for selection in selections:
+            work_element_id = selection["work_element_id"]
+            step = step_by_id[work_element_id]
+            pattern_id = selection["pattern_id"]
+            if not pattern_id:
+                staged = [_empty_pfmea_draft_row(work_element_id, step)]
+                preview_rows.append(
+                    {
+                        "Item #": _plain_text(step.get("pitch")) or "Unassigned",
+                        "Process Function": _process_step_option_label(step),
+                        "Pattern": "Blank PFMEA line",
+                        "Failure Mode": "",
+                        "Effects": 0,
+                        "Causes": 0,
+                        "Actions": 0,
+                        "Prevention suggestions": "",
+                        "Detection suggestions": "",
+                    }
+                )
+            else:
+                try:
+                    staged, omitted = _pattern_draft_rows(
+                        project_id, scenario_id, work_element_id, step, pattern_id
+                    )
+                    graph = pfmea_pattern_graph(project_id, pattern_id)
+                    staged_frame = _frame(pd.DataFrame(staged), PFMEA_FLAT_COLUMNS)
+                    control_labels = _control_label_map(
+                        project_id, scenario_id, staged_frame
+                    )
+
+                    def _preview_controls(column: str) -> str:
+                        ordered = list(
+                            dict.fromkeys(
+                                source
+                                for values in staged_frame[column]
+                                for source in _list_values(values)
+                            )
+                        )
+                        return "; ".join(
+                            control_labels.get(source, "Unavailable control")
+                            for source in ordered
+                        )
+
+                    preview_rows.append(
+                        {
+                            "Item #": _plain_text(step.get("pitch")) or "Unassigned",
+                            "Process Function": _process_step_option_label(step),
+                            "Pattern": str(pattern_by_id[pattern_id]["label"]),
+                            "Failure Mode": _plain_text(
+                                graph["pattern"].get("potential_failure_mode")
+                            ),
+                            "Effects": len(graph["effects"]),
+                            "Causes": len(graph["causes"]),
+                            "Actions": len(graph["actions"]),
+                            "Prevention suggestions": _preview_controls(
+                                "prevention_controls"
+                            ),
+                            "Detection suggestions": _preview_controls(
+                                "detection_controls"
+                            ),
+                        }
+                    )
+                    omitted_messages.extend(
+                        f"{_process_step_option_label(step)}: {message}"
+                        for message in omitted
+                    )
+                except ValueError as exc:
+                    staged = []
+                    omitted_messages.append(
+                        f"{_process_step_option_label(step)}: {exc}"
+                    )
+            staged_groups.append(staged)
+
+        if preview_rows:
+            st.dataframe(pd.DataFrame(preview_rows), hide_index=True)
+        if omitted_messages:
+            st.warning(
+                "These unavailable suggestions will not be staged:\n\n"
+                + "\n".join(f"- {message}" for message in omitted_messages)
+            )
+        if st.button(
+            "Stage PFMEA lines",
+            icon=":material/add_notes:",
+            type="primary",
+            disabled=not selections or any(not group for group in staged_groups),
+            key=f"pfmea_stage_patterns_{project_id}_{scenario_id}",
+        ):
+            additions = [row for group in staged_groups for row in group]
+            updated = _deduplicate_pfmea_draft_rows(
+                pd.concat(
+                    [rows, _frame(pd.DataFrame(additions), PFMEA_FLAT_COLUMNS)],
+                    ignore_index=True,
+                    sort=False,
+                )
+            )
+            st.session_state[draft_key] = updated
+            _clear_control_clipboard(project_id, scenario_id)
+            request_table_editor_reset(editor_key)
+            st.toast(
+                f"Staged {len(selections)} independent PFMEA graph(s)",
+                icon=":material/add_notes:",
+            )
+            st.rerun()
+
+
+def _completion_issues(row: pd.Series) -> list[str]:
+    issues: list[str] = []
+    for column, label in [
+        ("potential_failure_mode", "Failure Mode"),
+        ("potential_effects", "Effect"),
+        ("potential_causes", "Cause"),
+    ]:
+        if not _plain_text(row.get(column)):
+            issues.append(label)
+    for column, label in [
+        ("severity", "Severity"),
+        ("occurrence", "Occurrence"),
+        ("detection", "Detection"),
+    ]:
+        if pd.isna(row.get(column)):
+            issues.append(label)
+    if not _plain_text(row.get("classification")):
+        issues.append("Classification")
+    if not _list_values(row.get("prevention_controls")):
+        issues.append("Prevention controls")
+    if not _list_values(row.get("detection_controls")):
+        issues.append("Detection controls")
+    if not _plain_text(row.get("recommended_action")):
+        issues.append("Recommended Action")
+    return issues
+
+
+def _render_pfmea_completion_assistant(
+    project_id: str,
+    scenario_id: str,
+    rows: pd.DataFrame,
+    step_by_id: dict[str, dict | pd.Series],
+) -> str:
+    focus_key = f"pfmea_completion_focus_{project_id}_{scenario_id}"
+    incomplete: list[tuple[str, pd.Series, list[str]]] = []
+    for _, row in rows.iterrows():
+        identity = _pfmea_row_identity(row)
+        issues = _completion_issues(row)
+        if identity and issues:
+            incomplete.append((identity, row, issues))
+    with st.expander("PFMEA completion assistant", icon=":material/checklist:"):
+        st.caption(
+            "Advisory only. Process Function remains the only field required to save."
+        )
+        if not incomplete:
+            st.success("Every visible PFMEA line has the reviewed analysis fields listed here.")
+        else:
+            st.write(f"{len(incomplete)} line(s) have advisory follow-up items.")
+            preview = pd.DataFrame(
+                [
+                    {
+                        "Item #": _plain_text(row.get("item_number")) or "Unassigned",
+                        "Process Function": _pfmea_line_label(row, step_by_id),
+                        "Follow-up": ", ".join(issues),
+                    }
+                    for _, row, issues in incomplete[:20]
+                ]
+            )
+            st.dataframe(preview, hide_index=True)
+            actions = st.container(horizontal=True)
+            if actions.button(
+                "Next incomplete line",
+                icon=":material/skip_next:",
+                key=f"pfmea_next_incomplete_{project_id}_{scenario_id}",
+            ):
+                identities = [identity for identity, _, _ in incomplete]
+                current = _plain_text(st.session_state.get(focus_key))
+                next_index = (identities.index(current) + 1) if current in identities else 0
+                st.session_state[focus_key] = identities[next_index % len(identities)]
+                st.rerun()
+            if actions.button(
+                "Show all lines",
+                icon=":material/view_list:",
+                key=f"pfmea_show_all_completion_{project_id}_{scenario_id}",
+            ):
+                st.session_state.pop(focus_key, None)
+                st.rerun()
+    focus = _plain_text(st.session_state.get(focus_key))
+    valid = {identity for identity, _, _ in incomplete}
+    if focus and focus not in valid:
+        st.session_state.pop(focus_key, None)
+        return ""
+    return focus
+
+
+def _source_key_from_pattern_row(row: pd.Series | dict) -> str:
+    source_type = _plain_text(row.get("source_type"))
+    source_id = _plain_text(row.get("source_id"))
+    return f"{source_type}:{source_id}" if source_type and source_id else ""
+
+
+def _manager_lines(value: str) -> list[str]:
+    return [line.strip() for line in str(value or "").splitlines() if line.strip()]
+
+
+def _render_pattern_manager(
+    project_id: str,
+    scenario_id: str,
+    stored_rows: pd.DataFrame,
+    draft_key: str,
+    pfmea_editor_key: str,
+) -> None:
+    with st.expander("Manage PFMEA patterns", icon=":material/library_books:"):
+        badge_row = st.container(horizontal=True)
+        scope_badge(badge_row, scope="project")
+        patterns = pfmea_patterns(project_id)
+        st.caption(
+            "Patterns store reusable analysis and source suggestions. They never store "
+            "ratings, completion evidence, or a relationship to generated PFMEA rows."
+        )
+        pattern_editor_key = apply_pending_table_editor_reset(
+            f"pfmea_patterns_editor_{project_id}"
+        )
+        catalog_rows = patterns[
+            [
+                "id", "label", "active", "potential_failure_mode", "class_code",
+                "effect_count", "cause_count", "action_count", "control_source_count",
+            ]
+        ].copy() if not patterns.empty else pd.DataFrame(
+            {
+                "id": pd.Series(dtype="string"),
+                "label": pd.Series(dtype="string"),
+                "active": pd.Series(dtype="bool"),
+                "potential_failure_mode": pd.Series(dtype="string"),
+                "class_code": pd.Series(dtype="string"),
+                "effect_count": pd.Series(dtype="int64"),
+                "cause_count": pd.Series(dtype="int64"),
+                "action_count": pd.Series(dtype="int64"),
+                "control_source_count": pd.Series(dtype="int64"),
+            }
+        )
+        visible = filter_table(
+            catalog_rows,
+            key=f"pfmea_patterns_filters_{project_id}",
+            dropdown_columns=["active", "class_code"],
+            search_columns=["label", "potential_failure_mode"],
+            labels={"class_code": "Classification"},
+            reset_widget_keys=[pattern_editor_key],
+        )
+        st.data_editor(
+            visible,
+            key=pattern_editor_key,
+            num_rows="delete",
+            hide_index=True,
+            disabled=list(visible.columns),
+            column_config={
+                "id": None,
+                "label": "Label",
+                "active": "Active",
+                "potential_failure_mode": "Potential Failure Mode",
+                "class_code": "Suggested Classification",
+                "effect_count": "Effects",
+                "cause_count": "Causes",
+                "action_count": "Actions",
+                "control_source_count": "Control suggestions",
+            },
+        )
+        st.download_button(
+            "Export filtered patterns",
+            data=dataframe_to_excel(
+                visible.drop(columns=["id"], errors="ignore"), "PFMEA patterns"
+            ),
+            file_name="pfmea_patterns_filtered.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            icon=":material/download:",
+            key=f"pfmea_patterns_export_{project_id}",
+        )
+        selected_for_delete = native_selected_rows(visible, editor_key=pattern_editor_key)
+        if not selected_for_delete.empty:
+            st.session_state[PENDING_PATTERN_DELETE_KEY] = {
+                "project_id": project_id,
+                "pattern_ids": selected_for_delete["id"].astype(str).tolist(),
+                "labels": selected_for_delete["label"].astype(str).tolist(),
+                "editor_key": pattern_editor_key,
+            }
+            stage_native_delete_confirmation(pattern_editor_key)
+
+        pattern_by_id = {str(row["id"]): row for _, row in patterns.iterrows()}
+        selected_pattern_id = st.selectbox(
+            "Pattern to edit",
+            options=["", *pattern_by_id],
+            format_func=lambda value: (
+                "Create new pattern" if not value else str(pattern_by_id[value]["label"])
+            ),
+            key=f"pfmea_pattern_manager_selection_{project_id}",
+        )
+        graph = (
+            pfmea_pattern_graph(project_id, selected_pattern_id)
+            if selected_pattern_id else {
+                "pattern": {}, "effects": pd.DataFrame(), "causes": pd.DataFrame(),
+                "actions": pd.DataFrame(), "prevention_sources": pd.DataFrame(),
+                "detection_sources": pd.DataFrame(),
+            }
+        )
+        header = graph["pattern"]
+        widget_scope = selected_pattern_id or "new"
+        label = st.text_input(
+            "Label",
+            value=_plain_text(header.get("label")),
+            key=f"pfmea_pattern_label_{project_id}_{widget_scope}",
+        )
+        notes = st.text_area(
+            "Notes",
+            value=_plain_text(header.get("notes")),
+            key=f"pfmea_pattern_notes_{project_id}_{widget_scope}",
+        )
+        failure_mode = st.text_area(
+            "Potential Failure Mode",
+            value=_plain_text(header.get("potential_failure_mode")),
+            key=f"pfmea_pattern_failure_{project_id}_{widget_scope}",
+        )
+        class_code = st.selectbox(
+            "Suggested Classification",
+            options=PFMEA_CLASSIFICATIONS,
+            index=(
+                PFMEA_CLASSIFICATIONS.index(_plain_text(header.get("class_code")))
+                if _plain_text(header.get("class_code")) in PFMEA_CLASSIFICATIONS else 0
+            ),
+            format_func=lambda code: (
+                "Unclassified" if not code
+                else f"{code} — {PFMEA_CLASSIFICATION_MEANINGS[code]}"
+            ),
+            key=f"pfmea_pattern_class_{project_id}_{widget_scope}",
+        )
+        active = st.toggle(
+            "Active",
+            value=bool(header.get("active", True)),
+            key=f"pfmea_pattern_active_{project_id}_{widget_scope}",
+        )
+        effect_rows = graph["effects"].to_dict("records")
+        cause_rows = graph["causes"].to_dict("records")
+        effect_lines = st.text_area(
+            "Effects — one per line",
+            value="\n".join(_plain_text(row.get("effect_description")) for row in effect_rows),
+            key=f"pfmea_pattern_effects_{project_id}_{widget_scope}",
+        )
+        cause_lines = st.text_area(
+            "Causes — one per line",
+            value="\n".join(_plain_text(row.get("cause_description")) for row in cause_rows),
+            key=f"pfmea_pattern_causes_{project_id}_{widget_scope}",
+        )
+        current_effects = _manager_lines(effect_lines)
+        current_causes = _manager_lines(cause_lines)
+        prevention_candidates = pfmea_pattern_source_candidates(project_id, "Prevention")
+        detection_candidates = pfmea_pattern_source_candidates(project_id, "Detection")
+        candidate_maps = {
+            "Prevention": {
+                str(row["source_key"]): row for _, row in prevention_candidates.iterrows()
+            },
+            "Detection": {
+                str(row["source_key"]): row for _, row in detection_candidates.iterrows()
+            },
+        }
+        active_candidate_keys = {
+            "Prevention": [
+                str(row["source_key"]) for _, row in prevention_candidates.iterrows()
+                if bool(row.get("active"))
+            ],
+            "Detection": [
+                str(row["source_key"]) for _, row in detection_candidates.iterrows()
+                if bool(row.get("active"))
+            ],
+        }
+        actions_by_cause: dict[str, list[dict]] = {}
+        for row in graph["actions"].to_dict("records"):
+            actions_by_cause.setdefault(_plain_text(row.get("pattern_cause_id")), []).append(row)
+        sources_by_cause: dict[tuple[str, str], list[dict]] = {}
+        for control_type, frame_name in [
+            ("Prevention", "prevention_sources"), ("Detection", "detection_sources")
+        ]:
+            for row in graph[frame_name].to_dict("records"):
+                sources_by_cause.setdefault(
+                    (control_type, _plain_text(row.get("pattern_cause_id"))), []
+                ).append(row)
+
+        cause_payload: list[dict] = []
+        action_payload: list[dict] = []
+        source_payload: dict[str, list[dict]] = {"Prevention": [], "Detection": []}
+        for index, cause_text in enumerate(current_causes):
+            existing_cause = cause_rows[index] if index < len(cause_rows) else {}
+            draft_cause_id = _plain_text(existing_cause.get("id")) or f"draft-cause-{index}"
+            cause_payload.append(
+                {
+                    "id": _plain_text(existing_cause.get("id")),
+                    "draft_id": draft_cause_id,
+                    "cause_description": cause_text,
+                    "sequence": (index + 1) * 10,
+                }
+            )
+            with st.container(border=True):
+                st.markdown(f"**Cause {index + 1}:** {cause_text}")
+                existing_actions = actions_by_cause.get(
+                    _plain_text(existing_cause.get("id")), []
+                )
+                action_lines = st.text_area(
+                    "Recommended Actions — one per line",
+                    value="\n".join(
+                        _plain_text(row.get("recommended_action")) for row in existing_actions
+                    ),
+                    key=f"pfmea_pattern_actions_{project_id}_{widget_scope}_{index}",
+                )
+                for action_index, action_text in enumerate(_manager_lines(action_lines)):
+                    existing_action = (
+                        existing_actions[action_index]
+                        if action_index < len(existing_actions) else {}
+                    )
+                    action_payload.append(
+                        {
+                            "id": _plain_text(existing_action.get("id")),
+                            "pattern_cause_id": draft_cause_id,
+                            "recommended_action": action_text,
+                            "sequence": (action_index + 1) * 10,
+                        }
+                    )
+                for control_type in ("Prevention", "Detection"):
+                    existing_sources = sources_by_cause.get(
+                        (control_type, _plain_text(existing_cause.get("id"))), []
+                    )
+                    existing_keys = [
+                        _source_key_from_pattern_row(row) for row in existing_sources
+                        if _source_key_from_pattern_row(row) in candidate_maps[control_type]
+                    ]
+                    retained_inactive_keys = [
+                        key for key in existing_keys
+                        if not bool(candidate_maps[control_type][key].get("active"))
+                    ]
+                    source_options = list(
+                        dict.fromkeys(
+                            [*active_candidate_keys[control_type], *retained_inactive_keys]
+                        )
+                    )
+                    selected_sources = st.multiselect(
+                        f"{control_type} suggestions",
+                        options=source_options,
+                        default=existing_keys,
+                        format_func=lambda value, kind=control_type: str(
+                            candidate_maps[kind][value]["label"]
+                            + (
+                                " (inactive; retained only)"
+                                if not bool(candidate_maps[kind][value].get("active"))
+                                else ""
+                            )
+                        ),
+                        key=(
+                            f"pfmea_pattern_{control_type.lower()}_{project_id}_"
+                            f"{widget_scope}_{index}"
+                        ),
+                    )
+                    existing_by_key = {
+                        _source_key_from_pattern_row(row): row for row in existing_sources
+                    }
+                    for source_index, source_key in enumerate(selected_sources):
+                        candidate = candidate_maps[control_type][source_key]
+                        existing_source = existing_by_key.get(source_key, {})
+                        source_payload[control_type].append(
+                            {
+                                "id": _plain_text(existing_source.get("id")),
+                                "pattern_cause_id": draft_cause_id,
+                                "source_type": str(candidate["source_type"]),
+                                "source_id": str(candidate["source_id"]),
+                                "sequence": (source_index + 1) * 10,
+                            }
+                        )
+
+        st.caption("Pattern changes are stored only when Save & Refresh is selected.")
+        actions = st.container(horizontal=True, horizontal_alignment="right")
+        if actions.button(
+            "Undo",
+            icon=":material/undo:",
+            key=f"pfmea_pattern_undo_{project_id}_{widget_scope}",
+        ):
+            for key in list(st.session_state):
+                if str(key).startswith("pfmea_pattern_") and str(project_id) in str(key):
+                    if key != f"pfmea_pattern_manager_selection_{project_id}":
+                        st.session_state.pop(key, None)
+            st.rerun()
+        if actions.button(
+            "Save & Refresh",
+            icon=":material/save:",
+            type="primary",
+            key=f"pfmea_pattern_save_{project_id}_{widget_scope}",
+        ):
+            try:
+                if not _plain_text(st.session_state.get("current_editor")):
+                    raise ValueError("Enter Current editor before saving PFMEA patterns.")
+                effects_payload = [
+                    {
+                        "id": _plain_text(effect_rows[index].get("id"))
+                        if index < len(effect_rows) else "",
+                        "effect_description": text,
+                        "sequence": (index + 1) * 10,
+                    }
+                    for index, text in enumerate(current_effects)
+                ]
+                result = save_pfmea_pattern_graph(
+                    project_id,
+                    {
+                        "id": selected_pattern_id,
+                        "label": label,
+                        "notes": notes,
+                        "potential_failure_mode": failure_mode,
+                        "class_code": class_code,
+                        "active": active,
+                    },
+                    effects=effects_payload,
+                    causes=cause_payload,
+                    actions=action_payload,
+                    prevention_sources=source_payload["Prevention"],
+                    detection_sources=source_payload["Detection"],
+                )
+                _audit(
+                    project_id,
+                    "Save PFMEA pattern",
+                    result,
+                    {"pattern_id": result["pattern_id"], "label": label},
+                )
+                st.session_state[f"pfmea_pattern_manager_selection_{project_id}"] = result[
+                    "pattern_id"
+                ]
+                st.toast("Saved PFMEA pattern", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+        st.markdown("**Save a PFMEA line as a pattern**")
+        saved_entries = stored_rows.drop_duplicates(subset=["entry_id"]).copy()
+        saved_entries = saved_entries.loc[
+            saved_entries["entry_id"].map(_plain_text).ne("")
+        ]
+        entry_by_id = {
+            _plain_text(row["entry_id"]): row for _, row in saved_entries.iterrows()
+        }
+        capture_entry_id = st.selectbox(
+            "Saved PFMEA line",
+            options=list(entry_by_id),
+            index=None,
+            format_func=lambda value: _pfmea_line_label(entry_by_id[value], {}),
+            placeholder="Choose one saved PFMEA line",
+            key=f"pfmea_pattern_capture_entry_{project_id}_{scenario_id}",
+        )
+        capture_label = st.text_input(
+            "New pattern label",
+            key=f"pfmea_pattern_capture_label_{project_id}_{scenario_id}",
+        )
+        capture_notes = st.text_area(
+            "New pattern notes",
+            key=f"pfmea_pattern_capture_notes_{project_id}_{scenario_id}",
+        )
+        if capture_entry_id:
+            capture_rows = stored_rows.loc[
+                stored_rows["entry_id"].map(_plain_text).eq(str(capture_entry_id))
+            ]
+
+            def _capture_count(identity_column: str, text_column: str) -> int:
+                identities = {
+                    _plain_text(value)
+                    for value in capture_rows.get(identity_column, pd.Series(dtype="object"))
+                    if _plain_text(value)
+                }
+                if identities:
+                    return len(identities)
+                return len(
+                    {
+                        _plain_text(value)
+                        for value in capture_rows.get(text_column, pd.Series(dtype="object"))
+                        if _plain_text(value)
+                    }
+                )
+
+            preview_row = entry_by_id[str(capture_entry_id)]
+            prevention_count = len(
+                {
+                    source
+                    for values in capture_rows.get(
+                        "prevention_controls", pd.Series(dtype="object")
+                    )
+                    for source in _list_values(values)
+                }
+            )
+            detection_count = len(
+                {
+                    source
+                    for values in capture_rows.get(
+                        "detection_controls", pd.Series(dtype="object")
+                    )
+                    for source in _list_values(values)
+                }
+            )
+            st.caption(
+                "Capture preview. Ratings, responsibility, completion evidence, and "
+                "resulting values will not be stored in the pattern."
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Potential Failure Mode": _plain_text(
+                                preview_row.get("potential_failure_mode")
+                            ),
+                            "Effects": _capture_count("effect_id", "potential_effects"),
+                            "Causes": _capture_count("cause_id", "potential_causes"),
+                            "Recommended Actions": _capture_count(
+                                "action_id", "recommended_action"
+                            ),
+                            "Prevention suggestions": prevention_count,
+                            "Detection suggestions": detection_count,
+                            "Suggested Classification": _plain_text(
+                                preview_row.get("classification")
+                            ) or "Unclassified",
+                        }
+                    ]
+                ),
+                hide_index=True,
+            )
+        capture_blocked = isinstance(st.session_state.get(draft_key), pd.DataFrame) or bool(
+            table_has_unsaved_changes(pfmea_editor_key, native_row_selection=True)
+        )
+        if capture_blocked:
+            st.info("Save or undo the PFMEA table draft before capturing a saved pattern.")
+        if st.button(
+            "Save selected PFMEA line as pattern",
+            icon=":material/bookmark_add:",
+            disabled=capture_blocked or not capture_entry_id or not capture_label.strip(),
+            key=f"pfmea_pattern_capture_{project_id}_{scenario_id}",
+        ):
+            try:
+                if not _plain_text(st.session_state.get("current_editor")):
+                    raise ValueError("Enter Current editor before creating a PFMEA pattern.")
+                result = capture_pfmea_entry_as_pattern(
+                    project_id,
+                    scenario_id,
+                    str(capture_entry_id),
+                    label=capture_label,
+                    notes=capture_notes,
+                )
+                _audit(
+                    project_id,
+                    "Create PFMEA pattern from saved line",
+                    result,
+                    {
+                        "pattern_id": result["pattern_id"],
+                        "source_pfmea_entry_id": str(capture_entry_id),
+                        "omitted_sources": result.get("omitted_sources", []),
+                    },
+                )
+                if result.get("omitted_sources"):
+                    st.warning(
+                        "The pattern omitted inactive or unavailable controls: "
+                        + "; ".join(result["omitted_sources"])
+                    )
+                st.toast("Created PFMEA pattern", icon=":material/bookmark_added:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+@st.dialog("Delete selected PFMEA patterns?", dismissible=False)
+def _confirm_pattern_delete() -> None:
+    pending = st.session_state.get(PENDING_PATTERN_DELETE_KEY) or {}
+    st.warning(
+        f"Delete {len(pending.get('pattern_ids', []))} selected project-wide PFMEA "
+        "pattern(s)? Existing PFMEA rows created from them remain unchanged."
+    )
+    for label in pending.get("labels", []):
+        st.write(f"- {label}")
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key="cancel_pfmea_pattern_delete"):
+        st.session_state.pop(PENDING_PATTERN_DELETE_KEY, None)
+        request_table_editor_reset(str(pending.get("editor_key") or ""))
+        st.rerun()
+    if actions.button(
+        "Delete",
+        icon=":material/delete:",
+        type="primary",
+        key="destructive_confirm_pfmea_pattern_delete",
+    ):
+        try:
+            if not _plain_text(st.session_state.get("current_editor")):
+                raise ValueError("Enter Current editor before deleting PFMEA patterns.")
+            result = delete_pfmea_patterns(
+                str(pending["project_id"]), list(pending["pattern_ids"])
+            )
+            _audit(
+                str(pending["project_id"]),
+                "Delete PFMEA patterns",
+                result,
+                {"pattern_ids": pending["pattern_ids"], "labels": pending["labels"]},
+            )
+            st.session_state.pop(PENDING_PATTERN_DELETE_KEY, None)
+            request_table_editor_reset(str(pending.get("editor_key") or ""))
+            st.toast("Deleted PFMEA pattern(s)", icon=":material/delete:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 
 def _render_flat_pfmea_table(
@@ -2323,13 +3268,23 @@ def _render_flat_pfmea_table(
         labels={"item_number": "Item #", "classification": "Classification"},
         reset_widget_keys=[editor_key],
     )
+    step_by_id = {str(row["id"]): row for _, row in steps.iterrows()}
+    focus = _render_pfmea_completion_assistant(
+        project_id, scenario_id, rows, step_by_id
+    )
+    if focus:
+        focus_mask = visible.apply(_pfmea_row_identity, axis=1).eq(focus)
+        visible = visible.loc[focus_mask].copy()
+        st.info(
+            "Showing the selected incomplete PFMEA line. Use Show all lines to clear "
+            "this focus."
+        )
     editor_rows = direct_entry_editor_rows(
         visible,
         editor_key=editor_key,
         sort_columns=["item_number", "potential_failure_mode", "potential_effects", "potential_causes"],
         labels={"item_number": "Item #", "potential_failure_mode": "Potential Failure Mode"},
     )
-    step_by_id = {str(row["id"]): row for _, row in steps.iterrows()}
     process_options = list(step_by_id)
     editor_rows = _prepare_pfmea_process_columns(editor_rows, step_by_id)
     rating_help = (
@@ -2343,6 +3298,9 @@ def _render_flat_pfmea_table(
         project_id, scenario_id, rows, "Detection"
     )
     control_labels = prevention_labels | detection_labels
+    _render_add_pfmea_lines(
+        project_id, scenario_id, rows, draft_key, editor_key, step_by_id
+    )
     panel_rows = _pfmea_panel_rows_from_editor_state(
         rows,
         visible,
@@ -2351,6 +3309,9 @@ def _render_flat_pfmea_table(
         step_by_id,
     )
     _render_control_selection_panel(
+        project_id, scenario_id, panel_rows, draft_key, editor_key, step_by_id
+    )
+    _render_pfmea_duplicate_workflow(
         project_id, scenario_id, panel_rows, draft_key, editor_key, step_by_id
     )
     column_config = {
@@ -2364,6 +3325,7 @@ def _render_flat_pfmea_table(
             ),
             "process_function": st.column_config.SelectboxColumn(
                 "Process Function", options=process_options, required=True,
+                pinned=True,
                 format_func=lambda work_element_id: _process_step_option_label(
                     step_by_id.get(str(work_element_id), {})
                 ),
@@ -2375,11 +3337,19 @@ def _render_flat_pfmea_table(
             ),
             "potential_failure_mode": st.column_config.TextColumn(
                 "Potential Failure Mode", width="large",
-                help="Free text preserves pasted or saved line breaks.",
+                help=(
+                    "Line breaks are preserved in saved text, but the closed table cell may "
+                    "display them as spaces. Use a separate PFMEA line when distinct Failure "
+                    "Modes need separate ratings or controls."
+                ),
             ),
             "potential_effects": st.column_config.TextColumn(
                 "Potential Effect(s) of Failure", width="large",
-                help="Free text preserves pasted or saved line breaks.",
+                help=(
+                    "Line breaks are preserved in saved text, but the closed table cell may "
+                    "display them as spaces. Use a separate PFMEA line when distinct Effects "
+                    "need separate ratings or controls."
+                ),
             ),
             "classification": st.column_config.SelectboxColumn(
                 "Classification", options=PFMEA_CLASSIFICATIONS,
@@ -2391,7 +3361,10 @@ def _render_flat_pfmea_table(
             ),
             "potential_causes": st.column_config.TextColumn(
                 "Potential Causes(s) of Failure", width="large",
-                help="Free text preserves pasted or saved line breaks.",
+                help=(
+                    "Line breaks are preserved in saved text, but the closed table cell may "
+                    "display them as spaces."
+                ),
             ),
             "prevention_controls": st.column_config.MultiselectColumn(
                 "Current Process Controls — Prevention",
@@ -2420,7 +3393,10 @@ def _render_flat_pfmea_table(
             "rpn": st.column_config.NumberColumn("RPN", disabled=True, format="%d"),
             "recommended_action": st.column_config.TextColumn(
                 "Recommended Action", width="large",
-                help="Free text preserves pasted or saved line breaks.",
+                help=(
+                    "Line breaks are preserved in saved text, but the closed table cell may "
+                    "display them as spaces."
+                ),
             ),
             "responsibility_target": st.column_config.TextColumn(
                 "Responsibility & Target Completion Date",
@@ -2428,7 +3404,10 @@ def _render_flat_pfmea_table(
             ),
             "actions_taken": st.column_config.TextColumn(
                 "Actions Taken", width="large",
-                help="Free text preserves pasted or saved line breaks.",
+                help=(
+                    "Line breaks are preserved in saved text, but the closed table cell may "
+                    "display them as spaces."
+                ),
             ),
             "resulting_rpn": st.column_config.NumberColumn(
                 "Resulting RPN", disabled=True, format="%d"
@@ -2462,7 +3441,7 @@ def _render_flat_pfmea_table(
         ),
         num_rows="dynamic",
         hide_index=True,
-        height=850,
+        height=754,
         row_height=96,
         disabled=[
             "item_number", "prevention_controls", "detection_controls", "rpn",
@@ -2550,9 +3529,6 @@ def _render_flat_pfmea_table(
         project_id,
         scenario_id,
         _forced_copy_ids(project_id, scenario_id) & present_draft_ids,
-    )
-    _render_pfmea_duplicate_workflow(
-        project_id, scenario_id, complete, draft_key, editor_key, step_by_id
     )
     footer = editable_table_footer(
         editor_key=editor_key,
@@ -2710,6 +3686,9 @@ def _render_flat_pfmea_table(
                 + "Process at a Glance and Quality records remain unchanged."
             ),
         )
+    _render_pattern_manager(
+        project_id, scenario_id, stored, draft_key, editor_key
+    )
     return stored, complete
 
 
@@ -2832,6 +3811,8 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         _confirm_source_review()
     if st.session_state.get(PENDING_OPTION_DELETE_KEY):
         _confirm_control_option_delete()
+    if st.session_state.get(PENDING_PATTERN_DELETE_KEY):
+        _confirm_pattern_delete()
     if st.session_state.get(PENDING_PROCESS_CHANGE_KEY):
         _confirm_pfmea_process_change()
     elif st.session_state.get(PENDING_CONTROL_PASTE_KEY):

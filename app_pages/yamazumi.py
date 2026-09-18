@@ -1594,7 +1594,7 @@ def edit_element_dialog(
             "values": {
                 "pitch_id": selected_pitch_id,
                 "description": description,
-                "time_s": float(time_s),
+                "time_s": display_to_seconds(time_value, yamazumi_time_unit),
                 "model_variants": list(model_variants),
                 "work_type": work_type,
                 "work_region": work_region,
