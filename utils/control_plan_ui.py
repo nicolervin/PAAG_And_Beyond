@@ -9,6 +9,7 @@ from utils.control_plan_store import (
     PROCESS_NUMBERING_VERSION,
     PLACEMENTS,
     control_plan_evidence,
+    control_plan_flow_projection,
     control_plan_projection,
     control_plan_relink_candidates,
     control_plan_review_items,
@@ -21,6 +22,7 @@ from utils.control_plan_store import (
     restore_control_plan_item,
     save_control_plan_rows,
 )
+from utils.control_plan_flow import control_plan_process_flow
 from utils.pfmea_store import PFMEA_CLASSIFICATION_MEANINGS, migrate_pfmea_classifications
 from utils.scope_ui import scope_badge
 from utils.store import record_audit_event
@@ -42,7 +44,7 @@ from utils.table_ui import (
 
 
 VISIBLE_COLUMNS = [
-    "pr_number", "station_pitch", "machine_fixture", "operation",
+    "pr_number", "station_pitch", "op_id", "machine_fixture", "operation",
     "characteristic_suffix", "characteristic_placement",
     "product_part_characteristic", "process_characteristic", "classification",
     "specification_requirement", "measurement_evaluation", "sample_size",
@@ -135,6 +137,16 @@ def _column_config() -> dict:
                 "It is read-only and does not control Pr. Nº or Process order."
             ),
         ),
+        "op_id": st.column_config.TextColumn(
+            "Op ID",
+            disabled=True,
+            pinned=True,
+            width="medium",
+            help=(
+                "The current full Process operation identifier, including its position "
+                "within the Pitch. It is derived live and controls the displayed Process order."
+            ),
+        ),
         "machine_fixture": st.column_config.TextColumn("Machine / fixture", width="medium"),
         "operation": st.column_config.TextColumn("Operation", disabled=True, width="large"),
         "characteristic_suffix": st.column_config.NumberColumn(
@@ -225,6 +237,49 @@ def _display_first_pr_numbers(rows: pd.DataFrame) -> pd.DataFrame:
 def _rebuild_characteristic_numbers(rows: pd.DataFrame) -> pd.DataFrame:
     """Refresh derived characteristic prefixes from Process numbers and suffixes."""
     return rebuild_control_plan_characteristic_numbers(rows)
+
+
+def _operations_in_projection_order(rows: pd.DataFrame) -> list[str]:
+    """Return each active Process-step identity once in live projection order."""
+    if rows.empty or "work_element_id" not in rows:
+        return []
+    ordered = rows.copy()
+    if "projection_order" in ordered:
+        ordered = ordered.sort_values(
+            "projection_order", kind="stable", na_position="last"
+        )
+    return list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in ordered["work_element_id"].tolist()
+            if str(value or "").strip()
+        )
+    )
+
+
+def _op_id_number_mismatches(rows: pd.DataFrame) -> list[str]:
+    """Identify active operations not numbered 1.0, 2.0, 3.0 in live order."""
+    mismatches: list[str] = []
+    for position, work_id in enumerate(_operations_in_projection_order(rows), start=1):
+        operation_rows = rows.loc[rows["work_element_id"].astype(str).eq(work_id)]
+        values = {
+            normalize_control_plan_pr_number(value)
+            for value in operation_rows["operation_pr_number"].tolist()
+        }
+        if values != {float(position)}:
+            mismatches.append(work_id)
+    return mismatches
+
+
+def _renumber_operations_by_op_id(rows: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Stage sequential Process numbers across all active operations."""
+    updated = rows.copy()
+    operation_ids = _operations_in_projection_order(updated)
+    for position, work_id in enumerate(operation_ids, start=1):
+        mask = updated["work_element_id"].astype(str).eq(work_id)
+        updated.loc[mask, "operation_pr_number"] = float(position)
+        updated.loc[mask, "pr_number"] = float(position)
+    return _rebuild_characteristic_numbers(updated), len(operation_ids)
 
 
 def _apply_pr_number_editor_changes(
@@ -379,13 +434,32 @@ def _persist_control_plan_draft(pending: dict) -> None:
     result = save_control_plan_rows(
         project_id, scenario_id, pd.DataFrame(pending.get("rows", []))
     )
-    _audit(project_id, "Save & Refresh", result, scenario_id)
+    renumbered_operation_count = int(pending.get("renumbered_operation_count") or 0)
+    if renumbered_operation_count:
+        record_audit_event(
+            project_id,
+            "Control Plan",
+            "Save & Refresh",
+            int(result.get("row_count", 0)),
+            st.session_state.get("current_editor", ""),
+            {
+                "scenario_id": scenario_id,
+                "affected_ids": result.get("affected_ids", []),
+                "store_timestamp": result.get("timestamp", ""),
+                "process_numbering_version": PROCESS_NUMBERING_VERSION,
+                "renumbered_by_op_id": True,
+                "renumbered_operation_count": renumbered_operation_count,
+            },
+        )
+    else:
+        _audit(project_id, "Save & Refresh", result, scenario_id)
     draft_key = str(pending.get("draft_key") or "")
     editor_key = str(pending.get("editor_key") or "")
     st.session_state.pop(PENDING_DUPLICATE_NUMBER_KEY, None)
     if draft_key:
         st.session_state.pop(draft_key, None)
         st.session_state.pop(f"{draft_key}_pr_conflicts", None)
+        st.session_state.pop(f"{draft_key}_op_id_renumber_count", None)
     if editor_key:
         request_table_editor_reset(editor_key)
     st.toast("Saved Control Plan working draft", icon=":material/check_circle:")
@@ -631,42 +705,8 @@ def _render_review_area(project_id: str, scenario_id: str) -> None:
                     st.rerun()
 
 
-def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: str) -> None:
-    """Render the approved scenario-specific MCP body-table working draft."""
-    heading = st.container(horizontal=True, vertical_alignment="center")
-    heading.subheader("Manufacturing Control Plan working draft")
-    scope_badge(heading, scope="scenario", scenario_name=scenario_name)
-    st.caption(
-        "This is an editable working draft only. Document headers, revisions, approvals, "
-        "issued status, and Word export remain deferred."
-    )
-    try:
-        migration = migrate_pfmea_classifications(
-            project_id, st.session_state.get("current_editor", "")
-        )
-    except ValueError as exc:
-        st.error(str(exc))
-        st.info("Enter Current editor to complete the pending one-time PFMEA migration.")
-        return
-    if migration.get("row_count"):
-        st.toast(
-            f"Updated {migration['row_count']} legacy PFMEA Classification record(s)",
-            icon=":material/check_circle:",
-        )
-    try:
-        number_migration = migrate_control_plan_pr_numbers(
-            project_id, st.session_state.get("current_editor", "")
-        )
-    except ValueError as exc:
-        st.error(str(exc))
-        st.info("Enter Current editor to complete the pending one-time Control Plan migration.")
-        return
-    if number_migration.get("row_count"):
-        st.toast(
-            f"Backfilled Pr. Nº for {number_migration['operation_count']} Process operation(s)",
-            icon=":material/check_circle:",
-        )
-    _render_classification_legend()
+def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> None:
+    """Render the editable Characteristics table peer view."""
     source = control_plan_projection(project_id, scenario_id)
     if source.empty:
         st.info(
@@ -701,7 +741,7 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
         key=f"control_plan_filters_{project_id}_{scenario_id}",
         dropdown_columns=["classification", "characteristic_type_filter", "source_review_required"],
         search_columns=[
-            "operation", "product_part_characteristic", "process_characteristic",
+            "op_id", "operation", "product_part_characteristic", "process_characteristic",
             "machine_fixture", "control_method", "decision_rule",
         ],
         labels={
@@ -769,6 +809,38 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
             "Conflicting Pr. Nº values were entered for the same Process operation. "
             "Use one value for all of that operation's characteristic lines before saving."
         )
+    selected_for_action = native_selected_rows(
+        editor_rows, editor_key=editor_key, id_column="projection_key"
+    )
+    order_mismatches = _op_id_number_mismatches(complete)
+    if order_mismatches:
+        st.warning(
+            f"Pr. Nº does not match the current Op ID order for "
+            f"{len(order_mismatches)} operation(s). Renumber to stage 1.0, 2.0, 3.0… "
+            "across the complete active Control Plan."
+        )
+    if st.button(
+        "Renumber Pr. Nº by Op ID",
+        icon=":material/format_list_numbered:",
+        disabled=not order_mismatches or not selected_for_action.empty,
+        help=(
+            "Stages sequential Process numbers for every active operation in live Op ID "
+            "order, including rows hidden by filters. Save & Refresh persists the result."
+        ),
+        key=f"control_plan_renumber_op_id_{project_id}_{scenario_id}",
+    ):
+        renumbered, operation_count = _renumber_operations_by_op_id(complete)
+        st.session_state[draft_key] = renumbered
+        st.session_state[f"{draft_key}_op_id_renumber_count"] = operation_count
+        st.session_state.pop(f"{draft_key}_pr_conflicts", None)
+        request_table_editor_reset(editor_key)
+        st.toast(
+            f"Staged Op ID renumbering for {operation_count} operation(s)",
+            icon=":material/format_list_numbered:",
+        )
+        st.rerun()
+    if not selected_for_action.empty:
+        st.info("Clear selected Control Plan rows before renumbering by Op ID.")
     unassigned = complete.loc[
         complete["characteristic_placement"].fillna("").astype(str).str.strip().eq("")
     ]
@@ -793,6 +865,7 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
     if footer.undo:
         st.session_state.pop(draft_key, None)
         st.session_state.pop(f"{draft_key}_pr_conflicts", None)
+        st.session_state.pop(f"{draft_key}_op_id_renumber_count", None)
         st.session_state.pop(PENDING_DUPLICATE_NUMBER_KEY, None)
         request_table_editor_reset(editor_key)
         st.toast("Discarded unsaved Control Plan edits", icon=":material/undo:")
@@ -812,6 +885,12 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
                     "rows": complete.to_dict("records"),
                     "duplicates": _duplicate_pr_numbers(complete),
                     "suffix_duplicates": _duplicate_characteristic_suffixes(complete),
+                    "renumbered_operation_count": int(
+                        st.session_state.get(
+                            f"{draft_key}_op_id_renumber_count", 0
+                        )
+                        or 0
+                    ),
                     "draft_key": draft_key,
                     "editor_key": editor_key,
                 }
@@ -824,6 +903,7 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
                 st.error(str(exc))
     export = editor_rows[VISIBLE_COLUMNS].rename(columns={
         "pr_number": "Pr. Nº", "station_pitch": "Station / Pitch",
+        "op_id": "Op ID",
         "machine_fixture": "Machine / fixture",
         "operation": "Operation", "characteristic_suffix": "Characteristic suffix",
         "characteristic_placement": "Characteristic type",
@@ -866,3 +946,234 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
         _confirm_relink()
     if st.session_state.get(PENDING_DUPLICATE_NUMBER_KEY):
         _confirm_duplicate_pr_numbers()
+
+
+def _filter_control_plan_flow(
+    projection: dict,
+    *,
+    section: str = "All",
+    pitch: str = "All",
+    characteristic_type: str = "All",
+    classification: str = "All",
+    keyword: str = "",
+) -> dict:
+    """Apply presentation-only filters while retaining referentially valid edges."""
+    lowered = keyword.strip().casefold()
+    sections = projection.get("sections", [])
+    pitches = projection.get("pitches", [])
+    operations = projection.get("operations", [])
+    characteristics = projection.get("characteristics", [])
+    section_keys = {
+        item["key"] for item in sections
+        if section == "All" or item["name"] == section
+    }
+    pitch_keys = {
+        item["key"] for item in pitches
+        if (pitch == "All" or item["number"] == pitch)
+        and (section == "All" or item.get("section_key") in section_keys)
+    }
+    candidate_operations = [
+        item for item in operations
+        if (section == "All" or item.get("section_key") in section_keys)
+        and (pitch == "All" or item.get("pitch_key") in pitch_keys)
+    ]
+    candidate_keys = {item["key"] for item in candidate_operations}
+    filtered_characteristics = [
+        item for item in characteristics
+        if item.get("operation_key") in candidate_keys
+        and (characteristic_type == "All" or item.get("placement") == characteristic_type)
+        and (classification == "All" or item.get("classification") == classification)
+    ]
+    if lowered:
+        matching_characteristic_ops = {
+            item["operation_key"] for item in filtered_characteristics
+            if lowered in " ".join(
+                str(item.get(name) or "") for name in (
+                    "number", "description", "classification", "specification",
+                    "evaluation", "control_method", "decision_rule",
+                )
+            ).casefold()
+        }
+        candidate_operations = [
+            item for item in candidate_operations
+            if item["key"] in matching_characteristic_ops
+            or lowered in " ".join(
+                str(item.get(name) or "") for name in (
+                    "op_id", "operation", "station_pitch", "pitch", "pr_number",
+                )
+            ).casefold()
+        ]
+        candidate_keys = {item["key"] for item in candidate_operations}
+        filtered_characteristics = [
+            item for item in filtered_characteristics
+            if item["operation_key"] in candidate_keys
+        ]
+    visible_section_keys = {item.get("section_key") for item in candidate_operations}
+    visible_pitch_keys = {item.get("pitch_key") for item in candidate_operations}
+    return {
+        "sections": [item for item in sections if item["key"] in visible_section_keys],
+        "section_edges": [
+            edge for edge in projection.get("section_edges", [])
+            if edge["from"] in visible_section_keys and edge["to"] in visible_section_keys
+        ],
+        "pitches": [item for item in pitches if item["key"] in visible_pitch_keys],
+        "operations": candidate_operations,
+        "characteristics": filtered_characteristics,
+        "sequence_edges": [
+            edge for edge in projection.get("sequence_edges", [])
+            if edge["from"] in candidate_keys and edge["to"] in candidate_keys
+        ],
+        "feed_edges": [
+            edge for edge in projection.get("feed_edges", [])
+            if edge["from"] in candidate_keys and edge["to"] in candidate_keys
+        ],
+        "unresolved_feeds": [
+            item for item in projection.get("unresolved_feeds", [])
+            if item.get("pitch_key") in visible_pitch_keys
+        ],
+    }
+
+
+@st.dialog("Control Plan characteristic", width="large")
+def _control_plan_characteristic_dialog(item: dict) -> None:
+    """Show one characteristic without exposing its internal relationship keys."""
+    st.subheader(
+        " ".join(value for value in (
+            str(item.get("number") or "").strip(),
+            str(item.get("description") or "Unnamed characteristic").strip(),
+        ) if value)
+    )
+    st.caption(
+        f"{str(item.get('placement') or 'unassigned').title()} characteristic · "
+        f"CL {item.get('classification') or 'Unclassified'}"
+    )
+    details = pd.DataFrame([
+        {"Field": "Specification / Requirement", "Value": item.get("specification") or "—"},
+        {"Field": "Measurement / Evaluation", "Value": item.get("evaluation") or "—"},
+        {"Field": "Sample size", "Value": item.get("sample_size") or "—"},
+        {"Field": "Sample frequency", "Value": item.get("sample_frequency") or "—"},
+        {"Field": "Who", "Value": item.get("who") or "—"},
+        {"Field": "Control method", "Value": item.get("control_method") or "—"},
+        {"Field": "Decision rule / corrective action", "Value": item.get("decision_rule") or "—"},
+        {"Field": "Source review", "Value": "Required" if item.get("source_review_required") else "Current"},
+    ])
+    st.dataframe(details, hide_index=True)
+    evidence = item.get("source_evidence") or {}
+    st.markdown("**Source evidence**")
+    for label in ("Prevention", "Detection", "Actions"):
+        values = evidence.get(label) or []
+        st.markdown(f"**{label}:** " + ("; ".join(values) if values else "None"))
+
+
+def _render_control_plan_flow(project_id: str, scenario_id: str) -> None:
+    """Render the read-only Process Flow Map peer view."""
+    try:
+        projection = control_plan_flow_projection(project_id, scenario_id)
+    except ValueError as exc:
+        st.warning(str(exc))
+        return
+    if not projection.get("operations"):
+        st.info("Add Process at a Glance Work Elements to display the Process flow map.")
+        return
+    st.caption(
+        "Read-only live view. Fishbone supplies structural grouping; Yamazumi feed routing "
+        "supplies exact joins. Pr. Nº is shown for document context and never controls order."
+    )
+    sections = sorted({item["name"] for item in projection.get("sections", [])})
+    pitches = sorted({item["number"] for item in projection.get("pitches", [])})
+    classifications = sorted({
+        item["classification"] for item in projection.get("characteristics", [])
+        if item.get("classification")
+    })
+    filters = st.container(horizontal=True, vertical_alignment="bottom")
+    keyword = filters.text_input(
+        "Filter by keyword", key=f"control_plan_flow_keyword_{project_id}_{scenario_id}"
+    )
+    section = filters.selectbox(
+        "Fishbone section", ["All", *sections],
+        key=f"control_plan_flow_section_{project_id}_{scenario_id}",
+    )
+    pitch = filters.selectbox(
+        "Pitch", ["All", *pitches], key=f"control_plan_flow_pitch_{project_id}_{scenario_id}"
+    )
+    characteristic_type = filters.selectbox(
+        "Characteristic type", ["All", "product", "process", "unassigned"],
+        format_func=lambda value: value.title() if value != "All" else value,
+        key=f"control_plan_flow_type_{project_id}_{scenario_id}",
+    )
+    classification = filters.selectbox(
+        "Classification", ["All", *classifications],
+        key=f"control_plan_flow_classification_{project_id}_{scenario_id}",
+    )
+    filtered = _filter_control_plan_flow(
+        projection,
+        section=section,
+        pitch=pitch,
+        characteristic_type=characteristic_type,
+        classification=classification,
+        keyword=keyword,
+    )
+    st.caption(
+        "White rectangle = Process operation · Blue oval = Product characteristic · "
+        "Green oval = Process characteristic · Amber outline = type not assigned"
+    )
+    component_key = f"control_plan_flow_component_{project_id}_{scenario_id}"
+    request_key = f"control_plan_flow_detail_request_{project_id}_{scenario_id}"
+
+    def stage_detail() -> None:
+        event = st.session_state.get(component_key, {}) or {}
+        detail = event.get("detail") or {}
+        selected_key = str(detail.get("key") or "")
+        valid_keys = {item["key"] for item in projection.get("characteristics", [])}
+        if selected_key in valid_keys:
+            st.session_state[request_key] = selected_key
+
+    control_plan_process_flow(
+        filtered, key=component_key, on_detail_change=stage_detail
+    )
+    selected_key = st.session_state.pop(request_key, "")
+    selected = next(
+        (item for item in projection.get("characteristics", [])
+         if item["key"] == selected_key),
+        None,
+    )
+    if selected:
+        _control_plan_characteristic_dialog(selected)
+
+
+def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: str) -> None:
+    """Render the editable MCP table and its read-only Process Flow Map peer view."""
+    heading = st.container(horizontal=True, vertical_alignment="center")
+    heading.subheader("Manufacturing Control Plan working draft")
+    scope_badge(heading, scope="scenario", scenario_name=scenario_name)
+    st.caption(
+        "This is an editable working draft only. Document headers, revisions, approvals, "
+        "issued status, and Word export remain deferred."
+    )
+    try:
+        migration = migrate_pfmea_classifications(
+            project_id, st.session_state.get("current_editor", "")
+        )
+        number_migration = migrate_control_plan_pr_numbers(
+            project_id, st.session_state.get("current_editor", "")
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        st.info("Enter Current editor to complete the pending one-time migration.")
+        return
+    if migration.get("row_count"):
+        st.toast(
+            f"Updated {migration['row_count']} legacy PFMEA Classification record(s)",
+            icon=":material/check_circle:",
+        )
+    if number_migration.get("row_count"):
+        st.toast(
+            f"Backfilled Pr. Nº for {number_migration['operation_count']} Process operation(s)",
+            icon=":material/check_circle:",
+        )
+    _render_classification_legend()
+    characteristics_tab, flow_tab = st.tabs(["Characteristics table", "Process flow map"])
+    with characteristics_tab:
+        _render_control_plan_characteristics(project_id, scenario_id)
+    with flow_tab:
+        _render_control_plan_flow(project_id, scenario_id)

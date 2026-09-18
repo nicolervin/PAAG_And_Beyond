@@ -606,12 +606,17 @@ def pfmea_control_option_delete_impact(
                 WHERE selection.project_id=? AND selection.{option_column} IN ({placeholders})""",
             (project_id, *ids),
         ).fetchall()
+    from utils.pfmea_pattern_store import pattern_manual_reference_count
+
     return {
         "option_count": len(ids),
         "selection_count": len(selections),
         "cause_count": len({str(row["pfmea_cause_id"]) for row in selections}),
         "scenario_count": len({str(row["scenario_id"]) for row in selections}),
         "labels": [str(row["label"]) for row in options],
+        "pattern_reference_count": pattern_manual_reference_count(
+            project_id, control_type, ids
+        ),
     }
 
 
@@ -623,6 +628,11 @@ def delete_pfmea_control_options(
     impact = pfmea_control_option_delete_impact(project_id, control_type, ids)
     if not ids:
         return impact | {"row_count": 0, "timestamp": _store().now_iso()}
+    if int(impact.get("pattern_reference_count", 0)):
+        raise ValueError(
+            f"Remove {impact['pattern_reference_count']} PFMEA pattern reference(s) "
+            f"before deleting the selected {control_type} option(s)."
+        )
     placeholders = ",".join("?" for _ in ids)
     timestamp = _store().now_iso()
     with _store().connection() as conn:
@@ -1910,8 +1920,18 @@ def save_pfmea_flat_rows(
             changed_rows += 1
 
         new_rows = [row for row in records if not _text(row.get("id"))]
+        draft_entry_ids: dict[str, str] = {}
+        draft_effect_ids: dict[str, str] = {}
+        draft_cause_ids: dict[str, str] = {}
+        draft_action_ids: dict[str, str] = {}
         for row in new_rows:
-            force_independent = _text(row.get("draft_row_id")) in force_new
+            draft_entry_key = _text(row.get("draft_entry_key"))
+            draft_effect_key = _text(row.get("draft_effect_key"))
+            draft_cause_key = _text(row.get("draft_cause_key"))
+            draft_action_key = _text(row.get("draft_action_key"))
+            force_independent = (
+                _text(row.get("draft_row_id")) in force_new or bool(draft_entry_key)
+            )
             work_id = _text(row.get("work_element_id"))
             work = work_by_id.get(work_id)
             if not work:
@@ -1920,6 +1940,7 @@ def save_pfmea_flat_rows(
             effect_description = _text(row.get("potential_effects"))
             cause_description = _text(row.get("potential_causes"))
             classification = _classification(row.get("classification"))
+            existing_draft_entry_id = draft_entry_ids.get(draft_entry_key)
             entry_matches = (
                 [
                     entry for entry in entries.values()
@@ -1935,7 +1956,10 @@ def save_pfmea_flat_rows(
                     "More than one saved failure mode matches this new line. Refresh and edit "
                     "the intended saved line instead."
                 )
-            if entry_matches:
+            if existing_draft_entry_id:
+                entry_id = existing_draft_entry_id
+                entry = entries[entry_id]
+            elif entry_matches:
                 entry = entry_matches[0]
                 entry_id = str(entry["id"])
                 if classification and classification != _text(entry["class_code"]):
@@ -1963,9 +1987,12 @@ def save_pfmea_flat_rows(
                 entry = dict(id=entry_id, work_element_id=work_id,
                              potential_failure_mode=failure_mode, class_code=classification)
                 entries[entry_id] = entry
+                if draft_entry_key:
+                    draft_entry_ids[draft_entry_key] = entry_id
 
             severity = _rating(row.get("severity"), "Severity")
             has_effect = bool(effect_description) or severity is not None
+            existing_draft_effect_id = draft_effect_ids.get(draft_effect_key)
             effect_matches = (
                 [
                     effect for effect in effects.values()
@@ -1973,13 +2000,15 @@ def save_pfmea_flat_rows(
                     and _text(effect["effect_description"]).casefold()
                     == effect_description.casefold()
                 ]
-                if effect_description and not force_independent
+                if effect_description and not force_independent and not draft_effect_key
                 else []
             )
             if len(effect_matches) > 1:
                 raise ValueError("More than one saved Effect matches this new line.")
             effect_id = ""
-            if has_effect and effect_matches:
+            if existing_draft_effect_id:
+                effect_id = existing_draft_effect_id
+            elif has_effect and effect_matches:
                 effect = effect_matches[0]
                 effect_id = str(effect["id"])
                 if severity != effect.get("severity"):
@@ -2010,6 +2039,8 @@ def save_pfmea_flat_rows(
                     effect_description=effect_description, severity=severity,
                     sequence=next_effect_sequence,
                 )
+                if draft_effect_key:
+                    draft_effect_ids[draft_effect_key] = effect_id
 
             occurrence = _rating(row.get("occurrence"), "Occurrence")
             detection = _rating(row.get("detection"), "Detection")
@@ -2018,6 +2049,7 @@ def save_pfmea_flat_rows(
             has_cause = bool(cause_description or prevention_values or detection_values) or any(
                 value is not None for value in (occurrence, detection)
             )
+            existing_draft_cause_id = draft_cause_ids.get(draft_cause_key)
             cause_matches = (
                 [
                     cause for cause in causes.values()
@@ -2025,13 +2057,15 @@ def save_pfmea_flat_rows(
                     and _text(cause["cause_description"]).casefold()
                     == cause_description.casefold()
                 ]
-                if cause_description and not force_independent
+                if cause_description and not force_independent and not draft_cause_key
                 else []
             )
             if len(cause_matches) > 1:
                 raise ValueError("More than one saved Cause matches this new line.")
             cause_id = ""
-            if has_cause and cause_matches:
+            if existing_draft_cause_id:
+                cause_id = existing_draft_cause_id
+            elif has_cause and cause_matches:
                 cause = cause_matches[0]
                 cause_id = str(cause["id"])
                 conn.execute(
@@ -2066,6 +2100,8 @@ def save_pfmea_flat_rows(
                     cause_description=cause_description, occurrence=occurrence,
                     detection=detection, sequence=next_cause_sequence,
                 )
+                if draft_cause_key:
+                    draft_cause_ids[draft_cause_key] = cause_id
             row["entry_id"] = entry_id
             row["effect_id"] = effect_id
             row["cause_id"] = cause_id
@@ -2083,7 +2119,10 @@ def save_pfmea_flat_rows(
             has_action = bool(recommended or responsibility or target_date or actions_taken) or any(
                 value is not None for value in resulting_ratings
             )
-            if has_action:
+            existing_draft_action_id = draft_action_ids.get(draft_action_key)
+            if existing_draft_action_id:
+                action_id = existing_draft_action_id
+            elif has_action:
                 resulting_rpn = (
                     math.prod(resulting_ratings)
                     if all(value is not None for value in resulting_ratings)
@@ -2101,6 +2140,8 @@ def save_pfmea_flat_rows(
                      responsibility, target_date, actions_taken,
                      *resulting_ratings, resulting_rpn, 10, timestamp, timestamp),
                 )
+                if draft_action_key:
+                    draft_action_ids[draft_action_key] = action_id
             elif effect_id and cause_id:
                 already_exists = conn.execute(
                     """SELECT 1 FROM pfmea_risk_rows

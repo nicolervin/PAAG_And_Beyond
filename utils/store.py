@@ -21,6 +21,7 @@ from utils.pfmea_store import (
     clone_pfmea_scenario,
     init_pfmea_schema,
 )
+from utils.pfmea_pattern_store import init_pfmea_pattern_schema
 from utils.yamazumi_stack import UNASSIGNED_STACK_ID, build_stack_draft
 from utils.time_units import display_to_seconds, normalize_time_unit
 from utils.control_plan_store import clone_control_plan_scenario, init_control_plan_schema
@@ -830,6 +831,7 @@ def init_db() -> None:
         _upgrade_ergonomics_reviews_risk_classification(conn)
         init_quality_schema(conn)
         init_pfmea_schema(conn)
+        init_pfmea_pattern_schema(conn)
         init_control_plan_schema(conn)
         project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "product_line" not in project_columns:

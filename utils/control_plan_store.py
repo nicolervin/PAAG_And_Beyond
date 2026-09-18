@@ -12,6 +12,7 @@ import json
 import math
 import sqlite3
 from datetime import datetime, timezone
+from typing import TypedDict
 from uuid import uuid4
 
 import pandas as pd
@@ -20,6 +21,81 @@ import pandas as pd
 PLACEMENTS = ("", "Product / Part", "Process")
 SOURCE_KINDS = ("quality", "pfmea_only")
 PROCESS_NUMBERING_VERSION = 1
+
+
+class FlowSection(TypedDict):
+    key: str
+    name: str
+    section_type: str
+    depth: int
+    parent_key: str
+    order: int
+
+
+class FlowPitch(TypedDict):
+    key: str
+    section_key: str
+    number: str
+    name: str
+    type: str
+    status: str
+    order: int
+    feeds_into_key: str
+
+
+class FlowOperation(TypedDict):
+    key: str
+    order: int
+    section_key: str
+    pitch_key: str
+    pitch: str
+    op_id: str
+    operation: str
+    station_pitch: str
+    pr_number: float | None
+    status: str
+
+
+class FlowCharacteristic(TypedDict):
+    key: str
+    operation_key: str
+    placement: str
+    number: str
+    description: str
+    classification: str
+    specification: str
+    evaluation: str
+    sample_size: str
+    sample_frequency: str
+    who: str
+    control_method: str
+    decision_rule: str
+    source_review_required: bool
+    source_kind: str
+    source_evidence: dict[str, list[str]]
+
+
+class FlowEdge(TypedDict):
+    from_: str
+    to: str
+    kind: str
+
+
+class UnresolvedFlowFeed(TypedDict):
+    pitch_key: str
+    section_key: str
+    label: str
+
+
+class ControlPlanFlowProjection(TypedDict):
+    sections: list[FlowSection]
+    section_edges: list[dict[str, str]]
+    pitches: list[FlowPitch]
+    operations: list[FlowOperation]
+    characteristics: list[FlowCharacteristic]
+    sequence_edges: list[dict[str, str]]
+    feed_edges: list[dict[str, str]]
+    unresolved_feeds: list[UnresolvedFlowFeed]
 
 
 def _store():
@@ -600,6 +676,7 @@ def _live_projection_conn(
     for entry in entries:
         entry_id = str(entry["id"])
         work_id = str(entry["work_element_id"])
+        op_context = op_contexts.get(work_id, {})
         sources = sources_by_entry.get(entry_id) or [None]
         sources = sorted(
             enumerate(sources),
@@ -677,6 +754,7 @@ def _live_projection_conn(
                     for value in sorted(reserved_suffixes_by_work.get(work_id, set()))
                 ),
                 "station_pitch": current_pitch or "Unassigned",
+                "op_id": _text(op_context.get("op_id")) or "Op ID unavailable",
                 "operation": _text(entry.get("process_operation_snapshot")),
                 "classification": _text(entry.get("class_code")),
                 "characteristic_placement": placement,
@@ -712,6 +790,257 @@ def control_plan_projection(project_id: str, scenario_id: str) -> pd.DataFrame:
         _validate_context(conn, project_id, scenario_id)
         rows = _live_projection_conn(conn, project_id, scenario_id)
     return pd.DataFrame(rows)
+
+
+def control_plan_flow_projection(
+    project_id: str, scenario_id: str
+) -> ControlPlanFlowProjection:
+    """Return a read-only, JSON-safe Process Flow Map projection.
+
+    Process identity and order come from the live Work Element/Op ID graph.  The
+    Control Plan contributes characteristics and document context only; it never
+    determines Process order or routing.
+    """
+    store = _store()
+    with store.connection() as conn:
+        _validate_context(conn, project_id, scenario_id)
+        work_rows = [
+            dict(row) for row in conn.execute(
+                """SELECT id, station, operation, status, sequence
+                   FROM work_elements
+                   WHERE project_id=? AND scenario_id=?
+                   ORDER BY sequence, id""",
+                (project_id, scenario_id),
+            ).fetchall()
+        ]
+        work_ids = [str(row["id"]) for row in work_rows]
+        contexts = store.work_element_op_contexts(project_id, scenario_id, work_ids)
+        yamazumi_links = [
+            dict(row) for row in conn.execute(
+                """SELECT element.process_element_id, element.id AS element_id,
+                          element.pitch_id, element.sequence AS element_sequence,
+                          element.description AS element_description,
+                          pitch.pitch_number, pitch.pitch_name, pitch.pitch_type,
+                          pitch.sequence AS pitch_sequence, pitch.status AS pitch_status,
+                          pitch.feeds_into_pitch_id,
+                          area.id AS area_id, area.name AS area_name,
+                          area.section_id
+                   FROM yamazumi_elements element
+                   JOIN yamazumi_areas area
+                     ON area.id=element.area_id AND area.project_id=element.project_id
+                   LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
+                   WHERE element.project_id=? AND area.scenario_id=?
+                     AND TRIM(COALESCE(element.process_element_id, ''))<>''
+                   ORDER BY element.sequence, element.id""",
+                (project_id, scenario_id),
+            ).fetchall()
+        ]
+        pitch_rows = [
+            dict(row) for row in conn.execute(
+                """SELECT pitch.id, pitch.area_id, pitch.pitch_number,
+                          pitch.pitch_name, pitch.pitch_type, pitch.status,
+                          pitch.sequence, pitch.feeds_into_pitch_id,
+                          area.name AS area_name, area.section_id
+                   FROM yamazumi_pitches pitch
+                   JOIN yamazumi_areas area ON area.id=pitch.area_id
+                   WHERE pitch.project_id=? AND area.scenario_id=?
+                   ORDER BY pitch.sequence, pitch.id""",
+                (project_id, scenario_id),
+            ).fetchall()
+        ]
+        active_characteristics = [
+            row for row in _live_projection_conn(conn, project_id, scenario_id)
+            if not bool(row.get("excluded"))
+        ]
+
+    section_frame = store.assembly_section_walk_order(project_id)
+    section_rows = (
+        section_frame.loc[section_frame["active"].fillna(0).astype(bool)].to_dict("records")
+        if not section_frame.empty and "active" in section_frame else
+        section_frame.to_dict("records") if not section_frame.empty else []
+    )
+    section_key_by_id = {
+        str(row["id"]): f"section:{position}"
+        for position, row in enumerate(section_rows)
+    }
+    sections = [
+        {
+            "key": section_key_by_id[str(row["id"])],
+            "name": _text(row.get("name")) or "Unnamed Fishbone section",
+            "section_type": _text(row.get("section_type")) or "Section",
+            "depth": int(row.get("depth") or 0),
+            "parent_key": section_key_by_id.get(_text(row.get("parent_id")), ""),
+            "order": position,
+        }
+        for position, row in enumerate(section_rows)
+    ]
+
+    pitch_key_by_id = {
+        str(row["id"]): f"pitch:{position}" for position, row in enumerate(pitch_rows)
+    }
+    pitches = [
+        {
+            "key": pitch_key_by_id[str(row["id"])],
+            "section_key": section_key_by_id.get(_text(row.get("section_id")), ""),
+            "number": _text(row.get("pitch_number")) or "Unassigned",
+            "name": _text(row.get("pitch_name")),
+            "type": _text(row.get("pitch_type")) or "Pitch",
+            "status": _text(row.get("status")),
+            "order": int(row.get("sequence") or 0),
+            "feeds_into_key": pitch_key_by_id.get(
+                _text(row.get("feeds_into_pitch_id")), ""
+            ),
+        }
+        for row in pitch_rows
+    ]
+
+    links_by_work: dict[str, list[dict]] = {}
+    for row in yamazumi_links:
+        links_by_work.setdefault(_text(row.get("process_element_id")), []).append(row)
+    sorted_work = sorted(
+        work_rows,
+        key=lambda row: (
+            int(contexts.get(str(row["id"]), {}).get("sort_order", 10**9)),
+            str(row["id"]),
+        ),
+    )
+    operation_key_by_work = {
+        str(row["id"]): f"operation:{position}"
+        for position, row in enumerate(sorted_work)
+    }
+    operations: list[dict] = []
+    for position, row in enumerate(sorted_work):
+        work_id = str(row["id"])
+        links = links_by_work.get(work_id, [])
+        link = links[0] if len(links) == 1 else {}
+        pitch_key = pitch_key_by_id.get(_text(link.get("pitch_id")), "")
+        section_key = section_key_by_id.get(_text(link.get("section_id")), "")
+        relevant = [
+            item for item in active_characteristics
+            if _text(item.get("work_element_id")) == work_id
+        ]
+        pr_number = next(
+            (item.get("operation_pr_number") for item in relevant
+             if item.get("operation_pr_number") is not None),
+            None,
+        )
+        operations.append({
+            "key": operation_key_by_work[work_id],
+            "order": position,
+            "section_key": section_key,
+            "pitch_key": pitch_key,
+            "pitch": _text(link.get("pitch_number")) or _text(row.get("station")) or "Unassigned",
+            "op_id": _text(contexts.get(work_id, {}).get("op_id")) or "Op ID unavailable",
+            "operation": _text(link.get("element_description")) or _text(row.get("operation")) or "Unnamed operation",
+            "station_pitch": _text(row.get("station")) or "Unassigned",
+            "pr_number": pr_number,
+            "status": _text(row.get("status")),
+        })
+
+    characteristics: list[dict] = []
+    seen_sources: set[str] = set()
+    evidence_by_entry: dict[str, dict[str, list[str]]] = {}
+    for row in active_characteristics:
+        source_identity = _text(row.get("projection_key"))
+        if source_identity in seen_sources:
+            continue
+        seen_sources.add(source_identity)
+        work_id = _text(row.get("work_element_id"))
+        if work_id not in operation_key_by_work:
+            continue
+        entry_id = _text(row.get("pfmea_entry_id"))
+        if entry_id not in evidence_by_entry:
+            evidence_by_entry[entry_id] = control_plan_evidence(
+                project_id, scenario_id, entry_id
+            )
+        placement = _text(row.get("characteristic_placement"))
+        placement_key = (
+            "product" if placement == "Product / Part"
+            else "process" if placement == "Process" else "unassigned"
+        )
+        description = _text(row.get("source_description_snapshot")) or "Unnamed characteristic"
+        characteristic_number = ""
+        if placement == "Product / Part":
+            characteristic_number = _text(row.get("product_part_characteristic")).split(" ", 1)[0]
+        elif placement == "Process":
+            characteristic_number = _text(row.get("process_characteristic")).split(" ", 1)[0]
+        characteristics.append({
+            "key": f"characteristic:{len(characteristics)}",
+            "operation_key": operation_key_by_work[work_id],
+            "placement": placement_key,
+            "number": characteristic_number,
+            "description": description,
+            "classification": _text(row.get("classification")),
+            "specification": _text(row.get("specification_requirement")),
+            "evaluation": _text(row.get("measurement_evaluation")),
+            "sample_size": _text(row.get("sample_size")),
+            "sample_frequency": _text(row.get("sample_frequency")),
+            "who": _text(row.get("who")),
+            "control_method": _text(row.get("control_method")),
+            "decision_rule": _text(row.get("decision_rule")),
+            "source_review_required": bool(row.get("source_review_required")),
+            "source_kind": _text(row.get("source_kind")),
+            "source_evidence": evidence_by_entry[entry_id],
+        })
+
+    operation_keys_by_pitch: dict[str, list[str]] = {}
+    for operation in operations:
+        operation_keys_by_pitch.setdefault(operation["pitch_key"], []).append(operation["key"])
+    sequence_edges: list[dict] = []
+    for keys in operation_keys_by_pitch.values():
+        sequence_edges.extend(
+            {"from": left, "to": right, "kind": "sequence"}
+            for left, right in zip(keys, keys[1:])
+        )
+    # Continue each non-feeder Process spine from one populated Pitch to the next
+    # in the same Fishbone section. Feeder Pitches use their explicit feed edge.
+    spine_pitches_by_section: dict[str, list[dict]] = {}
+    for pitch in pitches:
+        if pitch["type"] not in {"Subassembly", "Kitter"}:
+            spine_pitches_by_section.setdefault(pitch["section_key"], []).append(pitch)
+    for section_pitches in spine_pitches_by_section.values():
+        populated = [
+            operation_keys_by_pitch[pitch["key"]]
+            for pitch in sorted(section_pitches, key=lambda item: (item["order"], item["key"]))
+            if operation_keys_by_pitch.get(pitch["key"])
+        ]
+        sequence_edges.extend(
+            {"from": left[-1], "to": right[0], "kind": "sequence"}
+            for left, right in zip(populated, populated[1:])
+        )
+
+    feed_edges: list[dict] = []
+    unresolved_feeds: list[dict] = []
+    for pitch in pitches:
+        if pitch["type"] not in {"Subassembly", "Kitter"}:
+            continue
+        source_ops = operation_keys_by_pitch.get(pitch["key"], [])
+        target_ops = operation_keys_by_pitch.get(pitch["feeds_into_key"], [])
+        if source_ops and target_ops:
+            feed_edges.append({
+                "from": source_ops[-1], "to": target_ops[0], "kind": "feed",
+                "label": "Feeds into",
+            })
+        else:
+            unresolved_feeds.append({
+                "pitch_key": pitch["key"],
+                "section_key": pitch["section_key"],
+                "label": "Feed target required",
+            })
+
+    return {
+        "sections": sections,
+        "section_edges": [
+            {"from": section["parent_key"], "to": section["key"], "kind": "hierarchy"}
+            for section in sections if section["parent_key"]
+        ],
+        "pitches": pitches,
+        "operations": operations,
+        "characteristics": characteristics,
+        "sequence_edges": sequence_edges,
+        "feed_edges": feed_edges,
+        "unresolved_feeds": unresolved_feeds,
+    }
 
 
 def control_plan_review_items(project_id: str, scenario_id: str) -> pd.DataFrame:

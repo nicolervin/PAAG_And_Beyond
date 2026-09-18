@@ -45,6 +45,7 @@ st.html(
     div[class*="st-key-control_plan_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-pfmea_prevention_options_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-pfmea_detection_options_editor"] button[aria-label="Delete row(s)"],
+    div[class*="st-key-pfmea_patterns_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-quality_requirement_types_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-quality_requirements_editor"] button[aria-label="Delete row(s)"] {
         display: inline-flex !important;

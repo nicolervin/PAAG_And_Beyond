@@ -6,7 +6,8 @@ from utils.control_plan_store import control_plan_assignment_impact
 from utils.control_plan_ui import render_control_plan_tab
 from utils.quality_help import (
     CONTROL_PLAN_HELP,
-    PFMEA_HELP,
+    PFMEA_HELP_SECTIONS,
+    PFMEA_QUICK_START,
     REQUIREMENTS_REPOSITORY_HELP,
 )
 from utils.quality_store import (
@@ -108,7 +109,10 @@ def show_quality_page_help() -> None:
     with requirements_help_tab:
         st.markdown(REQUIREMENTS_REPOSITORY_HELP)
     with pfmea_help_tab:
-        st.markdown(PFMEA_HELP)
+        st.markdown(PFMEA_QUICK_START)
+        for section_title, section_content in PFMEA_HELP_SECTIONS:
+            with st.expander(section_title):
+                st.markdown(section_content)
     with control_plan_help_tab:
         st.markdown(CONTROL_PLAN_HELP)
 
@@ -638,7 +642,7 @@ table_columns = [
     "id", "requirement_type", "description", "unique_identifier", "pass_fail",
     "target_value", "tolerances", "unit", "assignment_count",
     "pending_assignment_count", "updated_at",
-    "torque_detail_count",
+    "torque_detail_count", "pfmea_pattern_reference_count",
 ]
 requirements = quality_requirements(project_id)
 requirement_type_catalog = quality_requirement_types(project_id)
@@ -656,6 +660,7 @@ if requirements.empty:
             "assignment_count": pd.Series(dtype="int64"),
             "pending_assignment_count": pd.Series(dtype="int64"),
             "torque_detail_count": pd.Series(dtype="int64"),
+            "pfmea_pattern_reference_count": pd.Series(dtype="int64"),
             "updated_at": pd.Series(dtype="string"),
         }
     )
@@ -667,6 +672,7 @@ else:
     )
     for count_column in [
         "assignment_count", "pending_assignment_count", "torque_detail_count",
+        "pfmea_pattern_reference_count",
     ]:
         requirements[count_column] = (
             pd.to_numeric(requirements[count_column], errors="coerce")
@@ -819,6 +825,7 @@ edited_requirements = st.data_editor(
             "Updated", format="MMM DD, YYYY HH:mm"
         ),
         "torque_detail_count": None,
+        "pfmea_pattern_reference_count": None,
     },
 )
 footer_actions = editable_table_footer(
@@ -959,6 +966,9 @@ if not selected_requirements_for_deletion.empty:
                 "description": str(row["description"]),
                 "assignment_count": int(row.get("assignment_count") or 0),
                 "torque_detail_count": int(row.get("torque_detail_count") or 0),
+                "pfmea_pattern_reference_count": int(
+                    row.get("pfmea_pattern_reference_count") or 0
+                ),
             }
             for _, row in selected_requirements_for_deletion.iterrows()
         ]
@@ -970,6 +980,9 @@ def confirm_quality_requirement_delete() -> None:
     pending = st.session_state.get(pending_delete_key, [])
     linked_count = sum(int(item["assignment_count"]) for item in pending)
     torque_detail_count = sum(int(item["torque_detail_count"]) for item in pending)
+    pattern_reference_count = sum(
+        int(item.get("pfmea_pattern_reference_count", 0)) for item in pending
+    )
     st.warning(
         f"Delete {len(pending)} selected Quality requirement(s)? This permanently "
         "removes the project repository definitions."
@@ -978,7 +991,8 @@ def confirm_quality_requirement_delete() -> None:
         st.write(
             f"- {item['unique_identifier']}: {item['description']} "
             f"— {item['assignment_count']} linked Process step(s), "
-            f"{item['torque_detail_count']} Torque tool detail record(s)"
+            f"{item['torque_detail_count']} Torque tool detail record(s), "
+            f"{item.get('pfmea_pattern_reference_count', 0)} PFMEA pattern reference(s)"
         )
     if linked_count:
         st.error(
@@ -990,6 +1004,11 @@ def confirm_quality_requirement_delete() -> None:
             "These definitions cannot be deleted until their linked Torque tool "
             "details are removed."
         )
+    if pattern_reference_count:
+        st.error(
+            "These definitions cannot be deleted until their PFMEA pattern control "
+            "references are removed."
+        )
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_quality_requirement_delete_{project_id}"):
         st.session_state.pop(pending_delete_key, None)
@@ -997,7 +1016,7 @@ def confirm_quality_requirement_delete() -> None:
         st.rerun()
     if actions.button(
         "Delete", type="primary", icon=":material/delete:",
-        disabled=bool(linked_count or torque_detail_count),
+        disabled=bool(linked_count or torque_detail_count or pattern_reference_count),
         key=f"destructive_confirm_quality_requirement_delete_{project_id}",
     ):
         try:

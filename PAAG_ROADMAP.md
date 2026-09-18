@@ -192,7 +192,7 @@
 
 **Goal:** Provide a read-only Process Flow Map presentation generated one-way from approved planning and saved Manufacturing Control Plan working-draft data.
 
-**Status: Not started — deferred.**
+**Status: Interactive in-app view implemented September 16, 2026. Document pagination and Word/print export remain deferred.**
 
 **Proposed inputs:**
 
@@ -200,13 +200,12 @@
 - Fishbone section structure; and
 - saved Control Plan **Characteristic placement** values distinguishing Product / Part from Process characteristics.
 
-The future map is presentation only. It cannot update or influence Process at a Glance, `work_elements`, Yamazumi, Fishbone, PFMEA, Quality requirements, or Control Plan numbering. Collaborator-curated **Pr. Nº** remains independent document numbering and has no role in the diagram's sequence, grouping, connectors, or identity.
+The implemented map is presentation only. It displays every active Process step in live Op ID order, groups lanes through Fishbone hierarchy, and uses `yamazumi_pitches.feeds_into_pitch_id` only for validated physical joins. Active Control Plan Product, Process, and unassigned characteristics appear as accessible nodes with read-only details. It cannot update or influence Process at a Glance, `work_elements`, Yamazumi, Fishbone, PFMEA, Quality requirements, or Control Plan numbering. Collaborator-curated **Pr. Nº** remains independent document numbering and has no role in sequence, grouping, connectors, or identity.
 
-**Open questions — preserve for project-owner review:**
+**Deferred boundaries:**
 
-- How does Fishbone structure determine Process Flow Map box grouping and branching?
-- Whether and how PFMEA or Quality evidence identifies inspection or reject paths?
-- Does the diagram render in the app, in an exported document, or both?
+- Reject and inspection routing requires a future structured relationship and is not inferred from narrative PFMEA or Control Plan text.
+- Document-style pagination and Word/print rendering remain deferred; the current implementation is the interactive application view.
 
 ---
 
