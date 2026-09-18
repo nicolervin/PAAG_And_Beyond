@@ -31,14 +31,14 @@ from utils.store import (
     replace_yamazumi_pitches,
     replace_yamazumi_work_regions,
     save_yamazumi_stack_draft,
-    update_yamazumi_area,
     update_yamazumi_element,
     update_yamazumi_pitch,
-    update_yamazumi_time_unit,
+    update_yamazumi_settings,
     sync_yamazumi_areas_from_fishbone,
     yamazumi_area_link_status,
     yamazumi_areas,
     yamazumi_elements,
+    yamazumi_element_delete_impact,
     yamazumi_elements_for_scenario,
     work_element_criticality,
     yamazumi_pitch_delete_blockers,
@@ -86,6 +86,7 @@ from utils.yamazumi_stack import (
     apply_stack_drop,
     build_stack_draft,
     draft_differs,
+    remove_element_from_stack_draft,
 )
 
 
@@ -112,12 +113,14 @@ if not scenario:
 yamazumi_time_unit = normalize_time_unit(
     scenario.get("yamazumi_time_unit", "seconds")
 )
+takt_time_unit = normalize_time_unit(scenario.get("takt_time_unit", "seconds"))
 from utils.yamazumi_naming import (
     format_yamazumi_pitch_address,
     normalize_yamazumi_line_code,
     normalize_yamazumi_section_code,
 )
 time_config = time_unit(yamazumi_time_unit)
+takt_config = time_unit(takt_time_unit)
 time_column_label = f"Time ({time_config.label.lower()})"
 
 
@@ -170,7 +173,7 @@ has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
 with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
     st.caption(
         f"Rev {scenario['revision_label']} · {scenario['name']} · "
-        f"{format_seconds(scenario['takt_time_s'], yamazumi_time_unit)} takt"
+        f"{format_seconds(scenario['takt_time_s'], scenario['takt_time_unit'])} takt"
     )
     request_clear_area = st.button(
         "Clear this Yamazumi Section",
@@ -231,7 +234,11 @@ section_id_by_name = {name: section_id for section_id, name in section_name_by_i
 def order_areas_by_fishbone(rows: pd.DataFrame) -> pd.DataFrame:
     if rows.empty:
         return rows
-    section_ids = sections.get("id", pd.Series(dtype="string")).astype(str).tolist()
+    section_ids = (
+        sections["id"].astype(str).tolist()
+        if "id" in sections.columns
+        else []
+    )
     area_ids = ordered_yamazumi_area_ids(
         rows, section_ids
     )
@@ -248,8 +255,8 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
         "Yamazumi Excel file", type=["xlsx"], key=f"yamazumi_import_file_{scenario_id}"
     )
     st.caption(
-        "Imports the current system-style fields. Pitch_Takt_time and "
-        f"Work_Time_to_complete are interpreted as {time_config.label.lower()}. "
+        f"Imports the current system-style fields. Pitch_Takt_time is interpreted as {takt_config.label.lower()}, "
+        f"and Work_Time_to_complete as {time_config.label.lower()}. "
         "Sub-Line is matched to a Fishbone section by name when possible; "
         "unmatched areas remain available to link manually."
     )
@@ -266,7 +273,8 @@ with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
                     "areas": area_count,
                     "pitches": pitch_count,
                     "file": uploaded.name,
-                    "time_unit": yamazumi_time_unit,
+                    "takt_time_unit": takt_time_unit,
+                    "work_time_unit": yamazumi_time_unit,
                 },
             )
             st.toast(f"Imported {element_count} work elements into {pitch_count} pitches", icon=":material/check_circle:")
@@ -282,9 +290,12 @@ if fishbone_sections.empty and areas.empty:
 if not fishbone_sections.empty:
     link_status = yamazumi_area_link_status(project_id, scenario_id)
     if link_status["needs_sync"] and st.button(
-        "Create Yamazumi areas from Fishbone",
-        icon=":material/account_tree:",
-        help="Creates or repairs one linked Yamazumi area for every active Fishbone section, including subassemblies with no assigned parts.",
+        "Repair Fishbone area links",
+        icon=":material/build:",
+        help=(
+            "Repairs legacy missing, mismatched, or duplicate Fishbone links in this scenario. "
+            "New Fishbone sections create their Yamazumi areas automatically."
+        ),
     ):
         try:
             summary = sync_yamazumi_areas_from_fishbone(project_id, scenario_id)
@@ -296,7 +307,7 @@ if not fishbone_sections.empty:
             record_audit_event(
                 project_id,
                 "Yamazumi",
-                "Synchronize Fishbone areas",
+                "Repair Fishbone area links",
                 summary["created"] + summary["relinked"] + summary["conflicts_cleared"],
                 st.session_state.get("current_editor", ""),
                 summary,
@@ -341,8 +352,34 @@ empty_pitch_dialog_key = (
 pitch_editor_key = apply_pending_table_editor_reset(pitch_editor_key)
 element_editor_key = apply_pending_table_editor_reset(element_editor_key)
 
-unit_controls = st.container(horizontal=True, vertical_alignment="bottom")
-selected_time_unit = unit_controls.segmented_control(
+default_takt = float(scenario.get("takt_time_s") or 0)
+if not math.isfinite(default_takt):
+    default_takt = 0.0
+area_takt_value = area.get("takt_override_s")
+area_takt = (
+    default_takt
+    if area_takt_value is None or pd.isna(area_takt_value)
+    else float(area_takt_value)
+)
+if not math.isfinite(area_takt):
+    area_takt = default_takt
+
+section_id_value = area.get("section_id")
+current_section_id = (
+    None if section_id_value is None or pd.isna(section_id_value)
+    else str(section_id_value).strip() or None
+)
+linked_elsewhere = {
+    str(value) for value in areas["section_id"].dropna().astype(str).tolist()
+    if str(value).strip()
+}
+available_sections = [
+    section_id for section_id in section_name_by_id
+    if section_id not in linked_elsewhere
+]
+
+settings_controls = st.container(horizontal=True, vertical_alignment="bottom")
+selected_time_unit = settings_controls.segmented_control(
     "Yamazumi time unit",
     options=list(TIME_UNITS),
     default=yamazumi_time_unit,
@@ -353,53 +390,93 @@ selected_time_unit = unit_controls.segmented_control(
     ),
     key=f"yamazumi_time_unit_{scenario_id}",
 )
-save_time_unit = unit_controls.button(
+takt_time = settings_controls.number_input(
+    f"Yamazumi takt time ({takt_config.label.lower()})",
+    min_value=0.0,
+    value=seconds_to_display(area_takt, takt_time_unit),
+    step=takt_config.step,
+    format=f"%.{takt_config.decimals}f",
+    help="Enter an area-specific takt or use the active planning scenario's target takt.",
+    key=f"yamazumi_takt_{scenario_id}_{area_id}_{takt_time_unit}",
+)
+if current_section_id:
+    linked_section = current_section_id
+else:
+    linked_section = settings_controls.selectbox(
+        "Pair with Fishbone section",
+        options=[None, *available_sections],
+        format_func=lambda value: (
+            "Unlinked" if value is None else section_option_labels.get(value, value)
+        ),
+        help="Manual matching is available only for imported areas that could not be matched by name.",
+        key=f"linked_fishbone_for_import_{area_id}",
+    )
+
+selected_time_unit = normalize_time_unit(selected_time_unit)
+entered_takt_s = (
+    display_to_seconds(takt_time, takt_time_unit)
+    if takt_time else default_takt
+)
+submitted_takt_override = (
+    None
+    if math.isclose(entered_takt_s, default_takt, rel_tol=1e-9, abs_tol=1e-9)
+    else entered_takt_s
+)
+stored_takt_override = (
+    None
+    if area_takt_value is None or pd.isna(area_takt_value)
+    else float(area_takt_value)
+)
+settings_changed = (
+    selected_time_unit != yamazumi_time_unit
+    or submitted_takt_override != stored_takt_override
+    or linked_section != current_section_id
+)
+save_settings = settings_controls.button(
     "Save & Refresh",
     type="primary",
     icon=":material/save:",
-    key=f"save_yamazumi_time_unit_{scenario_id}",
+    disabled=not settings_changed,
+    key=f"save_yamazumi_settings_{scenario_id}_{area_id}",
 )
-if save_time_unit:
+if save_settings:
     try:
-        selected_time_unit = normalize_time_unit(selected_time_unit)
-        if selected_time_unit == yamazumi_time_unit:
-            raise ValueError("The Yamazumi time unit has not changed.")
-        has_pending_time_edits = (
-            table_has_unsaved_changes(
-                element_editor_key, native_row_selection=True
+        time_unit_changed = selected_time_unit != yamazumi_time_unit
+        if time_unit_changed:
+            has_pending_time_edits = (
+                table_has_unsaved_changes(
+                    element_editor_key, native_row_selection=True
+                )
+                or bool(st.session_state.get(pitch_delete_key))
+                or bool(st.session_state.get(element_delete_key))
+                or bool(st.session_state.get(
+                    f"yamazumi_add_element_target_{project_id}_{area_id}"
+                ))
+                or bool(st.session_state.get(
+                    f"yamazumi_edit_element_target_{project_id}_{area_id}"
+                ))
             )
-            or bool(st.session_state.get(pitch_delete_key))
-            or bool(st.session_state.get(element_delete_key))
-            or bool(st.session_state.get(
-                f"yamazumi_add_element_target_{project_id}_{area_id}"
-            ))
-            or bool(st.session_state.get(
-                f"yamazumi_edit_element_target_{project_id}_{area_id}"
-            ))
-        )
-        if has_pending_time_edits:
-            raise ValueError(
-                "Save or undo Yamazumi work-element edits before changing the time unit."
-            )
-        unit_change = update_yamazumi_time_unit(
-            project_id, scenario_id, selected_time_unit
-        )
-        record_audit_event(
+            if has_pending_time_edits:
+                raise ValueError(
+                    "Save or undo Yamazumi work-element edits before changing the time unit."
+                )
+        result = update_yamazumi_settings(
             project_id,
-            "Yamazumi",
-            "Save & Refresh",
-            1,
+            scenario_id,
+            area_id,
+            selected_time_unit,
+            linked_section,
+            submitted_takt_override,
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id, **unit_change},
         )
-        request_table_editor_reset(element_editor_key)
-        st.toast(
-            f"Yamazumi time unit changed to {TIME_UNITS[selected_time_unit].label}",
-            icon=":material/check_circle:",
-        )
+        if result["time_unit_changed"]:
+            request_table_editor_reset(element_editor_key)
+        st.toast("Saved Yamazumi settings", icon=":material/check_circle:")
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
+
+takt = submitted_takt_override if submitted_takt_override is not None else default_takt
 
 if request_clear_area:
     st.session_state["yamazumi_reset_scope"] = "area"
@@ -460,81 +537,6 @@ def confirm_yamazumi_reset() -> None:
 
 if st.session_state.get("yamazumi_reset_scope") in {"area", "all"}:
     confirm_yamazumi_reset()
-
-area_controls = st.container(horizontal=True, vertical_alignment="bottom")
-section_id_value = area.get("section_id")
-current_section_id = (
-    None if section_id_value is None or pd.isna(section_id_value)
-    else str(section_id_value).strip() or None
-)
-if current_section_id:
-    linked_section = current_section_id
-    area_controls.text_input(
-        "Linked Fishbone section",
-        value=section_option_labels.get(
-            current_section_id,
-            str(area.get("section_name") or "Linked section"),
-        ),
-        disabled=True,
-        help="This link is fixed because the area is already matched to the Fishbone.",
-        key=f"linked_fishbone_read_only_{area_id}",
-    )
-else:
-    linked_elsewhere = {
-        str(value) for value in areas["section_id"].dropna().astype(str).tolist()
-        if str(value).strip()
-    }
-    available_sections = [
-        section_id for section_id in section_name_by_id
-        if section_id not in linked_elsewhere
-    ]
-    linked_section = area_controls.selectbox(
-        "Linked Fishbone section",
-        options=[None, *available_sections],
-        format_func=lambda value: (
-            "Unlinked" if value is None else section_option_labels.get(value, value)
-        ),
-        help="Manual matching is available only for imported areas that could not be matched by name.",
-        key=f"linked_fishbone_for_import_{area_id}",
-    )
-default_takt = float(scenario.get("takt_time_s") or 0)
-if not math.isfinite(default_takt):
-    default_takt = 0.0
-area_takt_value = area.get("takt_override_s")
-area_takt = (
-    default_takt
-    if area_takt_value is None or pd.isna(area_takt_value)
-    else float(area_takt_value)
-)
-if not math.isfinite(area_takt):
-    area_takt = default_takt
-takt_time = area_controls.number_input(
-    f"Yamazumi takt time ({time_config.label.lower()})",
-    min_value=0.0,
-    value=seconds_to_display(area_takt, yamazumi_time_unit),
-    step=time_config.step,
-    format=f"%.{time_config.decimals}f",
-    help="Enter an area-specific takt or use the active planning scenario's target takt.",
-    key=f"yamazumi_takt_{scenario_id}_{area_id}_{yamazumi_time_unit}",
-)
-if area_controls.button("Save area settings", type="primary", icon=":material/save:"):
-    try:
-        update_yamazumi_area(
-            project_id,
-            area_id,
-            linked_section,
-            display_to_seconds(takt_time, yamazumi_time_unit) if takt_time else None,
-        )
-        record_audit_event(project_id, "Yamazumi", "Area settings", 1, st.session_state.get("current_editor", ""))
-        st.rerun()
-    except ValueError as exc:
-        st.error(str(exc))
-takt = (
-    display_to_seconds(takt_time, yamazumi_time_unit)
-    if takt_time else default_takt
-)
-if not math.isfinite(takt):
-    takt = default_takt
 
 pitches = yamazumi_pitches(project_id, area_id)
 pitch_address_suggestion = yamazumi_pitch_address_suggestion(project_id, area_id)
@@ -842,7 +844,7 @@ def empty_pitch_setup_dialog() -> None:
         st.rerun()
 
 
-setup_columns = st.columns(3)
+setup_columns = st.columns(2)
 with setup_columns[0].expander(
     "Generate pitch addresses",
     icon=":material/format_list_numbered:",
@@ -1075,7 +1077,7 @@ metrics.metric("Theoretical operators", f"{theoretical:.2f}", border=True)
 metrics.metric("Active pitches / operators", active_pitch_count, border=True)
 metrics.metric("Line balance efficiency", f"{efficiency:.1f}%", border=True)
 metrics.metric("Bottleneck pitch", bottleneck, border=True)
-metrics.metric("Takt", format_seconds(takt, yamazumi_time_unit), border=True)
+metrics.metric("Takt", format_seconds(takt, takt_time_unit), border=True)
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
@@ -1088,6 +1090,7 @@ gui_pitch_delete_key = f"yamazumi_gui_pitch_pending_delete_{project_id}_{scenari
 gui_element_delete_key = f"yamazumi_gui_element_pending_delete_{project_id}_{scenario_id}_{area_id}"
 pitch_edit_restore_key = f"yamazumi_gui_pitch_edit_restore_{project_id}_{scenario_id}_{area_id}"
 element_edit_restore_key = f"yamazumi_gui_element_edit_restore_{project_id}_{scenario_id}_{area_id}"
+delete_element_dialog_key = f"yamazumi_delete_element_target_{project_id}_{area_id}"
 
 
 def close_other_yamazumi_dialogs(keep: str) -> None:
@@ -1098,6 +1101,7 @@ def close_other_yamazumi_dialogs(keep: str) -> None:
         add_element_dialog_key,
         edit_pitch_dialog_key,
         edit_element_dialog_key,
+        delete_element_dialog_key,
     ):
         if dialog_key != keep:
             st.session_state.pop(dialog_key, None)
@@ -1445,8 +1449,14 @@ def edit_pitch_dialog() -> None:
         st.rerun(scope="app")
 
 
-@st.dialog("Edit Yamazumi work element")
-def edit_element_dialog(element_id: str) -> None:
+def close_edit_element_dialog() -> None:
+    st.session_state.pop(edit_element_dialog_key, None)
+
+
+@st.dialog("Edit Yamazumi work element", on_dismiss=close_edit_element_dialog)
+def edit_element_dialog(
+    element_id: str, restored_values: dict[str, object] | None = None
+) -> None:
     state_key = f"yamazumi_edit_element_target_{project_id}_{area_id}"
     matches = elements.loc[elements["id"].astype(str) == str(element_id)]
     if matches.empty:
@@ -1457,11 +1467,10 @@ def edit_element_dialog(element_id: str) -> None:
         return
     current = matches.iloc[0]
     restored = st.session_state.pop(element_edit_restore_key, None)
-    restored_values = (
-        dict(restored.get("values") or {})
-        if isinstance(restored, dict) and str(restored.get("id")) == str(element_id)
-        else {}
-    )
+    if isinstance(restored, dict) and str(restored.get("id")) == str(element_id):
+        restored_values = dict(restored.get("values") or {})
+    else:
+        restored_values = dict(restored_values or {})
     active_pitches = pitches.loc[pitches["status"] == "Active"].copy()
     pitch_label_by_id = {
         str(row["id"]): f"{row['pitch_number']} — {row['pitch_name']}".rstrip(" —")
@@ -1471,7 +1480,7 @@ def edit_element_dialog(element_id: str) -> None:
     current_pitch_id = (
         str(restored_values.get("pitch_id", current.get("pitch_id")) or "") or None
     )
-    with st.form(f"edit_element_form_{element_id}"):
+    with st.container():
         selected_pitch_id = st.selectbox(
             "Pitch",
             options=destinations,
@@ -1484,11 +1493,6 @@ def edit_element_dialog(element_id: str) -> None:
             value=str(restored_values.get("description", current.get("description")) or ""),
             key=f"edit_element_description_{element_id}",
         )
-        current_variants = list(
-            restored_values.get("model_variants")
-            or current.get("model_variants")
-            or ["Base"]
-        )
         time_value = st.number_input(
             f"Time to complete ({time_config.label.lower()})",
             min_value=0.0,
@@ -1499,6 +1503,11 @@ def edit_element_dialog(element_id: str) -> None:
             step=time_config.step,
             format=f"%.{time_config.decimals}f",
             key=f"edit_element_time_{element_id}",
+        )
+        current_variants = list(
+            restored_values.get("model_variants")
+            or current.get("model_variants")
+            or ["Base"]
         )
         available_variants = list(dict.fromkeys([*variant_options, *current_variants]))
         row = st.container(horizontal=True, vertical_alignment="bottom")
@@ -1525,15 +1534,15 @@ def edit_element_dialog(element_id: str) -> None:
             key=f"edit_element_work_region_{element_id}",
         )
         actions = st.container(horizontal=True)
-        # The first submit button is Streamlit's Ctrl+Enter target. Keep Save
-        # first so the text-area keyboard hint performs the expected action.
-        save_edit = actions.form_submit_button("Save element", type="primary", icon=":material/save:")
-        cancel_edit = actions.form_submit_button("Cancel", shortcut="Esc")
-        delete_edit = actions.form_submit_button(
+        save_edit = actions.button(
+            "Save element", type="primary", icon=":material/save:",
+            key=f"save_edit_element_{element_id}",
+        )
+        delete_edit = actions.button(
             "Delete work element…",
             icon=":material/delete:",
-            key=f"request_delete_element_from_board_{element_id}",
-            disabled=has_board_draft,
+            key=f"destructive_request_edit_element_delete_{element_id}",
+            disabled=has_board_draft and "__unassigned__" in (board_draft or {}),
             help=(
                 "Save or undo the unsaved board arrangement before deleting this work element."
                 if has_board_draft
@@ -1563,8 +1572,19 @@ def edit_element_dialog(element_id: str) -> None:
             st.rerun(scope="app")
         except ValueError as exc:
             st.error(str(exc))
-    if cancel_edit:
-        st.session_state.pop(state_key, None)
+    if delete_edit:
+        close_other_yamazumi_dialogs(delete_element_dialog_key)
+        st.session_state[delete_element_dialog_key] = {
+            "element_id": str(element_id),
+            "draft": {
+                "pitch_id": selected_pitch_id,
+                "description": description,
+                "time_value": float(time_value),
+                "model_variants": list(model_variants),
+                "work_type": work_type,
+                "work_region": work_region,
+            },
+        }
         st.rerun(scope="app")
     if delete_edit:
         st.session_state.pop(state_key, None)
@@ -1736,6 +1756,108 @@ def confirm_gui_element_delete() -> None:
             st.error(str(exc))
 
 
+@st.dialog("Delete Yamazumi work element?", dismissible=False)
+def confirm_interactive_element_delete() -> None:
+    pending = st.session_state.get(delete_element_dialog_key, {})
+    element_id = str(pending.get("element_id") or "")
+    try:
+        impact = yamazumi_element_delete_impact(
+            project_id, scenario_id, area_id, element_id
+        )
+    except ValueError as exc:
+        st.warning(str(exc))
+        if st.button(
+            "Close",
+            key=f"close_missing_interactive_element_{project_id}_{area_id}",
+        ):
+            st.session_state.pop(delete_element_dialog_key, None)
+            st.rerun()
+        return
+
+    pitch_label = yamazumi_pitch_label(
+        impact.get("pitch_number"), impact.get("pitch_name")
+    ) if impact.get("pitch_id") else "Unassigned"
+    st.warning(
+        f"Delete **{impact['description']}** from **{pitch_label}** in this planning scenario?"
+    )
+    st.write(
+        "This removes the element from the Yamazumi board, stack order, work totals, "
+        "and line-balance calculations. Changes made in the edit form will not be saved."
+    )
+    if impact["process_step_exists"]:
+        process_label = impact.get("process_operation") or "the linked Work Element"
+        st.info(
+            f"The Process at a Glance step **{process_label}** and its downstream part "
+            "pairings, reviews, Quality, PFMEA, and Control Plan data will remain. It will "
+            "lose its Yamazumi pitch, derived Op ID, and pitch-summary connection."
+        )
+    else:
+        st.info("No current Process at a Glance step is linked to this Yamazumi element.")
+    legacy_group_count = int(impact.get("legacy_material_group_count") or 0)
+    legacy_option_count = int(impact.get("legacy_material_option_count") or 0)
+    if legacy_group_count or legacy_option_count:
+        st.write(
+            f"This also removes {legacy_group_count} legacy Yamazumi-level material "
+            f"requirement(s) and {legacy_option_count} option(s) attached directly to the element."
+        )
+    st.caption(
+        "The pitch, Yamazumi area, Fishbone structure, work-region definition, and audit history remain."
+    )
+    actions = st.container(horizontal=True)
+    if actions.button(
+        "Cancel",
+        key=f"cancel_interactive_element_delete_{project_id}_{area_id}_{element_id}",
+    ):
+        st.session_state.pop(delete_element_dialog_key, None)
+        st.session_state[edit_element_dialog_key] = {
+            "element_id": element_id,
+            "draft": dict(pending.get("draft") or {}),
+        }
+        st.rerun()
+    if actions.button(
+        "Delete element",
+        type="primary",
+        icon=":material/delete:",
+        key=f"destructive_confirm_interactive_element_delete_{element_id}",
+    ):
+        try:
+            result = delete_yamazumi_element(
+                project_id, scenario_id, area_id, element_id
+            )
+            record_audit_event(
+                project_id,
+                "Yamazumi elements",
+                "Delete from interactive board",
+                1,
+                st.session_state.get("current_editor", ""),
+                {
+                    "scenario_id": scenario_id,
+                    "area_id": area_id,
+                    **result,
+                },
+            )
+            current_draft = st.session_state.get(board_draft_key)
+            if isinstance(current_draft, dict):
+                updated_draft = remove_element_from_stack_draft(
+                    current_draft, element_id
+                )
+                remaining_elements = [
+                    row for row in elements.to_dict("records")
+                    if str(row.get("id")) != element_id
+                ]
+                if draft_differs(remaining_elements, updated_draft):
+                    st.session_state[board_draft_key] = updated_draft
+                else:
+                    st.session_state.pop(board_draft_key, None)
+            st.session_state.pop(delete_element_dialog_key, None)
+            st.session_state.pop(edit_element_dialog_key, None)
+            request_table_editor_reset(element_editor_key)
+            st.toast("Deleted Yamazumi work element", icon=":material/delete:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
 
 st.subheader("Interactive balancing board")
 if len(defined_variant_options) == 1:
@@ -1745,8 +1867,8 @@ if len(defined_variant_options) == 1:
 st.caption(
     "Pitch stacks follow Op ID pitch-address order, with Subassembly and Kitter "
     "feeders immediately before the pitch they feed. Drag work within or between "
-    "pitch stacks. Work order is measured outward from the assembly-flow centerline "
-    "and remains a draft until Save & Refresh.",
+    "stacks; order is measured outward from the assembly-flow centerline and remains "
+    "a draft until Save & Refresh.",
     help=(
         "CTQ comes from a linked PFMEA Classification of E, P, P-, Q, or E-. "
         "Safety comes from an active Safety requirement linked to the same Process step."
@@ -1769,6 +1891,7 @@ yamazumi_board(
     variants,
     takt,
     time_unit=yamazumi_time_unit,
+    takt_time_unit=takt_time_unit,
     key=board_key,
     on_move=handle_yamazumi_move,
     on_add_pitch=handle_add_pitch_request,
@@ -1835,10 +1958,16 @@ elif st.session_state.get(add_element_dialog_key):
     add_element_dialog()
 elif st.session_state.get(edit_pitch_dialog_key):
     edit_pitch_dialog()
-elif edit_element_target := st.session_state.pop(edit_element_dialog_key, None):
-    # Treat a board click as a one-shot event. The dialog fragment retains its
-    # argument during interaction, while page navigation cannot replay it.
-    edit_element_dialog(str(edit_element_target))
+elif st.session_state.get(delete_element_dialog_key):
+    confirm_interactive_element_delete()
+elif edit_element_target := st.session_state.get(edit_element_dialog_key):
+    if isinstance(edit_element_target, dict):
+        edit_element_dialog(
+            str(edit_element_target.get("element_id") or ""),
+            dict(edit_element_target.get("draft") or {}),
+        )
+    else:
+        edit_element_dialog(str(edit_element_target))
 
 ALL_YAMAZUMI_AREAS = "__all_yamazumi_areas__"
 yamazumi_area_ids = list(area_labels)

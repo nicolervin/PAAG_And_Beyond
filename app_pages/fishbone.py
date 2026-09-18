@@ -26,6 +26,7 @@ from utils.store import (
     restore_fishbone_assignment_snapshot,
     restore_fishbone_plan_snapshot,
     update_assembly_section_rows,
+    yamazumi_area_creation_summary,
 )
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
@@ -196,6 +197,11 @@ with st.expander(
                         project_id, section_name, section_type, parent_id,
                         section_description,
                     )
+                    area_summary = yamazumi_area_creation_summary(
+                        project_id, section_id
+                    )
+                    created_areas = list(area_summary["created"])
+                    area_conflicts = list(area_summary["conflicts"])
                     record_audit_event(
                         project_id,
                         "Fishbone framework",
@@ -212,11 +218,34 @@ with st.expander(
                                     else "subassembly"
                                 ),
                             },
+                            "automatic_yamazumi_areas": created_areas,
+                            "yamazumi_area_conflicts": area_conflicts,
                         },
                     )
+                    if created_areas:
+                        record_audit_event(
+                            project_id,
+                            "Yamazumi",
+                            "Create areas from Fishbone",
+                            len(created_areas),
+                            st.session_state.get("current_editor", ""),
+                            {
+                                "section_id": section_id,
+                                "section_name": section_name.strip(),
+                                "created_areas": created_areas,
+                                "conflicts": area_conflicts,
+                            },
+                        )
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     st.session_state[section_form_version_key] += 1
-                    st.toast("Fishbone section added", icon=":material/check_circle:")
+                    result_message = (
+                        f"Fishbone section added; {len(created_areas)} Yamazumi area(s) created"
+                    )
+                    if area_conflicts:
+                        result_message += (
+                            f"; {len(area_conflicts)} scenario(s) need manual link repair"
+                        )
+                    st.toast(result_message, icon=":material/check_circle:")
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
@@ -420,7 +449,7 @@ with st.expander(
                 f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections; "
                 "mini-BOM uses tied to a re-pointed Built section move to the target, and all "
                 "other uses return to Not placed.\n"
-                f"- **{impact['yamazumi_area_count']}** Yamazumi area(s) will be re-pointed.\n"
+                f"- **{impact['yamazumi_area_count']}** Yamazumi area(s) will move or merge into the target area, keeping their pitches and work.\n"
                 f"- **{impact['process_link_count']}** Process at a Glance part requirement(s) will be re-pointed.\n"
                 f"- **{impact['assembly_reference_count']}** assembly Built/Installed reference(s) will be re-pointed.\n"
                 f"- **{impact['category_built_reference_count']}** assembly-grid category Built reference(s) will be re-pointed.\n"

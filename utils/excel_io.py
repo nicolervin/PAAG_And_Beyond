@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 import pandas as pd
 
+from utils.time_units import seconds_to_display, time_unit
 from utils.store import (
     active_part_ids,
     assembly_sections,
@@ -234,6 +235,13 @@ def export_workbook(project_id: str, scenario_id: str | None = None) -> bytes:
     scenario_summary = pd.DataFrame([scenario]).drop(
         columns=["id", "project_id", "parent_scenario_id"], errors="ignore"
     ) if scenario else pd.DataFrame()
+    for frame in (summary, scenario_summary):
+        if not frame.empty:
+            unit_key = str(frame.iloc[0]["takt_time_unit"])
+            frame["takt_time"] = seconds_to_display(
+                frame.iloc[0]["takt_time_s"], unit_key
+            )
+            frame["takt_unit"] = time_unit(unit_key).label
     export_elements = elements.copy()
     lucid_columns = [
         "sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",

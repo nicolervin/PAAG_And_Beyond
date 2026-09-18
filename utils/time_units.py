@@ -24,7 +24,7 @@ TIME_UNITS = {
 def normalize_time_unit(value: object) -> str:
     unit = str(value or "seconds").strip().casefold()
     if unit not in TIME_UNITS:
-        raise ValueError("Choose Seconds, Minutes, or Hours for the Yamazumi time unit.")
+        raise ValueError("Choose Seconds, Minutes, or Hours for the time unit.")
     return unit
 
 

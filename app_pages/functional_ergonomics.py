@@ -6,6 +6,8 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 
+from utils.time_units import format_seconds
+
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     ERGONOMICS_RISK_CLASSIFICATIONS,
@@ -82,7 +84,7 @@ page_title_with_scope(
 if scenario:
     st.metric(
         "Current scenario takt time",
-        f"{float(scenario['takt_time_s']):g} seconds",
+        format_seconds(scenario["takt_time_s"], scenario["takt_time_unit"]),
         help=(
             "Use the active scenario's takt time to judge whether a previously "
             "assessed frequency-driven ergonomic risk still applies under this timing."

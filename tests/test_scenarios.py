@@ -49,12 +49,13 @@ class PlanningScenarioTableTests(unittest.TestCase):
             )
 
         update.assert_called_once_with(
-            "project-1", "scenario-1", records[0] | {"takt_time_s": 60.0},
+            "project-1", "scenario-1",
+            records[0] | {"takt_time_s": 60.0, "takt_time_unit": "seconds"},
             _conn=transaction,
         )
         clone.assert_called_once_with(
             "project-1", "scenario-1", "Higher demand", "2", 54.0,
-            "Faster takt", "Nicole", _conn=transaction,
+            "Faster takt", "Nicole", takt_time_unit="seconds", _conn=transaction,
         )
         self.assertEqual(result["created_ids"], ["scenario-2"])
         self.assertEqual(result["updated_count"], 1)

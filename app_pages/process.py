@@ -1001,6 +1001,7 @@ columns = [
 compact_columns = [
     "op_id",
     "details",
+    "station",
     "pitch_name",
     "work_element",
     "assigned_parts",
@@ -1009,6 +1010,7 @@ compact_columns = [
     "criticality",
     "model_applicability",
     "cycle_time_s",
+    "sequence",
 ]
 yamazumi_context = pd.DataFrame()
 if elements.empty:
@@ -1343,9 +1345,7 @@ export_actions = st.container(horizontal=True)
 export_actions.download_button(
     "Export filtered table view",
     data=dataframe_to_excel(
-        visible_elements.reindex(columns=compact_columns).drop(
-            columns=["details"], errors="ignore"
-        ),
+        visible_elements.reindex(columns=compact_columns),
         "Process plan",
     ),
     file_name="process_plan_filtered_view.xlsx",

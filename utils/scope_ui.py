@@ -4,6 +4,7 @@ from typing import Literal
 
 import streamlit as st
 
+from utils.time_units import TIME_UNITS, display_to_seconds, seconds_to_display, time_unit
 from utils.store import (
     clone_planning_scenario,
     next_scenario_revision_label,
@@ -91,11 +92,23 @@ def save_as_scenario_dialog(
             value=f"{source_scenario['name']} · Rev {suggested_revision}",
         )
         revision_label = st.text_input("Scenario revision", value=suggested_revision)
+        source_takt_unit = str(source_scenario.get("takt_time_unit") or "seconds")
+        takt_time_unit = st.selectbox(
+            "Target takt unit",
+            list(TIME_UNITS),
+            index=list(TIME_UNITS).index(source_takt_unit),
+            format_func=lambda value: TIME_UNITS[value].label,
+        )
+        takt_config = time_unit(takt_time_unit)
+        source_takt_display = seconds_to_display(
+            source_scenario["takt_time_s"], source_takt_unit
+        )
         takt_time = st.number_input(
-            "Target takt time (seconds)",
-            min_value=0.1,
-            value=float(source_scenario["takt_time_s"]),
-            step=0.1,
+            f"Target takt time ({takt_config.label.lower()})",
+            min_value=takt_config.step,
+            value=source_takt_display,
+            step=takt_config.step,
+            format=f"%.{takt_config.decimals}f",
         )
         change_summary = st.text_area(
             "What is changing?",
@@ -105,14 +118,21 @@ def save_as_scenario_dialog(
             "Create scenario", type="primary", icon=":material/content_copy:"
         ):
             try:
+                takt_seconds = (
+                    float(source_scenario["takt_time_s"])
+                    if takt_time_unit != source_takt_unit
+                    and float(takt_time) == float(source_takt_display)
+                    else display_to_seconds(takt_time, takt_time_unit)
+                )
                 new_scenario_id = clone_planning_scenario(
                     project_id,
                     source_scenario_id,
                     name,
                     revision_label,
-                    takt_time,
+                    takt_seconds,
                     change_summary,
                     st.session_state.get("current_editor", ""),
+                    takt_time_unit=takt_time_unit,
                 )
                 st.session_state["scenario_id"] = new_scenario_id
                 st.toast(
