@@ -7,6 +7,8 @@ import streamlit as st
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.store import (
+    PART_MAKE_BUY_VALUES,
+    PART_SOURCE_CODES,
     add_part_image,
     assembly_bom_components,
     audit_history,
@@ -149,7 +151,12 @@ st.caption(
     "Edit catalog fields directly, then save. Select View details on a row to open its "
     "photos, full information, and completed-subassembly mini-BOM below."
 )
-editable_columns = ["id", "part_number", "description", "quantity", "revision", "model_applicability", "notes", "source", "image_path", "updated_at", "assembly_id", "assembly_number"]
+editable_columns = [
+    "id", "part_number", "description", "official_windchill_part_name",
+    "technology_engineer", "pits_tracker_number", "source_code", "make_buy",
+    "quantity", "revision", "model_applicability", "notes", "source", "image_path",
+    "updated_at", "assembly_id", "assembly_number",
+]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
 linked_assembly_by_part = {
     str(row["id"]): str(row.get("assembly_number") or "")
@@ -186,11 +193,22 @@ parts_for_editing["view_details"] = ":material/visibility: View details"
 parts_for_editing["photo_status"] = parts_for_editing["image_path"].apply(
     lambda value: "✅ Added" if str(value or "").strip() else "❌ Missing"
 )
+updated_values = pd.to_datetime(parts_for_editing["updated_at"], errors="coerce", utc=True)
+parts_for_editing["updated_display"] = updated_values.dt.strftime(
+    "%b %d, %Y %H:%M"
+).fillna("")
 parts_for_editing = filter_table(
     parts_for_editing,
     key="part_catalog_filters",
-    dropdown_columns=["active", "source", "revision", "photo_status", "applicability_status"],
-    search_columns=["part_number", "description", "photo_status", "applicability_status", "notes", "source"],
+    dropdown_columns=[
+        "active", "source", "revision", "source_code", "make_buy",
+        "technology_engineer", "photo_status", "applicability_status",
+    ],
+    search_columns=[
+        "part_number", "description", "official_windchill_part_name",
+        "technology_engineer", "pits_tracker_number", "source_code", "make_buy",
+        "photo_status", "applicability_status", "notes", "source",
+    ],
     labels={
         "active": "Active in scenario",
         "photo_status": "Photo status",
@@ -212,7 +230,9 @@ parts_editor_rows = direct_entry_editor_rows(
     editor_key=parts_editor_key,
     sort_columns=[
         "active", "photo_status", "part_number", "description", "revision",
-        "feature_applicability", "applicability_status", "notes", "source", "updated_at",
+        "official_windchill_part_name", "technology_engineer", "pits_tracker_number",
+        "source_code", "make_buy", "feature_applicability", "applicability_status",
+        "notes", "source", "updated_at",
     ],
     labels={
         "photo_status": "Photo status", "part_number": "Part number",
@@ -227,8 +247,13 @@ edited_parts = st.data_editor(
     hide_index=True,
     num_rows="dynamic",
     height=430,
-    disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "assembly_id", "assembly_number"],
-    column_order=["view_details", "active", "photo_status", "part_number", "description", "revision", "feature_applicability", "applicability_status", "notes", "source", "updated_at"],
+    disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "updated_display", "assembly_id", "assembly_number"],
+    column_order=[
+        "view_details", "active", "photo_status", "part_number", "description",
+        "official_windchill_part_name", "technology_engineer", "pits_tracker_number",
+        "source_code", "make_buy", "revision", "feature_applicability",
+        "applicability_status", "notes", "source", "updated_display",
+    ],
     column_config={
         "id": None,
         "assembly_id": None,
@@ -244,10 +269,40 @@ edited_parts = st.data_editor(
         ),
         "photo_status": st.column_config.TextColumn(
             "Photo status",
+            default="",
             help="A green check means a primary CAD image is attached; a red X means it is missing.",
         ),
         "part_number": st.column_config.TextColumn("Part number", required=True),
         "description": st.column_config.TextColumn("Part Name", width="large"),
+        "official_windchill_part_name": st.column_config.TextColumn(
+            "Official Windchill Part Name",
+            width="large",
+            help="The official name recorded in Windchill. This does not replace the collaborator-maintained Part Name.",
+        ),
+        "technology_engineer": st.column_config.TextColumn("Technology Engineer"),
+        "pits_tracker_number": st.column_config.TextColumn(
+            "PITS Tracker number",
+            help="This identifier must be unique within the current project. Leading zeros are preserved.",
+        ),
+        "source_code": st.column_config.SelectboxColumn(
+            "Source Code",
+            options=["", *PART_SOURCE_CODES],
+            default="",
+            help=(
+                "m/b - Make / Buy Decision\n\n"
+                "1 - Purchased Part\n\n"
+                "+1 - Purchased Asm\n\n"
+                "2,4 - From AP3\n\n"
+                "3 -\n\n"
+                "4 - Mfg Part\n\n"
+                "5 - Asm (Disassembly no)\n\n"
+                "6 - Asm (Disassembly yes)\n\n"
+                "8 - Component of Purchased Asm"
+            ),
+        ),
+        "make_buy": st.column_config.SelectboxColumn(
+            "Make vs Buy", options=["", *PART_MAKE_BUY_VALUES], default=""
+        ),
         "quantity": None,
         "revision": st.column_config.TextColumn("Revision", default="0"),
         "model_applicability": None,
@@ -261,8 +316,9 @@ edited_parts = st.data_editor(
         ),
         "applicability_status": None,
         "notes": st.column_config.TextColumn("Notes", width="large"),
-        "source": st.column_config.TextColumn("Source"),
-        "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
+        "source": st.column_config.TextColumn("Source", default=""),
+        "updated_at": None,
+        "updated_display": st.column_config.TextColumn("Updated", default=""),
     },
 )
 parts_actions = editable_table_footer(
@@ -281,8 +337,9 @@ st.caption(
 )
 
 export_columns = [
-    "active", "part_number", "description", "revision", "feature_applicability",
-    "photo_status", "notes", "source", "updated_at",
+    "active", "part_number", "description", "official_windchill_part_name",
+    "technology_engineer", "pits_tracker_number", "source_code", "make_buy",
+    "revision", "feature_applicability", "photo_status", "notes", "source", "updated_at",
 ]
 st.download_button(
     "Export filtered rows",
@@ -424,7 +481,7 @@ if save_part_table:
         if missing_rule.any():
             raise ValueError("Every part needs All models or at least one feature choice.")
         parts_to_save = edited_parts.drop(
-            columns=["view_details", "active", "photo_status", "feature_applicability", "applicability_status", "assembly_id", "assembly_number"]
+            columns=["view_details", "active", "photo_status", "feature_applicability", "applicability_status", "updated_display", "assembly_id", "assembly_number"]
         ).copy()
         new_row_mask = parts_to_save["id"].isna() | parts_to_save["id"].astype(str).str.strip().eq("")
         parts_to_save.loc[new_row_mask, "id"] = [str(uuid4()) for _ in range(int(new_row_mask.sum()))]
@@ -433,6 +490,38 @@ if save_part_table:
         parts_to_save.loc[new_row_mask, "quantity"] = 1
         parts_to_save.loc[new_row_mask, "model_applicability"] = "All"
         parts_to_save.loc[new_row_mask, "source"] = "Manual"
+        tracked_fields = {
+            "technology_engineer": "Technology Engineer",
+            "pits_tracker_number": "PITS Tracker number",
+            "source_code": "Source Code",
+            "official_windchill_part_name": "Official Windchill Part Name",
+            "make_buy": "Make vs Buy",
+        }
+        saved_parts_by_id = (
+            parts.set_index(parts["id"].astype(str)).to_dict("index")
+            if not parts.empty else {}
+        )
+        field_changes = []
+        for _, row in parts_to_save.iterrows():
+            part_id = str(row["id"])
+            previous = saved_parts_by_id.get(part_id)
+            changed_fields = {}
+            for field, label in tracked_fields.items():
+                new_value = "" if pd.isna(row.get(field)) else str(row.get(field)).strip()
+                old_value = "" if previous is None else str(previous.get(field) or "").strip()
+                if previous is None or new_value != old_value:
+                    changed_fields[label] = {
+                        "old_value": None if previous is None else old_value,
+                        "new_value": new_value,
+                    }
+            if changed_fields:
+                field_changes.append(
+                    {
+                        "part_id": part_id,
+                        "part_number": str(row["part_number"]).strip(),
+                        "fields": changed_fields,
+                    }
+                )
         count = update_part_rows(
             project_id,
             parts_to_save,
@@ -463,7 +552,7 @@ if save_part_table:
             "Save & Refresh",
             count,
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id},
+            {"scenario_id": scenario_id, "catalog_field_changes": field_changes},
         )
         request_table_editor_reset(parts_editor_key)
         st.toast(f"Saved {count} parts", icon=":material/check_circle:")

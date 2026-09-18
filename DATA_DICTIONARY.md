@@ -82,10 +82,11 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 
 ### `parts`
 
-- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, the primary CAD image path, and optional project-wide physical weight in `weight_lb`.
+- **Purpose:** The approved Parts Catalog, with one master record per project and official part number. It stores the part name in the legacy `description` field, revision, provenance, notes, legacy model-applicability text, the primary CAD image path, optional project-wide physical weight in `weight_lb`, and the collaborator-maintained Technology Engineer, unique PITS Tracker number, controlled Source Code, Official Windchill Part Name, and Make vs Buy fields described below.
 - **Key relationships:** Belongs to `projects`. Parent of `part_images`, `part_scenario_activity`, `part_feature_rules`, `fishbone_part_assignments`, and `process_part_options`. A completed `manufacturing_assemblies` record may reference one catalog row through `catalog_part_id`, allowing the built subassembly to return to the normal Parts Catalog → Fishbone-use → downstream-planning flow.
 - **Scope:** Project-wide master data.
 - **Weight:** `weight_lb` is a nullable `REAL` value storing physical part weight in pounds. It has no inferred or automatic source in Phase 1. The future Ergonomics trigger may evaluate deliberately entered values greater than 33 pounds, regardless of Handle/Consume classification.
+- **Catalog engineering fields:** `technology_engineer`, `pits_tracker_number`, `source_code`, `official_windchill_part_name`, and `make_buy` are optional project-wide text fields. Nonblank `pits_tracker_number` values are unique within one project and preserve leading zeros. `source_code` accepts only blank or `1` through `8`; `make_buy` accepts only blank, `Make`, or `Buy`. These fields remain independent from the legacy Part name and Source fields and from imported `pits_records`; imports never silently overwrite them.
 
 ### `part_scenario_activity`
 
@@ -747,6 +748,15 @@ All writes validate project ownership, complete input sets, required fields, uni
 In-house fabrication tagging for Fishbone sections: a future idea to mark a Subassembly-type Fishbone section as representing an in-house fabrication process (e.g., stamped metal, injection molding), for Quality's PFMEA and Control Plan tracking. Confirmed approach: an orthogonal flag added to an existing Subassembly section (not a new `section_type` value). The section remains structurally an ordinary Subassembly in every respect — walk order, nesting, parent/child rules, and all existing behavior are unaffected. The flag only changes its display designator in the Op ID naming scheme (an `F` instead of `S`) and will drive future Quality-tracked fields once scoped. Requires Quality's input on what specific data should be tracked (for example, tooling, material lot, process parameters) before a real proposal can be written and before the New Module Proposal Gate can be completed. Not yet approved, not yet scoped, no implementation should begin from this note alone.
 
 ## Proposed modules — pending owner review
+
+### Parts Catalog engineering fields
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date proposed:** September 17, 2026
+- **Purpose and connection:** Extend each existing project-wide `parts` record with Technology Engineer, PITS Tracker number, Source Code, Official Windchill Part Name, and Make vs Buy. The fields add reviewed catalog context at the Parts stage of the Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance critical thread without replacing imported evidence or downstream planning decisions.
+- **Scope and storage:** Store all five fields directly on `parts`; no new table or relationship is introduced. Existing and newly migrated records default to blank. PITS Tracker number is trimmed text, preserves leading zeros, and is unique among nonblank values within a project. Source Code accepts blank or `1` through `8`. Make vs Buy accepts blank, `Make`, or `Buy`. Technology Engineer and Official Windchill Part Name are trimmed optional text.
+- **Applicable standards:** Edit the fields through the existing scenario-aware Parts Catalog table and its atomic **Save & Refresh** and Undo workflow. Include them in filters, search, and filtered Excel export. Record changed old/new values with Current editor attribution in the existing `Parts` audit category and retain the bottom Parts history. The existing relationship-aware deletion workflow and scenario-specific Active field are unchanged.
+- **Approval status:** Approved by the project owner on September 17, 2026; implemented on `NE_Parts_Catalog_Updates`.
 
 ### Takt display-unit preferences
 

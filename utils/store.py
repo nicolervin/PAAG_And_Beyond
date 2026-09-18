@@ -476,6 +476,13 @@ def init_db() -> None:
                 part_number TEXT NOT NULL, description TEXT DEFAULT '', quantity REAL DEFAULT 1,
                 revision TEXT DEFAULT '0', source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
                 model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', weight_lb REAL,
+                technology_engineer TEXT NOT NULL DEFAULT '',
+                pits_tracker_number TEXT NOT NULL DEFAULT '',
+                source_code TEXT NOT NULL DEFAULT ''
+                    CHECK (source_code IN ('', '1', '2', '3', '4', '5', '6', '7', '8')),
+                official_windchill_part_name TEXT NOT NULL DEFAULT '',
+                make_buy TEXT NOT NULL DEFAULT ''
+                    CHECK (make_buy IN ('', 'Make', 'Buy')),
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
             );
@@ -886,6 +893,22 @@ def init_db() -> None:
         part_columns = {row[1] for row in conn.execute("PRAGMA table_info(parts)").fetchall()}
         if "weight_lb" not in part_columns:
             conn.execute("ALTER TABLE parts ADD COLUMN weight_lb REAL")
+        for column in (
+            "technology_engineer",
+            "pits_tracker_number",
+            "source_code",
+            "official_windchill_part_name",
+            "make_buy",
+        ):
+            if column not in part_columns:
+                conn.execute(
+                    f"ALTER TABLE parts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_parts_project_pits_tracker_number
+               ON parts(project_id, pits_tracker_number)
+               WHERE pits_tracker_number <> ''"""
+        )
         process_option_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(process_part_options)").fetchall()
         }
@@ -9085,21 +9108,74 @@ def normalize_model_applicability(value) -> str:
     return text or "All"
 
 
+PART_SOURCE_CODES = tuple(str(value) for value in range(1, 9))
+PART_MAKE_BUY_VALUES = ("Make", "Buy")
+
+
+def _clean_optional_text(value) -> str:
+    return "" if value is None or pd.isna(value) else str(value).strip()
+
+
+def _validated_part_catalog_fields(values) -> dict[str, str]:
+    fields = {
+        "technology_engineer": _clean_optional_text(values.get("technology_engineer")),
+        "pits_tracker_number": _clean_optional_text(values.get("pits_tracker_number")),
+        "source_code": _clean_optional_text(values.get("source_code")),
+        "official_windchill_part_name": _clean_optional_text(
+            values.get("official_windchill_part_name")
+        ),
+        "make_buy": _clean_optional_text(values.get("make_buy")),
+    }
+    if fields["source_code"] not in {"", *PART_SOURCE_CODES}:
+        raise ValueError("Source Code must be blank or a value from 1 through 8.")
+    if fields["make_buy"] not in {"", *PART_MAKE_BUY_VALUES}:
+        raise ValueError("Make vs Buy must be blank, Make, or Buy.")
+    return fields
+
+
 def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> str:
     timestamp = now_iso()
     part_id = part_id or str(uuid4())
     quantity = values.get("quantity", 1)
     quantity = None if quantity is None or pd.isna(quantity) or str(quantity).strip() == "" else float(quantity)
+    catalog_fields = _validated_part_catalog_fields(values)
+    if catalog_fields["pits_tracker_number"]:
+        duplicate = query(
+            """SELECT id FROM parts
+               WHERE project_id=? AND pits_tracker_number=?
+                 AND id<>? AND part_number<>?""",
+            (
+                project_id,
+                catalog_fields["pits_tracker_number"],
+                part_id,
+                values["part_number"].strip(),
+            ),
+        )
+        if duplicate:
+            raise ValueError(
+                "Duplicate PITS Tracker numbers are not allowed in this project: "
+                f"{catalog_fields['pits_tracker_number']}"
+            )
     execute(
         """INSERT INTO parts (id, project_id, part_number, description, quantity, revision, source,
-           image_path, model_applicability, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           image_path, model_applicability, notes, technology_engineer, pits_tracker_number,
+           source_code, official_windchill_part_name, make_buy, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, part_number) DO UPDATE SET description=excluded.description,
            quantity=excluded.quantity, revision=excluded.revision, source=excluded.source,
-           model_applicability=excluded.model_applicability, notes=excluded.notes, updated_at=excluded.updated_at""",
+           model_applicability=excluded.model_applicability, notes=excluded.notes,
+           technology_engineer=CASE WHEN excluded.technology_engineer<>'' THEN excluded.technology_engineer ELSE parts.technology_engineer END,
+           pits_tracker_number=CASE WHEN excluded.pits_tracker_number<>'' THEN excluded.pits_tracker_number ELSE parts.pits_tracker_number END,
+           source_code=CASE WHEN excluded.source_code<>'' THEN excluded.source_code ELSE parts.source_code END,
+           official_windchill_part_name=CASE WHEN excluded.official_windchill_part_name<>'' THEN excluded.official_windchill_part_name ELSE parts.official_windchill_part_name END,
+           make_buy=CASE WHEN excluded.make_buy<>'' THEN excluded.make_buy ELSE parts.make_buy END,
+           updated_at=excluded.updated_at""",
         (part_id, project_id, values["part_number"].strip(), values.get("description", "").strip(),
          quantity, str(values.get("revision") or "0").strip() or "0", values.get("source", "Manual"),
          values.get("image_path", ""), normalize_model_applicability(values.get("model_applicability", "All")),
-         values.get("notes", "").strip(), timestamp),
+         values.get("notes", "").strip(), catalog_fields["technology_engineer"],
+         catalog_fields["pits_tracker_number"], catalog_fields["source_code"],
+         catalog_fields["official_windchill_part_name"], catalog_fields["make_buy"], timestamp),
     )
     rows = query("SELECT id FROM parts WHERE project_id = ? AND part_number = ?", (project_id, values["part_number"].strip()))
     return rows[0]["id"]
@@ -9121,6 +9197,18 @@ def update_part_rows(
     if part_numbers.duplicated().any():
         duplicates = ", ".join(sorted(part_numbers[part_numbers.duplicated(keep=False)].unique()))
         raise ValueError(f"Duplicate part numbers are not allowed: {duplicates}")
+    pits_numbers = (
+        edited.get("pits_tracker_number", pd.Series("", index=edited.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    duplicate_pits = pits_numbers.ne("") & pits_numbers.duplicated(keep=False)
+    if duplicate_pits.any():
+        duplicates = ", ".join(sorted(pits_numbers[duplicate_pits].unique()))
+        raise ValueError(
+            f"Duplicate PITS Tracker numbers are not allowed in this project: {duplicates}"
+        )
     def clean_text(value) -> str:
         return "" if value is None or pd.isna(value) else str(value).strip()
 
@@ -9138,6 +9226,32 @@ def update_part_rows(
             ).fetchall()
         }
         existing_ids = set(existing_parts)
+        tracker_owner = {
+            str(existing["pits_tracker_number"] or "").strip(): part_id
+            for part_id, existing in existing_parts.items()
+            if str(existing["pits_tracker_number"] or "").strip()
+        }
+        edited_ids = {
+            str(row.get("id") or "").strip()
+            for _, row in edited.iterrows()
+            if row.get("id") is not None and not pd.isna(row.get("id"))
+        }
+        tracker_owner = {
+            tracker: owner
+            for tracker, owner in tracker_owner.items()
+            if owner not in edited_ids
+        }
+        for _, row in edited.iterrows():
+            tracker = clean_text(row.get("pits_tracker_number"))
+            if not tracker:
+                continue
+            part_id = clean_text(row.get("id"))
+            if tracker in tracker_owner and tracker_owner[tracker] != part_id:
+                raise ValueError(
+                    "Duplicate PITS Tracker numbers are not allowed in this project: "
+                    f"{tracker}"
+                )
+            tracker_owner[tracker] = part_id
         linked_assemblies = {
             str(row["catalog_part_id"]): str(row["assembly_number"])
             for row in conn.execute(
@@ -9174,25 +9288,48 @@ def update_part_rows(
                 if part_id in linked_assemblies and previous
                 else normalize_model_applicability(row.get("model_applicability"))
             )
+            catalog_fields = _validated_part_catalog_fields(
+                {
+                    field: (
+                        row.get(field)
+                        if field in edited.columns
+                        else (previous or {}).get(field, "")
+                    )
+                    for field in (
+                        "technology_engineer",
+                        "pits_tracker_number",
+                        "source_code",
+                        "official_windchill_part_name",
+                        "make_buy",
+                    )
+                }
+            )
             values = (
                 part_number, clean_text(row.get("description")), quantity,
                 revision, applicability,
-                clean_text(row.get("notes")), timestamp,
+                clean_text(row.get("notes")), catalog_fields["technology_engineer"],
+                catalog_fields["pits_tracker_number"], catalog_fields["source_code"],
+                catalog_fields["official_windchill_part_name"],
+                catalog_fields["make_buy"], timestamp,
             )
             if part_id in existing_ids:
                 conn.execute(
                     """UPDATE parts SET part_number=?, description=?, quantity=?, revision=?,
-                       model_applicability=?, notes=?, updated_at=? WHERE id=? AND project_id=?""",
+                       model_applicability=?, notes=?, technology_engineer=?,
+                       pits_tracker_number=?, source_code=?, official_windchill_part_name=?,
+                       make_buy=?, updated_at=? WHERE id=? AND project_id=?""",
                     (*values, part_id, project_id),
                 )
             else:
                 conn.execute(
                     """INSERT INTO parts
                        (id, project_id, part_number, description, quantity, revision, source,
-                        image_path, model_applicability, notes, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)""",
+                        image_path, model_applicability, notes, technology_engineer,
+                        pits_tracker_number, source_code, official_windchill_part_name,
+                        make_buy, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (part_id, project_id, values[0], values[1], values[2], values[3],
-                     clean_text(row.get("source")) or "Manual", values[4], values[5], values[6]),
+                     clean_text(row.get("source")) or "Manual", *values[4:]),
                 )
         if scenario_id and activity_by_part is not None:
             normalized_activity = {
