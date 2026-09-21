@@ -404,10 +404,10 @@ def parse_yamazumi_model_variants(value, fallback: str | None = "Base") -> list[
 def connection():
     DATA_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=20)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         yield conn
         conn.commit()
@@ -441,7 +441,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_number TEXT NOT NULL, description TEXT DEFAULT '', quantity REAL DEFAULT 1,
                 revision TEXT DEFAULT '0', source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
-                model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', weight_lb REAL,
+                model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', source_code TEXT DEFAULT '', weight_lb REAL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
             );
@@ -776,6 +776,33 @@ def init_db() -> None:
         if "product_line" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
         part_columns = {row[1] for row in conn.execute("PRAGMA table_info(parts)").fetchall()}
+        if "source_code" not in part_columns:
+            conn.execute("ALTER TABLE parts ADD COLUMN source_code TEXT DEFAULT ''")
+        for part in conn.execute(
+            """SELECT record.project_id, record.part_number, record.source_payload
+               FROM pits_records record
+               JOIN parts catalog
+                 ON catalog.project_id=record.project_id
+                AND catalog.part_number=record.part_number
+                AND catalog.source='PITS snapshot'
+               WHERE TRIM(record.part_number) <> ''"""
+        ).fetchall():
+            try:
+                payload = json.loads(part["source_payload"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            source_code = str(
+                payload.get("source_code")
+                or payload.get("sourcecode")
+                or payload.get("source_code_t")
+                or ""
+            ).strip()
+            revision = str(payload.get("revision") or "").strip()
+            conn.execute(
+                """UPDATE parts SET revision=?, source_code=?
+                   WHERE project_id=? AND part_number=? AND source='PITS snapshot'""",
+                (revision, source_code, part["project_id"], part["part_number"]),
+            )
         if "weight_lb" not in part_columns:
             conn.execute("ALTER TABLE parts ADD COLUMN weight_lb REAL")
         process_option_columns = {
@@ -8631,14 +8658,15 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
     quantity = None if quantity is None or pd.isna(quantity) or str(quantity).strip() == "" else float(quantity)
     execute(
         """INSERT INTO parts (id, project_id, part_number, description, quantity, revision, source,
-           image_path, model_applicability, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              image_path, model_applicability, notes, source_code, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, part_number) DO UPDATE SET description=excluded.description,
            quantity=excluded.quantity, revision=excluded.revision, source=excluded.source,
-           model_applicability=excluded.model_applicability, notes=excluded.notes, updated_at=excluded.updated_at""",
+              model_applicability=excluded.model_applicability, notes=excluded.notes,
+              source_code=excluded.source_code, updated_at=excluded.updated_at""",
         (part_id, project_id, values["part_number"].strip(), values.get("description", "").strip(),
          quantity, str(values.get("revision") or "0").strip() or "0", values.get("source", "Manual"),
          values.get("image_path", ""), normalize_model_applicability(values.get("model_applicability", "All")),
-         values.get("notes", "").strip(), timestamp),
+            values.get("notes", "").strip(), str(values.get("source_code") or "").strip(), timestamp),
     )
     rows = query("SELECT id FROM parts WHERE project_id = ? AND part_number = ?", (project_id, values["part_number"].strip()))
     return rows[0]["id"]
@@ -8713,25 +8741,31 @@ def update_part_rows(
                 if part_id in linked_assemblies and previous
                 else normalize_model_applicability(row.get("model_applicability"))
             )
+            source_code = (
+                clean_text(row.get("source_code"))
+                if "source_code" in edited.columns
+                else str(previous.get("source_code") or "") if previous else ""
+            )
             values = (
                 part_number, clean_text(row.get("description")), quantity,
-                revision, applicability,
+                revision, source_code, applicability,
                 clean_text(row.get("notes")), timestamp,
             )
             if part_id in existing_ids:
                 conn.execute(
                     """UPDATE parts SET part_number=?, description=?, quantity=?, revision=?,
-                       model_applicability=?, notes=?, updated_at=? WHERE id=? AND project_id=?""",
+                       source_code=?, model_applicability=?, notes=?, updated_at=?
+                       WHERE id=? AND project_id=?""",
                     (*values, part_id, project_id),
                 )
             else:
                 conn.execute(
                     """INSERT INTO parts
                        (id, project_id, part_number, description, quantity, revision, source,
-                        image_path, model_applicability, notes, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)""",
+                        image_path, model_applicability, notes, source_code, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)""",
                     (part_id, project_id, values[0], values[1], values[2], values[3],
-                     clean_text(row.get("source")) or "Manual", values[4], values[5], values[6]),
+                                         clean_text(row.get("source")) or "Manual", values[5], values[6], values[4], values[7]),
                 )
         if scenario_id and activity_by_part is not None:
             normalized_activity = {
@@ -11059,15 +11093,69 @@ def pits_revisions(project_id: str) -> pd.DataFrame:
     ))
 
 
-def import_pits_id_snapshot(project_id: str, records: list[dict], models: list[dict]) -> dict[str, int]:
+def import_pits_id_snapshot(
+    project_id: str,
+    records: list[dict],
+    models: list[dict],
+    *,
+    scenario_id: str | None = None,
+) -> dict[str, int]:
     timestamp = now_iso()
     summary = {"new": 0, "changed": 0, "unchanged": 0, "models": 0}
     with connection() as conn:
+        project_exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?",
+            (project_id,),
+        ).fetchone()
+        if not project_exists:
+            raise ValueError("The selected project no longer exists.")
+        if scenario_id and not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+
         next_sequence = conn.execute(
             "SELECT COALESCE(MAX(sequence), 0) FROM fishbone_nodes WHERE project_id = ?", (project_id,)
         ).fetchone()[0]
         for record in records:
             pits_id = str(record["pits_id"]).strip()
+            part_number = str(record.get("part_number") or "").strip()
+            description = str(record.get("description") or "").strip()
+            notes = str(record.get("comments") or "").strip()
+            used_in_bom = str(record.get("used_bom") or "").strip().casefold() not in {"n", "no"}
+            if part_number:
+                conn.execute(
+                    """INSERT INTO parts
+                       (id, project_id, part_number, description, quantity, revision, source,
+                        image_path, model_applicability, notes, source_code, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                       ON CONFLICT(project_id, part_number) DO UPDATE SET
+                       description=excluded.description, quantity=excluded.quantity,
+                       revision=excluded.revision, source_code=excluded.source_code,
+                       source=excluded.source, notes=excluded.notes,
+                       updated_at=excluded.updated_at""",
+                    (
+                        str(uuid4()), project_id, part_number, description,
+                        record.get("quantity") if record.get("quantity") is not None else 1,
+                        str(record.get("revision") or "").strip(),
+                        "PITS snapshot", "All", notes,
+                        str(record.get("source_code") or "").strip(), timestamp,
+                    ),
+                )
+                if scenario_id:
+                    part_row = conn.execute(
+                        "SELECT id FROM parts WHERE project_id=? AND part_number=?",
+                        (project_id, part_number),
+                    ).fetchone()
+                    conn.execute(
+                        """INSERT INTO part_scenario_activity
+                           (project_id, scenario_id, part_id, active, updated_at)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(scenario_id, part_id) DO UPDATE SET
+                           active=excluded.active, updated_at=excluded.updated_at""",
+                        (project_id, scenario_id, part_row["id"], 1 if used_in_bom else 0, timestamp),
+                    )
             payload = json.dumps(record["source_payload"], sort_keys=True, ensure_ascii=False, default=str)
             source_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
             existing = conn.execute(

@@ -149,7 +149,7 @@ st.caption(
     "Edit catalog fields directly, then save. Select View details on a row to open its "
     "photos, full information, and completed-subassembly mini-BOM below."
 )
-editable_columns = ["id", "part_number", "description", "quantity", "revision", "model_applicability", "notes", "source", "image_path", "updated_at", "assembly_id", "assembly_number"]
+editable_columns = ["id", "part_number", "description", "quantity", "revision", "source_code", "model_applicability", "notes", "source", "image_path", "updated_at", "assembly_id", "assembly_number"]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
 linked_assembly_by_part = {
     str(row["id"]): str(row.get("assembly_number") or "")
@@ -182,22 +182,41 @@ parts_for_editing["applicability_status"] = parts_for_editing.apply(
     ),
     axis=1,
 )
+parts_for_editing["source_code"] = parts_for_editing["source_code"].apply(
+    lambda value: ""
+    if value is None or pd.isna(value)
+    else str(int(value))
+    if isinstance(value, float) and value.is_integer()
+    else str(value).strip()
+).astype("string")
 parts_for_editing["view_details"] = ":material/visibility: View details"
 parts_for_editing["photo_status"] = parts_for_editing["image_path"].apply(
     lambda value: "✅ Added" if str(value or "").strip() else "❌ Missing"
 )
-parts_for_editing = filter_table(
-    parts_for_editing,
-    key="part_catalog_filters",
-    dropdown_columns=["active", "source", "revision", "photo_status", "applicability_status"],
-    search_columns=["part_number", "description", "photo_status", "applicability_status", "notes", "source"],
-    labels={
-        "active": "Active in scenario",
-        "photo_status": "Photo status",
-        "applicability_status": "Feature applicability",
-    },
-    reset_widget_keys=[parts_editor_key],
-)
+with st.expander("Filter columns", icon=":material/filter_list:"):
+    parts_for_editing = filter_table(
+        parts_for_editing,
+        key="part_catalog_filters",
+        dropdown_columns=[
+            "active", "photo_status", "part_number", "description", "revision",
+            "source_code", "feature_applicability", "notes", "source", "updated_at",
+        ],
+        search_columns=[
+            "part_number", "description", "revision", "source_code", "photo_status",
+            "feature_applicability", "notes", "source", "updated_at",
+        ],
+        labels={
+            "active": "Active in scenario",
+            "photo_status": "Photo status",
+            "part_number": "Part number",
+            "description": "Part Name",
+            "source_code": "Source Code",
+            "feature_applicability": "Feature applicability",
+            "updated_at": "Updated",
+        },
+        reset_widget_keys=[parts_editor_key],
+        multi_value_columns=["feature_applicability"],
+    )
 selected_part_key = f"parts_selected_id_{project_id}"
 
 
@@ -211,8 +230,8 @@ parts_editor_rows = direct_entry_editor_rows(
     parts_for_editing,
     editor_key=parts_editor_key,
     sort_columns=[
-        "active", "photo_status", "part_number", "description", "revision",
-        "feature_applicability", "applicability_status", "notes", "source", "updated_at",
+            "active", "photo_status", "part_number", "description", "revision", "source_code",
+            "feature_applicability", "applicability_status", "notes", "source", "updated_at",
     ],
     labels={
         "photo_status": "Photo status", "part_number": "Part number",
@@ -228,7 +247,7 @@ edited_parts = st.data_editor(
     num_rows="dynamic",
     height=430,
     disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "assembly_id", "assembly_number"],
-    column_order=["view_details", "active", "photo_status", "part_number", "description", "revision", "feature_applicability", "applicability_status", "notes", "source", "updated_at"],
+    column_order=["view_details", "active", "photo_status", "part_number", "description", "revision", "source_code", "feature_applicability", "applicability_status", "notes", "source", "updated_at"],
     column_config={
         "id": None,
         "assembly_id": None,
@@ -250,6 +269,19 @@ edited_parts = st.data_editor(
         "description": st.column_config.TextColumn("Part Name", width="large"),
         "quantity": None,
         "revision": st.column_config.TextColumn("Revision", default="0"),
+        "source_code": st.column_config.TextColumn(
+            "Source Code",
+            help=(
+                "PITS source code from tracker column T.\n\n"
+                "- 1 - Purchased Part\n"
+                "- +1 - Purchased Asm\n"
+                "- 2.4 - From AP3\n"
+                "- 3 - Mfg Part\n"
+                "- 5 - Asm (Disassembly no)\n"
+                "- 6 - Asm (Disassembly yes)\n"
+                "- 8 - Component of Purchased Asm"
+            ),
+        ),
         "model_applicability": None,
         "image_path": None,
         "feature_applicability": st.column_config.MultiselectColumn(
@@ -281,7 +313,7 @@ st.caption(
 )
 
 export_columns = [
-    "active", "part_number", "description", "revision", "feature_applicability",
+    "active", "part_number", "description", "revision", "source_code", "feature_applicability",
     "photo_status", "notes", "source", "updated_at",
 ]
 st.download_button(

@@ -72,13 +72,32 @@ with import_col.container(border=True):
                         search_columns=["model_number", "appearance", "sku_upc"],
                     )
                     selectable_dataframe(model_preview_table, key="pits_model_preview_table", hide_index=True)
-                if st.button("Import PITS snapshot", type="primary", icon=":material/upload:"):
+                excluded_records = [
+                    record for record in records
+                    if str(record.get("used_bom") or "").strip().casefold() in {"n", "no"}
+                ]
+                if excluded_records:
+                    st.warning(
+                        f"{len(excluded_records):,} workbook row(s) marked Used BOM = N will remain in the "
+                        "Parts Catalog but will be marked inactive for the selected planning scenario.",
+                        icon=":material/warning:",
+                    )
+                if st.button(
+                    "Import PITS snapshot",
+                    type="primary",
+                    icon=":material/upload:",
+                ):
                     existing_pits = pits_records(project_id)
                     previous_revisions = {
                         str(row["pits_id"]): int(row["revision_no"])
                         for _, row in existing_pits.iterrows()
                     }
-                    summary = import_pits_id_snapshot(project_id, records, models)
+                    summary = import_pits_id_snapshot(
+                        project_id,
+                        records,
+                        models,
+                        scenario_id=scenario_id,
+                    )
                     imported_pits = pits_records(project_id)
                     imported_ids = {str(record["pits_id"]).strip() for record in records}
                     created_revisions = []
@@ -149,12 +168,19 @@ with import_col.container(border=True):
                     st.success(f"Sent {count:,} source occurrences to MBOM review. No candidate was accepted into the part catalog automatically.", icon=":material/check_circle:")
                 st.stop()
             suggestions = suggest_mapping(raw.columns)
-            options = [None] + raw.columns.tolist()
+            raw_columns = [column for column in raw.columns.tolist() if str(column).strip()]
+            options = [None] + raw_columns
             st.caption(f"{len(raw):,} rows found. Confirm the column mapping before importing.")
             mapping = {}
             for target, label in [("part_number", "Part number"), ("description", "Part Name"), ("quantity", "Quantity"), ("revision", "Revision"), ("model_applicability", "Model applicability")]:
                 suggested = suggestions[target]
-                mapping[target] = st.selectbox(label, options, index=options.index(suggested) if suggested in options else 0, key=f"map_{target}")
+                mapping[target] = st.selectbox(
+                    label,
+                    options,
+                    index=(options.index(suggested) if suggested in options else 0),
+                    key=f"map_{target}",
+                    help="Choose the column in the uploaded file that matches this required field.",
+                )
             preview = mapped_bom(raw, mapping)
             preview_for_display = preview.copy()
             preview_for_display["model_applicability"] = preview_for_display["model_applicability"].apply(

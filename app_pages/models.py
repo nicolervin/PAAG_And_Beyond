@@ -587,6 +587,10 @@ active_features = (
     features.loc[features["active"].fillna(1).astype(bool)].copy()
     if not features.empty else features
 )
+active_model_ids = (
+    set(models.loc[models["active"].fillna(1).astype(bool), "id"].astype(str))
+    if not models.empty else set()
+)
 if models.empty:
     st.info("Add official models above before mapping the complexity tree.")
 elif active_features.empty:
@@ -596,6 +600,7 @@ else:
         "Assign one team-defined choice per feature to each official model. Models may share the same process-relevant choices."
     )
     tree = complexity_tree(project_id)
+    tree = tree.loc[tree["model_id"].astype(str).isin(active_model_ids)].copy()
     active_feature_ids = active_features["id"].astype(str).tolist()
     tree = tree[["model_id", "common_name", "official_model_number", *active_feature_ids]]
     tree_config = {
@@ -756,7 +761,6 @@ else:
             st.error(str(exc))
     if st.session_state.get(tree_pending_save_key):
         confirm_duplicate_model_save()
-
 
 with st.expander("History", icon=":material/history:"):
     models_history_tab, features_history_tab, tree_history_tab = st.tabs(
