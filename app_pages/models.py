@@ -1,4 +1,5 @@
 import json
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -118,8 +119,8 @@ edited_models = st.data_editor(
         "eau": st.column_config.NumberColumn(
             "EAU",
             min_value=0,
-            step=1,
-            format="%d",
+            step=0.1,
+            format="%.1f",
             help="Estimated annual usage for this model.",
         ),
         "description": st.column_config.TextColumn("Description", width="large"),
@@ -603,10 +604,18 @@ else:
     tree = tree.loc[tree["model_id"].astype(str).isin(active_model_ids)].copy()
     active_feature_ids = active_features["id"].astype(str).tolist()
     tree = tree[["model_id", "common_name", "official_model_number", *active_feature_ids]]
+    spacer_count = max(6, len(active_feature_ids))
+    spacer_columns = [
+        f"__complexity_tree_spacer_{index}" for index in range(1, spacer_count + 1)
+    ]
+    for spacer_column in spacer_columns:
+        tree[spacer_column] = ""
     tree_config = {
         "model_id": None,
-        "common_name": st.column_config.TextColumn("Common name", pinned=True),
-        "official_model_number": st.column_config.TextColumn("Official model number", pinned=True),
+        "common_name": st.column_config.TextColumn("Common name", width="medium"),
+        "official_model_number": st.column_config.TextColumn(
+            "Official model number", width="medium", pinned=True
+        ),
     }
     for _, feature in active_features.iterrows():
         feature_id = str(feature["id"])
@@ -614,7 +623,12 @@ else:
         tree_config[feature_id] = st.column_config.SelectboxColumn(
             f"{feature['category']} · {feature['name']}",
             options=choices,
+            width="medium",
             help=str(feature.get("description") or ""),
+        )
+    for spacer_column in spacer_columns:
+        tree_config[spacer_column] = st.column_config.TextColumn(
+            "", width="medium"
         )
     edited_tree = st.data_editor(
         tree,
@@ -622,8 +636,13 @@ else:
         hide_index=True,
         num_rows="delete",
         height=420,
-        disabled=["model_id", "common_name", "official_model_number"],
-        column_order=["common_name", "official_model_number", *active_feature_ids],
+        width="content",
+        disabled=[
+            "model_id", "common_name", "official_model_number", *spacer_columns,
+        ],
+        column_order=[
+            "official_model_number", "common_name", *active_feature_ids, *spacer_columns,
+        ],
         column_config=tree_config,
     )
     tree_actions = editable_table_footer(
@@ -762,6 +781,194 @@ else:
     if st.session_state.get(tree_pending_save_key):
         confirm_duplicate_model_save()
 
+    st.divider()
+    editable_table_heading("Complexity tree visual")
+    category_values = sorted(
+        {
+            str(category).strip()
+            for category in active_features["category"].dropna()
+            if str(category).strip()
+        }
+    )
+    visual_category = st.selectbox(
+        "Category",
+        ["", *category_values],
+        index=0,
+        format_func=lambda value: value or "Select a category",
+        key=f"complexity_tree_visual_category_{project_id}",
+    )
+    visual_model_label = st.selectbox(
+        "Model label",
+        ["", "Common name", "Official model number"],
+        index=0,
+        format_func=lambda value: value or "Select a model label",
+        key=f"complexity_tree_visual_model_label_{project_id}",
+        help="Choose which model identifier appears in the visual headers.",
+    )
+    if not visual_category or not visual_model_label:
+        if not visual_category and not visual_model_label:
+            st.info("Select a category and model label to generate the complexity tree visual.")
+        elif not visual_category:
+            st.info("Select a category to generate the complexity tree visual.")
+        else:
+            st.info("Select a model label to generate the complexity tree visual.")
+        visual_features = None
+    else:
+        visual_features = active_features.loc[
+            active_features["category"].fillna("").astype(str).eq(visual_category)
+        ]
+
+    visual_models = models.loc[
+        models["active"].fillna(1).astype(bool),
+        ["id", "display_name", "model_number"],
+    ].copy()
+    visual_tree = complexity_tree(project_id).set_index("model_id")
+    visual_model_groups: list[dict[str, object]] = []
+    if visual_features is not None:
+        feature_ids = [str(feature_id) for feature_id in visual_features["id"]]
+        groups_by_values: dict[tuple[str, ...], dict[str, object]] = {}
+        for _, model in visual_models.iterrows():
+            model_id = str(model["id"])
+            if model_id not in visual_tree.index:
+                continue
+            values = tuple(
+                "" if pd.isna(visual_tree.at[model_id, feature_id])
+                else str(visual_tree.at[model_id, feature_id]).strip()
+                for feature_id in feature_ids
+            )
+            group = groups_by_values.setdefault(
+                values,
+                {"model_ids": [], "model_names": [], "model_numbers": []},
+            )
+            group["model_ids"].append(model_id)
+            group["model_names"].append(str(model["display_name"] or "").strip())
+            group["model_numbers"].append(str(model["model_number"]).strip())
+        visual_model_groups = list(groups_by_values.values())
+    if visual_features is None:
+        pass
+    elif visual_features.empty:
+        st.info("No active features match this category.")
+    elif not visual_model_groups:
+        st.info("No active models are available for the complexity tree visual.")
+    else:
+        grid_columns = len(visual_model_groups)
+        grid_template = (
+            f"minmax(130px, 1.2fr) repeat({grid_columns}, minmax(90px, 1fr))"
+        )
+        model_header_height = max(
+            42,
+            max(len(group["model_numbers"]) for group in visual_model_groups) * 22 + 12,
+        )
+        visual_html = [
+            f'<div style="display:grid;grid-template-columns:{grid_template};'
+            'gap:10px 8px;align-items:center;">',
+            '<div style="font-weight:700;">Model</div>',
+        ]
+        for group in visual_model_groups:
+            labels = (
+                group["model_names"]
+                if visual_model_label == "Common name"
+                else group["model_numbers"]
+            )
+            if visual_model_label == "Common name":
+                labels = list(dict.fromkeys(labels))
+            model_labels = "<br>".join(
+                escape(str(label or "Common name not defined")) for label in labels
+            )
+            visual_html.append(
+                '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;height:{model_header_height}px;'
+                'box-sizing:border-box;display:flex;align-items:center;'
+                'justify-content:center;text-align:center;">'
+                f"{model_labels}</div>"
+            )
+        visual_html.append('<div></div>')
+        visual_html.extend(
+            '<div style="height:12px;width:0;border-left:2px solid #475569;'
+            'margin:auto;"></div>'
+            for _ in visual_model_groups
+        )
+
+        row_hues = [220, 145, 35, 295, 5, 180, 75, 255, 330, 110]
+        feature_count = len(visual_features)
+        for feature_index, (_, feature) in enumerate(visual_features.iterrows()):
+            feature_id = str(feature["id"])
+            choices = [str(choice).strip() for choice in json.loads(
+                feature["allowed_values"] or "[]"
+            ) if str(choice).strip()]
+            color_by_choice = {
+                choice: (
+                    "hsl("
+                    f"{row_hues[feature_index % len(row_hues)]}, 65%, "
+                    f"{max(38, 92 - index * 8)}%)"
+                )
+                for index, choice in enumerate(choices)
+            }
+            visual_html.append(
+                '<div style="font-weight:700;">'
+                f"{escape(str(feature['name']).strip())}</div>"
+            )
+            values: list[str] = []
+            for group in visual_model_groups:
+                model_id = group["model_ids"][0]
+                value = visual_tree.at[model_id, feature_id]
+                selected_value = "" if pd.isna(value) else str(value).strip()
+                values.append(selected_value)
+            start = 0
+            while start < len(values):
+                end = start + 1
+                while end < len(values) and values[end] == values[start]:
+                    end += 1
+                selected_value = values[start]
+                background = color_by_choice.get(selected_value, "#f1f5f9")
+                choice_index = choices.index(selected_value) if selected_value in choices else -1
+                text_color = "#ffffff" if choice_index >= 4 else "#17324d"
+                if not selected_value:
+                    text_color = "#64748b"
+                label = escape(selected_value or "Not assigned")
+                visual_html.append(
+                    f'<div style="grid-column:span {end - start};background:{background};'
+                    'border-radius:8px;padding:10px 12px;text-align:center;display:flex;'
+                    'align-items:center;justify-content:center;'
+                    f'color:{text_color};"><strong>{label}</strong></div>'
+                )
+                start = end
+            if feature_index < feature_count - 1:
+                visual_html.append('<div></div>')
+                visual_html.extend(
+                    '<div style="height:12px;width:0;border-left:2px solid #475569;'
+                    'margin:auto;"></div>'
+                    for _ in visual_model_groups
+                )
+        visual_html.append('<div></div>')
+        visual_html.extend(
+            '<div style="height:12px;width:0;border-left:2px solid #475569;'
+            'margin:auto;"></div>'
+            for _ in visual_model_groups
+        )
+        visual_html.append('<div style="font-weight:700;">Model</div>')
+        for group in visual_model_groups:
+            labels = (
+                group["model_names"]
+                if visual_model_label == "Common name"
+                else group["model_numbers"]
+            )
+            if visual_model_label == "Common name":
+                labels = list(dict.fromkeys(labels))
+            model_labels = "<br>".join(
+                escape(str(label or "Common name not defined")) for label in labels
+            )
+            visual_html.append(
+                '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;height:{model_header_height}px;'
+                'box-sizing:border-box;display:flex;align-items:center;'
+                'justify-content:center;text-align:center;">'
+                f"{model_labels}</div>"
+            )
+        visual_html.append("</div>")
+        st.markdown("".join(visual_html), unsafe_allow_html=True)
+
+    st.markdown('<div style="height:24px;"></div>', unsafe_allow_html=True)
 with st.expander("History", icon=":material/history:"):
     models_history_tab, features_history_tab, tree_history_tab = st.tabs(
         ["Model information", "Feature definitions", "Complexity tree"]

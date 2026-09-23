@@ -28,6 +28,7 @@ from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
+    merge_filtered_edits,
     request_table_editor_reset,
 )
 from utils.table_ui import (
@@ -49,6 +50,7 @@ from utils.table_ui import (
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 parts_editor_key = f"parts_catalog_editor_v7_{scenario_id}"
+parts_draft_key = f"parts_catalog_draft_{project_id}_{scenario_id}"
 page_title_with_scope(
     "Parts Catalog",
     scope="scenario-aware",
@@ -193,7 +195,39 @@ parts_for_editing["view_details"] = ":material/visibility: View details"
 parts_for_editing["photo_status"] = parts_for_editing["image_path"].apply(
     lambda value: "✅ Added" if str(value or "").strip() else "❌ Missing"
 )
-with st.expander("Filter columns", icon=":material/filter_list:"):
+
+
+def merge_parts_editor_draft(source: pd.DataFrame) -> pd.DataFrame:
+    """Overlay the prior visible editor draft onto the full Parts Catalog view."""
+    state = st.session_state.get(parts_editor_key, {}) or {}
+    previous_visible = pd.DataFrame(
+        st.session_state.get(f"{parts_draft_key}_visible", [])
+    )
+    if previous_visible.empty or "id" not in previous_visible.columns:
+        return source
+    draft = previous_visible.copy()
+    for raw_position, changes in (state.get("edited_rows") or {}).items():
+        position = int(raw_position)
+        if 0 <= position < len(draft):
+            for column, value in (changes or {}).items():
+                if column in draft.columns:
+                    draft.at[draft.index[position], column] = value
+    if not state.get("edited_rows"):
+        return source
+    source_by_id = source.copy()
+    draft_by_id = draft.set_index(draft["id"].astype(str))
+    for row_index, row in source_by_id.iterrows():
+        part_id = str(row.get("id") or "")
+        if part_id in draft_by_id.index:
+            for column in source_by_id.columns:
+                if column in draft_by_id.columns:
+                    source_by_id.at[row_index, column] = draft_by_id.at[part_id, column]
+    return source_by_id
+
+
+parts_for_editing = merge_parts_editor_draft(parts_for_editing)
+parts_full_for_editing = parts_for_editing.copy()
+with st.expander("Filter columns", icon=":material/filter_list:", expanded=True):
     parts_for_editing = filter_table(
         parts_for_editing,
         key="part_catalog_filters",
@@ -217,6 +251,19 @@ with st.expander("Filter columns", icon=":material/filter_list:"):
         reset_widget_keys=[parts_editor_key],
         multi_value_columns=["feature_applicability"],
     )
+    clear_filter_actions = st.container(horizontal=True, horizontal_alignment="right")
+    if clear_filter_actions.button(
+        "Clear filters",
+        icon=":material/filter_alt_off:",
+        key="clear_part_catalog_filters",
+    ):
+        st.session_state.pop("part_catalog_filters_keyword", None)
+        for filter_column in [
+            "active", "photo_status", "part_number", "description", "revision",
+            "source_code", "feature_applicability", "notes", "source", "updated_at",
+        ]:
+            st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
+        st.rerun()
 selected_part_key = f"parts_selected_id_{project_id}"
 
 
@@ -297,6 +344,7 @@ edited_parts = st.data_editor(
         "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
     },
 )
+st.session_state[parts_draft_key + "_visible"] = parts_editor_rows.to_dict("records")
 parts_actions = editable_table_footer(
     editor_key=parts_editor_key,
     key_prefix="parts_catalog",
@@ -304,6 +352,7 @@ parts_actions = editable_table_footer(
 )
 save_part_table = parts_actions.save_and_refresh
 if parts_actions.undo:
+    st.session_state.pop(parts_draft_key + "_visible", None)
     request_table_editor_reset(parts_editor_key)
     st.toast("Discarded the unsaved Parts Catalog edits", icon=":material/undo:")
     st.rerun()
@@ -438,6 +487,11 @@ if save_part_table:
         edited_parts = drop_untouched_new_rows(
             edited_parts, identifying_columns=["part_number"]
         )
+        edited_parts = merge_filtered_edits(
+            parts_full_for_editing,
+            parts_for_editing,
+            edited_parts,
+        )
         validation_errors = required_field_errors(edited_parts, {"part_number": "Part number"})
         if validation_errors:
             raise ValueError(" ".join(validation_errors))
@@ -497,6 +551,7 @@ if save_part_table:
             st.session_state.get("current_editor", ""),
             {"scenario_id": scenario_id},
         )
+        st.session_state.pop(parts_draft_key + "_visible", None)
         request_table_editor_reset(parts_editor_key)
         st.toast(f"Saved {count} parts", icon=":material/check_circle:")
         st.rerun()

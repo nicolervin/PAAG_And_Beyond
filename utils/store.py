@@ -8661,7 +8661,17 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
               image_path, model_applicability, notes, source_code, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, part_number) DO UPDATE SET description=excluded.description,
            quantity=excluded.quantity, revision=excluded.revision, source=excluded.source,
-              model_applicability=excluded.model_applicability, notes=excluded.notes,
+                            model_applicability=CASE
+                                WHEN EXISTS (
+                                        SELECT 1 FROM part_feature_rules rule
+                                        WHERE rule.project_id=parts.project_id AND rule.part_id=parts.id
+                                ) THEN parts.model_applicability
+                                ELSE excluded.model_applicability
+                            END,
+                            notes=CASE
+                                WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
+                                ELSE excluded.notes
+                            END,
               source_code=excluded.source_code, updated_at=excluded.updated_at""",
         (part_id, project_id, values["part_number"].strip(), values.get("description", "").strip(),
          quantity, str(values.get("revision") or "0").strip() or "0", values.get("source", "Manual"),
@@ -10964,16 +10974,16 @@ def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
     def clean_text(value) -> str:
         return "" if value is None or pd.isna(value) else str(value).strip()
 
-    def clean_eau(value) -> int | None:
+    def clean_eau(value) -> float | None:
         if value is None or pd.isna(value) or str(value).strip() == "":
             return None
         try:
-            numeric = float(value)
+            numeric = float(str(value).replace(",", "").strip())
         except (TypeError, ValueError) as exc:
-            raise ValueError("EAU must be a non-negative whole number.") from exc
-        if numeric < 0 or not numeric.is_integer():
-            raise ValueError("EAU must be a non-negative whole number.")
-        return int(numeric)
+            raise ValueError("EAU must be a non-negative number.") from exc
+        if numeric < 0:
+            raise ValueError("EAU must be a non-negative number.")
+        return numeric
 
     model_numbers = edited["model_number"].apply(clean_text)
     if model_numbers.eq("").any():

@@ -180,6 +180,92 @@ class PitsImportDetectionTests(unittest.TestCase):
             for suffix in ("", "-wal", "-shm"):
                 Path(f"{database_path}{suffix}").unlink(missing_ok=True)
 
+    def test_import_preserves_manual_feature_applicability(self):
+        database_path = store.DATA_DIR / f"test_pits_manual_applicability_{uuid4()}.db"
+        database_patch = patch.object(store, "DB_PATH", database_path)
+        database_patch.start()
+        store.init_db()
+        project_id = str(store.query("SELECT id FROM projects LIMIT 1")[0]["id"])
+
+        try:
+            feature_id = str(uuid4())
+            store.execute(
+                """INSERT INTO complexity_features
+                   (id, project_id, category, name, allowed_values, description,
+                    sequence, active, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    feature_id, project_id, "Control Panel", "Fascia",
+                    '["W2", "G1"]', "", 10, 1, store.now_iso(),
+                ),
+            )
+            model_id = str(uuid4())
+            store.execute(
+                """INSERT INTO project_models
+                   (id, project_id, model_number, source_payload, updated_at,
+                    display_name, active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (model_id, project_id, "MODEL-1", "{}", store.now_iso(), "Model 1", 1),
+            )
+            store.execute(
+                """INSERT INTO model_feature_values
+                   (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (project_id, model_id, feature_id, "W2", store.now_iso()),
+            )
+            record = {
+                "pits_id": "1206",
+                "part_number": "P-MANUAL-RULE",
+                "description": "Manual applicability part",
+                "revision": "Rev A",
+                "source_code": "3",
+                "used_bom": "Y",
+                "status": "Active",
+                "subsystem": "Power",
+                "design_maturity": "Prototype",
+                "comments": "",
+                "workstation": "Line 1",
+                "source_row": 2,
+                "source_payload": {"ID Number": "1206", "Part Number": "P-MANUAL-RULE"},
+            }
+            store.import_pits_id_snapshot(project_id, [record], [])
+            part_id = store.query(
+                "SELECT id FROM parts WHERE project_id=? AND part_number=?",
+                (project_id, "P-MANUAL-RULE"),
+            )[0]["id"]
+            store.update_part_feature_rules(
+                project_id,
+                {part_id: [f"{feature_id}::W2"]},
+            )
+
+            store.upsert_part(
+                project_id,
+                {
+                    "part_number": "P-MANUAL-RULE",
+                    "description": "Updated from PITS",
+                    "model_applicability": "All",
+                    "notes": "Keep this contributor note",
+                    "source": "BOM import",
+                },
+            )
+
+            rule = store.query(
+                """SELECT feature_id, value FROM part_feature_rules
+                   WHERE project_id=? AND part_id=?""",
+                (project_id, part_id),
+            )
+            part = store.query(
+                "SELECT model_applicability, notes FROM parts WHERE id=?",
+                (part_id,),
+            )[0]
+            self.assertEqual([(row["feature_id"], row["value"]) for row in rule], [(feature_id, "W2")])
+            self.assertEqual(part["model_applicability"], "MODEL-1")
+            self.assertEqual(part["notes"], "Keep this contributor note")
+        finally:
+            database_patch.stop()
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+
     def test_blank_pits_revision_stays_blank_in_catalog(self):
         database_path = store.DATA_DIR / f"test_pits_blank_revision_{uuid4()}.db"
         database_patch = patch.object(store, "DB_PATH", database_path)
