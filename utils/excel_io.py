@@ -32,12 +32,44 @@ def normalize_header(value: object) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
 
+def _clean_excel_header(value: object, index: int) -> str:
+    text = "" if value is None or pd.isna(value) else str(value).strip()
+    if not text:
+        return f"Unnamed: {index}"
+    return text
+
+
 def read_bom(uploaded_file, sheet_name=0) -> pd.DataFrame:
     suffix = uploaded_file.name.lower()
     if suffix.endswith((".csv", ".txt", ".tsv")):
         separator = "\t" if suffix.endswith((".txt", ".tsv")) else ","
         return pd.read_csv(uploaded_file, sep=separator, dtype=str, keep_default_na=False)
-    return pd.read_excel(uploaded_file, sheet_name=sheet_name)
+
+    raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, dtype=object)
+    if raw.empty:
+        return raw
+
+    best_header_row = 0
+    best_score = -1
+    for row_index in range(len(raw)):
+        row = raw.iloc[row_index]
+        populated = row.dropna().astype(str).map(str.strip).loc[lambda values: values != ""]
+        if populated.empty:
+            continue
+        score = len(populated)
+        if score > best_score:
+            best_score = score
+            best_header_row = row_index
+
+    header_row = raw.iloc[best_header_row].copy()
+    values = raw.iloc[best_header_row + 1:].copy() if best_header_row + 1 < len(raw) else raw.iloc[0:0].copy()
+    values.columns = [
+        _clean_excel_header(value, index)
+        for index, value in enumerate(header_row)
+    ]
+    values = values.loc[:, [str(column).strip() != "" for column in values.columns]].copy()
+    values = values.dropna(how="all").reset_index(drop=True)
+    return values
 
 
 def is_pits_format(df: pd.DataFrame) -> bool:
@@ -45,12 +77,39 @@ def is_pits_format(df: pd.DataFrame) -> bool:
     return {"intracker", "partnumber", "description", "level1", "level2"}.issubset(normalized)
 
 
+def _normalized_sheet_name(name: object) -> str:
+    return normalize_header(name)
+
+
+def _find_pits_sheet(workbook, *, type_name: str) -> str | None:
+    normalized_names = { _normalized_sheet_name(sheet): sheet for sheet in workbook.sheet_names }
+    aliases = {
+        "part_tracker": {"parttracker", "parttracker", "pitstracker", "pitstracker", "parttracker"},
+        "models": {"models", "modeldefinitions", "modeldefinition", "modelsheet", "modeldetails"},
+    }
+    lookup = aliases[type_name]
+    for normalized in lookup:
+        if normalized in normalized_names:
+            return normalized_names[normalized]
+
+    if type_name == "part_tracker":
+        for sheet_name in workbook.sheet_names:
+            normalized = _normalized_sheet_name(sheet_name)
+            if ("part" in normalized or "pits" in normalized or "tracker" in normalized) and "model" not in normalized:
+                return sheet_name
+    else:
+        for sheet_name in workbook.sheet_names:
+            normalized = _normalized_sheet_name(sheet_name)
+            if ("model" in normalized or "vehicle" in normalized) and "tracker" not in normalized:
+                return sheet_name
+    return None
+
+
 def has_pits_id_sheets(uploaded_file) -> bool:
     if not uploaded_file.name.lower().endswith((".xlsx", ".xlsm")):
         return False
     workbook = pd.ExcelFile(BytesIO(uploaded_file.getvalue()))
-    sheets = {sheet.lower() for sheet in workbook.sheet_names}
-    return {"part_tracker", "models"}.issubset(sheets)
+    return bool(_find_pits_sheet(workbook, type_name="part_tracker")) and bool(_find_pits_sheet(workbook, type_name="models"))
 
 
 def _clean_value(value):
@@ -63,29 +122,106 @@ def _clean_value(value):
     return value
 
 
+def _excel_column_value(row: pd.Series, column: str) -> str:
+    """Read a source value by its stable spreadsheet column position."""
+    position = 0
+    for character in column.upper():
+        position = position * 26 + ord(character) - ord("A") + 1
+    zero_based_position = position - 1
+    if zero_based_position >= len(row):
+        return ""
+    value = _clean_value(row.iloc[zero_based_position])
+    return "" if value is None else str(value).strip()
+
+
+def _source_code_number(value: str) -> str:
+    """Keep only the numeric PITS source code prefix from column T."""
+    match = re.match(r"^[+]?\d+(?:\.\d+)?", str(value or "").strip())
+    return match.group(0) if match else ""
+
+
 def _normalized_row(row: pd.Series) -> dict[str, object]:
     return {normalize_header(column): _clean_value(value) for column, value in row.items()}
 
 
+def _detect_header_row(raw_df: pd.DataFrame, required_tokens: set[str]) -> int:
+    best_row = 0
+    best_score = -1
+    for row_index, row in raw_df.iterrows():
+        row_values = [str(value).strip() for value in row.to_list() if value is not None and not pd.isna(value)]
+        if not row_values:
+            continue
+        score = 0
+        for value in row_values:
+            normalized = normalize_header(value)
+            if any(token in normalized for token in required_tokens):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_row = row_index
+    return best_row
+
+
+def _sheet_with_header(raw_df: pd.DataFrame, required_tokens: set[str]) -> pd.DataFrame:
+    header_row = _detect_header_row(raw_df, required_tokens)
+    header = raw_df.iloc[header_row].tolist()
+    data = raw_df.iloc[header_row + 1:].copy()
+    data.columns = [
+        _clean_excel_header(value, index)
+        for index, value in enumerate(header)
+    ]
+    data = data.dropna(how="all").reset_index(drop=True)
+    return data
+
+
 def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
     content = BytesIO(uploaded_file.getvalue())
-    parts = pd.read_excel(content, sheet_name="part_tracker", dtype=object)
+    workbook = pd.ExcelFile(content)
+    tracker_sheet = _find_pits_sheet(workbook, type_name="part_tracker")
+    model_sheet = _find_pits_sheet(workbook, type_name="models")
+    if tracker_sheet is None or model_sheet is None:
+        raise ValueError("This file does not contain the expected PITS tracker and model sheets.")
+
     content.seek(0)
-    models_df = pd.read_excel(content, sheet_name="models", header=1, dtype=object)
+    parts_raw = pd.read_excel(content, sheet_name=tracker_sheet, header=None, dtype=object)
+    content.seek(0)
+    models_raw = pd.read_excel(content, sheet_name=model_sheet, header=None, dtype=object)
+
+    parts = _sheet_with_header(parts_raw, {"id", "part", "description", "status", "subsystem", "design"})
+    models_df = _sheet_with_header(models_raw, {"model", "item", "platform", "package", "appearance", "base"})
 
     records = []
     for source_index, row in parts.iterrows():
         source = _normalized_row(row)
-        pits_id = str(source.get("idnumber", "")).strip()
+        pits_id = str(source.get("idnumber", "")).strip() or str(source.get("id", "")).strip()
         if not pits_id:
             continue
+        part_number = next(
+            (str(source.get(alias, "")).strip() for alias in (
+                "partnumber", "partno", "partnum", "pn", "material",
+                "materialnumber", "itemnumber",
+            ) if str(source.get(alias, "")).strip()),
+            "",
+        )
+        description = next(
+            (str(source.get(alias, "")).strip() for alias in (
+                "description", "partdescription", "materialdescription", "name",
+            ) if str(source.get(alias, "")).strip()),
+            "",
+        )
+        source_code = _source_code_number(_excel_column_value(row, "T"))
+        revision = _excel_column_value(row, "BL")
+        source["source_code"] = source_code
+        source["revision"] = revision
         records.append({
             "pits_id": pits_id,
             "source_row": int(source_index) + 2,
-            "part_number": str(source.get("partnumber", "")).strip(),
-            "description": str(source.get("description", "")).strip(),
+            "part_number": part_number or str(source.get("partnumber1", "")).strip(),
+            "description": description,
+            "revision": revision,
+            "source_code": source_code,
             "used_bom": str(source.get("usedbom", "")).strip(),
-            "status": str(source.get("baseinfostatus", "")).strip(),
+            "status": str(source.get("baseinfostatus", "")).strip() or str(source.get("status", "")).strip(),
             "subsystem": str(source.get("subsystem", "")).strip(),
             "design_maturity": str(source.get("designmaturity", "")).strip(),
             "comments": str(source.get("comments", "")).strip(),
@@ -96,7 +232,7 @@ def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
     models = []
     for _, row in models_df.iterrows():
         source = _normalized_row(row)
-        model_number = str(source.get("modelnumber", "")).strip()
+        model_number = str(source.get("modelnumber", "")).strip() or str(source.get("model", "")).strip()
         if not model_number:
             continue
         eau_value = source.get("eau", "")

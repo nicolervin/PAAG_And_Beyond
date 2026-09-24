@@ -429,10 +429,11 @@ def parse_yamazumi_model_variants(value, fallback: str | None = "Base") -> list[
 def connection():
     DATA_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=20)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         yield conn
         conn.commit()
@@ -485,7 +486,7 @@ def init_db() -> None:
                 technology_engineer TEXT NOT NULL DEFAULT '',
                 pits_tracker_number TEXT NOT NULL DEFAULT '',
                 source_code TEXT NOT NULL DEFAULT ''
-                    CHECK (source_code IN ('', '1', '2', '3', '4', '5', '6', '7', '8')),
+                    CHECK (source_code IN ('', '1', '+1', '2', '2.4', '3', '4', '5', '6', '7', '8')),
                 official_windchill_part_name TEXT NOT NULL DEFAULT '',
                 make_buy TEXT NOT NULL DEFAULT ''
                     CHECK (make_buy IN ('', 'Make', 'Buy')),
@@ -910,6 +911,34 @@ def init_db() -> None:
                     (prefixes[0], project_row["id"]),
                 )
         part_columns = {row[1] for row in conn.execute("PRAGMA table_info(parts)").fetchall()}
+        if "source_code" not in part_columns:
+            conn.execute("ALTER TABLE parts ADD COLUMN source_code TEXT DEFAULT ''")
+            part_columns.add("source_code")
+        for part in conn.execute(
+            """SELECT record.project_id, record.part_number, record.source_payload
+               FROM pits_records record
+               JOIN parts catalog
+                 ON catalog.project_id=record.project_id
+                AND catalog.part_number=record.part_number
+                AND catalog.source='PITS snapshot'
+               WHERE TRIM(record.part_number) <> ''"""
+        ).fetchall():
+            try:
+                payload = json.loads(part["source_payload"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            source_code = str(
+                payload.get("source_code")
+                or payload.get("sourcecode")
+                or payload.get("source_code_t")
+                or ""
+            ).strip()
+            revision = str(payload.get("revision") or "").strip()
+            conn.execute(
+                """UPDATE parts SET revision=?, source_code=?
+                   WHERE project_id=? AND part_number=? AND source='PITS snapshot'""",
+                (revision, source_code, part["project_id"], part["part_number"]),
+            )
         if "weight_lb" not in part_columns:
             conn.execute("ALTER TABLE parts ADD COLUMN weight_lb REAL")
         for column in (
@@ -10148,7 +10177,7 @@ def normalize_model_applicability(value) -> str:
     return text or "All"
 
 
-PART_SOURCE_CODES = tuple(str(value) for value in range(1, 9))
+PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
 
 
@@ -10167,7 +10196,9 @@ def _validated_part_catalog_fields(values) -> dict[str, str]:
         "make_buy": _clean_optional_text(values.get("make_buy")),
     }
     if fields["source_code"] not in {"", *PART_SOURCE_CODES}:
-        raise ValueError("Source Code must be blank or a value from 1 through 8.")
+        raise ValueError(
+            "Source Code must be blank or an approved code: 1, +1, 2, 2.4, 3, 4, 5, 6, 7, 8."
+        )
     if fields["make_buy"] not in {"", *PART_MAKE_BUY_VALUES}:
         raise ValueError("Make vs Buy must be blank, Make, or Buy.")
     return fields
@@ -10203,7 +10234,17 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, part_number) DO UPDATE SET description=excluded.description,
            quantity=excluded.quantity, revision=excluded.revision, source=excluded.source,
-           model_applicability=excluded.model_applicability, notes=excluded.notes,
+           model_applicability=CASE
+               WHEN EXISTS (
+                   SELECT 1 FROM part_feature_rules rule
+                   WHERE rule.project_id=parts.project_id AND rule.part_id=parts.id
+               ) THEN parts.model_applicability
+               ELSE excluded.model_applicability
+           END,
+           notes=CASE
+               WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
+               ELSE excluded.notes
+           END,
            technology_engineer=CASE WHEN excluded.technology_engineer<>'' THEN excluded.technology_engineer ELSE parts.technology_engineer END,
            pits_tracker_number=CASE WHEN excluded.pits_tracker_number<>'' THEN excluded.pits_tracker_number ELSE parts.pits_tracker_number END,
            source_code=CASE WHEN excluded.source_code<>'' THEN excluded.source_code ELSE parts.source_code END,
@@ -12926,16 +12967,16 @@ def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
     def clean_text(value) -> str:
         return "" if value is None or pd.isna(value) else str(value).strip()
 
-    def clean_eau(value) -> int | None:
+    def clean_eau(value) -> float | None:
         if value is None or pd.isna(value) or str(value).strip() == "":
             return None
         try:
-            numeric = float(value)
+            numeric = float(str(value).replace(",", "").strip())
         except (TypeError, ValueError) as exc:
-            raise ValueError("EAU must be a non-negative whole number.") from exc
-        if numeric < 0 or not numeric.is_integer():
-            raise ValueError("EAU must be a non-negative whole number.")
-        return int(numeric)
+            raise ValueError("EAU must be a non-negative number.") from exc
+        if numeric < 0:
+            raise ValueError("EAU must be a non-negative number.")
+        return numeric
 
     model_numbers = edited["model_number"].apply(clean_text)
     if model_numbers.eq("").any():
@@ -13055,15 +13096,122 @@ def pits_revisions(project_id: str) -> pd.DataFrame:
     ))
 
 
-def import_pits_id_snapshot(project_id: str, records: list[dict], models: list[dict]) -> dict[str, int]:
+def pits_import_conflict_parts(project_id: str, records: list[dict]) -> list[dict]:
+    """Return existing parts in the project catalog that were manually created or edited by collaborators."""
+    part_numbers = [
+        str(r.get("part_number") or "").strip()
+        for r in records
+        if str(r.get("part_number") or "").strip()
+    ]
+    if not part_numbers:
+        return []
+    with connection() as conn:
+        placeholders = ",".join("?" for _ in part_numbers)
+        rows = conn.execute(
+            f"""SELECT id, part_number, description, revision, source, notes
+                FROM parts
+                WHERE project_id=? AND part_number IN ({placeholders})
+                  AND (source <> 'PITS snapshot' OR TRIM(COALESCE(notes, '')) <> '')""",
+            (project_id, *part_numbers),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def import_pits_id_snapshot(
+    project_id: str,
+    records: list[dict],
+    models: list[dict],
+    *,
+    scenario_id: str | None = None,
+    overwrite_manual: bool = False,
+) -> dict[str, int]:
     timestamp = now_iso()
     summary = {"new": 0, "changed": 0, "unchanged": 0, "models": 0}
     with connection() as conn:
+        project_exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?",
+            (project_id,),
+        ).fetchone()
+        if not project_exists:
+            raise ValueError("The selected project no longer exists.")
+        if scenario_id and not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+
         next_sequence = conn.execute(
             "SELECT COALESCE(MAX(sequence), 0) FROM fishbone_nodes WHERE project_id = ?", (project_id,)
         ).fetchone()[0]
         for record in records:
             pits_id = str(record["pits_id"]).strip()
+            part_number = str(record.get("part_number") or "").strip()
+            description = str(record.get("description") or "").strip()
+            notes = str(record.get("comments") or "").strip()
+            used_in_bom = str(record.get("used_bom") or "").strip().casefold() not in {"n", "no"}
+            if part_number:
+                if overwrite_manual:
+                    update_clause = """ON CONFLICT(project_id, part_number) DO UPDATE SET
+                       description=excluded.description, quantity=excluded.quantity,
+                       revision=excluded.revision, source_code=excluded.source_code,
+                       source=excluded.source,
+                       notes=CASE
+                           WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
+                           ELSE excluded.notes
+                       END,
+                       model_applicability=CASE
+                           WHEN EXISTS (
+                               SELECT 1 FROM part_feature_rules rule
+                               WHERE rule.project_id=parts.project_id AND rule.part_id=parts.id
+                           ) THEN parts.model_applicability
+                           ELSE excluded.model_applicability
+                       END,
+                       updated_at=excluded.updated_at"""
+                else:
+                    update_clause = """ON CONFLICT(project_id, part_number) DO UPDATE SET
+                       description=CASE WHEN parts.source='PITS snapshot' THEN excluded.description ELSE parts.description END,
+                       quantity=CASE WHEN parts.source='PITS snapshot' THEN excluded.quantity ELSE parts.quantity END,
+                       revision=CASE WHEN parts.source='PITS snapshot' THEN excluded.revision ELSE parts.revision END,
+                       source_code=CASE WHEN parts.source='PITS snapshot' THEN excluded.source_code ELSE parts.source_code END,
+                       notes=CASE
+                           WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
+                           ELSE excluded.notes
+                       END,
+                       model_applicability=CASE
+                           WHEN EXISTS (
+                               SELECT 1 FROM part_feature_rules rule
+                               WHERE rule.project_id=parts.project_id AND rule.part_id=parts.id
+                           ) THEN parts.model_applicability
+                           ELSE excluded.model_applicability
+                       END,
+                       updated_at=CASE WHEN parts.source='PITS snapshot' THEN excluded.updated_at ELSE parts.updated_at END"""
+                conn.execute(
+                    f"""INSERT INTO parts
+                       (id, project_id, part_number, description, quantity, revision, source,
+                        image_path, model_applicability, notes, source_code, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                       {update_clause}""",
+                    (
+                        str(uuid4()), project_id, part_number, description,
+                        record.get("quantity") if record.get("quantity") is not None else 1,
+                        str(record.get("revision") or "").strip(),
+                        "PITS snapshot", "All", notes,
+                        str(record.get("source_code") or "").strip(), timestamp,
+                    ),
+                )
+                if scenario_id:
+                    part_row = conn.execute(
+                        "SELECT id FROM parts WHERE project_id=? AND part_number=?",
+                        (project_id, part_number),
+                    ).fetchone()
+                    conn.execute(
+                        """INSERT INTO part_scenario_activity
+                           (project_id, scenario_id, part_id, active, updated_at)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(scenario_id, part_id) DO UPDATE SET
+                           active=excluded.active, updated_at=excluded.updated_at""",
+                        (project_id, scenario_id, part_row["id"], 1 if used_in_bom else 0, timestamp),
+                    )
             payload = json.dumps(record["source_payload"], sort_keys=True, ensure_ascii=False, default=str)
             source_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
             existing = conn.execute(
