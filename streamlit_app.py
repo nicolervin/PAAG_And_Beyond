@@ -60,6 +60,15 @@ all_projects = projects()
 st.session_state.setdefault("project_id", all_projects[0]["id"] if all_projects else None)
 st.session_state.setdefault("scenario_id", None)
 
+pending_project_id = st.session_state.pop("pending_active_project_id", None)
+if pending_project_id and any(
+    str(project["id"]) == str(pending_project_id) for project in all_projects
+):
+    st.session_state.project_id = str(pending_project_id)
+    st.session_state.scenario_id = None
+    st.session_state.pop("global_project", None)
+    st.session_state.pop("global_scenario", None)
+
 pages = {
     "Project": [
         st.Page("app_pages/overview.py", title="Overview", icon=":material/dashboard:"),

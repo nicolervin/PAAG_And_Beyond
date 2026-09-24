@@ -312,11 +312,55 @@ with import_col.container(border=True):
             if has_pits_id_sheets(uploaded):
                 records, models = parse_pits_id_workbook(uploaded)
                 st.success("ID-based PITS tracker detected", icon=":material/key:")
-                summary_cols = st.columns(3)
-                summary_cols[0].metric("PITS records", len(records))
-                summary_cols[1].metric("Unique IDs", len({record["pits_id"] for record in records}))
-                summary_cols[2].metric("Models", len(models))
-                st.caption("ID Number is the stable source key. Re-imports create source revisions and flag changed MBOM candidates without overwriting IE decisions.")
+                unique_ids = {
+                    str(record.get("pits_id") or "").strip()
+                    for record in records
+                    if str(record.get("pits_id") or "").strip()
+                }
+                part_numbers = [
+                    str(record.get("part_number") or "").strip()
+                    for record in records
+                ]
+                importable_parts = {part_number for part_number in part_numbers if part_number}
+                missing_part_numbers = sum(not part_number for part_number in part_numbers)
+                unique_models = {
+                    str(model.get("model_number") or "").strip()
+                    for model in models
+                    if str(model.get("model_number") or "").strip()
+                }
+                summary_cols = st.columns(4)
+                summary_cols[0].metric("PITS rows", len(records))
+                summary_cols[1].metric("Unique IDs", len(unique_ids))
+                summary_cols[2].metric("Importable parts", len(importable_parts))
+                summary_cols[3].metric("Unique models", len(unique_models))
+                if missing_part_numbers:
+                    st.warning(
+                        f"{missing_part_numbers:,} PITS row(s) have an ID but no part number. "
+                        "They remain source-evidence records but cannot create Parts Catalog records.",
+                        icon=":material/warning:",
+                    )
+                duplicate_part_rows = len(part_numbers) - missing_part_numbers - len(importable_parts)
+                duplicate_model_rows = len(models) - len(unique_models)
+                if duplicate_part_rows or duplicate_model_rows:
+                    duplicate_details = []
+                    if duplicate_part_rows:
+                        duplicate_details.append(
+                            f"{duplicate_part_rows:,} duplicate part-number row(s)"
+                        )
+                    if duplicate_model_rows:
+                        duplicate_details.append(
+                            f"{duplicate_model_rows:,} duplicate model-number row(s)"
+                        )
+                    st.info(
+                        f"The workbook also contains {' and '.join(duplicate_details)}. "
+                        "Repeated identifiers update the same project record during import.",
+                        icon=":material/info:",
+                    )
+                st.caption(
+                    "ID Number is the stable source key. Re-imports create source revisions "
+                    "and flag changed MBOM candidates without overwriting collaborator-reviewed "
+                    "planning decisions."
+                )
                 preview = [{key: value for key, value in record.items() if key != "source_payload"} for record in records]
                 preview_table = filter_table(
                     pd.DataFrame(preview),
