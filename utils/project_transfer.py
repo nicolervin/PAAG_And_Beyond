@@ -34,12 +34,18 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("parts"), TransferTable("part_scenario_activity"),
     TransferTable("work_elements"), TransferTable("concerns"),
     TransferTable("fishbone_nodes"),
+    TransferTable("pits_bom_imports"),
     TransferTable("part_images", "parts", "part_id"),
     TransferTable("pits_records"),
     TransferTable("pits_record_revisions", "pits_records", "record_id"),
     TransferTable("project_models"), TransferTable("complexity_features"),
     TransferTable("model_feature_values"), TransferTable("part_feature_rules"),
     TransferTable("assembly_sections"), TransferTable("fishbone_part_assignments"),
+    TransferTable("pits_bom_occurrences"),
+    TransferTable(
+        "pits_bom_occurrence_revisions", "pits_bom_occurrences", "occurrence_id"
+    ),
+    TransferTable("pits_bom_occurrence_concerns"),
     TransferTable("audit_log"), TransferTable("yamazumi_areas"),
     TransferTable("yamazumi_pitches"), TransferTable("yamazumi_elements"),
     TransferTable("yamazumi_work_regions"),

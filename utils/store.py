@@ -547,6 +547,8 @@ def init_db() -> None:
                 image_path TEXT NOT NULL, image_type TEXT DEFAULT 'Supplemental', caption TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_part_images_part
+                ON part_images(part_id);
             CREATE TABLE IF NOT EXISTS pits_records (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 pits_id TEXT NOT NULL, part_number TEXT DEFAULT '', description TEXT DEFAULT '',
@@ -585,6 +587,8 @@ def init_db() -> None:
                 value TEXT DEFAULT '', updated_at TEXT NOT NULL,
                 PRIMARY KEY(model_id, feature_id)
             );
+            CREATE INDEX IF NOT EXISTS idx_model_feature_values_project
+                ON model_feature_values(project_id);
             CREATE TABLE IF NOT EXISTS part_feature_rules (
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
@@ -592,6 +596,8 @@ def init_db() -> None:
                 value TEXT NOT NULL, updated_at TEXT NOT NULL,
                 PRIMARY KEY(part_id, feature_id, value)
             );
+            CREATE INDEX IF NOT EXISTS idx_part_feature_rules_project
+                ON part_feature_rules(project_id);
             CREATE TABLE IF NOT EXISTS assembly_sections (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
@@ -604,13 +610,92 @@ def init_db() -> None:
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
                 section_id TEXT NOT NULL REFERENCES assembly_sections(id), sequence INTEGER NOT NULL DEFAULT 10,
                 quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0), use_description TEXT DEFAULT '',
-                notes TEXT DEFAULT '', updated_at TEXT NOT NULL
+                notes TEXT DEFAULT '',
+                pits_sync_status TEXT NOT NULL DEFAULT 'Not linked'
+                    CHECK(pits_sync_status IN ('Not linked', 'In sync', 'Quantity differs', 'No longer found')),
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_imports (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                import_sequence INTEGER NOT NULL CHECK(import_sequence > 0),
+                workbook_name TEXT NOT NULL DEFAULT '',
+                workbook_sha256 TEXT NOT NULL,
+                bom_sheet_name TEXT NOT NULL DEFAULT 'BOM',
+                source_row_count INTEGER NOT NULL DEFAULT 0 CHECK(source_row_count >= 0),
+                occurrence_count INTEGER NOT NULL DEFAULT 0 CHECK(occurrence_count >= 0),
+                issue_count INTEGER NOT NULL DEFAULT 0 CHECK(issue_count >= 0),
+                imported_by TEXT NOT NULL DEFAULT '',
+                imported_at TEXT NOT NULL,
+                UNIQUE(project_id, import_sequence)
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_occurrences (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                parent_tracker_number TEXT NOT NULL,
+                child_tracker_number TEXT NOT NULL CHECK(TRIM(child_tracker_number) <> ''),
+                parent_part_id TEXT REFERENCES parts(id) ON DELETE SET NULL,
+                child_part_id TEXT REFERENCES parts(id) ON DELETE SET NULL,
+                proposed_depth INTEGER NOT NULL CHECK(proposed_depth BETWEEN 1 AND 11),
+                raw_quantity_text TEXT NOT NULL DEFAULT '',
+                proposed_quantity REAL,
+                source_row INTEGER NOT NULL CHECK(source_row > 0),
+                raw_levels_json TEXT NOT NULL DEFAULT '{}',
+                source_fingerprint TEXT NOT NULL,
+                reviewed_source_fingerprint TEXT,
+                review_status TEXT NOT NULL DEFAULT 'Needs review'
+                    CHECK(review_status IN ('Needs review', 'Approved', 'Rejected')),
+                source_state TEXT NOT NULL DEFAULT 'New'
+                    CHECK(source_state IN ('New', 'Current', 'Changed', 'Missing')),
+                validation_issues_json TEXT NOT NULL DEFAULT '[]',
+                confirmed_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
+                approved_assignment_id TEXT UNIQUE
+                    REFERENCES fishbone_part_assignments(id) ON DELETE RESTRICT,
+                first_seen_import_id TEXT NOT NULL REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                last_seen_import_id TEXT NOT NULL REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                last_reviewed_import_id TEXT REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                reviewed_by TEXT NOT NULL DEFAULT '',
+                reviewed_at TEXT,
+                rejection_reason TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, parent_tracker_number, child_tracker_number)
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_occurrence_revisions (
+                id TEXT PRIMARY KEY,
+                occurrence_id TEXT NOT NULL REFERENCES pits_bom_occurrences(id) ON DELETE CASCADE,
+                import_id TEXT NOT NULL REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                revision_no INTEGER NOT NULL CHECK(revision_no > 0),
+                source_row INTEGER NOT NULL CHECK(source_row > 0),
+                proposed_depth INTEGER NOT NULL CHECK(proposed_depth BETWEEN 1 AND 11),
+                raw_quantity_text TEXT NOT NULL DEFAULT '',
+                proposed_quantity REAL,
+                raw_levels_json TEXT NOT NULL DEFAULT '{}',
+                source_fingerprint TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                UNIQUE(occurrence_id, revision_no),
+                UNIQUE(occurrence_id, source_fingerprint)
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_occurrence_concerns (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                occurrence_id TEXT NOT NULL REFERENCES pits_bom_occurrences(id) ON DELETE CASCADE,
+                concern_id TEXT NOT NULL REFERENCES concerns(id) ON DELETE CASCADE,
+                escalated_source_state TEXT NOT NULL
+                    CHECK(escalated_source_state IN ('New', 'Changed', 'Missing')),
+                escalated_source_fingerprint TEXT NOT NULL,
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(occurrence_id, concern_id)
             );
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 table_name TEXT NOT NULL, action TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0,
                 editor_name TEXT DEFAULT '', details TEXT DEFAULT '{}', created_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_audit_log_project_table_created
+                ON audit_log(project_id, table_name, created_at);
             CREATE TABLE IF NOT EXISTS project_transfer_events (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -914,31 +999,32 @@ def init_db() -> None:
         if "source_code" not in part_columns:
             conn.execute("ALTER TABLE parts ADD COLUMN source_code TEXT DEFAULT ''")
             part_columns.add("source_code")
-        for part in conn.execute(
-            """SELECT record.project_id, record.part_number, record.source_payload
-               FROM pits_records record
-               JOIN parts catalog
-                 ON catalog.project_id=record.project_id
-                AND catalog.part_number=record.part_number
-                AND catalog.source='PITS snapshot'
-               WHERE TRIM(record.part_number) <> ''"""
-        ).fetchall():
-            try:
-                payload = json.loads(part["source_payload"] or "{}")
-            except (TypeError, json.JSONDecodeError):
-                payload = {}
-            source_code = str(
-                payload.get("source_code")
-                or payload.get("sourcecode")
-                or payload.get("source_code_t")
-                or ""
-            ).strip()
-            revision = str(payload.get("revision") or "").strip()
-            conn.execute(
-                """UPDATE parts SET revision=?, source_code=?
-                   WHERE project_id=? AND part_number=? AND source='PITS snapshot'""",
-                (revision, source_code, part["project_id"], part["part_number"]),
-            )
+            for part in conn.execute(
+                """SELECT record.project_id, record.part_number, record.source_payload
+                   FROM pits_records record
+                   JOIN parts catalog
+                     ON catalog.project_id=record.project_id
+                    AND catalog.part_number=record.part_number
+                    AND catalog.source='PITS snapshot'
+                   WHERE TRIM(record.part_number) <> ''
+                     AND (catalog.source_code IS NULL OR catalog.source_code = '')"""
+            ).fetchall():
+                try:
+                    payload = json.loads(part["source_payload"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+                source_code = str(
+                    payload.get("source_code")
+                    or payload.get("sourcecode")
+                    or payload.get("source_code_t")
+                    or ""
+                ).strip()
+                revision = str(payload.get("revision") or "").strip()
+                conn.execute(
+                    """UPDATE parts SET revision=?, source_code=?
+                       WHERE project_id=? AND part_number=? AND source='PITS snapshot'""",
+                    (revision, source_code, part["project_id"], part["part_number"]),
+                )
         if "weight_lb" not in part_columns:
             conn.execute("ALTER TABLE parts ADD COLUMN weight_lb REAL")
         for column in (
@@ -1066,8 +1152,45 @@ def init_db() -> None:
                     RENAME TO fishbone_part_assignments;
                 """
             )
+        assignment_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(fishbone_part_assignments)"
+            ).fetchall()
+        }
+        if "pits_sync_status" not in assignment_columns:
+            conn.execute(
+                "ALTER TABLE fishbone_part_assignments ADD COLUMN pits_sync_status "
+                "TEXT NOT NULL DEFAULT 'Not linked' "
+                "CHECK(pits_sync_status IN "
+                "('Not linked', 'In sync', 'Quantity differs', 'No longer found'))"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fishbone_assignment_part ON fishbone_part_assignments(project_id, part_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pits_bom_occurrence_state "
+            "ON pits_bom_occurrences(project_id, source_state, review_status)"
+        )
+        conn.execute(
+            """CREATE TRIGGER IF NOT EXISTS trg_fishbone_assignment_pits_quantity_sync
+               AFTER UPDATE OF quantity ON fishbone_part_assignments
+               BEGIN
+                   UPDATE fishbone_part_assignments
+                   SET pits_sync_status=COALESCE((
+                       SELECT CASE
+                           WHEN occurrence.source_state='Missing' THEN 'No longer found'
+                           WHEN occurrence.proposed_quantity IS NOT NULL
+                            AND ROUND(occurrence.proposed_quantity, 9)=ROUND(NEW.quantity, 9)
+                               THEN 'In sync'
+                           ELSE 'Quantity differs'
+                       END
+                       FROM pits_bom_occurrences occurrence
+                       WHERE occurrence.project_id=NEW.project_id
+                         AND occurrence.approved_assignment_id=NEW.id
+                   ), 'Not linked')
+                   WHERE id=NEW.id;
+               END"""
         )
         conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_assembly_catalog_sections
@@ -1379,6 +1502,22 @@ def init_db() -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_process_part_groups_element ON process_part_groups(project_id, scenario_id, work_element_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_project_table_created "
+            "ON audit_log(project_id, table_name, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_part_feature_rules_project "
+            "ON part_feature_rules(project_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_part_images_part "
+            "ON part_images(part_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_feature_values_project "
+            "ON model_feature_values(project_id)"
         )
         material_group_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(work_element_material_groups)").fetchall()
@@ -11310,6 +11449,12 @@ def assembly_section_delete_impact(
         feature_visibility_preference_count = count_rows(
             "assembly_grid_feature_visibility"
         )
+        pits_bom_approved_occurrence_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM pits_bom_occurrences
+                WHERE project_id=? AND review_status='Approved'
+                  AND confirmed_section_id IN ({affected_placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
         assembly_reference_count = sum(
             int(str(row.get("built_section_id")) in affected_ids)
             + int(str(row.get("installed_section_id")) in affected_ids)
@@ -11334,6 +11479,7 @@ def assembly_section_delete_impact(
             "category_references": category_references,
             "feature_visibility_preference_count": feature_visibility_preference_count,
             "assembly_component_count": assembly_component_count,
+            "pits_bom_approved_occurrence_count": pits_bom_approved_occurrence_count,
             "requires_repointing": bool(
                 yamazumi_area_count
                 or process_link_count
@@ -11400,6 +11546,17 @@ def delete_assembly_sections(
                 WHERE project_id=? AND section_id IN ({placeholders})""",
             (project_id, *affected_ids),
         ).fetchone()[0])
+        pits_bom_approved_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM pits_bom_occurrences
+                WHERE project_id=? AND review_status='Approved'
+                  AND confirmed_section_id IN ({placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
+        if pits_bom_approved_count:
+            raise ValueError(
+                "One or more affected Fishbone sections contain approved PITS BOM occurrences. "
+                "Detach those occurrences in Import/Export Projects before deleting the sections."
+            )
         requires_repointing = bool(
             yamazumi_count
             or process_count
@@ -11742,7 +11899,7 @@ def fishbone_part_assignments(
     params = (scenario_id, project_id) if scenario_id else (project_id,)
     return pd.DataFrame(query(
         f"""SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
-                  a.use_description, a.notes,
+                  a.use_description, a.notes, a.pits_sync_status,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
                   s.name AS section_name
            FROM fishbone_part_assignments a
@@ -12038,6 +12195,16 @@ def delete_fishbone_part_assignments(project_id: str, assignment_ids: list[str])
         ).fetchone()[0]
         if found != len(selected_ids):
             raise ValueError("One or more selected fishbone uses no longer exist.")
+        linked = conn.execute(
+            f"""SELECT COUNT(*) FROM pits_bom_occurrences
+                WHERE project_id=? AND approved_assignment_id IN ({placeholders})""",
+            (project_id, *selected_ids),
+        ).fetchone()[0]
+        if linked:
+            raise ValueError(
+                "One or more selected Fishbone uses are approved PITS BOM occurrences. "
+                "Detach those occurrences in Import/Export Projects before deleting the uses."
+            )
         cursor = conn.execute(
             f"""DELETE FROM fishbone_part_assignments
                 WHERE project_id=? AND id IN ({placeholders})""",
@@ -12083,11 +12250,51 @@ def replace_fishbone_part_assignments(
                 str(row.get("use_description") or "").strip(),
                 str(row.get("notes") or "").strip(), timestamp,
             ))
-        conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
+        desired_by_id = {record[0]: record for record in records}
+        linked_rows = conn.execute(
+            """SELECT occurrence.approved_assignment_id, assignment.part_id, assignment.section_id
+               FROM pits_bom_occurrences occurrence
+               JOIN fishbone_part_assignments assignment
+                 ON assignment.id=occurrence.approved_assignment_id
+               WHERE occurrence.project_id=?""",
+            (project_id,),
+        ).fetchall()
+        for linked in linked_rows:
+            assignment_id = str(linked["approved_assignment_id"])
+            desired = desired_by_id.get(assignment_id)
+            if desired is None:
+                raise ValueError(
+                    "An approved PITS BOM Fishbone use cannot be removed here. Detach its "
+                    "occurrence in Import/Export Projects first."
+                )
+            if desired[2] != str(linked["part_id"]) or desired[3] != str(linked["section_id"]):
+                raise ValueError(
+                    "The part or Fishbone section of an approved PITS BOM use cannot be changed "
+                    "here. Detach its occurrence first."
+                )
+        desired_ids = set(desired_by_id)
+        existing_ids = {
+            str(row[0]) for row in conn.execute(
+                "SELECT id FROM fishbone_part_assignments WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        stale_ids = existing_ids - desired_ids
+        if stale_ids:
+            stale_placeholders = ",".join("?" for _ in stale_ids)
+            conn.execute(
+                f"""DELETE FROM fishbone_part_assignments
+                    WHERE project_id=? AND id IN ({stale_placeholders})""",
+                (project_id, *stale_ids),
+            )
         conn.executemany(
             """INSERT INTO fishbone_part_assignments
-               (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, project_id, part_id, section_id, sequence, quantity,
+                use_description, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 sequence=excluded.sequence, quantity=excluded.quantity,
+                 use_description=excluded.use_description, notes=excluded.notes,
+                 updated_at=excluded.updated_at""",
             records,
         )
     return len(records)
@@ -13096,8 +13303,660 @@ def pits_revisions(project_id: str) -> pd.DataFrame:
     ))
 
 
+def pits_bom_occurrences(
+    project_id: str, *, actionable_only: bool = False
+) -> pd.DataFrame:
+    """Return staged BOM occurrences with friendly relationship context."""
+    action_clause = (
+        "AND (occurrence.review_status='Needs review' "
+        "OR occurrence.source_state IN ('Changed', 'Missing') "
+        "OR occurrence.validation_issues_json<>'[]')"
+        if actionable_only
+        else ""
+    )
+    return pd.DataFrame(query(
+        f"""SELECT occurrence.*, parent_part.part_number AS parent_part_number,
+                   child_part.part_number AS child_part_number,
+                   child_part.description AS child_part_name,
+                   section.name AS confirmed_section_name,
+                   assignment.quantity AS approved_quantity,
+                   assignment.pits_sync_status
+            FROM pits_bom_occurrences occurrence
+            LEFT JOIN parts parent_part ON parent_part.id=occurrence.parent_part_id
+            LEFT JOIN parts child_part ON child_part.id=occurrence.child_part_id
+            LEFT JOIN assembly_sections section ON section.id=occurrence.confirmed_section_id
+            LEFT JOIN fishbone_part_assignments assignment
+              ON assignment.id=occurrence.approved_assignment_id
+            WHERE occurrence.project_id=? {action_clause}
+            ORDER BY CASE occurrence.source_state
+                       WHEN 'Missing' THEN 1 WHEN 'Changed' THEN 2
+                       WHEN 'New' THEN 3 ELSE 4 END,
+                     occurrence.source_row, occurrence.id""",
+        (project_id,),
+    ))
+
+
+def _pits_bom_fingerprint(depth: int, raw_quantity_text: str, quantity) -> str:
+    normalized_quantity = None
+    if quantity is not None:
+        try:
+            numeric = float(quantity)
+            if math.isfinite(numeric):
+                normalized_quantity = round(numeric, 9)
+        except (TypeError, ValueError):
+            pass
+    payload = json.dumps(
+        {
+            "depth": int(depth),
+            "quantity": normalized_quantity,
+            "raw_quantity": "" if normalized_quantity is not None else raw_quantity_text,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _refresh_pits_assignment_sync_status(
+    conn: sqlite3.Connection, project_id: str
+) -> None:
+    conn.execute(
+        """UPDATE fishbone_part_assignments
+           SET pits_sync_status='Not linked'
+           WHERE project_id=?
+             AND NOT EXISTS (
+                 SELECT 1 FROM pits_bom_occurrences occurrence
+                 WHERE occurrence.project_id=fishbone_part_assignments.project_id
+                   AND occurrence.approved_assignment_id=fishbone_part_assignments.id
+             )""",
+        (project_id,),
+    )
+    conn.execute(
+        """UPDATE fishbone_part_assignments
+           SET pits_sync_status=(
+               SELECT CASE
+                   WHEN occurrence.source_state='Missing' THEN 'No longer found'
+                   WHEN occurrence.proposed_quantity IS NOT NULL
+                    AND ROUND(occurrence.proposed_quantity, 9)=ROUND(fishbone_part_assignments.quantity, 9)
+                       THEN 'In sync'
+                   ELSE 'Quantity differs'
+               END
+               FROM pits_bom_occurrences occurrence
+               WHERE occurrence.project_id=fishbone_part_assignments.project_id
+                 AND occurrence.approved_assignment_id=fishbone_part_assignments.id
+           )
+           WHERE project_id=?
+             AND EXISTS (
+                 SELECT 1 FROM pits_bom_occurrences occurrence
+                 WHERE occurrence.project_id=fishbone_part_assignments.project_id
+                   AND occurrence.approved_assignment_id=fishbone_part_assignments.id
+             )""",
+        (project_id,),
+    )
+
+
+def _import_pits_bom_snapshot(
+    conn: sqlite3.Connection,
+    project_id: str,
+    bom_snapshot: dict,
+    *,
+    workbook_name: str,
+    workbook_sha256: str,
+    editor_name: str,
+    timestamp: str,
+) -> dict[str, int | str]:
+    occurrences = list(bom_snapshot.get("occurrences") or [])
+    duplicates = list(bom_snapshot.get("duplicates") or [])
+    blocking_issues = [
+        issue for issue in (bom_snapshot.get("issues") or []) if issue.get("blocking")
+    ]
+    if blocking_issues:
+        examples = ", ".join(
+            f"row {issue.get('source_row')}: {issue.get('issue')}"
+            for issue in blocking_issues[:5]
+        )
+        raise ValueError(
+            "The BOM hierarchy contains rows without stable occurrence identities. "
+            f"Resolve them before importing: {examples}"
+        )
+
+    duplicate_rows_by_key: dict[tuple[str, str], set[int]] = {}
+    for duplicate in duplicates:
+        key = (
+            str(duplicate.get("parent_tracker_number") or "").strip(),
+            str(duplicate.get("child_tracker_number") or "").strip(),
+        )
+        if not key[1]:
+            continue
+        rows = duplicate_rows_by_key.setdefault(key, set())
+        for field in ("first_source_row", "duplicate_source_row"):
+            try:
+                rows.add(int(duplicate.get(field)))
+            except (TypeError, ValueError):
+                pass
+
+    first_occurrence_by_key: dict[tuple[str, str], dict] = {}
+    normalized_occurrences: list[dict] = []
+    for occurrence in occurrences:
+        key = (
+            str(occurrence.get("parent_tracker_number") or "").strip(),
+            str(occurrence.get("child_tracker_number") or "").strip(),
+        )
+        if not key[1]:
+            raise ValueError("Every BOM occurrence requires a child tracker number.")
+        if key in first_occurrence_by_key:
+            rows = duplicate_rows_by_key.setdefault(key, set())
+            for candidate in (first_occurrence_by_key[key], occurrence):
+                try:
+                    rows.add(int(candidate.get("source_row")))
+                except (TypeError, ValueError):
+                    pass
+            continue
+        first_occurrence_by_key[key] = occurrence
+        normalized_occurrences.append(occurrence)
+    occurrences = normalized_occurrences
+
+    import_id = str(uuid4())
+    import_sequence = int(conn.execute(
+        "SELECT COALESCE(MAX(import_sequence), 0) + 1 FROM pits_bom_imports WHERE project_id=?",
+        (project_id,),
+    ).fetchone()[0])
+    part_by_tracker = {
+        str(row["pits_tracker_number"]).strip(): dict(row)
+        for row in conn.execute(
+            """SELECT id, part_number, pits_tracker_number FROM parts
+               WHERE project_id=? AND TRIM(COALESCE(pits_tracker_number, ''))<>''""",
+            (project_id,),
+        ).fetchall()
+    }
+    issue_count = len(bom_snapshot.get("issues") or [])
+    summary: dict[str, int | str] = {
+        "import_id": import_id, "new": 0, "changed": 0,
+        "unchanged": 0, "missing": 0, "issues": 0,
+        "duplicate_pairs": len(duplicate_rows_by_key),
+    }
+    conn.execute(
+        """INSERT INTO pits_bom_imports
+           (id, project_id, import_sequence, workbook_name, workbook_sha256,
+            bom_sheet_name, source_row_count, occurrence_count, issue_count,
+            imported_by, imported_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+        (
+            import_id, project_id, import_sequence, str(workbook_name or "").strip(),
+            str(workbook_sha256 or "").strip(),
+            str(bom_snapshot.get("sheet_name") or "BOM").strip() or "BOM",
+            int(bom_snapshot.get("source_row_count") or 0), len(occurrences),
+            str(editor_name or "").strip(), timestamp,
+        ),
+    )
+
+    for source in occurrences:
+        parent_tracker = str(source.get("parent_tracker_number") or "").strip()
+        child_tracker = str(source.get("child_tracker_number") or "").strip()
+        depth = int(source.get("proposed_depth") or 0)
+        if depth < 1 or depth > 11:
+            raise ValueError(f"BOM row {source.get('source_row')} has an invalid Level depth.")
+        raw_quantity_text = str(source.get("raw_quantity_text") or "").strip()
+        proposed_quantity = source.get("proposed_quantity")
+        quantity_is_valid = False
+        try:
+            numeric_quantity = float(proposed_quantity)
+            quantity_is_valid = math.isfinite(numeric_quantity) and numeric_quantity > 0
+            proposed_quantity = numeric_quantity if math.isfinite(numeric_quantity) else None
+        except (TypeError, ValueError):
+            proposed_quantity = None
+        validation_issues: list[str] = []
+        parent_part = part_by_tracker.get(parent_tracker) if parent_tracker else None
+        child_part = part_by_tracker.get(child_tracker)
+        source_row = int(source["source_row"])
+        if depth > 1 and parent_part is None:
+            validation_issues.append(
+                f"BOM row {source_row}: Parent tracker {parent_tracker or '[blank]'} is not "
+                "matched to a Parts Catalog record"
+            )
+        if child_part is None:
+            validation_issues.append(
+                f"BOM row {source_row}: Child tracker {child_tracker} is not matched to a "
+                "Parts Catalog record"
+            )
+        if not quantity_is_valid:
+            validation_issues.append(
+                f"BOM row {source_row}: Level {depth} value {raw_quantity_text or '[blank]'} "
+                "must be a finite number greater than zero"
+            )
+        duplicate_source_rows = sorted(duplicate_rows_by_key.get(
+            (parent_tracker, child_tracker), set()
+        ))
+        if duplicate_source_rows:
+            row_list = ", ".join(str(row) for row in duplicate_source_rows)
+            validation_issues.append(
+                f"Duplicate parent/child pair appears on BOM rows {row_list}; "
+                "resolve the duplicate in PITS and re-import before approval"
+            )
+        issue_count += len(validation_issues)
+        fingerprint = _pits_bom_fingerprint(depth, raw_quantity_text, proposed_quantity)
+        raw_levels_json = json.dumps(
+            source.get("raw_levels") or {}, ensure_ascii=False, sort_keys=True, default=str
+        )
+        existing = conn.execute(
+            """SELECT * FROM pits_bom_occurrences
+               WHERE project_id=? AND parent_tracker_number=? AND child_tracker_number=?""",
+            (project_id, parent_tracker, child_tracker),
+        ).fetchone()
+        if existing is None:
+            occurrence_id = str(uuid4())
+            conn.execute(
+                """INSERT INTO pits_bom_occurrences
+                   (id, project_id, parent_tracker_number, child_tracker_number,
+                    parent_part_id, child_part_id, proposed_depth, raw_quantity_text,
+                    proposed_quantity, source_row, raw_levels_json, source_fingerprint,
+                    review_status, source_state, validation_issues_json,
+                    first_seen_import_id, last_seen_import_id,
+                    first_seen_at, last_seen_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Needs review', 'New',
+                           ?, ?, ?, ?, ?, ?)""",
+                (
+                    occurrence_id, project_id, parent_tracker, child_tracker,
+                    parent_part["id"] if parent_part else None,
+                    child_part["id"] if child_part else None,
+                    depth, raw_quantity_text, proposed_quantity, source_row,
+                    raw_levels_json, fingerprint,
+                    json.dumps(validation_issues, ensure_ascii=False),
+                    import_id, import_id, timestamp, timestamp, timestamp,
+                ),
+            )
+            revision_no = 1
+            summary["new"] = int(summary["new"]) + 1
+        else:
+            occurrence_id = str(existing["id"])
+            changed = str(existing["source_fingerprint"]) != fingerprint
+            reviewed_fingerprint = existing["reviewed_source_fingerprint"]
+            source_state = (
+                "New" if not reviewed_fingerprint
+                else ("Current" if str(reviewed_fingerprint) == fingerprint else "Changed")
+            )
+            review_status = str(existing["review_status"])
+            if changed and review_status == "Rejected":
+                review_status = "Needs review"
+            conn.execute(
+                """UPDATE pits_bom_occurrences
+                   SET parent_part_id=?, child_part_id=?, proposed_depth=?, raw_quantity_text=?,
+                       proposed_quantity=?, source_row=?, raw_levels_json=?, source_fingerprint=?,
+                       review_status=?, source_state=?, validation_issues_json=?,
+                       last_seen_import_id=?, last_seen_at=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    parent_part["id"] if parent_part else None,
+                    child_part["id"] if child_part else None,
+                    depth, raw_quantity_text, proposed_quantity, source_row,
+                    raw_levels_json, fingerprint, review_status, source_state,
+                    json.dumps(validation_issues, ensure_ascii=False),
+                    import_id, timestamp, timestamp, occurrence_id, project_id,
+                ),
+            )
+            revision_no = int(conn.execute(
+                """SELECT COALESCE(MAX(revision_no), 0) + 1
+                   FROM pits_bom_occurrence_revisions WHERE occurrence_id=?""",
+                (occurrence_id,),
+            ).fetchone()[0])
+            summary["changed" if changed else "unchanged"] = (
+                int(summary["changed" if changed else "unchanged"]) + 1
+            )
+
+        revision_exists = conn.execute(
+            """SELECT 1 FROM pits_bom_occurrence_revisions
+               WHERE occurrence_id=? AND source_fingerprint=?""",
+            (occurrence_id, fingerprint),
+        ).fetchone()
+        if not revision_exists:
+            conn.execute(
+                """INSERT INTO pits_bom_occurrence_revisions
+                   (id, occurrence_id, import_id, revision_no, source_row, proposed_depth,
+                    raw_quantity_text, proposed_quantity, raw_levels_json,
+                    source_fingerprint, recorded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()), occurrence_id, import_id, revision_no,
+                    source_row, depth, raw_quantity_text,
+                    proposed_quantity, raw_levels_json, fingerprint, timestamp,
+                ),
+            )
+
+    missing_cursor = conn.execute(
+        """UPDATE pits_bom_occurrences
+           SET source_state='Missing', updated_at=?
+           WHERE project_id=? AND last_seen_import_id<>? AND source_state<>'Missing'""",
+        (timestamp, project_id, import_id),
+    )
+    summary["missing"] = max(int(missing_cursor.rowcount), 0)
+    summary["issues"] = issue_count
+    conn.execute("UPDATE pits_bom_imports SET issue_count=? WHERE id=?", (issue_count, import_id))
+    _refresh_pits_assignment_sync_status(conn, project_id)
+    record_audit_event(
+        project_id, "PITS BOM structure", "Import PITS BOM structure",
+        len(occurrences), editor_name,
+        {
+            "import_id": import_id,
+            "new_occurrences": summary["new"],
+            "changed_occurrences": summary["changed"],
+            "unchanged_occurrences": summary["unchanged"],
+            "missing_occurrences": summary["missing"],
+            "duplicate_parent_child_pairs": summary["duplicate_pairs"],
+            "issue_count": issue_count,
+        },
+        _conn=conn,
+    )
+    return summary
+
+
+def review_pits_bom_occurrences(
+    project_id: str,
+    occurrence_ids: list[str],
+    action: str,
+    editor_name: str = "",
+    *,
+    section_id: str | None = None,
+    existing_assignment_id: str | None = None,
+    rejection_reason: str = "",
+) -> dict[str, int | str]:
+    """Approve, reject, acknowledge, or detach staged BOM occurrences atomically."""
+    selected_ids = list(dict.fromkeys(
+        str(value).strip() for value in occurrence_ids if str(value).strip()
+    ))
+    if not selected_ids:
+        raise ValueError("Select at least one PITS BOM occurrence.")
+    allowed_actions = {"Approve", "Reject", "Acknowledge", "Detach"}
+    if action not in allowed_actions:
+        raise ValueError("Unsupported PITS BOM review action.")
+    if action == "Approve" and len(selected_ids) != 1:
+        raise ValueError("Approve one occurrence at a time so its Fishbone section is explicit.")
+    placeholders = ",".join("?" for _ in selected_ids)
+    timestamp = now_iso()
+    created_assignments = 0
+    with connection() as conn:
+        rows = conn.execute(
+            f"""SELECT * FROM pits_bom_occurrences
+                WHERE project_id=? AND id IN ({placeholders})""",
+            (project_id, *selected_ids),
+        ).fetchall()
+        if len(rows) != len(selected_ids):
+            raise ValueError("One or more selected PITS BOM occurrences no longer exist.")
+
+        if action == "Approve":
+            occurrence = rows[0]
+            if occurrence["source_state"] == "Missing":
+                raise ValueError("A missing occurrence cannot be approved.")
+            try:
+                validation_issues = json.loads(occurrence["validation_issues_json"] or "[]")
+            except json.JSONDecodeError:
+                validation_issues = ["Stored validation details are invalid"]
+            if validation_issues:
+                raise ValueError("Resolve the occurrence's validation issues before approval.")
+            child_part_id = occurrence["child_part_id"]
+            if not child_part_id:
+                raise ValueError("Match the child tracker number to a Parts Catalog record first.")
+            try:
+                quantity = float(occurrence["proposed_quantity"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("A positive PITS quantity is required before approval.") from exc
+            if not math.isfinite(quantity) or quantity <= 0:
+                raise ValueError("A positive PITS quantity is required before approval.")
+            section = conn.execute(
+                "SELECT id FROM assembly_sections WHERE id=? AND project_id=? AND active=1",
+                (section_id, project_id),
+            ).fetchone()
+            if not section:
+                raise ValueError("Choose an active Fishbone section.")
+            assignment_id = str(existing_assignment_id or "").strip()
+            if assignment_id:
+                assignment = conn.execute(
+                    """SELECT id FROM fishbone_part_assignments
+                       WHERE id=? AND project_id=? AND part_id=? AND section_id=?""",
+                    (assignment_id, project_id, child_part_id, section_id),
+                ).fetchone()
+                if not assignment:
+                    raise ValueError(
+                        "The selected Fishbone use must use the same part and Fishbone section."
+                    )
+                claimed = conn.execute(
+                    """SELECT 1 FROM pits_bom_occurrences
+                       WHERE project_id=? AND approved_assignment_id=? AND id<>?""",
+                    (project_id, assignment_id, occurrence["id"]),
+                ).fetchone()
+                if claimed:
+                    raise ValueError("That Fishbone use is already linked to another occurrence.")
+            else:
+                assignment_id = str(uuid4())
+                next_sequence = int(conn.execute(
+                    """SELECT COALESCE(MAX(sequence), 0) + 10
+                       FROM fishbone_part_assignments
+                       WHERE project_id=? AND section_id=?""",
+                    (project_id, section_id),
+                ).fetchone()[0])
+                conn.execute(
+                    """INSERT INTO fishbone_part_assignments
+                       (id, project_id, part_id, section_id, sequence, quantity,
+                        use_description, notes, pits_sync_status, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', 'Not linked', ?)""",
+                    (
+                        assignment_id, project_id, child_part_id, section_id,
+                        next_sequence, quantity,
+                        f"PITS {occurrence['parent_tracker_number'] or 'root'} → "
+                        f"{occurrence['child_tracker_number']}",
+                        timestamp,
+                    ),
+                )
+                created_assignments = 1
+            conn.execute(
+                """UPDATE pits_bom_occurrences
+                   SET review_status='Approved', source_state='Current',
+                       reviewed_source_fingerprint=source_fingerprint,
+                       confirmed_section_id=?, approved_assignment_id=?,
+                       last_reviewed_import_id=last_seen_import_id,
+                       reviewed_by=?, reviewed_at=?, rejection_reason='', updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    section_id, assignment_id, str(editor_name or "").strip(),
+                    timestamp, timestamp, occurrence["id"], project_id,
+                ),
+            )
+        elif action == "Reject":
+            if any(row["review_status"] == "Approved" for row in rows):
+                raise ValueError("Detach an approved occurrence before rejecting it.")
+            if any(row["source_state"] == "Missing" for row in rows):
+                raise ValueError("A missing unapproved occurrence does not require rejection.")
+            conn.execute(
+                f"""UPDATE pits_bom_occurrences
+                    SET review_status='Rejected', source_state='Current',
+                        reviewed_source_fingerprint=source_fingerprint,
+                        last_reviewed_import_id=last_seen_import_id,
+                        reviewed_by=?, reviewed_at=?, rejection_reason=?, updated_at=?
+                    WHERE project_id=? AND id IN ({placeholders})""",
+                (
+                    str(editor_name or "").strip(), timestamp,
+                    str(rejection_reason or "").strip(), timestamp,
+                    project_id, *selected_ids,
+                ),
+            )
+        elif action == "Acknowledge":
+            for row in rows:
+                if row["source_state"] == "Changed":
+                    conn.execute(
+                        """UPDATE pits_bom_occurrences
+                           SET reviewed_source_fingerprint=source_fingerprint,
+                               source_state='Current', last_reviewed_import_id=last_seen_import_id,
+                               reviewed_by=?, reviewed_at=?, updated_at=?
+                           WHERE id=? AND project_id=?""",
+                        (
+                            str(editor_name or "").strip(), timestamp, timestamp,
+                            row["id"], project_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE pits_bom_occurrences
+                           SET reviewed_by=?, reviewed_at=?, updated_at=?
+                           WHERE id=? AND project_id=?""",
+                        (
+                            str(editor_name or "").strip(), timestamp, timestamp,
+                            row["id"], project_id,
+                        ),
+                    )
+        else:
+            if any(row["review_status"] != "Approved" for row in rows):
+                raise ValueError("Only approved occurrences can be detached.")
+            conn.execute(
+                f"""UPDATE pits_bom_occurrences
+                    SET review_status='Needs review', confirmed_section_id=NULL,
+                        approved_assignment_id=NULL, reviewed_source_fingerprint=NULL,
+                        last_reviewed_import_id=NULL, reviewed_by=?, reviewed_at=?,
+                        source_state=CASE WHEN source_state='Missing' THEN 'Missing' ELSE 'New' END,
+                        updated_at=?
+                    WHERE project_id=? AND id IN ({placeholders})""",
+                (
+                    str(editor_name or "").strip(), timestamp, timestamp,
+                    project_id, *selected_ids,
+                ),
+            )
+
+        _refresh_pits_assignment_sync_status(conn, project_id)
+        record_audit_event(
+            project_id, "PITS BOM structure", action, len(selected_ids), editor_name,
+            {
+                "occurrence_ids": selected_ids,
+                "section_id": section_id,
+                "existing_assignment_id": existing_assignment_id,
+                "created_assignments": created_assignments,
+            },
+            _conn=conn,
+        )
+    return {
+        "reviewed": len(selected_ids),
+        "created_assignments": created_assignments,
+        "timestamp": timestamp,
+    }
+
+
+def escalate_pits_bom_occurrence(
+    project_id: str, occurrence_id: str, editor_name: str = ""
+) -> str:
+    """Create a linked concern without clearing any PITS difference state."""
+    timestamp = now_iso()
+    concern_id = str(uuid4())
+    with connection() as conn:
+        occurrence = conn.execute(
+            """SELECT occurrence.*, child_part.part_number AS child_part_number,
+                      assignment.pits_sync_status
+               FROM pits_bom_occurrences occurrence
+               LEFT JOIN parts child_part ON child_part.id=occurrence.child_part_id
+               LEFT JOIN fishbone_part_assignments assignment
+                 ON assignment.id=occurrence.approved_assignment_id
+               WHERE occurrence.id=? AND occurrence.project_id=?""",
+            (occurrence_id, project_id),
+        ).fetchone()
+        if not occurrence:
+            raise ValueError("The selected PITS BOM occurrence no longer exists.")
+        source_state = str(occurrence["source_state"])
+        escalation_state = source_state
+        if source_state == "Current" and occurrence["pits_sync_status"] == "Quantity differs":
+            escalation_state = "Changed"
+        elif source_state == "Current" and occurrence["pits_sync_status"] == "No longer found":
+            escalation_state = "Missing"
+        if escalation_state not in {"New", "Changed", "Missing"}:
+            raise ValueError("Only a new, changed, or missing occurrence can be escalated.")
+        child_label = str(
+            occurrence["child_part_number"] or occurrence["child_tracker_number"]
+        )
+        parent_label = str(occurrence["parent_tracker_number"] or "Product / main assembly")
+        conn.execute(
+            """INSERT INTO concerns
+               (id, project_id, category, subject, detail, owner, priority, status,
+                related_part, related_station, created_at, updated_at)
+               VALUES (?, ?, 'Concern', ?, ?, '', 'Medium', 'Open', ?, '', ?, ?)""",
+            (
+                concern_id, project_id,
+                f"PITS BOM occurrence requires review: {parent_label} → {child_label}",
+                f"Source state: {escalation_state}. PITS tracker relationship "
+                f"{parent_label} → {occurrence['child_tracker_number']}.",
+                child_label, timestamp, timestamp,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO pits_bom_occurrence_concerns
+               (id, project_id, occurrence_id, concern_id, escalated_source_state,
+                escalated_source_fingerprint, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()), project_id, occurrence_id, concern_id, escalation_state,
+                str(occurrence["source_fingerprint"]),
+                str(editor_name or "").strip(), timestamp,
+            ),
+        )
+        record_audit_event(
+            project_id, "PITS BOM structure", "Escalate", 1, editor_name,
+            {"occurrence_id": occurrence_id, "concern_id": concern_id},
+            _conn=conn,
+        )
+    return concern_id
+
+
+def _pits_tracker_number_claims(
+    conn: sqlite3.Connection,
+    project_id: str,
+    records: list[dict],
+) -> tuple[list[str], list[dict]]:
+    """Resolve blank-only tracker-number claims without violating project uniqueness."""
+    existing_parts = conn.execute(
+        """SELECT id, part_number, pits_tracker_number
+           FROM parts WHERE project_id=?""",
+        (project_id,),
+    ).fetchall()
+    tracker_by_part = {
+        str(row["part_number"]): str(row["pits_tracker_number"] or "").strip()
+        for row in existing_parts
+    }
+    owner_by_tracker = {
+        str(row["pits_tracker_number"] or "").strip(): {
+            "id": str(row["id"]),
+            "part_number": str(row["part_number"]),
+        }
+        for row in existing_parts
+        if str(row["pits_tracker_number"] or "").strip()
+    }
+    tracker_numbers = [""] * len(records)
+    conflicts: list[dict] = []
+    reported_conflicts: set[tuple[str, str, str]] = set()
+    for record_index, record in enumerate(records):
+        part_number = str(record.get("part_number") or "").strip()
+        tracker_number = str(record.get("pits_id") or "").strip()
+        if not part_number or not tracker_number:
+            continue
+        if tracker_by_part.get(part_number, ""):
+            continue
+        owner = owner_by_tracker.get(tracker_number)
+        if owner and owner["part_number"] != part_number:
+            conflict_key = (part_number, tracker_number, owner["part_number"])
+            if conflict_key not in reported_conflicts:
+                conflicts.append({
+                    "conflict_type": "pits_tracker_number",
+                    "part_number": part_number,
+                    "pits_tracker_number": tracker_number,
+                    "existing_part_id": owner["id"],
+                    "existing_part_number": owner["part_number"],
+                })
+                reported_conflicts.add(conflict_key)
+            continue
+        tracker_numbers[record_index] = tracker_number
+        tracker_by_part[part_number] = tracker_number
+        owner_by_tracker[tracker_number] = {
+            "id": "",
+            "part_number": part_number,
+        }
+    return tracker_numbers, conflicts
+
+
 def pits_import_conflict_parts(project_id: str, records: list[dict]) -> list[dict]:
-    """Return existing parts in the project catalog that were manually created or edited by collaborators."""
+    """Return protected manual values and PITS Tracker number conflicts."""
     part_numbers = [
         str(r.get("part_number") or "").strip()
         for r in records
@@ -13114,7 +13973,12 @@ def pits_import_conflict_parts(project_id: str, records: list[dict]) -> list[dic
                   AND (source <> 'PITS snapshot' OR TRIM(COALESCE(notes, '')) <> '')""",
             (project_id, *part_numbers),
         ).fetchall()
-        return [dict(row) for row in rows]
+        manual_conflicts = [
+            {**dict(row), "conflict_type": "manual_values"}
+            for row in rows
+        ]
+        _, tracker_conflicts = _pits_tracker_number_claims(conn, project_id, records)
+        return [*manual_conflicts, *tracker_conflicts]
 
 
 def import_pits_id_snapshot(
@@ -13124,9 +13988,20 @@ def import_pits_id_snapshot(
     *,
     scenario_id: str | None = None,
     overwrite_manual: bool = False,
-) -> dict[str, int]:
+    bom_snapshot: dict | None = None,
+    workbook_name: str = "",
+    workbook_sha256: str = "",
+    editor_name: str = "",
+) -> dict:
     timestamp = now_iso()
-    summary = {"new": 0, "changed": 0, "unchanged": 0, "models": 0}
+    summary = {
+        "new": 0,
+        "changed": 0,
+        "unchanged": 0,
+        "models": 0,
+        "tracker_conflicts": 0,
+        "bom": None,
+    }
     with connection() as conn:
         project_exists = conn.execute(
             "SELECT 1 FROM projects WHERE id=?",
@@ -13140,10 +14015,14 @@ def import_pits_id_snapshot(
         ).fetchone():
             raise ValueError("The active planning scenario no longer exists.")
 
+        tracker_numbers, tracker_conflicts = _pits_tracker_number_claims(
+            conn, project_id, records
+        )
+        summary["tracker_conflicts"] = len(tracker_conflicts)
         next_sequence = conn.execute(
             "SELECT COALESCE(MAX(sequence), 0) FROM fishbone_nodes WHERE project_id = ?", (project_id,)
         ).fetchone()[0]
-        for record in records:
+        for record_index, record in enumerate(records):
             pits_id = str(record["pits_id"]).strip()
             part_number = str(record.get("part_number") or "").strip()
             description = str(record.get("description") or "").strip()
@@ -13158,6 +14037,11 @@ def import_pits_id_snapshot(
                        notes=CASE
                            WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
                            ELSE excluded.notes
+                       END,
+                       pits_tracker_number=CASE
+                           WHEN TRIM(COALESCE(parts.pits_tracker_number, '')) = ''
+                           THEN excluded.pits_tracker_number
+                           ELSE parts.pits_tracker_number
                        END,
                        model_applicability=CASE
                            WHEN EXISTS (
@@ -13177,6 +14061,11 @@ def import_pits_id_snapshot(
                            WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
                            ELSE excluded.notes
                        END,
+                       pits_tracker_number=CASE
+                           WHEN TRIM(COALESCE(parts.pits_tracker_number, '')) = ''
+                           THEN excluded.pits_tracker_number
+                           ELSE parts.pits_tracker_number
+                       END,
                        model_applicability=CASE
                            WHEN EXISTS (
                                SELECT 1 FROM part_feature_rules rule
@@ -13188,14 +14077,15 @@ def import_pits_id_snapshot(
                 conn.execute(
                     f"""INSERT INTO parts
                        (id, project_id, part_number, description, quantity, revision, source,
-                        image_path, model_applicability, notes, source_code, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                        image_path, model_applicability, notes, pits_tracker_number,
+                        source_code, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
                        {update_clause}""",
                     (
                         str(uuid4()), project_id, part_number, description,
                         record.get("quantity") if record.get("quantity") is not None else 1,
                         str(record.get("revision") or "").strip(),
-                        "PITS snapshot", "All", notes,
+                        "PITS snapshot", "All", notes, tracker_numbers[record_index],
                         str(record.get("source_code") or "").strip(), timestamp,
                     ),
                 )
@@ -13296,6 +14186,16 @@ def import_pits_id_snapshot(
                  model["yamazumi"], model["bop_l1"], payload, timestamp),
             )
             summary["models"] += 1
+        if bom_snapshot and str(bom_snapshot.get("sheet_name") or "").strip():
+            summary["bom"] = _import_pits_bom_snapshot(
+                conn,
+                project_id,
+                bom_snapshot,
+                workbook_name=workbook_name,
+                workbook_sha256=workbook_sha256,
+                editor_name=editor_name,
+                timestamp=timestamp,
+            )
     return summary
 
 

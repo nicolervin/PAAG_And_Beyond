@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -47,6 +48,21 @@ from utils.table_ui import (
     direct_entry_editor_rows,
     table_has_unsaved_changes,
 )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_parts_dataframe_to_excel(
+    data_hash: str,
+    _dataframe: pd.DataFrame,
+    sheet_name: str = "Parts",
+) -> bytes:
+    del data_hash
+    return dataframe_to_excel(_dataframe, sheet_name)
+
+
+def _hash_filtered_export(dataframe: pd.DataFrame) -> str:
+    serialized = dataframe.to_json(orient="split", date_format="iso").encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
 
 
 project_id = st.session_state.get("project_id")
@@ -406,9 +422,11 @@ export_columns = [
     "technology_engineer", "pits_tracker_number", "source_code", "make_buy",
     "revision", "feature_applicability", "photo_status", "notes", "source", "updated_at",
 ]
+export_dataframe = parts_for_editing.reindex(columns=export_columns)
+export_hash = _hash_filtered_export(export_dataframe)
 st.download_button(
     "Export filtered rows",
-    data=dataframe_to_excel(parts_for_editing.reindex(columns=export_columns), "Parts"),
+    data=_cached_parts_dataframe_to_excel(export_hash, export_dataframe, "Parts"),
     file_name="parts_filtered.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     icon=":material/download:",

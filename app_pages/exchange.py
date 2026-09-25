@@ -9,7 +9,7 @@ from utils.excel_io import (
     is_pits_format,
     mapped_bom,
     parse_pits,
-    parse_pits_id_workbook,
+    parse_pits_combined_workbook,
     read_bom,
     suggest_mapping,
 )
@@ -21,20 +21,25 @@ from utils.project_transfer import (
 )
 from utils.store import (
     audit_history,
+    assembly_sections,
+    escalate_pits_bom_occurrence,
+    fishbone_part_assignments,
     get_planning_scenario,
     get_project,
     import_fishbone_nodes,
     import_pits_id_snapshot,
     pits_import_conflict_parts,
+    pits_bom_occurrences,
     pits_records,
     projects,
     project_models,
     record_audit_event,
+    review_pits_bom_occurrences,
     upsert_part,
 )
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import filter_table, split_filter_values
-from utils.table_ui import selectable_dataframe
+from utils.table_ui import selectable_dataframe, selected_dataframe_rows
 
 
 project_id = st.session_state.get("project_id")
@@ -45,6 +50,7 @@ if not project_id:
 
 import_upload_key = f"project_package_upload_{project_id}"
 pending_import_key = f"pending_project_import_{project_id}"
+pits_bom_review_key = f"pending_pits_bom_review_{project_id}"
 
 
 def complete_project_import(pending: dict) -> None:
@@ -120,6 +126,85 @@ def confirm_replace_project_import(pending: dict) -> None:
             complete_project_import(pending)
         except (ValueError, OSError) as exc:
             st.error(str(exc))
+
+
+@st.dialog("Review PITS BOM structure changes", dismissible=False, width="large")
+def review_pits_bom_import(import_id: str) -> None:
+    review_rows = pits_bom_occurrences(project_id, actionable_only=True)
+    if review_rows.empty:
+        st.success("No PITS BOM structure changes need review.")
+        if st.button("Close", key=f"close_empty_pits_bom_review_{project_id}"):
+            st.session_state.pop(pits_bom_review_key, None)
+            st.rerun()
+        return
+    relevant = review_rows.loc[
+        review_rows["last_seen_import_id"].astype(str).eq(str(import_id))
+        | review_rows["source_state"].astype(str).eq("Missing")
+    ].reset_index(drop=True)
+    if relevant.empty:
+        relevant = review_rows.reset_index(drop=True)
+    display = relevant[[
+        "id", "source_state", "review_status", "parent_tracker_number",
+        "child_tracker_number", "child_part_number", "proposed_depth",
+        "proposed_quantity", "approved_quantity", "pits_sync_status",
+        "validation_issues_json",
+    ]].copy()
+    st.write(
+        "Review every suspected addition, change, and removal. Rows are selected by default; "
+        "clear any row you do not want to acknowledge in this review. Approved Fishbone "
+        "quantities remain unchanged."
+    )
+    event = selectable_dataframe(
+        display,
+        key=f"pits_bom_import_review_table_{project_id}_{import_id}",
+        hide_index=True,
+        height=420,
+        selection_default={"selection": {"rows": list(range(len(display))) }},
+        column_config={
+            "id": None,
+            "source_state": "PITS change",
+            "review_status": "Review status",
+            "parent_tracker_number": "Parent tracker number",
+            "child_tracker_number": "Child tracker number",
+            "child_part_number": "Child part number",
+            "proposed_depth": "Level",
+            "proposed_quantity": st.column_config.NumberColumn("PITS quantity"),
+            "approved_quantity": st.column_config.NumberColumn("Approved Fishbone quantity"),
+            "pits_sync_status": "Fishbone PITS state",
+            "validation_issues_json": "Validation issues",
+        },
+    )
+    selected = selected_dataframe_rows(display, event)
+    st.caption(
+        "Accepting records the reviewed source version. It never creates a Fishbone section, "
+        "changes an approved quantity, or clears a PITS difference that still exists."
+    )
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        if st.button(
+            "Cancel",
+            key=f"cancel_pits_bom_import_review_{project_id}_{import_id}",
+        ):
+            st.session_state.pop(pits_bom_review_key, None)
+            st.rerun()
+        if st.button(
+            "Accept selected",
+            type="primary",
+            icon=":material/check:",
+            disabled=selected.empty,
+            key=f"accept_pits_bom_import_review_{project_id}_{import_id}",
+        ):
+            try:
+                review_pits_bom_occurrences(
+                    project_id,
+                    selected["id"].astype(str).tolist(),
+                    "Acknowledge",
+                    st.session_state.get("current_editor", ""),
+                )
+                st.session_state.pop(pits_bom_review_key, None)
+                st.toast("PITS BOM review recorded", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
 
 part_data_tab, whole_project_tab = st.tabs(
@@ -310,7 +395,7 @@ with import_col.container(border=True):
     if uploaded:
         try:
             if has_pits_id_sheets(uploaded):
-                records, models = parse_pits_id_workbook(uploaded)
+                records, models, bom_snapshot = parse_pits_combined_workbook(uploaded)
                 st.success("ID-based PITS tracker detected", icon=":material/key:")
                 unique_ids = {
                     str(record.get("pits_id") or "").strip()
@@ -379,6 +464,135 @@ with import_col.container(border=True):
                         search_columns=["model_number", "appearance", "sku_upc"],
                     )
                     selectable_dataframe(model_preview_table, key="pits_model_preview_table", hide_index=True)
+                bom_occurrences = list(bom_snapshot.get("occurrences") or [])
+                bom_issues = list(bom_snapshot.get("issues") or [])
+                bom_duplicates = list(bom_snapshot.get("duplicates") or [])
+                bom_duplicate_pair_count = len({
+                    (
+                        str(row.get("parent_tracker_number") or "").strip(),
+                        str(row.get("child_tracker_number") or "").strip(),
+                    )
+                    for row in bom_duplicates
+                })
+                blocking_bom_issues = [issue for issue in bom_issues if issue.get("blocking")]
+                if bom_snapshot.get("sheet_name"):
+                    with st.expander(
+                        f"BOM structure in this workbook ({len(bom_occurrences):,} occurrences)",
+                        icon=":material/account_tree:",
+                    ):
+                        bom_preview = pd.DataFrame(bom_occurrences)
+                        if not bom_preview.empty:
+                            selectable_dataframe(
+                                bom_preview.head(50),
+                                key=f"pits_bom_preview_{project_id}",
+                                hide_index=True,
+                                height=360,
+                                column_config={
+                                    "parent_tracker_number": "Parent tracker number",
+                                    "child_tracker_number": "Child tracker number",
+                                    "part_number": "Part number",
+                                    "description": "Part Name",
+                                    "proposed_depth": "Level",
+                                    "raw_quantity_text": "PITS quantity source",
+                                    "proposed_quantity": "PITS quantity",
+                                    "source_row": "BOM row",
+                                    "raw_levels": None,
+                                },
+                            )
+                        if bom_issues:
+                            if blocking_bom_issues:
+                                st.error(
+                                    f"Import is blocked by {len(blocking_bom_issues):,} BOM row "
+                                    "issue(s). The blocking rows are listed first below with their "
+                                    "exact Excel row and available source values.",
+                                    icon=":material/error:",
+                                )
+                            else:
+                                st.warning(
+                                    f"Found {len(bom_issues):,} nonblocking BOM row issue(s). "
+                                    "Their exact Excel locations and source values are listed below.",
+                                    icon=":material/warning:",
+                                )
+                            issue_preview = pd.DataFrame([{
+                                "result": (
+                                    "Blocks import" if issue.get("blocking") else "Flagged only"
+                                ),
+                                "source_row": issue.get("source_row"),
+                                "issue": issue.get("issue"),
+                                "child_tracker_number": issue.get("child_tracker_number", ""),
+                                "part_number": issue.get("part_number", ""),
+                                "description": issue.get("description", ""),
+                                "proposed_depth": issue.get("proposed_depth"),
+                                "expected_parent_level": issue.get("expected_parent_level"),
+                                "raw_quantity_text": issue.get("raw_quantity_text", ""),
+                            } for issue in bom_issues])
+                            issue_preview["_blocking_order"] = issue_preview["result"].eq(
+                                "Blocks import"
+                            )
+                            issue_preview = issue_preview.sort_values(
+                                ["_blocking_order", "source_row"],
+                                ascending=[False, True],
+                                kind="stable",
+                            ).drop(columns=["_blocking_order"])
+                            selectable_dataframe(
+                                issue_preview,
+                                key=f"pits_bom_issue_preview_{project_id}",
+                                hide_index=True,
+                                height=360,
+                                column_config={
+                                    "result": st.column_config.TextColumn("Import result", pinned=True),
+                                    "source_row": st.column_config.NumberColumn(
+                                        "Excel row", format="%d", pinned=True
+                                    ),
+                                    "issue": st.column_config.TextColumn("Issue", width="large"),
+                                    "child_tracker_number": "Tracker number (Column A)",
+                                    "part_number": "Part number (Column B)",
+                                    "description": st.column_config.TextColumn(
+                                        "Description (Column C)", width="large"
+                                    ),
+                                    "proposed_depth": st.column_config.NumberColumn(
+                                        "Populated level", format="%d"
+                                    ),
+                                    "expected_parent_level": st.column_config.NumberColumn(
+                                        "Expected parent level", format="%d"
+                                    ),
+                                    "raw_quantity_text": "Level-cell value",
+                                },
+                            )
+                        if bom_duplicates:
+                            st.warning(
+                                f"Found {len(bom_duplicates):,} additional BOM occurrence row(s) "
+                                f"across {bom_duplicate_pair_count:,} duplicate parent/child pair(s). "
+                                "Import will continue, and each affected occurrence will "
+                                "be flagged with its BOM row numbers until a later PITS file resolves it.",
+                                icon=":material/warning:",
+                            )
+                            duplicate_preview = pd.DataFrame(bom_duplicates)
+                            selectable_dataframe(
+                                duplicate_preview,
+                                key=f"pits_bom_duplicate_preview_{project_id}",
+                                hide_index=True,
+                                column_config={
+                                    "parent_tracker_number": "Parent tracker number",
+                                    "child_tracker_number": "Child tracker number",
+                                    "first_source_row": "First BOM row",
+                                    "duplicate_source_row": "Duplicate BOM row",
+                                    "part_number": "Part number (Column B)",
+                                    "description": st.column_config.TextColumn(
+                                        "Description (Column C)", width="large"
+                                    ),
+                                    "proposed_depth": st.column_config.NumberColumn(
+                                        "Populated level", format="%d"
+                                    ),
+                                    "raw_quantity_text": "Level-cell value",
+                                },
+                            )
+                else:
+                    st.warning(
+                        "This PITS workbook has no BOM worksheet. Tracker and Models can still "
+                        "be imported, but no parent-child structure will be staged.",
+                        icon=":material/warning:",
+                    )
                 excluded_records = [
                     record for record in records
                     if str(record.get("used_bom") or "").strip().casefold() in {"n", "no"}
@@ -390,21 +604,49 @@ with import_col.container(border=True):
                         icon=":material/warning:",
                     )
                 conflict_parts = pits_import_conflict_parts(project_id, records)
+                manual_conflicts = [
+                    conflict for conflict in conflict_parts
+                    if conflict.get("conflict_type") == "manual_values"
+                ]
+                tracker_conflicts = [
+                    conflict for conflict in conflict_parts
+                    if conflict.get("conflict_type") == "pits_tracker_number"
+                ]
                 confirm_overwrite_manual = False
-                if conflict_parts:
+                if manual_conflicts:
                     st.warning(
-                        f"Found {len(conflict_parts):,} existing part(s) in the Parts Catalog with manual collaborator edits. "
+                        f"Found {len(manual_conflicts):,} existing part(s) in the Parts Catalog with manual collaborator edits. "
                         "By default, manual edits are preserved. Check the box below if you wish to overwrite them.",
                         icon=":material/warning:",
                     )
                     confirm_overwrite_manual = st.checkbox(
-                        f"Confirm overwriting manual edits for {len(conflict_parts):,} catalog part(s) with PITS values",
+                        f"Confirm overwriting manual edits for {len(manual_conflicts):,} catalog part(s) with PITS values",
                         key=f"confirm_overwrite_manual_{project_id}",
                     )
+                if tracker_conflicts:
+                    st.warning(
+                        f"{len(tracker_conflicts):,} PITS Tracker number(s) are already assigned to other "
+                        "Parts Catalog records. The affected imported parts will keep a blank PITS Tracker number.",
+                        icon=":material/warning:",
+                    )
+                    with st.expander("PITS Tracker number conflicts", icon=":material/key:"):
+                        selectable_dataframe(
+                            pd.DataFrame(tracker_conflicts)[[
+                                "pits_tracker_number", "part_number", "existing_part_number"
+                            ]],
+                            key=f"pits_tracker_conflicts_{project_id}",
+                            hide_index=True,
+                            column_config={
+                                "pits_tracker_number": "PITS Tracker number",
+                                "part_number": "Incoming part number",
+                                "existing_part_number": "Existing owning part number",
+                            },
+                        )
                 if st.button(
                     "Import PITS snapshot",
                     type="primary",
                     icon=":material/upload:",
+                    disabled=bool(blocking_bom_issues),
                 ):
                     existing_pits = pits_records(project_id)
                     previous_revisions = {
@@ -417,6 +659,10 @@ with import_col.container(border=True):
                         models,
                         scenario_id=scenario_id,
                         overwrite_manual=confirm_overwrite_manual,
+                        bom_snapshot=bom_snapshot,
+                        workbook_name=uploaded.name,
+                        workbook_sha256=hashlib.sha256(uploaded.getvalue()).hexdigest(),
+                        editor_name=st.session_state.get("current_editor", ""),
                     )
                     imported_pits = pits_records(project_id)
                     imported_ids = {str(record["pits_id"]).strip() for record in records}
@@ -445,13 +691,181 @@ with import_col.container(border=True):
                             "pits_revisions_updated": updated_revisions,
                             "models_synchronized": summary["models"],
                             "unchanged_pits_records": summary["unchanged"],
+                            "pits_tracker_number_conflicts": summary["tracker_conflicts"],
+                            "pits_bom_import": summary.get("bom"),
                         },
                     )
-                    st.success(
+                    success_message = (
                         f"Imported {summary['new']} new IDs, detected {summary['changed']} revised IDs, "
-                        f"left {summary['unchanged']} unchanged, and synchronized {summary['models']} models.",
-                        icon=":material/check_circle:",
+                        f"left {summary['unchanged']} unchanged, and synchronized {summary['models']} models."
                     )
+                    if summary["tracker_conflicts"]:
+                        success_message += (
+                            f" Left {summary['tracker_conflicts']} conflicting PITS Tracker number(s) blank."
+                        )
+                    bom_summary = summary.get("bom")
+                    if bom_summary:
+                        success_message += (
+                            f" Staged {bom_summary['new']} new, {bom_summary['changed']} changed, "
+                            f"and {bom_summary['missing']} missing BOM occurrence(s)."
+                        )
+                        if bom_summary.get("duplicate_pairs"):
+                            success_message += (
+                                f" Flagged {bom_summary['duplicate_pairs']} duplicate parent/child "
+                                "pair(s) for review."
+                            )
+                        st.session_state[pits_bom_review_key] = bom_summary["import_id"]
+                    st.success(success_message, icon=":material/check_circle:")
+                    if bom_summary:
+                        st.rerun()
+                pending_bom_review = st.session_state.get(pits_bom_review_key)
+                if pending_bom_review:
+                    review_pits_bom_import(str(pending_bom_review))
+                staged_bom = pits_bom_occurrences(project_id, actionable_only=True)
+                if not staged_bom.empty:
+                    with st.expander(
+                        f"PITS BOM structure review queue ({len(staged_bom):,})",
+                        icon=":material/rule:",
+                    ):
+                        queue_display = staged_bom[[
+                            "id", "source_state", "review_status",
+                            "parent_tracker_number", "child_tracker_number",
+                            "child_part_number", "child_part_name", "proposed_depth",
+                            "proposed_quantity", "approved_quantity", "pits_sync_status",
+                            "validation_issues_json",
+                        ]].reset_index(drop=True)
+                        queue_event = selectable_dataframe(
+                            queue_display,
+                            key=f"pits_bom_review_queue_{project_id}",
+                            hide_index=True,
+                            height=360,
+                            column_config={
+                                "id": None,
+                                "source_state": "PITS change",
+                                "review_status": "Review status",
+                                "parent_tracker_number": "Parent tracker number",
+                                "child_tracker_number": "Child tracker number",
+                                "child_part_number": "Child part number",
+                                "child_part_name": "Part Name",
+                                "proposed_depth": "Level",
+                                "proposed_quantity": st.column_config.NumberColumn("PITS quantity"),
+                                "approved_quantity": st.column_config.NumberColumn("Approved Fishbone quantity"),
+                                "pits_sync_status": "Fishbone PITS state",
+                                "validation_issues_json": "Validation issues",
+                            },
+                        )
+                        queue_selected = selected_dataframe_rows(queue_display, queue_event)
+                        if len(queue_selected) == 1:
+                            selected_row = queue_selected.iloc[0]
+                            selected_occurrence_id = str(selected_row["id"])
+                            selected_full = staged_bom.loc[
+                                staged_bom["id"].astype(str).eq(selected_occurrence_id)
+                            ].iloc[0]
+                            active_sections = assembly_sections(project_id)
+                            active_sections = active_sections.loc[
+                                active_sections["active"].fillna(0).astype(bool)
+                            ].copy()
+                            section_options = active_sections["id"].astype(str).tolist()
+                            section_labels = {
+                                str(row["id"]): str(row["name"])
+                                for _, row in active_sections.iterrows()
+                            }
+                            selected_section_id = st.selectbox(
+                                "Fishbone section",
+                                options=section_options,
+                                format_func=lambda value: section_labels.get(value, value),
+                                key=f"pits_bom_review_section_{project_id}_{selected_occurrence_id}",
+                                disabled=not section_options,
+                            ) if section_options else None
+                            existing_use_options = [""]
+                            existing_use_labels = {"": "Create a new Fishbone use"}
+                            if selected_section_id and selected_full.get("child_part_id"):
+                                uses = fishbone_part_assignments(project_id)
+                                uses = uses.loc[
+                                    uses["section_id"].astype(str).eq(str(selected_section_id))
+                                    & uses["part_id"].astype(str).eq(str(selected_full["child_part_id"]))
+                                ]
+                                for _, use in uses.iterrows():
+                                    use_id = str(use["id"])
+                                    existing_use_options.append(use_id)
+                                    existing_use_labels[use_id] = (
+                                        f"{use['use_description'] or 'Existing Fishbone use'} · "
+                                        f"quantity {use['quantity']:g}"
+                                    )
+                            selected_use_id = st.selectbox(
+                                "Fishbone use",
+                                options=existing_use_options,
+                                format_func=lambda value: existing_use_labels.get(value, value),
+                                key=f"pits_bom_review_use_{project_id}_{selected_occurrence_id}",
+                            )
+                            with st.container(horizontal=True):
+                                if st.button(
+                                    "Approve",
+                                    type="primary",
+                                    icon=":material/check:",
+                                    disabled=(
+                                        selected_full["review_status"] == "Approved"
+                                        or not selected_section_id
+                                    ),
+                                    key=f"approve_pits_bom_{project_id}_{selected_occurrence_id}",
+                                ):
+                                    try:
+                                        review_pits_bom_occurrences(
+                                            project_id, [selected_occurrence_id], "Approve",
+                                            st.session_state.get("current_editor", ""),
+                                            section_id=selected_section_id,
+                                            existing_assignment_id=selected_use_id or None,
+                                        )
+                                        st.toast("PITS BOM occurrence approved", icon=":material/check_circle:")
+                                        st.rerun()
+                                    except ValueError as exc:
+                                        st.error(str(exc))
+                                if st.button(
+                                    "Reject",
+                                    disabled=selected_full["review_status"] == "Approved",
+                                    key=f"reject_pits_bom_{project_id}_{selected_occurrence_id}",
+                                ):
+                                    try:
+                                        review_pits_bom_occurrences(
+                                            project_id, [selected_occurrence_id], "Reject",
+                                            st.session_state.get("current_editor", ""),
+                                        )
+                                        st.toast("PITS BOM occurrence rejected", icon=":material/block:")
+                                        st.rerun()
+                                    except ValueError as exc:
+                                        st.error(str(exc))
+                                if st.button(
+                                    "Escalate",
+                                    icon=":material/help:",
+                                    key=f"escalate_pits_bom_{project_id}_{selected_occurrence_id}",
+                                ):
+                                    try:
+                                        escalate_pits_bom_occurrence(
+                                            project_id, selected_occurrence_id,
+                                            st.session_state.get("current_editor", ""),
+                                        )
+                                        st.toast(
+                                            "Linked Questions and concerns record created",
+                                            icon=":material/check_circle:",
+                                        )
+                                        st.rerun()
+                                    except ValueError as exc:
+                                        st.error(str(exc))
+                                if selected_full["review_status"] == "Approved" and st.button(
+                                    "Detach",
+                                    key=f"detach_pits_bom_{project_id}_{selected_occurrence_id}",
+                                ):
+                                    try:
+                                        review_pits_bom_occurrences(
+                                            project_id, [selected_occurrence_id], "Detach",
+                                            st.session_state.get("current_editor", ""),
+                                        )
+                                        st.toast("PITS BOM occurrence detached", icon=":material/link_off:")
+                                        st.rerun()
+                                    except ValueError as exc:
+                                        st.error(str(exc))
+                        else:
+                            st.caption("Select one occurrence to approve, reject, escalate, or detach.")
                 st.stop()
             raw = read_bom(uploaded)
             if is_pits_format(raw):
@@ -558,8 +972,8 @@ with export_col.container(border=True):
 
 
 with st.expander("History", icon=":material/history:"):
-    pits_history_tab, mbom_history_tab, parts_history_tab, transfer_history_tab = st.tabs(
-        ["PITS snapshots", "MBOM review", "Parts import", "Project transfer"]
+    pits_history_tab, pits_bom_history_tab, mbom_history_tab, parts_history_tab, transfer_history_tab = st.tabs(
+        ["PITS snapshots", "PITS BOM structure", "MBOM review", "Parts import", "Project transfer"]
     )
     with pits_history_tab:
         pits_history = audit_history(project_id, "PITS snapshot", limit=50)
@@ -569,6 +983,24 @@ with st.expander("History", icon=":material/history:"):
             selectable_dataframe(
                 pits_history.drop(columns=["details"], errors="ignore"),
                 key=f"exchange_pits_history_{project_id}",
+                hide_index=True,
+                column_config={
+                    "action": "Action",
+                    "row_count": "Rows",
+                    "editor_name": "Editor",
+                    "created_at": st.column_config.DatetimeColumn(
+                        "When", format="MMM DD, YYYY HH:mm"
+                    ),
+                },
+            )
+    with pits_bom_history_tab:
+        pits_bom_history = audit_history(project_id, "PITS BOM structure", limit=50)
+        if pits_bom_history.empty:
+            st.caption("No PITS BOM structure history has been recorded yet.")
+        else:
+            selectable_dataframe(
+                pits_bom_history.drop(columns=["details"], errors="ignore"),
+                key=f"exchange_pits_bom_history_{project_id}",
                 hide_index=True,
                 column_config={
                     "action": "Action",

@@ -56,6 +56,30 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 - **Key relationships:** Belongs to `pits_records`; deleting the parent PITS record deletes its revisions.
 - **Scope:** Project-wide source history through its parent record.
 
+### `pits_bom_imports`
+
+- **Purpose:** Records each successfully completed BOM-worksheet snapshot in the combined PITS import, including its per-project sequence, workbook identity, source row and occurrence counts, issue count, editor attribution, and completion time. The import row and all occurrence changes commit atomically; a failed or incomplete parse cannot become the latest snapshot or mark existing occurrences missing.
+- **Key relationships:** Belongs to `projects`. Referenced by the first-seen, last-seen, and last-reviewed fields on `pits_bom_occurrences` and by `pits_bom_occurrence_revisions`.
+- **Scope:** Project-wide source evidence. `UNIQUE(project_id, import_sequence)` defines deterministic snapshot order independently of timestamp ties.
+
+### `pits_bom_occurrences`
+
+- **Purpose:** Stores one stable BOM parent-child relationship per `(project_id, parent_tracker_number, child_tracker_number)`, with tracker values retained as trimmed text, the latest Level 1-11 depth and quantity evidence, source row and raw levels, source fingerprint, validation issues, independent review and source-change states, and optional reviewed Fishbone relationships. An empty parent tracker is reserved for a Level 1/root occurrence. When one snapshot contains the same parent-child key more than once, the import retains one occurrence, records every conflicting BOM row number in its validation issues, and continues importing the rest of the workbook.
+- **Key relationships:** Belongs to `projects`; optionally resolves parent and child identities to `parts`; optionally references a human-confirmed `assembly_sections` row and one exact `fishbone_part_assignments` destination; and references the imports where it was first seen, last seen, and last reviewed. It has no relationship to `fishbone_nodes`.
+- **Scope:** Project-wide source/review staging. New occurrences start as `Needs review` / `New`. Approved occurrences retain their assignment when source quantity changes or the occurrence disappears; re-import never overwrites the authoritative Fishbone quantity.
+
+### `pits_bom_occurrence_revisions`
+
+- **Purpose:** Preserves each distinct normalized depth/quantity source version for a BOM occurrence. Row movement alone updates current traceability without creating a false revision.
+- **Key relationships:** Belongs to `pits_bom_occurrences` and references the `pits_bom_imports` snapshot in which that version first appeared.
+- **Scope:** Project-wide source history through the parent occurrence. Revision number and source fingerprint are independently unique within an occurrence.
+
+### `pits_bom_occurrence_concerns`
+
+- **Purpose:** Links an escalated new, changed, or missing BOM occurrence to a real `concerns` record while preserving the occurrence's normal source state and the approved Fishbone use's PITS sync state.
+- **Key relationships:** Belongs to `projects`, references `pits_bom_occurrences`, and references `concerns`. More than one concern may be linked over the lifetime of an occurrence, while each occurrence/concern pair is unique.
+- **Scope:** Project-wide. Deleting a concern removes only this relationship and never clears a PITS difference.
+
 ### `fishbone_nodes`
 
 - **Purpose:** Holds PITS and legacy-BOM candidate occurrences for the Manufacturing BOM review stage. It records proposed hierarchy, source evidence, review status, applicable models, and whether the upstream source changed.
@@ -86,7 +110,7 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 - **Key relationships:** Belongs to `projects`. Parent of `part_images`, `part_scenario_activity`, `part_feature_rules`, `fishbone_part_assignments`, and `process_part_options`. A completed `manufacturing_assemblies` record may reference one catalog row through `catalog_part_id`, allowing the built subassembly to return to the normal Parts Catalog → Fishbone-use → downstream-planning flow.
 - **Scope:** Project-wide master data.
 - **Weight:** `weight_lb` is a nullable `REAL` value storing physical part weight in pounds. It has no inferred or automatic source in Phase 1. The future Ergonomics trigger may evaluate deliberately entered values greater than 33 pounds, regardless of Handle/Consume classification.
-- **Catalog engineering fields:** `technology_engineer`, `pits_tracker_number`, `source_code`, `official_windchill_part_name`, and `make_buy` are optional project-wide text fields. Nonblank `pits_tracker_number` values are unique within one project and preserve leading zeros. `source_code` accepts blank, `1`, `+1`, `2`, `2.4`, `3`, `4`, `5`, `6`, `7`, or `8` (`1 - Purchased Part`, `+1 - Purchased Asm`, `2.4 - From AP3`, `3 - Mfg Part`, `5 - Asm (Disassembly no)`, `6 - Asm (Disassembly yes)`, and `8 - Component of Purchased Asm`); `make_buy` accepts only blank, `Make`, or `Buy`. When importing a PITS snapshot, `source_code` is extracted from tracker column T and revision from column BL; imported records update the Parts Catalog, confirming with the user before overwriting fields that had been manually edited by collaborators.
+- **Catalog engineering fields:** `technology_engineer`, `pits_tracker_number`, `source_code`, `official_windchill_part_name`, and `make_buy` are optional project-wide text fields. Nonblank `pits_tracker_number` values are unique within one project and preserve leading zeros. A preferred PITS snapshot import copies the Tracker `ID Number` into this field only when the matched Parts Catalog row is blank; an existing nonblank collaborator value is always preserved, including when manual-value overwrite is confirmed. If another project part already owns the incoming number, the import reports the conflict and leaves the affected row blank without failing the remaining import. `source_code` accepts blank, `1`, `+1`, `2`, `2.4`, `3`, `4`, `5`, `6`, `7`, or `8` (`1 - Purchased Part`, `+1 - Purchased Asm`, `2.4 - From AP3`, `3 - Mfg Part`, `5 - Asm (Disassembly no)`, `6 - Asm (Disassembly yes)`, and `8 - Component of Purchased Asm`); `make_buy` accepts only blank, `Make`, or `Buy`. When importing a PITS snapshot, `source_code` is extracted from tracker column T and revision from column BL; imported records update the Parts Catalog, confirming with the user before overwriting fields that had been manually edited by collaborators.
 
 ### `part_scenario_activity`
 
@@ -114,8 +138,8 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 
 ### `fishbone_part_assignments`
 
-- **Purpose:** Represents one placed occurrence or use of a catalog part in a fishbone section, with a strictly positive decimal occurrence quantity, use or installation description, notes, and order. One part may have multiple assignments.
-- **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section and may save the exact placement through `process_part_options.fishbone_assignment_id`.
+- **Purpose:** Represents one placed occurrence or use of a catalog part in a fishbone section, with a strictly positive decimal occurrence quantity, use or installation description, notes, order, and a controlled `pits_sync_status` of `Not linked`, `In sync`, `Quantity differs`, or `No longer found`. One part may have multiple assignments.
+- **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section and may save the exact placement through `process_part_options.fishbone_assignment_id`. At most one `pits_bom_occurrences` row may reference an assignment as its approved source occurrence.
 - **Scope:** Project-wide; scenario views filter these assignments using `part_scenario_activity`.
 
 ### `manufacturing_assemblies`
@@ -797,6 +821,28 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### PITS BOM-tab structure import (parent-child occurrences and quantities)
+
+- **Proposed by:** Project owner
+- **Date recorded:** September 24, 2026
+- **Purpose:** Extend the existing preferred Tracker+Models PITS import into one combined import step that also reads the BOM worksheet's Level 1-11 staggered hierarchy columns, so Industrial Engineers no longer have to manually rebuild product structure and quantities in Fishbone and Assembly Grid for every new program.
+- **Connections and relationship to the critical thread:** The combined import connects PITS source evidence from the Tracker, Models, and BOM worksheets to project-wide Parts Catalog records and a new staged parent-child occurrence layer. After human review, an occurrence may be matched or confirmed to a real, already-existing `assembly_sections` row and represented as an approved `fishbone_part_assignments` use. This preserves the Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance critical thread. Escalated differences also connect to Questions and concerns for discussion and resolution.
+- **Scope:** The imported source structure, staging queue, Parts Catalog relationships, Fishbone sections, and approved Fishbone uses are project-wide. This proposal does not introduce scenario-owned source or staging records; existing downstream scenario-visibility rules remain unchanged.
+- **Single combined import step:** Uploading a PITS workbook parses Tracker+Models using the existing behavior, unchanged, and parses the BOM worksheet's Level 1-11 hierarchy in the same import pass.
+- **Hierarchy parsing:** For each BOM row, depth is the leftmost populated Level column among columns D through N (Level 1 through Level 11). Its parent is the nearest preceding row at one shallower depth, resolved with the same stack-based traversal approach already used by the existing legacy Level 1-11 parser.
+- **Stable occurrence identity:** Each position in the imported tree is identified by the pair `(parent PITS tracker number from Column A, child PITS tracker number from Column A)`. This pair has been confirmed stable across re-uploads, and a child tracker number has been confirmed not to repeat beneath the same exact parent.
+- **Duplicate-pair reconciliation:** If a workbook nevertheless contains a repeated parent-child pair, the duplicate does not block the combined import. One staged occurrence is retained under the stable identity, all conflicting BOM row numbers are displayed in its validation flag and review queue, and the occurrence cannot be approved until a later PITS re-import contains only one source row for that pair. The uniqueness constraint remains unchanged and no row-number-based identity is invented.
+- **Catalog identity versus occurrence identity:** A tracker number continues to identify only which catalog part a source row represents. It must never be reused as the identity of an occurrence because the same tracker number may legitimately occur under many different parents, such as for a common fastener. The existing `fishbone_nodes` model enforces one row per project and `pits_id` and therefore cannot represent these repeated structural occurrences.
+- **Staging and approval:** Every newly discovered occurrence is automatically added to a **Needs review** staging queue and is never silently approved as a real Fishbone use. A BOM-tab assembly-level row can become usable for real, quantity-tracked Fishbone uses only after an Industrial Engineer manually matches or confirms it to a real, already-existing `assembly_sections` row. The import never creates assembly sections automatically.
+- **Authoritative quantity:** `fishbone_part_assignments.quantity` remains the single authoritative quantity feeding Process at a Glance. Re-import never automatically overwrites an already-approved quantity.
+- **Change detection on re-import:** A parent-child occurrence not seen before is staged as **Needs review**, not auto-approved. When the source quantity of a previously approved occurrence changes, its approved value remains untouched and a **differs from PITS** flag is set and displayed on the record. When a previously approved occurrence is absent from the latest file, its approved Fishbone use remains untouched and is flagged **no longer found in latest PITS file** for review.
+- **Review UI:** Importing a new file opens one non-dismissible review window listing every suspected addition, change, and removal. All rows are selected by default, following Select All behavior, and the Industrial Engineer may deselect individual rows before accepting. Each row also provides a separate **Escalate** action.
+- **Escalation behavior:** Escalating a row creates a linked Questions and concerns record while preserving the normal **differs from PITS** flag on the affected record at the same time. The flag remains visible on the record, and the concern exists separately for discussion and resolution; escalation neither replaces nor suppresses the flag.
+- **Storage decision and persisted state:** `pits_bom_imports` records completed snapshots; `pits_bom_occurrences` stores the stable parent-child review row; `pits_bom_occurrence_revisions` preserves distinct structural source versions; and `pits_bom_occurrence_concerns` preserves escalation links. `fishbone_part_assignments.pits_sync_status` displays `Not linked`, `In sync`, `Quantity differs`, or `No longer found`. These tables remain distinct from `fishbone_nodes` so the same tracker number can participate in multiple parent-child relationships.
+- **Applicable standards:** Source evidence remains distinct from collaborator-approved planning decisions. Review acceptance is explicit, assembly sections are never auto-created, approved uses and quantities are never silently overwritten or removed, and escalation preserves both the source-difference state and the separately linked concern. The implemented Import/Export review queue uses native selection, non-dismissible confirmation, Current editor audit attribution, PITS BOM History, and relationship-aware deletion safeguards consistent with `DESIGN_SYSTEM.md`.
+- **Deferred interaction:** Whether or how this scoped workflow will eventually reconcile with the dormant MBOM-review confirmation workflow remains **BLOCKED / TBD**. The occurrence workflow does not read, write, replace, or extend `fishbone_nodes`.
+- **Approval status:** Approved by the project owner and implemented on September 24, 2026. The active Import/Export Projects path parses Tracker, Models, and BOM with one workbook reader, previews every hierarchy issue with its exact Excel row and available Tracker, part, description, Level, expected-parent, and quantity context, imports the snapshot atomically, opens the default-selected non-dismissible review dialog, provides the persistent per-occurrence approval/rejection/escalation queue, and records PITS BOM structure History.
+
 ### Parts Catalog engineering fields
 
 - **Proposed by:** Nicole Ervin, project owner
@@ -988,6 +1034,8 @@ The following tables are implemented in the schema and data layer but are not cu
 The database and data-access functions for this review stage exist, but none of the active navigation screens currently exposes the complete review and confirmation workflow.
 
 **Current status — BLOCKED / TBD:** This stage is intentionally on hold until the PITS spreadsheet import is migrated to a better format. Do not build an MBOM review screen or duplicate, bypass, replace, or extend this logic until that migration is complete and the project owner confirms the workflow is ready to revisit.
+
+The approved PITS BOM-tab occurrence workflow is a narrowly scoped exception and an independent working alternative for source parent-child structure. It uses `pits_bom_imports`, `pits_bom_occurrences`, `pits_bom_occurrence_revisions`, and `pits_bom_occurrence_concerns`; it does not read, write, synchronize, expose, replace, or extend `fishbone_nodes`. Reconciliation between the two review models remains blocked pending a separate owner decision.
 
 ## Critical thread — do not break
 

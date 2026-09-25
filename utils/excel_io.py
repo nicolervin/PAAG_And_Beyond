@@ -86,6 +86,7 @@ def _find_pits_sheet(workbook, *, type_name: str) -> str | None:
     aliases = {
         "part_tracker": {"parttracker", "parttracker", "pitstracker", "pitstracker", "parttracker"},
         "models": {"models", "modeldefinitions", "modeldefinition", "modelsheet", "modeldetails"},
+        "bom": {"bom", "billofmaterials", "engineeringbom", "ebom"},
     }
     lookup = aliases[type_name]
     for normalized in lookup:
@@ -97,10 +98,15 @@ def _find_pits_sheet(workbook, *, type_name: str) -> str | None:
             normalized = _normalized_sheet_name(sheet_name)
             if ("part" in normalized or "pits" in normalized or "tracker" in normalized) and "model" not in normalized:
                 return sheet_name
-    else:
+    elif type_name == "models":
         for sheet_name in workbook.sheet_names:
             normalized = _normalized_sheet_name(sheet_name)
             if ("model" in normalized or "vehicle" in normalized) and "tracker" not in normalized:
+                return sheet_name
+    else:
+        for sheet_name in workbook.sheet_names:
+            normalized = _normalized_sheet_name(sheet_name)
+            if normalized == "bom" or normalized.endswith("bom"):
                 return sheet_name
     return None
 
@@ -174,7 +180,131 @@ def _sheet_with_header(raw_df: pd.DataFrame, required_tokens: set[str]) -> pd.Da
     return data
 
 
-def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
+def _clean_tracker_number(value: object) -> str:
+    """Preserve tracker identifiers as trimmed text without float artifacts."""
+    cleaned = _clean_value(value)
+    return "" if cleaned is None else str(cleaned).strip()
+
+
+def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
+    header_row = _detect_header_row(raw_df, {"intracker", "partnumber", "level1", "level2"})
+    header = raw_df.iloc[header_row].tolist()
+    data = raw_df.iloc[header_row + 1:].copy().reset_index(drop=True)
+    data.columns = [_clean_excel_header(value, index) for index, value in enumerate(header)]
+    occurrences: list[dict] = []
+    issues: list[dict] = []
+    stack: dict[int, str] = {}
+    seen_keys: dict[tuple[str, str], int] = {}
+    duplicate_keys: list[dict] = []
+
+    for source_index, row in data.iterrows():
+        source_row = int(source_index) + int(header_row) + 2
+        child_tracker = _clean_tracker_number(row.iloc[0] if len(row) else "")
+        part_number = _clean_tracker_number(row.iloc[1] if len(row) > 1 else "")
+        description = _clean_tracker_number(row.iloc[2] if len(row) > 2 else "")
+        level_values = [row.iloc[index] if index < len(row) else None for index in range(3, 14)]
+        populated_levels = [
+            index + 1
+            for index, value in enumerate(level_values)
+            if value is not None and not pd.isna(value) and str(value).strip()
+        ]
+        if not child_tracker and not part_number and not description and not populated_levels:
+            continue
+        if not populated_levels:
+            issues.append({
+                "source_row": source_row,
+                "issue": "No Level 1-11 value",
+                "blocking": False,
+                "child_tracker_number": child_tracker,
+                "part_number": part_number,
+                "description": description,
+                "proposed_depth": None,
+                "raw_quantity_text": "",
+            })
+            continue
+
+        depth = populated_levels[0]
+        parent_tracker = "" if depth == 1 else stack.get(depth - 1, "")
+        raw_quantity = level_values[depth - 1]
+        raw_quantity_text = _clean_tracker_number(raw_quantity)
+        if not child_tracker:
+            issues.append({
+                "source_row": source_row,
+                "issue": "Missing child tracker number in Column A",
+                "blocking": True,
+                "child_tracker_number": "",
+                "part_number": part_number,
+                "description": description,
+                "proposed_depth": depth,
+                "raw_quantity_text": raw_quantity_text,
+            })
+            continue
+        if depth > 1 and not parent_tracker:
+            issues.append({
+                "source_row": source_row,
+                "issue": "Missing parent tracker number",
+                "blocking": True,
+                "child_tracker_number": child_tracker,
+                "part_number": part_number,
+                "description": description,
+                "proposed_depth": depth,
+                "expected_parent_level": depth - 1,
+                "raw_quantity_text": raw_quantity_text,
+            })
+            continue
+
+        proposed_quantity = None
+        try:
+            numeric_quantity = float(raw_quantity_text)
+            if pd.notna(numeric_quantity):
+                proposed_quantity = numeric_quantity
+        except (TypeError, ValueError):
+            pass
+        raw_levels = {
+            f"Level {index + 1}": _clean_value(value)
+            for index, value in enumerate(level_values)
+            if value is not None and not pd.isna(value) and str(value).strip()
+        }
+        occurrence = {
+            "parent_tracker_number": parent_tracker,
+            "child_tracker_number": child_tracker,
+            "part_number": part_number,
+            "description": description,
+            "proposed_depth": depth,
+            "raw_quantity_text": raw_quantity_text,
+            "proposed_quantity": proposed_quantity,
+            "source_row": source_row,
+            "raw_levels": raw_levels,
+        }
+        key = (parent_tracker, child_tracker)
+        if key in seen_keys:
+            duplicate_keys.append({
+                "parent_tracker_number": parent_tracker,
+                "child_tracker_number": child_tracker,
+                "first_source_row": seen_keys[key],
+                "duplicate_source_row": source_row,
+                "part_number": part_number,
+                "description": description,
+                "proposed_depth": depth,
+                "raw_quantity_text": raw_quantity_text,
+            })
+        else:
+            seen_keys[key] = source_row
+            occurrences.append(occurrence)
+        stack[depth] = child_tracker
+        stack = {level: tracker for level, tracker in stack.items() if level <= depth}
+
+    return {
+        "sheet_name": sheet_name,
+        "source_row_count": len(data),
+        "occurrences": occurrences,
+        "issues": issues,
+        "duplicates": duplicate_keys,
+    }
+
+
+def parse_pits_combined_workbook(uploaded_file) -> tuple[list[dict], list[dict], dict]:
+    """Parse Tracker, Models, and BOM from one reusable Excel reader."""
     content = BytesIO(uploaded_file.getvalue())
     workbook = pd.ExcelFile(content)
     tracker_sheet = _find_pits_sheet(workbook, type_name="part_tracker")
@@ -182,10 +312,9 @@ def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
     if tracker_sheet is None or model_sheet is None:
         raise ValueError("This file does not contain the expected PITS tracker and model sheets.")
 
-    content.seek(0)
-    parts_raw = pd.read_excel(content, sheet_name=tracker_sheet, header=None, dtype=object)
-    content.seek(0)
-    models_raw = pd.read_excel(content, sheet_name=model_sheet, header=None, dtype=object)
+    bom_sheet = _find_pits_sheet(workbook, type_name="bom")
+    parts_raw = workbook.parse(sheet_name=tracker_sheet, header=None, dtype=object)
+    models_raw = workbook.parse(sheet_name=model_sheet, header=None, dtype=object)
 
     parts = _sheet_with_header(parts_raw, {"id", "part", "description", "status", "subsystem", "design"})
     models_df = _sheet_with_header(models_raw, {"model", "item", "platform", "package", "appearance", "base"})
@@ -259,6 +388,22 @@ def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
             "bop_l1": str(source.get("bopl1", "")),
             "source_payload": source,
         })
+    bom_snapshot = {
+        "sheet_name": "",
+        "source_row_count": 0,
+        "occurrences": [],
+        "issues": [],
+        "duplicates": [],
+    }
+    if bom_sheet is not None:
+        bom_raw = workbook.parse(sheet_name=bom_sheet, header=None, dtype=object)
+        bom_snapshot = _parse_pits_bom_sheet(bom_raw, bom_sheet)
+    return records, models, bom_snapshot
+
+
+def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
+    """Backward-compatible Tracker+Models parser for non-combined callers."""
+    records, models, _ = parse_pits_combined_workbook(uploaded_file)
     return records, models
 
 
