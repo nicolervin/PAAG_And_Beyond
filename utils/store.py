@@ -14421,12 +14421,15 @@ def is_g_format_number(number_str: str) -> bool:
     return bool(G_FORMAT_REGEX.search(str(number_str).strip()))
 
 
-def model_bom_tree_nodes(project_id: str, model_id: str) -> list[dict]:
-    """Return the approved product structure tree for a model as an ordered list of nodes.
+def model_bom_tree_nodes(
+    project_id: str, model_id: str, include_staged: bool = True
+) -> list[dict]:
+    """Return the product structure tree for a model as an ordered list of nodes.
 
-    Sourced strictly from assembly_sections, fishbone_part_assignments,
-    and manufacturing_assembly_components (plus assembly_grid_categories
-    and assembly_grid_model_mappings).
+    Includes approved product structure sourced from assembly_sections,
+    fishbone_part_assignments, and manufacturing_assembly_components.
+    When include_staged is True, also weaves in unapproved PITS BOM occurrences
+    marked with review_status='Needs review'.
     """
     with connection() as conn:
         model = conn.execute(
@@ -14561,6 +14564,9 @@ def model_bom_tree_nodes(project_id: str, model_id: str) -> list[dict]:
             assembly_id: str | None = None,
             assignment_id: str | None = None,
             part_id: str | None = None,
+            review_status: str = "Approved",
+            occurrence_id: str | None = None,
+            source_state: str = "",
         ) -> dict:
             p_num = str(part_number or "").strip()
             return {
@@ -14584,7 +14590,9 @@ def model_bom_tree_nodes(project_id: str, model_id: str) -> list[dict]:
                 "assignment_id": assignment_id,
                 "part_id": part_id,
                 "is_g_format": is_g_format_number(p_num),
-                "review_status": "Approved",
+                "review_status": review_status,
+                "occurrence_id": occurrence_id,
+                "source_state": source_state,
             }
 
         top_level_mappings = [m for m in mappings if m["is_top_level"]]
@@ -14706,4 +14714,99 @@ def model_bom_tree_nodes(project_id: str, model_id: str) -> list[dict]:
                         assignment_id=str(f["assignment_id"]), part_id=str(f["part_id"]),
                     ))
 
+        if include_staged:
+            staged_rows = conn.execute(
+                """SELECT o.id, o.proposed_depth, o.parent_tracker_number, o.child_tracker_number,
+                          o.parent_part_id, o.child_part_id, o.proposed_quantity,
+                          o.source_state, o.review_status,
+                          p.part_number, p.description AS part_name, p.model_applicability
+                   FROM pits_bom_occurrences o
+                   LEFT JOIN parts p ON o.child_part_id = p.id
+                   WHERE o.project_id=? AND o.review_status='Needs review'
+                   ORDER BY o.source_row""",
+                (project_id,),
+            ).fetchall()
+
+            if staged_rows:
+                clean_m = re.sub(r"[^A-Za-z0-9]", "", model_num).upper()
+                l1_occurrences = [s for s in staged_rows if s["proposed_depth"] == 1]
+                matched_l1 = None
+                for l1 in l1_occurrences:
+                    desc = re.sub(r"[^A-Za-z0-9]", "", str(l1["part_name"] or "")).upper()
+                    pnum = re.sub(r"[^A-Za-z0-9]", "", str(l1["part_number"] or "")).upper()
+                    if clean_m in desc or clean_m in pnum or (len(clean_m) >= 6 and clean_m[:6] in desc):
+                        matched_l1 = l1
+                        break
+
+                relevant_staged: list[sqlite3.Row] = []
+                seen_occ_ids: set[str] = set()
+                if matched_l1:
+                    by_parent_tracker: dict[str, list[sqlite3.Row]] = {}
+                    for s in staged_rows:
+                        p_trk = str(s["parent_tracker_number"] or "").strip()
+                        by_parent_tracker.setdefault(p_trk, []).append(s)
+
+                    frontier = [str(matched_l1["child_tracker_number"])]
+                    relevant_staged.append(matched_l1)
+                    seen_occ_ids.add(str(matched_l1["id"]))
+                    while frontier:
+                        nxt = []
+                        for t in frontier:
+                            for c in by_parent_tracker.get(t, []):
+                                c_id = str(c["id"])
+                                if c_id not in seen_occ_ids:
+                                    seen_occ_ids.add(c_id)
+                                    relevant_staged.append(c)
+                                    c_trk = str(c["child_tracker_number"] or "").strip()
+                                    if c_trk:
+                                        nxt.append(c_trk)
+                        frontier = nxt
+
+                    if len(relevant_staged) == 1 and by_parent_tracker:
+                        largest_trk = max(by_parent_tracker.keys(), key=lambda k: len(by_parent_tracker[k]) if k else 0)
+                        if largest_trk:
+                            frontier = [largest_trk]
+                            while frontier:
+                                nxt = []
+                                for t in frontier:
+                                    for c in by_parent_tracker.get(t, []):
+                                        c_id = str(c["id"])
+                                        if c_id not in seen_occ_ids:
+                                            seen_occ_ids.add(c_id)
+                                            relevant_staged.append(c)
+                                            c_trk = str(c["child_tracker_number"] or "").strip()
+                                            if c_trk:
+                                                nxt.append(c_trk)
+                                frontier = nxt
+                else:
+                    for s in staged_rows:
+                        c_id = str(s["id"])
+                        if c_id not in seen_occ_ids:
+                            app = str(s["model_applicability"] or "").strip() or "All"
+                            app_models = [x.strip() for x in app.split(",") if x.strip()]
+                            if "All" in app_models or "All models" in app_models or model_num in app_models:
+                                seen_occ_ids.add(c_id)
+                                relevant_staged.append(s)
+
+                for s in relevant_staged:
+                    is_g = is_g_format_number(s["part_number"])
+                    p_depth = int(s["proposed_depth"] or 2)
+                    nodes.append(make_node(
+                        f"occ_{s['id']}",
+                        p_depth,
+                        None,
+                        "Assembly" if is_g else "Component",
+                        s["part_number"] or s["child_tracker_number"],
+                        s["part_name"] or "",
+                        "", "", "", "",
+                        s["proposed_quantity"] or 1.0,
+                        f"PITS {s['parent_tracker_number'] or 'root'} → {s['child_tracker_number']}",
+                        "Needs review", "",
+                        part_id=str(s["child_part_id"] or ""),
+                        review_status="Needs review",
+                        occurrence_id=str(s["id"]),
+                        source_state=str(s["source_state"] or "New"),
+                    ))
+
         return nodes
+
