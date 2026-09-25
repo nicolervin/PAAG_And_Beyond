@@ -14810,3 +14810,40 @@ def model_bom_tree_nodes(
 
         return nodes
 
+
+def update_fishbone_assignment_use(
+    project_id: str,
+    assignment_id: str,
+    use_description: str,
+    editor_name: str = "",
+) -> None:
+    """Update the use / installation location description for a fishbone part assignment."""
+    clean_use = str(use_description or "").strip()
+    timestamp = now_iso()
+    with connection() as conn:
+        current = conn.execute(
+            "SELECT id, part_id, section_id, use_description FROM fishbone_part_assignments WHERE id=? AND project_id=?",
+            (assignment_id, project_id),
+        ).fetchone()
+        if not current:
+            raise ValueError("Fishbone assignment not found.")
+        conn.execute(
+            "UPDATE fishbone_part_assignments SET use_description=?, updated_at=? WHERE id=? AND project_id=?",
+            (clean_use, timestamp, assignment_id, project_id),
+        )
+        record_audit_event(
+            project_id,
+            "Fishbone part assignments",
+            "Update use location",
+            1,
+            str(editor_name or "").strip(),
+            {
+                "assignment_id": assignment_id,
+                "part_id": current["part_id"],
+                "section_id": current["section_id"],
+                "old_use_description": current["use_description"],
+                "new_use_description": clean_use,
+            },
+            _conn=conn,
+        )
+

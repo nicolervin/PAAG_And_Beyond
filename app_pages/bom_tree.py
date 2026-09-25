@@ -2,7 +2,8 @@
 
 Replaces Assembly Grid with an indented parent-child tree view sourced from
 approved Fishbone, Parts Catalog, and manufacturing assembly data, with
-inline PITS BOM occurrence review and approval.
+inline PITS BOM occurrence review and approval, editable Use / installation
+locations, and EBOM category-to-model mapping.
 """
 
 from uuid import uuid4
@@ -11,14 +12,21 @@ import streamlit as st
 
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
+    assembly_catalog_rows,
+    assembly_grid_categories,
+    assembly_grid_model_mappings,
     assembly_sections,
     audit_history,
     escalate_pits_bom_occurrence,
     model_bom_tree_nodes,
     pits_bom_occurrences,
     project_models,
+    record_audit_event,
     review_pits_bom_occurrences,
     save_assembly_catalog_rows,
+    save_assembly_grid_model_mappings,
+    save_assembly_grid_sections,
+    update_fishbone_assignment_use,
 )
 from utils.table_ui import selectable_dataframe, selected_dataframe_rows
 
@@ -68,6 +76,149 @@ section_labels = {
     str(row["id"]): str(row["name"]) for _, row in active_sections.iterrows()
 }
 default_section_id = str(active_sections.iloc[0]["id"]) if not active_sections.empty else ""
+
+# Category-to-model mapping per Must-Have Scope Item 6
+grid_cats = assembly_grid_categories(project_id)
+grid_maps = assembly_grid_model_mappings(project_id)
+catalog_asms = assembly_catalog_rows(project_id)
+
+with st.expander(
+    f":material/hub: Category-to-model mapping ({len(grid_cats)} categories)",
+    expanded=False,
+):
+    st.write(
+        "Map named EBOM categories to real assembly part numbers for the selected model. "
+        "Top-level packaged units and subassembly configurations are preserved project-wide."
+    )
+    if grid_cats.empty:
+        st.info("No EBOM categories defined for this project yet. Add categories below.")
+    else:
+        st.caption(f"Configuring assembly assignments for model: **{model_options.get(selected_model_id)}**")
+        model_mappings = grid_maps.loc[grid_maps["model_id"].astype(str).eq(str(selected_model_id))]
+        cat_to_asm = {
+            str(r["category_id"]): str(r["assembly_id"])
+            for _, r in model_mappings.iterrows()
+            if pd.notna(r.get("assembly_id"))
+        }
+
+        cat_choices = {}
+        for _, cat in grid_cats.iterrows():
+            cid = str(cat["id"])
+            c_name = cat["display_name"] or cat["ebom_name"]
+            c_sec = cat.get("section_name", "")
+            is_top = bool(cat.get("is_top_level"))
+            badge = " [Top-level packaged unit]" if is_top else ""
+
+            matching_asms = catalog_asms.loc[
+                catalog_asms["built_section_id"].astype(str).eq(str(cat["section_id"]))
+            ]
+            asm_options = {"": "— None (Unassigned) —"}
+            for _, a in matching_asms.iterrows():
+                asm_options[str(a["id"])] = f"{a['assembly_number']} · {a['name']}"
+
+            curr_asm_id = cat_to_asm.get(cid, "")
+            if curr_asm_id and curr_asm_id not in asm_options:
+                asm_row = catalog_asms.loc[catalog_asms["id"].astype(str).eq(curr_asm_id)]
+                if not asm_row.empty:
+                    asm_options[curr_asm_id] = f"{asm_row.iloc[0]['assembly_number']} · {asm_row.iloc[0]['name']}"
+
+            init_idx = list(asm_options.keys()).index(curr_asm_id) if curr_asm_id in asm_options else 0
+            selected_asm = st.selectbox(
+                f"{c_name}{badge} (Section: {c_sec})",
+                options=list(asm_options.keys()),
+                index=init_idx,
+                format_func=lambda aid: asm_options.get(aid, aid),
+                key=f"cat_map_sel_{selected_model_id}_{cid}",
+            )
+            cat_choices[cid] = selected_asm
+
+        col_save_m, _ = st.columns([2, 5])
+        if col_save_m.button("Save category mappings", type="primary", key=f"btn_save_cat_maps_{project_id}"):
+            other_mappings = grid_maps.loc[~grid_maps["model_id"].astype(str).eq(str(selected_model_id))]
+            retained_records = []
+            for _, r in other_mappings.iterrows():
+                retained_records.append({
+                    "id": str(r["id"]),
+                    "category_id": str(r["category_id"]),
+                    "model_id": str(r["model_id"]),
+                    "assembly_id": str(r["assembly_id"]) if pd.notna(r.get("assembly_id")) else None,
+                    "assembly_number": str(r["assembly_number"]) if pd.notna(r.get("assembly_number")) else None,
+                })
+
+            for cid, aid in cat_choices.items():
+                if aid:
+                    asm_row = catalog_asms.loc[catalog_asms["id"].astype(str).eq(aid)]
+                    asm_num = str(asm_row.iloc[0]["assembly_number"]) if not asm_row.empty else ""
+                    retained_records.append({
+                        "category_id": cid,
+                        "model_id": selected_model_id,
+                        "assembly_id": aid,
+                        "assembly_number": asm_num,
+                    })
+
+            try:
+                res = save_assembly_grid_model_mappings(project_id, retained_records)
+                record_audit_event(
+                    project_id,
+                    "BOM Tree",
+                    "Update category mappings",
+                    len(cat_choices),
+                    editor_name,
+                    {"model_id": selected_model_id, "total_mappings": res.get("count")},
+                )
+                st.toast("Saved category mappings for model!", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    st.markdown("---")
+    with st.expander(":material/add: Add new EBOM category", expanded=False):
+        with st.form(key=f"add_ebom_cat_form_{project_id}"):
+            new_ebom_name = st.text_input("Official EBOM category name *")
+            new_disp_name = st.text_input("Display name (optional)")
+            new_cat_sec = st.selectbox(
+                "Fishbone section *",
+                options=list(section_labels.keys()),
+                format_func=lambda sid: section_labels.get(sid, sid),
+            )
+            new_inst_sec = st.selectbox(
+                "Installed section (optional)",
+                options=["None"] + list(section_labels.keys()),
+                format_func=lambda sid: "Same as built section" if sid == "None" else section_labels.get(sid, sid),
+            )
+            is_top_unit = st.checkbox("Top-level packaged unit")
+            submit_cat = st.form_submit_button("Create category", type="primary")
+            if submit_cat:
+                if not new_ebom_name.strip():
+                    st.error("Official EBOM category name is required.")
+                else:
+                    inst_val = None if new_inst_sec == "None" else new_inst_sec
+                    try:
+                        save_assembly_grid_sections(
+                            project_id,
+                            new_cat_sec,
+                            [{
+                                "id": str(uuid4()),
+                                "ebom_name": new_ebom_name.strip(),
+                                "display_name": (new_disp_name.strip() or new_ebom_name.strip()),
+                                "root_number": "",
+                                "is_top_level": is_top_unit,
+                                "installed_section_id": inst_val,
+                                "sequence": (len(grid_cats) + 1) * 10,
+                            }],
+                        )
+                        record_audit_event(
+                            project_id,
+                            "BOM Tree",
+                            "Create EBOM category",
+                            1,
+                            editor_name,
+                            {"ebom_name": new_ebom_name, "section_id": new_cat_sec},
+                        )
+                        st.toast(f"Created EBOM category '{new_ebom_name}'", icon=":material/check_circle:")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
 
 # Review queue expander per Must-Have Scope Item 2
 staged_queue = pits_bom_occurrences(project_id, actionable_only=True)
@@ -238,6 +389,7 @@ else:
             indent = "    " * (n["depth"] - 1) + ("└─ " if n["depth"] > 1 else "")
             table_rows.append(
                 {
+                    "node_id": n["id"],
                     "Structure": f"{indent}{n['part_number']} · {n['part_name']}",
                     "Depth": f"Level {n['depth']}",
                     "Part number": n["part_number"],
@@ -252,10 +404,23 @@ else:
                 }
             )
         table_df = pd.DataFrame(table_rows)
-        selectable_dataframe(
+        tbl_event = selectable_dataframe(
             table_df,
             key=f"bom_tree_table_view_{project_id}",
             hide_index=True,
+            column_order=[
+                "Structure",
+                "Depth",
+                "Part number",
+                "Part Name",
+                "Type",
+                "Quantity",
+                "Status",
+                "Built section",
+                "Installed section",
+                "Use / installation location",
+                "PITS traceability",
+            ],
             column_config={
                 "Structure": st.column_config.TextColumn("Product structure tree", width="large"),
                 "Depth": st.column_config.TextColumn("Depth", width="small"),
@@ -270,14 +435,36 @@ else:
                 "PITS traceability": st.column_config.TextColumn("PITS traceability", width="medium"),
             },
         )
+        selected_tbl_rows = selected_dataframe_rows(table_df, tbl_event)
+        if not selected_tbl_rows.empty:
+            sel_item = selected_tbl_rows.iloc[0]
+            matched_node = next((n for n in filtered_nodes if n["id"] == sel_item.get("node_id")), None)
+            if matched_node and matched_node.get("assignment_id"):
+                st.markdown("---")
+                st.markdown(
+                    f"**:material/edit: Edit Use / installation location for `{matched_node['part_number']}` · {matched_node['part_name']}**"
+                )
+                col_u1, col_u2 = st.columns([4, 1])
+                new_tbl_use = col_u1.text_input(
+                    "Use / installation location",
+                    value=matched_node.get("use_description") or "",
+                    key=f"table_edit_use_{matched_node['id']}",
+                )
+                if col_u2.button("Save location", type="primary", key=f"table_save_use_{matched_node['id']}"):
+                    try:
+                        update_fishbone_assignment_use(project_id, matched_node["assignment_id"], new_tbl_use, editor_name)
+                        st.toast(f"Updated use location for {matched_node['part_number']}", icon=":material/check_circle:")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
     else:
-        # Tree card/row view with inline approval actions
+        # Tree card/row view with inline approval actions and use editing
         st.caption(
             "Product structure hierarchy for selected model. Quantities are read-only and synchronized from PITS/Fishbone."
         )
 
         # Header row
-        h_cols = st.columns([3.0, 1.1, 0.7, 1.3, 1.3, 1.5, 1.5, 1.6])
+        h_cols = st.columns([3.0, 1.1, 0.7, 1.3, 1.3, 1.6, 1.4, 1.6])
         h_cols[0].markdown("**Tree item (Part / Assembly)**")
         h_cols[1].markdown("**Type**")
         h_cols[2].markdown("**Quantity**")
@@ -303,7 +490,7 @@ else:
 
             # Container for row
             with st.container(border=True):
-                r_cols = st.columns([3.0, 1.1, 0.7, 1.3, 1.3, 1.5, 1.5, 1.6])
+                r_cols = st.columns([3.0, 1.1, 0.7, 1.3, 1.3, 1.6, 1.4, 1.6])
 
                 # Indentation prefix
                 indent_str = "&nbsp;&nbsp;&nbsp;&nbsp;" * (depth - 1)
@@ -318,7 +505,28 @@ else:
                 r_cols[2].markdown(qty_display)
                 r_cols[3].markdown(n["built_section_name"] or "—")
                 r_cols[4].markdown(n["installed_section_name"] or "—")
-                r_cols[5].markdown(n["use_description"] or "—")
+
+                # Editable use / installation location per Must-Have Scope Item 5
+                if n.get("assignment_id"):
+                    with r_cols[5]:
+                        curr_use = n["use_description"] or "—"
+                        with st.popover(curr_use, help="Click to edit use / installation location"):
+                            edit_use_val = st.text_input(
+                                "Use / installation location",
+                                value=n["use_description"] or "",
+                                key=f"pop_use_{idx}_{n['id']}",
+                            )
+                            if st.button("Save location", key=f"btn_pop_save_{idx}_{n['id']}", type="primary"):
+                                try:
+                                    update_fishbone_assignment_use(
+                                        project_id, n["assignment_id"], edit_use_val, editor_name
+                                    )
+                                    st.toast(f"Updated use location for {n['part_number']}", icon=":material/check_circle:")
+                                    st.rerun()
+                                except ValueError as exc:
+                                    st.error(str(exc))
+                else:
+                    r_cols[5].markdown(n["use_description"] or "—")
 
                 if is_unapproved:
                     r_cols[6].markdown(f":material/warning: **Needs review** (`{n.get('source_state', 'New')}`)")
