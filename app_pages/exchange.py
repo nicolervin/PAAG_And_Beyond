@@ -152,7 +152,7 @@ def review_pits_bom_import(import_id: str) -> None:
     st.write(
         "Review every suspected addition, change, and removal. Rows are selected by default; "
         "clear any row you do not want to acknowledge in this review. Approved Fishbone "
-        "quantities remain unchanged."
+        "quantities update automatically on import."
     )
     event = selectable_dataframe(
         display,
@@ -177,7 +177,7 @@ def review_pits_bom_import(import_id: str) -> None:
     selected = selected_dataframe_rows(display, event)
     st.caption(
         "Accepting records the reviewed source version. It never creates a Fishbone section, "
-        "changes an approved quantity, or clears a PITS difference that still exists."
+        "changes an approved quantity, or clears a structural difference that still exists."
     )
     with st.container(horizontal=True, horizontal_alignment="right"):
         if st.button(

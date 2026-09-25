@@ -613,6 +613,7 @@ def init_db() -> None:
                 notes TEXT DEFAULT '',
                 pits_sync_status TEXT NOT NULL DEFAULT 'Not linked'
                     CHECK(pits_sync_status IN ('Not linked', 'In sync', 'Quantity differs', 'No longer found')),
+                pits_quantity_updated_at TEXT,
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS pits_bom_imports (
@@ -1164,6 +1165,10 @@ def init_db() -> None:
                 "TEXT NOT NULL DEFAULT 'Not linked' "
                 "CHECK(pits_sync_status IN "
                 "('Not linked', 'In sync', 'Quantity differs', 'No longer found'))"
+            )
+        if "pits_quantity_updated_at" not in assignment_columns:
+            conn.execute(
+                "ALTER TABLE fishbone_part_assignments ADD COLUMN pits_quantity_updated_at TEXT"
             )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fishbone_assignment_part ON fishbone_part_assignments(project_id, part_id)"
@@ -11899,7 +11904,7 @@ def fishbone_part_assignments(
     params = (scenario_id, project_id) if scenario_id else (project_id,)
     return pd.DataFrame(query(
         f"""SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
-                  a.use_description, a.notes, a.pits_sync_status,
+                  a.use_description, a.notes, a.pits_sync_status, a.pits_quantity_updated_at,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
                   s.name AS section_name
            FROM fishbone_part_assignments a
@@ -12252,7 +12257,8 @@ def replace_fishbone_part_assignments(
             ))
         desired_by_id = {record[0]: record for record in records}
         linked_rows = conn.execute(
-            """SELECT occurrence.approved_assignment_id, assignment.part_id, assignment.section_id
+            """SELECT occurrence.approved_assignment_id, assignment.part_id,
+                      assignment.section_id, assignment.quantity
                FROM pits_bom_occurrences occurrence
                JOIN fishbone_part_assignments assignment
                  ON assignment.id=occurrence.approved_assignment_id
@@ -12271,6 +12277,11 @@ def replace_fishbone_part_assignments(
                 raise ValueError(
                     "The part or Fishbone section of an approved PITS BOM use cannot be changed "
                     "here. Detach its occurrence first."
+                )
+            if round(float(desired[5]), 9) != round(float(linked["quantity"]), 9):
+                raise ValueError(
+                    "The quantity of an approved PITS BOM use is determined by PITS and cannot be changed here. "
+                    "Correct the quantity in PITS."
                 )
         desired_ids = set(desired_by_id)
         existing_ids = {
@@ -13362,7 +13373,7 @@ def _refresh_pits_assignment_sync_status(
 ) -> None:
     conn.execute(
         """UPDATE fishbone_part_assignments
-           SET pits_sync_status='Not linked'
+           SET pits_sync_status='Not linked', pits_quantity_updated_at=NULL
            WHERE project_id=?
              AND NOT EXISTS (
                  SELECT 1 FROM pits_bom_occurrences occurrence
@@ -13474,6 +13485,7 @@ def _import_pits_bom_snapshot(
         "import_id": import_id, "new": 0, "changed": 0,
         "unchanged": 0, "missing": 0, "issues": 0,
         "duplicate_pairs": len(duplicate_rows_by_key),
+        "quantity_updates": 0,
     }
     conn.execute(
         """INSERT INTO pits_bom_imports
@@ -13569,27 +13581,65 @@ def _import_pits_bom_snapshot(
             summary["new"] = int(summary["new"]) + 1
         else:
             occurrence_id = str(existing["id"])
+            depth_changed = int(existing["proposed_depth"]) != depth
             changed = str(existing["source_fingerprint"]) != fingerprint
             reviewed_fingerprint = existing["reviewed_source_fingerprint"]
-            source_state = (
-                "New" if not reviewed_fingerprint
-                else ("Current" if str(reviewed_fingerprint) == fingerprint else "Changed")
+            approved_assignment_id = existing["approved_assignment_id"]
+            is_approved = (
+                str(existing["review_status"]) == "Approved" and bool(approved_assignment_id)
             )
-            review_status = str(existing["review_status"])
-            if changed and review_status == "Rejected":
-                review_status = "Needs review"
+            quantity_updated = False
+            if is_approved and proposed_quantity is not None:
+                assignment = conn.execute(
+                    "SELECT id, quantity FROM fishbone_part_assignments WHERE id=?",
+                    (approved_assignment_id,),
+                ).fetchone()
+                if assignment and assignment["quantity"] is not None:
+                    try:
+                        old_qty = float(assignment["quantity"])
+                        new_qty = float(proposed_quantity)
+                        if round(old_qty, 9) != round(new_qty, 9):
+                            conn.execute(
+                                """UPDATE fishbone_part_assignments
+                                   SET quantity=?, pits_quantity_updated_at=?, updated_at=?
+                                   WHERE id=?""",
+                                (new_qty, timestamp, timestamp, approved_assignment_id),
+                            )
+                            quantity_updated = True
+                    except (TypeError, ValueError):
+                        pass
+
+            if is_approved:
+                if depth_changed:
+                    source_state = "Changed"
+                else:
+                    source_state = "Current"
+                    reviewed_fingerprint = fingerprint
+                review_status = "Approved"
+                structural_changed = depth_changed
+            else:
+                source_state = (
+                    "New" if not reviewed_fingerprint
+                    else ("Current" if str(reviewed_fingerprint) == fingerprint else "Changed")
+                )
+                review_status = str(existing["review_status"])
+                if changed and review_status == "Rejected":
+                    review_status = "Needs review"
+                structural_changed = changed
+
             conn.execute(
                 """UPDATE pits_bom_occurrences
                    SET parent_part_id=?, child_part_id=?, proposed_depth=?, raw_quantity_text=?,
                        proposed_quantity=?, source_row=?, raw_levels_json=?, source_fingerprint=?,
-                       review_status=?, source_state=?, validation_issues_json=?,
-                       last_seen_import_id=?, last_seen_at=?, updated_at=?
+                       reviewed_source_fingerprint=?, review_status=?, source_state=?,
+                       validation_issues_json=?, last_seen_import_id=?, last_seen_at=?, updated_at=?
                    WHERE id=? AND project_id=?""",
                 (
                     parent_part["id"] if parent_part else None,
                     child_part["id"] if child_part else None,
                     depth, raw_quantity_text, proposed_quantity, source_row,
-                    raw_levels_json, fingerprint, review_status, source_state,
+                    raw_levels_json, fingerprint, reviewed_fingerprint,
+                    review_status, source_state,
                     json.dumps(validation_issues, ensure_ascii=False),
                     import_id, timestamp, timestamp, occurrence_id, project_id,
                 ),
@@ -13599,9 +13649,11 @@ def _import_pits_bom_snapshot(
                    FROM pits_bom_occurrence_revisions WHERE occurrence_id=?""",
                 (occurrence_id,),
             ).fetchone()[0])
-            summary["changed" if changed else "unchanged"] = (
-                int(summary["changed" if changed else "unchanged"]) + 1
+            summary["changed" if structural_changed else "unchanged"] = (
+                int(summary["changed" if structural_changed else "unchanged"]) + 1
             )
+            if quantity_updated:
+                summary["quantity_updates"] = int(summary["quantity_updates"]) + 1
 
         revision_exists = conn.execute(
             """SELECT 1 FROM pits_bom_occurrence_revisions
@@ -13642,6 +13694,7 @@ def _import_pits_bom_snapshot(
             "unchanged_occurrences": summary["unchanged"],
             "missing_occurrences": summary["missing"],
             "duplicate_parent_child_pairs": summary["duplicate_pairs"],
+            "quantity_updates": summary["quantity_updates"],
             "issue_count": issue_count,
         },
         _conn=conn,
@@ -13858,9 +13911,7 @@ def escalate_pits_bom_occurrence(
             raise ValueError("The selected PITS BOM occurrence no longer exists.")
         source_state = str(occurrence["source_state"])
         escalation_state = source_state
-        if source_state == "Current" and occurrence["pits_sync_status"] == "Quantity differs":
-            escalation_state = "Changed"
-        elif source_state == "Current" and occurrence["pits_sync_status"] == "No longer found":
+        if source_state == "Current" and occurrence["pits_sync_status"] == "No longer found":
             escalation_state = "Missing"
         if escalation_state not in {"New", "Changed", "Missing"}:
             raise ValueError("Only a new, changed, or missing occurrence can be escalated.")
@@ -14358,3 +14409,301 @@ def replace_concerns(project_id: str, edited: pd.DataFrame) -> None:
                 (str(row.get("id")) if row.get("id") and not pd.isna(row.get("id")) else str(uuid4()), project_id, *values,
                  str(row.get("created_at")) if row.get("created_at") and not pd.isna(row.get("created_at")) else timestamp, timestamp),
             )
+
+
+G_FORMAT_REGEX = re.compile(r"G\d+", re.IGNORECASE)
+
+
+def is_g_format_number(number_str: str) -> bool:
+    """Return True if the given part or assembly number matches the Gxxx group pattern."""
+    if not number_str:
+        return False
+    return bool(G_FORMAT_REGEX.search(str(number_str).strip()))
+
+
+def model_bom_tree_nodes(project_id: str, model_id: str) -> list[dict]:
+    """Return the approved product structure tree for a model as an ordered list of nodes.
+
+    Sourced strictly from assembly_sections, fishbone_part_assignments,
+    and manufacturing_assembly_components (plus assembly_grid_categories
+    and assembly_grid_model_mappings).
+    """
+    with connection() as conn:
+        model = conn.execute(
+            "SELECT id, model_number, display_name FROM project_models WHERE id=? AND project_id=?",
+            (model_id, project_id),
+        ).fetchone()
+        if not model:
+            raise ValueError("The selected model does not exist in this project.")
+        model_num = str(model["model_number"] or "").strip()
+
+        sections = conn.execute(
+            "SELECT id, name, sequence FROM assembly_sections WHERE project_id=? ORDER BY sequence",
+            (project_id,),
+        ).fetchall()
+        section_name_map = {str(s["id"]): str(s["name"]) for s in sections}
+
+        mappings = conn.execute(
+            """SELECT m.id AS mapping_id, m.category_id, m.assembly_id,
+                      c.ebom_name, c.display_name AS category_name, c.is_top_level,
+                      c.section_id AS category_section_id, c.installed_section_id AS category_installed_section_id,
+                      a.assembly_number, a.name AS assembly_name, a.catalog_part_id,
+                      built.name AS built_section_name,
+                      installed.name AS installed_section_name
+               FROM assembly_grid_model_mappings m
+               JOIN assembly_grid_categories c ON m.category_id = c.id
+               JOIN manufacturing_assemblies a ON m.assembly_id = a.id
+               LEFT JOIN assembly_sections built ON c.section_id = built.id
+               LEFT JOIN assembly_sections installed ON c.installed_section_id = installed.id
+               WHERE m.project_id=? AND m.model_id=?
+               ORDER BY c.is_top_level DESC, c.sequence, c.display_name""",
+            (project_id, model_id),
+        ).fetchall()
+
+        mapped_assembly_ids = [str(m["assembly_id"]) for m in mappings if m["assembly_id"]]
+        comps_by_asm: dict[str, list[dict]] = {}
+        if mapped_assembly_ids:
+            placeholders = ",".join("?" for _ in mapped_assembly_ids)
+            comp_rows = conn.execute(
+                f"""SELECT c.id, c.assembly_id, c.quantity,
+                           f.id AS assignment_id, f.use_description, f.pits_sync_status, f.pits_quantity_updated_at,
+                           f.section_id, s.name AS section_name,
+                           p.id AS part_id, p.part_number, p.description AS part_name,
+                           child_asm.id AS nested_assembly_id, child_asm.assembly_number AS nested_assembly_number,
+                           child_asm.built_section_id AS nested_built_section_id,
+                           child_asm.installed_section_id AS nested_installed_section_id
+                    FROM manufacturing_assembly_components c
+                    JOIN fishbone_part_assignments f ON c.fishbone_assignment_id = f.id
+                    JOIN parts p ON f.part_id = p.id
+                    LEFT JOIN assembly_sections s ON f.section_id = s.id
+                    LEFT JOIN manufacturing_assemblies child_asm
+                      ON child_asm.catalog_part_id = p.id AND child_asm.project_id=?
+                    WHERE c.assembly_id IN ({placeholders})
+                    ORDER BY p.part_number""",
+                (project_id, *mapped_assembly_ids),
+            ).fetchall()
+            for r in comp_rows:
+                comps_by_asm.setdefault(str(r["assembly_id"]), []).append(dict(r))
+
+        nested_asm_ids = [
+            str(r["nested_assembly_id"])
+            for clist in comps_by_asm.values()
+            for r in clist
+            if r.get("nested_assembly_id") and str(r["nested_assembly_id"]) not in comps_by_asm
+        ]
+        if nested_asm_ids:
+            placeholders = ",".join("?" for _ in nested_asm_ids)
+            nested_comp_rows = conn.execute(
+                f"""SELECT c.id, c.assembly_id, c.quantity,
+                           f.id AS assignment_id, f.use_description, f.pits_sync_status, f.pits_quantity_updated_at,
+                           f.section_id, s.name AS section_name,
+                           p.id AS part_id, p.part_number, p.description AS part_name,
+                           NULL AS nested_assembly_id, NULL AS nested_assembly_number
+                    FROM manufacturing_assembly_components c
+                    JOIN fishbone_part_assignments f ON c.fishbone_assignment_id = f.id
+                    JOIN parts p ON f.part_id = p.id
+                    LEFT JOIN assembly_sections s ON f.section_id = s.id
+                    WHERE c.assembly_id IN ({placeholders})
+                    ORDER BY p.part_number""",
+                tuple(nested_asm_ids),
+            ).fetchall()
+            for r in nested_comp_rows:
+                comps_by_asm.setdefault(str(r["assembly_id"]), []).append(dict(r))
+
+        fpa_rows = conn.execute(
+            """SELECT f.id AS assignment_id, f.section_id, s.name AS section_name,
+                      f.part_id, p.part_number, p.description AS part_name, p.model_applicability,
+                      f.quantity, f.use_description, f.pits_sync_status, f.pits_quantity_updated_at
+               FROM fishbone_part_assignments f
+               JOIN parts p ON f.part_id = p.id
+               LEFT JOIN assembly_sections s ON f.section_id = s.id
+               WHERE f.project_id=?
+               ORDER BY s.sequence, f.sequence""",
+            (project_id,),
+        ).fetchall()
+
+        fpa_in_mapped_asm = {
+            str(c["assignment_id"])
+            for clist in comps_by_asm.values()
+            for c in clist
+            if c.get("assignment_id")
+        }
+
+        direct_fpa_by_section: dict[str, list[dict]] = {}
+        for f in fpa_rows:
+            f_dict = dict(f)
+            if str(f_dict["assignment_id"]) in fpa_in_mapped_asm:
+                continue
+            app = str(f_dict.get("model_applicability") or "").strip() or "All"
+            app_models = [x.strip() for x in app.split(",") if x.strip()]
+            if "All" in app_models or "All models" in app_models or model_num in app_models:
+                direct_fpa_by_section.setdefault(str(f_dict["section_id"]), []).append(f_dict)
+
+        nodes: list[dict] = []
+
+        def make_node(
+            node_id: str,
+            depth: int,
+            parent_id: str | None,
+            node_type: str,
+            part_number: str,
+            part_name: str,
+            built_sec_id: str | None,
+            built_sec_name: str | None,
+            inst_sec_id: str | None,
+            inst_sec_name: str | None,
+            quantity: float,
+            use_desc: str,
+            pits_status: str,
+            pits_updated_at: str,
+            category_id: str | None = None,
+            category_name: str = "",
+            assembly_id: str | None = None,
+            assignment_id: str | None = None,
+            part_id: str | None = None,
+        ) -> dict:
+            p_num = str(part_number or "").strip()
+            return {
+                "id": node_id,
+                "depth": depth,
+                "parent_id": parent_id,
+                "node_type": node_type,
+                "part_number": p_num,
+                "part_name": str(part_name or "").strip(),
+                "built_section_id": str(built_sec_id or ""),
+                "built_section_name": str(built_sec_name or ""),
+                "installed_section_id": str(inst_sec_id or ""),
+                "installed_section_name": str(inst_sec_name or ""),
+                "quantity": float(quantity) if quantity is not None else 1.0,
+                "use_description": str(use_desc or "").strip(),
+                "pits_sync_status": str(pits_status or "Not linked"),
+                "pits_quantity_updated_at": str(pits_updated_at or ""),
+                "category_id": category_id,
+                "category_name": category_name or "",
+                "assembly_id": assembly_id,
+                "assignment_id": assignment_id,
+                "part_id": part_id,
+                "is_g_format": is_g_format_number(p_num),
+                "review_status": "Approved",
+            }
+
+        top_level_mappings = [m for m in mappings if m["is_top_level"]]
+        other_mappings = [m for m in mappings if not m["is_top_level"]]
+
+        if top_level_mappings:
+            for t in top_level_mappings:
+                t_node_id = f"asm_{t['assembly_id']}"
+                nodes.append(make_node(
+                    t_node_id, 1, None, "Top-level packaged unit",
+                    t["assembly_number"], t["assembly_name"] or t["category_name"],
+                    t["category_section_id"], t["built_section_name"],
+                    t["category_installed_section_id"], t["installed_section_name"],
+                    1.0, "", "", "",
+                    category_id=str(t["category_id"]), category_name=str(t["category_name"]),
+                    assembly_id=str(t["assembly_id"]), part_id=str(t["catalog_part_id"] or ""),
+                ))
+                for m in other_mappings:
+                    m_node_id = f"asm_{m['assembly_id']}"
+                    cat_display = str(m["category_name"])
+                    asm_display = str(m["assembly_name"] or "")
+                    disp = f"{cat_display} ({asm_display})" if asm_display and asm_display != cat_display else cat_display
+                    nodes.append(make_node(
+                        m_node_id, 2, t_node_id, "Assembly",
+                        m["assembly_number"], disp,
+                        m["category_section_id"], m["built_section_name"],
+                        m["category_installed_section_id"], m["installed_section_name"],
+                        1.0, "", "", "",
+                        category_id=str(m["category_id"]), category_name=str(m["category_name"]),
+                        assembly_id=str(m["assembly_id"]), part_id=str(m["catalog_part_id"] or ""),
+                    ))
+                    for c in comps_by_asm.get(str(m["assembly_id"]), []):
+                        c_node_id = f"comp_{c['id']}"
+                        nodes.append(make_node(
+                            c_node_id, 3, m_node_id, "Component",
+                            c["part_number"], c["part_name"],
+                            c["section_id"], c["section_name"],
+                            "", "",
+                            c["quantity"], c["use_description"], c["pits_sync_status"], c["pits_quantity_updated_at"],
+                            assignment_id=str(c["assignment_id"]), part_id=str(c["part_id"]),
+                        ))
+                        nested_id = str(c.get("nested_assembly_id") or "")
+                        if nested_id and nested_id in comps_by_asm:
+                            for nc in comps_by_asm[nested_id]:
+                                nc_node_id = f"nested_comp_{nc['id']}"
+                                nodes.append(make_node(
+                                    nc_node_id, 4, c_node_id, "Component",
+                                    nc["part_number"], nc["part_name"],
+                                    nc["section_id"], nc["section_name"],
+                                    "", "",
+                                    nc["quantity"], nc["use_description"], nc["pits_sync_status"], nc["pits_quantity_updated_at"],
+                                    assignment_id=str(nc["assignment_id"]), part_id=str(nc["part_id"]),
+                                ))
+                for c in comps_by_asm.get(str(t["assembly_id"]), []):
+                    c_node_id = f"comp_{c['id']}"
+                    nodes.append(make_node(
+                        c_node_id, 2, t_node_id, "Component",
+                        c["part_number"], c["part_name"],
+                        c["section_id"], c["section_name"],
+                        "", "",
+                        c["quantity"], c["use_description"], c["pits_sync_status"], c["pits_quantity_updated_at"],
+                        assignment_id=str(c["assignment_id"]), part_id=str(c["part_id"]),
+                    ))
+        elif other_mappings:
+            for m in other_mappings:
+                m_node_id = f"asm_{m['assembly_id']}"
+                cat_display = str(m["category_name"])
+                asm_display = str(m["assembly_name"] or "")
+                disp = f"{cat_display} ({asm_display})" if asm_display and asm_display != cat_display else cat_display
+                nodes.append(make_node(
+                    m_node_id, 1, None, "Assembly",
+                    m["assembly_number"], disp,
+                    m["category_section_id"], m["built_section_name"],
+                    m["category_installed_section_id"], m["installed_section_name"],
+                    1.0, "", "", "",
+                    category_id=str(m["category_id"]), category_name=str(m["category_name"]),
+                    assembly_id=str(m["assembly_id"]), part_id=str(m["catalog_part_id"] or ""),
+                ))
+                for c in comps_by_asm.get(str(m["assembly_id"]), []):
+                    c_node_id = f"comp_{c['id']}"
+                    nodes.append(make_node(
+                        c_node_id, 2, m_node_id, "Component",
+                        c["part_number"], c["part_name"],
+                        c["section_id"], c["section_name"],
+                        "", "",
+                        c["quantity"], c["use_description"], c["pits_sync_status"], c["pits_quantity_updated_at"],
+                        assignment_id=str(c["assignment_id"]), part_id=str(c["part_id"]),
+                    ))
+                    nested_id = str(c.get("nested_assembly_id") or "")
+                    if nested_id and nested_id in comps_by_asm:
+                        for nc in comps_by_asm[nested_id]:
+                            nc_node_id = f"nested_comp_{nc['id']}"
+                            nodes.append(make_node(
+                                nc_node_id, 3, c_node_id, "Component",
+                                nc["part_number"], nc["part_name"],
+                                nc["section_id"], nc["section_name"],
+                                "", "",
+                                nc["quantity"], nc["use_description"], nc["pits_sync_status"], nc["pits_quantity_updated_at"],
+                                assignment_id=str(nc["assignment_id"]), part_id=str(nc["part_id"]),
+                            ))
+
+        if direct_fpa_by_section:
+            for sec_id, fpa_list in direct_fpa_by_section.items():
+                sec_name = fpa_list[0].get("section_name") or section_name_map.get(sec_id, "Fishbone Section")
+                sec_node_id = f"sec_{sec_id}"
+                nodes.append(make_node(
+                    sec_node_id, 1 if not top_level_mappings else 2, None, "Fishbone Section",
+                    sec_name, f"Section ({len(fpa_list)} parts)",
+                    sec_id, sec_name, "", "",
+                    float(len(fpa_list)), "", "", "",
+                ))
+                for f in fpa_list:
+                    f_node_id = f"fpa_{f['assignment_id']}"
+                    nodes.append(make_node(
+                        f_node_id, 2 if not top_level_mappings else 3, sec_node_id, "Fishbone Part",
+                        f["part_number"], f["part_name"],
+                        f["section_id"], sec_name, "", "",
+                        f["quantity"], f["use_description"], f["pits_sync_status"], f["pits_quantity_updated_at"],
+                        assignment_id=str(f["assignment_id"]), part_id=str(f["part_id"]),
+                    ))
+
+        return nodes

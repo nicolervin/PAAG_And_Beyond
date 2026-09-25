@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+import pandas as pd
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -104,7 +105,7 @@ class PitsBomStructureImportTests(unittest.TestCase):
         )[0]["source_state"]
         self.assertEqual(state, "New")
 
-    def test_approval_quantity_sync_and_escalation_preserve_difference(self):
+    def test_approval_automatic_quantity_sync_and_override_prevention(self):
         result = self.import_rows([tracker_record("001", "P-001")], [occurrence("", "001", 2)])
         occurrence_row = store.query("SELECT * FROM pits_bom_occurrences")[0]
         section_id = str(uuid4())
@@ -118,32 +119,40 @@ class PitsBomStructureImportTests(unittest.TestCase):
             self.project_id, [occurrence_row["id"]], "Approve", "Tester", section_id=section_id
         )
         self.assertEqual(review["created_assignments"], 1)
-        assignment = store.query("SELECT * FROM fishbone_part_assignments")[0]
+        assignment = store.fishbone_part_assignments(self.project_id).iloc[0]
         self.assertEqual(assignment["quantity"], 2)
         self.assertEqual(assignment["pits_sync_status"], "In sync")
+        self.assertTrue(pd.isna(assignment["pits_quantity_updated_at"]) or not assignment["pits_quantity_updated_at"])
 
-        store.execute(
-            "UPDATE fishbone_part_assignments SET quantity=4, updated_at=? WHERE id=?",
-            (store.now_iso(), assignment["id"]),
-        )
-        self.assertEqual(
-            store.query("SELECT pits_sync_status FROM fishbone_part_assignments")[0]["pits_sync_status"],
-            "Quantity differs",
-        )
-        concern_id = store.escalate_pits_bom_occurrence(
-            self.project_id, occurrence_row["id"], "Tester"
-        )
-        self.assertTrue(store.query("SELECT id FROM concerns WHERE id=?", (concern_id,)))
-        self.assertEqual(
-            store.query("SELECT pits_sync_status FROM fishbone_part_assignments")[0]["pits_sync_status"],
-            "Quantity differs",
-        )
+        # Re-import with updated quantity 5: should automatically update quantity with no manual review step
+        reimport = self.import_rows([tracker_record("001", "P-001")], [occurrence("", "001", 5)], "qty_update.xlsm")
+        self.assertEqual(reimport["bom"]["changed"], 0)
+        self.assertEqual(reimport["bom"]["unchanged"], 1)
+        self.assertEqual(reimport["bom"]["quantity_updates"], 1)
 
+        updated_assignment = store.fishbone_part_assignments(self.project_id).iloc[0]
+        self.assertEqual(updated_assignment["quantity"], 5)
+        self.assertEqual(updated_assignment["pits_sync_status"], "In sync")
+        self.assertTrue(bool(updated_assignment["pits_quantity_updated_at"]))
+
+        # Manual quantity edit in Fishbone table must be blocked for approved PITS occurrence
+        edited_df = store.fishbone_part_assignments(self.project_id)[
+            ["id", "part_id", "section_id", "sequence", "quantity", "use_description", "notes"]
+        ].copy()
+        edited_df.loc[:, "quantity"] = 9
+        with self.assertRaisesRegex(ValueError, "determined by PITS"):
+            store.replace_fishbone_part_assignments(self.project_id, edited_df)
+
+        # Removed from PITS: assignment status transitions to "No longer found" and can be escalated
         self.import_rows([tracker_record("001", "P-001")], [], "removed.xlsm")
         self.assertEqual(
             store.query("SELECT pits_sync_status FROM fishbone_part_assignments")[0]["pits_sync_status"],
             "No longer found",
         )
+        concern_id = store.escalate_pits_bom_occurrence(
+            self.project_id, occurrence_row["id"], "Tester"
+        )
+        self.assertTrue(store.query("SELECT id FROM concerns WHERE id=?", (concern_id,)))
 
     def test_duplicate_key_imports_once_and_is_flagged_with_source_rows(self):
         duplicate = {
