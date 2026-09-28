@@ -16,6 +16,9 @@ _HTML = """
       <button id="search-clear" type="button" title="Clear search" style="display:none;">✕</button>
     </div>
     <div class="toolbar-actions">
+      <span id="match-counter" style="display:none; font-size:11px; font-weight:600; color:#0969da; align-self:center; margin-right:4px;"></span>
+      <button id="btn-prev-match" type="button" title="Previous matching part" style="display:none;">▲</button>
+      <button id="btn-next-match" type="button" title="Next matching part" style="display:none;">▼</button>
       <button id="btn-expand-all" type="button" title="Expand all assembly groups">➕ Expand all</button>
       <button id="btn-collapse-all" type="button" title="Collapse all assembly groups">➖ Collapse all</button>
     </div>
@@ -153,6 +156,15 @@ _CSS = """
 }
 .node-row.search-match {
   background: #fff8c5 !important;
+  border-left: 3px solid #d4a72c !important;
+  color: #24292f !important;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px #eac54f inset;
+}
+.node-row.search-match.selected {
+  background: #fef08a !important;
+  border-left: 4px solid #b45309 !important;
+  box-shadow: 0 0 0 2px #b45309 inset !important;
 }
 .chevron {
   display: inline-flex;
@@ -262,6 +274,9 @@ export default function(component) {
   const clearBtn = parentElement.querySelector("#search-clear")
   const expandAllBtn = parentElement.querySelector("#btn-expand-all")
   const collapseAllBtn = parentElement.querySelector("#btn-collapse-all")
+  const matchCounter = parentElement.querySelector("#match-counter")
+  const prevMatchBtn = parentElement.querySelector("#btn-prev-match")
+  const nextMatchBtn = parentElement.querySelector("#btn-next-match")
   const statusEl = parentElement.querySelector("#cad-tree-status")
 
   if (!rootEl) return
@@ -280,8 +295,13 @@ export default function(component) {
   }
 
   const roots = data.roots || []
-  const selectedId = data.selected_id || null
+  let selectedId = data.selected_id || null
+  const searchQuery = (data.search_query || "").trim()
+  const statusFilter = (data.status_filter || "All items").trim()
+
   let totalNodesCount = 0
+  let matchingNodesList = []
+  let currentMatchIndex = 0
 
   rootEl.innerHTML = ""
 
@@ -294,6 +314,8 @@ export default function(component) {
     nodeEl.dataset.partNo = (node.part_number || "").toLowerCase()
     nodeEl.dataset.desc = (node.description || "").toLowerCase()
     nodeEl.dataset.tracker = (node.child_tracker || "").toLowerCase()
+    nodeEl.dataset.inCatalog = node.in_catalog ? "1" : "0"
+    nodeEl.dataset.inFishbone = node.in_fishbone ? "1" : "0"
 
     const rowEl = document.createElement("div")
     rowEl.className = "node-row" + (node.id === selectedId ? " selected" : "")
@@ -398,6 +420,7 @@ export default function(component) {
       e.stopPropagation()
       parentElement.querySelectorAll(".node-row.selected").forEach((el) => el.classList.remove("selected"))
       rowEl.classList.add("selected")
+      selectedId = node.id
       if (setTriggerValue) {
         setTriggerValue("select_node", { node_id: node.id })
       }
@@ -420,64 +443,78 @@ export default function(component) {
     }
   })
 
-  // If a node was pre-selected, reveal its path and scroll into view
-  if (selectedId) {
-    const selNode = rootEl.querySelector(`.tree-node[data-id="${selectedId}"]`)
-    if (selNode) {
-      let curr = selNode.parentElement
-      while (curr && curr !== rootEl) {
-        if (curr.classList.contains("node-children")) {
-          curr.classList.add("open")
-          const parentRow = curr.previousElementSibling
-          if (parentRow) {
-            const chv = parentRow.querySelector(".chevron")
-            if (chv) chv.classList.add("open")
-          }
+  // Function to select and scroll to a node
+  const selectAndScrollToNode = (targetEl) => {
+    if (!targetEl) return
+    let curr = targetEl.parentElement
+    while (curr && curr !== rootEl) {
+      if (curr.classList.contains("node-children")) {
+        curr.classList.add("open")
+        const parentRow = curr.previousElementSibling
+        if (parentRow) {
+          const chv = parentRow.querySelector(".chevron")
+          if (chv) chv.classList.add("open")
         }
-        curr = curr.parentElement
       }
-      setTimeout(() => {
-        selNode.scrollIntoView({ behavior: "smooth", block: "center" })
-      }, 50)
+      curr = curr.parentElement
     }
-  }
-
-  // Toolbar actions
-  expandAllBtn.onclick = () => {
-    rootEl.querySelectorAll(".node-children").forEach((c) => c.classList.add("open"))
-    rootEl.querySelectorAll(".chevron").forEach((c) => {
-      if (!c.classList.contains("empty")) c.classList.add("open")
-    })
-  }
-
-  collapseAllBtn.onclick = () => {
-    rootEl.querySelectorAll(".node-children").forEach((c) => c.classList.remove("open"))
-    rootEl.querySelectorAll(".chevron").forEach((c) => c.classList.remove("open"))
+    parentElement.querySelectorAll(".node-row.selected").forEach((el) => el.classList.remove("selected"))
+    const row = targetEl.querySelector(":scope > .node-row")
+    if (row) row.classList.add("selected")
+    selectedId = targetEl.dataset.id
+    if (setTriggerValue) {
+      setTriggerValue("select_node", { node_id: targetEl.dataset.id })
+    }
+    setTimeout(() => {
+      targetEl.scrollIntoView({ behavior: "smooth", block: "center" })
+    }, 70)
   }
 
   // Filter/search
-  const filterTree = (query) => {
+  const filterTree = (query, currentStatusFilter) => {
     const q = (query || "").trim().toLowerCase()
+    const cleanQ = q.replace(/[^a-z0-9]/g, "")
+    const sf = currentStatusFilter !== undefined ? currentStatusFilter : statusFilter
     clearBtn.style.display = q ? "inline-block" : "none"
     const allNodes = rootEl.querySelectorAll(".tree-node")
 
-    if (!q) {
+    if (!q && (!sf || sf === "All items")) {
       allNodes.forEach((n) => {
         n.style.display = ""
         const row = n.querySelector(":scope > .node-row")
         if (row) row.classList.remove("search-match")
       })
+      matchCounter.style.display = "none"
+      prevMatchBtn.style.display = "none"
+      nextMatchBtn.style.display = "none"
       statusEl.textContent = `${totalNodesCount} items in model structure`
+      matchingNodesList = []
       return
     }
 
-    let matchCount = 0
-    // Evaluate leaves first to propagate visibility upwards
+    matchingNodesList = []
     allNodes.forEach((n) => {
-      const match = (n.dataset.partNo.includes(q) || n.dataset.desc.includes(q) || n.dataset.tracker.includes(q))
+      const cleanPartNo = (n.dataset.partNo || "").replace(/[^a-z0-9]/g, "")
+      const matchText = !q || (
+        n.dataset.partNo.includes(q) ||
+        n.dataset.desc.includes(q) ||
+        n.dataset.tracker.includes(q) ||
+        (cleanQ.length >= 3 && cleanPartNo.includes(cleanQ))
+      )
+
+      let matchStatus = true
+      if (sf === "Missing from Fishbone") {
+        matchStatus = n.dataset.inFishbone === "0"
+      } else if (sf === "Missing from Parts Catalog") {
+        matchStatus = n.dataset.inCatalog === "0"
+      } else if (sf === "Placed in Fishbone") {
+        matchStatus = n.dataset.inFishbone === "1"
+      }
+
+      const match = matchText && matchStatus
       const row = n.querySelector(":scope > .node-row")
       if (match) {
-        matchCount++
+        matchingNodesList.push(n)
         row.classList.add("search-match")
       } else {
         row.classList.remove("search-match")
@@ -504,22 +541,75 @@ export default function(component) {
       }
     })
 
-    statusEl.textContent = `${matchCount} items match "${q}"`
+    const count = matchingNodesList.length
+    if (count > 0) {
+      matchCounter.style.display = "inline-block"
+      prevMatchBtn.style.display = "inline-block"
+      nextMatchBtn.style.display = "inline-block"
+      currentMatchIndex = 0
+      matchCounter.textContent = `1 of ${count}`
+      statusEl.textContent = `Found ${count} matching item(s)`
+
+      // Pull up the first match immediately!
+      selectAndScrollToNode(matchingNodesList[0])
+    } else {
+      matchCounter.style.display = "none"
+      prevMatchBtn.style.display = "none"
+      nextMatchBtn.style.display = "none"
+      statusEl.textContent = `No items match "${query}"`
+    }
   }
 
-  searchInput.oninput = (e) => filterTree(e.target.value)
+  // Next / Previous match navigation
+  nextMatchBtn.onclick = () => {
+    if (!matchingNodesList.length) return
+    currentMatchIndex = (currentMatchIndex + 1) % matchingNodesList.length
+    matchCounter.textContent = `${currentMatchIndex + 1} of ${matchingNodesList.length}`
+    selectAndScrollToNode(matchingNodesList[currentMatchIndex])
+  }
+
+  prevMatchBtn.onclick = () => {
+    if (!matchingNodesList.length) return
+    currentMatchIndex = (currentMatchIndex - 1 + matchingNodesList.length) % matchingNodesList.length
+    matchCounter.textContent = `${currentMatchIndex + 1} of ${matchingNodesList.length}`
+    selectAndScrollToNode(matchingNodesList[currentMatchIndex])
+  }
+
+  // Toolbar actions
+  expandAllBtn.onclick = () => {
+    rootEl.querySelectorAll(".node-children").forEach((c) => c.classList.add("open"))
+    rootEl.querySelectorAll(".chevron").forEach((c) => {
+      if (!c.classList.contains("empty")) c.classList.add("open")
+    })
+  }
+
+  collapseAllBtn.onclick = () => {
+    rootEl.querySelectorAll(".node-children").forEach((c) => c.classList.remove("open"))
+    rootEl.querySelectorAll(".chevron").forEach((c) => c.classList.remove("open"))
+  }
+
+  searchInput.oninput = (e) => filterTree(e.target.value, statusFilter)
   clearBtn.onclick = () => {
     searchInput.value = ""
-    filterTree("")
+    filterTree("", statusFilter)
     searchInput.focus()
   }
 
-  statusEl.textContent = `${totalNodesCount} items in model structure`
+  // Initialize with initial search query / status filter if supplied from Streamlit
+  if (searchQuery || (statusFilter && statusFilter !== "All items")) {
+    searchInput.value = searchQuery
+    filterTree(searchQuery, statusFilter)
+  } else if (selectedId) {
+    const selNode = rootEl.querySelector(`.tree-node[data-id="${selectedId}"]`)
+    if (selNode) {
+      selectAndScrollToNode(selNode)
+    }
+  }
 }
 """
 
 _CAD_MODEL_TREE = st.components.v2.component(
-    "paag_cad_model_tree_v1",
+    "paag_cad_model_tree_v2",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -530,6 +620,8 @@ def cad_model_tree(
     roots: list[dict[str, Any]],
     *,
     selected_id: str | None = None,
+    search_query: str | None = None,
+    status_filter: str | None = None,
     key: str = "cad_model_tree",
     on_select_node: Callable[[], None] | None = None,
 ) -> None:
@@ -540,6 +632,8 @@ def cad_model_tree(
         data={
             "roots": safe_roots,
             "selected_id": selected_id,
+            "search_query": search_query or "",
+            "status_filter": status_filter or "All items",
         },
         on_select_node_change=on_select_node,
         width="stretch",

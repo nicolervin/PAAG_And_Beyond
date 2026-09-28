@@ -39,20 +39,57 @@ if not models_df.empty:
         model_options[str(row["id"])] = label
 
 # Top filter bar
-col_m, col_s, col_f = st.columns([1.5, 1.5, 1.2], gap="small")
-with col_m:
+col_m_search, col_m_select, col_s, col_f = st.columns([1.1, 1.4, 1.6, 1.1], gap="small")
+
+with col_m_search:
+    model_search_query = st.text_input(
+        "Search model #",
+        placeholder="Type e.g. HPS15, GTE18...",
+        key="model_tree_model_search",
+        help="Type to search and filter official model numbers.",
+    )
+
+clean_m_search = (model_search_query or "").strip().upper()
+if clean_m_search:
+    matched_model_keys = [
+        k for k, v in model_options.items()
+        if k != "all" and (clean_m_search in v.upper() or clean_m_search in k.upper())
+    ]
+    dropdown_keys = ["all"] + matched_model_keys
+    if not matched_model_keys:
+        st.caption(":material/search_off: No models matched")
+    else:
+        st.caption(f":material/check: {len(matched_model_keys)} model(s) found")
+else:
+    dropdown_keys = list(model_options.keys())
+
+current_selected_model = st.session_state.get("model_tree_selected_model")
+default_model_idx = 0
+if clean_m_search and len(dropdown_keys) > 1:
+    if current_selected_model in dropdown_keys and current_selected_model != "all":
+        default_model_idx = dropdown_keys.index(current_selected_model)
+    else:
+        default_model_idx = 1
+elif current_selected_model in dropdown_keys:
+    default_model_idx = dropdown_keys.index(current_selected_model)
+
+with col_m_select:
     selected_model_id = st.selectbox(
         "Official model number",
-        options=list(model_options.keys()),
-        format_func=lambda k: model_options[k],
+        options=dropdown_keys,
+        index=default_model_idx,
+        format_func=lambda k: model_options.get(k, k),
         key="model_tree_selected_model",
     )
+
 with col_s:
     search_query = st.text_input(
-        "Search Model Browser",
-        placeholder="Filter by part number, description, or tracker...",
+        "Search parts in tree",
+        placeholder="Part #, description, tracker...",
         key="model_tree_search",
+        help="Type a part number, description, or tracker to highlight and pull up in the tree.",
     )
+
 with col_f:
     status_filter = st.selectbox(
         "Reconciliation status",
@@ -92,27 +129,34 @@ with m_col4:
 st.markdown("---")
 
 # 4. Filter nodes by search and status
-filtered_nodes: list[dict[str, Any]] = []
 q = (search_query or "").strip().lower()
+clean_q = "".join(c for c in q if c.isalnum())
+stat = (status_filter or "All items").strip()
+
+matching_node_ids: set[str] = set()
+filtered_nodes: list[dict[str, Any]] = []
 
 for n in nodes:
     # Status filter match
-    if status_filter == "Missing from Fishbone" and n["in_fishbone"]:
+    if stat == "Missing from Fishbone" and n["in_fishbone"]:
         continue
-    if status_filter == "Missing from Parts Catalog" and n["in_catalog"]:
+    if stat == "Missing from Parts Catalog" and n["in_catalog"]:
         continue
-    if status_filter == "Placed in Fishbone" and not n["in_fishbone"]:
+    if stat == "Placed in Fishbone" and not n["in_fishbone"]:
         continue
 
     # Search query match
     if q:
-        match_pnum = q in str(n["part_number"]).lower()
+        pnum_str = str(n["part_number"]).lower()
+        clean_pnum = "".join(c for c in pnum_str if c.isalnum())
+        match_pnum = (q in pnum_str) or (len(clean_q) >= 3 and clean_q in clean_pnum)
         match_desc = q in str(n["description"]).lower()
         match_trk = q in str(n["child_tracker"]).lower()
-        match_sec = any(q in str(s).lower() for s in n["fishbone_sections"])
+        match_sec = any(q in str(s).lower() for s in n.get("fishbone_sections", []))
         if not (match_pnum or match_desc or match_trk or match_sec):
             continue
 
+    matching_node_ids.add(n["id"])
     filtered_nodes.append(n)
 
 # Build a lookup for quick selection
@@ -120,10 +164,18 @@ node_by_id = {n["id"]: n for n in nodes}
 
 # State for selected node
 selected_node_id = st.session_state.get("selected_model_tree_node_id")
-if selected_node_id and selected_node_id not in node_by_id:
-    selected_node_id = None
-if not selected_node_id and filtered_nodes:
-    selected_node_id = filtered_nodes[0]["id"]
+
+# PULL UP THE PART: When the user searched or filtered, auto-select the first matching node!
+if (q or stat != "All items") and matching_node_ids:
+    if selected_node_id not in matching_node_ids:
+        # Pick the first matching node in outline order
+        for n in nodes:
+            if n["id"] in matching_node_ids:
+                selected_node_id = n["id"]
+                st.session_state["selected_model_tree_node_id"] = selected_node_id
+                break
+elif not selected_node_id and nodes:
+    selected_node_id = nodes[0]["id"]
     st.session_state["selected_model_tree_node_id"] = selected_node_id
 
 selected_node = node_by_id.get(selected_node_id) if selected_node_id else None
@@ -146,6 +198,17 @@ def on_cad_tree_select() -> None:
         st.session_state["selected_model_tree_node_id"] = str(event["node_id"])
 
 
+# Search feedback banner
+if q or stat != "All items":
+    match_count = len(matching_node_ids)
+    if match_count == 0:
+        st.warning(f":material/search_off: No parts found matching '{search_query}'.")
+    else:
+        pulled_str = f" · Pulled up **{selected_node['part_number']}** in tree & properties" if selected_node else ""
+        st.success(
+            f":material/search_check: Found **{match_count}** matching item(s) in active model{pulled_str}."
+        )
+
 # 5. Split CAD-Browser Layout
 col_browser, col_props = st.columns([1.4, 1.0], gap="medium")
 
@@ -160,12 +223,14 @@ with col_browser:
 
     with tab_cad:
         st.caption(
-            "Click **▶** to expand any group number and view its subassemblies. "
+            "Click **▶** or folder to expand any group and view subassemblies. "
             "Single-click any part or subassembly to inspect its properties."
         )
         cad_model_tree(
             roots=roots,
             selected_id=selected_node_id,
+            search_query=search_query,
+            status_filter=status_filter,
             key=cad_tree_key,
             on_select_node=on_cad_tree_select,
         )
@@ -182,10 +247,27 @@ with col_browser:
         with col_c2:
             st.caption(f"{len(roots)} root assembly group(s)")
 
+        has_filter = bool(q or stat != "All items")
+        descendant_matches: dict[str, bool] = {}
+
+        def check_matches(n: dict[str, Any]) -> bool:
+            self_m = n["id"] in matching_node_ids
+            child_m = any(check_matches(c) for c in n.get("children", []))
+            res = self_m or child_m
+            descendant_matches[n["id"]] = res
+            return res
+
+        for r in roots:
+            check_matches(r)
+
         def render_expander_branch(node: dict[str, Any], expand_all: bool) -> None:
+            if has_filter and not descendant_matches.get(node["id"], False):
+                return
             has_children = bool(node.get("children"))
             d = node["depth"]
             is_active = node["id"] == selected_node_id
+            self_matches = node["id"] in matching_node_ids
+            is_expanded = expand_all or (has_filter and descendant_matches.get(node["id"], False))
 
             if not node["in_catalog"]:
                 status_txt = "🛑 Missing from Catalog"
@@ -195,13 +277,15 @@ with col_browser:
                 sec_lbl = ", ".join(node["fishbone_sections"])
                 status_txt = f"✅ Placed: {sec_lbl}"
 
+            match_badge = " 🔍 MATCH" if self_matches else ""
+
             if has_children:
                 sub_count = len(node["children"])
                 expander_title = (
                     f"📁 L{d} [{node['child_tracker'] or '—'}] {node['part_number']} — {node['description']} "
-                    f"(×{node['quantity']}) · {sub_count} sub-items"
+                    f"(×{node['quantity']}) · {sub_count} sub-items{match_badge}"
                 )
-                with st.expander(expander_title, expanded=expand_all):
+                with st.expander(expander_title, expanded=is_expanded):
                     c_btn, c_badge = st.columns([1.2, 4])
                     with c_btn:
                         if st.button("Inspect properties", key=f"exp_insp_{node['id']}", type="primary" if is_active else "secondary"):
@@ -216,12 +300,14 @@ with col_browser:
                 indent_px = max(0, (d - 1) * 16)
                 c_item, c_act = st.columns([5, 1])
                 with c_item:
+                    bg_style = "background:#fff8c5; border-left:3px solid #d4a72c; padding:2px 6px; border-radius:3px;" if self_matches else ""
                     st.markdown(
-                        f"<div style='padding-left:{indent_px}px; font-family:monospace; font-size:0.88rem; line-height:28px;'>"
+                        f"<div style='padding-left:{indent_px}px; font-family:monospace; font-size:0.88rem; line-height:28px; {bg_style}'>"
                         f"📄 <strong>L{d}</strong> [{node['child_tracker'] or '—'}] "
                         f"<strong>{node['part_number']}</strong> &mdash; {node['description']} "
                         f"<span style='color:#666;'>&times;{node['quantity']}</span> "
                         f"<small style='margin-left:6px;'>[{status_txt}]</small>"
+                        f"{match_badge}"
                         f"</div>",
                         unsafe_allow_html=True,
                     )

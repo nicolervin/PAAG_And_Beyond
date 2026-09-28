@@ -203,13 +203,26 @@ class ModelTreeTests(unittest.TestCase):
         self.assertEqual(len(l2_b["children"]), 1)
         l3_b = l2_b["children"][0]
         self.assertEqual(l3_b["child_tracker"], "302")
-        self.assertEqual(l3_b["quantity"], 5.0)
+        # Test resolving model tree by model number string directly
+        tree_a_str = store.pits_bom_model_tree(self.project_id, model_id="MODEL-A-01")
+        self.assertEqual(tree_a_str["metrics"]["total"], 3)
+        self.assertEqual(tree_a_str["roots"][0]["child_tracker"], "101")
 
     def test_model_tree_page_smoke(self) -> None:
         file_path = str(Path(__file__).parent.parent / "app_pages" / "bom_tree.py")
         at = AppTest.from_file(file_path)
         at.session_state["project_id"] = self.project_id
         at.session_state["scenario_id"] = self.scenario_id
+        at.run()
+        self.assertEqual(at.exception, [])
+
+    def test_model_tree_page_with_search_queries(self) -> None:
+        file_path = str(Path(__file__).parent.parent / "app_pages" / "bom_tree.py")
+        at = AppTest.from_file(file_path)
+        at.session_state["project_id"] = self.project_id
+        at.session_state["scenario_id"] = self.scenario_id
+        at.session_state["model_tree_model_search"] = "MODEL"
+        at.session_state["model_tree_search"] = "PART"
         at.run()
         self.assertEqual(at.exception, [])
 

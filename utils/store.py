@@ -14936,6 +14936,8 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
             ).fetchone()
             if m_row:
                 target_model = m_row["model_number"]
+            else:
+                target_model = model_id
 
         # Case A: Model-specific tree using PITS model usages
         if target_model and has_any_model_usages:
