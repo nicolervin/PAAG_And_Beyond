@@ -4,8 +4,13 @@ import streamlit as st
 from utils.pfmea_ui import render_pfmea_tab
 from utils.control_plan_store import control_plan_assignment_impact
 from utils.control_plan_ui import render_control_plan_tab
+from utils.equipment_ui import (
+    EQUIPMENT_HISTORY_CATEGORIES,
+    render_functional_equipment_tab,
+)
 from utils.quality_help import (
     CONTROL_PLAN_HELP,
+    EQUIPMENT_HELP,
     PFMEA_HELP_SECTIONS,
     PFMEA_QUICK_START,
     REQUIREMENTS_REPOSITORY_HELP,
@@ -101,9 +106,9 @@ LINKED_STEP_DIALOG_COLUMNS = [
     icon=":material/help:",
 )
 def show_quality_page_help() -> None:
-    """Show static, read-only instructions for the three Quality workflows."""
-    requirements_help_tab, pfmea_help_tab, control_plan_help_tab = st.tabs(
-        ["Requirements repository", "PFMEA", "Control Plan"],
+    """Show static, read-only instructions for the Quality workflows."""
+    requirements_help_tab, pfmea_help_tab, control_plan_help_tab, equipment_help_tab = st.tabs(
+        ["Requirements repository", "PFMEA", "Control Plan", "Equipment"],
         key="quality_page_help_tabs",
     )
     with requirements_help_tab:
@@ -115,6 +120,8 @@ def show_quality_page_help() -> None:
                 st.markdown(section_content)
     with control_plan_help_tab:
         st.markdown(CONTROL_PLAN_HELP)
+    with equipment_help_tab:
+        st.markdown(EQUIPMENT_HELP)
 
     actions = st.container(horizontal=True, horizontal_alignment="right")
     if actions.button(
@@ -188,8 +195,8 @@ def _requirement_friendly_values(requirement: pd.Series) -> tuple[str, str]:
 def render_quality_history(project_id: str) -> None:
     """Render the page's one bottom History expander with workflow tabs."""
     with st.expander("History", icon=":material/history:"):
-        requirements_history_tab, pfmea_history_tab, control_plan_history_tab = st.tabs(
-            ["Requirements", "PFMEA", "Control Plan"], key=f"quality_history_tabs_{project_id}"
+        requirements_history_tab, pfmea_history_tab, control_plan_history_tab, equipment_history_tab = st.tabs(
+            ["Requirements", "PFMEA", "Control Plan", "Equipment"], key=f"quality_history_tabs_{project_id}"
         )
         with requirements_history_tab:
             history_groups: list[pd.DataFrame] = []
@@ -255,6 +262,36 @@ def render_quality_history(project_id: str) -> None:
                     hide_index=True,
                     column_config={
                         "action": "Action", "row_count": "Rows",
+                        "editor_name": "Editor",
+                        "created_at": st.column_config.DatetimeColumn(
+                            "When", format="MMM DD, YYYY HH:mm"
+                        ),
+                    },
+                )
+        with equipment_history_tab:
+            groups: list[pd.DataFrame] = []
+            for category in EQUIPMENT_HISTORY_CATEGORIES:
+                category_history = audit_history(project_id, category, limit=50)
+                if category_history.empty:
+                    continue
+                category_history = category_history.copy()
+                category_history.insert(0, "workflow", category)
+                groups.append(category_history)
+            history = (
+                pd.concat(groups, ignore_index=True)
+                .sort_values("created_at", ascending=False, kind="stable")
+                .head(50)
+                if groups else pd.DataFrame()
+            )
+            if history.empty:
+                st.caption("No Equipment changes have been recorded yet.")
+            else:
+                selectable_dataframe(
+                    history.drop(columns=["details"], errors="ignore"),
+                    key=f"quality_equipment_history_{project_id}",
+                    hide_index=True,
+                    column_config={
+                        "workflow": "Workflow", "action": "Action", "row_count": "Rows",
                         "editor_name": "Editor",
                         "created_at": st.column_config.DatetimeColumn(
                             "When", format="MMM DD, YYYY HH:mm"
@@ -586,7 +623,7 @@ if st.button(
     "How to use this page",
     icon=":material/help:",
     key="quality_page_help",
-    help="Open instructions for the Requirements repository, PFMEA, and Control Plan.",
+    help="Open instructions for Requirements repository, PFMEA, Control Plan, and Equipment.",
 ):
     show_quality_page_help()
 st.caption(
@@ -612,8 +649,8 @@ scenario_by_id = {str(scenario["id"]): scenario for scenario in scenarios}
 scenario_id = str(st.session_state.get("scenario_id") or "")
 active_scenario = scenario_by_id.get(scenario_id)
 
-requirements_repository_tab, pfmea_tab, control_plan_tab = st.tabs(
-    ["Requirements repository", "PFMEA", "Control Plan"],
+requirements_repository_tab, pfmea_tab, control_plan_tab, equipment_tab = st.tabs(
+    ["Requirements repository", "PFMEA", "Control Plan", "Equipment"],
     key=f"quality_page_tabs_{project_id}",
     on_change="rerun",
 )
@@ -633,6 +670,16 @@ if control_plan_tab.open:
             render_control_plan_tab(project_id, scenario_id, str(active_scenario["name"]))
     render_quality_history(project_id)
     st.stop()
+if equipment_tab.open:
+    with equipment_tab:
+        render_functional_equipment_tab(
+            project_id,
+            scenario_id if active_scenario else None,
+            "Quality",
+            render_history=False,
+        )
+    render_quality_history(project_id)
+    st.stop()
 
 # The existing repository workflow remains in its own lazy tab without moving or
 # duplicating its established widgets and state keys.
@@ -643,6 +690,7 @@ table_columns = [
     "target_value", "tolerances", "unit", "assignment_count",
     "pending_assignment_count", "updated_at",
     "torque_detail_count", "pfmea_pattern_reference_count",
+    "equipment_torque_link_count",
 ]
 requirements = quality_requirements(project_id)
 requirement_type_catalog = quality_requirement_types(project_id)
@@ -660,6 +708,7 @@ if requirements.empty:
             "assignment_count": pd.Series(dtype="int64"),
             "pending_assignment_count": pd.Series(dtype="int64"),
             "torque_detail_count": pd.Series(dtype="int64"),
+            "equipment_torque_link_count": pd.Series(dtype="int64"),
             "pfmea_pattern_reference_count": pd.Series(dtype="int64"),
             "updated_at": pd.Series(dtype="string"),
         }
@@ -672,7 +721,7 @@ else:
     )
     for count_column in [
         "assignment_count", "pending_assignment_count", "torque_detail_count",
-        "pfmea_pattern_reference_count",
+        "pfmea_pattern_reference_count", "equipment_torque_link_count",
     ]:
         requirements[count_column] = (
             pd.to_numeric(requirements[count_column], errors="coerce")
@@ -1112,43 +1161,7 @@ render_quality_requirement_type_catalog(
 )
 
 linked_process_section = st.container()
-
-st.divider()
-section_heading_with_scope("Torque tool details", scope="project")
-st.caption(
-    "Select a saved Torque requirement to maintain its project-wide tool details. "
-    "Each Torque requirement can have one detail record."
-)
-torque_requirements = requirements.loc[
-    requirements["requirement_type"].fillna("").astype(str).str.strip().str.casefold().eq(
-        "torque"
-    )
-].copy()
-torque_requirement_labels = {
-    str(row["id"]): f"{row['unique_identifier']} — {row['description']}"
-    for _, row in torque_requirements.iterrows()
-}
-selected_torque_requirement_id = st.selectbox(
-    "Saved Torque requirement",
-    options=list(torque_requirement_labels),
-    index=None,
-    placeholder="Choose a saved Torque requirement",
-    format_func=lambda requirement_id: torque_requirement_labels.get(
-        str(requirement_id), "Unavailable Torque requirement"
-    ),
-    disabled=not torque_requirement_labels or has_unsaved_edits,
-    key=f"quality_torque_detail_requirement_{project_id}",
-    help=(
-        "Only saved Quality requirements whose Type is Torque appear here. "
-        "Tool details stay linked to the selected repository requirement."
-    ),
-)
-if not torque_requirement_labels:
-    st.caption("Create and save a Quality requirement with Type set to Torque first.")
-elif has_unsaved_edits:
-    st.info("Save or undo repository edits before maintaining Torque tool details.")
-
-if selected_torque_requirement_id and not has_unsaved_edits:
+if False:  # Legacy Torque editor moved to Quality → Equipment.
     selected_torque_requirement_id = str(selected_torque_requirement_id)
     torque_editor_key = apply_pending_table_editor_reset(
         f"quality_torque_details_editor_{project_id}_{selected_torque_requirement_id}"

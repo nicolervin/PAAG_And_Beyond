@@ -120,7 +120,7 @@ class QualityPageSmokeTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertIn("Quality requirements", [heading.value for heading in app.subheader])
 
-    def test_linked_process_workflow_renders_before_torque_and_publish_after(self) -> None:
+    def test_linked_process_workflow_renders_before_publish_after_torque_move(self) -> None:
         active_scenario = [
             {
                 "id": "scenario-1",
@@ -136,12 +136,9 @@ class QualityPageSmokeTests(unittest.TestCase):
                 self.assertEqual(len(app.exception), 0)
                 self.assertLess(
                     headings.index("Link to Process at a Glance"),
-                    headings.index("Torque tool details"),
-                )
-                self.assertLess(
-                    headings.index("Torque tool details"),
                     headings.index("Publish saved updates"),
                 )
+                self.assertNotIn("Torque tool details", headings)
 
     def test_active_scenario_renders_attach_unlink_and_linked_step_controls(self) -> None:
         requirements = pd.DataFrame(
@@ -273,10 +270,11 @@ class QualityPageSmokeTests(unittest.TestCase):
             "Push saved updates to linked Process steps",
             [button.label for button in app.button],
         )
-        self.assertIn(
+        self.assertNotIn(
             "Saved Torque requirement",
             [selectbox.label for selectbox in app.selectbox],
         )
+        self.assertIn("Equipment", [tab.label for tab in app.tabs])
         page_source = PAGE_PATH.read_text(encoding="utf-8")
         self.assertIn('accept_new_options=True', page_source)
         self.assertIn('"Tool type"', page_source)
@@ -724,7 +722,7 @@ class QualityPageSmokeTests(unittest.TestCase):
         self.assertIn('"requirement_count": st.column_config.NumberColumn(', source)
         self.assertIn('"id": None', source)
 
-    def test_selected_torque_requirement_renders_tool_details_without_exception(self) -> None:
+    def test_torque_requirement_details_are_not_rendered_in_repository(self) -> None:
         requirements = pd.DataFrame(
             [
                 {
@@ -768,9 +766,10 @@ class QualityPageSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(len(app.exception), 0)
-        self.assertIn("Screw bit type", [selectbox.label for selectbox in app.selectbox])
-        self.assertGreaterEqual(
-            [button.label for button in app.button].count("Save & Refresh"), 2
+        self.assertNotIn("Screw bit type", [selectbox.label for selectbox in app.selectbox])
+        self.assertIn(
+            "render_torque_requirement_specifications",
+            (PAGE_PATH.parents[1] / "utils" / "equipment_ui.py").read_text(encoding="utf-8"),
         )
 
     def test_pending_unlink_uses_assignment_scenario_not_session_scenario(self) -> None:

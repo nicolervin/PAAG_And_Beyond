@@ -99,7 +99,7 @@ class ControlPlanFlowProjection(TypedDict):
 
 
 def _store():
-    from utils import store
+    from utils import db_core as store
 
     return store
 

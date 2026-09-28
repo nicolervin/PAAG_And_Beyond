@@ -18,7 +18,7 @@ PATTERN_COLUMNS = [
 
 
 def _store():
-    from utils import store
+    from utils import db_core as store
 
     return store
 
@@ -922,3 +922,57 @@ def pattern_manual_reference_count(
                 (project_id, *ids),
             ).fetchone()["count"]
         )
+
+
+DEFAULT_PFMEA_PATTERNS = [
+    {
+        "label": "Torque Fastener",
+        "notes": "Standard pattern for threaded fastener tightening operations",
+        "potential_failure_mode": "Fastener undertorqued, overtorqued, or missing",
+        "class_code": "CC",
+        "effects": [{"effect_description": "Joint loosening under operational vibration; potential assembly component separation"}],
+        "causes": [{"cause_description": "Torque tool shut-off set improperly or operator skipped fastener"}],
+        "actions": [{"recommended_action": "Implement DC electric torque tool with count interlocking and automated batch complete confirmation"}],
+    },
+    {
+        "label": "Press Fit Component",
+        "notes": "Standard pattern for press-fit pins, bearings, or bushings",
+        "potential_failure_mode": "Bushing pressed out-of-spec, cocked, or missing",
+        "class_code": "SC",
+        "effects": [{"effect_description": "Interference fit failure; component noise or premature wear in service"}],
+        "causes": [{"cause_description": "Press force/distance limits exceeded or part misaligned during insertion"}],
+        "actions": [{"recommended_action": "Use automated press with force vs. distance curve monitoring interlock"}],
+    },
+    {
+        "label": "Visual Quality Inspection",
+        "notes": "Standard pattern for surface finish or cosmetic defects",
+        "potential_failure_mode": "Surface scratch, gouge, or contamination present",
+        "class_code": "KPC",
+        "effects": [{"effect_description": "Customer complaint; aesthetic dissatisfaction or coating adhesion failure"}],
+        "causes": [{"cause_description": "Handling damage during transfer or contaminated wash bath"}],
+        "actions": [{"recommended_action": "Install automated vision camera system or standardized boundary sample light box"}],
+    },
+]
+
+
+def seed_default_pfmea_patterns(project_id: str) -> list[str]:
+    """Seed standard starter PFMEA patterns for a project catalog if none exist."""
+    created_ids = []
+    for pat in DEFAULT_PFMEA_PATTERNS:
+        header = {
+            "label": pat["label"],
+            "notes": pat["notes"],
+            "potential_failure_mode": pat["potential_failure_mode"],
+            "class_code": pat["class_code"],
+            "active": True,
+        }
+        res = save_pfmea_pattern_graph(
+            project_id,
+            header,
+            effects=pat["effects"],
+            causes=pat["causes"],
+            actions=pat["actions"],
+        )
+        created_ids.append(res["pattern"]["id"])
+    return created_ids
+
