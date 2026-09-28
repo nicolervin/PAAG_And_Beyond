@@ -226,6 +226,161 @@ class PartsCatalogFieldTests(unittest.TestCase):
             },
         )
 
+    def test_tracker_cross_functional_fields_and_aliases_round_trip(self) -> None:
+        columns = {row["name"] for row in store.query("PRAGMA table_info(parts)")}
+        expected_fields = {
+            "design_engineer", "technology_engineer",
+            "factory_nickname", "official_windchill_part_name",
+            "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
+            "subsystem", "design_maturity",
+        }
+        self.assertTrue(expected_fields.issubset(columns))
+
+        part = self.edited_parts().iloc[0]
+        part_id = str(part["id"])
+
+        # Test updating with new names: design_engineer, factory_nickname, design_maturity, subsystem
+        store.upsert_part(
+            self.project_id,
+            {
+                "part_number": str(part["part_number"]),
+                "design_engineer": "Jordan DE",
+                "factory_nickname": "Door Bracket Assembly",
+                "ppm": "PPM-Pat",
+                "buyer_gcl": "Buyer-Chris",
+                "pmqe_aqe": "AQE-Sam",
+                "ame_tooling_engineer": "AME-Riley",
+                "part_code": "P-1099",
+                "subsystem": "Door Systems",
+                "design_maturity": "Pilot",
+            },
+        )
+
+        saved = store.query(
+            """SELECT design_engineer, technology_engineer, factory_nickname,
+                      official_windchill_part_name, ppm, buyer_gcl, pmqe_aqe,
+                      ame_tooling_engineer, part_code, subsystem, design_maturity, revision
+               FROM parts WHERE id=?""",
+            (part_id,),
+        )[0]
+        self.assertEqual(saved["design_engineer"], "Jordan DE")
+        self.assertEqual(saved["technology_engineer"], "Jordan DE")
+        self.assertEqual(saved["factory_nickname"], "Door Bracket Assembly")
+        self.assertEqual(saved["official_windchill_part_name"], "Door Bracket Assembly")
+        self.assertEqual(saved["ppm"], "PPM-Pat")
+        self.assertEqual(saved["buyer_gcl"], "Buyer-Chris")
+        self.assertEqual(saved["pmqe_aqe"], "AQE-Sam")
+        self.assertEqual(saved["ame_tooling_engineer"], "AME-Riley")
+        self.assertEqual(saved["part_code"], "P-1099")
+        self.assertEqual(saved["subsystem"], "Door Systems")
+        self.assertEqual(saved["design_maturity"], "Pilot")
+        self.assertEqual(saved["revision"], "Pilot")
+
+        # Test updating with legacy name revision syncs to design_maturity
+        store.upsert_part(
+            self.project_id,
+            {
+                "part_number": str(part["part_number"]),
+                "technology_engineer": "Legacy DE",
+                "official_windchill_part_name": "Legacy Nickname",
+                "revision": "Rev-C",
+            },
+        )
+        synced = store.query(
+            """SELECT design_engineer, technology_engineer, factory_nickname,
+                      official_windchill_part_name, design_maturity, revision
+               FROM parts WHERE id=?""",
+            (part_id,),
+        )[0]
+        self.assertEqual(synced["design_engineer"], "Legacy DE")
+        self.assertEqual(synced["technology_engineer"], "Legacy DE")
+        self.assertEqual(synced["factory_nickname"], "Legacy Nickname")
+        self.assertEqual(synced["official_windchill_part_name"], "Legacy Nickname")
+        self.assertEqual(synced["design_maturity"], "Rev-C")
+        self.assertEqual(synced["revision"], "Rev-C")
+
+    def test_import_pits_id_snapshot_stores_cross_functional_fields(self) -> None:
+        tracker_record = {
+            "pits_id": "0099",
+            "part_number": "PITS-TRACKER-001",
+            "description": "Cross Functional Test Part",
+            "quantity": 2,
+            "revision": "B",
+            "source_code": "3",
+            "design_engineer": "Casey Design",
+            "ppm": "Morgan PPM",
+            "buyer_gcl": "Taylor Buyer",
+            "pmqe_aqe": "Alex AQE",
+            "ame_tooling_engineer": "Logan AME",
+            "part_code": "PC-5501",
+            "used_bom": "Yes",
+            "status": "Active",
+            "subsystem": "Doors",
+            "design_maturity": "Proto",
+            "comments": "Test comment",
+            "workstation": "WS-1",
+            "source_row": 2,
+            "source_payload": {},
+        }
+        res = store.import_pits_id_snapshot(
+            self.project_id,
+            [tracker_record],
+            models=[],
+            editor_name="Test Importer",
+            scenario_id=self.scenario_id,
+        )
+        self.assertGreaterEqual(res["new"], 1)
+
+        saved = store.query(
+            """SELECT design_engineer, technology_engineer, factory_nickname,
+                      ppm, buyer_gcl, pmqe_aqe, ame_tooling_engineer, part_code,
+                      subsystem, design_maturity, revision
+               FROM parts WHERE project_id=? AND part_number=?""",
+            (self.project_id, "PITS-TRACKER-001"),
+        )[0]
+        self.assertEqual(saved["design_engineer"], "Casey Design")
+        self.assertEqual(saved["technology_engineer"], "Casey Design")
+        self.assertEqual(saved["ppm"], "Morgan PPM")
+        self.assertEqual(saved["buyer_gcl"], "Taylor Buyer")
+        self.assertEqual(saved["pmqe_aqe"], "Alex AQE")
+        self.assertEqual(saved["ame_tooling_engineer"], "Logan AME")
+        self.assertEqual(saved["part_code"], "PC-5501")
+        self.assertEqual(saved["subsystem"], "Doors")
+        self.assertEqual(saved["design_maturity"], "Proto")
+        self.assertEqual(saved["revision"], "B")
+
+        # Test importing a record where only design_maturity is provided (maps to revision)
+        dm_only_record = {
+            "pits_id": "0100",
+            "part_number": "PITS-TRACKER-002",
+            "description": "Design Maturity Only Part",
+            "quantity": 1,
+            "source_code": "1",
+            "used_bom": "Yes",
+            "status": "Active",
+            "subsystem": "Chassis",
+            "design_maturity": "Production",
+            "comments": "",
+            "workstation": "Line 2",
+            "source_row": 3,
+            "source_payload": {},
+        }
+        store.import_pits_id_snapshot(
+            self.project_id,
+            [dm_only_record],
+            models=[],
+            editor_name="Test Importer",
+            scenario_id=self.scenario_id,
+        )
+        saved2 = store.query(
+            "SELECT subsystem, design_maturity, revision FROM parts WHERE project_id=? AND part_number=?",
+            (self.project_id, "PITS-TRACKER-002"),
+        )[0]
+        self.assertEqual(saved2["subsystem"], "Chassis")
+        self.assertEqual(saved2["design_maturity"], "Production")
+        self.assertEqual(saved2["revision"], "Production")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -868,6 +868,28 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
   5. *Summary metrics header:* Displays total nodes in model tree, count placed in Fishbone, count missing from Fishbone, and count missing from Parts Catalog.
 - **Status:** Implemented on September 28, 2026; pending project-owner manual verification.
 
+### Parts Catalog cross-functional fields and PITS Tracker mapping
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** September 28, 2026
+- **Purpose and connection:** Extend each project-wide `parts` record with cross-functional collaborator roles and metadata imported from PITS Tracker tab: Subsystem (Col F, new column), Design Maturity (Col G, mapped from and renaming Revision), Design Engineer (Col I, mapped from former Technology Engineer), PPM (Col J), Buyer / GCL (Col K), PMQE / AQE (Col L), AME / Tooling Engineer (Col M), and Part Code (Col N). In addition, rename Official Windchill Part Name to Factory Nickname. These fields add critical collaborator ownership and catalog context at the Parts stage of the Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance critical thread.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects directly to `parts` (Parts Catalog) and `pits_records` (PITS Tracker source evidence).
+  2. *Critical thread relationship:* Direct 1:1 attribute on `parts` and `pits_records` linked by `part_id` / `pits_id`, extending the Parts stage of the critical thread.
+  3. *Scope:* Project-wide, consistent with the project-wide scope of `parts` and PITS Tracker source records.
+  4. *Table requirement:* Existing table `parts` (and `pits_records`) serves it directly. Schema additions:
+     - `subsystem TEXT NOT NULL DEFAULT ''` (Column F: "Subsystem", new column in Parts Catalog)
+     - `design_maturity TEXT NOT NULL DEFAULT ''` (Column G: "Design Maturity", mapped to and renaming "Revision" in Parts Catalog, with backward-compatible alias to `revision`)
+     - `design_engineer TEXT NOT NULL DEFAULT ''` (mapped from Column I: "Design Engineer", with backward-compatible alias to `technology_engineer`)
+     - `factory_nickname TEXT NOT NULL DEFAULT ''` (renamed from "Official Windchill Part Name", with backward-compatible alias to `official_windchill_part_name`)
+     - `ppm TEXT NOT NULL DEFAULT ''` (Column J: "PPM")
+     - `buyer_gcl TEXT NOT NULL DEFAULT ''` (Column K: "Buyer / GCL")
+     - `pmqe_aqe TEXT NOT NULL DEFAULT ''` (Column L: "PMQE / AQE")
+     - `ame_tooling_engineer TEXT NOT NULL DEFAULT ''` (Column M: "AME / Tooling Engineer")
+     - `part_code TEXT NOT NULL DEFAULT ''` (Column N: "Part Code". Codes: NP = New Part, New Tool; NPNT = New Part, No Tooling; ASM = Assembly; CP = Current Production; CP Other = CP different site)
+  5. *Applicable DESIGN_SYSTEM.md standards:* Standard Parts Catalog table editor with atomic Save & Refresh, Undo, filter/search/Excel export, audit logging with Current editor attribution in Parts category, and sentence-case headers.
+- **Status:** Proposed by project owner on September 28, 2026; pending implementation and verification.
+
 ### Parts Catalog engineering fields
 
 - **Proposed by:** Nicole Ervin, project owner

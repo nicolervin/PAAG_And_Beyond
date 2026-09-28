@@ -481,15 +481,25 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS parts (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_number TEXT NOT NULL, description TEXT DEFAULT '', quantity REAL DEFAULT 1,
-                revision TEXT DEFAULT '0', source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
+                revision TEXT DEFAULT '0',
+                design_maturity TEXT NOT NULL DEFAULT '',
+                subsystem TEXT NOT NULL DEFAULT '',
+                source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
                 model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', weight_lb REAL,
                 technology_engineer TEXT NOT NULL DEFAULT '',
+                design_engineer TEXT NOT NULL DEFAULT '',
                 pits_tracker_number TEXT NOT NULL DEFAULT '',
                 source_code TEXT NOT NULL DEFAULT ''
                     CHECK (source_code IN ('', '1', '+1', '2', '2.4', '3', '4', '5', '6', '7', '8')),
                 official_windchill_part_name TEXT NOT NULL DEFAULT '',
+                factory_nickname TEXT NOT NULL DEFAULT '',
                 make_buy TEXT NOT NULL DEFAULT ''
                     CHECK (make_buy IN ('', 'Make', 'Buy')),
+                ppm TEXT NOT NULL DEFAULT '',
+                buyer_gcl TEXT NOT NULL DEFAULT '',
+                pmqe_aqe TEXT NOT NULL DEFAULT '',
+                ame_tooling_engineer TEXT NOT NULL DEFAULT '',
+                part_code TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
             );
@@ -1030,15 +1040,55 @@ def init_db() -> None:
             conn.execute("ALTER TABLE parts ADD COLUMN weight_lb REAL")
         for column in (
             "technology_engineer",
+            "design_engineer",
             "pits_tracker_number",
             "source_code",
             "official_windchill_part_name",
+            "factory_nickname",
             "make_buy",
+            "ppm",
+            "buyer_gcl",
+            "pmqe_aqe",
+            "ame_tooling_engineer",
+            "part_code",
+            "subsystem",
+            "design_maturity",
         ):
             if column not in part_columns:
                 conn.execute(
                     f"ALTER TABLE parts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+                part_columns.add(column)
+        conn.execute(
+            """UPDATE parts SET design_engineer = technology_engineer
+               WHERE (design_engineer IS NULL OR design_engineer = '')
+                 AND (technology_engineer IS NOT NULL AND technology_engineer <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET technology_engineer = design_engineer
+               WHERE (technology_engineer IS NULL OR technology_engineer = '')
+                 AND (design_engineer IS NOT NULL AND design_engineer <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET factory_nickname = official_windchill_part_name
+               WHERE (factory_nickname IS NULL OR factory_nickname = '')
+                 AND (official_windchill_part_name IS NOT NULL AND official_windchill_part_name <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET official_windchill_part_name = factory_nickname
+               WHERE (official_windchill_part_name IS NULL OR official_windchill_part_name = '')
+                 AND (factory_nickname IS NOT NULL AND factory_nickname <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET design_maturity = revision
+               WHERE (design_maturity IS NULL OR design_maturity = '')
+                 AND (revision IS NOT NULL AND revision <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET revision = design_maturity
+               WHERE (revision IS NULL OR revision = '' OR revision = '0')
+                 AND (design_maturity IS NOT NULL AND design_maturity <> '')"""
+        )
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS uq_parts_project_pits_tracker_number
                ON parts(project_id, pits_tracker_number)
@@ -10329,15 +10379,76 @@ def _clean_optional_text(value) -> str:
     return "" if value is None or pd.isna(value) else str(value).strip()
 
 
-def _validated_part_catalog_fields(values) -> dict[str, str]:
+def _validated_part_catalog_fields(values, previous: dict | None = None) -> dict[str, str]:
+    prev = previous or {}
+    prev_de = _clean_optional_text(prev.get("design_engineer") or prev.get("technology_engineer"))
+    prev_fn = _clean_optional_text(prev.get("factory_nickname") or prev.get("official_windchill_part_name"))
+    prev_dm = _clean_optional_text(prev.get("design_maturity") or prev.get("revision"))
+
+    raw_de = _clean_optional_text(values.get("design_engineer"))
+    raw_te = _clean_optional_text(values.get("technology_engineer"))
+    if "design_engineer" in values and "technology_engineer" in values:
+        if raw_de != prev_de and raw_te == prev_de:
+            design_eng = raw_de
+        elif raw_te != prev_de and raw_de == prev_de:
+            design_eng = raw_te
+        else:
+            design_eng = raw_de or raw_te
+    elif "design_engineer" in values:
+        design_eng = raw_de
+    elif "technology_engineer" in values:
+        design_eng = raw_te
+    else:
+        design_eng = raw_de or raw_te
+
+    raw_fn = _clean_optional_text(values.get("factory_nickname"))
+    raw_wn = _clean_optional_text(values.get("official_windchill_part_name"))
+    if "factory_nickname" in values and "official_windchill_part_name" in values:
+        if raw_fn != prev_fn and raw_wn == prev_fn:
+            fac_nickname = raw_fn
+        elif raw_wn != prev_fn and raw_fn == prev_fn:
+            fac_nickname = raw_wn
+        else:
+            fac_nickname = raw_fn or raw_wn
+    elif "factory_nickname" in values:
+        fac_nickname = raw_fn
+    elif "official_windchill_part_name" in values:
+        fac_nickname = raw_wn
+    else:
+        fac_nickname = raw_fn or raw_wn
+
+    raw_dm = _clean_optional_text(values.get("design_maturity"))
+    raw_rev = _clean_optional_text(values.get("revision"))
+    if "design_maturity" in values and "revision" in values:
+        if raw_dm != prev_dm and raw_rev == prev_dm:
+            design_mat = raw_dm
+        elif raw_rev != prev_dm and raw_dm == prev_dm:
+            design_mat = raw_rev
+        else:
+            design_mat = raw_dm or raw_rev
+    elif "design_maturity" in values:
+        design_mat = raw_dm
+    elif "revision" in values:
+        design_mat = raw_rev
+    else:
+        design_mat = raw_dm or raw_rev
+
     fields = {
-        "technology_engineer": _clean_optional_text(values.get("technology_engineer")),
+        "design_engineer": design_eng,
+        "technology_engineer": design_eng,
         "pits_tracker_number": _clean_optional_text(values.get("pits_tracker_number")),
         "source_code": _clean_optional_text(values.get("source_code")),
-        "official_windchill_part_name": _clean_optional_text(
-            values.get("official_windchill_part_name")
-        ),
+        "factory_nickname": fac_nickname,
+        "official_windchill_part_name": fac_nickname,
         "make_buy": _clean_optional_text(values.get("make_buy")),
+        "ppm": _clean_optional_text(values.get("ppm")),
+        "buyer_gcl": _clean_optional_text(values.get("buyer_gcl")),
+        "pmqe_aqe": _clean_optional_text(values.get("pmqe_aqe")),
+        "ame_tooling_engineer": _clean_optional_text(values.get("ame_tooling_engineer")),
+        "part_code": _clean_optional_text(values.get("part_code")),
+        "subsystem": _clean_optional_text(values.get("subsystem")),
+        "design_maturity": design_mat,
+        "revision": design_mat,
     }
     if fields["source_code"] not in {"", *PART_SOURCE_CODES}:
         raise ValueError(
@@ -10353,7 +10464,15 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
     part_id = part_id or str(uuid4())
     quantity = values.get("quantity", 1)
     quantity = None if quantity is None or pd.isna(quantity) or str(quantity).strip() == "" else float(quantity)
-    catalog_fields = _validated_part_catalog_fields(values)
+    previous = None
+    if (
+        ("design_engineer" in values and "technology_engineer" in values and values.get("design_engineer") != values.get("technology_engineer"))
+        or ("factory_nickname" in values and "official_windchill_part_name" in values and values.get("factory_nickname") != values.get("official_windchill_part_name"))
+        or ("design_maturity" in values and "revision" in values and values.get("design_maturity") != values.get("revision"))
+    ):
+        prev_rows = query("SELECT * FROM parts WHERE project_id=? AND (id=? OR part_number=?)", (project_id, part_id, str(values.get("part_number") or "")))
+        previous = prev_rows[0] if prev_rows else None
+    catalog_fields = _validated_part_catalog_fields(values, previous=previous)
     if catalog_fields["pits_tracker_number"]:
         duplicate = query(
             """SELECT id FROM parts
@@ -10372,12 +10491,16 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
                 f"{catalog_fields['pits_tracker_number']}"
             )
     execute(
-        """INSERT INTO parts (id, project_id, part_number, description, quantity, revision, source,
-           image_path, model_applicability, notes, technology_engineer, pits_tracker_number,
-           source_code, official_windchill_part_name, make_buy, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """INSERT INTO parts (id, project_id, part_number, description, quantity, revision,
+           design_maturity, subsystem, source, image_path, model_applicability, notes,
+           technology_engineer, design_engineer, pits_tracker_number, source_code,
+           official_windchill_part_name, factory_nickname, make_buy, ppm, buyer_gcl,
+           pmqe_aqe, ame_tooling_engineer, part_code, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, part_number) DO UPDATE SET description=excluded.description,
-           quantity=excluded.quantity, revision=excluded.revision, source=excluded.source,
+           quantity=excluded.quantity, revision=excluded.revision, design_maturity=excluded.design_maturity,
+           subsystem=CASE WHEN excluded.subsystem<>'' THEN excluded.subsystem ELSE parts.subsystem END,
+           source=excluded.source,
            model_applicability=CASE
                WHEN EXISTS (
                    SELECT 1 FROM part_feature_rules rule
@@ -10390,17 +10513,27 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
                ELSE excluded.notes
            END,
            technology_engineer=CASE WHEN excluded.technology_engineer<>'' THEN excluded.technology_engineer ELSE parts.technology_engineer END,
+           design_engineer=CASE WHEN excluded.design_engineer<>'' THEN excluded.design_engineer ELSE parts.design_engineer END,
            pits_tracker_number=CASE WHEN excluded.pits_tracker_number<>'' THEN excluded.pits_tracker_number ELSE parts.pits_tracker_number END,
            source_code=CASE WHEN excluded.source_code<>'' THEN excluded.source_code ELSE parts.source_code END,
            official_windchill_part_name=CASE WHEN excluded.official_windchill_part_name<>'' THEN excluded.official_windchill_part_name ELSE parts.official_windchill_part_name END,
+           factory_nickname=CASE WHEN excluded.factory_nickname<>'' THEN excluded.factory_nickname ELSE parts.factory_nickname END,
            make_buy=CASE WHEN excluded.make_buy<>'' THEN excluded.make_buy ELSE parts.make_buy END,
+           ppm=CASE WHEN excluded.ppm<>'' THEN excluded.ppm ELSE parts.ppm END,
+           buyer_gcl=CASE WHEN excluded.buyer_gcl<>'' THEN excluded.buyer_gcl ELSE parts.buyer_gcl END,
+           pmqe_aqe=CASE WHEN excluded.pmqe_aqe<>'' THEN excluded.pmqe_aqe ELSE parts.pmqe_aqe END,
+           ame_tooling_engineer=CASE WHEN excluded.ame_tooling_engineer<>'' THEN excluded.ame_tooling_engineer ELSE parts.ame_tooling_engineer END,
+           part_code=CASE WHEN excluded.part_code<>'' THEN excluded.part_code ELSE parts.part_code END,
            updated_at=excluded.updated_at""",
         (part_id, project_id, values["part_number"].strip(), values.get("description", "").strip(),
-         quantity, str(values.get("revision") or "0").strip() or "0", values.get("source", "Manual"),
+         quantity, catalog_fields["revision"] or "0", catalog_fields["design_maturity"],
+         catalog_fields["subsystem"], values.get("source", "Manual"),
          values.get("image_path", ""), normalize_model_applicability(values.get("model_applicability", "All")),
          values.get("notes", "").strip(), catalog_fields["technology_engineer"],
-         catalog_fields["pits_tracker_number"], catalog_fields["source_code"],
-         catalog_fields["official_windchill_part_name"], catalog_fields["make_buy"], timestamp),
+         catalog_fields["design_engineer"], catalog_fields["pits_tracker_number"], catalog_fields["source_code"],
+         catalog_fields["official_windchill_part_name"], catalog_fields["factory_nickname"], catalog_fields["make_buy"],
+         catalog_fields["ppm"], catalog_fields["buyer_gcl"], catalog_fields["pmqe_aqe"],
+         catalog_fields["ame_tooling_engineer"], catalog_fields["part_code"], timestamp),
     )
     rows = query("SELECT id FROM parts WHERE project_id = ? AND part_number = ?", (project_id, values["part_number"].strip()))
     return rows[0]["id"]
@@ -10522,39 +10655,68 @@ def update_part_rows(
                     )
                     for field in (
                         "technology_engineer",
+                        "design_engineer",
                         "pits_tracker_number",
                         "source_code",
                         "official_windchill_part_name",
+                        "factory_nickname",
                         "make_buy",
+                        "ppm",
+                        "buyer_gcl",
+                        "pmqe_aqe",
+                        "ame_tooling_engineer",
+                        "part_code",
+                        "subsystem",
+                        "design_maturity",
+                        "revision",
                     )
-                }
+                },
+                previous=previous,
             )
+            revision = catalog_fields["revision"]
+            if part_id not in existing_ids and not revision:
+                revision = "0"
+            design_maturity = catalog_fields["design_maturity"]
+            subsystem = catalog_fields["subsystem"]
             values = (
                 part_number, clean_text(row.get("description")), quantity,
-                revision, applicability,
+                revision, design_maturity, subsystem, applicability,
                 clean_text(row.get("notes")), catalog_fields["technology_engineer"],
+                catalog_fields["design_engineer"],
                 catalog_fields["pits_tracker_number"], catalog_fields["source_code"],
                 catalog_fields["official_windchill_part_name"],
-                catalog_fields["make_buy"], timestamp,
+                catalog_fields["factory_nickname"],
+                catalog_fields["make_buy"],
+                catalog_fields["ppm"],
+                catalog_fields["buyer_gcl"],
+                catalog_fields["pmqe_aqe"],
+                catalog_fields["ame_tooling_engineer"],
+                catalog_fields["part_code"],
+                timestamp,
             )
             if part_id in existing_ids:
                 conn.execute(
                     """UPDATE parts SET part_number=?, description=?, quantity=?, revision=?,
-                       model_applicability=?, notes=?, technology_engineer=?,
+                       design_maturity=?, subsystem=?,
+                       model_applicability=?, notes=?, technology_engineer=?, design_engineer=?,
                        pits_tracker_number=?, source_code=?, official_windchill_part_name=?,
-                       make_buy=?, updated_at=? WHERE id=? AND project_id=?""",
+                       factory_nickname=?, make_buy=?, ppm=?, buyer_gcl=?, pmqe_aqe=?,
+                       ame_tooling_engineer=?, part_code=?, updated_at=? WHERE id=? AND project_id=?""",
                     (*values, part_id, project_id),
                 )
             else:
                 conn.execute(
                     """INSERT INTO parts
-                       (id, project_id, part_number, description, quantity, revision, source,
-                        image_path, model_applicability, notes, technology_engineer,
+                       (id, project_id, part_number, description, quantity, revision,
+                        design_maturity, subsystem, source,
+                        image_path, model_applicability, notes, technology_engineer, design_engineer,
                         pits_tracker_number, source_code, official_windchill_part_name,
-                        make_buy, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        factory_nickname, make_buy, ppm, buyer_gcl, pmqe_aqe, ame_tooling_engineer,
+                        part_code, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (part_id, project_id, values[0], values[1], values[2], values[3],
-                     clean_text(row.get("source")) or "Manual", *values[4:]),
+                     values[4], values[5],
+                     clean_text(row.get("source")) or "Manual", *values[6:]),
                 )
         if scenario_id and activity_by_part is not None:
             normalized_activity = {
@@ -14079,11 +14241,33 @@ def import_pits_id_snapshot(
             description = str(record.get("description") or "").strip()
             notes = str(record.get("comments") or "").strip()
             used_in_bom = str(record.get("used_bom") or "").strip().casefold() not in {"n", "no"}
+            design_engineer = str(record.get("design_engineer") or record.get("technology_engineer") or "").strip()
+            ppm = str(record.get("ppm") or "").strip()
+            buyer_gcl = str(record.get("buyer_gcl") or "").strip()
+            pmqe_aqe = str(record.get("pmqe_aqe") or "").strip()
+            ame_tooling_engineer = str(record.get("ame_tooling_engineer") or "").strip()
+            part_code = str(record.get("part_code") or "").strip()
+            subsystem = str(record.get("subsystem") or "").strip()
+            if "revision" in record:
+                revision = str(record.get("revision") or "").strip()
+                design_maturity = str(record.get("design_maturity") or revision or "").strip()
+            else:
+                design_maturity = str(record.get("design_maturity") or "").strip()
+                revision = design_maturity
             if part_number:
                 if overwrite_manual:
                     update_clause = """ON CONFLICT(project_id, part_number) DO UPDATE SET
                        description=excluded.description, quantity=excluded.quantity,
-                       revision=excluded.revision, source_code=excluded.source_code,
+                       revision=excluded.revision, design_maturity=excluded.design_maturity,
+                       subsystem=CASE WHEN excluded.subsystem<>'' THEN excluded.subsystem ELSE parts.subsystem END,
+                       source_code=excluded.source_code,
+                       design_engineer=CASE WHEN excluded.design_engineer<>'' THEN excluded.design_engineer ELSE parts.design_engineer END,
+                       technology_engineer=CASE WHEN excluded.technology_engineer<>'' THEN excluded.technology_engineer ELSE parts.technology_engineer END,
+                       ppm=CASE WHEN excluded.ppm<>'' THEN excluded.ppm ELSE parts.ppm END,
+                       buyer_gcl=CASE WHEN excluded.buyer_gcl<>'' THEN excluded.buyer_gcl ELSE parts.buyer_gcl END,
+                       pmqe_aqe=CASE WHEN excluded.pmqe_aqe<>'' THEN excluded.pmqe_aqe ELSE parts.pmqe_aqe END,
+                       ame_tooling_engineer=CASE WHEN excluded.ame_tooling_engineer<>'' THEN excluded.ame_tooling_engineer ELSE parts.ame_tooling_engineer END,
+                       part_code=CASE WHEN excluded.part_code<>'' THEN excluded.part_code ELSE parts.part_code END,
                        source=excluded.source,
                        notes=CASE
                            WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
@@ -14096,10 +14280,10 @@ def import_pits_id_snapshot(
                        END,
                        model_applicability=CASE
                            WHEN EXISTS (
-                               SELECT 1 FROM part_feature_rules rule
-                               WHERE rule.project_id=parts.project_id AND rule.part_id=parts.id
-                           ) THEN parts.model_applicability
-                           ELSE excluded.model_applicability
+                                SELECT 1 FROM part_feature_rules rule
+                                WHERE rule.project_id=parts.project_id AND rule.part_id=parts.id
+                            ) THEN parts.model_applicability
+                            ELSE excluded.model_applicability
                        END,
                        updated_at=excluded.updated_at"""
                 else:
@@ -14107,7 +14291,16 @@ def import_pits_id_snapshot(
                        description=CASE WHEN parts.source='PITS snapshot' THEN excluded.description ELSE parts.description END,
                        quantity=CASE WHEN parts.source='PITS snapshot' THEN excluded.quantity ELSE parts.quantity END,
                        revision=CASE WHEN parts.source='PITS snapshot' THEN excluded.revision ELSE parts.revision END,
+                       design_maturity=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.design_maturity, '')) = '' THEN excluded.design_maturity ELSE parts.design_maturity END,
+                       subsystem=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.subsystem, '')) = '' THEN excluded.subsystem ELSE parts.subsystem END,
                        source_code=CASE WHEN parts.source='PITS snapshot' THEN excluded.source_code ELSE parts.source_code END,
+                       design_engineer=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.design_engineer, '')) = '' THEN excluded.design_engineer ELSE parts.design_engineer END,
+                       technology_engineer=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.technology_engineer, '')) = '' THEN excluded.technology_engineer ELSE parts.technology_engineer END,
+                       ppm=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.ppm, '')) = '' THEN excluded.ppm ELSE parts.ppm END,
+                       buyer_gcl=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.buyer_gcl, '')) = '' THEN excluded.buyer_gcl ELSE parts.buyer_gcl END,
+                       pmqe_aqe=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.pmqe_aqe, '')) = '' THEN excluded.pmqe_aqe ELSE parts.pmqe_aqe END,
+                       ame_tooling_engineer=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.ame_tooling_engineer, '')) = '' THEN excluded.ame_tooling_engineer ELSE parts.ame_tooling_engineer END,
+                       part_code=CASE WHEN parts.source='PITS snapshot' OR TRIM(COALESCE(parts.part_code, '')) = '' THEN excluded.part_code ELSE parts.part_code END,
                        notes=CASE
                            WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
                            ELSE excluded.notes
@@ -14127,17 +14320,21 @@ def import_pits_id_snapshot(
                        updated_at=CASE WHEN parts.source='PITS snapshot' THEN excluded.updated_at ELSE parts.updated_at END"""
                 conn.execute(
                     f"""INSERT INTO parts
-                       (id, project_id, part_number, description, quantity, revision, source,
+                       (id, project_id, part_number, description, quantity, revision,
+                        design_maturity, subsystem, source,
                         image_path, model_applicability, notes, pits_tracker_number,
-                        source_code, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                        source_code, design_engineer, technology_engineer, ppm, buyer_gcl,
+                        pmqe_aqe, ame_tooling_engineer, part_code, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        {update_clause}""",
                     (
                         str(uuid4()), project_id, part_number, description,
                         record.get("quantity") if record.get("quantity") is not None else 1,
-                        str(record.get("revision") or "").strip(),
+                        revision, design_maturity, subsystem,
                         "PITS snapshot", "All", notes, tracker_numbers[record_index],
-                        str(record.get("source_code") or "").strip(), timestamp,
+                        str(record.get("source_code") or "").strip(),
+                        design_engineer, design_engineer, ppm, buyer_gcl, pmqe_aqe,
+                        ame_tooling_engineer, part_code, timestamp,
                     ),
                 )
                 if scenario_id:
@@ -14864,8 +15061,10 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                    o.parent_part_id, o.child_part_id, o.proposed_quantity, o.raw_quantity_text,
                    o.source_row, o.raw_levels_json, o.review_status, o.source_state,
                    p.part_number, p.description, p.weight_lb, p.make_buy,
-                   p.technology_engineer, p.source_code, p.model_applicability,
-                   p.official_windchill_part_name,
+                   p.subsystem, p.design_maturity, p.revision,
+                   p.technology_engineer, p.design_engineer, p.source_code, p.model_applicability,
+                   p.official_windchill_part_name, p.factory_nickname,
+                   p.ppm, p.buyer_gcl, p.pmqe_aqe, p.ame_tooling_engineer, p.part_code,
                    COALESCE(NULLIF(TRIM(p.image_path), ''), (
                        SELECT pi.image_path FROM part_images pi WHERE pi.part_id = p.id ORDER BY pi.created_at, pi.id LIMIT 1
                    ), '') AS image_path
@@ -14999,9 +15198,19 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                     "fishbone_uses": [x["use"] for x in fb_info if x["use"]],
                     "weight_lb": r["weight_lb"],
                     "make_buy": r["make_buy"],
+                    "subsystem": str(r["subsystem"] or ""),
+                    "design_maturity": str(r["design_maturity"] or r["revision"] or ""),
+                    "revision": str(r["design_maturity"] or r["revision"] or ""),
                     "technology_engineer": r["technology_engineer"],
+                    "design_engineer": r["design_engineer"] or r["technology_engineer"],
                     "source_code": r["source_code"],
                     "official_name": r["official_windchill_part_name"],
+                    "factory_nickname": r["factory_nickname"] or r["official_windchill_part_name"],
+                    "ppm": r["ppm"],
+                    "buyer_gcl": r["buyer_gcl"],
+                    "pmqe_aqe": r["pmqe_aqe"],
+                    "ame_tooling_engineer": r["ame_tooling_engineer"],
+                    "part_code": r["part_code"],
                     "model_applicability": r["model_applicability"],
                     "image_path": str(r["image_path"] or ""),
                     "source_state": r["source_state"],
@@ -15085,9 +15294,19 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 "fishbone_uses": [x["use"] for x in fb_info if x["use"]],
                 "weight_lb": r["weight_lb"],
                 "make_buy": r["make_buy"],
+                "subsystem": str(r["subsystem"] or ""),
+                "design_maturity": str(r["design_maturity"] or r["revision"] or ""),
+                "revision": str(r["design_maturity"] or r["revision"] or ""),
                 "technology_engineer": r["technology_engineer"],
+                "design_engineer": r["design_engineer"] or r["technology_engineer"],
                 "source_code": r["source_code"],
                 "official_name": r["official_windchill_part_name"],
+                "factory_nickname": r["factory_nickname"] or r["official_windchill_part_name"],
+                "ppm": r["ppm"],
+                "buyer_gcl": r["buyer_gcl"],
+                "pmqe_aqe": r["pmqe_aqe"],
+                "ame_tooling_engineer": r["ame_tooling_engineer"],
+                "part_code": r["part_code"],
                 "model_applicability": r["model_applicability"],
                 "image_path": str(r["image_path"] or ""),
                 "source_state": r["source_state"],

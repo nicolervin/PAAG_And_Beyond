@@ -462,13 +462,20 @@ with col_props:
             else:
                 c_col1, c_col2 = st.columns(2)
                 with c_col1:
-                    st.write("**Make vs Buy:**", selected_node["make_buy"] or "—")
-                    st.write("**Weight:**", f"{selected_node['weight_lb']} lb" if selected_node['weight_lb'] is not None else "—")
-                    st.write("**Source Code:**", selected_node["source_code"] or "—")
+                    st.write("**Subsystem:**", selected_node.get("subsystem") or "—")
+                    st.write("**Design Maturity:**", selected_node.get("design_maturity") or selected_node.get("revision") or "—")
+                    st.write("**Make vs Buy:**", selected_node.get("make_buy") or "—")
+                    st.write("**Weight:**", f"{selected_node['weight_lb']} lb" if selected_node.get("weight_lb") is not None else "—")
+                    st.write("**Source Code:**", selected_node.get("source_code") or "—")
+                    st.write("**Part Code:**", selected_node.get("part_code") or "—")
                 with c_col2:
-                    st.write("**Technology Engineer:**", selected_node["technology_engineer"] or "—")
-                    st.write("**Official Name:**", selected_node["official_name"] or "—")
-                    st.write("**Applicability:**", selected_node["model_applicability"] or "All")
+                    st.write("**Design Engineer:**", selected_node.get("design_engineer") or selected_node.get("technology_engineer") or "—")
+                    st.write("**Factory Nickname:**", selected_node.get("factory_nickname") or selected_node.get("official_name") or "—")
+                    st.write("**Applicability:**", selected_node.get("model_applicability") or "All")
+                    st.write("**PPM:**", selected_node.get("ppm") or "—")
+                    st.write("**Buyer / GCL:**", selected_node.get("buyer_gcl") or "—")
+                    st.write("**PMQE / AQE:**", selected_node.get("pmqe_aqe") or "—")
+                    st.write("**AME / Tooling:**", selected_node.get("ame_tooling_engineer") or "—")
 
             st.markdown("##### :material/schema: Fishbone Placement")
             if not selected_node["in_fishbone"]:

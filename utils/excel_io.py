@@ -374,20 +374,66 @@ def parse_pits_combined_workbook(uploaded_file) -> tuple[list[dict], list[dict],
             "",
         )
         source_code = _source_code_number(_excel_column_value(row, "T"))
-        revision = _excel_column_value(row, "BL")
+        subsystem = _excel_column_value(row, "F") or str(source.get("subsystem", "")).strip()
+        design_maturity = _excel_column_value(row, "G") or str(source.get("designmaturity", "")).strip()
+        raw_revision = _excel_column_value(row, "BL")
+        revision = design_maturity or raw_revision
+        design_engineer = _excel_column_value(row, "I") or next(
+            (str(source.get(alias, "")).strip() for alias in (
+                "designengineer", "technologyengineer", "leadengineer",
+            ) if str(source.get(alias, "")).strip()),
+            "",
+        )
+        ppm = _excel_column_value(row, "J") or next(
+            (str(source.get(alias, "")).strip() for alias in ("ppm", "partprojectmanager") if str(source.get(alias, "")).strip()),
+            "",
+        )
+        buyer_gcl = _excel_column_value(row, "K") or next(
+            (str(source.get(alias, "")).strip() for alias in ("buyergcl", "buyer", "gcl") if str(source.get(alias, "")).strip()),
+            "",
+        )
+        pmqe_aqe = _excel_column_value(row, "L") or next(
+            (str(source.get(alias, "")).strip() for alias in ("pmqeaqe", "pmqe", "aqe") if str(source.get(alias, "")).strip()),
+            "",
+        )
+        ame_tooling_engineer = _excel_column_value(row, "M") or next(
+            (str(source.get(alias, "")).strip() for alias in ("ametoolingengineer", "toolingengineer", "ame") if str(source.get(alias, "")).strip()),
+            "",
+        )
+        part_code = _excel_column_value(row, "N") or next(
+            (str(source.get(alias, "")).strip() for alias in ("partcode", "code") if str(source.get(alias, "")).strip()),
+            "",
+        )
         source["source_code"] = source_code
+        source["subsystem"] = subsystem
+        source["design_maturity"] = design_maturity
         source["revision"] = revision
+        source["design_engineer"] = design_engineer
+        source["technology_engineer"] = design_engineer
+        source["ppm"] = ppm
+        source["buyer_gcl"] = buyer_gcl
+        source["pmqe_aqe"] = pmqe_aqe
+        source["ame_tooling_engineer"] = ame_tooling_engineer
+        source["part_code"] = part_code
         records.append({
             "pits_id": pits_id,
             "source_row": int(source_index) + 2,
             "part_number": part_number or str(source.get("partnumber1", "")).strip(),
             "description": description,
             "revision": revision,
+            "design_maturity": design_maturity,
             "source_code": source_code,
+            "design_engineer": design_engineer,
+            "technology_engineer": design_engineer,
+            "ppm": ppm,
+            "buyer_gcl": buyer_gcl,
+            "pmqe_aqe": pmqe_aqe,
+            "ame_tooling_engineer": ame_tooling_engineer,
+            "part_code": part_code,
             "used_bom": str(source.get("usedbom", "")).strip(),
             "status": str(source.get("baseinfostatus", "")).strip() or str(source.get("status", "")).strip(),
-            "subsystem": str(source.get("subsystem", "")).strip(),
-            "design_maturity": str(source.get("designmaturity", "")).strip(),
+            "subsystem": subsystem,
+            "design_maturity": design_maturity,
             "comments": str(source.get("comments", "")).strip(),
             "workstation": str(source.get("factoryworkstationlocation", "")).strip(),
             "source_payload": source,
