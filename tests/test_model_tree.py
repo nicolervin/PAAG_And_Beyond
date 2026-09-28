@@ -217,14 +217,24 @@ class ModelTreeTests(unittest.TestCase):
         self.assertEqual(at.exception, [])
 
     def test_model_tree_page_with_search_queries(self) -> None:
+        store.add_project_model(self.project_id, "MODEL-A-01", "Model A", "tester")
         file_path = str(Path(__file__).parent.parent / "app_pages" / "bom_tree.py")
         at = AppTest.from_file(file_path)
         at.session_state["project_id"] = self.project_id
         at.session_state["scenario_id"] = self.scenario_id
-        at.session_state["model_tree_model_search"] = "MODEL"
+        at.run()
+        self.assertEqual(at.exception, [])
+        self.assertEqual(at.session_state["model_tree_selected_model"], "all")
+
+        # Now search for MODEL-A
+        at.session_state["model_tree_model_search"] = "MODEL-A"
         at.session_state["model_tree_search"] = "PART"
         at.run()
         self.assertEqual(at.exception, [])
+        # The official model dropdown must reflect the search, not 'all'
+        self.assertNotEqual(at.session_state["model_tree_selected_model"], "all")
+        sel = at.selectbox(key="model_tree_selected_model")
+        self.assertNotEqual(sel.value, "all")
 
 
 if __name__ == "__main__":

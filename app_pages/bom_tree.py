@@ -50,34 +50,39 @@ with col_m_search:
     )
 
 clean_m_search = (model_search_query or "").strip().upper()
+last_m_search = st.session_state.get("_last_model_tree_search", "")
+
 if clean_m_search:
     matched_model_keys = [
         k for k, v in model_options.items()
         if k != "all" and (clean_m_search in v.upper() or clean_m_search in k.upper())
     ]
-    dropdown_keys = ["all"] + matched_model_keys
-    if not matched_model_keys:
-        st.caption(":material/search_off: No models matched")
-    else:
+    if matched_model_keys:
+        dropdown_keys = matched_model_keys
         st.caption(f":material/check: {len(matched_model_keys)} model(s) found")
+        curr = st.session_state.get("model_tree_selected_model")
+        if clean_m_search != last_m_search or curr not in matched_model_keys:
+            st.session_state["model_tree_selected_model"] = matched_model_keys[0]
+    else:
+        dropdown_keys = ["all"]
+        st.caption(":material/search_off: No models matched")
+        st.session_state["model_tree_selected_model"] = "all"
 else:
     dropdown_keys = list(model_options.keys())
+    curr = st.session_state.get("model_tree_selected_model")
+    if curr not in dropdown_keys:
+        st.session_state["model_tree_selected_model"] = "all"
 
-current_selected_model = st.session_state.get("model_tree_selected_model")
-default_model_idx = 0
-if clean_m_search and len(dropdown_keys) > 1:
-    if current_selected_model in dropdown_keys and current_selected_model != "all":
-        default_model_idx = dropdown_keys.index(current_selected_model)
-    else:
-        default_model_idx = 1
-elif current_selected_model in dropdown_keys:
-    default_model_idx = dropdown_keys.index(current_selected_model)
+st.session_state["_last_model_tree_search"] = clean_m_search
+
+curr_selected = st.session_state.get("model_tree_selected_model")
+selected_idx = dropdown_keys.index(curr_selected) if curr_selected in dropdown_keys else 0
 
 with col_m_select:
     selected_model_id = st.selectbox(
         "Official model number",
         options=dropdown_keys,
-        index=default_model_idx,
+        index=selected_idx,
         format_func=lambda k: model_options.get(k, k),
         key="model_tree_selected_model",
     )
