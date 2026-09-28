@@ -342,6 +342,16 @@ export default function(component) {
     partNo.className = "node-part-no"
     partNo.textContent = node.part_number || "—"
 
+    if (node.image_path) {
+      const photoBadge = document.createElement("span")
+      photoBadge.className = "node-photo-badge"
+      photoBadge.textContent = " 📷"
+      photoBadge.title = "CAD photo attached"
+      photoBadge.style.fontSize = "0.75rem"
+      photoBadge.style.opacity = "0.85"
+      partNo.appendChild(photoBadge)
+    }
+
     // Description
     const desc = document.createElement("span")
     desc.className = "node-desc"
@@ -609,7 +619,7 @@ export default function(component) {
 """
 
 _CAD_MODEL_TREE = st.components.v2.component(
-    "paag_cad_model_tree_v2",
+    "paag_cad_model_tree_v3",
     html=_HTML,
     css=_CSS,
     js=_JS,

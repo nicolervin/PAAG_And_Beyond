@@ -14865,7 +14865,10 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                    o.source_row, o.raw_levels_json, o.review_status, o.source_state,
                    p.part_number, p.description, p.weight_lb, p.make_buy,
                    p.technology_engineer, p.source_code, p.model_applicability,
-                   p.official_windchill_part_name
+                   p.official_windchill_part_name,
+                   COALESCE(NULLIF(TRIM(p.image_path), ''), (
+                       SELECT pi.image_path FROM part_images pi WHERE pi.part_id = p.id ORDER BY pi.created_at, pi.id LIMIT 1
+                   ), '') AS image_path
             FROM pits_bom_occurrences o
             LEFT JOIN parts p ON p.id = o.child_part_id
             WHERE o.project_id = ?
@@ -15000,6 +15003,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                     "source_code": r["source_code"],
                     "official_name": r["official_windchill_part_name"],
                     "model_applicability": r["model_applicability"],
+                    "image_path": str(r["image_path"] or ""),
                     "source_state": r["source_state"],
                     "review_status": r["review_status"],
                     "source_row": r["source_row"],
@@ -15085,6 +15089,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 "source_code": r["source_code"],
                 "official_name": r["official_windchill_part_name"],
                 "model_applicability": r["model_applicability"],
+                "image_path": str(r["image_path"] or ""),
                 "source_state": r["source_state"],
                 "review_status": r["review_status"],
                 "source_row": r["source_row"],

@@ -236,6 +236,62 @@ class ModelTreeTests(unittest.TestCase):
         sel = at.selectbox(key="model_tree_selected_model")
         self.assertNotEqual(sel.value, "all")
 
+    def test_model_tree_part_photo_thumbnail(self) -> None:
+        # Create a mock image file on disk
+        from PIL import Image
+        img_file = store.DATA_DIR / f"test_img_{uuid4()}.png"
+        img = Image.new("RGB", (32, 32), color=(73, 109, 137))
+        img.save(img_file, format="PNG")
+        self.addCleanup(lambda: img_file.unlink(missing_ok=True))
+
+        part_id = str(uuid4())
+        ts = store.now_iso()
+        store.execute(
+            """INSERT INTO parts (id, project_id, part_number, description, weight_lb, make_buy, model_applicability, image_path, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (part_id, self.project_id, "PART-PHOTO", "Photo part", 1.0, "Make", "All", str(img_file), ts),
+        )
+        import_id = str(uuid4())
+        store.execute(
+            """INSERT INTO pits_bom_imports (
+                id, project_id, import_sequence, workbook_name, workbook_sha256,
+                bom_sheet_name, source_row_count, occurrence_count, issue_count,
+                imported_by, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (import_id, self.project_id, 99, "test.xlsx", "sha_photo", "BOM", 1, 1, 0, "tester", ts),
+        )
+
+        occ_id = str(uuid4())
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                occ_id, self.project_id, "", "TRK-PHOTO", part_id,
+                1, 1.0, "1", 1,
+                "fp_photo", import_id, import_id,
+                ts, ts, ts, "Needs review",
+            ),
+        )
+
+        tree = store.pits_bom_model_tree(self.project_id)
+        photo_node = next((n for n in tree["nodes"] if n["id"] == occ_id), None)
+        self.assertIsNotNone(photo_node)
+        self.assertEqual(photo_node["image_path"], str(img_file))
+
+        # Test AppTest renders image
+        file_path = str(Path(__file__).parent.parent / "app_pages" / "bom_tree.py")
+        at = AppTest.from_file(file_path)
+        at.session_state["project_id"] = self.project_id
+        at.session_state["scenario_id"] = self.scenario_id
+        at.session_state["selected_model_tree_node_id"] = occ_id
+        at.run()
+        self.assertEqual(at.exception, [])
+        self.assertEqual(len(at.image), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,10 +6,12 @@ reconciliation flags identifying parts missing from the Parts Catalog and/or
 missing from the Fishbone diagram, and a Properties inspector panel.
 """
 
+from pathlib import Path
 from typing import Any
 import pandas as pd
 import streamlit as st
 
+from utils.fishbone_visual import part_thumbnail
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     pits_bom_model_tree,
@@ -282,13 +284,15 @@ with col_browser:
                 sec_lbl = ", ".join(node["fishbone_sections"])
                 status_txt = f"✅ Placed: {sec_lbl}"
 
+            has_photo = bool(node.get("image_path") and Path(str(node["image_path"])).is_file())
+            photo_badge = " 📷" if has_photo else ""
             match_badge = " 🔍 MATCH" if self_matches else ""
 
             if has_children:
                 sub_count = len(node["children"])
                 expander_title = (
                     f"📁 L{d} [{node['child_tracker'] or '—'}] {node['part_number']} — {node['description']} "
-                    f"(×{node['quantity']}) · {sub_count} sub-items{match_badge}"
+                    f"(×{node['quantity']}) · {sub_count} sub-items{photo_badge}{match_badge}"
                 )
                 with st.expander(expander_title, expanded=is_expanded):
                     c_btn, c_badge = st.columns([1.2, 4])
@@ -312,6 +316,7 @@ with col_browser:
                         f"<strong>{node['part_number']}</strong> &mdash; {node['description']} "
                         f"<span style='color:#666;'>&times;{node['quantity']}</span> "
                         f"<small style='margin-left:6px;'>[{status_txt}]</small>"
+                        f"{photo_badge}"
                         f"{match_badge}"
                         f"</div>",
                         unsafe_allow_html=True,
@@ -348,7 +353,12 @@ with col_browser:
                 else:
                     fb_badge = "⚠️ Missing"
 
+                img_p = n.get("image_path", "")
+                has_img = bool(img_p and Path(str(img_p)).is_file())
+                photo_uri = part_thumbnail(img_p) if has_img else None
+
                 table_rows.append({
+                    "Photo": photo_uri,
                     "Tree Structure": f"{prefix}{n['part_number']}",
                     "Description": n["description"],
                     "Level": f"L{d}",
@@ -363,6 +373,12 @@ with col_browser:
 
             event = st.dataframe(
                 df_display,
+                column_config={
+                    "Photo": st.column_config.ImageColumn(
+                        "Photo",
+                        help="Part CAD thumbnail",
+                    ),
+                },
                 selection_mode="single-row",
                 on_select="rerun",
                 hide_index=True,
@@ -394,6 +410,22 @@ with col_props:
             p_desc = selected_node["description"]
             st.markdown(f"#### {p_num}")
             st.markdown(f"*{p_desc}*")
+
+            # Part Photo Thumbnail
+            img_p = selected_node.get("image_path")
+            img_file = Path(img_p) if img_p else None
+            rendered_img = False
+            if img_file and img_file.is_file():
+                try:
+                    st.image(
+                        str(img_file),
+                        caption=f"{p_num} · CAD preview",
+                    )
+                    rendered_img = True
+                except Exception:
+                    pass
+            if not rendered_img:
+                st.caption(":material/no_photography: No photo attached in Parts Catalog")
 
             # Status alert banner
             if not selected_node["in_catalog"]:
