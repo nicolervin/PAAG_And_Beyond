@@ -14862,7 +14862,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
             """
             SELECT o.id, o.proposed_depth, o.parent_tracker_number, o.child_tracker_number,
                    o.parent_part_id, o.child_part_id, o.proposed_quantity, o.raw_quantity_text,
-                   o.source_row, o.review_status, o.source_state,
+                   o.source_row, o.raw_levels_json, o.review_status, o.source_state,
                    p.part_number, p.description, p.weight_lb, p.make_buy,
                    p.technology_engineer, p.source_code, p.model_applicability,
                    p.official_windchill_part_name
@@ -14908,10 +14908,151 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 "quantity": r["quantity"],
             })
 
-        all_nodes: list[dict[str, Any]] = []
-        children_map: dict[str, list[dict[str, Any]]] = {}
+        parsed_rows: list[dict[str, Any]] = []
+        has_any_model_usages = False
+        all_model_keys: set[str] = set()
 
         for r in occ_rows:
+            usages: dict[str, float] = {}
+            if r["raw_levels_json"]:
+                try:
+                    data = json.loads(r["raw_levels_json"])
+                    if isinstance(data, dict):
+                        u = data.get("model_usages")
+                        if isinstance(u, dict):
+                            usages = {str(k): float(v) for k, v in u.items() if v is not None}
+                except Exception:
+                    pass
+            if usages:
+                has_any_model_usages = True
+                all_model_keys.update(usages.keys())
+            parsed_rows.append({"r": r, "usages": usages})
+
+        target_model = None
+        if model_id and model_id != "all":
+            m_row = conn.execute(
+                "SELECT model_number FROM project_models WHERE id=? AND project_id=?",
+                (model_id, project_id),
+            ).fetchone()
+            if m_row:
+                target_model = m_row["model_number"]
+
+        # Case A: Model-specific tree using PITS model usages
+        if target_model and has_any_model_usages:
+            clean_target = re.sub(r"[^A-Za-z0-9]", "", target_model).upper()
+            matched_model_key = None
+            for mk in all_model_keys:
+                clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk).upper()
+                if clean_target == clean_mk or (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
+                    matched_model_key = mk
+                    break
+
+            qualifying_nodes: list[dict[str, Any]] = []
+            stack: dict[int, dict[str, Any]] = {}
+
+            for pr in parsed_rows:
+                r = pr["r"]
+                usages = pr["usages"]
+
+                model_qty = None
+                if matched_model_key and matched_model_key in usages:
+                    model_qty = usages[matched_model_key]
+                elif not matched_model_key:
+                    for mk, q in usages.items():
+                        clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk).upper()
+                        if clean_target in clean_mk or clean_mk in clean_target:
+                            model_qty = q
+                            break
+
+                # If this row is not used on this model, skip it
+                if model_qty is None or float(model_qty) <= 0:
+                    continue
+
+                pid = str(r["child_part_id"]) if r["child_part_id"] else None
+                in_catalog = pid is not None
+                fb_info = fb_by_part.get(pid, []) if pid else []
+                in_fishbone = len(fb_info) > 0
+
+                p_num = r["part_number"] or (
+                    f"Uncataloged (Tracker #{r['child_tracker_number']})" if r["child_tracker_number"] else "—"
+                )
+                p_desc = r["description"] or "—"
+                depth = int(r["proposed_depth"] or 1)
+
+                node: dict[str, Any] = {
+                    "id": str(r["id"]),
+                    "depth": depth,
+                    "parent_tracker": "",
+                    "child_tracker": str(r["child_tracker_number"] or "").strip(),
+                    "part_number": p_num,
+                    "description": p_desc,
+                    "quantity": float(model_qty),
+                    "raw_quantity_text": str(model_qty),
+                    "in_catalog": in_catalog,
+                    "in_fishbone": in_fishbone,
+                    "fishbone_sections": [x["section"] for x in fb_info],
+                    "fishbone_uses": [x["use"] for x in fb_info if x["use"]],
+                    "weight_lb": r["weight_lb"],
+                    "make_buy": r["make_buy"],
+                    "technology_engineer": r["technology_engineer"],
+                    "source_code": r["source_code"],
+                    "official_name": r["official_windchill_part_name"],
+                    "model_applicability": r["model_applicability"],
+                    "source_state": r["source_state"],
+                    "review_status": r["review_status"],
+                    "source_row": r["source_row"],
+                    "children": [],
+                }
+
+                # Outline rule: parent is the level right above the child
+                parent_node = stack.get(depth - 1)
+                if parent_node:
+                    parent_node["children"].append(node)
+                    node["parent_tracker"] = parent_node["child_tracker"]
+
+                stack[depth] = node
+                stack = {lvl: n for lvl, n in stack.items() if lvl <= depth}
+                qualifying_nodes.append(node)
+
+            all_roots = [n for n in qualifying_nodes if n["depth"] == 1 or not n["parent_tracker"]]
+            # Prioritize active roots that have children (e.g. main assembly BOM)
+            active_roots = [rt for rt in all_roots if len(rt["children"]) > 0] or all_roots
+
+            reachable_nodes: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+
+            def collect_model(n: dict[str, Any]) -> None:
+                if n["id"] in seen_ids:
+                    return
+                seen_ids.add(n["id"])
+                reachable_nodes.append(n)
+                for c in n["children"]:
+                    collect_model(c)
+
+            for root_item in active_roots:
+                collect_model(root_item)
+
+            metrics = {
+                "total": len(reachable_nodes),
+                "placed_fishbone": sum(1 for n in reachable_nodes if n["in_fishbone"]),
+                "missing_fishbone": sum(1 for n in reachable_nodes if not n["in_fishbone"]),
+                "missing_catalog": sum(1 for n in reachable_nodes if not n["in_catalog"]),
+            }
+
+            return {
+                "roots": active_roots,
+                "nodes": reachable_nodes,
+                "metrics": metrics,
+                "target_model": target_model,
+            }
+
+        # Case B: Master BOM or legacy data without model usages
+        all_nodes: list[dict[str, Any]] = []
+        stack_b: dict[int, dict[str, Any]] = {}
+        children_map: dict[str, list[dict[str, Any]]] = {}
+
+        for pr in parsed_rows:
+            r = pr["r"]
             pid = str(r["child_part_id"]) if r["child_part_id"] else None
             in_catalog = pid is not None
             fb_info = fb_by_part.get(pid, []) if pid else []
@@ -14921,10 +15062,11 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 f"Uncataloged (Tracker #{r['child_tracker_number']})" if r["child_tracker_number"] else "—"
             )
             p_desc = r["description"] or "—"
+            depth = int(r["proposed_depth"] or 1)
 
             node: dict[str, Any] = {
                 "id": str(r["id"]),
-                "depth": int(r["proposed_depth"] or 1),
+                "depth": depth,
                 "parent_tracker": str(r["parent_tracker_number"] or "").strip(),
                 "child_tracker": str(r["child_tracker_number"] or "").strip(),
                 "part_number": p_num,
@@ -14947,42 +15089,45 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 "children": [],
             }
             all_nodes.append(node)
-            p_tr = node["parent_tracker"]
-            if p_tr not in children_map:
-                children_map[p_tr] = []
-            children_map[p_tr].append(node)
 
-        for node in all_nodes:
-            c_tr = node["child_tracker"]
-            if c_tr in children_map:
-                node["children"] = children_map[c_tr]
+            if has_any_model_usages:
+                # Outline stack hierarchy for Master BOM
+                parent_node = stack_b.get(depth - 1)
+                if parent_node:
+                    parent_node["children"].append(node)
+                    node["parent_tracker"] = parent_node["child_tracker"]
+                stack_b[depth] = node
+                stack_b = {lvl: n for lvl, n in stack_b.items() if lvl <= depth}
+            else:
+                # Legacy parent_tracker mapping
+                p_tr = node["parent_tracker"]
+                if p_tr not in children_map:
+                    children_map[p_tr] = []
+                children_map[p_tr].append(node)
+
+        if not has_any_model_usages:
+            for node in all_nodes:
+                c_tr = node["child_tracker"]
+                if c_tr in children_map:
+                    node["children"] = children_map[c_tr]
 
         roots = [n for n in all_nodes if not n["parent_tracker"] or n["depth"] == 1]
-
-        target_model = None
-        if model_id and model_id != "all":
-            m_row = conn.execute(
-                "SELECT model_number FROM project_models WHERE id=? AND project_id=?",
-                (model_id, project_id),
-            ).fetchone()
-            if m_row:
-                target_model = m_row["model_number"]
 
         filtered_roots = roots
         if target_model:
             clean_m = re.sub(r"[^A-Za-z0-9]", "", target_model).upper()
             matched = [
-                r
-                for r in roots
-                if clean_m in re.sub(r"[^A-Za-z0-9]", "", r["description"]).upper()
-                or clean_m in re.sub(r"[^A-Za-z0-9]", "", r["part_number"]).upper()
-                or (len(clean_m) >= 6 and clean_m[:6] in re.sub(r"[^A-Za-z0-9]", "", r["description"]).upper())
+                rt
+                for rt in roots
+                if clean_m in re.sub(r"[^A-Za-z0-9]", "", rt["description"]).upper()
+                or clean_m in re.sub(r"[^A-Za-z0-9]", "", rt["part_number"]).upper()
+                or (len(clean_m) >= 6 and clean_m[:6] in re.sub(r"[^A-Za-z0-9]", "", rt["description"]).upper())
             ]
             if matched:
                 filtered_roots = matched
 
-        reachable_nodes: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
+        reachable_nodes = []
+        seen_ids = set()
 
         def collect(n: dict[str, Any]) -> None:
             if n["id"] in seen_ids:
@@ -14992,8 +15137,8 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
             for c in n["children"]:
                 collect(c)
 
-        for r in filtered_roots:
-            collect(r)
+        for rt in filtered_roots:
+            collect(rt)
 
         metrics = {
             "total": len(reachable_nodes),

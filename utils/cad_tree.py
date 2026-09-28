@@ -158,13 +158,18 @@ _CSS = """
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
-  font-size: 10px;
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
   color: #57606a;
   cursor: pointer;
-  transition: transform 0.15s ease;
+  transition: transform 0.15s ease, background 0.15s ease;
   user-select: none;
+  border-radius: 4px;
+}
+.chevron:hover {
+  background: rgba(9, 105, 218, 0.15);
+  color: #0969da;
 }
 .chevron.empty {
   visibility: hidden;
@@ -174,8 +179,10 @@ _CSS = """
   transform: rotate(90deg);
 }
 .node-icon {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
+  cursor: pointer;
+  user-select: none;
 }
 .node-part-no {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -295,11 +302,13 @@ export default function(component) {
     const chevron = document.createElement("span")
     chevron.className = "chevron" + (hasChildren ? "" : " empty")
     chevron.innerHTML = "▶"
+    if (hasChildren) chevron.title = "Click to expand/collapse"
 
     // Icon
     const icon = document.createElement("span")
     icon.className = "node-icon"
     icon.textContent = hasChildren ? "📁" : "📄"
+    if (hasChildren) icon.title = "Click to expand/collapse"
 
     // Depth badge
     const depthBadge = document.createElement("span")
@@ -369,6 +378,11 @@ export default function(component) {
       }
 
       chevron.addEventListener("click", (e) => {
+        e.stopPropagation()
+        toggle()
+      })
+
+      icon.addEventListener("click", (e) => {
         e.stopPropagation()
         toggle()
       })

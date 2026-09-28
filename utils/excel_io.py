@@ -197,6 +197,23 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
     seen_keys: dict[tuple[str, str], int] = {}
     duplicate_keys: list[dict] = []
 
+    # Detect model usage columns (typically columns U through DZ, above header row)
+    model_columns: dict[int, str] = {}
+    for col_idx in range(14, raw_df.shape[1]):
+        for r_check in range(header_row):
+            val = raw_df.iat[r_check, col_idx]
+            if val is not None:
+                s_val = str(val).strip()
+                if (
+                    len(s_val) >= 3
+                    and not any(kw in s_val.lower() for kw in ("pick cost", "standard", "engineering manager", "po", "level codes"))
+                ):
+                    try:
+                        float(s_val)
+                    except ValueError:
+                        model_columns[col_idx] = s_val
+                        break
+
     for source_index, row in data.iterrows():
         source_row = int(source_index) + int(header_row) + 2
         child_tracker = _clean_tracker_number(row.iloc[0] if len(row) else "")
@@ -253,18 +270,36 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
             })
             continue
 
+        model_usages: dict[str, float] = {}
+        for col_idx, m_name in model_columns.items():
+            if col_idx < len(row):
+                u_val = row.iloc[col_idx]
+                if u_val is not None:
+                    try:
+                        u_qty = float(u_val)
+                        if u_qty > 0:
+                            model_usages[m_name] = u_qty
+                    except (ValueError, TypeError):
+                        pass
+
         proposed_quantity = None
-        try:
-            numeric_quantity = float(raw_quantity_text)
-            if pd.notna(numeric_quantity):
-                proposed_quantity = numeric_quantity
-        except (TypeError, ValueError):
-            pass
+        if model_usages:
+            proposed_quantity = next(iter(model_usages.values()))
+            raw_quantity_text = str(proposed_quantity)
+        else:
+            try:
+                numeric_quantity = float(raw_quantity_text)
+                if pd.notna(numeric_quantity):
+                    proposed_quantity = numeric_quantity
+            except (TypeError, ValueError):
+                pass
         raw_levels = {
             f"Level {index + 1}": _clean_value(value)
             for index, value in enumerate(level_values)
             if value is not None and not pd.isna(value) and str(value).strip()
         }
+        if model_usages:
+            raw_levels["model_usages"] = model_usages
         occurrence = {
             "parent_tracker_number": parent_tracker,
             "child_tracker_number": child_tracker,

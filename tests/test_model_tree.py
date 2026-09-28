@@ -127,6 +127,84 @@ class ModelTreeTests(unittest.TestCase):
         self.assertFalse(child_40["in_catalog"])
         self.assertFalse(child_40["in_fishbone"])
 
+    def test_pits_bom_model_tree_with_model_usages_and_outline_hierarchy(self) -> None:
+        import json
+
+        # 1. Create two models
+        store.add_project_model(self.project_id, "MODEL-A-01", "Model A", "tester")
+        store.add_project_model(self.project_id, "MODEL-B-02", "Model B", "tester")
+        models_df = store.project_models(self.project_id)
+        model_a = models_df[models_df["model_number"] == "MODEL-A-01"].iloc[0]
+        model_b = models_df[models_df["model_number"] == "MODEL-B-02"].iloc[0]
+
+        import_id = str(uuid4())
+        ts = store.now_iso()
+        store.execute(
+            """INSERT INTO pits_bom_imports (
+                id, project_id, import_sequence, workbook_name, workbook_sha256,
+                bom_sheet_name, source_row_count, occurrence_count, issue_count,
+                imported_by, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (import_id, self.project_id, 2, "test_models.xlsx", "sha_m", "BOM", 5, 5, 0, "tester", ts),
+        )
+
+        def add_usage_occ(parent_trk: str, child_trk: str, depth: int, row_num: int, usages: dict[str, float]):
+            raw_json = json.dumps({"Level": depth, "model_usages": usages})
+            first_qty = next(iter(usages.values()))
+            store.execute(
+                """INSERT INTO pits_bom_occurrences (
+                    id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                    proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                    raw_levels_json, source_fingerprint, first_seen_import_id, last_seen_import_id,
+                    first_seen_at, last_seen_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()), self.project_id, parent_trk, child_trk, None,
+                    depth, first_qty, str(first_qty), row_num,
+                    raw_json, f"fp_{child_trk}", import_id, import_id,
+                    ts, ts, ts,
+                ),
+            )
+
+        # Row 10: Root assembly for Model A (Level 1)
+        add_usage_occ("", "101", 1, 10, {"MODEL-A-01": 1.0})
+        # Row 11: Root assembly for Model B (Level 1)
+        add_usage_occ("", "102", 1, 11, {"MODEL-B-02": 1.0})
+        # Row 20: Shared Level 2 Subassembly
+        add_usage_occ("102", "201", 2, 20, {"MODEL-A-01": 1.0, "MODEL-B-02": 1.0})
+        # Row 25: Level 3 component unique to Model A (Qty 2.0)
+        add_usage_occ("201", "301", 3, 25, {"MODEL-A-01": 2.0})
+        # Row 26: Level 3 component unique to Model B (Qty 5.0)
+        add_usage_occ("201", "302", 3, 26, {"MODEL-B-02": 5.0})
+
+        # Test Tree for Model A
+        tree_a = store.pits_bom_model_tree(self.project_id, model_id=str(model_a["id"]))
+        self.assertEqual(tree_a["metrics"]["total"], 3)
+        self.assertEqual(len(tree_a["roots"]), 1)
+        root_a = tree_a["roots"][0]
+        self.assertEqual(root_a["child_tracker"], "101")
+        self.assertEqual(len(root_a["children"]), 1)
+        l2_a = root_a["children"][0]
+        self.assertEqual(l2_a["child_tracker"], "201")
+        self.assertEqual(len(l2_a["children"]), 1)
+        l3_a = l2_a["children"][0]
+        self.assertEqual(l3_a["child_tracker"], "301")
+        self.assertEqual(l3_a["quantity"], 2.0)
+
+        # Test Tree for Model B
+        tree_b = store.pits_bom_model_tree(self.project_id, model_id=str(model_b["id"]))
+        self.assertEqual(tree_b["metrics"]["total"], 3)
+        self.assertEqual(len(tree_b["roots"]), 1)
+        root_b = tree_b["roots"][0]
+        self.assertEqual(root_b["child_tracker"], "102")
+        self.assertEqual(len(root_b["children"]), 1)
+        l2_b = root_b["children"][0]
+        self.assertEqual(l2_b["child_tracker"], "201")
+        self.assertEqual(len(l2_b["children"]), 1)
+        l3_b = l2_b["children"][0]
+        self.assertEqual(l3_b["child_tracker"], "302")
+        self.assertEqual(l3_b["quantity"], 5.0)
+
     def test_model_tree_page_smoke(self) -> None:
         file_path = str(Path(__file__).parent.parent / "app_pages" / "bom_tree.py")
         at = AppTest.from_file(file_path)
