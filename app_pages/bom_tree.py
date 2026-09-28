@@ -128,13 +128,111 @@ if not selected_node_id and filtered_nodes:
 
 selected_node = node_by_id.get(selected_node_id) if selected_node_id else None
 
+from utils.cad_tree import cad_model_tree
+
+
+def _component_event(component_key: str, event_name: str) -> dict:
+    state = st.session_state.get(component_key, {}) or {}
+    value = state.get(event_name) if hasattr(state, "get") else getattr(state, event_name, None)
+    return dict(value or {})
+
+
+cad_tree_key = "cad_model_tree_comp"
+
+
+def on_cad_tree_select() -> None:
+    event = _component_event(cad_tree_key, "select_node")
+    if event and event.get("node_id"):
+        st.session_state["selected_model_tree_node_id"] = str(event["node_id"])
+
+
 # 5. Split CAD-Browser Layout
 col_browser, col_props = st.columns([1.4, 1.0], gap="medium")
 
 with col_browser:
     st.markdown("### :material/account_tree: Model Browser")
 
-    tab_table, tab_tree = st.tabs(["📋 Tree Table", "🌲 Tree Hierarchy"])
+    tab_cad, tab_expanders, tab_table = st.tabs([
+        "🌲 CAD Tree (Interactive)",
+        "📂 Native Expanders",
+        "📋 Data Table",
+    ])
+
+    with tab_cad:
+        st.caption(
+            "Click **▶** to expand any group number and view its subassemblies. "
+            "Single-click any part or subassembly to inspect its properties."
+        )
+        cad_model_tree(
+            roots=roots,
+            selected_id=selected_node_id,
+            key=cad_tree_key,
+            on_select_node=on_cad_tree_select,
+        )
+
+    with tab_expanders:
+        st.caption("Native Streamlit collapsible hierarchy. Click any group header to expand its subassemblies.")
+        col_c1, col_c2 = st.columns([2, 1])
+        with col_c1:
+            expand_all_native = st.checkbox(
+                "Expand all subassembly groups",
+                value=False,
+                key="model_tree_native_expand_all",
+            )
+        with col_c2:
+            st.caption(f"{len(roots)} root assembly group(s)")
+
+        def render_expander_branch(node: dict[str, Any], expand_all: bool) -> None:
+            has_children = bool(node.get("children"))
+            d = node["depth"]
+            is_active = node["id"] == selected_node_id
+
+            if not node["in_catalog"]:
+                status_txt = "🛑 Missing from Catalog"
+            elif not node["in_fishbone"]:
+                status_txt = "⚠️ Missing from Fishbone"
+            else:
+                sec_lbl = ", ".join(node["fishbone_sections"])
+                status_txt = f"✅ Placed: {sec_lbl}"
+
+            if has_children:
+                sub_count = len(node["children"])
+                expander_title = (
+                    f"📁 L{d} [{node['child_tracker'] or '—'}] {node['part_number']} — {node['description']} "
+                    f"(×{node['quantity']}) · {sub_count} sub-items"
+                )
+                with st.expander(expander_title, expanded=expand_all):
+                    c_btn, c_badge = st.columns([1.2, 4])
+                    with c_btn:
+                        if st.button("Inspect properties", key=f"exp_insp_{node['id']}", type="primary" if is_active else "secondary"):
+                            st.session_state["selected_model_tree_node_id"] = node["id"]
+                            st.rerun()
+                    with c_badge:
+                        st.caption(f"Status: {status_txt} · Tracker #{node['child_tracker']}")
+
+                    for child in node["children"]:
+                        render_expander_branch(child, expand_all)
+            else:
+                indent_px = max(0, (d - 1) * 16)
+                c_item, c_act = st.columns([5, 1])
+                with c_item:
+                    st.markdown(
+                        f"<div style='padding-left:{indent_px}px; font-family:monospace; font-size:0.88rem; line-height:28px;'>"
+                        f"📄 <strong>L{d}</strong> [{node['child_tracker'] or '—'}] "
+                        f"<strong>{node['part_number']}</strong> &mdash; {node['description']} "
+                        f"<span style='color:#666;'>&times;{node['quantity']}</span> "
+                        f"<small style='margin-left:6px;'>[{status_txt}]</small>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                with c_act:
+                    if st.button("Inspect", key=f"leaf_insp_{node['id']}", type="primary" if is_active else "secondary"):
+                        st.session_state["selected_model_tree_node_id"] = node["id"]
+                        st.rerun()
+
+        with st.container(height=560):
+            for r in roots:
+                render_expander_branch(r, expand_all_native)
 
     with tab_table:
         if not filtered_nodes:
@@ -172,11 +270,6 @@ with col_browser:
 
             df_display = pd.DataFrame(table_rows)
 
-            # Determine currently selected row index
-            initial_selected = []
-            if selected_node_id in row_id_mapping:
-                initial_selected = [row_id_mapping.index(selected_node_id)]
-
             event = st.dataframe(
                 df_display,
                 selection_mode="single-row",
@@ -194,49 +287,6 @@ with col_browser:
                     if new_sel_id != st.session_state.get("selected_model_tree_node_id"):
                         st.session_state["selected_model_tree_node_id"] = new_sel_id
                         st.rerun()
-
-    with tab_tree:
-        if not filtered_nodes:
-            st.info("No items match the active search and status filter.")
-        else:
-            st.caption("Click any item to view its details in the Properties panel.")
-            # Render scrollable hierarchy list
-            with st.container(height=560):
-                for n in filtered_nodes:
-                    d = n["depth"]
-                    is_active = n["id"] == selected_node_id
-                    indent_px = (d - 1) * 20
-
-                    # Status tag
-                    if not n["in_catalog"]:
-                        status_tag = ":red[**[Missing from Catalog]**]"
-                    elif n["in_fishbone"]:
-                        status_tag = f":green[**[Placed: {', '.join(n['fishbone_sections'])}]**]"
-                    else:
-                        status_tag = ":orange[**[Missing from Fishbone]**]"
-
-                    c_indent, c_btn = st.columns([1, 10])
-                    has_children = len(n["children"]) > 0
-                    icon = "📁" if has_children else "📄"
-
-                    btn_label = f"{icon} L{d} | {n['part_number']} — {n['description']} (qty: {n['quantity']}) {status_tag}"
-                    btn_type = "primary" if is_active else "secondary"
-
-                    # Indented row with selection button
-                    col_item, col_act = st.columns([5, 1])
-                    with col_item:
-                        st.markdown(
-                            f"<div style='padding-left: {indent_px}px; font-family: monospace; font-size: 0.9rem;'>"
-                            f"<strong>{icon} L{d}</strong> [{n['child_tracker'] or '—'}] "
-                            f"<strong>{n['part_number']}</strong> &mdash; {n['description']} "
-                            f"<span style='color: #888;'>&times;{n['quantity']}</span> "
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
-                    with col_act:
-                        if st.button("Inspect", key=f"insp_{n['id']}", type=btn_type):
-                            st.session_state["selected_model_tree_node_id"] = n["id"]
-                            st.rerun()
 
 # 6. Properties Inspector Panel (Right Column)
 with col_props:
