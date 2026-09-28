@@ -14847,3 +14847,166 @@ def update_fishbone_assignment_use(
             _conn=conn,
         )
 
+
+def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[str, Any]:
+    """Retrieve the PITS BOM tree structure with reconciliation status against Parts Catalog and Fishbone.
+
+    Returns a dict containing:
+      - 'roots': list of root node dicts (hierarchically containing 'children')
+      - 'nodes': flat list of all nodes in tree traversal order
+      - 'metrics': dict with counts of total, placed_fishbone, missing_fishbone, missing_catalog
+      - 'target_model': model number if filtered by model, else None
+    """
+    with connection() as conn:
+        occ_rows = conn.execute(
+            """
+            SELECT o.id, o.proposed_depth, o.parent_tracker_number, o.child_tracker_number,
+                   o.parent_part_id, o.child_part_id, o.proposed_quantity, o.raw_quantity_text,
+                   o.source_row, o.review_status, o.source_state,
+                   p.part_number, p.description, p.weight_lb, p.make_buy,
+                   p.technology_engineer, p.source_code, p.model_applicability,
+                   p.official_windchill_part_name
+            FROM pits_bom_occurrences o
+            LEFT JOIN parts p ON p.id = o.child_part_id
+            WHERE o.project_id = ?
+            ORDER BY o.source_row
+            """,
+            (project_id,),
+        ).fetchall()
+
+        if not occ_rows:
+            return {
+                "roots": [],
+                "nodes": [],
+                "metrics": {
+                    "total": 0,
+                    "placed_fishbone": 0,
+                    "missing_fishbone": 0,
+                    "missing_catalog": 0,
+                },
+                "target_model": None,
+            }
+
+        fb_rows = conn.execute(
+            """
+            SELECT a.part_id, s.name as section_name, a.use_description, a.quantity
+            FROM fishbone_part_assignments a
+            JOIN assembly_sections s ON s.id = a.section_id
+            WHERE a.project_id = ?
+            """,
+            (project_id,),
+        ).fetchall()
+
+        fb_by_part: dict[str, list[dict[str, Any]]] = {}
+        for r in fb_rows:
+            pid = str(r["part_id"])
+            if pid not in fb_by_part:
+                fb_by_part[pid] = []
+            fb_by_part[pid].append({
+                "section": r["section_name"],
+                "use": r["use_description"],
+                "quantity": r["quantity"],
+            })
+
+        all_nodes: list[dict[str, Any]] = []
+        children_map: dict[str, list[dict[str, Any]]] = {}
+
+        for r in occ_rows:
+            pid = str(r["child_part_id"]) if r["child_part_id"] else None
+            in_catalog = pid is not None
+            fb_info = fb_by_part.get(pid, []) if pid else []
+            in_fishbone = len(fb_info) > 0
+
+            p_num = r["part_number"] or (
+                f"Uncataloged (Tracker #{r['child_tracker_number']})" if r["child_tracker_number"] else "—"
+            )
+            p_desc = r["description"] or "—"
+
+            node: dict[str, Any] = {
+                "id": str(r["id"]),
+                "depth": int(r["proposed_depth"] or 1),
+                "parent_tracker": str(r["parent_tracker_number"] or "").strip(),
+                "child_tracker": str(r["child_tracker_number"] or "").strip(),
+                "part_number": p_num,
+                "description": p_desc,
+                "quantity": r["proposed_quantity"] if r["proposed_quantity"] is not None else (r["raw_quantity_text"] or 1),
+                "raw_quantity_text": str(r["raw_quantity_text"] or ""),
+                "in_catalog": in_catalog,
+                "in_fishbone": in_fishbone,
+                "fishbone_sections": [x["section"] for x in fb_info],
+                "fishbone_uses": [x["use"] for x in fb_info if x["use"]],
+                "weight_lb": r["weight_lb"],
+                "make_buy": r["make_buy"],
+                "technology_engineer": r["technology_engineer"],
+                "source_code": r["source_code"],
+                "official_name": r["official_windchill_part_name"],
+                "model_applicability": r["model_applicability"],
+                "source_state": r["source_state"],
+                "review_status": r["review_status"],
+                "source_row": r["source_row"],
+                "children": [],
+            }
+            all_nodes.append(node)
+            p_tr = node["parent_tracker"]
+            if p_tr not in children_map:
+                children_map[p_tr] = []
+            children_map[p_tr].append(node)
+
+        for node in all_nodes:
+            c_tr = node["child_tracker"]
+            if c_tr in children_map:
+                node["children"] = children_map[c_tr]
+
+        roots = [n for n in all_nodes if not n["parent_tracker"] or n["depth"] == 1]
+
+        target_model = None
+        if model_id and model_id != "all":
+            m_row = conn.execute(
+                "SELECT model_number FROM project_models WHERE id=? AND project_id=?",
+                (model_id, project_id),
+            ).fetchone()
+            if m_row:
+                target_model = m_row["model_number"]
+
+        filtered_roots = roots
+        if target_model:
+            clean_m = re.sub(r"[^A-Za-z0-9]", "", target_model).upper()
+            matched = [
+                r
+                for r in roots
+                if clean_m in re.sub(r"[^A-Za-z0-9]", "", r["description"]).upper()
+                or clean_m in re.sub(r"[^A-Za-z0-9]", "", r["part_number"]).upper()
+                or (len(clean_m) >= 6 and clean_m[:6] in re.sub(r"[^A-Za-z0-9]", "", r["description"]).upper())
+            ]
+            if matched:
+                filtered_roots = matched
+
+        reachable_nodes: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        def collect(n: dict[str, Any]) -> None:
+            if n["id"] in seen_ids:
+                return
+            seen_ids.add(n["id"])
+            reachable_nodes.append(n)
+            for c in n["children"]:
+                collect(c)
+
+        for r in filtered_roots:
+            collect(r)
+
+        metrics = {
+            "total": len(reachable_nodes),
+            "placed_fishbone": sum(1 for n in reachable_nodes if n["in_fishbone"]),
+            "missing_fishbone": sum(1 for n in reachable_nodes if not n["in_fishbone"]),
+            "missing_catalog": sum(1 for n in reachable_nodes if not n["in_catalog"]),
+        }
+
+        return {
+            "roots": filtered_roots,
+            "nodes": reachable_nodes,
+            "metrics": metrics,
+            "target_model": target_model,
+        }
+
+

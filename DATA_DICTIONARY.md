@@ -845,34 +845,28 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 - **Deferred interaction:** Whether or how this scoped workflow will eventually reconcile with the dormant MBOM-review confirmation workflow remains **BLOCKED / TBD**. The occurrence workflow does not read, write, replace, or extend `fishbone_nodes`.
 - **Approval status:** Approved by the project owner and implemented on September 24, 2026. The active Import/Export Projects path parses Tracker, Models, and BOM with one workbook reader, previews every hierarchy issue with its exact Excel row and available Tracker, part, description, Level, expected-parent, and quantity context, imports the snapshot atomically, opens the default-selected non-dismissible review dialog, provides the persistent per-occurrence approval/rejection/escalation queue, and records PITS BOM structure History.
 
-### Model BOM Tree screen (Assembly Grid replacement)
+### View-Only PITS Model Tree (CAD Browser Reference)
 
-- **Proposed by:** Project owner
-- **Date recorded:** September 25, 2026
-- **Purpose:** Replace the existing Assembly Grid page with a new tree-based screen that lets an Industrial Engineer pick a model and see its real product structure as a readable, indented parent-child tree - mimicking the PITS BOM tab's structure but made human-readable - built from already-approved Fishbone and Parts Catalog data. The new screen also becomes the primary place to review and approve PITS BOM structure occurrences (see the separately recorded "PITS BOM-tab structure import" entry), replacing the need to work through a separate Exchange-page queue for that task.
-- **Rollout decision:** Hard cutover. Assembly Grid (app_pages/assemblies.py) will be removed from active navigation once the new screen covers the must-have set below, rather than running in parallel. This is a deliberate project-owner decision, not a default assumption.
-- **Screen name and navigation placement:** The new screen is named "BOM Tree" in navigation, replacing "Assembly Grid" in the same "Product structure" navigation group and position. "BOM Tree" is a new canonical navigation label; confirm it does not conflict with any existing entry in the DESIGN_SYSTEM.md Canonical Terminology Glossary before implementation, and add it to that glossary if not already present.
-- **Must-have scope for initial cutover release:**
-  1. Select a model and view its real approved product-structure tree in indented parent/child form, sourced from existing assembly_sections, fishbone_part_assignments, and manufacturing_assembly_components data - not from raw unapproved PITS staging data.
-  2. The PITS BOM structure review queue (approve/reject/escalate occurrences) is available directly within this screen, replacing its current location as a separate expander on the Import/Export Projects page.
-  3. Built section and Installed section assignment for Gxxx-format assembly-group occurrences remains an explicit, required manual Industrial Engineer decision, consistent with the already-approved PITS BOM-tab structure import design.
-  4. Quantity is displayed read-only in this screen, automatically synchronized from PITS BOM data, showing the existing "Updated from PITS on [date]" traceability label where applicable. This screen does not introduce a new quantity-editing path.
-  5. Use / installation location remains editable where applicable.
-  6. Category-to-model mapping (assigning a real assembly number to each official model within a Fishbone-section category) remains available, preserving this core existing Assembly Grid capability.
-  7. Approval interaction pattern: Unapproved PITS occurrences appear inline within the tree with a visibly distinct "Needs review" indicator and an inline Approve action on the row itself. For ordinary parts requiring no additional decision, clicking Approve commits immediately with no dialog or panel. For Gxxx-format assembly-group occurrences that still require a Built section and/or Installed section decision, the row expands in place (accordion-style, directly below itself within the tree) to reveal the Built/Installed section controls and an Approve action; the row collapses back to its normal compact appearance once approved. This inline pattern replaces the separate review-queue-style interaction for approval purposes within this screen.
-- **Explicitly deferred to a fast-follow release (temporarily unavailable immediately after cutover):**
-  - Nested completed-subassembly reuse across multiple parent assemblies (the existing many-to-many mini-BOM nesting behavior).
-  - The protected "Top-level packaged unit" row and its Built-section synchronization behavior.
-  - Primary and supplemental CAD images.
-  - Make / buy field editing.
-  - Full relationship-aware deletion workflows, including confirmed merge, cascade, and multi-level move/reassign/delete behavior currently in Assembly Grid.
-- **Connections and relationship to the critical thread:** This screen sits at the Fishbone/Assembly Grid position in the critical thread (Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance) and directly depends on the separately recorded PITS BOM-tab structure import design. It does not change the underlying data already captured in assembly_sections, fishbone_part_assignments, manufacturing_assembly_components, parts, or pits_bom_occurrences; this is a UI/workflow redesign over existing data, not a new data model.
-- **Scope:** Project-wide, consistent with the existing project-wide scope of Fishbone, Parts Catalog, and Assembly Grid data.
-- **Explicitly deferred / not yet decided:**
-  - app_pages/assemblies.py will be marked legacy and unlinked from active navigation following the existing assembly_sequence.py precedent, rather than deleted, once the BOM Tree screen covers the must-have scope. Exact timing of that navigation removal relative to BOM Tree's initial release is still to be confirmed.
-  - Whether and how the deferred fast-follow items (subassembly reuse, top-level packaged unit row, images, Make/buy, full deletion workflows) will be added back, and in what order.
-  - Applicable DESIGN_SYSTEM.md standards for the new screen's table, save, deletion, audit, and history behavior have not yet been individually confirmed against this specific layout.
-- **Approval status:** Design and must-have scope approved in principle by the project owner through direct conversation, including the explicit hard-cutover rollout decision. Detailed UI layout, navigation changes, and file structure have not yet been scoped or built. This entry is the required pre-implementation record. Implementation must not begin until the project owner explicitly authorizes moving from this recorded proposal into a build session.
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** September 28, 2026
+- **Purpose:** Provide a dedicated view-only Model Tree screen inspired by CAD model browsers (e.g., Autodesk/Creo viewer reference), derived directly from the imported PITS BOM tab structure and using its recorded Levels (Level 1–11 via `proposed_depth` and tracker parentage) to build an expandable visual tree. It is interactive by official model, showing the product architecture hierarchy and flagging gap discrepancies—specifically highlighting parts on the tree that are missing from the Parts Catalog and/or missing from the Fishbone diagram (not placed into any Fishbone section).
+- **Navigation placement & coexistence:** Placed as a separate page named "Model Tree" in the "Product structure" navigation group, keeping the existing "Assembly grid" page intact and active.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `project_models` (Model selection), `pits_bom_occurrences` (raw Level 1–11 PITS hierarchy, tracker numbers, and quantities), `parts` (Parts Catalog master data and model applicability), and `fishbone_part_assignments` (Fishbone framework placement and sections).
+  2. *Critical thread relationship:* Connects raw Product Architecture/PITS evidence (`pits_bom_occurrences`) to the Parts Catalog (`parts`) and Fishbone diagram (`fishbone_part_assignments`). It functions as an inspection and reconciliation tool to identify parts in the engineering BOM that have not yet been onboarded into the Parts Catalog or assigned to any Fishbone section.
+  3. *Scope:* Project-wide, consistent with the project-wide scope of PITS BOM evidence, Parts Catalog, and Fishbone framework structure.
+  4. *Table requirement:* No new database table required. Reads directly from existing tables: `pits_bom_occurrences`, `parts`, `fishbone_part_assignments`, `assembly_sections`, and `project_models`.
+  5. *Applicable DESIGN_SYSTEM.md standards:* Scope badge `page_title_with_scope("Model Tree", scope="project")`; Canonical terminology ("Official model number", "Parts Catalog", "Fishbone section"); view-only layout with split Model Browser tree on the left and Properties inspector panel on the right matching the CAD viewer reference; no edit/save/delete buttons required.
+- **Core capabilities:**
+  1. *Official model filter:* Select an official model to display only the tree branches and parts applicable to that specific model according to PITS BOM data.
+  2. *CAD browser tree layout (Left panel):* Expandable/collapsible hierarchy tree with search (`Search Model Browser`), node depth indentation matching PITS Levels, Level indicator, part number, description, and status badges.
+  3. *Reconciliation flags on tree nodes:*
+     - `:material/error:` `Missing from Parts Catalog` (if part number does not exist in `parts`).
+     - `:material/warning:` `Missing from Fishbone` (if part exists in `parts`, but has 0 `fishbone_part_assignments` for the project).
+     - `:material/check_circle:` `Placed: [Section Name]` (if placed into Fishbone).
+  4. *Properties inspector panel (Right panel):* When a tree node is clicked, displays its metadata: Part number, Description, Level, PITS Tracker Number, PITS Quantity, Catalog status (Make/Buy, Technology Engineer, etc.), and Fishbone placement details (Section, Use / installation location).
+  5. *Summary metrics header:* Displays total nodes in model tree, count placed in Fishbone, count missing from Fishbone, and count missing from Parts Catalog.
+- **Status:** Implemented on September 28, 2026; pending project-owner manual verification.
 
 ### Parts Catalog engineering fields
 
