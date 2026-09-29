@@ -12,14 +12,15 @@ from utils.table_ui import editable_table_footer, editable_table_heading
 
 
 def render_functional_review_shell(
-    *, title: str, description: str, key_prefix: str
+    *, title: str, description: str, key_prefix: str, show_title: bool = True
 ) -> None:
     """Render a non-persistent Functional Reviews placeholder page."""
     project_id = st.session_state.get("project_id")
     if not project_id:
         st.stop()
 
-    page_title_with_scope(title, scope="project")
+    if show_title:
+        page_title_with_scope(title, scope="project")
     st.caption(description)
     st.info(
         "This page is a shell. Review fields and permanent storage will be defined in a future step.",

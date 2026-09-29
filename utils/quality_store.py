@@ -183,9 +183,9 @@ def _validate_new_requirement_type(
 
 
 def _store_module():
-    # Import lazily so utils.store can initialize this module's schema without a
+    # Import lazily so db_core can initialize this module's schema without a
     # circular import during module loading.
-    from utils import store
+    from utils import db_core as store
 
     return store
 
@@ -620,6 +620,10 @@ def quality_requirements(project_id: str) -> pd.DataFrame:
                    WHERE detail.project_id=requirement.project_id
                      AND detail.quality_requirement_id=requirement.id
                   ) AS torque_detail_count,
+                  (SELECT COUNT(*) FROM equipment_torque_requirement_links equipment_link
+                   WHERE equipment_link.project_id=requirement.project_id
+                     AND equipment_link.quality_requirement_id=requirement.id
+                  ) AS equipment_torque_link_count,
                   ((SELECT COUNT(*) FROM pfmea_pattern_prevention_sources source
                     JOIN pfmea_patterns pattern ON pattern.id=source.pattern_id
                     WHERE pattern.project_id=requirement.project_id
@@ -646,6 +650,7 @@ def quality_requirements(project_id: str) -> pd.DataFrame:
             "assignment_count",
             "pending_assignment_count",
             "torque_detail_count",
+            "equipment_torque_link_count",
             "pfmea_pattern_reference_count",
         ],
     )
@@ -891,6 +896,10 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
                         WHERE detail.project_id=requirement.project_id
                           AND detail.quality_requirement_id=requirement.id
                        ) AS torque_detail_count,
+                       (SELECT COUNT(*) FROM equipment_torque_requirement_links equipment_link
+                        WHERE equipment_link.project_id=requirement.project_id
+                          AND equipment_link.quality_requirement_id=requirement.id
+                       ) AS equipment_torque_link_count,
                        ((SELECT COUNT(*) FROM pfmea_pattern_prevention_sources source
                          JOIN pfmea_patterns pattern ON pattern.id=source.pattern_id
                          WHERE pattern.project_id=requirement.project_id
@@ -914,6 +923,9 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
             )
         linked_count = sum(int(row["assignment_count"]) for row in rows)
         torque_detail_count = sum(int(row["torque_detail_count"]) for row in rows)
+        equipment_torque_link_count = sum(
+            int(row["equipment_torque_link_count"]) for row in rows
+        )
         pattern_reference_count = sum(
             int(row["pfmea_pattern_reference_count"]) for row in rows
         )
@@ -924,6 +936,11 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
         if torque_detail_count:
             raise ValueError(
                 f"Delete {torque_detail_count} linked Torque tool detail record(s) before deleting."
+            )
+        if equipment_torque_link_count:
+            raise ValueError(
+                f"Remove {equipment_torque_link_count} installed Torque equipment link(s) "
+                "before deleting."
             )
         if pattern_reference_count:
             raise ValueError(

@@ -21,9 +21,38 @@ specifications for the project.
   requirements in its read-only list, choose the setting, and use **Apply to
   selected**. Save or undo ordinary repository edits first.
 
-Torque requirements can also use the project-wide **Torque tool details** area.
+Torque requirements can also use **Quality → Equipment → Torque requirement
+specifications**.
 Requirement Types are maintained separately under **Manage Quality requirement
 types**.
+"""
+
+
+EQUIPMENT_HELP = """
+Use **Equipment** to maintain physical equipment used by the Quality review.
+
+- **All equipment** shows every shared equipment record attached to Quality.
+  Each applicable Equipment Type also has its own chart.
+- Shared fields—Equipment name, Equipment Type, Description, Manufacturer,
+  Model, and Notes—stay synchronized when the same equipment is attached to
+  another Functional Review.
+- Select equipment to manage its primary image and its placement for the active
+  scenario. A placement may be **Unassigned** or use one Station / Pitch.
+- Process Function links are optional and must belong to the saved Station /
+  Pitch. If upstream Process Functions move, use the displayed reconciliation
+  guidance rather than creating a duplicate equipment record.
+- In the **Torque tool** chart, installed tools can link to several saved Torque
+  Quality requirements. Published target, tolerance, unit, tool type,
+  orientation, and screw-bit values remain read-only source information.
+- **Torque requirement specifications** maintains the requirement-level tool
+  details formerly shown in Requirements repository. It does not create a
+  physical installed tool automatically.
+- Use **Add existing equipment** to attach a shared project record to Quality.
+  Removing it from Quality removes only that association; permanent deletion is
+  available from the top-level Equipment page.
+
+Equipment changes use Current editor attribution and appear in Equipment
+History. Viewing, filtering, and exporting do not write data.
 """
 
 
@@ -109,22 +138,145 @@ Leave Classification blank when the line has not yet been classified.
 """,
     ),
     (
-        "Patterns, duplication, and faster entry",
+        "PFMEA pattern overview",
         """
-- **Add PFMEA lines** can stage blank or patterned graphs for one or several
-  Process Functions. Its preview shows Item #, Process context, analysis counts,
-  compatible controls, and any omitted sources before staging.
-- A project-wide PFMEA pattern can suggest Failure Mode, Effects, Causes,
-  Recommended Actions, Classification, and ordered control sources. It never
-  supplies ratings, RPN, responsibility, completion evidence, or resulting
-  values, and generated PFMEA rows retain no pattern lineage.
+A PFMEA pattern is a reviewed, project-wide starting point for analysis that is
+expected to recur. Applying one to a Process Function creates a new,
+scenario-specific PFMEA graph; it does not connect the saved PFMEA back to the
+pattern.
+
+A pattern can retain:
+
+- A Potential Failure Mode and optional Suggested Classification.
+- Ordered Effects and Causes.
+- Cause-specific Recommended Actions.
+- Ordered Prevention and Detection control suggestions.
+
+A pattern never retains Severity, Occurrence, Detection, RPN, Responsibility &
+Target Completion Date, Actions Taken, resulting ratings, or Resulting RPN.
+Those values require a fresh review for the selected Process Function. Later
+pattern edits, deactivation, or deletion never modify PFMEA graphs that were
+already created from it.
+""",
+    ),
+    (
+        "Create or edit a pattern",
+        """
+Open **Manage PFMEA patterns** below the PFMEA line-items table.
+
+1. Use the pattern filters to search Label or Potential Failure Mode and filter
+   by Active state or Suggested Classification. **Export filtered patterns**
+   downloads the filtered catalog without hidden identifiers.
+2. Under **Pattern to edit**, choose **Create new pattern** or an existing
+   pattern.
+3. Complete the pattern header:
+   - **Label** is required and must be unique within the project, ignoring
+     capitalization.
+   - **Notes** optionally explain when or why the pattern should be used.
+   - **Potential Failure Mode** is required and becomes the staged Failure Mode.
+   - **Suggested Classification** may be Unclassified or one of the approved
+     PFMEA Classification codes. It is a starting suggestion, not an approval.
+   - **Active** controls whether the pattern is available under **Add PFMEA
+     lines**. An inactive pattern remains stored and can still be reviewed or
+     edited in the manager.
+4. Enter **Effects** and **Causes**, with one entry per line. Blank lines
+   are ignored, and the displayed top-to-bottom order becomes the saved order.
+5. Each Cause creates its own bordered section. Enter **Recommended Actions**,
+   with one entry per line, then choose its ordered **Prevention suggestions** and
+   **Detection suggestions**. Suggestions can reference project-wide Quality
+   requirement definitions or the corresponding manual control catalog.
+6. **Undo** reloads the saved pattern values. Enter a nonblank **Current editor**
+   and select **Save & Refresh** to save the complete pattern graph atomically
+   and record one PFMEA History event.
+
+The pattern table itself is a read-only catalog and deletion-selection surface;
+use **Pattern to edit** for content changes rather than typing into the catalog
+rows.
+""",
+    ),
+    (
+        "Create a pattern from a saved PFMEA line",
+        """
+Use **Save a PFMEA line as a pattern** inside **Manage PFMEA patterns** when a
+saved PFMEA graph is a useful reusable starting point.
+
+1. First use the PFMEA table's **Save & Refresh** or **Undo**, and clear any
+   native deletion selection. Capture is disabled while the PFMEA table has an
+   unsaved draft or selected deletion rows.
+2. Choose exactly one **Saved PFMEA line**.
+3. Enter a required, project-unique **New pattern label** and optional **New
+   pattern notes**.
+4. Review the capture preview for Failure Mode, Effect, Cause, Recommended
+   Action, control-suggestion, and Classification counts.
+5. Enter a nonblank **Current editor** and select **Save selected PFMEA line as
+   pattern**.
+
+Capture copies the reusable Failure Mode graph, Suggested Classification, and
+eligible control sources. Quality selections are converted to their reusable
+project-wide Quality requirement definitions; the scenario assignment and
+Process Function are not copied. Inactive or unavailable controls are omitted
+and disclosed. Ratings, RPN, responsibility, completion evidence, Actions
+Taken, and resulting values are never stored in the new pattern.
+""",
+    ),
+    (
+        "Apply a pattern to PFMEA lines",
+        """
+Open **Add PFMEA lines** above **Select Current Process Controls** and the PFMEA
+line-items table.
+
+1. Select one or more **Process Functions**. Choices follow the established
+   live Op ID order, and selecting them does not stage or save data.
+2. For each Process Function, choose **Blank PFMEA line** or an active pattern.
+3. Review the preview. It shows Item #, Process Function, pattern, Failure Mode,
+   Effect/Cause/Action counts, compatible Prevention and Detection suggestions,
+   and any source that will be omitted.
+4. Select **Stage PFMEA lines**. Each choice creates a fresh, independent
+   session-only PFMEA graph and appends it to the existing PFMEA draft. The flat
+   table can show several rows when the graph contains several Effects, Causes,
+   or Cause-specific Actions.
+5. Review the staged analysis, enter fresh Severity, Occurrence, and Detection
+   ratings, and adjust operation-specific text or controls as needed.
+6. Use the PFMEA table's **Save & Refresh** to validate and persist the complete
+   draft. Use the PFMEA table's **Undo** to discard the staged graphs.
+
+**Stage PFMEA lines** performs no database write and creates no History event.
+Only the normal PFMEA **Save & Refresh** persists the generated graphs and
+records the save. Generated PFMEA entries keep no stored pattern lineage.
+""",
+    ),
+    (
+        "How pattern controls are handled",
+        """
+- A Quality requirement is copied into the PFMEA only when it has already been
+  published to the selected Process Function in the current scenario. Applying
+  a pattern never creates, publishes, or moves a Quality requirement.
+- A manual control is copied only when it is **Active** and is in the correct
+  Prevention or Detection list. An inactive control already saved in a pattern
+  stays visible so you can remove it, but it is not copied into new PFMEA lines.
+- The preview lists any controls that cannot be used. Those controls are left
+  out. This means the same pattern may copy different controls to different
+  Process Functions.
+- If a Quality requirement or manual control is used by a pattern, remove it
+  from the pattern and save before deleting that requirement or control.
+- To delete a pattern, select it in the pattern list and use **Delete row(s)**.
+  Confirming deletes the pattern only. PFMEA lines previously created from it
+  are not deleted or changed.
+- Creating, changing, activating, deactivating, or deleting a pattern is
+  recorded in PFMEA History with the Current editor. Previewing or staging a
+  pattern is not recorded because nothing has been saved yet.
+""",
+    ),
+    (
+        "Duplicate PFMEA lines",
+        """
 - **Duplicate selected PFMEA line** creates an independent unsaved line next to
   the source. It copies approved analysis, initial ratings, Classification,
   Actions, and compatible active controls while clearing Actions Taken and all
   resulting ratings/RPN values.
-- **Save selected PFMEA line as pattern** captures one saved graph after a
-  preview. It excludes ratings, completion evidence, resulting values, and
-  inactive controls.
+- Duplication is different from a pattern: it copies one current line inside
+  the active scenario and can retain its initial ratings, while patterns are
+  project-wide reusable guidance and always leave ratings blank.
 """,
     ),
     (
@@ -171,60 +323,10 @@ Leave Classification blank when the line has not yet been classified.
   deletion discloses affected selections and marks affected Causes for review.
   An option referenced by a pattern cannot be deleted until that reference is
   removed.
-- **Manage PFMEA patterns** maintains reusable pattern headers, Effects,
-  Causes, Recommended Actions, Classification suggestions, and ordered control
-  suggestions. It provides filtering, export, Undo, Save & Refresh, and
-  confirmed deletion. Deleting a pattern never deletes PFMEA rows previously
-  created from it.
 """,
     ),
 )
 
-
-PFMEA_HELP = """
-Use **PFMEA** to document scenario-specific failure analysis for Process at a
-Glance work.
-
-- For a new line, choose **Process Function** from the active scenario's Work
-  Elements. The friendly choice shows the current derived Op ID followed by
-  the Work Element; the internal relationship stays hidden. Complete choices
-  follow the curated Fishbone and Yamazumi physical order, while incomplete
-  Op IDs remain selectable at the end. After the first **Save & Refresh**, the
-  Process Function is locked in the normal editor.
-- **Item #** is read-only. It automatically shows the selected Process
-  Function's current Pitch; it is not a separately entered identifier.
-- Enter **Severity**, **Occurrence**, and **Detection** as ratings from 1 through
-  10. **RPN** is Severity × Occurrence × Detection. Resulting RPN uses the three
-  Resulting ratings. A calculation stays blank until all three inputs exist.
-- **Recalculate RPN** refreshes Initial and Resulting RPN from the current
-  unsaved ratings without saving the PFMEA. **Save & Refresh** also recalculates
-  and persists the current results.
-- **Current Process Controls — Prevention** and **Current Process Controls —
-  Detection** combine published Quality requirements linked to that Process
-  step with active choices from the corresponding project-wide manual control
-  catalog. The selections remain staged with the PFMEA draft until **Save &
-  Refresh**.
-- **High-risk PFMEA lines** is read-only. It shows a line when either RPN or
-  Resulting RPN is greater than the entered review threshold and lists the
-  highest current risk first. The threshold is a view filter, not an approval
-  limit and not a stored scoring rule.
-
-### Classification codes
-
-| Code | Meaning |
-| --- | --- |
-| S | Critical to Product Safety |
-| R | Regulatory |
-| E | Engineering CTQ |
-| P | Process CTQ |
-| P- | Process CTQ done at qualification |
-| Q | Quality Specific |
-| E- | Engineering CTQ at qualification |
-| M | Maintain Control |
-| PM | Preventative Maintenance |
-
-Leave Classification blank when the line has not yet been classified.
-"""
 
 # Backward-compatible combined content for read-only consumers outside the
 # dialog. The dialog itself renders the quick start and collapsed sections.
