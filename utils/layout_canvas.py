@@ -252,19 +252,31 @@ export default function(component) {
 
   const imgW = Number(data.imageWidth || 1000)
   const imgH = Number(data.imageHeight || 800)
-  const pxPerIn = Number(data.scalePxPerIn || 1.0)
+  const pxPerInX = Number(data.scalePxPerInX || data.scalePxPerIn || 1.0)
+  const pxPerInY = Number(data.scalePxPerInY || data.scalePxPerIn || 1.0)
   const unit = String(data.unit || "feet")
 
   const unitFactor = (unit === "feet") ? 12.0 : (unit === "yards" ? 36.0 : (unit === "miles" ? 63360.0 : 1.0))
 
-  function pxToDisplay(px) {
-    const inches = px / pxPerIn
-    const val = inches / unitFactor
+  function formatNum(val) {
+    if (Math.abs(val - Math.round(val)) < 0.005) {
+      return Math.round(val).toString()
+    }
     return val >= 10 ? val.toFixed(1) : val.toFixed(2)
   }
 
-  function formatDim(px) {
-    return `${pxToDisplay(px)} ${unit}`
+  function pxToDisplayX(px) {
+    const inches = px / pxPerInX
+    return formatNum(inches / unitFactor)
+  }
+
+  function pxToDisplayY(px) {
+    const inches = px / pxPerInY
+    return formatNum(inches / unitFactor)
+  }
+
+  function formatDim(w, h) {
+    return `${pxToDisplayX(w)} × ${pxToDisplayY(h)} ${unit}`
   }
 
   // Update background image
@@ -277,7 +289,7 @@ export default function(component) {
   }
 
   // Scale badge
-  scaleBadge.textContent = `${imgW}×${imgH} px · 1 ${unit} = ${(pxPerIn * unitFactor).toFixed(1)} px`
+  scaleBadge.textContent = `${imgW}×${imgH} px · 1 ${unit} = ${(pxPerInX * unitFactor).toFixed(1)} px`
 
   // Build arrow marker in defs
   defs.replaceChildren()
@@ -323,14 +335,68 @@ export default function(component) {
     return ""
   }
 
+  function updateGroupGeometry(group, s) {
+    if (!group) return
+    const titleEl = group.querySelector("title")
+    if (titleEl) titleEl.textContent = `${s.label || s.shape_type} (${formatDim(s.width, s.height)})`
+
+    const geomEl = group.querySelector(".layout-geom")
+    if (geomEl) {
+      if (s.shape_type === "rectangle") {
+        geomEl.setAttribute("x", s.x)
+        geomEl.setAttribute("y", s.y)
+        geomEl.setAttribute("width", Math.max(0.5, s.width))
+        geomEl.setAttribute("height", Math.max(0.5, s.height))
+      } else if (s.shape_type === "circle") {
+        const r = Math.max(0.5, Math.min(s.width, s.height) / 2)
+        geomEl.setAttribute("cx", s.x + s.width / 2)
+        geomEl.setAttribute("cy", s.y + s.height / 2)
+        geomEl.setAttribute("r", r)
+      } else if (s.shape_type === "oval") {
+        geomEl.setAttribute("cx", s.x + s.width / 2)
+        geomEl.setAttribute("cy", s.y + s.height / 2)
+        geomEl.setAttribute("rx", Math.max(0.5, s.width / 2))
+        geomEl.setAttribute("ry", Math.max(0.5, s.height / 2))
+      } else if (s.shape_type === "triangle" || s.shape_type === "hexagon") {
+        geomEl.setAttribute("points", getShapePoints(s))
+      } else if (s.shape_type === "arrow") {
+        const cy = s.y + s.height / 2
+        geomEl.setAttribute("x1", s.x)
+        geomEl.setAttribute("y1", cy)
+        geomEl.setAttribute("x2", s.x + s.width)
+        geomEl.setAttribute("y2", cy)
+      } else if (s.shape_type === "text") {
+        geomEl.setAttribute("x", s.x + 4)
+        geomEl.setAttribute("y", s.y + 14)
+      }
+    }
+    const pill = group.querySelector(".layout-pill")
+    const textEl = group.querySelector(".layout-text")
+    if (pill || textEl) {
+      const cx = s.x + s.width / 2
+      const cy = s.y + s.height / 2
+      if (pill) {
+        const pw = parseFloat(pill.getAttribute("width") || "10")
+        const ph = parseFloat(pill.getAttribute("height") || "10")
+        pill.setAttribute("x", cx - pw / 2)
+        pill.setAttribute("y", cy - ph / 2)
+      }
+      if (textEl) {
+        textEl.setAttribute("x", cx)
+        textEl.setAttribute("y", cy + 3)
+      }
+    }
+  }
+
   function renderHandles(targetShape) {
     handlesLayer.replaceChildren()
     if (!targetShape) return
     const selBox = svgEl("rect", {
+      class: "layout-selbox",
       x: targetShape.x,
       y: targetShape.y,
-      width: targetShape.width,
-      height: targetShape.height,
+      width: Math.max(1, targetShape.width),
+      height: Math.max(1, targetShape.height),
       fill: "none",
       stroke: "#1976d2",
       "stroke-width": 1.5,
@@ -340,18 +406,19 @@ export default function(component) {
     handlesLayer.appendChild(selBox)
 
     const badge = svgEl("text", {
+      class: "layout-dim-badge",
       x: targetShape.x + targetShape.width / 2,
-      y: targetShape.y - 8,
+      y: Math.max(12, targetShape.y - 6),
       "text-anchor": "middle",
-      "font-size": 11,
+      "font-size": 10,
       "font-weight": "600",
       fill: "#1976d2",
       "pointer-events": "none"
     })
-    badge.textContent = `${formatDim(targetShape.width)} × ${formatDim(targetShape.height)}`
+    badge.textContent = formatDim(targetShape.width, targetShape.height)
     handlesLayer.appendChild(badge)
 
-    const handleSize = 8
+    const handleSize = Math.max(4, Math.min(8, Math.max(targetShape.width, targetShape.height) * 0.4))
     const handles = [
       { type: "nw", x: targetShape.x - handleSize/2, y: targetShape.y - handleSize/2 },
       { type: "ne", x: targetShape.x + targetShape.width - handleSize/2, y: targetShape.y - handleSize/2 },
@@ -371,14 +438,51 @@ export default function(component) {
       handleEl.onpointerdown = (event) => {
         event.stopPropagation()
         state.resizingHandle = { handle: h.type, shape: targetShape }
+        state.hasMoved = false
         state.dragStartX = event.clientX
         state.dragStartY = event.clientY
         state.shapeStart = { x: targetShape.x, y: targetShape.y, width: targetShape.width, height: targetShape.height }
-        svg.setPointerCapture(event.pointerId)
+        try { svg.setPointerCapture(event.pointerId) } catch (e) {}
       }
 
       handlesLayer.appendChild(handleEl)
     })
+  }
+
+  function updateHandlesGeometry(targetShape) {
+    if (!targetShape) {
+      handlesLayer.replaceChildren()
+      return
+    }
+    const selBox = handlesLayer.querySelector(".layout-selbox")
+    if (selBox) {
+      selBox.setAttribute("x", targetShape.x)
+      selBox.setAttribute("y", targetShape.y)
+      selBox.setAttribute("width", Math.max(1, targetShape.width))
+      selBox.setAttribute("height", Math.max(1, targetShape.height))
+    }
+    const badge = handlesLayer.querySelector(".layout-dim-badge")
+    if (badge) {
+      badge.setAttribute("x", targetShape.x + targetShape.width / 2)
+      badge.setAttribute("y", Math.max(12, targetShape.y - 6))
+      badge.textContent = formatDim(targetShape.width, targetShape.height)
+    }
+    const handleSize = Math.max(4, Math.min(8, Math.max(targetShape.width, targetShape.height) * 0.4))
+    const coords = {
+      nw: { x: targetShape.x - handleSize/2, y: targetShape.y - handleSize/2 },
+      ne: { x: targetShape.x + targetShape.width - handleSize/2, y: targetShape.y - handleSize/2 },
+      se: { x: targetShape.x + targetShape.width - handleSize/2, y: targetShape.y + targetShape.height - handleSize/2 },
+      sw: { x: targetShape.x - handleSize/2, y: targetShape.y + targetShape.height - handleSize/2 }
+    }
+    for (const [type, pos] of Object.entries(coords)) {
+      const hEl = handlesLayer.querySelector(`.layout-handle.${type}`)
+      if (hEl) {
+        hEl.setAttribute("x", pos.x)
+        hEl.setAttribute("y", pos.y)
+        hEl.setAttribute("width", handleSize)
+        hEl.setAttribute("height", handleSize)
+      }
+    }
   }
 
   shapes.forEach(s => {
@@ -410,15 +514,20 @@ export default function(component) {
       group.setAttribute("transform", `rotate(${s.rotation} ${s.x + s.width / 2} ${s.y + s.height / 2})`)
     }
 
+    const titleEl = svgEl("title")
+    titleEl.textContent = `${s.label || s.shape_type} (${formatDim(s.width, s.height)})`
+    group.appendChild(titleEl)
+
     let geomEl = null
 
     if (s.shape_type === "rectangle") {
       geomEl = svgEl("rect", {
+        class: "layout-geom",
         x: s.x,
         y: s.y,
-        width: Math.max(10, s.width),
-        height: Math.max(10, s.height),
-        rx: "4",
+        width: Math.max(0.5, s.width),
+        height: Math.max(0.5, s.height),
+        rx: "2",
         fill: fillColor,
         "fill-opacity": fillOpacity,
         stroke: strokeColor,
@@ -426,8 +535,9 @@ export default function(component) {
         "stroke-dasharray": dashArray
       })
     } else if (s.shape_type === "circle") {
-      const r = Math.max(5, Math.min(s.width, s.height) / 2)
+      const r = Math.max(0.5, Math.min(s.width, s.height) / 2)
       geomEl = svgEl("circle", {
+        class: "layout-geom",
         cx: s.x + s.width / 2,
         cy: s.y + s.height / 2,
         r: r,
@@ -439,10 +549,11 @@ export default function(component) {
       })
     } else if (s.shape_type === "oval") {
       geomEl = svgEl("ellipse", {
+        class: "layout-geom",
         cx: s.x + s.width / 2,
         cy: s.y + s.height / 2,
-        rx: Math.max(5, s.width / 2),
-        ry: Math.max(5, s.height / 2),
+        rx: Math.max(0.5, s.width / 2),
+        ry: Math.max(0.5, s.height / 2),
         fill: fillColor,
         "fill-opacity": fillOpacity,
         stroke: strokeColor,
@@ -451,6 +562,7 @@ export default function(component) {
       })
     } else if (s.shape_type === "triangle" || s.shape_type === "hexagon") {
       geomEl = svgEl("polygon", {
+        class: "layout-geom",
         points: getShapePoints(s),
         fill: fillColor,
         "fill-opacity": fillOpacity,
@@ -461,24 +573,25 @@ export default function(component) {
     } else if (s.shape_type === "arrow") {
       const cy = s.y + s.height / 2
       geomEl = svgEl("line", {
+        class: "layout-geom",
         x1: s.x,
         y1: cy,
         x2: s.x + s.width,
         y2: cy,
         stroke: strokeColor,
-        "stroke-width": Math.max(4, strokeWidth * 2),
+        "stroke-width": Math.max(2, strokeWidth * 2),
         "stroke-dasharray": dashArray,
         "marker-end": "url(#arrow-head)"
       })
     } else if (s.shape_type === "text") {
-      // Background pill if requested
       if (style.bg_pill) {
         const bgPill = svgEl("rect", {
+          class: "layout-pill",
           x: s.x,
           y: s.y,
-          width: Math.max(20, s.width),
-          height: Math.max(20, s.height),
-          rx: "4",
+          width: Math.max(10, s.width),
+          height: Math.max(8, s.height),
+          rx: "2",
           fill: fillColor,
           "fill-opacity": fillOpacity || 0.8,
           stroke: strokeColor,
@@ -487,8 +600,9 @@ export default function(component) {
         group.appendChild(bgPill)
       }
       geomEl = svgEl("text", {
-        x: s.x + 8,
-        y: s.y + fontSize + 4,
+        class: "layout-geom",
+        x: s.x + 4,
+        y: s.y + fontSize,
         "font-size": fontSize,
         "font-family": "sans-serif",
         "font-weight": fontWeight,
@@ -504,52 +618,67 @@ export default function(component) {
       const cx = s.x + s.width / 2
       const cy = s.y + s.height / 2
       
-      if (style.bg_pill) {
-        const estW = s.label.length * (fontSize * 0.6) + 12
-        const estH = fontSize + 8
-        const pill = svgEl("rect", {
-          x: cx - estW / 2,
-          y: cy - estH / 2,
-          width: estW,
-          height: estH,
-          rx: "4",
-          fill: "#ffffff",
-          "fill-opacity": 0.88,
-          stroke: strokeColor,
-          "stroke-width": 1
-        })
-        group.appendChild(pill)
+      const requestedFontSize = Number(style.font_size || 11)
+      let effFontSize = requestedFontSize
+      if (s.height > 0 && effFontSize > s.height * 0.75) {
+        effFontSize = Math.max(5, s.height * 0.75)
+      }
+      if (s.width > 0 && (s.label.length * effFontSize * 0.55) > s.width) {
+        effFontSize = Math.max(5, (s.width * 0.95) / (s.label.length * 0.55))
       }
 
-      const textEl = svgEl("text", {
-        x: cx,
-        y: cy + (fontSize * 0.35),
-        "text-anchor": "middle",
-        "font-size": fontSize,
-        "font-family": "sans-serif",
-        "font-weight": fontWeight,
-        fill: fontColor,
-        "pointer-events": "none"
-      })
-      textEl.textContent = s.label
-      group.appendChild(textEl)
+      if (s.width >= 10 && s.height >= 8 && effFontSize >= 5) {
+        if (style.bg_pill) {
+          const estW = Math.min(s.width, s.label.length * (effFontSize * 0.6) + 4)
+          const estH = Math.min(s.height, effFontSize + 3)
+          const pill = svgEl("rect", {
+            class: "layout-pill",
+            x: cx - estW / 2,
+            y: cy - estH / 2,
+            width: estW,
+            height: estH,
+            rx: "2",
+            fill: "#ffffff",
+            "fill-opacity": 0.85,
+            stroke: strokeColor,
+            "stroke-width": 0.75
+          })
+          group.appendChild(pill)
+        }
+
+        const textEl = svgEl("text", {
+          class: "layout-text",
+          x: cx,
+          y: cy + (effFontSize * 0.35),
+          "text-anchor": "middle",
+          "font-size": effFontSize.toFixed(1),
+          "font-family": "sans-serif",
+          "font-weight": fontWeight,
+          fill: fontColor,
+          "pointer-events": "none"
+        })
+        textEl.textContent = s.label
+        group.appendChild(textEl)
+      }
     }
 
     // Interactive shape selection & dragging
     group.onpointerdown = (event) => {
       event.stopPropagation()
       state.draggingShape = s
+      state.hasMoved = false
       state.dragStartX = event.clientX
       state.dragStartY = event.clientY
       state.shapeStart = { x: s.x, y: s.y, width: s.width, height: s.height }
 
       if (state.selectedId !== s.id) {
         state.selectedId = s.id
-        if (setTriggerValue) {
-          setTriggerValue("select_shape", { shape_id: s.id })
-        }
+        shapesLayer.querySelectorAll(".layout-shape").forEach(el => {
+          el.classList.toggle("selected", el.getAttribute("data-id") === s.id)
+        })
+        renderHandles(s)
       }
-      svg.setPointerCapture(event.pointerId)
+      try { svg.setPointerCapture(event.pointerId) } catch (e) {}
       updateSelectionHud(s)
     }
 
@@ -566,7 +695,7 @@ export default function(component) {
       hudShapeInfo.textContent = ""
       return
     }
-    hudShapeInfo.textContent = `Selected: ${s.label || s.shape_type} [${formatDim(s.width)} × ${formatDim(s.height)}]`
+    hudShapeInfo.textContent = `Selected: ${s.label || s.shape_type} [${formatDim(s.width, s.height)}]`
   }
 
   // Viewport transforms (Pan & Zoom)
@@ -620,9 +749,11 @@ export default function(component) {
       state.panningX = event.clientX
       state.panningY = event.clientY
       svg.classList.add("dragging")
-      svg.setPointerCapture(event.pointerId)
+      try { svg.setPointerCapture(event.pointerId) } catch (e) {}
       if (state.selectedId) {
         state.selectedId = ""
+        shapesLayer.querySelectorAll(".layout-shape").forEach(el => el.classList.remove("selected"))
+        handlesLayer.replaceChildren()
         updateSelectionHud(null)
         if (setTriggerValue) {
           setTriggerValue("select_shape", { shape_id: "" })
@@ -635,7 +766,7 @@ export default function(component) {
     const rect = svg.getBoundingClientRect()
     const worldX = (event.clientX - rect.left - state.x) / state.scale
     const worldY = (event.clientY - rect.top - state.y) / state.scale
-    hudCoords.textContent = `X: ${pxToDisplay(worldX)} ${unit}, Y: ${pxToDisplay(worldY)} ${unit}`
+    hudCoords.textContent = `X: ${pxToDisplayX(worldX)} ${unit}, Y: ${pxToDisplayY(worldY)} ${unit}`
 
     if (state.isPanning) {
       state.x += event.clientX - state.panningX
@@ -646,6 +777,9 @@ export default function(component) {
     } else if (state.draggingShape && state.shapeStart) {
       const dx = (event.clientX - state.dragStartX) / state.scale
       const dy = (event.clientY - state.dragStartY) / state.scale
+      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+        state.hasMoved = true
+      }
       const s = state.draggingShape
       let newX = Math.round(state.shapeStart.x + dx)
       let newY = Math.round(state.shapeStart.y + dy)
@@ -727,64 +861,37 @@ export default function(component) {
       s.x = newX
       s.y = newY
 
-      // re-render shapes & handles
       const group = shapesLayer.querySelector(`[data-id="${s.id}"]`)
-      if (group) {
-        const rectEl = group.querySelector("rect, circle, ellipse, polygon, line, text")
-        if (rectEl) {
-          if (s.shape_type === "rectangle") {
-            rectEl.setAttribute("x", s.x)
-            rectEl.setAttribute("y", s.y)
-          } else if (s.shape_type === "circle" || s.shape_type === "oval") {
-            rectEl.setAttribute("cx", s.x + s.width / 2)
-            rectEl.setAttribute("cy", s.y + s.height / 2)
-          } else if (s.shape_type === "triangle" || s.shape_type === "hexagon") {
-            rectEl.setAttribute("points", getShapePoints(s))
-          } else if (s.shape_type === "arrow") {
-            rectEl.setAttribute("x1", s.x)
-            rectEl.setAttribute("y1", s.y + s.height / 2)
-            rectEl.setAttribute("x2", s.x + s.width)
-            rectEl.setAttribute("y2", s.y + s.height / 2)
-          } else if (s.shape_type === "text") {
-            rectEl.setAttribute("x", s.x + 8)
-            rectEl.setAttribute("y", s.y + 18)
-          }
-        }
-      }
-      renderHandles(s)
+      if (group) updateGroupGeometry(group, s)
+      updateHandlesGeometry(s)
       updateSelectionHud(s)
     } else if (state.resizingHandle && state.shapeStart) {
       const dx = (event.clientX - state.dragStartX) / state.scale
       const dy = (event.clientY - state.dragStartY) / state.scale
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+        state.hasMoved = true
+      }
       const { handle, shape } = state.resizingHandle
       if (handle === "se") {
-        shape.width = Math.max(10, Math.round(state.shapeStart.width + dx))
-        shape.height = Math.max(10, Math.round(state.shapeStart.height + dy))
+        shape.width = Math.max(0.5, Math.round((state.shapeStart.width + dx) * 10) / 10)
+        shape.height = Math.max(0.5, Math.round((state.shapeStart.height + dy) * 10) / 10)
       } else if (handle === "sw") {
-        shape.x = Math.round(state.shapeStart.x + dx)
-        shape.width = Math.max(10, Math.round(state.shapeStart.width - dx))
-        shape.height = Math.max(10, Math.round(state.shapeStart.height + dy))
+        shape.x = Math.round((state.shapeStart.x + dx) * 10) / 10
+        shape.width = Math.max(0.5, Math.round((state.shapeStart.width - dx) * 10) / 10)
+        shape.height = Math.max(0.5, Math.round((state.shapeStart.height + dy) * 10) / 10)
       } else if (handle === "ne") {
-        shape.y = Math.round(state.shapeStart.y + dy)
-        shape.width = Math.max(10, Math.round(state.shapeStart.width + dx))
-        shape.height = Math.max(10, Math.round(state.shapeStart.height - dy))
+        shape.y = Math.round((state.shapeStart.y + dy) * 10) / 10
+        shape.width = Math.max(0.5, Math.round((state.shapeStart.width + dx) * 10) / 10)
+        shape.height = Math.max(0.5, Math.round((state.shapeStart.height - dy) * 10) / 10)
       } else if (handle === "nw") {
-        shape.x = Math.round(state.shapeStart.x + dx)
-        shape.y = Math.round(state.shapeStart.y + dy)
-        shape.width = Math.max(10, Math.round(state.shapeStart.width - dx))
-        shape.height = Math.max(10, Math.round(state.shapeStart.height - dy))
+        shape.x = Math.round((state.shapeStart.x + dx) * 10) / 10
+        shape.y = Math.round((state.shapeStart.y + dy) * 10) / 10
+        shape.width = Math.max(0.5, Math.round((state.shapeStart.width - dx) * 10) / 10)
+        shape.height = Math.max(0.5, Math.round((state.shapeStart.height - dy) * 10) / 10)
       }
       const group = shapesLayer.querySelector(`[data-id="${shape.id}"]`)
-      if (group) {
-        const rectEl = group.querySelector("rect, circle, ellipse, polygon, line, text")
-        if (rectEl && shape.shape_type === "rectangle") {
-          rectEl.setAttribute("x", shape.x)
-          rectEl.setAttribute("y", shape.y)
-          rectEl.setAttribute("width", shape.width)
-          rectEl.setAttribute("height", shape.height)
-        }
-      }
-      renderHandles(shape)
+      if (group) updateGroupGeometry(group, shape)
+      updateHandlesGeometry(shape)
       updateSelectionHud(shape)
     }
   }
@@ -797,35 +904,58 @@ export default function(component) {
     }
     if (state.draggingShape) {
       const s = state.draggingShape
+      const hasMoved = Boolean(state.hasMoved)
       state.draggingShape = null
       state.shapeStart = null
-      if (setTriggerValue) {
-        setTriggerValue("shape_moved", {
-          shape_id: s.id,
-          x: s.x,
-          y: s.y,
-          width: s.width,
-          height: s.height
-        })
+      state.hasMoved = false
+
+      if (hasMoved) {
+        state.selectedId = s.id
+        renderHandles(s)
+        updateSelectionHud(s)
+        if (setTriggerValue) {
+          setTriggerValue("shape_moved", {
+            shape_id: s.id,
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height
+          })
+        }
+      } else {
+        // Pure click to select without moving
+        if (setTriggerValue) {
+          setTriggerValue("select_shape", { shape_id: s.id })
+        }
       }
     }
     if (state.resizingHandle) {
       const s = state.resizingHandle.shape
+      const hasMoved = Boolean(state.hasMoved)
       state.resizingHandle = null
       state.shapeStart = null
-      if (setTriggerValue) {
-        setTriggerValue("shape_moved", {
-          shape_id: s.id,
-          x: s.x,
-          y: s.y,
-          width: s.width,
-          height: s.height
-        })
+      state.hasMoved = false
+
+      if (hasMoved) {
+        state.selectedId = s.id
+        renderHandles(s)
+        updateSelectionHud(s)
+        if (setTriggerValue) {
+          setTriggerValue("shape_moved", {
+            shape_id: s.id,
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height
+          })
+        }
       }
     }
-    if (svg.hasPointerCapture(event.pointerId)) {
-      svg.releasePointerCapture(event.pointerId)
-    }
+    try {
+      if (svg.hasPointerCapture(event.pointerId)) {
+        svg.releasePointerCapture(event.pointerId)
+      }
+    } catch (e) {}
   }
 
   // Toolbar button listeners
@@ -870,7 +1000,7 @@ export default function(component) {
 """
 
 _LAYOUT_CANVAS = st.components.v2.component(
-    "paag_layout_canvas_v2",
+    "paag_layout_canvas_v4",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -907,6 +1037,8 @@ def layout_canvas(
     shapes: list[dict[str, Any]],
     selected_shape_id: str | None = None,
     *,
+    scale_factor_px_per_in_x: float | None = None,
+    scale_factor_px_per_in_y: float | None = None,
     key: str,
     on_select_shape: Callable[[], None] | None = None,
     on_shape_moved: Callable[[], None] | None = None,
@@ -915,6 +1047,8 @@ def layout_canvas(
 
     Falls back safely if executed outside a browser context (e.g. headless unit tests).
     """
+    spx_x = float(scale_factor_px_per_in_x if scale_factor_px_per_in_x is not None else scale_factor_px_per_in)
+    spx_y = float(scale_factor_px_per_in_y if scale_factor_px_per_in_y is not None else scale_factor_px_per_in)
     try:
         return _LAYOUT_CANVAS(
             key=key,
@@ -922,7 +1056,9 @@ def layout_canvas(
                 "imageUrl": image_url,
                 "imageWidth": int(image_width),
                 "imageHeight": int(image_height),
-                "scalePxPerIn": float(scale_factor_px_per_in),
+                "scalePxPerIn": spx_x,
+                "scalePxPerInX": spx_x,
+                "scalePxPerInY": spx_y,
                 "unit": str(unit),
                 "shapes": shapes,
                 "selectedShapeId": str(selected_shape_id or ""),

@@ -934,6 +934,8 @@ def get_pitch_layout_footprints(project_id: str, scenario_id: str) -> list[dict[
                 r.image_width_px,
                 r.image_height_px,
                 (CAST(r.image_width_px AS REAL) / r.scale_width_in) AS scale_px_per_in,
+                (CAST(r.image_width_px AS REAL) / r.scale_width_in) AS scale_px_per_in_x,
+                (CAST(r.image_height_px AS REAL) / r.scale_height_in) AS scale_px_per_in_y,
                 l.id AS layout_id,
                 l.name AS layout_name
             FROM layout_shapes s

@@ -200,7 +200,8 @@ elif view_mode == "2D Plant Spatial Map":
         layout_name = sample_fp["layout_name"]
         rev_num = sample_fp["revision_number"]
         unit = str(sample_fp["unit"] or "feet")
-        px_per_in = float(sample_fp["scale_px_per_in"] or 1.0)
+        px_per_in_x = float(sample_fp.get("scale_px_per_in_x") or sample_fp.get("scale_px_per_in") or 1.0)
+        px_per_in_y = float(sample_fp.get("scale_px_per_in_y") or sample_fp.get("scale_px_per_in") or 1.0)
         img_w = int(sample_fp["image_width_px"] or 1200)
         img_h = int(sample_fp["image_height_px"] or 800)
         img_path = Path(str(sample_fp["image_path"]))
@@ -229,19 +230,18 @@ elif view_mode == "2D Plant Spatial Map":
             p_name = clean_text(fp["pitch_name"])
             p_id = str(fp["pitch_id"])
 
-            w_units = from_canonical_inches(fw / px_per_in if px_per_in > 0 else 0, unit)
-            h_units = from_canonical_inches(fh / px_per_in if px_per_in > 0 else 0, unit)
+            w_units = from_canonical_inches(fw / px_per_in_x if px_per_in_x > 0 else 0, unit)
+            h_units = from_canonical_inches(fh / px_per_in_y if px_per_in_y > 0 else 0, unit)
 
             p_work = visible.loc[(visible["pitch_id"].astype(str) == p_id) & visible["process_element_id"].notna()]
             ct_sum = pd.to_numeric(p_work["cycle_time_s"], errors="coerce").fillna(0).sum()
 
+            font_size = max(6.0, min(12.0, fh * 0.75, fw * 0.4))
             svg_rects.append(
                 f'<g class="station-node" transform="translate({fx},{fy})">'
-                f'<rect width="{fw}" height="{fh}" rx="4" fill="#e3f2fd" fill-opacity="0.8" stroke="#1565c0" stroke-width="2"/>'
-                f'<text x="{fw/2}" y="{min(20, fh/2)}" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="bold" fill="#0d47a1">{p_num}</text>'
-                f'<text x="{fw/2}" y="{min(36, fh/2 + 14)}" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#333">{p_name[:14]}</text>'
-                f'<rect x="{max(0, fw/2 - 45)}" y="{max(0, fh - 18)}" width="{min(fw, 90)}" height="14" rx="3" fill="#1976d2"/>'
-                f'<text x="{fw/2}" y="{max(10, fh - 7)}" text-anchor="middle" font-family="sans-serif" font-size="9" font-weight="bold" fill="#fff">{w_units:.1f}×{h_units:.1f} {unit} ({ct_sum:.0f}s)</text>'
+                f'<title>{p_num} - {p_name} ({w_units:.1f}×{h_units:.1f} {unit})</title>'
+                f'<rect width="{fw}" height="{fh}" rx="2" fill="#e3f2fd" fill-opacity="0.85" stroke="#1565c0" stroke-width="1.5"/>'
+                f'<text x="{fw/2}" y="{min(fh * 0.65, fh/2 + font_size * 0.35)}" text-anchor="middle" font-family="sans-serif" font-size="{font_size:.1f}" font-weight="bold" fill="#0d47a1">{p_num}</text>'
                 f'</g>'
             )
 
@@ -267,11 +267,10 @@ elif view_mode == "2D Plant Spatial Map":
             fx = float(fp["x"])
             fy = float(fp["y"])
             fw = float(fp["width"])
-            fh = float(fp["height"])
-            w_u = from_canonical_inches(fw / px_per_in if px_per_in > 0 else 0, unit)
-            h_u = from_canonical_inches(fh / px_per_in if px_per_in > 0 else 0, unit)
-            x_u = from_canonical_inches(fx / px_per_in if px_per_in > 0 else 0, unit)
-            y_u = from_canonical_inches(fy / px_per_in if px_per_in > 0 else 0, unit)
+            w_u = from_canonical_inches(fw / px_per_in_x if px_per_in_x > 0 else 0, unit)
+            h_u = from_canonical_inches(fh / px_per_in_y if px_per_in_y > 0 else 0, unit)
+            x_u = from_canonical_inches(fx / px_per_in_x if px_per_in_x > 0 else 0, unit)
+            y_u = from_canonical_inches(fy / px_per_in_y if px_per_in_y > 0 else 0, unit)
 
             process_rows = visible.loc[
                 (visible["pitch_id"].astype(str) == p_id)

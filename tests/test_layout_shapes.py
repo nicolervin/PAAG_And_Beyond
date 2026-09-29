@@ -93,6 +93,34 @@ class LayoutShapesMathTests(unittest.TestCase):
             self.assertGreaterEqual(preset["fill_opacity"], 0.0)
             self.assertLessEqual(preset["fill_opacity"], 1.0)
 
+    def test_dual_axis_scaling_and_subpixel_precision(self) -> None:
+        # User scenario: 800x133 px layout representing 680x80 ft
+        w_in = 680.0 * 12.0  # 8160 in
+        h_in = 80.0 * 12.0   # 960 in
+        px_per_in_x = 800.0 / w_in
+        px_per_in_y = 133.0 / h_in
+
+        # 4 ft by 2 ft pitch standards
+        pitch_w_ft = 4.0
+        pitch_h_ft = 2.0
+        w_px = _units_to_px(pitch_w_ft, px_per_in_x, "feet")
+        h_px = _units_to_px(pitch_h_ft, px_per_in_y, "feet")
+
+        # Must not be clamped to 24px or distorted to 20.4 ft
+        self.assertAlmostEqual(w_px, 4.71, places=2)
+        self.assertAlmostEqual(h_px, 3.33, places=2)
+
+        read_w_ft = _px_to_units(w_px, px_per_in_x, "feet")
+        read_h_ft = _px_to_units(h_px, px_per_in_y, "feet")
+        self.assertAlmostEqual(read_w_ft, 4.0, places=2)
+        self.assertAlmostEqual(read_h_ft, 2.0, places=2)
+
+        # Custom shape: 10 ft by 5 ft
+        custom_w_px = _units_to_px(10.0, px_per_in_x, "feet")
+        custom_h_px = _units_to_px(5.0, px_per_in_y, "feet")
+        self.assertAlmostEqual(_px_to_units(custom_w_px, px_per_in_x, "feet"), 10.0, places=2)
+        self.assertAlmostEqual(_px_to_units(custom_h_px, px_per_in_y, "feet"), 5.0, places=2)
+
 
 class LayoutShapesStoreTests(unittest.TestCase):
     """Test shape persistence, style JSON serialization, and revision copy-forward."""
@@ -439,6 +467,92 @@ class LayoutShapesAppSmokeTests(unittest.TestCase):
         app2.run(timeout=30)
         self.assertEqual([], list(app2.exception))
 
+    def test_drag_resize_shape_persistence_and_inspector_sync(self) -> None:
+        """Verify that dragging handles to resize and repositioning shapes persists through save."""
+        from utils.layout_ui import _px_to_units, _units_to_px
+
+        px_per_in_x = 0.8  # e.g. 800 px / (100 ft * 12) = 0.667 px/in
+        px_per_in_y = 1.0  # e.g. 500 px / (50 ft * 12)
+        unit = "feet"
+
+        init_w_px = _units_to_px(10.0, px_per_in_x, unit)
+        init_h_px = _units_to_px(10.0, px_per_in_y, unit)
+
+        shape_id = str(uuid4())
+        shape = {
+            "id": shape_id,
+            "shape_type": "rectangle",
+            "label": "Machine Cell A",
+            "x": 100.0,
+            "y": 100.0,
+            "width": init_w_px,
+            "height": init_h_px,
+            "rotation": 0.0,
+            "color": "#1976D2",
+        }
+        draft_shapes = [shape]
+
+        # 1. User drags corners out to 25.0 ft width and 15.0 ft height, and moves to (220, 180)
+        dragged_w_px = _units_to_px(25.0, px_per_in_x, unit)
+        dragged_h_px = _units_to_px(15.0, px_per_in_y, unit)
+        dragged_x = 220.0
+        dragged_y = 180.0
+
+        # Simulate shape_moved callback updating draft and inspector state
+        shape["x"] = dragged_x
+        shape["y"] = dragged_y
+        shape["width"] = dragged_w_px
+        shape["height"] = dragged_h_px
+
+        # Synchronize inspector keys as handle_shape_moved does
+        insp_w_val = float(round(_px_to_units(shape["width"], px_per_in_x, unit), 2))
+        insp_h_val = float(round(_px_to_units(shape["height"], px_per_in_y, unit), 2))
+        self.assertAlmostEqual(insp_w_val, 25.0, places=1)
+        self.assertAlmostEqual(insp_h_val, 15.0, places=1)
+
+        # Inspector re-renders:
+        sw_units = _px_to_units(float(shape["width"]), px_per_in_x, unit)
+        sh_units = _px_to_units(float(shape["height"]), px_per_in_y, unit)
+        cur_w_units = float(round(sw_units, 2))
+        cur_h_units = float(round(sh_units, 2))
+
+        # Because inspector inputs match insp_w_val, user did not edit inspector inputs
+        new_w_units = insp_w_val
+        new_h_units = insp_h_val
+        w_changed_in_inspector = abs(float(new_w_units) - cur_w_units) > 0.001
+        h_changed_in_inspector = abs(float(new_h_units) - cur_h_units) > 0.001
+
+        self.assertFalse(w_changed_in_inspector)
+        self.assertFalse(h_changed_in_inspector)
+
+        # Target px retains the dragged dimensions
+        target_w_px = round(_units_to_px(new_w_units, px_per_in_x, unit), 2) if w_changed_in_inspector else float(shape["width"])
+        target_h_px = round(_units_to_px(new_h_units, px_per_in_y, unit), 2) if h_changed_in_inspector else float(shape["height"])
+        self.assertEqual(target_w_px, dragged_w_px)
+        self.assertEqual(target_h_px, dragged_h_px)
+
+        # 2. Save & Refresh persists the dragged shape to SQLite
+        layout_store.save_layout_shapes(
+            self.project_id, self.rev_id, draft_shapes, self.editor
+        )
+
+        # 3. Reload from database and verify persistence
+        saved = layout_store.list_layout_shapes(self.rev_id)
+        self.assertEqual(len(saved), 1)
+        saved_shape = saved[0]
+        self.assertEqual(saved_shape["id"], shape_id)
+        self.assertAlmostEqual(saved_shape["x"], 220.0)
+        self.assertAlmostEqual(saved_shape["y"], 180.0)
+        self.assertAlmostEqual(saved_shape["width"], dragged_w_px, places=1)
+        self.assertAlmostEqual(saved_shape["height"], dragged_h_px, places=1)
+
+        # Dimension calculation in units confirms the saved shape is 25 x 15 ft
+        reloaded_w_units = _px_to_units(saved_shape["width"], px_per_in_x, unit)
+        reloaded_h_units = _px_to_units(saved_shape["height"], px_per_in_y, unit)
+        self.assertAlmostEqual(reloaded_w_units, 25.0, places=1)
+        self.assertAlmostEqual(reloaded_h_units, 15.0, places=1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

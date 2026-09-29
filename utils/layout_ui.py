@@ -608,7 +608,8 @@ def _section_standards_dialog(
 @st.dialog("Add shape to floor plan", width="large")
 def _add_shape_dialog(
     active_rev: dict[str, Any],
-    px_per_in: float,
+    px_per_in_x: float,
+    px_per_in_y: float,
     unit: str,
     draft_shapes_key: str,
     has_unsaved_shapes_key: str,
@@ -645,7 +646,7 @@ def _add_shape_dialog(
     with cd1:
         w_units = st.number_input(
             f"Width ({unit})",
-            min_value=0.1,
+            min_value=0.01,
             value=float(preset["w_default"]),
             step=1.0,
             format="%.2f",
@@ -654,7 +655,7 @@ def _add_shape_dialog(
     with cd2:
         h_units = st.number_input(
             f"Height ({unit})",
-            min_value=0.1,
+            min_value=0.01,
             value=float(preset["h_default"]),
             step=1.0,
             format="%.2f",
@@ -669,9 +670,9 @@ def _add_shape_dialog(
         )
         st.metric("Scaled Area", f"{area_units:,.1f} {unit_area_label}")
 
-    w_px = max(15.0, _units_to_px(w_units, px_per_in, unit))
-    h_px = max(15.0, _units_to_px(h_units, px_per_in, unit))
-    st.caption(f":material/straighten: Equivalent image footprint: **{w_px:.0f} × {h_px:.0f} px**")
+    w_px = max(0.5, _units_to_px(w_units, px_per_in_x, unit))
+    h_px = max(0.5, _units_to_px(h_units, px_per_in_y, unit))
+    st.caption(f":material/straighten: Equivalent image footprint: **{w_px:.1f} × {h_px:.1f} px**")
 
     st.markdown("##### Visual Styling & Contrast")
     cs1, cs2, cs3 = st.columns(3)
@@ -744,7 +745,7 @@ def _add_shape_dialog(
     with pos_c1:
         x_units = st.number_input(
             f"X position ({unit})",
-            value=float(_px_to_units(center_x, px_per_in, unit)),
+            value=float(_px_to_units(center_x, px_per_in_x, unit)),
             step=1.0,
             format="%.1f",
             key="add_shape_x_units",
@@ -752,14 +753,14 @@ def _add_shape_dialog(
     with pos_c2:
         y_units = st.number_input(
             f"Y position ({unit})",
-            value=float(_px_to_units(center_y, px_per_in, unit)),
+            value=float(_px_to_units(center_y, px_per_in_y, unit)),
             step=1.0,
             format="%.1f",
             key="add_shape_y_units",
         )
 
-    pos_x_px = _units_to_px(x_units, px_per_in, unit)
-    pos_y_px = _units_to_px(y_units, px_per_in, unit)
+    pos_x_px = _units_to_px(x_units, px_per_in_x, unit)
+    pos_y_px = _units_to_px(y_units, px_per_in_y, unit)
 
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -767,6 +768,16 @@ def _add_shape_dialog(
             st.rerun()
     with col2:
         if st.button("Add shape to floor plan", type="primary", width="stretch", key="submit_add_shape"):
+            cur_w_units = float(st.session_state.get("add_shape_w_units", w_units))
+            cur_h_units = float(st.session_state.get("add_shape_h_units", h_units))
+            cur_x_units = float(st.session_state.get("add_shape_x_units", x_units))
+            cur_y_units = float(st.session_state.get("add_shape_y_units", y_units))
+
+            final_w_px = max(0.5, _units_to_px(cur_w_units, px_per_in_x, unit))
+            final_h_px = max(0.5, _units_to_px(cur_h_units, px_per_in_y, unit))
+            final_x_px = _units_to_px(cur_x_units, px_per_in_x, unit)
+            final_y_px = _units_to_px(cur_y_units, px_per_in_y, unit)
+
             new_shape_id = str(uuid4())
             style_dict = {
                 "stroke_color": stroke_color,
@@ -784,10 +795,10 @@ def _add_shape_dialog(
                 "revision_id": str(active_rev["id"]),
                 "shape_type": shape_type,
                 "label": label.strip(),
-                "x": round(pos_x_px, 1),
-                "y": round(pos_y_px, 1),
-                "width": round(w_px, 1),
-                "height": round(h_px, 1),
+                "x": round(final_x_px, 2),
+                "y": round(final_y_px, 2),
+                "width": round(final_w_px, 2),
+                "height": round(final_h_px, 2),
                 "rotation": 0.0,
                 "color": stroke_color,
                 "style_json": json.dumps(style_dict),
@@ -871,25 +882,38 @@ def _render_scale_bar_html(px_per_ft: float, unit: str) -> str:
         return ""
 
     if unit == "feet":
-        step_units = 10.0 if px_per_ft * 10.0 < 400 else 5.0
+        candidate_steps = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]
+        step_units = 50.0
+        for s in candidate_steps:
+            if s * px_per_ft >= 50:
+                step_units = s
+                break
         bar_px = px_per_ft * step_units
         unit_text = f"{step_units:g} ft"
     elif unit == "inches":
         px_per_in = px_per_ft / 12.0
-        step_units = 24.0 if px_per_in * 24.0 < 400 else 12.0
+        candidate_steps = [1.0, 6.0, 12.0, 24.0, 48.0, 120.0, 240.0, 600.0]
+        step_units = 12.0
+        for s in candidate_steps:
+            if s * px_per_in >= 50:
+                step_units = s
+                break
         bar_px = px_per_in * step_units
         unit_text = f"{step_units:g} in"
     elif unit == "yards":
+        px_per_yd = px_per_ft * 3.0
+        candidate_steps = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0]
         step_units = 5.0
-        bar_px = px_per_ft * 3.0 * step_units
+        for s in candidate_steps:
+            if s * px_per_yd >= 50:
+                step_units = s
+                break
+        bar_px = px_per_yd * step_units
         unit_text = f"{step_units:g} yd"
     else:
         step_units = 1.0
-        bar_px = px_per_ft * step_units
+        bar_px = max(20.0, px_per_ft * step_units)
         unit_text = f"{step_units:g} {unit}"
-
-    if bar_px < 20 or bar_px > 600:
-        bar_px = max(40.0, min(500.0, bar_px))
 
     return f"""
     <div style="display:flex; align-items:center; gap:12px; margin:6px 0 10px 0; font-size:0.8rem; color:#57606a;">
@@ -999,9 +1023,15 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
     h_px = int(active_rev["image_height_px"])
     unit = str(active_rev["unit"])
 
-    px_per_in = (w_px / w_in) if w_in > 0 else 0.0
-    in_per_px = (w_in / w_px) if w_px > 0 else 0.0
-    px_per_ft = px_per_in * 12.0
+    px_per_in_x = (w_px / w_in) if w_in > 0 else 0.0
+    px_per_in_y = (h_px / h_in) if h_in > 0 else 0.0
+    px_per_in = px_per_in_x
+    in_per_px_x = (w_in / w_px) if w_px > 0 else 0.0
+    in_per_px_y = (h_in / h_px) if h_px > 0 else 0.0
+    in_per_px = in_per_px_x
+    px_per_ft_x = px_per_in_x * 12.0
+    px_per_ft_y = px_per_in_y * 12.0
+    px_per_ft = px_per_ft_x
 
     # Scale Dashboard Cards
     with st.container(border=True):
@@ -1019,11 +1049,11 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                 help="Native pixel resolution of uploaded drawing",
             )
         with m3:
-            scale_label = f"1 px = {in_per_px:.2f} in" if in_per_px < 12 else f"1 px = {in_per_px/12:.2f} ft"
+            scale_label = f"1 px = {in_per_px_x:.2f} in" if in_per_px_x < 12 else f"1 px = {in_per_px_x/12:.2f} ft"
             st.metric(
                 "Layout Scale",
                 scale_label,
-                help=f"{px_per_ft:.2f} px / ft ({px_per_in:.3f} px / in)",
+                help=f"X: {px_per_ft_x:.2f} px/ft ({px_per_in_x:.3f} px/in) · Y: {px_per_ft_y:.2f} px/ft ({px_per_in_y:.3f} px/in)",
             )
         with m4:
             st.metric(
@@ -1034,7 +1064,7 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
             if active_rev["notes"]:
                 st.caption(f":material/notes: {active_rev['notes']}")
 
-        scale_bar_html = _render_scale_bar_html(px_per_ft, unit)
+        scale_bar_html = _render_scale_bar_html(px_per_ft_x, unit)
         if scale_bar_html:
             st.markdown(scale_bar_html, unsafe_allow_html=True)
 
@@ -1096,7 +1126,8 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                 ):
                     _add_shape_dialog(
                         active_rev=active_rev,
-                        px_per_in=px_per_in,
+                        px_per_in_x=px_per_in_x,
+                        px_per_in_y=px_per_in_y,
                         unit=unit,
                         draft_shapes_key=draft_shapes_key,
                         has_unsaved_shapes_key=has_unsaved_shapes_key,
@@ -1166,8 +1197,8 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                             ):
                                 w_in_canon = to_canonical_inches(std_w, unit)
                                 h_in_canon = to_canonical_inches(std_h, unit)
-                                w_px_calc = max(24, round(w_in_canon * px_per_in))
-                                h_px_calc = max(24, round(h_in_canon * px_per_in))
+                                w_px_calc = max(0.5, round(w_in_canon * px_per_in_x, 2))
+                                h_px_calc = max(0.5, round(h_in_canon * px_per_in_y, 2))
 
                                 # Calculate snap placement adjacent to previous pitch in this area
                                 same_area_placed = [
@@ -1179,31 +1210,31 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                                 ]
                                 if same_area_placed:
                                     prev_s = same_area_placed[-1]
-                                    new_x = prev_s["x"] + prev_s["width"]
-                                    new_y = prev_s["y"]
+                                    new_x = float(prev_s["x"]) + float(prev_s["width"])
+                                    new_y = float(prev_s["y"])
                                 else:
-                                    new_x = 100
-                                    new_y = 100 + len(draft_shapes) * 20
+                                    new_x = 50.0
+                                    new_y = 50.0 + len(draft_shapes) * max(10.0, float(h_px_calc) + 4.0)
 
                                 new_shape_id = str(uuid4())
                                 new_pitch_shape = {
                                     "id": new_shape_id,
                                     "revision_id": str(active_rev["id"]),
                                     "shape_type": "rectangle",
-                                    "x": int(new_x),
-                                    "y": int(new_y),
-                                    "width": int(w_px_calc),
-                                    "height": int(h_px_calc),
+                                    "x": round(new_x, 2),
+                                    "y": round(new_y, 2),
+                                    "width": round(w_px_calc, 2),
+                                    "height": round(h_px_calc, 2),
                                     "rotation": 0.0,
                                     "color": "#1976d2",
-                                    "label": f"{pitch['pitch_number']} - {pitch['pitch_name']}",
+                                    "label": str(pitch["pitch_number"]),
                                     "style_json": json.dumps({
                                         "stroke_color": "#1565c0",
-                                        "stroke_width": 2,
+                                        "stroke_width": 1.5,
                                         "stroke_style": "solid",
                                         "fill_color": "#e3f2fd",
                                         "fill_opacity": 0.6,
-                                        "font_size": 13,
+                                        "font_size": 11,
                                         "font_color": "#0d47a1",
                                         "font_weight": "bold",
                                         "bg_pill": True,
@@ -1226,7 +1257,19 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
         if not trigger and isinstance(state, dict):
             trigger = state.get("select_shape")
         if trigger and "shape_id" in trigger:
-            st.session_state[selected_shape_id_key] = trigger["shape_id"] or None
+            sel_id = trigger["shape_id"] or None
+            st.session_state[selected_shape_id_key] = sel_id
+            if sel_id:
+                draft = st.session_state.get(draft_shapes_key, [])
+                for s in draft:
+                    if s.get("id") == sel_id:
+                        w_u = float(round(_px_to_units(float(s.get("width", 0)), px_per_in_x, unit), 2))
+                        h_u = float(round(_px_to_units(float(s.get("height", 0)), px_per_in_y, unit), 2))
+                        st.session_state[f"insp_w_{sel_id}"] = w_u
+                        st.session_state[f"insp_h_{sel_id}"] = h_u
+                        st.session_state[f"insp_label_{sel_id}"] = s.get("label", "")
+                        st.session_state[f"insp_rot_{sel_id}"] = int(s.get("rotation", 0))
+                        break
 
     def handle_shape_moved() -> None:
         state = st.session_state.get(canvas_key)
@@ -1244,6 +1287,10 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                         s["width"] = float(trigger["width"])
                     if "height" in trigger:
                         s["height"] = float(trigger["height"])
+                    w_u = float(round(_px_to_units(float(s["width"]), px_per_in_x, unit), 2))
+                    h_u = float(round(_px_to_units(float(s["height"]), px_per_in_y, unit), 2))
+                    st.session_state[f"insp_w_{s_id}"] = w_u
+                    st.session_state[f"insp_h_{s_id}"] = h_u
                     break
             st.session_state[draft_shapes_key] = draft
             st.session_state[has_unsaved_shapes_key] = True
@@ -1260,7 +1307,9 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
         image_url=image_data_url,
         image_width=w_px,
         image_height=h_px,
-        scale_factor_px_per_in=px_per_in,
+        scale_factor_px_per_in=px_per_in_x,
+        scale_factor_px_per_in_x=px_per_in_x,
+        scale_factor_px_per_in_y=px_per_in_y,
         unit=unit,
         shapes=draft_shapes,
         selected_shape_id=selected_shape_id,
@@ -1282,8 +1331,8 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
             stype = selected_shape.get("shape_type", "rectangle")
             slabel = selected_shape.get("label") or selected_shape.get("shape_type") or "Annotation"
             icon = SHAPE_TYPE_ICONS.get(stype, "⏹️")
-            sw_units = _px_to_units(float(selected_shape.get("width", 0)), px_per_in, unit)
-            sh_units = _px_to_units(float(selected_shape.get("height", 0)), px_per_in, unit)
+            sw_units = _px_to_units(float(selected_shape.get("width", 0)), px_per_in_x, unit)
+            sh_units = _px_to_units(float(selected_shape.get("height", 0)), px_per_in_y, unit)
             sarea = _calculate_shape_area(stype, sw_units, sh_units)
             unit_area_label = (
                 "sq ft"
@@ -1468,8 +1517,21 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                         )
 
             # Check if inspector values changed and apply them to draft
-            target_w_px = round(_units_to_px(new_w_units, px_per_in, unit), 1)
-            target_h_px = round(_units_to_px(new_h_units, px_per_in, unit), 1)
+            cur_w_units = float(round(sw_units, 2))
+            cur_h_units = float(round(sh_units, 2))
+            w_changed_in_inspector = abs(float(new_w_units) - cur_w_units) > 0.001
+            h_changed_in_inspector = abs(float(new_h_units) - cur_h_units) > 0.001
+
+            target_w_px = (
+                round(_units_to_px(new_w_units, px_per_in_x, unit), 2)
+                if w_changed_in_inspector
+                else float(selected_shape.get("width", 0))
+            )
+            target_h_px = (
+                round(_units_to_px(new_h_units, px_per_in_y, unit), 2)
+                if h_changed_in_inspector
+                else float(selected_shape.get("height", 0))
+            )
 
             new_style_dict = {
                 "stroke_color": new_stroke,
@@ -1486,8 +1548,8 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
 
             inspector_changed = (
                 new_slabel != selected_shape.get("label", "")
-                or abs(target_w_px - float(selected_shape.get("width", 0))) > 0.5
-                or abs(target_h_px - float(selected_shape.get("height", 0))) > 0.5
+                or w_changed_in_inspector
+                or h_changed_in_inspector
                 or float(new_rot) != float(selected_shape.get("rotation", 0))
                 or new_stroke != cur_stroke
                 or new_thick != cur_thick
@@ -1524,8 +1586,8 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
             for s in draft_shapes:
                 stype = s.get("shape_type", "rectangle")
                 icon = SHAPE_TYPE_ICONS.get(stype, "⏹️")
-                sw_u = _px_to_units(float(s.get("width", 0)), px_per_in, unit)
-                sh_u = _px_to_units(float(s.get("height", 0)), px_per_in, unit)
+                sw_u = _px_to_units(float(s.get("width", 0)), px_per_in_x, unit)
+                sh_u = _px_to_units(float(s.get("height", 0)), px_per_in_y, unit)
                 area_u = _calculate_shape_area(stype, sw_u, sh_u)
                 unit_area_label = (
                     "sq ft"
