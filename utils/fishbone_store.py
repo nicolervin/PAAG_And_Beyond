@@ -366,6 +366,12 @@ def assembly_section_delete_impact(
         feature_visibility_preference_count = count_rows(
             "assembly_grid_feature_visibility"
         )
+        pits_bom_approved_occurrence_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM pits_bom_occurrences
+                WHERE project_id=? AND review_status='Approved'
+                  AND confirmed_section_id IN ({affected_placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
         assembly_reference_count = sum(
             int(str(row.get("built_section_id")) in affected_ids)
             + int(str(row.get("installed_section_id")) in affected_ids)
@@ -390,6 +396,7 @@ def assembly_section_delete_impact(
             "category_references": category_references,
             "feature_visibility_preference_count": feature_visibility_preference_count,
             "assembly_component_count": assembly_component_count,
+            "pits_bom_approved_occurrence_count": pits_bom_approved_occurrence_count,
             "requires_repointing": bool(
                 yamazumi_area_count
                 or process_link_count
@@ -431,6 +438,17 @@ def delete_assembly_sections(
                 WHERE project_id=? AND section_id IN ({placeholders})""",
             (project_id, *affected_ids),
         ).fetchone()[0])
+        pits_bom_approved_count = int(conn.execute(
+            f"""SELECT COUNT(*) FROM pits_bom_occurrences
+                WHERE project_id=? AND review_status='Approved'
+                  AND confirmed_section_id IN ({placeholders})""",
+            (project_id, *affected_ids),
+        ).fetchone()[0])
+        if pits_bom_approved_count:
+            raise ValueError(
+                "One or more affected Fishbone sections contain approved PITS BOM occurrences. "
+                "Detach those occurrences in Import/Export Projects before deleting the sections."
+            )
         assembly_impact = assembly_section_reference_impact(
             project_id, affected_ids, connection=conn
         )
@@ -789,7 +807,7 @@ def fishbone_part_assignments(
     params = (scenario_id, project_id) if scenario_id else (project_id,)
     return pd.DataFrame(query(
         f"""SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
-                  a.use_description, a.notes,
+                  a.use_description, a.notes, a.pits_sync_status, a.pits_quantity_updated_at,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
                   s.name AS section_name
            FROM fishbone_part_assignments a
@@ -1080,6 +1098,16 @@ def delete_fishbone_part_assignments(project_id: str, assignment_ids: list[str])
         ).fetchone()[0]
         if found != len(selected_ids):
             raise ValueError("One or more selected fishbone uses no longer exist.")
+        linked = conn.execute(
+            f"""SELECT COUNT(*) FROM pits_bom_occurrences
+                WHERE project_id=? AND approved_assignment_id IN ({placeholders})""",
+            (project_id, *selected_ids),
+        ).fetchone()[0]
+        if linked:
+            raise ValueError(
+                "One or more selected Fishbone uses are approved PITS BOM occurrences. "
+                "Detach those occurrences in Import/Export Projects before deleting the uses."
+            )
         cursor = conn.execute(
             f"""DELETE FROM fishbone_part_assignments
                 WHERE project_id=? AND id IN ({placeholders})""",
@@ -1123,11 +1151,57 @@ def replace_fishbone_part_assignments(
                 str(row.get("use_description") or "").strip(),
                 str(row.get("notes") or "").strip(), timestamp,
             ))
-        conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
+        desired_by_id = {record[0]: record for record in records}
+        linked_rows = conn.execute(
+            """SELECT occurrence.approved_assignment_id, assignment.part_id,
+                      assignment.section_id, assignment.quantity
+               FROM pits_bom_occurrences occurrence
+               JOIN fishbone_part_assignments assignment
+                 ON assignment.id=occurrence.approved_assignment_id
+               WHERE occurrence.project_id=?""",
+            (project_id,),
+        ).fetchall()
+        for linked in linked_rows:
+            assignment_id = str(linked["approved_assignment_id"])
+            desired = desired_by_id.get(assignment_id)
+            if desired is None:
+                raise ValueError(
+                    "An approved PITS BOM Fishbone use cannot be removed here. Detach its "
+                    "occurrence in Import/Export Projects first."
+                )
+            if desired[2] != str(linked["part_id"]) or desired[3] != str(linked["section_id"]):
+                raise ValueError(
+                    "The part or Fishbone section of an approved PITS BOM use cannot be changed "
+                    "here. Detach its occurrence first."
+                )
+            if round(float(desired[5]), 9) != round(float(linked["quantity"]), 9):
+                raise ValueError(
+                    "The quantity of an approved PITS BOM use is determined by PITS and cannot be changed here. "
+                    "Correct the quantity in PITS."
+                )
+        desired_ids = set(desired_by_id)
+        existing_ids = {
+            str(row[0]) for row in conn.execute(
+                "SELECT id FROM fishbone_part_assignments WHERE project_id=?", (project_id,)
+            ).fetchall()
+        }
+        stale_ids = existing_ids - desired_ids
+        if stale_ids:
+            stale_placeholders = ",".join("?" for _ in stale_ids)
+            conn.execute(
+                f"""DELETE FROM fishbone_part_assignments
+                    WHERE project_id=? AND id IN ({stale_placeholders})""",
+                (project_id, *stale_ids),
+            )
         conn.executemany(
             """INSERT INTO fishbone_part_assignments
-               (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, project_id, part_id, section_id, sequence, quantity,
+                use_description, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 sequence=excluded.sequence, quantity=excluded.quantity,
+                 use_description=excluded.use_description, notes=excluded.notes,
+                 updated_at=excluded.updated_at""",
             records,
         )
     return len(records)
@@ -1338,7 +1412,43 @@ def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) 
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         _insert_snapshot_rows(conn, "fishbone_part_assignments", snapshot)
 
-__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot']
+def update_fishbone_assignment_use(
+    project_id: str,
+    assignment_id: str,
+    use_description: str,
+    editor_name: str = "",
+) -> None:
+    """Update the use / installation location description for a fishbone part assignment."""
+    clean_use = str(use_description or "").strip()
+    timestamp = now_iso()
+    with connection() as conn:
+        current = conn.execute(
+            "SELECT id, part_id, section_id, use_description FROM fishbone_part_assignments WHERE id=? AND project_id=?",
+            (assignment_id, project_id),
+        ).fetchone()
+        if not current:
+            raise ValueError("Fishbone assignment not found.")
+        conn.execute(
+            "UPDATE fishbone_part_assignments SET use_description=?, updated_at=? WHERE id=? AND project_id=?",
+            (clean_use, timestamp, assignment_id, project_id),
+        )
+        record_audit_event(
+            project_id,
+            "Fishbone part assignments",
+            "Update use location",
+            1,
+            str(editor_name or "").strip(),
+            {
+                "assignment_id": assignment_id,
+                "part_id": current["part_id"],
+                "section_id": current["section_id"],
+                "old_use_description": current["use_description"],
+                "new_use_description": clean_use,
+            },
+            _conn=conn,
+        )
+
+__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

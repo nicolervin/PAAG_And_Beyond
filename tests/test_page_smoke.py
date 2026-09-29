@@ -959,7 +959,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 for widget in app.selectbox
                 if widget.label == "Pair with Fishbone section"
             )
-            pairing.set_value(self.section_id)
+            pairing.set_value(self.section_id).run(timeout=30)
             next(
                 button
                 for button in app.button

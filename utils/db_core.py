@@ -488,15 +488,25 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS parts (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_number TEXT NOT NULL, description TEXT DEFAULT '', quantity REAL DEFAULT 1,
-                revision TEXT DEFAULT '0', source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
+                revision TEXT DEFAULT '0',
+                design_maturity TEXT NOT NULL DEFAULT '',
+                subsystem TEXT NOT NULL DEFAULT '',
+                source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
                 model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', weight_lb REAL,
                 technology_engineer TEXT NOT NULL DEFAULT '',
+                design_engineer TEXT NOT NULL DEFAULT '',
                 pits_tracker_number TEXT NOT NULL DEFAULT '',
                 source_code TEXT NOT NULL DEFAULT ''
                     CHECK (source_code IN ('', '1', '+1', '2', '2.4', '3', '4', '5', '6', '7', '8')),
                 official_windchill_part_name TEXT NOT NULL DEFAULT '',
+                factory_nickname TEXT NOT NULL DEFAULT '',
                 make_buy TEXT NOT NULL DEFAULT ''
                     CHECK (make_buy IN ('', 'Make', 'Buy')),
+                ppm TEXT NOT NULL DEFAULT '',
+                buyer_gcl TEXT NOT NULL DEFAULT '',
+                pmqe_aqe TEXT NOT NULL DEFAULT '',
+                ame_tooling_engineer TEXT NOT NULL DEFAULT '',
+                part_code TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
             );
@@ -554,6 +564,8 @@ def init_db() -> None:
                 image_path TEXT NOT NULL, image_type TEXT DEFAULT 'Supplemental', caption TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_part_images_part
+                ON part_images(part_id);
             CREATE TABLE IF NOT EXISTS pits_records (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 pits_id TEXT NOT NULL, part_number TEXT DEFAULT '', description TEXT DEFAULT '',
@@ -592,6 +604,8 @@ def init_db() -> None:
                 value TEXT DEFAULT '', updated_at TEXT NOT NULL,
                 PRIMARY KEY(model_id, feature_id)
             );
+            CREATE INDEX IF NOT EXISTS idx_model_feature_values_project
+                ON model_feature_values(project_id);
             CREATE TABLE IF NOT EXISTS part_feature_rules (
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
@@ -599,6 +613,8 @@ def init_db() -> None:
                 value TEXT NOT NULL, updated_at TEXT NOT NULL,
                 PRIMARY KEY(part_id, feature_id, value)
             );
+            CREATE INDEX IF NOT EXISTS idx_part_feature_rules_project
+                ON part_feature_rules(project_id);
             CREATE TABLE IF NOT EXISTS assembly_sections (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
@@ -611,13 +627,93 @@ def init_db() -> None:
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
                 section_id TEXT NOT NULL REFERENCES assembly_sections(id), sequence INTEGER NOT NULL DEFAULT 10,
                 quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0), use_description TEXT DEFAULT '',
-                notes TEXT DEFAULT '', updated_at TEXT NOT NULL
+                notes TEXT DEFAULT '',
+                pits_sync_status TEXT NOT NULL DEFAULT 'Not linked'
+                    CHECK(pits_sync_status IN ('Not linked', 'In sync', 'Quantity differs', 'No longer found')),
+                pits_quantity_updated_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_imports (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                import_sequence INTEGER NOT NULL CHECK(import_sequence > 0),
+                workbook_name TEXT NOT NULL DEFAULT '',
+                workbook_sha256 TEXT NOT NULL,
+                bom_sheet_name TEXT NOT NULL DEFAULT 'BOM',
+                source_row_count INTEGER NOT NULL DEFAULT 0 CHECK(source_row_count >= 0),
+                occurrence_count INTEGER NOT NULL DEFAULT 0 CHECK(occurrence_count >= 0),
+                issue_count INTEGER NOT NULL DEFAULT 0 CHECK(issue_count >= 0),
+                imported_by TEXT NOT NULL DEFAULT '',
+                imported_at TEXT NOT NULL,
+                UNIQUE(project_id, import_sequence)
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_occurrences (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                parent_tracker_number TEXT NOT NULL,
+                child_tracker_number TEXT NOT NULL CHECK(TRIM(child_tracker_number) <> ''),
+                parent_part_id TEXT REFERENCES parts(id) ON DELETE SET NULL,
+                child_part_id TEXT REFERENCES parts(id) ON DELETE SET NULL,
+                proposed_depth INTEGER NOT NULL CHECK(proposed_depth BETWEEN 1 AND 11),
+                raw_quantity_text TEXT NOT NULL DEFAULT '',
+                proposed_quantity REAL,
+                source_row INTEGER NOT NULL CHECK(source_row > 0),
+                raw_levels_json TEXT NOT NULL DEFAULT '{}',
+                source_fingerprint TEXT NOT NULL,
+                reviewed_source_fingerprint TEXT,
+                review_status TEXT NOT NULL DEFAULT 'Needs review'
+                    CHECK(review_status IN ('Needs review', 'Approved', 'Rejected')),
+                source_state TEXT NOT NULL DEFAULT 'New'
+                    CHECK(source_state IN ('New', 'Current', 'Changed', 'Missing')),
+                validation_issues_json TEXT NOT NULL DEFAULT '[]',
+                confirmed_section_id TEXT REFERENCES assembly_sections(id) ON DELETE RESTRICT,
+                approved_assignment_id TEXT UNIQUE
+                    REFERENCES fishbone_part_assignments(id) ON DELETE RESTRICT,
+                first_seen_import_id TEXT NOT NULL REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                last_seen_import_id TEXT NOT NULL REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                last_reviewed_import_id TEXT REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                reviewed_by TEXT NOT NULL DEFAULT '',
+                reviewed_at TEXT,
+                rejection_reason TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, parent_tracker_number, child_tracker_number)
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_occurrence_revisions (
+                id TEXT PRIMARY KEY,
+                occurrence_id TEXT NOT NULL REFERENCES pits_bom_occurrences(id) ON DELETE CASCADE,
+                import_id TEXT NOT NULL REFERENCES pits_bom_imports(id) ON DELETE RESTRICT,
+                revision_no INTEGER NOT NULL CHECK(revision_no > 0),
+                source_row INTEGER NOT NULL CHECK(source_row > 0),
+                proposed_depth INTEGER NOT NULL CHECK(proposed_depth BETWEEN 1 AND 11),
+                raw_quantity_text TEXT NOT NULL DEFAULT '',
+                proposed_quantity REAL,
+                raw_levels_json TEXT NOT NULL DEFAULT '{}',
+                source_fingerprint TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                UNIQUE(occurrence_id, revision_no),
+                UNIQUE(occurrence_id, source_fingerprint)
+            );
+            CREATE TABLE IF NOT EXISTS pits_bom_occurrence_concerns (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                occurrence_id TEXT NOT NULL REFERENCES pits_bom_occurrences(id) ON DELETE CASCADE,
+                concern_id TEXT NOT NULL REFERENCES concerns(id) ON DELETE CASCADE,
+                escalated_source_state TEXT NOT NULL
+                    CHECK(escalated_source_state IN ('New', 'Changed', 'Missing')),
+                escalated_source_fingerprint TEXT NOT NULL,
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(occurrence_id, concern_id)
             );
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 table_name TEXT NOT NULL, action TEXT NOT NULL, row_count INTEGER NOT NULL DEFAULT 0,
                 editor_name TEXT DEFAULT '', details TEXT DEFAULT '{}', created_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_audit_log_project_table_created
+                ON audit_log(project_id, table_name, created_at);
             CREATE TABLE IF NOT EXISTS project_transfer_events (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -929,7 +1025,8 @@ def init_db() -> None:
                  ON catalog.project_id=record.project_id
                 AND catalog.part_number=record.part_number
                 AND catalog.source='PITS snapshot'
-               WHERE TRIM(record.part_number) <> ''"""
+               WHERE TRIM(record.part_number) <> ''
+                 AND (catalog.source_code IS NULL OR catalog.source_code = '')"""
         ).fetchall():
             try:
                 payload = json.loads(part["source_payload"] or "{}")
@@ -951,15 +1048,55 @@ def init_db() -> None:
             conn.execute("ALTER TABLE parts ADD COLUMN weight_lb REAL")
         for column in (
             "technology_engineer",
+            "design_engineer",
             "pits_tracker_number",
             "source_code",
             "official_windchill_part_name",
+            "factory_nickname",
             "make_buy",
+            "ppm",
+            "buyer_gcl",
+            "pmqe_aqe",
+            "ame_tooling_engineer",
+            "part_code",
+            "subsystem",
+            "design_maturity",
         ):
             if column not in part_columns:
                 conn.execute(
                     f"ALTER TABLE parts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+                part_columns.add(column)
+        conn.execute(
+            """UPDATE parts SET design_engineer = technology_engineer
+               WHERE (design_engineer IS NULL OR design_engineer = '')
+                 AND (technology_engineer IS NOT NULL AND technology_engineer <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET technology_engineer = design_engineer
+               WHERE (technology_engineer IS NULL OR technology_engineer = '')
+                 AND (design_engineer IS NOT NULL AND design_engineer <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET factory_nickname = official_windchill_part_name
+               WHERE (factory_nickname IS NULL OR factory_nickname = '')
+                 AND (official_windchill_part_name IS NOT NULL AND official_windchill_part_name <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET official_windchill_part_name = factory_nickname
+               WHERE (official_windchill_part_name IS NULL OR official_windchill_part_name = '')
+                 AND (factory_nickname IS NOT NULL AND factory_nickname <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET design_maturity = revision
+               WHERE (design_maturity IS NULL OR design_maturity = '')
+                 AND (revision IS NOT NULL AND revision <> '')"""
+        )
+        conn.execute(
+            """UPDATE parts SET revision = design_maturity
+               WHERE (revision IS NULL OR revision = '' OR revision = '0')
+                 AND (design_maturity IS NOT NULL AND design_maturity <> '')"""
+        )
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS uq_parts_project_pits_tracker_number
                ON parts(project_id, pits_tracker_number)
@@ -1074,8 +1211,49 @@ def init_db() -> None:
                     RENAME TO fishbone_part_assignments;
                 """
             )
+        assignment_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(fishbone_part_assignments)"
+            ).fetchall()
+        }
+        if "pits_sync_status" not in assignment_columns:
+            conn.execute(
+                "ALTER TABLE fishbone_part_assignments ADD COLUMN pits_sync_status "
+                "TEXT NOT NULL DEFAULT 'Not linked' "
+                "CHECK(pits_sync_status IN "
+                "('Not linked', 'In sync', 'Quantity differs', 'No longer found'))"
+            )
+        if "pits_quantity_updated_at" not in assignment_columns:
+            conn.execute(
+                "ALTER TABLE fishbone_part_assignments ADD COLUMN pits_quantity_updated_at TEXT"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fishbone_assignment_part ON fishbone_part_assignments(project_id, part_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pits_bom_occurrence_state "
+            "ON pits_bom_occurrences(project_id, source_state, review_status)"
+        )
+        conn.execute(
+            """CREATE TRIGGER IF NOT EXISTS trg_fishbone_assignment_pits_quantity_sync
+               AFTER UPDATE OF quantity ON fishbone_part_assignments
+               BEGIN
+                   UPDATE fishbone_part_assignments
+                   SET pits_sync_status=COALESCE((
+                       SELECT CASE
+                           WHEN occurrence.source_state='Missing' THEN 'No longer found'
+                           WHEN occurrence.proposed_quantity IS NOT NULL
+                            AND ROUND(occurrence.proposed_quantity, 9)=ROUND(NEW.quantity, 9)
+                               THEN 'In sync'
+                           ELSE 'Quantity differs'
+                       END
+                       FROM pits_bom_occurrences occurrence
+                       WHERE occurrence.project_id=NEW.project_id
+                         AND occurrence.approved_assignment_id=NEW.id
+                   ), 'Not linked')
+                   WHERE id=NEW.id;
+               END"""
         )
         conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_assembly_catalog_sections
@@ -1387,6 +1565,22 @@ def init_db() -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_process_part_groups_element ON process_part_groups(project_id, scenario_id, work_element_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_project_table_created "
+            "ON audit_log(project_id, table_name, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_part_feature_rules_project "
+            "ON part_feature_rules(project_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_part_images_part "
+            "ON part_images(part_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_feature_values_project "
+            "ON model_feature_values(project_id)"
         )
         material_group_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(work_element_material_groups)").fetchall()

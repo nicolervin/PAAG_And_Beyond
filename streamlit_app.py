@@ -64,6 +64,15 @@ all_projects = projects()
 st.session_state.setdefault("project_id", all_projects[0]["id"] if all_projects else None)
 st.session_state.setdefault("scenario_id", None)
 
+pending_project_id = st.session_state.pop("pending_active_project_id", None)
+if pending_project_id and any(
+    str(project["id"]) == str(pending_project_id) for project in all_projects
+):
+    st.session_state.project_id = str(pending_project_id)
+    st.session_state.scenario_id = None
+    st.session_state.pop("global_project", None)
+    st.session_state.pop("global_scenario", None)
+
 pages = {
     "Project": [
         st.Page("app_pages/overview.py", title="Overview", icon=":material/dashboard:"),
@@ -73,7 +82,7 @@ pages = {
         st.Page("app_pages/exchange.py", title="Import/Export Projects", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
         st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
-        st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
+        st.Page("app_pages/bom_tree.py", title="Model Tree", icon=":material/account_tree:"),
         st.Page("app_pages/fishbone.py", title="Parts to fishbone", icon=":material/device_hub:"),
     ],
     "Process planning": [
@@ -113,7 +122,10 @@ pages = {
         ),
     ],
 }
-navigation = st.navigation(pages, position="hidden")
+unlisted_pages = [
+    st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
+]
+navigation = st.navigation({**pages, "_unlisted": unlisted_pages}, position="hidden")
 
 with st.sidebar:
     st.header("Process at a Glance")

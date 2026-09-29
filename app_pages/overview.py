@@ -35,9 +35,9 @@ st.caption("The current snapshot of an evolving NPI process plan.")
 @st.dialog("Create an NPI project")
 def new_project_dialog():
     with st.form("new_project"):
-        name = st.text_input("Project name")
-        program = st.text_input("Program or product")
-        product_line = st.text_input("Product line")
+        name = st.text_input("Program Name")
+        program = st.text_input("Product")
+        product_line = st.text_input("Assembly Line")
         takt_unit = st.selectbox(
             "Target takt unit", list(TIME_UNITS), format_func=lambda value: TIME_UNITS[value].label
         )
@@ -51,7 +51,7 @@ def new_project_dialog():
         )
         if st.form_submit_button("Create project", type="primary", icon=":material/add:"):
             if not name.strip():
-                st.error("Project name is required.")
+                st.error("Program Name is required.")
             else:
                 created_project_id = create_project(
                     name, program, "", display_to_seconds(takt, takt_unit),
@@ -69,6 +69,7 @@ def new_project_dialog():
                     },
                 )
                 st.session_state.project_id = created_project_id
+                st.session_state.pending_active_project_id = created_project_id
                 st.rerun()
 
 
