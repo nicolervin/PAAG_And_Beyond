@@ -154,8 +154,8 @@ st.caption(
     "photos, full information, and completed-subassembly mini-BOM below."
 )
 editable_columns = [
-    "id", "part_number", "description", "official_windchill_part_name",
-    "technology_engineer", "pits_tracker_number", "source_code", "make_buy",
+    "id", "part_number", "description", "technology_engineer", "subsystem", "part_code",
+    "pits_tracker_number", "source_code", "make_buy",
     "quantity", "revision", "model_applicability", "notes", "source", "image_path",
     "updated_at", "assembly_id", "assembly_number",
 ]
@@ -244,11 +244,11 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
         key="part_catalog_filters",
         dropdown_columns=[
             "active", "source", "revision", "source_code", "make_buy",
-            "technology_engineer", "photo_status", "applicability_status",
+            "technology_engineer", "subsystem", "part_code", "photo_status", "applicability_status",
         ],
         search_columns=[
-            "part_number", "description", "official_windchill_part_name",
-            "technology_engineer", "pits_tracker_number", "source_code", "make_buy",
+            "part_number", "description", "technology_engineer", "subsystem", "part_code",
+            "pits_tracker_number", "source_code", "make_buy",
             "photo_status", "applicability_status", "notes", "source",
         ],
         labels={
@@ -259,8 +259,9 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
             "source_code": "Source Code",
             "make_buy": "Make vs Buy",
             "technology_engineer": "Technology Engineer",
-            "pits_tracker_number": "PITS Tracker number",
-            "official_windchill_part_name": "Official Windchill Part Name",
+            "subsystem": "Subsystem",
+            "part_code": "Part Code",
+            "pits_tracker_number": "PITS ID",
             "applicability_status": "Feature applicability",
         },
         reset_widget_keys=[parts_editor_key],
@@ -275,8 +276,8 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
         st.session_state.pop("part_catalog_filters_keyword", None)
         for filter_column in [
             "active", "photo_status", "part_number", "description", "revision",
-            "source_code", "make_buy", "technology_engineer", "pits_tracker_number",
-            "official_windchill_part_name", "feature_applicability", "notes", "source", "updated_at",
+            "source_code", "make_buy", "technology_engineer", "subsystem", "part_code", "pits_tracker_number",
+            "feature_applicability", "notes", "source", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.rerun()
@@ -294,7 +295,7 @@ parts_editor_rows = direct_entry_editor_rows(
     editor_key=parts_editor_key,
     sort_columns=[
         "active", "photo_status", "part_number", "description", "revision",
-        "official_windchill_part_name", "technology_engineer", "pits_tracker_number",
+        "technology_engineer", "subsystem", "part_code", "pits_tracker_number",
         "source_code", "make_buy", "feature_applicability", "applicability_status",
         "notes", "source", "updated_at",
     ],
@@ -311,10 +312,10 @@ edited_parts = st.data_editor(
     hide_index=True,
     num_rows="dynamic",
     height=430,
-    disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "updated_display", "assembly_id", "assembly_number"],
+    disabled=["id", "subsystem", "part_code", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "updated_display", "assembly_id", "assembly_number"],
     column_order=[
         "view_details", "active", "photo_status", "part_number", "description",
-        "official_windchill_part_name", "technology_engineer", "pits_tracker_number",
+        "technology_engineer", "subsystem", "part_code", "pits_tracker_number",
         "source_code", "make_buy", "revision", "feature_applicability",
         "applicability_status", "notes", "source", "updated_display",
     ],
@@ -338,15 +339,28 @@ edited_parts = st.data_editor(
         ),
         "part_number": st.column_config.TextColumn("Part number", required=True),
         "description": st.column_config.TextColumn("Part Name", width="large"),
-        "official_windchill_part_name": st.column_config.TextColumn(
-            "Official Windchill Part Name",
-            width="large",
-            help="The official name recorded in Windchill. This does not replace the collaborator-maintained Part Name.",
+        "technology_engineer": st.column_config.TextColumn(
+            "Technology Engineer",
+            help="Design Engineer imported from column I of the PITS Tracker. Confirmed manual edits are preserved on later imports.",
         ),
-        "technology_engineer": st.column_config.TextColumn("Technology Engineer"),
+        "subsystem": st.column_config.TextColumn(
+            "Subsystem",
+            help="Read-only subsystem identifier from column F of the imported PITS Tracker row matched by PITS ID.",
+        ),
+        "part_code": st.column_config.TextColumn(
+            "Part Code",
+            help=(
+                "PITS part code from tracker column N.\n\n"
+                "- NP = New Part, New Tool\n"
+                "- NPNT = New Part, No Tooling\n"
+                "- ASM = Assembly\n"
+                "- CP = Current Production\n"
+                "- CP Other = CP different site"
+            ),
+        ),
         "pits_tracker_number": st.column_config.TextColumn(
-            "PITS Tracker number",
-            help="This identifier must be unique within the current project. Leading zeros are preserved.",
+            "PITS ID",
+            help="ID Number imported from column B of the PITS Tracker. It must be unique within the current project, and leading zeros are preserved.",
         ),
         "source_code": st.column_config.SelectboxColumn(
             "Source Code",
@@ -402,8 +416,8 @@ st.caption(
 )
 
 export_columns = [
-    "active", "part_number", "description", "official_windchill_part_name",
-    "technology_engineer", "pits_tracker_number", "source_code", "make_buy",
+    "active", "part_number", "description", "technology_engineer", "subsystem", "part_code",
+    "pits_tracker_number", "source_code", "make_buy",
     "revision", "feature_applicability", "photo_status", "notes", "source", "updated_at",
 ]
 st.download_button(
@@ -562,9 +576,8 @@ if save_part_table:
         parts_to_save.loc[new_row_mask, "source"] = "Manual"
         tracked_fields = {
             "technology_engineer": "Technology Engineer",
-            "pits_tracker_number": "PITS Tracker number",
+            "pits_tracker_number": "PITS ID",
             "source_code": "Source Code",
-            "official_windchill_part_name": "Official Windchill Part Name",
             "make_buy": "Make vs Buy",
         }
         saved_parts_by_id = (

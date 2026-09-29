@@ -286,16 +286,27 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         ]
         self.assertTrue(scenario_tables)
 
-    def test_project_exchange_tabs_smoke(self) -> None:
+    def test_project_exchange_whole_transfer_only_smoke(self) -> None:
         app = self.run_page("app_pages/exchange.py")
         self.assertTrue(any(title.value == "Import/Export Projects" for title in app.title))
-        self.assertIn("Part-data exchange", [tab.label for tab in app.tabs])
+        self.assertNotIn("Part-data exchange", [tab.label for tab in app.tabs])
+        self.assertFalse(
+            any(header.value == "Import a BOM draft" for header in app.subheader)
+        )
         self.assertTrue(
             any(
                 header.value.endswith("Whole-project transfer")
                 for header in app.subheader
             )
         )
+
+    def test_pits_exchange_smoke(self) -> None:
+        app = self.run_page("app_pages/pits_exchange.py")
+        self.assertTrue(any(title.value == "Import/Export PITS" for title in app.title))
+        self.assertTrue(
+            any(header.value == "Import a BOM draft" for header in app.subheader)
+        )
+        self.assertNotIn("Whole-project transfer", [tab.label for tab in app.tabs])
 
     def test_project_export_package_contains_complete_registry_and_audits(self) -> None:
         package = export_project_package(self.project_id, "AppTest smoke")

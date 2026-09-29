@@ -27,6 +27,7 @@ class PitsImportDetectionTests(unittest.TestCase):
                 "description": "Imported support part",
                 "revision": "Rev A : PreRelease",
                 "source_code": "3",
+                "technology_engineer": "Alex Engineer",
                 "used_bom": "Yes",
                 "status": "Active",
                 "subsystem": "Power",
@@ -41,6 +42,7 @@ class PitsImportDetectionTests(unittest.TestCase):
                     "Used BOM": "Yes",
                     "Base Info Status": "Active",
                     "Subsystem": "Power",
+                    "part_code": "NP",
                     "Design Maturity": "Prototype",
                     "Comments": "Created from import",
                     "Factory Workstation Location": "Line 1",
@@ -51,7 +53,10 @@ class PitsImportDetectionTests(unittest.TestCase):
 
             self.assertEqual(summary["new"], 1)
             catalog_rows = store.query(
-                "SELECT part_number, description, source, revision, source_code FROM parts WHERE project_id=?",
+                """SELECT part_number, description, source, revision, source_code,
+                          technology_engineer,
+                          pits_tracker_number
+                   FROM parts WHERE project_id=?""",
                 (project_id,),
             )
             match = next((row for row in catalog_rows if row["part_number"] == "P-1201"), None)
@@ -60,6 +65,26 @@ class PitsImportDetectionTests(unittest.TestCase):
             self.assertEqual(match["source"], "PITS snapshot")
             self.assertEqual(match["revision"], "Rev A : PreRelease")
             self.assertEqual(match["source_code"], "3")
+            self.assertEqual(match["technology_engineer"], "Alex Engineer")
+            self.assertEqual(match["pits_tracker_number"], "1201")
+            catalog_match = store.project_table("parts", project_id, "part_number")
+            catalog_match = catalog_match.loc[catalog_match["part_number"] == "P-1201"].iloc[0]
+            self.assertEqual(catalog_match["subsystem"], "Power")
+            self.assertEqual(catalog_match["part_code"], "NP")
+
+            with store.connection() as conn:
+                conn.execute(
+                    """UPDATE parts SET pits_tracker_number=''
+                       WHERE project_id=? AND part_number=?""",
+                    (project_id, "P-1201"),
+                )
+            store.import_pits_id_snapshot(project_id, records, [])
+            restored = store.query(
+                """SELECT pits_tracker_number FROM parts
+                   WHERE project_id=? AND part_number=?""",
+                (project_id, "P-1201"),
+            )[0]
+            self.assertEqual(restored["pits_tracker_number"], "1201")
         finally:
             database_patch.stop()
             for suffix in ("", "-wal", "-shm"):
@@ -132,6 +157,102 @@ class PitsImportDetectionTests(unittest.TestCase):
                 )[0]["part_number"],
                 "P-EXCLUDED",
             )
+        finally:
+            database_patch.stop()
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+
+    def test_import_leaves_catalog_pits_id_blank_when_part_number_has_multiple_ids(self):
+        database_path = store.DATA_DIR / f"test_pits_duplicate_part_{uuid4()}.db"
+        database_patch = patch.object(store, "DB_PATH", database_path)
+        database_patch.start()
+        store.init_db()
+        project_id = str(store.query("SELECT id FROM projects LIMIT 1")[0]["id"])
+
+        try:
+            records = []
+            for source_row, pits_id in enumerate(("1204", "1205"), start=2):
+                records.append({
+                    "pits_id": pits_id,
+                    "part_number": "P-REPEATED",
+                    "description": "Repeated source part",
+                    "used_bom": "Y",
+                    "status": "Active",
+                    "subsystem": "Power",
+                    "design_maturity": "Prototype",
+                    "comments": "",
+                    "workstation": "Line 1",
+                    "source_row": source_row,
+                    "_bom_pits_ids": ["1204", "1205"],
+                    "source_payload": {
+                        "ID Number": pits_id,
+                        "Part Number": "P-REPEATED",
+                    },
+                })
+
+            summary = store.import_pits_id_snapshot(project_id, records, [])
+
+            self.assertEqual(summary["pits_ids_linked"], 0)
+            self.assertEqual(summary["pits_id_conflicts"], 1)
+            self.assertEqual(summary["bom_pits_id_conflicts"], 1)
+            catalog_row = store.query(
+                """SELECT pits_tracker_number FROM parts
+                   WHERE project_id=? AND part_number=?""",
+                (project_id, "P-REPEATED"),
+            )[0]
+            self.assertEqual(catalog_row["pits_tracker_number"], "")
+            self.assertEqual(
+                len(store.query(
+                    """SELECT pits_id FROM pits_records
+                       WHERE project_id=? AND part_number=?""",
+                    (project_id, "P-REPEATED"),
+                )),
+                2,
+            )
+        finally:
+            database_patch.stop()
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+
+    def test_import_uses_unique_bom_id_for_repeated_tracker_part_number(self):
+        database_path = store.DATA_DIR / f"test_pits_bom_resolution_{uuid4()}.db"
+        database_patch = patch.object(store, "DB_PATH", database_path)
+        database_patch.start()
+        store.init_db()
+        project_id = str(store.query("SELECT id FROM projects LIMIT 1")[0]["id"])
+
+        try:
+            records = []
+            for source_row, pits_id in enumerate(("1204", "1205"), start=2):
+                records.append({
+                    "pits_id": pits_id,
+                    "part_number": "P-REPEATED",
+                    "description": "Repeated source part",
+                    "used_bom": "Y",
+                    "status": "Active",
+                    "subsystem": "Power",
+                    "design_maturity": "Prototype",
+                    "comments": "",
+                    "workstation": "Line 1",
+                    "source_row": source_row,
+                    "_bom_pits_ids": ["1204"],
+                    "source_payload": {
+                        "ID Number": pits_id,
+                        "Part Number": "P-REPEATED",
+                    },
+                })
+
+            summary = store.import_pits_id_snapshot(project_id, records, [])
+
+            self.assertEqual(summary["pits_ids_linked"], 1)
+            self.assertEqual(summary["pits_ids_resolved_from_bom"], 1)
+            self.assertEqual(summary["pits_id_conflicts"], 0)
+            catalog_row = store.query(
+                """SELECT pits_tracker_number FROM parts
+                   WHERE project_id=? AND part_number=?""",
+                (project_id, "P-REPEATED"),
+            )[0]
+            self.assertEqual(catalog_row["pits_tracker_number"], "1204")
         finally:
             database_patch.stop()
             for suffix in ("", "-wal", "-shm"):
@@ -266,6 +387,53 @@ class PitsImportDetectionTests(unittest.TestCase):
             for suffix in ("", "-wal", "-shm"):
                 Path(f"{database_path}{suffix}").unlink(missing_ok=True)
 
+    def test_import_preserves_manual_technology_engineer_unless_overwrite_confirmed(self):
+        database_path = store.DATA_DIR / f"test_pits_manual_engineer_{uuid4()}.db"
+        database_patch = patch.object(store, "DB_PATH", database_path)
+        database_patch.start()
+        store.init_db()
+        project_id = str(store.query("SELECT id FROM projects LIMIT 1")[0]["id"])
+
+        try:
+            store.upsert_part(project_id, {
+                "part_number": "P-ENGINEER",
+                "description": "Engineer ownership part",
+                "technology_engineer": "Manual Engineer",
+                "source": "Manual",
+            })
+            record = {
+                "pits_id": "1207",
+                "part_number": "P-ENGINEER",
+                "description": "Engineer ownership part",
+                "technology_engineer": "PITS Engineer",
+                "used_bom": "Y",
+                "status": "Active",
+                "subsystem": "Power",
+                "design_maturity": "Prototype",
+                "comments": "",
+                "workstation": "Line 1",
+                "source_row": 2,
+                "source_payload": {"ID Number": "1207", "Part Number": "P-ENGINEER"},
+            }
+
+            store.import_pits_id_snapshot(project_id, [record], [])
+            preserved = store.query(
+                "SELECT technology_engineer FROM parts WHERE project_id=? AND part_number=?",
+                (project_id, "P-ENGINEER"),
+            )[0]
+            self.assertEqual(preserved["technology_engineer"], "Manual Engineer")
+
+            store.import_pits_id_snapshot(project_id, [record], [], overwrite_manual=True)
+            overwritten = store.query(
+                "SELECT technology_engineer FROM parts WHERE project_id=? AND part_number=?",
+                (project_id, "P-ENGINEER"),
+            )[0]
+            self.assertEqual(overwritten["technology_engineer"], "PITS Engineer")
+        finally:
+            database_patch.stop()
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+
     def test_blank_pits_revision_stays_blank_in_catalog(self):
         database_path = store.DATA_DIR / f"test_pits_blank_revision_{uuid4()}.db"
         database_patch = patch.object(store, "DB_PATH", database_path)
@@ -345,9 +513,9 @@ class PitsImportDetectionTests(unittest.TestCase):
     def test_detects_nonstandard_tracker_and_model_sheet_names(self):
         tracker = pd.DataFrame(
             [
-                ["PITS Data", "", "", "", "", "", "", ""],
-                ["ID Number", "Part No", "Description", "Used BOM", "Base Info Status", "Subsystem", "Design Maturity", "Comments", "Factory Workstation Location"],
-                ["1001", "P-100", "Test part", "Yes", "Active", "Power", "Prototype", "ok", "Line 1"],
+                ["PITS Data", "", "", "", "", "", "", "", ""],
+                ["Used BOM", "ID Number", "Part No", "Description", "Base Info Status", "Subsystem", "Design Maturity", "Comments", "Factory Workstation Location"],
+                ["Yes", "1001", "P-100", "Test part", "Active", "Power", "Prototype", "ok", "Line 1"],
             ]
         )
         models = pd.DataFrame(
@@ -382,12 +550,18 @@ class PitsImportDetectionTests(unittest.TestCase):
         header[1] = "Part Number"
         header[2] = "Description"
         header[3] = "Used BOM"
+        header[5] = "Subsystem"
+        header[8] = "People Design Engineer"
+        header[13] = "Parts Part Code"
         header[19] = "Source Code"
         header[63] = "Windchill Status"
         values[0] = "1002"
         values[1] = "P-200"
         values[2] = "Column mapped part"
         values[3] = "Y"
+        values[5] = "Airflow"
+        values[8] = "Taylor Engineer"
+        values[13] = "NPNT"
         values[19] = "2.4"
         values[63] = "Rev B : Production Released"
         tracker = pd.DataFrame([["PITS Data", *([""] * 63)], header, values])
@@ -407,6 +581,44 @@ class PitsImportDetectionTests(unittest.TestCase):
 
         self.assertEqual(records[0]["source_code"], "2.4")
         self.assertEqual(records[0]["revision"], "Rev B : Production Released")
+        self.assertEqual(records[0]["technology_engineer"], "Taylor Engineer")
+        self.assertEqual(records[0]["subsystem"], "Airflow")
+        self.assertEqual(records[0]["part_code"], "NPNT")
+
+    def test_reads_bom_column_a_pits_ids_by_part_number(self):
+        tracker = pd.DataFrame([
+            ["ID Number", "Part Number", "Description", "Used BOM"],
+            ["1001", "P-300", "Repeated part", "Y"],
+            ["1002", "P-300", "Repeated part", "Y"],
+        ])
+        models = pd.DataFrame([
+            ["Model Number", "Item"],
+            ["M-03", "C3"],
+        ])
+        bom = pd.DataFrame([
+            ["", "", ""],
+            ["In Tracker", "Part Number", "Description"],
+            ["1002", "P-300", "Repeated part"],
+        ])
+
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            tracker.to_excel(writer, sheet_name="Tracker", index=False, header=False)
+            models.to_excel(writer, sheet_name="Models", index=False, header=False)
+            bom.to_excel(writer, sheet_name="BOM", index=False, header=False)
+        buffer.seek(0)
+        uploaded = type(
+            "Uploaded",
+            (),
+            {"name": "bom_resolution.xlsm", "getvalue": lambda self: buffer.getvalue()},
+        )()
+
+        records, _ = parse_pits_id_workbook(uploaded)
+        resolution = store.pits_catalog_id_resolution(records)
+
+        self.assertEqual({tuple(record["_bom_pits_ids"]) for record in records}, {("1002",)})
+        self.assertEqual(resolution["resolved_ids"]["P-300"], "1002")
+        self.assertEqual(resolution["resolved_from_bom"], {"P-300"})
 
 
 if __name__ == "__main__":

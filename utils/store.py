@@ -10016,6 +10016,30 @@ def project_table(
         query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,))
     )
     if table == "parts" and not frame.empty:
+        pits_catalog_evidence = query(
+            """SELECT pits_id, subsystem,
+                      COALESCE(
+                          NULLIF(TRIM(json_extract(source_payload, '$.part_code')), ''),
+                          NULLIF(TRIM(json_extract(source_payload, '$.partspartcode')), ''),
+                          ''
+                      ) AS part_code
+               FROM pits_records WHERE project_id=?""",
+            (project_id,),
+        )
+        subsystem_by_pits_id = {
+            str(row["pits_id"]): str(row["subsystem"] or "").strip()
+            for row in pits_catalog_evidence
+        }
+        part_code_by_pits_id = {
+            str(row["pits_id"]): str(row["part_code"] or "").strip()
+            for row in pits_catalog_evidence
+        }
+        frame["subsystem"] = frame["pits_tracker_number"].fillna("").astype(str).map(
+            subsystem_by_pits_id
+        ).fillna("")
+        frame["part_code"] = frame["pits_tracker_number"].fillna("").astype(str).map(
+            part_code_by_pits_id
+        ).fillna("")
         links = assembly_catalog_part_applicability(project_id)
         frame["assembly_id"] = ""
         frame["assembly_number"] = ""
@@ -10224,7 +10248,7 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
         )
         if duplicate:
             raise ValueError(
-                "Duplicate PITS Tracker numbers are not allowed in this project: "
+                "Duplicate PITS IDs are not allowed in this project: "
                 f"{catalog_fields['pits_tracker_number']}"
             )
     execute(
@@ -10288,7 +10312,7 @@ def update_part_rows(
     if duplicate_pits.any():
         duplicates = ", ".join(sorted(pits_numbers[duplicate_pits].unique()))
         raise ValueError(
-            f"Duplicate PITS Tracker numbers are not allowed in this project: {duplicates}"
+            f"Duplicate PITS IDs are not allowed in this project: {duplicates}"
         )
     def clean_text(value) -> str:
         return "" if value is None or pd.isna(value) else str(value).strip()
@@ -10329,7 +10353,7 @@ def update_part_rows(
             part_id = clean_text(row.get("id"))
             if tracker in tracker_owner and tracker_owner[tracker] != part_id:
                 raise ValueError(
-                    "Duplicate PITS Tracker numbers are not allowed in this project: "
+                    "Duplicate PITS IDs are not allowed in this project: "
                     f"{tracker}"
                 )
             tracker_owner[tracker] = part_id
@@ -13117,6 +13141,64 @@ def pits_import_conflict_parts(project_id: str, records: list[dict]) -> list[dic
         return [dict(row) for row in rows]
 
 
+def pits_catalog_id_resolution(records: list[dict]) -> dict[str, object]:
+    """Resolve one catalog PITS ID per part number, using BOM evidence when needed."""
+    tracker_ids_by_part: dict[str, set[str]] = {}
+    bom_ids_by_part: dict[str, set[str]] = {}
+    for record in records:
+        part_number = str(record.get("part_number") or "").strip()
+        pits_id = str(record.get("pits_id") or "").strip()
+        if not part_number:
+            continue
+        if pits_id:
+            tracker_ids_by_part.setdefault(part_number, set()).add(pits_id)
+        raw_bom_ids = record.get("_bom_pits_ids") or []
+        if isinstance(raw_bom_ids, str):
+            raw_bom_ids = [raw_bom_ids]
+        for bom_pits_id in raw_bom_ids:
+            cleaned_bom_id = str(bom_pits_id or "").strip()
+            if cleaned_bom_id:
+                bom_ids_by_part.setdefault(part_number, set()).add(cleaned_bom_id)
+
+    resolved_ids: dict[str, str] = {}
+    resolved_from_bom: set[str] = set()
+    missing_bom_match: set[str] = set()
+    mismatched_bom_match: set[str] = set()
+    multiple_bom_ids = {
+        part_number: sorted(pits_ids)
+        for part_number, pits_ids in bom_ids_by_part.items()
+        if len(pits_ids) > 1
+    }
+    for part_number, tracker_ids in tracker_ids_by_part.items():
+        if len(tracker_ids) == 1:
+            resolved_ids[part_number] = next(iter(tracker_ids))
+            continue
+        bom_ids = bom_ids_by_part.get(part_number, set())
+        if len(bom_ids) == 1:
+            bom_pits_id = next(iter(bom_ids))
+            if bom_pits_id in tracker_ids:
+                resolved_ids[part_number] = bom_pits_id
+                resolved_from_bom.add(part_number)
+            else:
+                mismatched_bom_match.add(part_number)
+        elif not bom_ids:
+            missing_bom_match.add(part_number)
+
+    unresolved_tracker_parts = {
+        part_number
+        for part_number, tracker_ids in tracker_ids_by_part.items()
+        if len(tracker_ids) > 1 and part_number not in resolved_ids
+    }
+    return {
+        "resolved_ids": resolved_ids,
+        "resolved_from_bom": resolved_from_bom,
+        "multiple_bom_ids": multiple_bom_ids,
+        "missing_bom_match": missing_bom_match,
+        "mismatched_bom_match": mismatched_bom_match,
+        "unresolved_tracker_parts": unresolved_tracker_parts,
+    }
+
+
 def import_pits_id_snapshot(
     project_id: str,
     records: list[dict],
@@ -13126,7 +13208,21 @@ def import_pits_id_snapshot(
     overwrite_manual: bool = False,
 ) -> dict[str, int]:
     timestamp = now_iso()
-    summary = {"new": 0, "changed": 0, "unchanged": 0, "models": 0}
+    id_resolution = pits_catalog_id_resolution(records)
+    unique_pits_id_by_part = id_resolution["resolved_ids"]
+    linked_part_numbers: set[str] = set()
+    summary = {
+        "new": 0,
+        "changed": 0,
+        "unchanged": 0,
+        "models": 0,
+        "pits_ids_linked": 0,
+        "pits_ids_resolved_from_bom": len(id_resolution["resolved_from_bom"]),
+        "pits_id_conflicts": len(id_resolution["unresolved_tracker_parts"]),
+        "bom_pits_id_conflicts": len(id_resolution["multiple_bom_ids"]),
+        "pits_id_missing_bom_matches": len(id_resolution["missing_bom_match"]),
+        "pits_id_mismatched_bom_matches": len(id_resolution["mismatched_bom_match"]),
+    }
     with connection() as conn:
         project_exists = conn.execute(
             "SELECT 1 FROM projects WHERE id=?",
@@ -13150,10 +13246,24 @@ def import_pits_id_snapshot(
             notes = str(record.get("comments") or "").strip()
             used_in_bom = str(record.get("used_bom") or "").strip().casefold() not in {"n", "no"}
             if part_number:
+                catalog_pits_id = unique_pits_id_by_part.get(part_number, "")
+                catalog_technology_engineer = (
+                    str(record.get("technology_engineer") or "").strip()
+                    if pits_id == catalog_pits_id
+                    else ""
+                )
                 if overwrite_manual:
                     update_clause = """ON CONFLICT(project_id, part_number) DO UPDATE SET
                        description=excluded.description, quantity=excluded.quantity,
                        revision=excluded.revision, source_code=excluded.source_code,
+                       technology_engineer=CASE
+                           WHEN excluded.technology_engineer<>'' THEN excluded.technology_engineer
+                           ELSE parts.technology_engineer
+                       END,
+                       pits_tracker_number=CASE
+                           WHEN excluded.pits_tracker_number<>'' THEN excluded.pits_tracker_number
+                           ELSE parts.pits_tracker_number
+                       END,
                        source=excluded.source,
                        notes=CASE
                            WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
@@ -13173,6 +13283,18 @@ def import_pits_id_snapshot(
                        quantity=CASE WHEN parts.source='PITS snapshot' THEN excluded.quantity ELSE parts.quantity END,
                        revision=CASE WHEN parts.source='PITS snapshot' THEN excluded.revision ELSE parts.revision END,
                        source_code=CASE WHEN parts.source='PITS snapshot' THEN excluded.source_code ELSE parts.source_code END,
+                       technology_engineer=CASE
+                           WHEN excluded.technology_engineer<>''
+                            AND (parts.source='PITS snapshot' OR parts.technology_engineer='')
+                           THEN excluded.technology_engineer
+                           ELSE parts.technology_engineer
+                       END,
+                       pits_tracker_number=CASE
+                           WHEN excluded.pits_tracker_number<>''
+                            AND (parts.source='PITS snapshot' OR parts.pits_tracker_number='')
+                           THEN excluded.pits_tracker_number
+                           ELSE parts.pits_tracker_number
+                       END,
                        notes=CASE
                            WHEN TRIM(COALESCE(parts.notes, '')) <> '' THEN parts.notes
                            ELSE excluded.notes
@@ -13185,20 +13307,37 @@ def import_pits_id_snapshot(
                            ELSE excluded.model_applicability
                        END,
                        updated_at=CASE WHEN parts.source='PITS snapshot' THEN excluded.updated_at ELSE parts.updated_at END"""
-                conn.execute(
-                    f"""INSERT INTO parts
-                       (id, project_id, part_number, description, quantity, revision, source,
-                        image_path, model_applicability, notes, source_code, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
-                       {update_clause}""",
-                    (
-                        str(uuid4()), project_id, part_number, description,
-                        record.get("quantity") if record.get("quantity") is not None else 1,
-                        str(record.get("revision") or "").strip(),
-                        "PITS snapshot", "All", notes,
-                        str(record.get("source_code") or "").strip(), timestamp,
-                    ),
-                )
+                try:
+                    conn.execute(
+                        f"""INSERT INTO parts
+                           (id, project_id, part_number, description, quantity, revision, source,
+                            image_path, model_applicability, notes, technology_engineer,
+                            pits_tracker_number, source_code, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+                           {update_clause}""",
+                        (
+                            str(uuid4()), project_id, part_number, description,
+                            record.get("quantity") if record.get("quantity") is not None else 1,
+                            str(record.get("revision") or "").strip(),
+                            "PITS snapshot", "All", notes, catalog_technology_engineer,
+                            catalog_pits_id,
+                            str(record.get("source_code") or "").strip(), timestamp,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    if "parts.project_id, parts.pits_tracker_number" in str(exc):
+                        raise ValueError(
+                            f"PITS ID {catalog_pits_id} is already assigned to another part in this project."
+                        ) from exc
+                    raise
+                if catalog_pits_id:
+                    linked_row = conn.execute(
+                        """SELECT pits_tracker_number FROM parts
+                           WHERE project_id=? AND part_number=?""",
+                        (project_id, part_number),
+                    ).fetchone()
+                    if linked_row and str(linked_row["pits_tracker_number"] or "").strip() == catalog_pits_id:
+                        linked_part_numbers.add(part_number)
                 if scenario_id:
                     part_row = conn.execute(
                         "SELECT id FROM parts WHERE project_id=? AND part_number=?",
@@ -13296,6 +13435,7 @@ def import_pits_id_snapshot(
                  model["yamazumi"], model["bop_l1"], payload, timestamp),
             )
             summary["models"] += 1
+        summary["pits_ids_linked"] = len(linked_part_numbers)
     return summary
 
 

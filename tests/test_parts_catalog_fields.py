@@ -140,7 +140,7 @@ class PartsCatalogFieldTests(unittest.TestCase):
         edited = self.edited_parts()
         edited.loc[0, "pits_tracker_number"] = "PITS-7"
         edited.loc[1, "pits_tracker_number"] = " PITS-7 "
-        with self.assertRaisesRegex(ValueError, "Duplicate PITS Tracker numbers.*PITS-7"):
+        with self.assertRaisesRegex(ValueError, "Duplicate PITS IDs.*PITS-7"):
             store.update_part_rows(self.project_id, edited)
 
         edited = self.edited_parts()
@@ -148,7 +148,7 @@ class PartsCatalogFieldTests(unittest.TestCase):
         store.update_part_rows(self.project_id, edited)
         filtered = self.edited_parts().iloc[[1]].copy()
         filtered.loc[filtered.index[0], "pits_tracker_number"] = " HIDDEN-1 "
-        with self.assertRaisesRegex(ValueError, "Duplicate PITS Tracker numbers.*HIDDEN-1"):
+        with self.assertRaisesRegex(ValueError, "Duplicate PITS IDs.*HIDDEN-1"):
             store.update_part_rows(self.project_id, filtered)
 
         edited = self.edited_parts()

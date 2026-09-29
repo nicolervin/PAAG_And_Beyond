@@ -60,17 +60,23 @@ all_projects = projects()
 st.session_state.setdefault("project_id", all_projects[0]["id"] if all_projects else None)
 st.session_state.setdefault("scenario_id", None)
 
+project_exchange_page = st.Page(
+    "app_pages/exchange.py",
+    title="Import/Export Projects",
+    icon=":material/sync_alt:",
+)
+
 pages = {
     "Project": [
         st.Page("app_pages/overview.py", title="Overview", icon=":material/dashboard:"),
         st.Page("app_pages/concerns.py", title="Questions and concerns", icon=":material/forum:"),
     ],
     "Product structure": [
-        st.Page("app_pages/exchange.py", title="Import/Export Projects", icon=":material/sync_alt:"),
+        st.Page("app_pages/pits_exchange.py", title="Import/Export PITS", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
         st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
-        st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
         st.Page("app_pages/fishbone.py", title="Parts to fishbone", icon=":material/device_hub:"),
+        st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
     ],
     "Process planning": [
         st.Page("app_pages/yamazumi.py", title="Yamazumi", icon=":material/view_column:"),
@@ -109,7 +115,11 @@ pages = {
         ),
     ],
 }
-navigation = st.navigation(pages, position="hidden")
+registered_pages = {
+    section: ([*section_pages, project_exchange_page] if section == "Project" else section_pages)
+    for section, section_pages in pages.items()
+}
+navigation = st.navigation(registered_pages, position="hidden")
 
 with st.sidebar:
     st.header("Process at a Glance")
@@ -135,6 +145,7 @@ with st.sidebar:
                 f"{active_scenario['status']} · "
                 f"{format_seconds(active_scenario['takt_time_s'], active_scenario['takt_time_unit'])} takt"
             )
+        st.page_link(project_exchange_page, width="stretch")
         render_fishbone_sidebar_context(
             st,
             page_title=navigation.title,

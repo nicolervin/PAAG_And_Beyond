@@ -86,6 +86,7 @@ def _find_pits_sheet(workbook, *, type_name: str) -> str | None:
     aliases = {
         "part_tracker": {"parttracker", "parttracker", "pitstracker", "pitstracker", "parttracker"},
         "models": {"models", "modeldefinitions", "modeldefinition", "modelsheet", "modeldetails"},
+        "bom": {"bom", "billofmaterials", "materialbom"},
     }
     lookup = aliases[type_name]
     for normalized in lookup:
@@ -97,10 +98,15 @@ def _find_pits_sheet(workbook, *, type_name: str) -> str | None:
             normalized = _normalized_sheet_name(sheet_name)
             if ("part" in normalized or "pits" in normalized or "tracker" in normalized) and "model" not in normalized:
                 return sheet_name
-    else:
+    elif type_name == "models":
         for sheet_name in workbook.sheet_names:
             normalized = _normalized_sheet_name(sheet_name)
             if ("model" in normalized or "vehicle" in normalized) and "tracker" not in normalized:
+                return sheet_name
+    else:
+        for sheet_name in workbook.sheet_names:
+            normalized = _normalized_sheet_name(sheet_name)
+            if "bom" in normalized and "bop" not in normalized:
                 return sheet_name
     return None
 
@@ -179,6 +185,7 @@ def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
     workbook = pd.ExcelFile(content)
     tracker_sheet = _find_pits_sheet(workbook, type_name="part_tracker")
     model_sheet = _find_pits_sheet(workbook, type_name="models")
+    bom_sheet = _find_pits_sheet(workbook, type_name="bom")
     if tracker_sheet is None or model_sheet is None:
         raise ValueError("This file does not contain the expected PITS tracker and model sheets.")
 
@@ -186,6 +193,16 @@ def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
     parts_raw = pd.read_excel(content, sheet_name=tracker_sheet, header=None, dtype=object)
     content.seek(0)
     models_raw = pd.read_excel(content, sheet_name=model_sheet, header=None, dtype=object)
+    bom_pits_ids_by_part: dict[str, set[str]] = {}
+    if bom_sheet is not None:
+        content.seek(0)
+        bom_raw = pd.read_excel(content, sheet_name=bom_sheet, header=None, dtype=object)
+        bom = _sheet_with_header(bom_raw, {"tracker", "part", "description"})
+        for _, row in bom.iterrows():
+            bom_pits_id = _excel_column_value(row, "A")
+            bom_part_number = _excel_column_value(row, "B")
+            if bom_pits_id and bom_part_number:
+                bom_pits_ids_by_part.setdefault(bom_part_number, set()).add(bom_pits_id)
 
     parts = _sheet_with_header(parts_raw, {"id", "part", "description", "status", "subsystem", "design"})
     models_df = _sheet_with_header(models_raw, {"model", "item", "platform", "package", "appearance", "base"})
@@ -211,21 +228,31 @@ def parse_pits_id_workbook(uploaded_file) -> tuple[list[dict], list[dict]]:
         )
         source_code = _source_code_number(_excel_column_value(row, "T"))
         revision = _excel_column_value(row, "BL")
+        technology_engineer = _excel_column_value(row, "I")
+        subsystem = _excel_column_value(row, "F")
+        part_code = _excel_column_value(row, "N")
+        catalog_part_number = part_number or str(source.get("partnumber1", "")).strip()
         source["source_code"] = source_code
         source["revision"] = revision
+        source["technology_engineer"] = technology_engineer
+        source["subsystem"] = subsystem
+        source["part_code"] = part_code
         records.append({
             "pits_id": pits_id,
             "source_row": int(source_index) + 2,
-            "part_number": part_number or str(source.get("partnumber1", "")).strip(),
+            "part_number": catalog_part_number,
             "description": description,
             "revision": revision,
             "source_code": source_code,
+            "technology_engineer": technology_engineer,
+            "part_code": part_code,
             "used_bom": str(source.get("usedbom", "")).strip(),
             "status": str(source.get("baseinfostatus", "")).strip() or str(source.get("status", "")).strip(),
-            "subsystem": str(source.get("subsystem", "")).strip(),
+            "subsystem": subsystem,
             "design_maturity": str(source.get("designmaturity", "")).strip(),
             "comments": str(source.get("comments", "")).strip(),
             "workstation": str(source.get("factoryworkstationlocation", "")).strip(),
+            "_bom_pits_ids": sorted(bom_pits_ids_by_part.get(catalog_part_number, set())),
             "source_payload": source,
         })
 
