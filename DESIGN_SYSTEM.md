@@ -273,6 +273,7 @@ This glossary is active, locked policy, not merely informational, and must be ch
 | Import/export page | **Import/Export Projects** | Navigation and page title |
 | Fishbone page | **Parts to fishbone** | Navigation and page title |
 | Pin Map page | **Pin Map** | Navigation and page title |
+| Model Tree page | **Model Tree** | Navigation and page title |
 | Parts master | **Parts Catalog** | Page title, captions, help text, dialogs, and cross-page references |
 | Fishbone framework | **Fishbone framework** | Section headings and explanatory copy |
 | Fishbone section | **Fishbone section** | Filters, selectors, table columns, captions, and help text |

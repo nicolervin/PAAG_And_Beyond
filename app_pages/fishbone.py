@@ -455,8 +455,14 @@ with st.expander(
                 f"- **{impact['category_built_reference_count']}** assembly-grid category Built reference(s) will be re-pointed.\n"
                 f"- **{impact['category_installed_reference_count']}** assembly-grid category Installed reference(s) will be re-pointed.\n"
                 f"- **{impact['feature_visibility_preference_count']}** section-specific grid feature visibility preference(s) will be removed.\n"
-                f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections."
+                f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections.\n"
+                f"- **{impact['pits_bom_approved_occurrence_count']}** approved PITS BOM occurrence(s) must be detached before deletion."
             )
+            if impact["pits_bom_approved_occurrence_count"]:
+                st.error(
+                    "Detach the approved PITS BOM occurrences in Import/Export Projects before "
+                    "deleting these Fishbone sections."
+                )
             st.caption("Sections: " + ", ".join(impact["section_names"]))
             replacement_sections = sections.loc[
                 ~sections["id"].astype(str).isin(impact["section_ids"])
@@ -521,7 +527,10 @@ with st.expander(
                 "Delete sections",
                 type="primary",
                 icon=":material/delete:",
-                disabled=bool(impact["requires_repointing"] and not target_is_valid),
+                disabled=bool(
+                    impact["pits_bom_approved_occurrence_count"]
+                    or (impact["requires_repointing"] and not target_is_valid)
+                ),
                 key=f"destructive_confirm_fishbone_framework_delete_{project_id}",
             ):
                 try:
@@ -924,7 +933,6 @@ else:
         key=pool_key,
         hide_index=True,
         height=330,
-        num_rows="delete",
         disabled=["id", "part_number", "description", "revision", "model_applicability", "models_familiar", "fishbone_section"],
         column_order=["place", "edit_part", "part_number", "description", "quantity", "revision", "models_familiar", "fishbone_section"],
         column_config={
@@ -1057,9 +1065,24 @@ if assignments.empty:
     st.caption("Assigned parts will appear here for ordering within each Fishbone section.")
 else:
     full_assignment_editor = assignments.copy()
+
+    def _format_pits_sync_status(row: pd.Series) -> str:
+        status = str(row.get("pits_sync_status") or "")
+        updated_at = row.get("pits_quantity_updated_at")
+        if status == "In sync" and updated_at and pd.notna(updated_at):
+            try:
+                dt = pd.to_datetime(updated_at, errors="coerce")
+                if pd.notna(dt):
+                    return f"Updated from PITS on {dt.strftime('%b %d, %Y')}"
+            except Exception:
+                pass
+        return status
     full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_option_labels)
     full_assignment_editor["model_applicability"] = full_assignment_editor.apply(
         lambda row: feature_applicability(row["part_id"], row["model_applicability"]), axis=1
+    )
+    full_assignment_editor["pits_sync_status"] = full_assignment_editor.apply(
+        _format_pits_sync_status, axis=1
     )
     assignment_editor = filter_table(
         full_assignment_editor,
@@ -1106,10 +1129,14 @@ else:
         hide_index=True,
         num_rows="delete",
         height=430,
-        disabled=["id", "part_id", "part_number", "description", "revision", "model_applicability", "updated_at"],
+        disabled=[
+            "id", "part_id", "part_number", "description", "revision",
+            "model_applicability", "pits_sync_status", "updated_at",
+        ],
         column_order=[
             "edit_part", "add_use", "section", "part_number", "description",
-            "quantity", "model_applicability", "revision", "use_description", "notes", "sequence",
+            "quantity", "pits_sync_status", "model_applicability", "revision",
+            "use_description", "notes", "sequence",
         ],
         column_config={
             "id": None,
@@ -1151,7 +1178,21 @@ else:
                 width="large",
                 help="What this occurrence does or where it is installed.",
             ),
-            "quantity": st.column_config.NumberColumn("Fishbone quantity", step=0.01, format="%g"),
+            "quantity": st.column_config.NumberColumn(
+                "Fishbone quantity",
+                step=0.01,
+                format="%g",
+                help="For PITS BOM uses, quantity is maintained in PITS and updated automatically on import.",
+            ),
+            "pits_sync_status": st.column_config.TextColumn(
+                "PITS status",
+                width="medium",
+                help=(
+                    "Shows whether this approved Fishbone use matches its linked PITS BOM occurrence. "
+                    "PITS imports automatically update approved quantities."
+                ),
+            ),
+            "pits_quantity_updated_at": None,
             "model_applicability": st.column_config.TextColumn("Feature applicability", width="medium"),
             "notes": st.column_config.TextColumn("IE notes", width="large"),
             "updated_at": None,
