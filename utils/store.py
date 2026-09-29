@@ -15381,3 +15381,124 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
         }
 
 
+def pits_assembly_mini_bom(
+    project_id: str,
+    part_id: str = "",
+    part_number: str = "",
+    pits_tracker_number: str = "",
+) -> pd.DataFrame:
+    """Returns an indented Mini-BOM dataframe for parts contained within an assembly from PITS BOM occurrences.
+
+    Matches the assembly in pits_bom_occurrences by:
+      1. child_part_id = part_id, or child_tracker_number = pits_tracker_number, or parts.part_number = part_number.
+      2. verifies whether this occurrence has children (either subsequent rows in source_row order with
+         proposed_depth > base_depth, or rows with parent_tracker_number matching this part's child_tracker_number).
+      3. if matched, extracts all descendant occurrences in the assembly's subtree (until proposed_depth <= base_depth)
+         and returns an indented hierarchy dataframe with tree-formatted part numbers, descriptions, quantities,
+         levels, tracker numbers, and make/buy info.
+    """
+    if not project_id:
+        return pd.DataFrame()
+
+    with connection() as conn:
+        occ_rows = conn.execute(
+            """SELECT o.source_row, o.proposed_depth, o.child_tracker_number
+               FROM pits_bom_occurrences o
+               LEFT JOIN parts p ON p.id = o.child_part_id
+               WHERE o.project_id = ?
+                 AND (
+                   (? <> '' AND o.child_part_id = ?)
+                   OR (? <> '' AND o.child_tracker_number = ?)
+                   OR (? <> '' AND p.part_number = ?)
+                 )
+               ORDER BY o.source_row""",
+            (
+                project_id,
+                part_id, part_id,
+                pits_tracker_number, pits_tracker_number,
+                part_number, part_number,
+            ),
+        ).fetchall()
+
+        matched_occ = None
+        for r in occ_rows:
+            sr, d, tr = int(r["source_row"]), int(r["proposed_depth"]), str(r["child_tracker_number"] or "").strip()
+            next_r = conn.execute(
+                """SELECT proposed_depth FROM pits_bom_occurrences
+                   WHERE project_id = ? AND source_row > ?
+                   ORDER BY source_row LIMIT 1""",
+                (project_id, sr),
+            ).fetchone()
+            if next_r and int(next_r["proposed_depth"]) > d:
+                matched_occ = (sr, d, tr)
+                break
+            if tr:
+                has_child = conn.execute(
+                    """SELECT 1 FROM pits_bom_occurrences
+                       WHERE project_id = ? AND parent_tracker_number = ? LIMIT 1""",
+                    (project_id, tr),
+                ).fetchone()
+                if has_child:
+                    matched_occ = (sr, d, tr)
+                    break
+
+        if not matched_occ and pits_tracker_number:
+            p_children = conn.execute(
+                """SELECT min(source_row), min(proposed_depth)
+                   FROM pits_bom_occurrences
+                   WHERE project_id = ? AND parent_tracker_number = ?""",
+                (project_id, pits_tracker_number),
+            ).fetchone()
+            if p_children and p_children[0] is not None:
+                min_sr, min_d = int(p_children[0]), int(p_children[1])
+                matched_occ = (min_sr - 1, min_d - 1, pits_tracker_number)
+
+        if not matched_occ:
+            return pd.DataFrame()
+
+        base_sr, base_d, _ = matched_occ
+        slice_rows = conn.execute(
+            """SELECT o.id, o.source_row, o.proposed_depth, o.parent_tracker_number, o.child_tracker_number,
+                      o.proposed_quantity, o.raw_quantity_text,
+                      p.id AS part_id, p.part_number, p.description, p.make_buy, p.subsystem,
+                      p.design_maturity, p.revision, p.part_code
+               FROM pits_bom_occurrences o
+               LEFT JOIN parts p ON p.id = o.child_part_id
+               WHERE o.project_id = ? AND o.source_row > ?
+               ORDER BY o.source_row""",
+            (project_id, base_sr),
+        ).fetchall()
+
+        result_rows = []
+        for r in slice_rows:
+            d = int(r["proposed_depth"])
+            if d <= base_d:
+                break
+            rel_depth = d - base_d
+            indent = "　" * (rel_depth - 1)
+            pn = str(r["part_number"] or "").strip()
+            if not pn:
+                pn = f"Tracker #{r['child_tracker_number']}" if r["child_tracker_number"] else "—"
+            tree_pn = f"{indent}↳ {pn}" if rel_depth > 1 else pn
+            qty = r["proposed_quantity"] if r["proposed_quantity"] is not None else (r["raw_quantity_text"] or 1)
+            result_rows.append({
+                "occurrence_id": str(r["id"]),
+                "part_id": str(r["part_id"] or ""),
+                "tree_part_number": tree_pn,
+                "part_number": pn,
+                "part_name": str(r["description"] or "—"),
+                "quantity": qty,
+                "level": f"L{d}",
+                "tracker_number": f"#{r['child_tracker_number']}" if r["child_tracker_number"] else "—",
+                "make_buy": str(r["make_buy"] or "—"),
+                "part_code": str(r["part_code"] or "—"),
+                "subsystem": str(r["subsystem"] or "—"),
+                "design_maturity": str(r["design_maturity"] or r["revision"] or "—"),
+                "depth": d,
+                "rel_depth": rel_depth,
+            })
+
+        return pd.DataFrame(result_rows)
+
+
+

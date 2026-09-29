@@ -380,7 +380,120 @@ class PartsCatalogFieldTests(unittest.TestCase):
         self.assertEqual(saved2["design_maturity"], "Production")
         self.assertEqual(saved2["revision"], "Production")
 
+    def test_pits_assembly_mini_bom_returns_indented_tree(self) -> None:
+        parent_id = str(uuid4())
+        c1_id = str(uuid4())
+        c2_id = str(uuid4())
+        c3_id = str(uuid4())
+        sibling_id = str(uuid4())
+        now = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'ASM-100G01', 'Main Door Asm', '100', ?)""",
+                (parent_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'COMP-101', 'Door Gasket', '101', ?)""",
+                (c1_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'COMP-102G01', 'Handle Sub-Asm', '102', ?)""",
+                (c2_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'COMP-103', 'Handle Screw', '103', ?)""",
+                (c3_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'ASM-200G01', 'Sibling Top Unit', '200', ?)""",
+                (sibling_id, self.project_id, now),
+            )
+
+        import_id = str(uuid4())
+        store.execute(
+            """INSERT INTO pits_bom_imports (
+                id, project_id, import_sequence, workbook_name, workbook_sha256,
+                bom_sheet_name, source_row_count, occurrence_count, issue_count,
+                imported_by, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (import_id, self.project_id, 1, "test.xlsx", "sha", "BOM", 5, 5, 0, "tester", now),
+        )
+
+        def add_occ(parent_trk: str, child_trk: str, child_pid: str | None, depth: int, qty: float, row_num: int):
+            store.execute(
+                """INSERT INTO pits_bom_occurrences (
+                    id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                    proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                    source_fingerprint, first_seen_import_id, last_seen_import_id,
+                    first_seen_at, last_seen_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()), self.project_id, parent_trk, child_trk, child_pid,
+                    depth, qty, str(qty), row_num,
+                    f"fp_{child_trk}", import_id, import_id,
+                    now, now, now,
+                ),
+            )
+
+        add_occ("", "100", parent_id, 2, 1.0, 10)
+        add_occ("100", "101", c1_id, 3, 2.0, 11)
+        add_occ("100", "102", c2_id, 3, 1.0, 12)
+        add_occ("102", "103", c3_id, 4, 4.0, 13)
+        add_occ("", "200", sibling_id, 2, 1.0, 14)
+
+        mini_bom = store.pits_assembly_mini_bom(
+            self.project_id,
+            part_id=parent_id,
+            part_number="ASM-100G01",
+            pits_tracker_number="100",
+        )
+        self.assertEqual(len(mini_bom), 3)
+        self.assertEqual(list(mini_bom["part_number"]), ["COMP-101", "COMP-102G01", "COMP-103"])
+        self.assertEqual(list(mini_bom["level"]), ["L3", "L3", "L4"])
+        self.assertEqual(list(mini_bom["quantity"]), [2.0, 1.0, 4.0])
+        # Verify relative indentation: L3 is rel_depth 1 (plain), L4 is rel_depth 2 (indented with ↳)
+        self.assertEqual(mini_bom.iloc[0]["tree_part_number"], "COMP-101")
+        self.assertEqual(mini_bom.iloc[1]["tree_part_number"], "COMP-102G01")
+        self.assertIn("↳", mini_bom.iloc[2]["tree_part_number"])
+        self.assertIn("COMP-103", mini_bom.iloc[2]["tree_part_number"])
+
+        # Sub-assembly COMP-102G01 should also have its own Mini-BOM containing COMP-103
+        sub_bom = store.pits_assembly_mini_bom(
+            self.project_id,
+            part_id=c2_id,
+            part_number="COMP-102G01",
+            pits_tracker_number="102",
+        )
+        self.assertEqual(len(sub_bom), 1)
+        self.assertEqual(sub_bom.iloc[0]["part_number"], "COMP-103")
+        self.assertEqual(sub_bom.iloc[0]["quantity"], 4.0)
+
+        # Leaf part COMP-103 should have an empty Mini-BOM
+        leaf_bom = store.pits_assembly_mini_bom(
+            self.project_id,
+            part_id=c3_id,
+            part_number="COMP-103",
+            pits_tracker_number="103",
+        )
+        self.assertTrue(leaf_bom.empty)
+
+    def test_assembly_grid_hidden_from_navigation_bar(self) -> None:
+        streamlit_app_code = (store.ROOT / "streamlit_app.py").read_text(encoding="utf-8")
+        # Ensure Assembly grid is not inside the Product structure visible navigation
+        product_struct_section = streamlit_app_code.split('"Product structure": [')[1].split(']')[0]
+        self.assertNotIn("app_pages/assemblies.py", product_struct_section)
+        # Ensure it is still registered in unlisted_pages for internal navigation and smoke checks
+        self.assertIn("unlisted_pages", streamlit_app_code)
+        self.assertIn('st.Page("app_pages/assemblies.py"', streamlit_app_code)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

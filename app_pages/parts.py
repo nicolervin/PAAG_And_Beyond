@@ -12,6 +12,7 @@ from utils.store import (
     PART_SOURCE_CODES,
     add_part_image,
     assembly_bom_components,
+    pits_assembly_mini_bom,
     audit_history,
     complexity_features,
     delete_project_part,
@@ -885,21 +886,56 @@ with details_col.container(border=True):
         else str(raw_assembly_id).strip()
     )
     st.subheader("Mini-BOM")
-    if not assembly_id:
+    mini_bom = pits_assembly_mini_bom(
+        project_id,
+        part_id=str(part.get("id") or ""),
+        part_number=str(part.get("part_number") or ""),
+        pits_tracker_number=str(part.get("pits_tracker_number") or ""),
+    )
+    if not mini_bom.empty:
         st.caption(
-            "This catalog part is not linked to a completed manufacturing assembly, "
-            "so it does not have an assembly mini-BOM."
+            f"Indented PITS BOM tree ({len(mini_bom)} component{'s' if len(mini_bom) != 1 else ''}) "
+            "contained within this assembly."
         )
-    else:
+        mini_bom_display = mini_bom[
+            ["tree_part_number", "part_name", "quantity", "level", "tracker_number", "make_buy"]
+        ].rename(
+            columns={
+                "tree_part_number": "Part number",
+                "part_name": "Part name",
+                "quantity": "Quantity",
+                "level": "Level",
+                "tracker_number": "PITS Tracker",
+                "make_buy": "Make / Buy",
+            }
+        )
+        st.dataframe(
+            mini_bom_display,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Part number": st.column_config.TextColumn(
+                    "Part number", pinned=True
+                ),
+                "Part name": st.column_config.TextColumn("Part name"),
+                "Quantity": st.column_config.NumberColumn(
+                    "Quantity", format="%g"
+                ),
+                "Level": st.column_config.TextColumn("Level", width="small"),
+                "PITS Tracker": st.column_config.TextColumn("PITS Tracker", width="small"),
+                "Make / Buy": st.column_config.TextColumn("Make / Buy", width="small"),
+            },
+        )
+    elif assembly_id:
         st.caption(
             "Read-only completed-subassembly structure. Edit it from Assembly grid "
             "Details → Mini-BOM."
         )
-        mini_bom = assembly_bom_components(project_id, assembly_id)
-        if mini_bom.empty:
-            st.caption("No components listed for this assembly yet.")
+        legacy_bom = assembly_bom_components(project_id, assembly_id)
+        if legacy_bom.empty:
+            st.caption("No sub-components found for this assembly in PITS BOM.")
         else:
-            mini_bom_view = mini_bom[
+            mini_bom_view = legacy_bom[
                 ["part_number", "part_name", "quantity", "use_description"]
             ].rename(
                 columns={
@@ -924,5 +960,7 @@ with details_col.container(border=True):
                     "Fishbone use": st.column_config.TextColumn("Fishbone use"),
                 },
             )
+    else:
+        st.caption("No sub-components found for this part in PITS BOM.")
 
 render_parts_history()
