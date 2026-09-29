@@ -3,9 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from utils.time_units import format_seconds
+from pathlib import Path
 
 from utils.fishbone_ui import ordered_yamazumi_area_ids, section_breadcrumb_labels
+from utils.layout_canvas import layout_image_data_url
+from utils.layout_store import from_canonical_inches, get_pitch_layout_footprints
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     assembly_section_walk_order,
@@ -13,6 +15,7 @@ from utils.store import (
     pin_map_for_scenario,
 )
 from utils.table_ui import dataframe_to_excel
+from utils.time_units import format_seconds
 
 
 def clean_text(value: object) -> str:
@@ -160,8 +163,138 @@ summary[2].metric(
     f"{pd.to_numeric(linked_work['cycle_time_s'], errors='coerce').fillna(0).sum():.1f} s",
 )
 
+view_mode = st.radio(
+    "Pin Map Display Mode",
+    ["Linear Flow Cards", "2D Plant Spatial Map"],
+    horizontal=True,
+    key=f"pin_map_view_mode_{scenario_id}",
+)
+
 if visible_pitches.empty:
     st.info("No pitches match the current filters.", icon=":material/filter_alt_off:")
+elif view_mode == "2D Plant Spatial Map":
+    footprints = get_pitch_layout_footprints(project_id, scenario_id)
+    if not footprints:
+        st.info(
+            "No workstations from this scenario have been placed on a 2D floor plan layout yet. "
+            "Go to **Equipment and Layouts -> Layouts** to place your workstation footprints to scale on your CAD floor plan.",
+            icon=":material/map:",
+        )
+    else:
+        layouts_dict: dict[str, list[dict]] = {}
+        for fp in footprints:
+            layouts_dict.setdefault(str(fp["layout_id"]), []).append(fp)
+
+        layout_id_options = list(layouts_dict.keys())
+        selected_fp_layout_id = layout_id_options[0]
+        if len(layout_id_options) > 1:
+            selected_fp_layout_id = st.selectbox(
+                "Floor Plan Layout",
+                options=layout_id_options,
+                format_func=lambda lid: f"{layouts_dict[lid][0]['layout_name']} (Rev {layouts_dict[lid][0]['revision_number']})",
+                key=f"pin_map_fp_layout_sel_{scenario_id}",
+            )
+
+        layout_fps = layouts_dict[selected_fp_layout_id]
+        sample_fp = layout_fps[0]
+        layout_name = sample_fp["layout_name"]
+        rev_num = sample_fp["revision_number"]
+        unit = str(sample_fp["unit"] or "feet")
+        px_per_in = float(sample_fp["scale_px_per_in"] or 1.0)
+        img_w = int(sample_fp["image_width_px"] or 1200)
+        img_h = int(sample_fp["image_height_px"] or 800)
+        img_path = Path(str(sample_fp["image_path"]))
+
+        visible_pitch_id_set = set(visible_pitches["pitch_id"].astype(str))
+        active_fps = [fp for fp in layout_fps if str(fp["pitch_id"]) in visible_pitch_id_set]
+
+        st.caption(
+            f":material/architecture: Layout: **{layout_name}** · Rev {rev_num} · "
+            f"{len(active_fps)} workstation(s) positioned to scale on plant floor plan"
+        )
+
+        img_url = (
+            layout_image_data_url(str(img_path), img_path.stat().st_mtime_ns)
+            if img_path.is_file()
+            else ""
+        )
+
+        svg_rects = []
+        for fp in active_fps:
+            fx = float(fp["x"])
+            fy = float(fp["y"])
+            fw = float(fp["width"])
+            fh = float(fp["height"])
+            p_num = clean_text(fp["pitch_number"])
+            p_name = clean_text(fp["pitch_name"])
+            p_id = str(fp["pitch_id"])
+
+            w_units = from_canonical_inches(fw / px_per_in if px_per_in > 0 else 0, unit)
+            h_units = from_canonical_inches(fh / px_per_in if px_per_in > 0 else 0, unit)
+
+            p_work = visible.loc[(visible["pitch_id"].astype(str) == p_id) & visible["process_element_id"].notna()]
+            ct_sum = pd.to_numeric(p_work["cycle_time_s"], errors="coerce").fillna(0).sum()
+
+            svg_rects.append(
+                f'<g class="station-node" transform="translate({fx},{fy})">'
+                f'<rect width="{fw}" height="{fh}" rx="4" fill="#e3f2fd" fill-opacity="0.8" stroke="#1565c0" stroke-width="2"/>'
+                f'<text x="{fw/2}" y="{min(20, fh/2)}" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="bold" fill="#0d47a1">{p_num}</text>'
+                f'<text x="{fw/2}" y="{min(36, fh/2 + 14)}" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#333">{p_name[:14]}</text>'
+                f'<rect x="{max(0, fw/2 - 45)}" y="{max(0, fh - 18)}" width="{min(fw, 90)}" height="14" rx="3" fill="#1976d2"/>'
+                f'<text x="{fw/2}" y="{max(10, fh - 7)}" text-anchor="middle" font-family="sans-serif" font-size="9" font-weight="bold" fill="#fff">{w_units:.1f}×{h_units:.1f} {unit} ({ct_sum:.0f}s)</text>'
+                f'</g>'
+            )
+
+        svg_content = f'''
+        <div style="width:100%; overflow:auto; max-height:550px; border:1px solid #ddd; border-radius:8px; background:#f9f9f9;">
+            <svg viewBox="0 0 {img_w} {img_h}" style="width:100%; min-width:800px; display:block;">
+                <image href="{img_url}" width="{img_w}" height="{img_h}" preserveAspectRatio="none"/>
+                {''.join(svg_rects)}
+            </svg>
+        </div>
+        '''
+        st.components.v1.html(svg_content, height=560, scrolling=True)
+
+        st.markdown("##### Workstation Pitches & Process Work (Spatially Positioned)")
+        sorted_fps = sorted(active_fps, key=lambda f: float(f["x"]))
+
+        card_cols = st.columns(3)
+        for idx, fp in enumerate(sorted_fps):
+            col = card_cols[idx % 3]
+            p_id = str(fp["pitch_id"])
+            p_num = clean_text(fp["pitch_number"])
+            p_name = clean_text(fp["pitch_name"])
+            fx = float(fp["x"])
+            fy = float(fp["y"])
+            fw = float(fp["width"])
+            fh = float(fp["height"])
+            w_u = from_canonical_inches(fw / px_per_in if px_per_in > 0 else 0, unit)
+            h_u = from_canonical_inches(fh / px_per_in if px_per_in > 0 else 0, unit)
+            x_u = from_canonical_inches(fx / px_per_in if px_per_in > 0 else 0, unit)
+            y_u = from_canonical_inches(fy / px_per_in if px_per_in > 0 else 0, unit)
+
+            process_rows = visible.loc[
+                (visible["pitch_id"].astype(str) == p_id)
+                & visible["process_element_id"].notna()
+            ].drop_duplicates(subset=["process_element_id"], keep="first")
+
+            ct_total = pd.to_numeric(process_rows["cycle_time_s"], errors="coerce").fillna(0).sum()
+
+            with col.container(border=True):
+                st.caption(f":material/pin_drop: Floor Plan Position: X={x_u:.1f} {unit}, Y={y_u:.1f} {unit}")
+                st.markdown(f"#### {p_num} — {p_name}")
+                st.badge(f"Footprint: {w_u:.1f} × {h_u:.1f} {unit}", color="blue")
+                st.caption(f"Cycle time: **{ct_total:.1f} s** · {len(process_rows)} work elements")
+
+                st.divider()
+                if process_rows.empty:
+                    st.caption("No linked process work")
+                else:
+                    for _, process in process_rows.iterrows():
+                        seq = process.get("process_sequence")
+                        seq_str = str(int(seq)) if pd.notna(seq) else "—"
+                        st.markdown(f"**{seq_str} · {clean_text(process.get('work_element')) or 'Untitled'}**")
+                        st.caption(f"{seconds_label(process.get('cycle_time_s'))} · {clean_text(process.get('tool')) or 'No tool'}")
 else:
     st.caption(
         "Line flow runs left to right. Process work appears above its workstation or pitch."

@@ -40,7 +40,35 @@ class EquipmentPageTests(unittest.TestCase):
 
     def test_top_level_equipment_page_loads(self) -> None:
         app = self._run("app_pages/functional_equipment.py")
+        tab_labels = [tab.label for tab in app.tabs]
+        self.assertIn("Equipment", tab_labels)
+        self.assertIn("Layouts", tab_labels)
         self.assertIn("Project equipment", [item.value for item in app.subheader])
+
+    def test_layouts_tab_renders_with_layout(self) -> None:
+        from utils.layout_store import create_layout, create_layout_revision
+        from tests.test_layout_store import _create_test_image_file
+
+        layout = create_layout(self.project_id, "Packaging Cell A", "Line A layout", "Layout Tester")
+        img = _create_test_image_file(width=1000, height=400)
+        create_layout_revision(
+            project_id=self.project_id,
+            layout_id=layout["id"],
+            image_file=img,
+            width_value=80.0,
+            height_value=32.0,
+            unit="feet",
+            notes="Rev 1 CAD floor plan",
+            copy_from_revision_id=None,
+            editor_name="Layout Tester",
+        )
+
+        app = self._run("app_pages/functional_equipment.py")
+        self.assertEqual([], list(app.exception))
+        metric_labels = [m.label for m in app.metric]
+        self.assertIn("Physical Dimensions", metric_labels)
+        self.assertIn("Image Resolution", metric_labels)
+        self.assertIn("Layout Scale", metric_labels)
 
     def test_quality_equipment_tab_lists_seeded_type_charts(self) -> None:
         app = self._run(

@@ -42,6 +42,7 @@ from utils.time_units import display_to_seconds, normalize_time_unit
 from utils.control_plan_store import clone_control_plan_scenario, init_control_plan_schema
 
 from utils.equipment_store import clone_equipment_scenario, init_equipment_schema
+from utils.layout_store import init_layout_schema
 
 from utils.yamazumi_naming import (
     format_yamazumi_pitch_address,
@@ -977,6 +978,7 @@ def init_db() -> None:
         init_pfmea_pattern_schema(conn)
         init_control_plan_schema(conn)
         init_equipment_schema(conn)
+        init_layout_schema(conn)
         project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "product_line" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
