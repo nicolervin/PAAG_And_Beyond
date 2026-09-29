@@ -85,7 +85,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         self.assertIn("Detection", issues)
         self.assertIn("Recommended Action", issues)
 
-    def test_pfmea_context_columns_are_pinned_and_editor_is_one_row_shorter(self) -> None:
+    def test_pfmea_context_columns_and_editor_layout(self) -> None:
         source = inspect.getsource(pfmea_ui._render_flat_pfmea_table)
         process_function_config = source.split(
             '"process_function": st.column_config.SelectboxColumn(', 1
@@ -94,16 +94,27 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         self.assertIn("pinned=True", process_function_config)
         self.assertIn("height=754", source)
         self.assertIn("row_height=96", source)
-        self.assertLess(
-            source.index("_render_control_selection_panel("),
-            source.index("_render_pfmea_duplicate_workflow("),
-        )
-        self.assertLess(
-            source.index("_render_pfmea_duplicate_workflow("),
-            source.index("edited = st.data_editor("),
-        )
+        editor_position = source.index("edited = st.data_editor(")
+        footer_position = source.index("footer = editable_table_footer(")
+        recalculate_position = source.index('"Recalculate RPN"')
+        export_position = source.index('"Export filtered rows"')
+        legend_position = source.index("render_pfmea_classification_legend()")
+        completion_position = source.index("_render_pfmea_completion_assistant(")
+        add_lines_position = source.index("_render_add_pfmea_lines(")
+        controls_position = source.index("_render_control_selection_panel(")
+        duplicate_position = source.index("_render_pfmea_duplicate_workflow(")
+        self.assertLess(editor_position, footer_position)
+        self.assertLess(footer_position, recalculate_position)
+        self.assertLess(recalculate_position, export_position)
+        self.assertLess(export_position, legend_position)
+        self.assertLess(legend_position, completion_position)
+        self.assertLess(editor_position, completion_position)
+        self.assertLess(completion_position, add_lines_position)
+        self.assertLess(add_lines_position, controls_position)
+        self.assertLess(controls_position, duplicate_position)
         self.assertNotIn("Free text preserves pasted or saved line breaks.", source)
         self.assertIn("closed table cell may", source)
+        self.assertNotIn("above the table", source)
 
     def test_pfmea_classification_choices_use_product_safety(self) -> None:
         self.assertEqual(
@@ -231,12 +242,12 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         detection = detection.split('"rpn": st.column_config.NumberColumn', 1)[0]
         for configuration in (prevention, detection):
             self.assertIn("accept_new_options=False", configuration)
-            self.assertIn("disabled=True", configuration)
+            self.assertIn("disabled=False", configuration)
         self.assertIn("options=list(prevention_labels)", prevention)
         self.assertIn("options=list(detection_labels)", detection)
         self.assertLess(
-            source.index("_render_control_selection_panel("),
             source.index("edited = st.data_editor("),
+            source.index("_render_control_selection_panel("),
         )
         self.assertFalse(hasattr(pfmea_ui, "_render_control_copy_workflow"))
 
@@ -1405,6 +1416,23 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         self.assertIn("Save & Refresh", [button.label for button in app.button])
         self.assertIn("Requirements", [tab.label for tab in app.tabs])
         self.assertIn("PFMEA", [tab.label for tab in app.tabs])
+
+
+    def test_sanitize_pfmea_row_controls_removes_unassigned_work_element_controls(self) -> None:
+        row_unassigned = pd.DataFrame([{
+            "work_element_id": "we_123",
+            "process_function": "Op 10 — Torque Bolt",
+            "prevention_controls": ["quality:unassigned_req_id", "manual:preset_1"],
+            "detection_controls": [],
+        }])
+        with patch.object(pfmea_ui, "pfmea_control_candidates") as mock_candidates:
+            mock_candidates.return_value = pd.DataFrame([{"source_key": "manual:preset_1", "label": "Preset 1"}])
+            sanitized, warnings = pfmea_ui._sanitize_pfmea_row_controls(
+                "proj_1", "scen_1", row_unassigned, {"quality:unassigned_req_id": "Unassigned Req"}
+            )
+            self.assertEqual(sanitized.iloc[0]["prevention_controls"], ["manual:preset_1"])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("Unassigned Req", warnings[0])
 
 
 if __name__ == "__main__":

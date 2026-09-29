@@ -236,7 +236,7 @@ def init_pfmea_schema(conn: sqlite3.Connection) -> None:
 
 
 def _store():
-    from utils import store
+    from utils import db_core as store
 
     return store
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from utils.equipment_ui import render_functional_equipment_tab
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     delete_safety_requirements,
@@ -54,6 +55,17 @@ st.caption(
 if not project_id or not scenario:
     st.info("Select an active planning scenario to manage Safety requirements.")
     st.stop()
+
+review_tab, equipment_tab = st.tabs(
+    ["Review", "Equipment"],
+    key=f"safety_page_tabs_{project_id}",
+    on_change="rerun",
+)
+if equipment_tab.open:
+    with equipment_tab:
+        render_functional_equipment_tab(project_id, scenario_id, "Safety")
+    st.stop()
+review_tab.__enter__()
 
 logical_editor_key = f"safety_requirements_editor_{project_id}_{scenario_id}"
 editor_key = apply_pending_table_editor_reset(logical_editor_key)

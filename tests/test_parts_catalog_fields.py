@@ -226,6 +226,274 @@ class PartsCatalogFieldTests(unittest.TestCase):
             },
         )
 
+    def test_tracker_cross_functional_fields_and_aliases_round_trip(self) -> None:
+        columns = {row["name"] for row in store.query("PRAGMA table_info(parts)")}
+        expected_fields = {
+            "design_engineer", "technology_engineer",
+            "factory_nickname", "official_windchill_part_name",
+            "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
+            "subsystem", "design_maturity",
+        }
+        self.assertTrue(expected_fields.issubset(columns))
+
+        part = self.edited_parts().iloc[0]
+        part_id = str(part["id"])
+
+        # Test updating with new names: design_engineer, factory_nickname, design_maturity, subsystem
+        store.upsert_part(
+            self.project_id,
+            {
+                "part_number": str(part["part_number"]),
+                "design_engineer": "Jordan DE",
+                "factory_nickname": "Door Bracket Assembly",
+                "ppm": "PPM-Pat",
+                "buyer_gcl": "Buyer-Chris",
+                "pmqe_aqe": "AQE-Sam",
+                "ame_tooling_engineer": "AME-Riley",
+                "part_code": "P-1099",
+                "subsystem": "Door Systems",
+                "design_maturity": "Pilot",
+            },
+        )
+
+        saved = store.query(
+            """SELECT design_engineer, technology_engineer, factory_nickname,
+                      official_windchill_part_name, ppm, buyer_gcl, pmqe_aqe,
+                      ame_tooling_engineer, part_code, subsystem, design_maturity, revision
+               FROM parts WHERE id=?""",
+            (part_id,),
+        )[0]
+        self.assertEqual(saved["design_engineer"], "Jordan DE")
+        self.assertEqual(saved["technology_engineer"], "Jordan DE")
+        self.assertEqual(saved["factory_nickname"], "Door Bracket Assembly")
+        self.assertEqual(saved["official_windchill_part_name"], "Door Bracket Assembly")
+        self.assertEqual(saved["ppm"], "PPM-Pat")
+        self.assertEqual(saved["buyer_gcl"], "Buyer-Chris")
+        self.assertEqual(saved["pmqe_aqe"], "AQE-Sam")
+        self.assertEqual(saved["ame_tooling_engineer"], "AME-Riley")
+        self.assertEqual(saved["part_code"], "P-1099")
+        self.assertEqual(saved["subsystem"], "Door Systems")
+        self.assertEqual(saved["design_maturity"], "Pilot")
+        self.assertEqual(saved["revision"], "Pilot")
+
+        # Test updating with legacy name revision syncs to design_maturity
+        store.upsert_part(
+            self.project_id,
+            {
+                "part_number": str(part["part_number"]),
+                "technology_engineer": "Legacy DE",
+                "official_windchill_part_name": "Legacy Nickname",
+                "revision": "Rev-C",
+            },
+        )
+        synced = store.query(
+            """SELECT design_engineer, technology_engineer, factory_nickname,
+                      official_windchill_part_name, design_maturity, revision
+               FROM parts WHERE id=?""",
+            (part_id,),
+        )[0]
+        self.assertEqual(synced["design_engineer"], "Legacy DE")
+        self.assertEqual(synced["technology_engineer"], "Legacy DE")
+        self.assertEqual(synced["factory_nickname"], "Legacy Nickname")
+        self.assertEqual(synced["official_windchill_part_name"], "Legacy Nickname")
+        self.assertEqual(synced["design_maturity"], "Rev-C")
+        self.assertEqual(synced["revision"], "Rev-C")
+
+    def test_import_pits_id_snapshot_stores_cross_functional_fields(self) -> None:
+        tracker_record = {
+            "pits_id": "0099",
+            "part_number": "PITS-TRACKER-001",
+            "description": "Cross Functional Test Part",
+            "quantity": 2,
+            "revision": "B",
+            "source_code": "3",
+            "design_engineer": "Casey Design",
+            "ppm": "Morgan PPM",
+            "buyer_gcl": "Taylor Buyer",
+            "pmqe_aqe": "Alex AQE",
+            "ame_tooling_engineer": "Logan AME",
+            "part_code": "PC-5501",
+            "used_bom": "Yes",
+            "status": "Active",
+            "subsystem": "Doors",
+            "design_maturity": "Proto",
+            "comments": "Test comment",
+            "workstation": "WS-1",
+            "source_row": 2,
+            "source_payload": {},
+        }
+        res = store.import_pits_id_snapshot(
+            self.project_id,
+            [tracker_record],
+            models=[],
+            editor_name="Test Importer",
+            scenario_id=self.scenario_id,
+        )
+        self.assertGreaterEqual(res["new"], 1)
+
+        saved = store.query(
+            """SELECT design_engineer, technology_engineer, factory_nickname,
+                      ppm, buyer_gcl, pmqe_aqe, ame_tooling_engineer, part_code,
+                      subsystem, design_maturity, revision
+               FROM parts WHERE project_id=? AND part_number=?""",
+            (self.project_id, "PITS-TRACKER-001"),
+        )[0]
+        self.assertEqual(saved["design_engineer"], "Casey Design")
+        self.assertEqual(saved["technology_engineer"], "Casey Design")
+        self.assertEqual(saved["ppm"], "Morgan PPM")
+        self.assertEqual(saved["buyer_gcl"], "Taylor Buyer")
+        self.assertEqual(saved["pmqe_aqe"], "Alex AQE")
+        self.assertEqual(saved["ame_tooling_engineer"], "Logan AME")
+        self.assertEqual(saved["part_code"], "PC-5501")
+        self.assertEqual(saved["subsystem"], "Doors")
+        self.assertEqual(saved["design_maturity"], "Proto")
+        self.assertEqual(saved["revision"], "B")
+
+        # Test importing a record where only design_maturity is provided (maps to revision)
+        dm_only_record = {
+            "pits_id": "0100",
+            "part_number": "PITS-TRACKER-002",
+            "description": "Design Maturity Only Part",
+            "quantity": 1,
+            "source_code": "1",
+            "used_bom": "Yes",
+            "status": "Active",
+            "subsystem": "Chassis",
+            "design_maturity": "Production",
+            "comments": "",
+            "workstation": "Line 2",
+            "source_row": 3,
+            "source_payload": {},
+        }
+        store.import_pits_id_snapshot(
+            self.project_id,
+            [dm_only_record],
+            models=[],
+            editor_name="Test Importer",
+            scenario_id=self.scenario_id,
+        )
+        saved2 = store.query(
+            "SELECT subsystem, design_maturity, revision FROM parts WHERE project_id=? AND part_number=?",
+            (self.project_id, "PITS-TRACKER-002"),
+        )[0]
+        self.assertEqual(saved2["subsystem"], "Chassis")
+        self.assertEqual(saved2["design_maturity"], "Production")
+        self.assertEqual(saved2["revision"], "Production")
+
+    def test_pits_assembly_mini_bom_returns_indented_tree(self) -> None:
+        parent_id = str(uuid4())
+        c1_id = str(uuid4())
+        c2_id = str(uuid4())
+        c3_id = str(uuid4())
+        sibling_id = str(uuid4())
+        now = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'ASM-100G01', 'Main Door Asm', '100', ?)""",
+                (parent_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'COMP-101', 'Door Gasket', '101', ?)""",
+                (c1_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'COMP-102G01', 'Handle Sub-Asm', '102', ?)""",
+                (c2_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'COMP-103', 'Handle Screw', '103', ?)""",
+                (c3_id, self.project_id, now),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                   VALUES (?, ?, 'ASM-200G01', 'Sibling Top Unit', '200', ?)""",
+                (sibling_id, self.project_id, now),
+            )
+
+        import_id = str(uuid4())
+        store.execute(
+            """INSERT INTO pits_bom_imports (
+                id, project_id, import_sequence, workbook_name, workbook_sha256,
+                bom_sheet_name, source_row_count, occurrence_count, issue_count,
+                imported_by, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (import_id, self.project_id, 1, "test.xlsx", "sha", "BOM", 5, 5, 0, "tester", now),
+        )
+
+        def add_occ(parent_trk: str, child_trk: str, child_pid: str | None, depth: int, qty: float, row_num: int):
+            store.execute(
+                """INSERT INTO pits_bom_occurrences (
+                    id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                    proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                    source_fingerprint, first_seen_import_id, last_seen_import_id,
+                    first_seen_at, last_seen_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()), self.project_id, parent_trk, child_trk, child_pid,
+                    depth, qty, str(qty), row_num,
+                    f"fp_{child_trk}", import_id, import_id,
+                    now, now, now,
+                ),
+            )
+
+        add_occ("", "100", parent_id, 2, 1.0, 10)
+        add_occ("100", "101", c1_id, 3, 2.0, 11)
+        add_occ("100", "102", c2_id, 3, 1.0, 12)
+        add_occ("102", "103", c3_id, 4, 4.0, 13)
+        add_occ("", "200", sibling_id, 2, 1.0, 14)
+
+        mini_bom = store.pits_assembly_mini_bom(
+            self.project_id,
+            part_id=parent_id,
+            part_number="ASM-100G01",
+            pits_tracker_number="100",
+        )
+        self.assertEqual(len(mini_bom), 3)
+        self.assertEqual(list(mini_bom["part_number"]), ["COMP-101", "COMP-102G01", "COMP-103"])
+        self.assertEqual(list(mini_bom["level"]), ["L3", "L3", "L4"])
+        self.assertEqual(list(mini_bom["quantity"]), [2.0, 1.0, 4.0])
+        # Verify relative indentation: L3 is rel_depth 1 (plain), L4 is rel_depth 2 (indented with ↳)
+        self.assertEqual(mini_bom.iloc[0]["tree_part_number"], "COMP-101")
+        self.assertEqual(mini_bom.iloc[1]["tree_part_number"], "COMP-102G01")
+        self.assertIn("↳", mini_bom.iloc[2]["tree_part_number"])
+        self.assertIn("COMP-103", mini_bom.iloc[2]["tree_part_number"])
+
+        # Sub-assembly COMP-102G01 should also have its own Mini-BOM containing COMP-103
+        sub_bom = store.pits_assembly_mini_bom(
+            self.project_id,
+            part_id=c2_id,
+            part_number="COMP-102G01",
+            pits_tracker_number="102",
+        )
+        self.assertEqual(len(sub_bom), 1)
+        self.assertEqual(sub_bom.iloc[0]["part_number"], "COMP-103")
+        self.assertEqual(sub_bom.iloc[0]["quantity"], 4.0)
+
+        # Leaf part COMP-103 should have an empty Mini-BOM
+        leaf_bom = store.pits_assembly_mini_bom(
+            self.project_id,
+            part_id=c3_id,
+            part_number="COMP-103",
+            pits_tracker_number="103",
+        )
+        self.assertTrue(leaf_bom.empty)
+
+    def test_assembly_grid_hidden_from_navigation_bar(self) -> None:
+        streamlit_app_code = (store.ROOT / "streamlit_app.py").read_text(encoding="utf-8")
+        # Ensure Assembly grid is not inside the Product structure visible navigation
+        product_struct_section = streamlit_app_code.split('"Product structure": [')[1].split(']')[0]
+        self.assertNotIn("app_pages/assemblies.py", product_struct_section)
+        # Ensure it is still registered in unlisted_pages for internal navigation and smoke checks
+        self.assertIn("unlisted_pages", streamlit_app_code)
+        self.assertIn('st.Page("app_pages/assemblies.py"', streamlit_app_code)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

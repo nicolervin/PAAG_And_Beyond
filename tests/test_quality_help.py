@@ -34,7 +34,12 @@ class QualityHelpContentTests(unittest.TestCase):
                 "Process Function and table entry",
                 "Ratings, RPN, and Classification",
                 "Current Process Controls",
-                "Patterns, duplication, and faster entry",
+                "PFMEA pattern overview",
+                "Create or edit a pattern",
+                "Create a pattern from a saved PFMEA line",
+                "Apply a pattern to PFMEA lines",
+                "How pattern controls are handled",
+                "Duplicate PFMEA lines",
                 "Review tools",
                 "Saving, deletion, export, and History",
                 "Manage reusable options",
@@ -53,6 +58,51 @@ class QualityHelpContentTests(unittest.TestCase):
             "Process source review",
         ):
             self.assertIn(label, combined_sections)
+
+    def test_pfmea_pattern_help_documents_complete_workflow(self) -> None:
+        pattern_sections = {
+            title: " ".join(content.split())
+            for title, content in PFMEA_HELP_SECTIONS
+            if "pattern" in title.lower()
+        }
+        self.assertEqual(
+            set(pattern_sections),
+            {
+                "PFMEA pattern overview",
+                "Create or edit a pattern",
+                "Create a pattern from a saved PFMEA line",
+                "Apply a pattern to PFMEA lines",
+                "How pattern controls are handled",
+            },
+        )
+        combined = " ".join(pattern_sections.values()).replace("**", "")
+        for expected in (
+            "project-wide starting point",
+            "Label is required",
+            "Potential Failure Mode is required",
+            "Effects and Causes, with one entry per line",
+            "Recommended Actions, with one entry per line",
+            "Save selected PFMEA line as pattern",
+            "Stage PFMEA lines performs no database write",
+            "published to the selected Process Function",
+            "inactive control",
+            "same pattern may copy different controls",
+            "Generated PFMEA entries keep no stored pattern lineage",
+            "PFMEA lines previously created from it are not deleted or changed",
+        ):
+            self.assertIn(expected, combined)
+
+        simplified_controls = pattern_sections["How pattern controls are handled"]
+        for implementation_term in (
+            "published assignment",
+            "clones",
+            "remaps",
+            "stale records",
+            "template children",
+            "session-only",
+            "audit event",
+        ):
+            self.assertNotIn(implementation_term, simplified_controls)
 
     def test_help_uses_current_quality_and_control_plan_labels(self) -> None:
         requirements_help = " ".join(REQUIREMENTS_REPOSITORY_HELP.split())
@@ -88,7 +138,17 @@ class QualityHelpContentTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(
             [tab.label for tab in app.tabs],
-            ["Requirements repository", "PFMEA", "Control Plan"],
+            ["Requirements repository", "PFMEA", "Control Plan", "Equipment"],
+        )
+        expander_labels = {expander.label for expander in app.expander}
+        self.assertTrue(
+            {
+                "PFMEA pattern overview",
+                "Create or edit a pattern",
+                "Create a pattern from a saved PFMEA line",
+                "Apply a pattern to PFMEA lines",
+                "How pattern controls are handled",
+            }.issubset(expander_labels)
         )
         rendered_help = " ".join(
             "\n".join(str(block.value) for block in app.markdown).split()

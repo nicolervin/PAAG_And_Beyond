@@ -39,7 +39,7 @@ Then open `http://localhost:8501`. Streamlit normally reloads the app after a so
 
 Exact package ranges are in `requirements.txt`. The shared Python virtual environment normally lives one directory above the repository at `..\.venv`.
 
-Database writes go through the `connection()` context manager in `utils/store.py`, which commits successful operations and always closes the connection. The database, its SQLite sidecars, uploaded files, and `.streamlit/secrets.toml` are local runtime data ignored by Git. They cannot be recovered from Git, so back up the database before intentionally destructive experiments.
+Database writes go through the `connection()` context manager implemented in `utils/db_core.py` and re-exported by `utils/store.py`. It commits successful operations and always closes the connection. The database, its SQLite sidecars, uploaded files, and `.streamlit/secrets.toml` are local runtime data ignored by Git. They cannot be recovered from Git, so back up the database before intentionally destructive experiments.
 
 ## Current product scope
 
@@ -85,15 +85,25 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, model variants, visual board, work tables, and derived CTQ/Safety context.
 - `app_pages/process.py` — Yamazumi reconciliation, Fishbone part pairing, compact pitch planning, bulk actions, export, and history. The former Details dialog and workload summary/chart are removed pending Phase 3 redesign.
 - `app_pages/pin_map.py` — Scenario-specific read-only line visualization of pitches and explicitly linked Process work.
-- `app_pages/functional_quality.py` — Scenario-aware Quality page with the project-wide Requirements repository, scenario-specific PFMEA tab, and Control Plan placeholder.
+- `app_pages/functional_quality.py` — Scenario-aware Quality page with project-wide Requirements and Equipment plus scenario-specific PFMEA, Control Plan, and equipment placement.
 - `app_pages/functional_ergonomics.py` — Scenario-specific Ergonomics review editor with linked/unlinked tracking, hazard tags, confirmed merging, deletion, and history.
 - `app_pages/functional_safety.py` — Scenario-specific Safety requirements linked to Process at a Glance steps.
-- `app_pages/functional_equipment.py` and `functional_materials.py` — Non-persistent Functional Reviews shells.
+- `app_pages/functional_equipment.py` — Shared Equipment Type management and the project-wide equipment collation.
+- `app_pages/functional_materials.py` — Materials Review shell plus a persistent shared Equipment tab.
 - `app_pages/assembly_sequence.py` — Legacy, unlinked assembly-Fishbone implementation; do not extend unless explicitly revived.
 
 ### Shared utility files
 
-- `utils/store.py` — Schema, initialization, validation, CRUD, scenario cloning, snapshots, history, and file storage.
+- `utils/store.py` — Backward-compatible persistence facade. Existing imports and monkeypatches continue to resolve through this module.
+- `utils/db_core.py` — SQLite paths, configured connections, schema initialization, queries, audit history, and database backup.
+- `utils/project_store.py` — Projects, planning scenarios, scenario cloning orchestration, and concerns.
+- `utils/model_part_store.py` — Models, complexity, Parts Catalog, applicability, and PITS evidence.
+- `utils/assembly_store.py` — Assembly grid, assembly catalog, mini-BOMs, model mappings, and assembly images.
+- `utils/fishbone_store.py` — Fishbone framework, traversal, part placement, deletion continuity, and snapshots.
+- `utils/yamazumi_store.py` — Yamazumi areas, pitches, work elements, copy/import, stack drafts, and balancing persistence.
+- `utils/process_store.py` — Process at a Glance relationships, part pairing, Op IDs, pitch summaries, and reconciliation.
+- `utils/ergonomics_store.py` — Ergonomics catalogs, reviews, hazards, and risk classification.
+- `utils/safety_store.py` — Scenario-specific Safety requirements.
 - `utils/quality_store.py` — Quality requirements repository, Process-step assignments, controlled synchronization, and scenario-cloning persistence.
 - `utils/pfmea_store.py` — Scenario-specific PFMEA schema, validation, CRUD, source review, persisted RPN calculations, and scenario cloning.
 - `utils/pfmea_ui.py` — PFMEA tab tables, source-review and deletion dialogs, RPN summary, and editable child workflows.
@@ -104,7 +114,8 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `utils/yamazumi_board.py` — Components v2 balancing board.
 - `utils/fishbone_visual.py` — Components v2 interactive assembly Fishbone.
 - `utils/clipboard_image.py` — Components v2 clipboard capture and server-side image normalization.
-- `utils/functional_review_ui.py` — Shared shell for Equipment, Materials, and Safety.
+- `utils/equipment_store.py` and `utils/equipment_ui.py` — Shared Equipment schema, validation, Functional Review charts, placement, images, Torque links, and audit UI.
+- `utils/functional_review_ui.py` — Shared placeholder Review content used by Materials.
 
 ## Navigation and screens
 
@@ -134,7 +145,7 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 
 ### Functional Reviews
 
-**Quality** is Scenario-aware: its Requirements repository is project-wide, while PFMEA and the Manufacturing Control Plan working draft belong to the active scenario. **Ergonomics** is scenario-specific and maintains linked or Unlinked reviews, hazard tags, status, reviewer, notes, requested due dates, automatic starting reviews for new Process steps, and relationship-aware merges. **Safety** is scenario-specific and stores active requirements against Process at a Glance steps. Process at a Glance and Yamazumi derive CTQ from PFMEA Classification and Safety from those active requirements. **Equipment** and **Materials** remain non-persistent shells.
+**Quality** is Scenario-aware: its Requirements repository and Equipment identities are project-wide, while PFMEA, the Manufacturing Control Plan working draft, and equipment placement use the active scenario. **Ergonomics** is scenario-specific and maintains linked or Unlinked reviews, hazard tags, status, reviewer, notes, requested due dates, automatic starting reviews, and relationship-aware merges. **Safety** stores scenario-specific active requirements. Quality, Ergonomics, Safety, and Materials each expose a shared Equipment tab; the top-level **Equipment** page manages types and the project collation. Materials Review content remains a non-persistent shell.
 
 ## Domain glossary
 

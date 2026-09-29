@@ -9,7 +9,11 @@ from uuid import uuid4
 import pandas as pd
 
 from utils import store
-from utils.excel_io import has_pits_id_sheets, parse_pits_id_workbook
+from utils.excel_io import (
+    has_pits_id_sheets,
+    parse_pits_combined_workbook,
+    parse_pits_id_workbook,
+)
 
 
 class PitsImportDetectionTests(unittest.TestCase):
@@ -22,7 +26,7 @@ class PitsImportDetectionTests(unittest.TestCase):
 
         try:
             records = [{
-                "pits_id": "1201",
+                "pits_id": "001201",
                 "part_number": "P-1201",
                 "description": "Imported support part",
                 "revision": "Rev A : PreRelease",
@@ -36,7 +40,7 @@ class PitsImportDetectionTests(unittest.TestCase):
                 "workstation": "Line 1",
                 "source_row": 2,
                 "source_payload": {
-                    "ID Number": "1201",
+                    "ID Number": "001201",
                     "Part Number": "P-1201",
                     "Description": "Imported support part",
                     "Used BOM": "Yes",
@@ -66,7 +70,7 @@ class PitsImportDetectionTests(unittest.TestCase):
             self.assertEqual(match["revision"], "Rev A : PreRelease")
             self.assertEqual(match["source_code"], "3")
             self.assertEqual(match["technology_engineer"], "Alex Engineer")
-            self.assertEqual(match["pits_tracker_number"], "1201")
+            self.assertEqual(match["pits_tracker_number"], "001201")
             catalog_match = store.project_table("parts", project_id, "part_number")
             catalog_match = catalog_match.loc[catalog_match["part_number"] == "P-1201"].iloc[0]
             self.assertEqual(catalog_match["subsystem"], "Power")
@@ -84,7 +88,7 @@ class PitsImportDetectionTests(unittest.TestCase):
                    WHERE project_id=? AND part_number=?""",
                 (project_id, "P-1201"),
             )[0]
-            self.assertEqual(restored["pits_tracker_number"], "1201")
+            self.assertEqual(restored["pits_tracker_number"], "001201")
         finally:
             database_patch.stop()
             for suffix in ("", "-wal", "-shm"):
@@ -480,10 +484,12 @@ class PitsImportDetectionTests(unittest.TestCase):
         project_id = str(store.query("SELECT id FROM projects LIMIT 1")[0]["id"])
 
         try:
+            with store.connection() as conn:
+                conn.execute("ALTER TABLE parts DROP COLUMN source_code")
             store.execute(
                 """INSERT INTO parts
-                   (id, project_id, part_number, description, revision, source, source_code, updated_at)
-                   VALUES (?, ?, ?, ?, '0', 'PITS snapshot', '1', ?)""",
+                   (id, project_id, part_number, description, revision, source, updated_at)
+                   VALUES (?, ?, ?, ?, '0', 'PITS snapshot', ?)""",
                 (str(uuid4()), project_id, "P-OLD", "Old imported part", store.now_iso()),
             )
             store.execute(
@@ -619,6 +625,58 @@ class PitsImportDetectionTests(unittest.TestCase):
         self.assertEqual({tuple(record["_bom_pits_ids"]) for record in records}, {("1002",)})
         self.assertEqual(resolution["resolved_ids"]["P-300"], "1002")
         self.assertEqual(resolution["resolved_from_bom"], {"P-300"})
+
+    def test_combined_parser_reads_bom_hierarchy_and_quantity(self):
+        tracker = pd.DataFrame([
+            ["ID Number", "Part Number", "Description"],
+            ["0001", "P-1", "Assembly"],
+            ["0002", "P-2", "Fastener"],
+        ])
+        models = pd.DataFrame([
+            ["Model Number", "Item"],
+            ["M-1", "Item"],
+        ])
+        bom = pd.DataFrame([
+            ["In Tracker", "Part Number", "Description", "Level 1", "Level 2", "Level 3"],
+            ["0001", "P-1", "Assembly", 1, "", ""],
+            ["0040", "P-40", "Missing Level 2 parent", "", "", 7],
+            ["0002", "P-2", "Fastener", "", 2.5, ""],
+            ["0002", "P-2", "Fastener duplicate", "", 2.5, ""],
+        ])
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            tracker.to_excel(writer, sheet_name="Tracker", index=False, header=False)
+            models.to_excel(writer, sheet_name="Models", index=False, header=False)
+            bom.to_excel(writer, sheet_name="BOM", index=False, header=False)
+        uploaded = type(
+            "Uploaded",
+            (),
+            {"name": "combined.xlsm", "getvalue": lambda self: buffer.getvalue()},
+        )()
+
+        records, model_rows, bom_snapshot = parse_pits_combined_workbook(uploaded)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(len(model_rows), 1)
+        self.assertEqual(len(bom_snapshot["occurrences"]), 2)
+        child = bom_snapshot["occurrences"][1]
+        self.assertEqual(child["parent_tracker_number"], "0001")
+        self.assertEqual(child["child_tracker_number"], "0002")
+        self.assertEqual(child["proposed_depth"], 2)
+        self.assertEqual(child["proposed_quantity"], 2.5)
+        self.assertEqual(len(bom_snapshot["issues"]), 1)
+        issue = bom_snapshot["issues"][0]
+        self.assertTrue(issue["blocking"])
+        self.assertEqual(issue["source_row"], 3)
+        self.assertEqual(issue["child_tracker_number"], "0040")
+        self.assertEqual(issue["part_number"], "P-40")
+        self.assertEqual(issue["description"], "Missing Level 2 parent")
+        self.assertEqual(issue["proposed_depth"], 3)
+        self.assertEqual(issue["expected_parent_level"], 2)
+        self.assertEqual(issue["raw_quantity_text"], "7")
+        self.assertEqual(len(bom_snapshot["duplicates"]), 1)
+        self.assertEqual(bom_snapshot["duplicates"][0]["first_source_row"], 4)
+        self.assertEqual(bom_snapshot["duplicates"][0]["duplicate_source_row"], 5)
 
 
 if __name__ == "__main__":

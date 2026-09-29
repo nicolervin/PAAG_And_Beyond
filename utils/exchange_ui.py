@@ -285,8 +285,8 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
 
 def render_pits_exchange_history(project_id: str) -> None:
     with st.expander("History", icon=":material/history:"):
-        pits_history_tab, mbom_history_tab, parts_history_tab = st.tabs(
-            ["PITS snapshots", "MBOM review", "Parts import"]
+        pits_history_tab, pits_bom_history_tab, mbom_history_tab, parts_history_tab = st.tabs(
+            ["PITS snapshots", "PITS BOM structure", "MBOM review", "Parts import"]
         )
         with pits_history_tab:
             pits_history = audit_history(project_id, "PITS snapshot", limit=50)
@@ -296,6 +296,24 @@ def render_pits_exchange_history(project_id: str) -> None:
                 selectable_dataframe(
                     pits_history.drop(columns=["details"], errors="ignore"),
                     key=f"exchange_pits_history_{project_id}",
+                    hide_index=True,
+                    column_config={
+                        "action": "Action",
+                        "row_count": "Rows",
+                        "editor_name": "Editor",
+                        "created_at": st.column_config.DatetimeColumn(
+                            "When", format="MMM DD, YYYY HH:mm"
+                        ),
+                    },
+                )
+        with pits_bom_history_tab:
+            pits_bom_history = audit_history(project_id, "PITS BOM structure", limit=50)
+            if pits_bom_history.empty:
+                st.caption("No PITS BOM structure history has been recorded yet.")
+            else:
+                selectable_dataframe(
+                    pits_bom_history.drop(columns=["details"], errors="ignore"),
+                    key=f"exchange_pits_bom_history_{project_id}",
                     hide_index=True,
                     column_config={
                         "action": "Action",

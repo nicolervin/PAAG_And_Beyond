@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,7 @@ from utils.store import (
     PART_SOURCE_CODES,
     add_part_image,
     assembly_bom_components,
+    pits_assembly_mini_bom,
     audit_history,
     complexity_features,
     delete_project_part,
@@ -47,6 +49,21 @@ from utils.table_ui import (
     direct_entry_editor_rows,
     table_has_unsaved_changes,
 )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_parts_dataframe_to_excel(
+    data_hash: str,
+    _dataframe: pd.DataFrame,
+    sheet_name: str = "Parts",
+) -> bytes:
+    del data_hash
+    return dataframe_to_excel(_dataframe, sheet_name)
+
+
+def _hash_filtered_export(dataframe: pd.DataFrame) -> str:
+    serialized = dataframe.to_json(orient="split", date_format="iso").encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
 
 
 project_id = st.session_state.get("project_id")
@@ -154,12 +171,26 @@ st.caption(
     "photos, full information, and completed-subassembly mini-BOM below."
 )
 editable_columns = [
-    "id", "part_number", "description", "technology_engineer", "subsystem", "part_code",
-    "pits_tracker_number", "source_code", "make_buy",
+    "id", "part_number", "description", "subsystem", "design_maturity",
+    "factory_nickname", "official_windchill_part_name",
+    "design_engineer", "technology_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
+    "ame_tooling_engineer", "part_code", "pits_tracker_number", "source_code", "make_buy",
     "quantity", "revision", "model_applicability", "notes", "source", "image_path",
     "updated_at", "assembly_id", "assembly_number",
 ]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
+parts_for_editing["subsystem"] = parts_for_editing["subsystem"].fillna("").astype("string")
+parts_for_editing["design_maturity"] = parts_for_editing["design_maturity"].fillna(
+    parts_for_editing["revision"]
+).fillna("").astype("string")
+parts_for_editing["factory_nickname"] = parts_for_editing["factory_nickname"].fillna(
+    parts_for_editing["official_windchill_part_name"]
+).fillna("").astype("string")
+parts_for_editing["design_engineer"] = parts_for_editing["design_engineer"].fillna(
+    parts_for_editing["technology_engineer"]
+).fillna("").astype("string")
+for col in ("ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code"):
+    parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
 linked_assembly_by_part = {
     str(row["id"]): str(row.get("assembly_number") or "")
     for _, row in parts_for_editing.iterrows()
@@ -243,24 +274,34 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
         parts_for_editing,
         key="part_catalog_filters",
         dropdown_columns=[
-            "active", "source", "revision", "source_code", "make_buy",
-            "technology_engineer", "subsystem", "part_code", "photo_status", "applicability_status",
+            "active", "source", "design_maturity", "subsystem", "source_code", "make_buy",
+            "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
+            "pmqe_aqe", "ame_tooling_engineer", "part_code", "photo_status", "applicability_status",
         ],
         search_columns=[
-            "part_number", "description", "technology_engineer", "subsystem", "part_code",
-            "pits_tracker_number", "source_code", "make_buy",
-            "photo_status", "applicability_status", "notes", "source",
+            "part_number", "description", "subsystem", "design_maturity", "factory_nickname",
+            "design_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
+            "ame_tooling_engineer", "part_code", "pits_tracker_number",
+            "source_code", "make_buy", "photo_status", "applicability_status",
+            "notes", "source",
         ],
         labels={
             "active": "Active in scenario",
             "photo_status": "Photo status",
             "part_number": "Part number",
             "description": "Part Name",
+            "subsystem": "Subsystem",
+            "design_maturity": "Design Maturity",
+            "factory_nickname": "Factory Nickname",
+            "design_engineer": "Design Engineer",
+            "ppm": "PPM",
+            "buyer_gcl": "Buyer / GCL",
+            "pmqe_aqe": "PMQE / AQE",
+            "ame_tooling_engineer": "AME / Tooling Engineer",
+            "part_code": "Part Code",
             "source_code": "Source Code",
             "make_buy": "Make vs Buy",
             "technology_engineer": "Technology Engineer",
-            "subsystem": "Subsystem",
-            "part_code": "Part Code",
             "pits_tracker_number": "PITS ID",
             "applicability_status": "Feature applicability",
         },
@@ -275,9 +316,10 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
     ):
         st.session_state.pop("part_catalog_filters_keyword", None)
         for filter_column in [
-            "active", "photo_status", "part_number", "description", "revision",
-            "source_code", "make_buy", "technology_engineer", "subsystem", "part_code", "pits_tracker_number",
-            "feature_applicability", "notes", "source", "updated_at",
+            "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
+            "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
+            "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
+            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.rerun()
@@ -294,14 +336,21 @@ parts_editor_rows = direct_entry_editor_rows(
     parts_for_editing,
     editor_key=parts_editor_key,
     sort_columns=[
-        "active", "photo_status", "part_number", "description", "revision",
-        "technology_engineer", "subsystem", "part_code", "pits_tracker_number",
-        "source_code", "make_buy", "feature_applicability", "applicability_status",
-        "notes", "source", "updated_at",
+        "active", "photo_status", "part_number", "description",
+        "subsystem", "design_maturity",
+        "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
+        "pmqe_aqe", "ame_tooling_engineer", "part_code", "pits_tracker_number",
+        "source_code", "make_buy", "feature_applicability",
+        "applicability_status", "notes", "source", "updated_at",
     ],
     labels={
         "photo_status": "Photo status", "part_number": "Part number",
-        "description": "Part name", "feature_applicability": "Feature applicability",
+        "description": "Part name", "subsystem": "Subsystem", "design_maturity": "Design Maturity",
+        "factory_nickname": "Factory Nickname",
+        "design_engineer": "Design Engineer", "ppm": "PPM",
+        "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
+        "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
+        "feature_applicability": "Feature applicability",
         "applicability_status": "Applicability status", "updated_at": "Updated",
     },
 )
@@ -315,12 +364,16 @@ edited_parts = st.data_editor(
     disabled=["id", "subsystem", "part_code", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "updated_display", "assembly_id", "assembly_number"],
     column_order=[
         "view_details", "active", "photo_status", "part_number", "description",
-        "technology_engineer", "subsystem", "part_code", "pits_tracker_number",
-        "source_code", "make_buy", "revision", "feature_applicability",
+        "subsystem", "design_maturity",
+        "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
+        "pmqe_aqe", "ame_tooling_engineer", "part_code", "pits_tracker_number",
+        "source_code", "make_buy", "feature_applicability",
         "applicability_status", "notes", "source", "updated_display",
     ],
     column_config={
         "id": None,
+        "official_windchill_part_name": None,
+        "technology_engineer": None,
         "assembly_id": None,
         "assembly_number": None,
         "view_details": standard_details_column_config(on_click=open_part_details, key="parts_view_details"),
@@ -339,18 +392,45 @@ edited_parts = st.data_editor(
         ),
         "part_number": st.column_config.TextColumn("Part number", required=True),
         "description": st.column_config.TextColumn("Part Name", width="large"),
-        "technology_engineer": st.column_config.TextColumn(
-            "Technology Engineer",
-            help="Design Engineer imported from column I of the PITS Tracker. Confirmed manual edits are preserved on later imports.",
-        ),
         "subsystem": st.column_config.TextColumn(
             "Subsystem",
+            width="medium",
             help="Read-only subsystem identifier from column F of the imported PITS Tracker row matched by PITS ID.",
+        ),
+        "design_maturity": st.column_config.TextColumn(
+            "Design Maturity",
+            default="",
+            help="Design maturity / revision from PITS Tracker column G.",
+        ),
+        "factory_nickname": st.column_config.TextColumn(
+            "Factory Nickname",
+            width="large",
+            help="The factory nickname or official Windchill name recorded from PITS.",
+        ),
+        "design_engineer": st.column_config.TextColumn(
+            "Design Engineer",
+            help="Design Engineer / Technology Engineer from PITS Tracker column I.",
+        ),
+        "ppm": st.column_config.TextColumn(
+            "PPM",
+            help="Part Project Manager from PITS Tracker column J.",
+        ),
+        "buyer_gcl": st.column_config.TextColumn(
+            "Buyer / GCL",
+            help="Buyer / Global Commodity Leader from PITS Tracker column K.",
+        ),
+        "pmqe_aqe": st.column_config.TextColumn(
+            "PMQE / AQE",
+            help="Plant Manufacturing Quality Engineer / Advanced Quality Engineer from PITS Tracker column L.",
+        ),
+        "ame_tooling_engineer": st.column_config.TextColumn(
+            "AME / Tooling Engineer",
+            help="Advanced Manufacturing Engineer / Tooling Engineer from PITS Tracker column M.",
         ),
         "part_code": st.column_config.TextColumn(
             "Part Code",
             help=(
-                "PITS part code from tracker column N.\n\n"
+                "Part Code from PITS Tracker column N.\n\n"
                 "- NP = New Part, New Tool\n"
                 "- NPNT = New Part, No Tooling\n"
                 "- ASM = Assembly\n"
@@ -381,7 +461,7 @@ edited_parts = st.data_editor(
             "Make vs Buy", options=["", *PART_MAKE_BUY_VALUES], default=""
         ),
         "quantity": None,
-        "revision": st.column_config.TextColumn("Revision", default="0"),
+        "revision": None,
         "model_applicability": None,
         "image_path": None,
         "feature_applicability": st.column_config.MultiselectColumn(
@@ -416,13 +496,17 @@ st.caption(
 )
 
 export_columns = [
-    "active", "part_number", "description", "technology_engineer", "subsystem", "part_code",
-    "pits_tracker_number", "source_code", "make_buy",
-    "revision", "feature_applicability", "photo_status", "notes", "source", "updated_at",
+    "active", "part_number", "description", "subsystem", "design_maturity", "factory_nickname",
+    "design_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
+    "ame_tooling_engineer", "part_code", "pits_tracker_number",
+    "source_code", "make_buy", "feature_applicability",
+    "photo_status", "notes", "source", "updated_at",
 ]
+export_dataframe = parts_for_editing.reindex(columns=export_columns)
+export_hash = _hash_filtered_export(export_dataframe)
 st.download_button(
     "Export filtered rows",
-    data=dataframe_to_excel(parts_for_editing.reindex(columns=export_columns), "Parts"),
+    data=_cached_parts_dataframe_to_excel(export_hash, export_dataframe, "Parts"),
     file_name="parts_filtered.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     icon=":material/download:",
@@ -574,8 +658,19 @@ if save_part_table:
         parts_to_save.loc[new_row_mask, "quantity"] = 1
         parts_to_save.loc[new_row_mask, "model_applicability"] = "All"
         parts_to_save.loc[new_row_mask, "source"] = "Manual"
+        parts_to_save["revision"] = parts_to_save["design_maturity"]
+        parts_to_save["technology_engineer"] = parts_to_save["design_engineer"]
+        parts_to_save["official_windchill_part_name"] = parts_to_save["factory_nickname"]
         tracked_fields = {
-            "technology_engineer": "Technology Engineer",
+            "subsystem": "Subsystem",
+            "design_maturity": "Design Maturity",
+            "factory_nickname": "Factory Nickname",
+            "design_engineer": "Design Engineer",
+            "ppm": "PPM",
+            "buyer_gcl": "Buyer / GCL",
+            "pmqe_aqe": "PMQE / AQE",
+            "ame_tooling_engineer": "AME / Tooling Engineer",
+            "part_code": "Part Code",
             "pits_tracker_number": "PITS ID",
             "source_code": "Source Code",
             "make_buy": "Make vs Buy",
@@ -768,12 +863,24 @@ with details_col.container(border=True):
     st.subheader(part["part_number"])
     st.write(part["description"] or "No part name")
     detail_cols = st.columns(2)
-    detail_cols[0].metric("Revision", part["revision"] or "—")
+    detail_cols[0].metric("Design Maturity", part.get("design_maturity") or part.get("revision") or "—")
     detail_cols[1].metric("Source", part["source"])
     st.markdown(
         f"**Feature applicability:** "
         f"{assembly_grid_applicability_status(str(part['id']), part['model_applicability'])}"
     )
+    col_meta1, col_meta2 = st.columns(2)
+    with col_meta1:
+        st.write("**Subsystem:**", part.get("subsystem") or "—")
+        st.write("**Factory Nickname:**", part.get("factory_nickname") or part.get("official_windchill_part_name") or "—")
+        st.write("**Design Engineer:**", part.get("design_engineer") or part.get("technology_engineer") or "—")
+        st.write("**Part Code:**", part.get("part_code") or "—")
+        st.write("**PPM:**", part.get("ppm") or "—")
+    with col_meta2:
+        st.write("**Buyer / GCL:**", part.get("buyer_gcl") or "—")
+        st.write("**PMQE / AQE:**", part.get("pmqe_aqe") or "—")
+        st.write("**AME / Tooling:**", part.get("ame_tooling_engineer") or "—")
+        st.write("**Source Code:**", part.get("source_code") or "—")
     if part["notes"]:
         st.write(part["notes"])
 
@@ -784,21 +891,56 @@ with details_col.container(border=True):
         else str(raw_assembly_id).strip()
     )
     st.subheader("Mini-BOM")
-    if not assembly_id:
+    mini_bom = pits_assembly_mini_bom(
+        project_id,
+        part_id=str(part.get("id") or ""),
+        part_number=str(part.get("part_number") or ""),
+        pits_tracker_number=str(part.get("pits_tracker_number") or ""),
+    )
+    if not mini_bom.empty:
         st.caption(
-            "This catalog part is not linked to a completed manufacturing assembly, "
-            "so it does not have an assembly mini-BOM."
+            f"Indented PITS BOM tree ({len(mini_bom)} component{'s' if len(mini_bom) != 1 else ''}) "
+            "contained within this assembly."
         )
-    else:
+        mini_bom_display = mini_bom[
+            ["tree_part_number", "part_name", "quantity", "level", "tracker_number", "make_buy"]
+        ].rename(
+            columns={
+                "tree_part_number": "Part number",
+                "part_name": "Part name",
+                "quantity": "Quantity",
+                "level": "Level",
+                "tracker_number": "PITS Tracker",
+                "make_buy": "Make / Buy",
+            }
+        )
+        st.dataframe(
+            mini_bom_display,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Part number": st.column_config.TextColumn(
+                    "Part number", pinned=True
+                ),
+                "Part name": st.column_config.TextColumn("Part name"),
+                "Quantity": st.column_config.NumberColumn(
+                    "Quantity", format="%g"
+                ),
+                "Level": st.column_config.TextColumn("Level", width="small"),
+                "PITS Tracker": st.column_config.TextColumn("PITS Tracker", width="small"),
+                "Make / Buy": st.column_config.TextColumn("Make / Buy", width="small"),
+            },
+        )
+    elif assembly_id:
         st.caption(
             "Read-only completed-subassembly structure. Edit it from Assembly grid "
             "Details → Mini-BOM."
         )
-        mini_bom = assembly_bom_components(project_id, assembly_id)
-        if mini_bom.empty:
-            st.caption("No components listed for this assembly yet.")
+        legacy_bom = assembly_bom_components(project_id, assembly_id)
+        if legacy_bom.empty:
+            st.caption("No sub-components found for this assembly in PITS BOM.")
         else:
-            mini_bom_view = mini_bom[
+            mini_bom_view = legacy_bom[
                 ["part_number", "part_name", "quantity", "use_description"]
             ].rename(
                 columns={
@@ -823,5 +965,7 @@ with details_col.container(border=True):
                     "Fishbone use": st.column_config.TextColumn("Fishbone use"),
                 },
             )
+    else:
+        st.caption("No sub-components found for this part in PITS BOM.")
 
 render_parts_history()
