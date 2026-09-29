@@ -75,7 +75,8 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 
 - `app_pages/overview.py` — Project definition, headline counts, default takt, and active-scenario metadata.
 - `app_pages/concerns.py` — Questions, concerns, decisions, and assumptions.
-- `app_pages/exchange.py` — **Import/Export Projects** page for ordinary BOM and PITS imports, preview/mapping, Excel snapshot export, and complete `.paagproject` package export.
+- `app_pages/exchange.py` — **Import/Export Projects** page linked beneath the active project details for complete `.paagproject` package transfer.
+- `app_pages/pits_exchange.py` — **Import/Export PITS** Product structure page providing focused access to ordinary BOM/PITS import and Excel snapshot export.
 - `app_pages/models.py` — Model catalog, common names, usage, manufacturing features, and the model-feature complexity tree.
 - `app_pages/parts.py` — Parts Catalog, applicability, images, filters, bulk actions, export, and history.
 - `app_pages/assemblies.py` — Project-wide multi-section assembly-to-model grid plus the shared full assembly catalog, operational mini-BOM nesting, image, deletion, and history workflows.
@@ -126,10 +127,11 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 
 - **Overview** creates and edits the project identity and active planning scenario, and shows project-level counts and takt comparisons.
 - **Questions and concerns** tracks cross-functional questions, concerns, decisions, and assumptions with ownership, priority, status, and related context.
+- **Import/Export Projects** appears directly beneath the active project details in the sidebar and exports or imports complete versioned `.paagproject` packages containing every registered project table, all scenarios, and referenced owned uploads.
 
 ### Product structure
 
-- **Import/Export Projects** accepts ordinary BOM data, the preferred `part_tracker` plus `models` PITS format, and legacy Level 1–11 PITS data. Preferred imports use `ID Number` as the stable source key; changed source content creates a revision and reconciliation item instead of overwriting reviewed planning decisions. The page exports and imports versioned `.paagproject` packages containing every registered project table, all scenarios, and referenced owned uploads. Import supports freshly remapped Create new and explicitly confirmed Replace; merge is not supported.
+- **Import/Export PITS** owns the Part-data exchange workflow. It accepts ordinary BOM data, the preferred `part_tracker` plus `models` PITS format, and legacy Level 1–11 PITS data. Preferred imports use `ID Number` as the stable source key; changed source content creates a revision and reconciliation item instead of overwriting reviewed planning decisions.
 - **Model definitions** maintains official model numbers, common names, descriptions, annual usage, manufacturing features, allowed feature choices, and model-to-feature mappings.
 - **Parts Catalog** maintains one approved record per official part number. Catalog data is project-wide while Active state is scenario-specific. Completed manufacturing assemblies are linked catalog parts so a built subassembly can be placed on the Fishbone and handled again downstream; their model applicability comes from Assembly grid mappings. The page supports primary and supplemental images, including direct Windows screenshot paste.
 - **Assembly grid** begins with one protected Top-level packaged unit row immediately below the active feature headers, followed by one or more selected Fishbone sections as labeled grid groups. The top row maps one final warehouse-handoff assembly per active official model, has a selectable final Built section and optional Installed section, and can nest completed subassemblies from every active Fishbone section. Section categories map their own real assembly numbers per model. Creating an assembly creates or reuses its linked completed-subassembly Parts Catalog row in the same save. Quantity-bearing mini-BOM links use automatic Fishbone-use placement, model-coverage validation, and cycle prevention. Category section values continuously synchronize mapped assemblies. Changing a saved cell to another same-category assembly's existing number opens a confirmed merge that redirects the old mappings, reuses the target mini-BOM and catalog part, and deletes the disclosed superseded assembly. Details opens with Images first, Mini-BOM second, and retains catalog editing for Make / buy, optional legacy parent grouping, and full deletion. Legacy assembly feature rules are not shown or evaluated.
@@ -151,7 +153,7 @@ On Fishbone-linked screens, the upper-left sidebar shows the current **Fishbone 
 - **IE** — Industrial engineer, one of several functional roles contributing to PAAG.
 - **BOM** — Bill of material: a list of parts or assemblies required for a product.
 - **MBOM** — Manufacturing bill of material: the collaborator-reviewed manufacturing product structure. Imported candidates are not automatically approved MBOM content.
-- **PITS** — The upstream product-information workbook. The preferred format has stable `ID Number` values in `part_tracker` and definitions in `models`; older Level 1–11 formats are interpreted conservatively.
+- **PITS** — The upstream product-information workbook. The preferred format has stable `ID Number` values in the tracker and definitions in `models`; tracker column I supplies the Parts Catalog's **Technology Engineer**, while tracker columns F and N appear there as the read-only **Subsystem** and **Part Code**. An imported ID Number appears as **PITS ID** when the part number has one tracker ID or one matching ID in BOM columns A and B. Multiple BOM IDs for one part number are reported instead of being assigned arbitrarily. Older Level 1–11 formats are interpreted conservatively.
 - **PITS record/revision** — The latest imported source row for a stable PITS ID and its preserved earlier source versions.
 - **Parts Catalog** — The approved project-wide list of part numbers, names, revisions, images, provenance, and applicability.
 - **Assembly grid** — The project-wide category-by-model mapping view whose cells reference real assembly records and whose nested rows reuse each assembly's explicit mini-BOM.

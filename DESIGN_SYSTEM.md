@@ -208,7 +208,7 @@ Every screen must display a small, consistently placed badge next to the page ti
 
 Assign each active screen its correct badge state based on the scope definitions in `DATA_DICTIONARY.md`:
 
-- **Project-wide:** Overview project-identity fields, Questions and concerns, Import/Export Projects, Model definitions, and Fishbone framework/structure.
+- **Project-wide:** Overview project-identity fields, Questions and concerns, Import/Export Projects, Import/Export PITS, Model definitions, and Fishbone framework/structure.
 - **Scenario-specific:** Overview active-scenario fields, Yamazumi, Process at a Glance, and Pin Map.
 - **Scenario-aware:** Parts Catalog, where the catalog is project-wide but Active status is scenario-specific; and Parts to fishbone, where the structure is project-wide but visible and active parts depend on the scenario.
 
@@ -271,6 +271,7 @@ This glossary is active, locked policy, not merely informational, and must be ch
 | --- | --- | --- |
 | Questions page | **Questions and concerns** | Navigation and page title |
 | Import/export page | **Import/Export Projects** | Navigation and page title |
+| Focused PITS exchange page | **Import/Export PITS** | Product structure navigation and page title |
 | Fishbone page | **Parts to fishbone** | Navigation and page title |
 | Pin Map page | **Pin Map** | Navigation and page title |
 | Model Tree page | **Model Tree** | Navigation and page title |
@@ -280,6 +281,9 @@ This glossary is active, locked policy, not merely informational, and must be ch
 | Placed part occurrence | **Fishbone use** | Table headings, actions, confirmation dialogs, and history display |
 | Friendly model label | **Common name** | Model definitions, fallback text, captions, and help |
 | Stable model label | **Official model number** | Model tables and explanatory copy |
+| PITS source-row identifier | **PITS ID** | Parts Catalog columns, filters, details, validation messages, and PITS previews |
+| PITS subsystem identifier | **Subsystem** | Parts Catalog column, filter, export, and PITS previews |
+| PITS part classification | **Part Code** | Parts Catalog column, filter, export, and hover help |
 | Scenario revision | **Scenario revision** | Editable field labels and explanatory text; compact value summaries may still abbreviate it as **Rev** |
 | Yamazumi area | **Yamazumi area** | Selectors, tables, captions, and help text |
 | Process material group | **Part requirement** | Forms, captions, dialog content, and history display |
@@ -291,6 +295,7 @@ This glossary is active, locked policy, not merely informational, and must be ch
 The following terms remain contextual exceptions rather than globally unified labels:
 
 - **Import/Export Projects** deliberately uses title case and a slash as an approved exception to the general sentence-case convention.
+- **Import/Export PITS** uses the same approved title-case and slash exception and names the focused Product structure entry point.
 - **Subassembly** remains a valid Fishbone section type.
 - **Common name** and **Official model number** remain separate fields.
 - Compact scenario summaries may use **Rev** even though the editable field label is **Scenario revision**.

@@ -301,7 +301,8 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
             "part_code": "Part Code",
             "source_code": "Source Code",
             "make_buy": "Make vs Buy",
-            "pits_tracker_number": "PITS Tracker number",
+            "technology_engineer": "Technology Engineer",
+            "pits_tracker_number": "PITS ID",
             "applicability_status": "Feature applicability",
         },
         reset_widget_keys=[parts_editor_key],
@@ -360,7 +361,7 @@ edited_parts = st.data_editor(
     hide_index=True,
     num_rows="dynamic",
     height=430,
-    disabled=["id", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "updated_display", "assembly_id", "assembly_number"],
+    disabled=["id", "subsystem", "part_code", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "updated_display", "assembly_id", "assembly_number"],
     column_order=[
         "view_details", "active", "photo_status", "part_number", "description",
         "subsystem", "design_maturity",
@@ -391,7 +392,11 @@ edited_parts = st.data_editor(
         ),
         "part_number": st.column_config.TextColumn("Part number", required=True),
         "description": st.column_config.TextColumn("Part Name", width="large"),
-        "subsystem": st.column_config.TextColumn("Subsystem", width="medium"),
+        "subsystem": st.column_config.TextColumn(
+            "Subsystem",
+            width="medium",
+            help="Read-only subsystem identifier from column F of the imported PITS Tracker row matched by PITS ID.",
+        ),
         "design_maturity": st.column_config.TextColumn(
             "Design Maturity",
             default="",
@@ -434,8 +439,8 @@ edited_parts = st.data_editor(
             ),
         ),
         "pits_tracker_number": st.column_config.TextColumn(
-            "PITS Tracker number",
-            help="This identifier must be unique within the current project. Leading zeros are preserved.",
+            "PITS ID",
+            help="ID Number imported from column B of the PITS Tracker. It must be unique within the current project, and leading zeros are preserved.",
         ),
         "source_code": st.column_config.SelectboxColumn(
             "Source Code",
@@ -666,7 +671,7 @@ if save_part_table:
             "pmqe_aqe": "PMQE / AQE",
             "ame_tooling_engineer": "AME / Tooling Engineer",
             "part_code": "Part Code",
-            "pits_tracker_number": "PITS Tracker number",
+            "pits_tracker_number": "PITS ID",
             "source_code": "Source Code",
             "make_buy": "Make vs Buy",
         }
