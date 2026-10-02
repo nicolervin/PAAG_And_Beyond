@@ -217,10 +217,6 @@ class QualityPageSmokeTests(unittest.TestCase):
             [button.label for button in app.button],
         )
         self.assertIn(
-            "Unlink selected Process at a Glance step",
-            [button.label for button in app.button],
-        )
-        self.assertIn(
             '"View Quality requirements linked to Process steps"',
             PAGE_PATH.read_text(encoding="utf-8"),
         )
@@ -429,7 +425,7 @@ class QualityPageSmokeTests(unittest.TestCase):
             for table in app.dataframe
             if list(table.value.columns)
             == [
-                "Scenario", "Pitch", "Pitch Name", "Work Element",
+                "Scenario", "Op ID", "Pitch", "Pitch Name", "Work Element",
                 "Status", "Seq", "Repository update pending",
             ]
         ]
@@ -774,19 +770,7 @@ class QualityPageSmokeTests(unittest.TestCase):
 
     def test_pending_unlink_uses_assignment_scenario_not_session_scenario(self) -> None:
         page_source = PAGE_PATH.read_text(encoding="utf-8")
-        unlink_request = page_source.split(
-            'if st.button(\n        "Unlink selected Process at a Glance step"', 1
-        )[1].split('@st.dialog("Unlink Quality requirement?"', 1)[0]
-
-        self.assertIn(
-            '"scenario_id": str(selected_assignment["scenario_id"])',
-            unlink_request,
-        )
-        self.assertNotIn('"scenario_id": scenario_id', unlink_request)
-        self.assertIn(
-            'quality_requirement_assignment(\n                project_id, selected_assignment_id',
-            unlink_request,
-        )
+        self.assertIn('sc_id = str(items[0]["scenario_id"])', page_source)
         self.assertIn(
             'scenario_changed = str(pending.get("scenario_id") or "") != scenario_id',
             page_source,

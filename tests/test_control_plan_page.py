@@ -155,11 +155,12 @@ class ControlPlanPageTests(unittest.TestCase):
         self.assertIn("Renumber Pr. Nº by Op ID", [button.label for button in app.button])
         self.assertIn("Control Plan", [tab.label for tab in app.tabs])
         self.assertEqual(control_plan_ui.VISIBLE_COLUMNS[:4], [
-            "pr_number", "station_pitch", "op_id", "machine_fixture",
+            "pr_number", "station_pitch", "op_id", "machine_fixture_operation",
         ])
         self.assertNotIn("station_pitch", control_plan_ui.EDITABLE_COLUMNS)
         self.assertNotIn("op_id", control_plan_ui.EDITABLE_COLUMNS)
-        self.assertIn("characteristic_suffix", control_plan_ui.EDITABLE_COLUMNS)
+        self.assertNotIn("machine_fixture", control_plan_ui.EDITABLE_COLUMNS)
+        self.assertNotIn("machine_fixture_operation", control_plan_ui.EDITABLE_COLUMNS)
         source = Path(
             Path(__file__).resolve().parents[1] / "utils" / "control_plan_ui.py"
         ).read_text(encoding="utf-8")
@@ -326,10 +327,10 @@ class ControlPlanPageTests(unittest.TestCase):
             ]
         )
         display = control_plan_ui._grouped_control_plan_display(rows)
-        self.assertEqual(display["operation"].tolist(), ["Load", "", "Inspect", ""])
+        self.assertEqual(display["operation"].tolist(), ["Load", "Load", "Inspect", "Inspect"])
         self.assertEqual(
             display["machine_fixture"].tolist(),
-            ["Fixture A", "", "Gauge A", "Gauge B"],
+            ["Fixture A", "Fixture A", "Gauge A", "Gauge B"],
         )
         self.assertEqual(rows.iloc[1]["machine_fixture"], "Fixture A")
 

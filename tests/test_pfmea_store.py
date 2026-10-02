@@ -1182,10 +1182,12 @@ class PfmeaStoreTests(unittest.TestCase):
             self.project_id, self.scenario_id, "other-step", requirement_id
         )
         current = pfmea_store.pfmea_control_candidates(
-            self.project_id, self.scenario_id, self.work_element_id, "Prevention"
+            self.project_id, self.scenario_id, self.work_element_id, "Prevention",
+            include_source_keys=[f"quality:{self.assignment_id}"]
         )
         other = pfmea_store.pfmea_control_candidates(
-            self.project_id, self.scenario_id, "other-step", "Prevention"
+            self.project_id, self.scenario_id, "other-step", "Prevention",
+            include_source_keys=[f"quality:{other_assignment}"]
         )
         self.assertIn(f"quality:{self.assignment_id}", set(current["source_key"]))
         self.assertNotIn(f"quality:{other_assignment}", set(current["source_key"]))

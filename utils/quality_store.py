@@ -32,7 +32,7 @@ TORQUE_DETAIL_COLUMNS = [
 ]
 
 REQUIREMENT_TYPE_COLUMNS = [
-    "id", "project_id", "label", "active", "created_at", "updated_at",
+    "id", "project_id", "label", "units_available", "active", "created_at", "updated_at",
 ]
 
 QUALITY_REQUIREMENT_TYPE_DEFAULTS = [
@@ -41,6 +41,10 @@ QUALITY_REQUIREMENT_TYPE_DEFAULTS = [
     "Torque",
     "Vision system",
 ]
+QUALITY_REQUIREMENT_TYPE_DEFAULT_UNITS = {
+    "dimensional": "inch;mm;mil",
+    "torque": "in-lbs;ft-lbs;N·m",
+}
 PROTECTED_QUALITY_REQUIREMENT_TYPE = "Torque"
 
 TORQUE_TOOL_TYPES = ["Air tool", "Electric clutch tool", "DC tool"]
@@ -102,6 +106,7 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             label TEXT NOT NULL,
+            units_available TEXT NOT NULL DEFAULT '',
             active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -118,6 +123,14 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
             ON quality_requirement_torque_details(project_id, quality_requirement_id);
         """
     )
+    type_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(quality_requirement_types)").fetchall()
+    }
+    if "units_available" not in type_cols:
+        conn.execute("ALTER TABLE quality_requirement_types ADD COLUMN units_available TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE quality_requirement_types SET units_available='inch;mm;mil' WHERE LOWER(TRIM(label))='dimensional'")
+        conn.execute("UPDATE quality_requirement_types SET units_available='in-lbs;ft-lbs;N·m' WHERE LOWER(TRIM(label))='torque'")
     project_rows = conn.execute("SELECT id FROM projects").fetchall()
     for project_row in project_rows:
         _ensure_quality_requirement_types(conn, str(project_row["id"]))
@@ -153,11 +166,12 @@ def _ensure_quality_requirement_types(
         key = cleaned.casefold()
         if not cleaned or key in existing_keys:
             continue
+        default_units = QUALITY_REQUIREMENT_TYPE_DEFAULT_UNITS.get(key, "")
         conn.execute(
             """INSERT INTO quality_requirement_types
-               (id, project_id, label, active, created_at, updated_at)
-               VALUES (?, ?, ?, 1, ?, ?)""",
-            (str(uuid4()), project_id, cleaned, timestamp, timestamp),
+               (id, project_id, label, units_available, active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 1, ?, ?)""",
+            (str(uuid4()), project_id, cleaned, default_units, timestamp, timestamp),
         )
         existing_keys.add(key)
 
@@ -188,6 +202,12 @@ def _store_module():
     from utils import db_core as store
 
     return store
+
+
+def _process_store():
+    from utils import process_store
+
+    return process_store
 
 
 def _clean_text(value) -> str:
@@ -250,7 +270,11 @@ def _active_value(value) -> int:
     return int(bool(value))
 
 
-def _validated_requirement(values: dict) -> dict:
+def _validated_requirement(
+    values: dict,
+    conn: sqlite3.Connection | None = None,
+    project_id: str | None = None,
+) -> dict:
     requirement_type = _clean_text(values.get("requirement_type"))
     description = _clean_text(values.get("description"))
     unique_identifier = _clean_text(values.get("unique_identifier"))
@@ -261,10 +285,45 @@ def _validated_requirement(values: dict) -> dict:
     if not unique_identifier:
         raise ValueError("Quality requirement Unique identifier is required.")
     unit = _clean_text(values.get("unit"))
-    if "dimension" in requirement_type.casefold() and unit.casefold() not in {
-        "", "in", "inch", "inches",
-    }:
-        raise ValueError("Linear dimensional Quality requirements must use inches.")
+
+    allowed_units_list: list[str] = []
+    if conn is not None and project_id:
+        type_row = _quality_requirement_type_row(conn, project_id, requirement_type)
+        if type_row:
+            raw_units = _clean_text(dict(type_row).get("units_available"))
+            if raw_units:
+                allowed_units_list = [u.strip() for u in raw_units.split(";") if u.strip()]
+
+    if not allowed_units_list:
+        key = requirement_type.casefold()
+        for default_type, default_units in QUALITY_REQUIREMENT_TYPE_DEFAULT_UNITS.items():
+            if default_type.casefold() in key:
+                allowed_units_list = [u.strip() for u in default_units.split(";") if u.strip()]
+                break
+
+    if allowed_units_list and unit:
+        allowed_keys = {u.casefold() for u in allowed_units_list}
+        if "dimension" in requirement_type.casefold():
+            allowed_keys.update({
+                "in", "inch", "inches", '"', "mm", "millimeter", "millimeters",
+                "cm", "centimeter", "centimeters", "m", "meter", "meters",
+                "ft", "foot", "feet", "'", "yd", "yard", "yards",
+                "mil", "thou", "micron", "microns", "µm", "um", "km",
+            })
+        if "torque" in requirement_type.casefold():
+            allowed_keys.update({
+                "n-m", "n·m", "n.m", "nm", "n m", "n*m",
+                "cn-m", "cn·m", "cn.m", "cnm",
+                "in-lbs", "in-lb", "in.lbs", "in.lb", "in lbs", "in lb", "in-oz",
+                "ft-lbs", "ft-lb", "ft.lbs", "ft.lb", "ft lbs", "ft lb",
+            })
+        if unit.casefold() not in allowed_keys:
+            formatted_allowed = "; ".join(allowed_units_list)
+            raise ValueError(
+                f"Unit '{unit}' is not allowed for Requirement Type '{requirement_type}'. "
+                f"Allowed units for this Type: {formatted_allowed}"
+            )
+
     return {
         "requirement_type": requirement_type,
         "description": description,
@@ -421,10 +480,12 @@ def save_quality_requirement_type_rows(
             if record_id in supplied_ids:
                 raise ValueError("The Quality requirement types table contains a duplicate row.")
             supplied_ids.add(record_id)
+        units_available = _clean_text(record.get("units_available"))
         prepared.append(
             {
                 "id": record_id,
                 "label": label,
+                "units_available": units_available,
                 "active": _active_value(record.get("active", True)),
             }
         )
@@ -463,12 +524,13 @@ def save_quality_requirement_type_rows(
                     record_id = str(uuid4())
                     conn.execute(
                         """INSERT INTO quality_requirement_types
-                           (id, project_id, label, active, created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
+                           (id, project_id, label, units_available, active, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (
                             record_id,
                             project_id,
                             row["label"],
+                            row["units_available"],
                             row["active"],
                             timestamp,
                             timestamp,
@@ -480,6 +542,7 @@ def save_quality_requirement_type_rows(
                 prior = existing[record_id]
                 old_label = str(prior["label"])
                 new_label = str(row["label"])
+                new_units = str(row["units_available"])
                 new_active = int(row["active"])
                 if old_label.casefold() == PROTECTED_QUALITY_REQUIREMENT_TYPE.casefold():
                     if new_label != PROTECTED_QUALITY_REQUIREMENT_TYPE or not new_active:
@@ -487,7 +550,11 @@ def save_quality_requirement_type_rows(
                             "Torque is a permanent Quality requirement Type and cannot be "
                             "renamed or deactivated."
                         )
-                changed = new_label != old_label or new_active != int(prior["active"])
+                changed = (
+                    new_label != old_label
+                    or new_active != int(prior["active"])
+                    or new_units != _clean_text(prior.get("units_available"))
+                )
                 if not changed:
                     continue
                 usage_rows = conn.execute(
@@ -513,9 +580,9 @@ def save_quality_requirement_type_rows(
                     rename_mapping[old_label] = new_label
                 conn.execute(
                     """UPDATE quality_requirement_types
-                       SET label=?, active=?, updated_at=?
+                       SET label=?, units_available=?, active=?, updated_at=?
                        WHERE id=? AND project_id=?""",
-                    (new_label, new_active, timestamp, record_id, project_id),
+                    (new_label, new_units, new_active, timestamp, record_id, project_id),
                 )
                 updated_ids.append(record_id)
     except sqlite3.IntegrityError as exc:
@@ -661,7 +728,6 @@ def save_quality_requirement(
 ) -> str:
     """Create or update a repository definition without changing assignments."""
     store = _store_module()
-    validated = _validated_requirement(values)
     supplied_id = _clean_text(requirement_id) or _clean_text(values.get("id"))
     requirement_id = supplied_id or str(uuid4())
     timestamp = store.now_iso()
@@ -670,6 +736,7 @@ def save_quality_requirement(
             if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
                 raise ValueError("The active project no longer exists.")
             _ensure_quality_requirement_types(conn, project_id)
+            validated = _validated_requirement(values, conn, project_id)
             existing = conn.execute(
                 "SELECT * FROM quality_requirements WHERE id=? AND project_id=?",
                 (requirement_id, project_id),
@@ -729,24 +796,6 @@ def save_quality_requirement_rows(
     if not required_columns.issubset(edited.columns):
         raise ValueError("The Quality requirements table is missing required columns.")
 
-    prepared: list[dict] = []
-    identifiers: set[str] = set()
-    supplied_ids: set[str] = set()
-    for record in edited.to_dict("records"):
-        validated = _validated_requirement(record)
-        identifier_key = validated["unique_identifier"].casefold()
-        if identifier_key in identifiers:
-            raise ValueError(
-                "Quality requirement Unique identifiers must be unique within the project."
-            )
-        identifiers.add(identifier_key)
-        requirement_id = _clean_text(record.get("id"))
-        if requirement_id:
-            if requirement_id in supplied_ids:
-                raise ValueError("The Quality requirements table contains a duplicate record.")
-            supplied_ids.add(requirement_id)
-        prepared.append({"id": requirement_id, **validated})
-
     store = _store_module()
     timestamp = store.now_iso()
     created_ids: list[str] = []
@@ -756,6 +805,24 @@ def save_quality_requirement_rows(
             if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
                 raise ValueError("The active project no longer exists.")
             _ensure_quality_requirement_types(conn, project_id)
+
+            prepared: list[dict] = []
+            identifiers: set[str] = set()
+            supplied_ids: set[str] = set()
+            for record in edited.to_dict("records"):
+                validated = _validated_requirement(record, conn, project_id)
+                identifier_key = validated["unique_identifier"].casefold()
+                if identifier_key in identifiers:
+                    raise ValueError(
+                        "Quality requirement Unique identifiers must be unique within the project."
+                    )
+                identifiers.add(identifier_key)
+                requirement_id = _clean_text(record.get("id"))
+                if requirement_id:
+                    if requirement_id in supplied_ids:
+                        raise ValueError("The Quality requirements table contains a duplicate record.")
+                    supplied_ids.add(requirement_id)
+                prepared.append({"id": requirement_id, **validated})
             existing_rows = conn.execute(
                 "SELECT * FROM quality_requirements WHERE project_id=?", (project_id,)
             ).fetchall()
@@ -1165,10 +1232,28 @@ def quality_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
            ORDER BY element.sequence, element.operation, element.id""",
         (project_id, scenario_id),
     )
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         rows,
         columns=["id", "sequence", "pitch", "pitch_name", "work_element", "status"],
     )
+    if not frame.empty:
+        p_store = _process_store()
+        contexts = p_store.work_element_op_contexts(
+            project_id, scenario_id, frame["id"].astype(str).tolist()
+        )
+        frame["op_id"] = frame["id"].astype(str).map(
+            lambda val: str(contexts.get(val, {}).get("op_id") or "No Op ID")
+        )
+        frame["sort_order"] = frame["id"].astype(str).map(
+            lambda val: int(contexts.get(val, {}).get("sort_order", 10**9))
+        )
+        frame = frame.sort_values(
+            ["sort_order", "sequence", "id"], kind="stable"
+        ).reset_index(drop=True)
+    else:
+        frame["op_id"] = pd.Series(dtype="string")
+        frame["sort_order"] = pd.Series(dtype="int64")
+    return frame
 
 
 def quality_requirement_links(
@@ -1244,7 +1329,7 @@ def quality_requirement_links(
                     assignment.id""",
         params,
     )
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         rows,
         columns=[
             "assignment_id", "quality_requirement_id", "scenario_id",
@@ -1254,6 +1339,18 @@ def quality_requirement_links(
             "tolerances", "unit", "repository_update_pending",
         ],
     )
+    if not frame.empty:
+        p_store = _process_store()
+        op_ids = []
+        for _, row in frame.iterrows():
+            sc_id = str(row["scenario_id"])
+            w_id = str(row["work_element_id"])
+            contexts = p_store.work_element_op_contexts(project_id, sc_id, [w_id])
+            op_ids.append(str(contexts.get(w_id, {}).get("op_id") or "No Op ID"))
+        frame["op_id"] = op_ids
+    else:
+        frame["op_id"] = pd.Series(dtype="string")
+    return frame
 
 
 def assign_quality_requirement(

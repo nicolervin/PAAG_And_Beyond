@@ -171,11 +171,64 @@ def init_control_plan_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS uq_control_plan_fallback_item
             ON control_plan_items(project_id, scenario_id, pfmea_entry_id)
             WHERE source_kind='pfmea_only';
+        CREATE TABLE IF NOT EXISTS control_method_catalog (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL DEFAULT 'GLOBAL',
+            name TEXT NOT NULL COLLATE NOCASE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_method_catalog_project
+            ON control_method_catalog(project_id, name);
         """
     )
     columns = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(control_plan_items)").fetchall()
     }
+    catalog_fk = False
+    for row in conn.execute("PRAGMA foreign_key_list(control_method_catalog)").fetchall():
+        if str(row[2]).lower() == "projects":
+            catalog_fk = True
+            break
+    if catalog_fk:
+        conn.executescript(
+            """
+            CREATE TABLE control_method_catalog_new (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL DEFAULT 'GLOBAL',
+                name TEXT NOT NULL COLLATE NOCASE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, name)
+            );
+            INSERT INTO control_method_catalog_new (id, project_id, name, created_at, updated_at)
+            SELECT id, project_id, name, created_at, updated_at FROM control_method_catalog;
+            DROP TABLE control_method_catalog;
+            ALTER TABLE control_method_catalog_new RENAME TO control_method_catalog;
+            CREATE INDEX IF NOT EXISTS idx_control_method_catalog_project
+                ON control_method_catalog(project_id, name);
+            """
+        )
+    has_seeded = conn.execute(
+        "SELECT 1 FROM control_method_catalog WHERE id='__seeded_defaults__' OR name='__seeded_defaults__' LIMIT 1"
+    ).fetchone()
+    if not has_seeded:
+        now = _store().now_iso()
+        conn.execute(
+            """INSERT OR IGNORE INTO control_method_catalog
+               (id, project_id, name, created_at, updated_at)
+               VALUES ('__seeded_defaults__', 'SYSTEM', '__seeded_defaults__', ?, ?)""",
+            (now, now),
+        )
+        for dname in DEFAULT_CONTROL_METHODS:
+            conn.execute(
+                """INSERT OR IGNORE INTO control_method_catalog
+                   (id, project_id, name, created_at, updated_at)
+                   VALUES (?, 'GLOBAL', ?, ?, ?)""",
+                (str(uuid4()), dname, now, now),
+            )
+        conn.commit()
     if "sequence" not in columns:
         conn.execute(
             "ALTER TABLE control_plan_items ADD COLUMN sequence INTEGER NOT NULL DEFAULT 10"
@@ -187,6 +240,10 @@ def init_control_plan_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE control_plan_items ADD COLUMN characteristic_suffix INTEGER "
             "CHECK (characteristic_suffix IS NULL OR "
             "(typeof(characteristic_suffix)='integer' AND characteristic_suffix > 0))"
+        )
+    if "specification_requirement" not in columns:
+        conn.execute(
+            "ALTER TABLE control_plan_items ADD COLUMN specification_requirement TEXT NOT NULL DEFAULT ''"
         )
 
 
@@ -501,6 +558,7 @@ def _validate_context(conn: sqlite3.Connection, project_id: str, scenario_id: st
 
 
 def _quality_sources(conn: sqlite3.Connection, project_id: str, scenario_id: str) -> list[dict]:
+    pfmea_selected_map: dict[str, list[str]] = {}
     unions: list[str] = []
     for table in ("pfmea_prevention_selections", "pfmea_detection_selections"):
         if _table_exists(conn, table):
@@ -508,25 +566,65 @@ def _quality_sources(conn: sqlite3.Connection, project_id: str, scenario_id: str
                 f"SELECT pfmea_entry_id, quality_requirement_assignment_id FROM {table} "
                 "WHERE project_id=? AND scenario_id=? AND source_type='quality_assignment'"
             )
-    if not unions:
-        return []
-    params: list[str] = []
-    for _ in unions:
-        params.extend([project_id, scenario_id])
-    rows = conn.execute(
-        f"""SELECT DISTINCT selected.pfmea_entry_id, a.id AS assignment_id,
-                   a.work_element_id, a.quality_requirement_id,
-                   a.requirement_type, a.description, a.unique_identifier,
-                   a.target_value, a.tolerances, a.unit, a.source_updated_at,
-                   a.updated_at AS assignment_updated_at
-            FROM ({' UNION ALL '.join(unions)}) selected
-            JOIN quality_requirement_assignments a
-              ON a.id=selected.quality_requirement_assignment_id
-             AND a.project_id=? AND a.scenario_id=?
-            ORDER BY selected.pfmea_entry_id, a.created_at, a.id""",
-        (*params, project_id, scenario_id),
+    if unions:
+        params: list[str] = []
+        for _ in unions:
+            params.extend([project_id, scenario_id])
+        sel_rows = conn.execute(
+            f"SELECT DISTINCT pfmea_entry_id, quality_requirement_assignment_id FROM ({' UNION ALL '.join(unions)})",
+            params,
+        ).fetchall()
+        for row in sel_rows:
+            pfmea_selected_map.setdefault(str(row["quality_requirement_assignment_id"]), []).append(str(row["pfmea_entry_id"]))
+
+    first_entry_by_work: dict[str, str] = {}
+    entry_rows = conn.execute(
+        """SELECT id, work_element_id FROM pfmea_entries
+           WHERE project_id=? AND scenario_id=? AND TRIM(class_code)<>''
+           ORDER BY process_sequence_snapshot, created_at, id""",
+        (project_id, scenario_id),
     ).fetchall()
-    return [dict(row) for row in rows]
+    for row in entry_rows:
+        work_id = str(row["work_element_id"])
+        if work_id not in first_entry_by_work:
+            first_entry_by_work[work_id] = str(row["id"])
+
+    assignments = conn.execute(
+        """SELECT a.id AS assignment_id, a.work_element_id, a.quality_requirement_id,
+                  a.requirement_type, a.description, a.unique_identifier,
+                  a.target_value, a.tolerances, a.unit, a.source_updated_at,
+                  a.updated_at AS assignment_updated_at, a.created_at
+           FROM quality_requirement_assignments a
+           WHERE a.project_id=? AND a.scenario_id=?
+           ORDER BY a.created_at, a.id""",
+        (project_id, scenario_id),
+    ).fetchall()
+
+    result: list[dict] = []
+    seen_entry_assignment: set[tuple[str, str]] = set()
+
+    for a in assignments:
+        a_dict = dict(a)
+        assignment_id = str(a_dict["assignment_id"])
+        work_id = str(a_dict["work_element_id"])
+
+        target_entry_ids = pfmea_selected_map.get(assignment_id)
+        if not target_entry_ids:
+            first_entry_id = first_entry_by_work.get(work_id)
+            target_entry_ids = [first_entry_id] if first_entry_id else []
+
+        for entry_id in target_entry_ids:
+            if not entry_id:
+                continue
+            pair = (entry_id, assignment_id)
+            if pair in seen_entry_assignment:
+                continue
+            seen_entry_assignment.add(pair)
+            item = dict(a_dict)
+            item["pfmea_entry_id"] = entry_id
+            result.append(item)
+
+    return result
 
 
 def _torque_text(conn: sqlite3.Connection, project_id: str, requirement_id: str) -> str:
@@ -555,7 +653,225 @@ def _specification(source: dict) -> str:
     return " ".join(value for value in values if value)
 
 
-def _source_fingerprint(entry: dict, source: dict | None, torque: str) -> str:
+DEFAULT_CONTROL_METHODS = (
+    "FRM-AP1-QYS-029",
+    "Test Loop",
+    "Job Instruction Form",
+    "FIS Genealogy Part Report",
+    "PLC / FIS",
+    "Visual Inspection",
+    "Go/NoGo Test and Sign Off",
+    "DC Tool Torque Control",
+    "100% Automated Vision Scan",
+    "Poka-Yoke / Fixture Interlock",
+    "SPC Chart / Control Limits",
+    "First Piece Inspection",
+    "Periodic Audit / Checklist",
+)
+
+
+def list_control_methods(conn: sqlite3.Connection, project_id: str) -> list[str]:
+    init_control_plan_schema(conn)
+    catalog = [
+        _text(row[0])
+        for row in conn.execute(
+            "SELECT name FROM control_method_catalog WHERE (project_id=? OR project_id='GLOBAL') AND name <> '__seeded_defaults__' ORDER BY name",
+            (project_id,),
+        ).fetchall()
+        if _text(row[0]) and _text(row[0]) != "__seeded_defaults__"
+    ]
+    items_used = [
+        _text(row[0])
+        for row in conn.execute(
+            "SELECT DISTINCT control_method FROM control_plan_items WHERE project_id=? AND TRIM(control_method) <> ''",
+            (project_id,),
+        ).fetchall()
+        if _text(row[0])
+    ]
+    combined = list(dict.fromkeys(catalog + items_used))
+    return sorted(combined, key=lambda s: s.casefold())
+
+
+def add_custom_control_method(
+    conn: sqlite3.Connection, project_id: str, name: str, is_global: bool = False
+) -> None:
+    init_control_plan_schema(conn)
+    clean_name = _text(name)
+    if not clean_name:
+        raise ValueError("Control method name cannot be blank.")
+    if clean_name == "__seeded_defaults__":
+        raise ValueError("Reserved name cannot be used.")
+    target_project = "GLOBAL" if is_global else project_id
+    if not target_project:
+        target_project = "GLOBAL"
+    now = _store().now_iso()
+    conn.execute(
+        """INSERT OR IGNORE INTO control_method_catalog
+           (id, project_id, name, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (str(uuid4()), target_project, clean_name, now, now),
+    )
+    conn.commit()
+
+
+def list_control_methods_detailed(
+    conn: sqlite3.Connection, project_id: str
+) -> pd.DataFrame:
+    init_control_plan_schema(conn)
+    catalog_rows = conn.execute(
+        "SELECT id, project_id, name FROM control_method_catalog WHERE (project_id=? OR project_id='GLOBAL') AND name <> '__seeded_defaults__' ORDER BY name",
+        (project_id,),
+    ).fetchall()
+
+    usage_counts = {}
+    for row in conn.execute(
+        "SELECT TRIM(control_method) AS cm, COUNT(*) FROM control_plan_items WHERE project_id=? AND TRIM(control_method) <> '' GROUP BY TRIM(control_method)",
+        (project_id,),
+    ).fetchall():
+        if row[0]:
+            usage_counts[str(row[0]).casefold()] = int(row[1])
+
+    seen_names = set()
+    records = []
+
+    for row in catalog_rows:
+        cid = str(row["id"])
+        cproj = str(row["project_id"])
+        cname = str(row["name"]).strip()
+        cname_fold = cname.casefold()
+        if cname_fold in seen_names or cname == "__seeded_defaults__":
+            continue
+        seen_names.add(cname_fold)
+        is_global = cproj == "GLOBAL"
+        scope_label = "Global" if is_global else "Current Project"
+        records.append({
+            "id": cid,
+            "name": cname,
+            "scope": scope_label,
+            "is_catalog": True,
+            "is_global": is_global,
+            "usage_count": usage_counts.get(cname_fold, 0),
+        })
+
+    for row in conn.execute(
+        "SELECT DISTINCT TRIM(control_method) FROM control_plan_items WHERE project_id=? AND TRIM(control_method) <> ''",
+        (project_id,),
+    ).fetchall():
+        name = str(row[0]).strip()
+        name_fold = name.casefold()
+        if name_fold not in seen_names:
+            seen_names.add(name_fold)
+            records.append({
+                "id": f"used_{name_fold}",
+                "name": name,
+                "scope": "In-Use Item Value",
+                "is_catalog": False,
+                "is_global": False,
+                "usage_count": usage_counts.get(name_fold, 0),
+            })
+
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df = df.sort_values(by=["name"], key=lambda col: col.str.casefold()).reset_index(drop=True)
+    return df
+
+
+def delete_custom_control_method(
+    conn: sqlite3.Connection, project_id: str, method_id: str
+) -> None:
+    init_control_plan_schema(conn)
+    row = conn.execute(
+        "SELECT id, project_id, name FROM control_method_catalog WHERE id=? AND name <> '__seeded_defaults__'",
+        (method_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError("Selected Control Method no longer exists.")
+    name = str(row["name"])
+    in_use = conn.execute(
+        "SELECT COUNT(*) FROM control_plan_items WHERE project_id=? AND TRIM(control_method)=? COLLATE NOCASE",
+        (project_id, name),
+    ).fetchone()[0]
+    if in_use > 0:
+        raise ValueError(
+            f"Cannot delete '{name}' because it is currently used by {in_use} Control Plan row(s)."
+        )
+    conn.execute("DELETE FROM control_method_catalog WHERE id=?", (method_id,))
+    conn.commit()
+
+
+def _equipment_by_work_element(
+    conn: sqlite3.Connection, project_id: str, scenario_id: str
+) -> dict[str, list[dict]]:
+    try:
+        rows = conn.execute(
+            """SELECT
+                   link.work_element_id,
+                   asset.id AS equipment_id,
+                   asset.name AS equipment_name,
+                   eqtype.label AS equipment_type
+               FROM equipment_process_links link
+               JOIN equipment_placements placement
+                 ON placement.id = link.placement_id
+                AND placement.project_id = link.project_id
+                AND placement.scenario_id = link.scenario_id
+               JOIN equipment_assets asset
+                 ON asset.id = placement.equipment_id
+                AND asset.project_id = link.project_id
+               JOIN equipment_types eqtype
+                 ON eqtype.id = asset.equipment_type_id
+                AND eqtype.project_id = link.project_id
+               WHERE link.project_id=? AND link.scenario_id=?
+               ORDER BY asset.name""",
+            (project_id, scenario_id),
+        ).fetchall()
+        result: dict[str, list[dict]] = {}
+        for r in rows:
+            r_dict = dict(r)
+            result.setdefault(str(r_dict["work_element_id"]), []).append(r_dict)
+        return result
+    except sqlite3.OperationalError:
+        return {}
+
+
+def _infer_equipment_control_method(eq_list: list[dict], source: dict | None) -> str:
+    if eq_list:
+        methods: list[str] = []
+        for eq in eq_list:
+            eq_type = _text(eq.get("equipment_type")).casefold()
+            eq_name = _text(eq.get("equipment_name"))
+            if "torque" in eq_type or "torque" in eq_name.casefold():
+                methods.append("DC Tool Torque Control" if "dc" in eq_name.casefold() or "tool" in eq_type else f"{eq_name} Torque Control")
+            elif "vision" in eq_type or "vision" in eq_name.casefold():
+                methods.append("100% Automated Vision Scan")
+            elif "scan" in eq_type or "scan" in eq_name.casefold():
+                methods.append("FIS Genealogy Scan")
+            elif "esd" in eq_type or "esd" in eq_name.casefold():
+                methods.append("FRM-AP1-QYS-029")
+            elif "test" in eq_type or "test" in eq_name.casefold():
+                methods.append("Test Loop")
+            elif "poka" in eq_type or "fixture" in eq_type:
+                methods.append("Poka-Yoke / Fixture Interlock")
+            else:
+                methods.append(eq_name)
+        if methods:
+            return " / ".join(dict.fromkeys(methods))
+    if source:
+        req_type = _text(source.get("requirement_type")).casefold()
+        desc = _text(source.get("description")).casefold()
+        if "torque" in req_type or "torque" in desc:
+            return "DC Tool Torque Control"
+        if "esd" in req_type or "esd" in desc:
+            return "FRM-AP1-QYS-029"
+        if "scan" in req_type or "scan" in desc:
+            return "FIS Genealogy Part Report"
+        if "test" in req_type or "test" in desc:
+            return "Test Loop"
+    return "Job Instruction Form"
+
+
+def _source_fingerprint(
+    entry: dict, source: dict | None, torque: str, equipment_summary: str = ""
+) -> str:
     published = (
         {
             name: source.get(name)
@@ -575,6 +891,7 @@ def _source_fingerprint(entry: dict, source: dict | None, torque: str) -> str:
             "failure_mode": _text(entry.get("potential_failure_mode")),
             "quality": published,
             "torque": torque,
+            "equipment": equipment_summary,
         }
     )
 
@@ -671,6 +988,7 @@ def _live_projection_conn(
             reserved_suffixes_by_work.setdefault(str(item["work_element_id"]), set()).add(
                 suffix
             )
+    equipment_by_work = _equipment_by_work_element(conn, project_id, scenario_id)
     result: list[dict] = []
     first_by_work: set[str] = set()
     for entry in entries:
@@ -712,7 +1030,9 @@ def _live_projection_conn(
             torque = ""
             if source and _text(source.get("requirement_type")).casefold() == "torque":
                 torque = _torque_text(conn, project_id, quality_id)
-            fingerprint = _source_fingerprint(entry, source, torque)
+            eq_list = equipment_by_work.get(work_id, [])
+            eq_summary = ",".join(sorted(str(eq["equipment_id"]) for eq in eq_list))
+            fingerprint = _source_fingerprint(entry, source, torque, eq_summary)
             operation_number = operation_numbers.get(work_id)
             placement = _text(item.get("characteristic_placement"))
             characteristic = (
@@ -725,6 +1045,12 @@ def _live_projection_conn(
                 bool(item.get("source_review_required"))
                 or bool(item and _text(item.get("source_fingerprint_snapshot")) != fingerprint)
                 or pitch_changed
+            )
+            inferred_method = _infer_equipment_control_method(eq_list, source)
+            control_method = (
+                _text(item.get("control_method"))
+                if _text(item.get("control_method"))
+                else inferred_method
             )
             row = {
                 "id": _text(item.get("id")),
@@ -756,11 +1082,21 @@ def _live_projection_conn(
                 "station_pitch": current_pitch or "Unassigned",
                 "op_id": _text(op_context.get("op_id")) or "Op ID unavailable",
                 "operation": _text(entry.get("process_operation_snapshot")),
+                "machine_fixture": _text(item.get("machine_fixture")),
+                "machine_fixture_operation": (
+                    f"[{_text(item.get('machine_fixture'))}] {_text(entry.get('process_operation_snapshot'))}"
+                    if _text(item.get("machine_fixture"))
+                    else _text(entry.get("process_operation_snapshot"))
+                ),
                 "classification": _text(entry.get("class_code")),
                 "characteristic_placement": placement,
                 "product_part_characteristic": "",
                 "process_characteristic": "",
-                "specification_requirement": _specification(source or {}),
+                "specification_requirement": (
+                    _text(item.get("specification_requirement"))
+                    if _text(item.get("specification_requirement"))
+                    else _specification(source or {})
+                ),
                 "measurement_evaluation": " — ".join(
                     value for value in [
                         _text(source.get("requirement_type")) if source else "",
@@ -771,7 +1107,7 @@ def _live_projection_conn(
                 "sample_size": _text(item.get("sample_size")),
                 "sample_frequency": _text(item.get("sample_frequency")),
                 "who": _text(item.get("who")),
-                "control_method": _text(item.get("control_method")),
+                "control_method": control_method,
                 "decision_rule": _text(item.get("decision_rule")),
                 "excluded": bool(item.get("excluded")),
                 "source_review_required": review_required,
@@ -1087,12 +1423,17 @@ def save_control_plan_rows(
             for row in _live_projection_conn(conn, project_id, scenario_id)
             if not bool(row.get("excluded"))
         }
-        supplied = {str(row.get("projection_key") or "") for row in records}
-        if not supplied.issubset(live):
-            raise ValueError("One or more Control Plan sources changed. Refresh and review them.")
+        supplied_by_key = {
+            str(record.get("projection_key") or ""): record
+            for record in records
+            if str(record.get("projection_key") or "") in live
+        }
+        target_records: list[tuple[dict, dict]] = [
+            (source, supplied_by_key.get(key, source))
+            for key, source in live.items()
+        ]
         operation_numbers: dict[str, float | None] = {}
-        for record in records:
-            source = live[str(record["projection_key"])]
+        for source, record in target_records:
             work_id = str(source["work_element_id"])
             number = _pr_number(
                 record.get("operation_pr_number", record.get("pr_number"))
@@ -1104,14 +1445,18 @@ def save_control_plan_rows(
                 )
             operation_numbers[work_id] = number
         changed_ids: list[str] = []
-        for record in records:
-            source = live[str(record["projection_key"])]
+        for source, record in target_records:
             pr_number = operation_numbers[str(source["work_element_id"])]
             placement = _text(record.get("characteristic_placement"))
             if placement not in PLACEMENTS:
                 raise ValueError("Characteristic placement must be Product / Part, Process, or blank.")
             characteristic_suffix = _characteristic_suffix(
                 record.get("characteristic_suffix")
+            )
+            supplied_spec = _text(record.get("specification_requirement"))
+            live_spec = _text(source.get("specification_requirement"))
+            spec_to_save = (
+                supplied_spec if supplied_spec and supplied_spec != live_spec else ""
             )
             values = {
                 name: _text(record.get(name))
@@ -1120,11 +1465,12 @@ def save_control_plan_rows(
                     "control_method", "decision_rule",
                 )
             }
+            values["specification_requirement"] = spec_to_save
             item_id = _text(source.get("id"))
             if item_id:
                 conn.execute(
                     """UPDATE control_plan_items SET characteristic_placement=?,
-                       machine_fixture=?, sample_size=?, sample_frequency=?, who=?,
+                       machine_fixture=?, specification_requirement=?, sample_size=?, sample_frequency=?, who=?,
                        control_method=?, decision_rule=?,
                        quality_requirement_assignment_id=?, quality_requirement_id=?,
                        source_unique_identifier_snapshot=?, source_description_snapshot=?,
@@ -1132,9 +1478,9 @@ def save_control_plan_rows(
                        pr_number=?, characteristic_suffix=?, updated_at=?
                        WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
-                        placement, values["machine_fixture"], values["sample_size"],
-                        values["sample_frequency"], values["who"], values["control_method"],
-                        values["decision_rule"],
+                        placement, values["machine_fixture"], values["specification_requirement"],
+                        values["sample_size"], values["sample_frequency"], values["who"],
+                        values["control_method"], values["decision_rule"],
                         source.get("quality_requirement_assignment_id") or None,
                         source.get("quality_requirement_id") or None,
                         source.get("source_unique_identifier_snapshot") or "",
@@ -1152,11 +1498,11 @@ def save_control_plan_rows(
                         quality_requirement_assignment_id, quality_requirement_id,
                         source_quality_requirement_id_snapshot,
                         source_unique_identifier_snapshot, source_description_snapshot,
-                        characteristic_placement, machine_fixture, sample_size,
+                        characteristic_placement, machine_fixture, specification_requirement, sample_size,
                         sample_frequency, who, control_method, decision_rule, excluded,
                         source_fingerprint_snapshot, source_review_required,
                          sequence, pr_number, characteristic_suffix, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?)""",
                     (
                         item_id, project_id, scenario_id, source["pfmea_entry_id"],
                         source["source_kind"],
@@ -1165,7 +1511,7 @@ def save_control_plan_rows(
                         source.get("source_quality_requirement_id_snapshot") or "",
                         source.get("source_unique_identifier_snapshot") or "",
                         source.get("source_description_snapshot") or "", placement,
-                        values["machine_fixture"], values["sample_size"],
+                        values["machine_fixture"], values["specification_requirement"], values["sample_size"],
                         values["sample_frequency"], values["who"], values["control_method"],
                         values["decision_rule"], source["source_fingerprint"],
                          int(source.get("sequence") or 10), pr_number,

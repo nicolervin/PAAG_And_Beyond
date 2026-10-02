@@ -3,6 +3,7 @@ import hashlib
 import streamlit as st
 import pandas as pd
 
+from utils.exchange_help import EXCHANGE_HELP_SECTIONS
 from utils.project_transfer import (
     AUDIT_CATEGORY,
     export_project_package,
@@ -17,8 +18,24 @@ from utils.scope_ui import page_title_with_scope
 from utils.table_ui import selectable_dataframe
 
 
+@st.dialog("How to use Import/Export Projects", width="large")
+def show_exchange_page_help() -> None:
+    for section_title, section_content in EXCHANGE_HELP_SECTIONS:
+        st.markdown(f"### {section_title}")
+        st.markdown(section_content)
+    if st.button("Close", key="close_exchange_page_help"):
+        st.rerun()
+
+
 project_id = st.session_state.get("project_id")
 page_title_with_scope("Import/Export Projects", scope="project")
+if st.button(
+    "How to use this page",
+    icon=":material/help:",
+    key="exchange_page_help",
+    help="Open step-by-step instructions for exporting and importing project packages.",
+):
+    show_exchange_page_help()
 if not project_id:
     st.stop()
 
@@ -205,6 +222,13 @@ with st.container(border=True):
                     },
                 )
 
+            st.divider()
+            st.markdown("**Step 2: Select a Target Operation to proceed**")
+            st.caption(
+                "All items listed in the preview above (scenarios, database records, and uploads) "
+                "will be included in the import. Select **Create new** (or **Replace an existing project**) "
+                "below to activate the **Continue** button."
+            )
             target_operation = st.segmented_control(
                 "Target operation",
                 ["Create new", "Replace an existing project"],

@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+import pandas as pd
+
 from utils import quality_store, store
 from utils.equipment_store import (
     DEFAULT_EQUIPMENT_TYPES,
@@ -12,6 +14,7 @@ from utils.equipment_store import (
     delete_equipment_types,
     detach_equipment_from_function,
     equipment_assets,
+    equipment_needs_vs_placements_matrix,
     equipment_placement_detail,
     equipment_torque_published_specifications,
     equipment_types,
@@ -410,6 +413,82 @@ class EquipmentStoreTests(unittest.TestCase):
         self.assertEqual("+/- 3", specification.iloc[0]["tolerances"])
         self.assertEqual("Published operation", specification.iloc[0]["process_function"])
 
+    def test_equipment_needs_vs_placements_matrix(self) -> None:
+        work_id = str(uuid4())
+        area_id = str(uuid4())
+        pitch_id = str(uuid4())
+        now = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, name, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (area_id, self.project_id, self.scenario_id, "Main Line", now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (pitch_id, self.project_id, area_id, "1-A1-1", "Station 1", now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                (str(uuid4()), self.project_id, area_id, pitch_id, work_id, "Torque Bolt", now),
+            )
+
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([{"id": work_id, "station": "01", "operation": "Torque Bolt", "sequence": 1, "pitch_id": pitch_id}]),
+        )
+
+        req_id = quality_store.save_quality_requirement(
+            self.project_id,
+            {
+                "requirement_type": "Torque",
+                "description": "Engine bolt torque",
+                "unique_identifier": "TQ-001",
+                "pass_fail": True,
+                "target_value": 25,
+                "tolerances": "+/- 2",
+                "unit": "N·m",
+            },
+        )
+        quality_store.assign_quality_requirement(
+            self.project_id, self.scenario_id, work_id, req_id
+        )
+
+        matrix = equipment_needs_vs_placements_matrix(self.project_id, self.scenario_id)
+        self.assertEqual(len(matrix), 1)
+        self.assertEqual(matrix.iloc[0]["source_stage"], "Drawing Requirement")
+        self.assertEqual(matrix.iloc[0]["expected_equipment_type"], "Torque tool")
+        self.assertEqual(matrix.iloc[0]["coverage_status"], "Missing Equipment")
+        self.assertFalse(bool(matrix.iloc[0]["is_satisfied"]))
+
+        types = equipment_types(self.project_id)
+        torque_type_id = str(types.loc[types["label"].eq("Torque tool"), "id"].iloc[0])
+        created = save_function_equipment_rows(
+            self.project_id,
+            "Quality",
+            self.scenario_id,
+            [{
+                "id": "",
+                "equipment_type_id": torque_type_id,
+                "name": "DC Tool 01",
+                "description": "Torque tool",
+                "manufacturer": "",
+                "model": "",
+                "notes": "",
+                "pitch_id": "",
+            }],
+            "Tester",
+        )
+        eq_id = str(created["created_ids"][0])
+        save_equipment_placement(self.project_id, self.scenario_id, eq_id, pitch_id, [work_id], "Tester")
+
+        matrix_satisfied = equipment_needs_vs_placements_matrix(self.project_id, self.scenario_id)
+        self.assertEqual(len(matrix_satisfied), 1)
+        self.assertEqual(matrix_satisfied.iloc[0]["coverage_status"], "Satisfied")
+        self.assertTrue(bool(matrix_satisfied.iloc[0]["is_satisfied"]))
+        self.assertEqual(matrix_satisfied.iloc[0]["linked_asset_names"], "DC Tool 01")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -324,11 +324,18 @@ class QualityStoreTests(unittest.TestCase):
                 self.project_id,
                 self.requirement_values(unique_identifier="tq-001"),
             )
-        with self.assertRaisesRegex(ValueError, "must use inches"):
+        metric_dim_id = quality_store.save_quality_requirement(
+            self.project_id,
+            self.requirement_values(
+                requirement_type="Dimensional", unique_identifier="DIM-001", unit="mm"
+            ),
+        )
+        self.assertTrue(metric_dim_id)
+        with self.assertRaisesRegex(ValueError, "is not allowed for Requirement Type"):
             quality_store.save_quality_requirement(
                 self.project_id,
                 self.requirement_values(
-                    requirement_type="Dimensional", unique_identifier="DIM-001", unit="mm"
+                    requirement_type="Dimensional", unique_identifier="DIM-002", unit="lbs"
                 ),
             )
         with self.assertRaisesRegex(ValueError, "no longer exists"):
@@ -794,6 +801,36 @@ class QualityStoreTests(unittest.TestCase):
             "Present and fully seated",
             quality_store.quality_requirement_types(self.project_id)["label"].tolist(),
         )
+
+    def test_units_available_catalog_and_validation(self) -> None:
+        types_df = quality_store.quality_requirement_types(self.project_id)
+        torque_row = types_df[types_df["label"] == "Torque"].iloc[0].to_dict()
+        self.assertEqual(torque_row["units_available"], "in-lbs;ft-lbs;N·m")
+
+        types_df.loc[types_df["label"] == "Torque", "units_available"] = "in-lbs;ft-lbs;Nm;N-m"
+        quality_store.save_quality_requirement_type_rows(self.project_id, types_df)
+
+        refreshed = quality_store.quality_requirement_types(self.project_id)
+        refreshed_torque = refreshed[refreshed["label"] == "Torque"].iloc[0].to_dict()
+        self.assertEqual(refreshed_torque["units_available"], "in-lbs;ft-lbs;Nm;N-m")
+
+        # Valid unit from configured list succeeds
+        req_id = quality_store.save_quality_requirement(
+            self.project_id,
+            self.requirement_values(
+                requirement_type="Torque", unique_identifier="TRQ-100", unit="Nm"
+            ),
+        )
+        self.assertTrue(req_id)
+
+        # Invalid unit raises ValueError specifying allowed units
+        with self.assertRaisesRegex(ValueError, "Allowed units for this Type"):
+            quality_store.save_quality_requirement(
+                self.project_id,
+                self.requirement_values(
+                    requirement_type="Torque", unique_identifier="TRQ-101", unit="lbs"
+                ),
+            )
 
 
 if __name__ == "__main__":
