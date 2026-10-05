@@ -685,17 +685,23 @@ def pfmea_control_candidates(
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
         _work_element(conn, project_id, scenario_id, work_element_id)
-        assignments = []
+        where_clause = "project_id=? AND scenario_id=? AND work_element_id=?"
+        params = [project_id, scenario_id, work_element_id]
         if quality_include_ids:
             placeholders = ",".join("?" for _ in quality_include_ids)
-            assignments = [
-                dict(row)
-                for row in conn.execute(
-                    f"""SELECT * FROM quality_requirement_assignments
-                       WHERE project_id=? AND id IN ({placeholders})""",
-                    (project_id, *quality_include_ids),
-                ).fetchall()
-            ]
+            where_clause = (
+                f"project_id=? AND ((scenario_id=? AND work_element_id=?) OR id IN ({placeholders}))"
+            )
+            params = [project_id, scenario_id, work_element_id, *quality_include_ids]
+        assignments = [
+            dict(row)
+            for row in conn.execute(
+                f"""SELECT * FROM quality_requirement_assignments
+                   WHERE {where_clause}
+                   ORDER BY description COLLATE NOCASE, unique_identifier COLLATE NOCASE, id""",
+                params,
+            ).fetchall()
+        ]
         options = [
             dict(row)
             for row in conn.execute(

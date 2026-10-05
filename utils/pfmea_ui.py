@@ -38,6 +38,7 @@ from utils.pfmea_store import (
     save_pfmea_flat_rows,
     save_pfmea_control_option_rows,
 )
+from utils.pfmea_control_palette import render_pfmea_control_drawer
 from utils.pfmea_pattern_store import (
     capture_pfmea_entry_as_pattern,
     delete_pfmea_patterns,
@@ -3783,32 +3784,96 @@ def _render_flat_pfmea_table(
             label, options=PFMEA_RATINGS, help=rating_help
         )
 
-    edited = st.data_editor(
-        editor_rows,
-        key=editor_key,
-        on_change=_stage_pfmea_process_selection,
-        args=(
-            editor_key,
-            draft_key,
-            rows,
-            visible,
+    drawer_open_key = f"pfmea_control_drawer_open_{project_id}_{scenario_id}"
+    drawer_open = bool(st.session_state.get(drawer_open_key, False))
+
+    toolbar_c1, toolbar_c2 = st.columns([7, 5], vertical_alignment="center")
+    with toolbar_c2:
+        btn_label = "✖ Close Control Drawer" if drawer_open else "🎛️ Control Assignment Drawer (Drag & Drop)"
+        btn_help = (
+            "Hide the side-by-side drag-and-drop control assignment drawer."
+            if drawer_open
+            else "Open the side-by-side drag-and-drop palette to assign Drawing Requirements and Catalog Controls to PFMEA Causes."
+        )
+        if st.button(
+            btn_label,
+            key=f"pfmea_toggle_drawer_{project_id}_{scenario_id}",
+            help=btn_help,
+            use_container_width=True,
+        ):
+            st.session_state[drawer_open_key] = not drawer_open
+            st.rerun()
+
+    if drawer_open:
+        table_col, drawer_col = st.columns([7, 5])
+        with table_col:
+            edited = st.data_editor(
+                editor_rows,
+                key=editor_key,
+                on_change=_stage_pfmea_process_selection,
+                args=(
+                    editor_key,
+                    draft_key,
+                    rows,
+                    visible,
+                    editor_rows,
+                    step_by_id,
+                    project_id,
+                    scenario_id,
+                    control_labels,
+                ),
+                num_rows="dynamic",
+                hide_index=True,
+                height=658,
+                row_height=96,
+                disabled=[
+                    "item_number", "rpn",
+                    "resulting_rpn",
+                ],
+                column_order=PFMEA_VISIBLE_COLUMNS,
+                column_config=column_config,
+            )
+        with drawer_col:
+            def _close_drawer():
+                st.session_state[drawer_open_key] = False
+
+            render_pfmea_control_drawer(
+                project_id=project_id,
+                scenario_id=scenario_id,
+                rows=rows,
+                draft_key=draft_key,
+                editor_key=editor_key,
+                step_by_id=step_by_id,
+                control_labels=control_labels,
+                on_close=_close_drawer,
+            )
+    else:
+        edited = st.data_editor(
             editor_rows,
-            step_by_id,
-            project_id,
-            scenario_id,
-            control_labels,
-        ),
-        num_rows="dynamic",
-        hide_index=True,
-        height=658,
-        row_height=96,
-        disabled=[
-            "item_number", "rpn",
-            "resulting_rpn",
-        ],
-        column_order=PFMEA_VISIBLE_COLUMNS,
-        column_config=column_config,
-    )
+            key=editor_key,
+            on_change=_stage_pfmea_process_selection,
+            args=(
+                editor_key,
+                draft_key,
+                rows,
+                visible,
+                editor_rows,
+                step_by_id,
+                project_id,
+                scenario_id,
+                control_labels,
+            ),
+            num_rows="dynamic",
+            hide_index=True,
+            height=658,
+            row_height=96,
+            disabled=[
+                "item_number", "rpn",
+                "resulting_rpn",
+            ],
+            column_order=PFMEA_VISIBLE_COLUMNS,
+            column_config=column_config,
+        )
     edited, process_selection_changed, reassignment_attempted = (
         _normalize_pfmea_process_selection(edited, editor_rows, step_by_id)
     )

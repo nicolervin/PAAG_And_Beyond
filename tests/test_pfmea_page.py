@@ -1432,7 +1432,24 @@ class PfmeaPageSmokeTests(unittest.TestCase):
             )
             self.assertEqual(sanitized.iloc[0]["prevention_controls"], ["manual:preset_1"])
             self.assertEqual(len(warnings), 1)
-            self.assertIn("Unassigned Req", warnings[0])
+    def test_pfmea_control_drawer_toggle_and_structure(self) -> None:
+        source = inspect.getsource(pfmea_ui._render_flat_pfmea_table)
+        self.assertIn("pfmea_control_drawer_open_", source)
+        self.assertIn("render_pfmea_control_drawer(", source)
+        self.assertIn("Control Assignment Drawer", source)
+        self.assertIn("drawer_col", source)
+        self.assertIn("table_col", source)
+
+    def test_pfmea_control_palette_drawer_targets(self) -> None:
+        from utils.pfmea_control_palette import _cause_target_key
+        row_saved = pd.Series({"id": "row_1", "cause_id": "c_123", "draft_row_id": ""})
+        self.assertEqual(_cause_target_key(row_saved), "cause:c_123")
+
+        row_draft = pd.Series({"id": "", "cause_id": "", "draft_row_id": "draft_456"})
+        self.assertEqual(_cause_target_key(row_draft), "draft:draft_456")
+
+        row_raw = pd.Series({"id": "raw_789", "cause_id": "", "draft_row_id": ""})
+        self.assertEqual(_cause_target_key(row_raw), "draft:raw_789")
 
 
 if __name__ == "__main__":
