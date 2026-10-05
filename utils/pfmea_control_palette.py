@@ -22,37 +22,37 @@ _HTML = """
     <div class="palette-column">
       <div class="section-title">
         <span class="title-badge quality">🔷</span>
-        <span>Drawing Quality Requirements</span>
+        <span>Drawing Requirements</span>
         <span class="count-pill" id="quality-count">0</span>
       </div>
       <div class="card-list" id="quality-list"></div>
 
-      <div class="section-title" style="margin-top: 14px;">
+      <div class="section-title" style="margin-top: 10px;">
         <span class="title-badge manual">🟢</span>
-        <span>Standard Catalog Controls</span>
+        <span>Catalog Controls</span>
         <span class="count-pill" id="manual-count">0</span>
       </div>
       <div class="card-list" id="manual-list"></div>
     </div>
 
-    <div class="zones-column">
+    <div class="zones-column" style="margin-top: 6px; border-top: 1px solid var(--st-border-color, #e8e8e8); padding-top: 10px;">
       <div class="zone-wrapper">
         <div class="zone-title">
-          <span>🛡️ Current Process Controls — Prevention</span>
+          <span>🛡️ Prevention Controls</span>
           <span class="count-pill" id="prev-count">0</span>
         </div>
         <div class="drop-zone" id="zone-prevention" data-target="prevention">
-          <div class="empty-drop-msg">Drag Prevention controls here or click &quot;+ Prev&quot;</div>
+          <div class="empty-drop-msg">Drop Prevention controls here or click &quot;+ Prev&quot;</div>
         </div>
       </div>
 
-      <div class="zone-wrapper" style="margin-top: 14px;">
+      <div class="zone-wrapper" style="margin-top: 10px;">
         <div class="zone-title">
-          <span>🔍 Current Process Controls — Detection</span>
+          <span>🔍 Detection Controls</span>
           <span class="count-pill" id="det-count">0</span>
         </div>
         <div class="drop-zone" id="zone-detection" data-target="detection">
-          <div class="empty-drop-msg">Drag Detection controls here or click &quot;+ Det&quot;</div>
+          <div class="empty-drop-msg">Drop Detection controls here or click &quot;+ Det&quot;</div>
         </div>
       </div>
     </div>
@@ -68,22 +68,21 @@ _CSS = """
 
 .pfmea-drawer-root {
   box-sizing: border-box;
-  padding: 8px 4px 16px;
+  padding: 6px 4px 12px;
   background: var(--st-background-color, #ffffff);
   border: 1px solid var(--st-border-color, #e0e0e0);
   border-radius: 8px;
-  min-height: 580px;
 }
 
 .drawer-header {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .search-box input {
   width: 100%;
   box-sizing: border-box;
-  padding: 8px 12px;
-  font-size: 0.85rem;
+  padding: 6px 10px;
+  font-size: 0.80rem;
   border: 1px solid var(--st-border-color, #ccc);
   border-radius: 6px;
   background: var(--st-secondary-background-color, #f9f9f9);
@@ -96,31 +95,25 @@ _CSS = """
 }
 
 .drawer-layout {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-@media (max-width: 650px) {
-  .drawer-layout {
-    grid-template-columns: 1fr;
-  }
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .section-title, .zone-title {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 0.82rem;
+  gap: 5px;
+  font-size: 0.77rem;
   font-weight: 700;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
   color: var(--st-text-color, #333);
 }
 
 .count-pill {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 600;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 10px;
   background: var(--st-secondary-background-color, #e9ecef);
   color: var(--st-secondary-text-color, #555);
@@ -130,14 +123,14 @@ _CSS = """
 .card-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 240px;
+  gap: 4px;
+  max-height: 130px;
   overflow-y: auto;
-  padding: 2px 2px 4px;
+  padding: 2px;
 }
 
 .card-list::-webkit-scrollbar, .drop-zone::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 
 .card-list::-webkit-scrollbar-thumb, .drop-zone::-webkit-scrollbar-thumb {
@@ -150,9 +143,9 @@ _CSS = """
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 6px 8px;
-  font-size: 0.78rem;
-  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 0.75rem;
+  border-radius: 5px;
   border: 1px solid var(--st-border-color, #ddd);
   background: var(--st-background-color, #fff);
   cursor: grab;
@@ -161,7 +154,7 @@ _CSS = """
 }
 
 .control-card:hover {
-  box-shadow: 0 2px 5px rgba(0,0,0,0.08);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
   border-color: var(--st-primary-color, #0d6efd);
 }
 
@@ -170,30 +163,31 @@ _CSS = """
 }
 
 .control-card.quality {
-  border-left: 4px solid #1976d2;
+  border-left: 3px solid #1976d2;
   background: color-mix(in srgb, #1976d2 4%, var(--st-background-color, #fff));
 }
 
 .control-card.manual {
-  border-left: 4px solid #2e7d32;
+  border-left: 3px solid #2e7d32;
   background: color-mix(in srgb, #2e7d32 4%, var(--st-background-color, #fff));
 }
 
 .card-info {
   flex: 1;
   min-width: 0;
-  line-height: 1.25;
+  line-height: 1.2;
 }
 
 .card-title {
   font-weight: 650;
+  font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .card-meta {
-  font-size: 0.71rem;
+  font-size: 0.68rem;
   color: var(--st-secondary-text-color, #666);
   white-space: nowrap;
   overflow: hidden;
@@ -202,19 +196,20 @@ _CSS = """
 
 .card-actions {
   display: flex;
-  gap: 4px;
+  gap: 3px;
   flex-shrink: 0;
 }
 
 .quick-btn {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 700;
-  padding: 2px 5px;
-  border-radius: 4px;
+  padding: 2px 4px;
+  border-radius: 3px;
   border: 1px solid var(--st-border-color, #bbb);
   background: var(--st-secondary-background-color, #f0f0f0);
   cursor: pointer;
   color: var(--st-text-color, #333);
+  white-space: nowrap;
 }
 
 .quick-btn:hover {
@@ -225,15 +220,15 @@ _CSS = """
 
 .drop-zone {
   box-sizing: border-box;
-  min-height: 195px;
-  max-height: 220px;
+  min-height: 75px;
+  max-height: 120px;
   overflow-y: auto;
   border: 2px dashed var(--st-border-color, #bbb);
-  border-radius: 8px;
-  padding: 6px;
+  border-radius: 6px;
+  padding: 4px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
   background: var(--st-secondary-background-color, #fafafa);
   transition: background 0.15s, border-color 0.15s;
 }
@@ -249,8 +244,8 @@ _CSS = """
   justify-content: center;
   text-align: center;
   height: 100%;
-  min-height: 150px;
-  font-size: 0.78rem;
+  min-height: 55px;
+  font-size: 0.72rem;
   font-style: italic;
   color: var(--st-secondary-text-color, #888);
   pointer-events: none;
@@ -260,10 +255,10 @@ _CSS = """
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 5px 8px;
-  font-size: 0.76rem;
-  border-radius: 5px;
+  gap: 5px;
+  padding: 3px 6px;
+  font-size: 0.74rem;
+  border-radius: 4px;
   border: 1px solid var(--st-border-color, #ccc);
   background: var(--st-background-color, #fff);
   cursor: grab;
@@ -284,16 +279,18 @@ _CSS = """
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.74rem;
+  line-height: 1.2;
 }
 
 .remove-btn {
   border: none;
   background: transparent;
   color: #d32f2f;
-  font-size: 0.85rem;
+  font-size: 0.80rem;
   font-weight: bold;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0 3px;
   border-radius: 3px;
   line-height: 1;
 }
@@ -305,7 +302,7 @@ _CSS = """
 .reorder-handle {
   color: #888;
   cursor: grab;
-  font-size: 0.85rem;
+  font-size: 0.80rem;
   margin-right: 2px;
 }
 """
@@ -687,9 +684,9 @@ def render_pfmea_control_drawer(
 ) -> None:
     """Render the collapsible side drawer for drag-and-drop control assignment."""
     with st.container(border=True):
-        header_cols = st.columns([8, 2], vertical_alignment="center")
+        header_cols = st.columns([7, 3], vertical_alignment="center")
         with header_cols[0]:
-            st.markdown("### 🎛️ Control Assignment Drawer")
+            st.markdown("#### 🎛️ Control Drawer")
         with header_cols[1]:
             if st.button("✖ Close", key=f"pfmea_drawer_close_btn_{project_id}_{scenario_id}", help="Close side drawer"):
                 if on_close:
@@ -697,8 +694,7 @@ def render_pfmea_control_drawer(
                 st.rerun()
 
         st.caption(
-            "Drag available Drawing Quality Requirements or Standard Catalog Controls into "
-            "the Prevention or Detection drop-zones, or use '+ Prev' / '+ Det' for 1-click add."
+            "Drag controls into drop-zones or use **+ Prev** / **+ Det**."
         )
 
         # Identify targets

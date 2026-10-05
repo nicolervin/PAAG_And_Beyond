@@ -3787,9 +3787,9 @@ def _render_flat_pfmea_table(
     drawer_open_key = f"pfmea_control_drawer_open_{project_id}_{scenario_id}"
     drawer_open = bool(st.session_state.get(drawer_open_key, False))
 
-    toolbar_c1, toolbar_c2 = st.columns([7, 5], vertical_alignment="center")
+    toolbar_c1, toolbar_c2 = st.columns([3, 1], vertical_alignment="center")
     with toolbar_c2:
-        btn_label = "✖ Close Control Drawer" if drawer_open else "🎛️ Control Assignment Drawer (Drag & Drop)"
+        btn_label = "✖ Close Control Drawer" if drawer_open else "🎛️ Control Assignment Drawer"
         btn_help = (
             "Hide the side-by-side drag-and-drop control assignment drawer."
             if drawer_open
@@ -3805,7 +3805,7 @@ def _render_flat_pfmea_table(
             st.rerun()
 
     if drawer_open:
-        table_col, drawer_col = st.columns([7, 5])
+        table_col, drawer_col = st.columns([3, 1])
         with table_col:
             edited = st.data_editor(
                 editor_rows,
