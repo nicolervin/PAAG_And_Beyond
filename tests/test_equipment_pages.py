@@ -40,9 +40,6 @@ class EquipmentPageTests(unittest.TestCase):
 
     def test_top_level_equipment_page_loads(self) -> None:
         app = self._run("app_pages/functional_equipment.py")
-        tab_labels = [tab.label for tab in app.tabs]
-        self.assertIn("Equipment", tab_labels)
-        self.assertIn("Layouts", tab_labels)
         self.assertIn("Project equipment", [item.value for item in app.subheader])
 
     def test_layouts_tab_renders_with_layout(self) -> None:
@@ -63,8 +60,11 @@ class EquipmentPageTests(unittest.TestCase):
             editor_name="Layout Tester",
         )
 
-        app = self._run("app_pages/functional_equipment.py")
+        app = self._run("app_pages/pin_map.py")
         self.assertEqual([], list(app.exception))
+        tab_labels = [tab.label for tab in app.tabs]
+        self.assertIn("Pin Map", tab_labels)
+        self.assertIn("Layouts", tab_labels)
         metric_labels = [m.label for m in app.metric]
         self.assertIn("Physical Dimensions", metric_labels)
         self.assertIn("Image Resolution", metric_labels)
@@ -87,7 +87,7 @@ class EquipmentPageTests(unittest.TestCase):
             editor_name="Layout Tester",
         )
 
-        app = AppTest.from_file(REPO_ROOT / "app_pages/functional_equipment.py")
+        app = AppTest.from_file(REPO_ROOT / "app_pages/pin_map.py")
         app.session_state["project_id"] = self.project_id
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "Equipment page tester"

@@ -855,11 +855,11 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
-### 2D Equipment and Layouts (Plant Floor Plan Layouts)
+### 2D Plant Floor Plan Layouts (Pin Map -> Layouts)
 
 - **Proposed by:** Nicole Ervin, project owner
 - **Date recorded:** September 29, 2026
-- **Purpose:** Provide a 2D plant floor plan layout workspace within the Equipment and Layouts module. Allows collaborators to upload or paste plant layout screenshots/drawings, establish real-world physical scale (e.g., width × height in feet, inches, yards, or miles), draw scaled footprints and annotations (rectangles, circles, ovals, triangles, hexagons, arrows, text boxes) for machines, equipment, conveyors, material storage, and workstation pitches, and drag and drop available pitches from Yamazumi onto the layout to establish physical workstation boundaries as the geometric foundation for the Pin Map.
+- **Purpose:** Provide a 2D plant floor plan layout workspace within the Pin Map module (under the Layouts sub-tab). Allows collaborators to upload or paste plant layout screenshots/drawings, establish real-world physical scale (e.g., width × height in feet, inches, yards, or miles), draw scaled footprints and annotations (rectangles, circles, ovals, triangles, hexagons, arrows, text boxes) for machines, equipment, conveyors, material storage, and workstation pitches, and drag and drop available pitches from Yamazumi onto the layout to establish physical workstation boundaries as the geometric foundation for the Pin Map.
 - **Answers to New Module Proposal Gate Questions:**
   1. *Connected entities:* Connects to `projects` (owning project), `yamazumi_pitches` (workstation pitches dropped/scaled onto layout), and `equipment_assets` (equipment/machines placed on the layout).
   2. *Critical thread relationship:* Connects scenario-specific Yamazumi pitches (`yamazumi_pitches`) and project equipment assets (`equipment_assets`) to real-world 2D spatial coordinates and scaled footprints on an imported plant floor plan. This establishes the physical geometric basis for the downstream derived **Pin Map** (*Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance -> 2D Layouts -> Pin Map*).
@@ -874,7 +874,7 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
      - Universal Save Action Standard: single primary **Save & Refresh** button with footer and Undo for draft edits.
      - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Layouts"`.
      - Universal History Display Standard: bottom History expander using `audit_history()`.
-     - Scope Badge: `page_title_with_scope("Equipment and Layouts", scope="scenario-aware")` on the combined page, with project-wide scope clearly identified in the Layouts workspace.
+     - Scope Badge: `page_title_with_scope("Pin Map", scope="scenario")` on the parent page, with project-wide scope clearly identified in the Layouts workspace heading.
      - Imperial Units Standard: storage in inches (`scale_width_in`, `scale_height_in`), user entry and display supporting inches, feet, yards, or miles.
   6. *Phase 3 Yamazumi Pitch & Pin Map Integration:*
      - Cross-scenario Pitches Palette: Lists unique workstation pitches across scenarios with a badge indicating the parent scenario.

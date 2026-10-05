@@ -369,6 +369,8 @@ class LayoutShapesAppSmokeTests(unittest.TestCase):
         self.database_patch.start()
         store.init_db()
         self.project_id = str(store.query("SELECT id FROM projects LIMIT 1")[0]["id"])
+        scenarios = store.query("SELECT id FROM planning_scenarios WHERE project_id = ? LIMIT 1", (self.project_id,))
+        self.scenario_id = str(scenarios[0]["id"]) if scenarios else ""
         self.editor = "Nicole Ervin"
 
         layout = layout_store.create_layout(
@@ -393,12 +395,12 @@ class LayoutShapesAppSmokeTests(unittest.TestCase):
 
     def _run_app(self) -> AppTest:
         app = AppTest.from_file(
-            str(store.ROOT / "app_pages/functional_equipment.py"),
+            str(store.ROOT / "app_pages/pin_map.py"),
             default_timeout=30,
         )
         app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = self.editor
-        app.session_state["active_equipment_subtab"] = "Layouts"
         app.session_state["active_layout_id"] = self.layout_id
         app.session_state["active_revision_id"] = self.rev_id
         app.run(timeout=30)
@@ -600,12 +602,12 @@ class LayoutShapesAppSmokeTests(unittest.TestCase):
         layout_store.save_layout_shapes(self.project_id, self.rev_id, [shape], self.editor)
 
         app = AppTest.from_file(
-            str(store.ROOT / "app_pages/functional_equipment.py"),
+            str(store.ROOT / "app_pages/pin_map.py"),
             default_timeout=30,
         )
         app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = self.editor
-        app.session_state["active_equipment_subtab"] = "Layouts"
         app.session_state["active_layout_id"] = self.layout_id
         app.session_state["active_revision_id"] = self.rev_id
         app.session_state[f"layout_selected_shape_{self.rev_id}"] = shape_id

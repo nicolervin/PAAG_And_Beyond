@@ -208,7 +208,7 @@ pages = {
 
             "app_pages/functional_equipment.py",
 
-            title="Equipment and Layouts",
+            title="Equipment",
 
             icon=":material/precision_manufacturing:",
 
