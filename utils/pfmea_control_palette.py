@@ -636,6 +636,7 @@ def pfmea_control_palette(
     """Render the interactive drag-and-drop control assignment palette."""
     return _PFMEA_CONTROL_PALETTE(
         key=key,
+        default={"change": None},
         data=json_safe(
             {
                 "cause_key": cause_key,
@@ -850,16 +851,19 @@ def render_pfmea_control_drawer(
         # Component key
         palette_key = f"pfmea_dnd_palette_{project_id}_{scenario_id}_{selected_target_key}"
 
-        def handle_dnd_change():
-            palette_state = st.session_state.get(palette_key)
-            change = getattr(palette_state, "change", None) if palette_state is not None else None
-            if not change and isinstance(palette_state, dict):
-                change = palette_state.get("change")
+        def _apply_control_change(change: dict | Any) -> bool:
             if not change:
-                return
+                return False
+            if hasattr(change, "get"):
+                new_prev = list(change.get("prevention") or [])
+                new_det = list(change.get("detection") or [])
+            else:
+                new_prev = list(getattr(change, "prevention", []) or [])
+                new_det = list(getattr(change, "detection", []) or [])
 
-            new_prev = list(change.get("prevention") or [])
-            new_det = list(change.get("detection") or [])
+            # Check if there's an actual change compared to current_prevention / current_detection
+            if new_prev == current_prevention and new_det == current_detection:
+                return False
 
             # Update target row in session state draft
             current_draft = st.session_state.get(draft_key)
@@ -889,8 +893,18 @@ def render_pfmea_control_drawer(
                 current_draft.loc[mask, "detection_review_required"] = True
                 st.session_state[draft_key] = current_draft
                 request_table_editor_reset(editor_key)
+                return True
+            return False
 
-        pfmea_control_palette(
+        def handle_dnd_change():
+            palette_state = st.session_state.get(palette_key)
+            change = getattr(palette_state, "change", None) if palette_state is not None else None
+            if not change and isinstance(palette_state, dict):
+                change = palette_state.get("change")
+            if change:
+                _apply_control_change(change)
+
+        palette_res = pfmea_control_palette(
             selected_target_key,
             cause_label,
             available_quality,
@@ -901,3 +915,9 @@ def render_pfmea_control_drawer(
             key=palette_key,
             on_change=handle_dnd_change,
         )
+
+        res_change = getattr(palette_res, "change", None) if palette_res is not None else None
+        if not res_change and isinstance(palette_res, dict):
+            res_change = palette_res.get("change")
+        if res_change and _apply_control_change(res_change):
+            st.rerun()
