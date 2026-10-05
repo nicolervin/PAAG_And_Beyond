@@ -17,6 +17,9 @@ from utils.layout_canvas import layout_canvas, layout_image_data_url
 from utils.layout_store import (
     LAYOUT_UNITS,
     UNIT_TO_INCHES,
+    annotate_preview_with_dimensions,
+    apply_image_crop,
+    auto_detect_whitespace_crop,
     create_layout,
     create_layout_revision,
     delete_layout,
@@ -25,12 +28,15 @@ from utils.layout_store import (
     from_canonical_inches,
     get_layout,
     get_layout_revision,
+    get_pdf_page_count,
     get_section_pitch_standards,
+    import_shapes_from_revision,
     layout_deletion_impact,
     list_layout_revisions,
     list_layout_shapes,
     list_layouts,
     list_project_yamazumi_pitches,
+    load_and_orient_layout_preview,
     save_layout_shapes,
     set_section_pitch_standard,
     to_canonical_inches,
@@ -214,6 +220,114 @@ FOOTPRINT_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
+_COLOR_PICKER_CSS = """
+<style>
+/* -------------------------------------------------------------------------
+   Floating UI & Color Picker Stacking Fix
+   Ensures color picker popovers float strictly above all Streamlit modals,
+   dialogs, selectbox menus, container borders, and canvas elements.
+   ------------------------------------------------------------------------- */
+div[data-floating-ui-portal],
+[data-floating-ui-portal] {
+    position: relative !important;
+    z-index: 99999999 !important;
+    pointer-events: auto !important;
+}
+
+div[data-testid="stColorPickerPopover"],
+div[data-baseweb="popover"],
+div[data-baseweb="menu"],
+div[role="dialog"][aria-label*="color picker"],
+div[role="dialog"][aria-label*="Color picker"] {
+    z-index: 99999999 !important;
+    pointer-events: auto !important;
+}
+
+div[data-testid="stColorPickerPopover"] *,
+div[role="dialog"][aria-label*="color picker"] *,
+div[role="dialog"][aria-label*="Color picker"] * {
+    pointer-events: auto !important;
+}
+
+button[data-testid="stColorPickerBlock"] {
+    cursor: pointer !important;
+}
+</style>
+"""
+
+LAYOUT_SWATCH_PALETTE: dict[str, str] = {
+    "🔵": "#1976d2",  # Workstation / Pitch Blue
+    "🟠": "#f57c00",  # Conveyor / Material Flow Orange
+    "🟢": "#388e3c",  # Staging / Buffer Green
+    "🟣": "#7b1fa2",  # Walking Path / Aisle Purple
+    "🔴": "#d32f2f",  # Quality / Defect / Hazard Red
+    "🟡": "#fbc02d",  # Caution / Warning Yellow
+    "🔘": "#607d8b",  # Machinery / Equipment Slate
+    "⚫": "#212121",  # Dark Charcoal / Black
+    "⚪": "#ffffff",  # White / Clear Fill
+}
+
+
+def _normalize_hex_color(val: Any, default: str = "#1976d2") -> str:
+    """Safely validate and normalize a color string to a 7-character lowercase hex string (#rrggbb)."""
+    if not val or not isinstance(val, str):
+        return default
+    s = val.strip()
+    if not s.startswith("#"):
+        s = "#" + s
+    if len(s) == 4:
+        s = "#" + "".join(c * 2 for c in s[1:])
+    if len(s) == 7:
+        try:
+            int(s[1:], 16)
+            return s.lower()
+        except ValueError:
+            pass
+    return default
+
+
+def _render_color_selector(
+    label: str,
+    current_color: str,
+    key_prefix: str,
+    help_text: str | None = None,
+) -> str:
+    """Render a robust color picker with 1-click quick-palette swatches and CSS stacking fix."""
+    norm_current = _normalize_hex_color(current_color, default="#1976d2")
+    picker_key = f"{key_prefix}_pick"
+    pill_key = f"{key_prefix}_pill"
+    ext_last_key = f"{key_prefix}_ext_last"
+
+    # Synchronize if external caller passed a new color
+    if st.session_state.get(ext_last_key) != norm_current:
+        st.session_state[picker_key] = norm_current
+        st.session_state[ext_last_key] = norm_current
+
+    if picker_key not in st.session_state:
+        st.session_state[picker_key] = norm_current
+
+    # Check if a quick-palette pill was selected
+    pill_val = st.session_state.get(pill_key)
+    if pill_val and pill_val in LAYOUT_SWATCH_PALETTE:
+        chosen_hex = LAYOUT_SWATCH_PALETTE[pill_val]
+        st.session_state[picker_key] = chosen_hex
+        st.session_state[ext_last_key] = chosen_hex
+        st.session_state[pill_key] = None
+
+    val = st.color_picker(
+        label,
+        key=picker_key,
+        help=help_text,
+    )
+    st.pills(
+        f"{label} Quick Palette",
+        options=list(LAYOUT_SWATCH_PALETTE.keys()),
+        key=pill_key,
+        label_visibility="collapsed",
+    )
+    return _normalize_hex_color(val, default=norm_current)
+
+
 def _px_to_units(px: float, px_per_in: float, unit: str) -> float:
     """Convert pixel dimension to real-world units based on scale."""
     if px_per_in <= 0:
@@ -293,6 +407,11 @@ def _create_layout_dialog(project_id: str, editor_name: str) -> None:
             try:
                 created = create_layout(project_id, name, description, editor_name)
                 st.session_state["active_layout_id"] = created["id"]
+                st.session_state["layout_plan_selector"] = created["id"]
+                st.session_state["_last_seen_active_layout_id"] = created["id"]
+                st.session_state.pop("active_revision_id", None)
+                st.session_state.pop("layout_revision_selector", None)
+                st.session_state.pop("_last_seen_active_rev_id", None)
                 st.toast(f"Created layout '{name}'", icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
@@ -305,6 +424,7 @@ def _create_revision_dialog(
     layout: dict[str, Any],
     latest_rev: dict[str, Any] | None,
     editor_name: str,
+    current_draft_shapes: list[dict[str, Any]] | None = None,
 ) -> None:
     st.write(
         f"Upload or paste an updated drawing revision for **{layout['name']}**."
@@ -314,18 +434,19 @@ def _create_revision_dialog(
     )
 
     input_mode = st.radio(
-        "Image source",
-        ["Upload image file", "Paste screenshot from clipboard"],
+        "Drawing source",
+        ["Upload drawing file", "Paste screenshot from clipboard"],
         horizontal=True,
         key="rev_image_source_mode",
     )
 
     image_file = None
-    if input_mode == "Upload image file":
+    if input_mode == "Upload drawing file":
         image_file = st.file_uploader(
-            "Upload floor plan image (PNG, JPG, WEBP)",
-            type=["png", "jpg", "jpeg", "webp"],
+            "Upload floor plan drawing (PDF, DXF, PNG, JPG, WEBP)",
+            type=["pdf", "dxf", "png", "jpg", "jpeg", "webp"],
             key="rev_file_upload",
+            help="Upload an architectural floor plan drawing. Vector PDFs and CAD DXFs will be automatically converted to high-resolution layout images.",
         )
     else:
         st.caption(
@@ -343,17 +464,146 @@ def _create_revision_dialog(
                 st.success("Screenshot captured from clipboard!")
         except Exception:
             st.info(
-                "Clipboard paste component unavailable; please use Upload image file instead."
+                "Clipboard paste component unavailable; please use Upload drawing file instead."
             )
-
-    st.markdown("##### Calibrate Physical Scale")
-    st.caption(
-        "Specify the real-world distance represented by the entire width and height of this drawing."
-    )
 
     default_unit = latest_rev["unit"] if latest_rev else "feet"
     default_w = float(latest_rev["width_value"]) if latest_rev else 100.0
     default_h = float(latest_rev["height_value"]) if latest_rev else 50.0
+
+    selected_page = 1
+    rotation_angle = 0
+    filename = ""
+
+    if image_file:
+        filename = str(getattr(image_file, "name", "screenshot.png"))
+        suffix = Path(filename).suffix.lower()
+
+        # Multi-page PDF sheet selection
+        if suffix == ".pdf":
+            try:
+                pdf_bytes = (
+                    image_file.getvalue()
+                    if hasattr(image_file, "getvalue")
+                    else image_file.read()
+                )
+                if hasattr(image_file, "seek"):
+                    image_file.seek(0)
+                page_count = get_pdf_page_count(pdf_bytes)
+                if page_count > 1:
+                    selected_page = st.number_input(
+                        f"Select PDF Sheet / Page (1 to {page_count})",
+                        min_value=1,
+                        max_value=page_count,
+                        value=1,
+                        step=1,
+                        key="rev_pdf_page_selector",
+                        help="Multi-sheet CAD drawings: choose which sheet/layout to import.",
+                    )
+            except Exception:
+                selected_page = 1
+
+        # Orientation / Rotation Controls
+        c_rot, c_swap = st.columns([3, 2])
+        with c_rot:
+            orientation_labels = {
+                0: "0° (Original orientation)",
+                90: "90° Clockwise",
+                180: "180° (Upside down)",
+                270: "270° Clockwise (90° CCW)",
+            }
+            rotation_angle = st.selectbox(
+                "Drawing orientation",
+                options=[0, 90, 180, 270],
+                format_func=lambda deg: orientation_labels[deg],
+                key="rev_rotation_angle",
+                help="Adjust orientation upon import if drawing was scanned or exported in landscape/portrait.",
+            )
+        with c_swap:
+            st.write("")
+            st.write("")
+            if st.button(
+                "⇄ Swap Width & Height",
+                key="btn_swap_scale_wh",
+                help="Swap physical width and height values (convenient when rotating 90° or 270°).",
+            ):
+                current_w = float(st.session_state.get("rev_scale_w", default_w))
+                current_h = float(st.session_state.get("rev_scale_h", default_h))
+                st.session_state["rev_scale_w"] = current_h
+                st.session_state["rev_scale_h"] = current_w
+                st.rerun()
+
+        # Load oriented base image to support cropping and preview
+        uncropped_img = None
+        preview_error = None
+        if image_file:
+            try:
+                uncropped_img = load_and_orient_layout_preview(
+                    image_file,
+                    rotation_angle=rotation_angle,
+                    pdf_page=selected_page,
+                )
+            except Exception as exc:
+                preview_error = str(exc)
+
+        # Margin Cropping & Trim Section
+        st.markdown("##### Crop & Trim Margins (Remove Excess Whitespace)")
+        st.caption(
+            "Trim outer margins, title blocks, or blank borders so your physical dimensions scale strictly to the factory floor plan."
+        )
+
+        c_crop_actions, c_crop_stat = st.columns([3, 4], vertical_alignment="center")
+        with c_crop_actions:
+            c_btn1, c_btn2 = st.columns(2)
+            with c_btn1:
+                if st.button(
+                    "🪄 Auto-trim whitespace",
+                    key="btn_auto_trim_margins",
+                    help="Automatically detect and trim outer white borders around the drawing.",
+                    width="stretch",
+                ):
+                    if uncropped_img:
+                        bbox = auto_detect_whitespace_crop(uncropped_img)
+                        st.session_state["rev_crop_left"] = round((bbox[0] / uncropped_img.width) * 100.0, 1)
+                        st.session_state["rev_crop_top"] = round((bbox[1] / uncropped_img.height) * 100.0, 1)
+                        st.session_state["rev_crop_right"] = round(((uncropped_img.width - bbox[2]) / uncropped_img.width) * 100.0, 1)
+                        st.session_state["rev_crop_bottom"] = round(((uncropped_img.height - bbox[3]) / uncropped_img.height) * 100.0, 1)
+                        st.rerun()
+            with c_btn2:
+                if st.button(
+                    "↺ Reset crop",
+                    key="btn_reset_crop_margins",
+                    help="Reset all crop margins back to 0% (restore full original drawing).",
+                    width="stretch",
+                ):
+                    st.session_state["rev_crop_left"] = 0.0
+                    st.session_state["rev_crop_top"] = 0.0
+                    st.session_state["rev_crop_right"] = 0.0
+                    st.session_state["rev_crop_bottom"] = 0.0
+                    st.rerun()
+
+        crop_l = float(st.session_state.get("rev_crop_left", 0.0))
+        crop_r = float(st.session_state.get("rev_crop_right", 0.0))
+        crop_t = float(st.session_state.get("rev_crop_top", 0.0))
+        crop_b = float(st.session_state.get("rev_crop_bottom", 0.0))
+
+        c_cr1, c_cr2, c_cr3, c_cr4 = st.columns(4)
+        with c_cr1:
+            crop_l = st.slider("Crop Left (%)", min_value=0.0, max_value=45.0, value=crop_l, step=0.5, key="rev_crop_left")
+        with c_cr2:
+            crop_r = st.slider("Crop Right (%)", min_value=0.0, max_value=45.0, value=crop_r, step=0.5, key="rev_crop_right")
+        with c_cr3:
+            crop_t = st.slider("Crop Top (%)", min_value=0.0, max_value=45.0, value=crop_t, step=0.5, key="rev_crop_top")
+        with c_cr4:
+            crop_b = st.slider("Crop Bottom (%)", min_value=0.0, max_value=45.0, value=crop_b, step=0.5, key="rev_crop_bottom")
+
+        preview_img = apply_image_crop(uncropped_img, crop_l, crop_t, crop_r, crop_b) if uncropped_img else None
+
+    st.markdown("##### Calibrate Physical Scale")
+    st.caption(
+        "Specify the real-world distance across the drawing. "
+        "Physical Width applies horizontally (Left ↔ Right), and Physical Height / Length applies vertically (Top ↕ Bottom)."
+    )
 
     unit_idx = (
         LAYOUT_UNITS.index(default_unit) if default_unit in LAYOUT_UNITS else 0
@@ -362,21 +612,23 @@ def _create_revision_dialog(
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         width_val = st.number_input(
-            "Physical Width",
+            "Physical Width (Horizontal ↔)",
             min_value=0.01,
             value=default_w,
             step=1.0,
             format="%.2f",
             key="rev_scale_w",
+            help="Real-world distance along the horizontal (left-to-right) axis of the drawing.",
         )
     with c2:
         height_val = st.number_input(
-            "Physical Height",
+            "Physical Height / Length (Vertical ↕)",
             min_value=0.01,
             value=default_h,
             step=1.0,
             format="%.2f",
             key="rev_scale_h",
+            help="Real-world distance along the vertical (top-to-bottom) axis of the drawing.",
         )
     with c3:
         unit = st.selectbox(
@@ -386,13 +638,44 @@ def _create_revision_dialog(
             key="rev_scale_unit",
         )
 
-    copy_shapes = False
-    if latest_rev:
-        copy_shapes = st.checkbox(
-            f"Copy forward shapes from Rev {latest_rev['revision_number']} (retains prior equipment / pitch annotations for easy adjustment)",
-            value=True,
-            key="rev_copy_shapes",
+    copy_from_rev_id = None
+    copy_shapes_count = 0
+    target_copy_rev = None
+    all_revisions = list_layout_revisions(str(layout["id"]))
+    if all_revisions:
+        rev_options: dict[str, str] = {}
+        for r in all_revisions:
+            s_count = int(r.get("shape_count", 0))
+            rev_options[r["id"]] = f"Rev {r['revision_number']} ({s_count} shape(s) — {r['created_at'][:10]})"
+        rev_options["none"] = "None (start with a blank layout)"
+
+        default_copy_id = "none"
+        if latest_rev and latest_rev.get("id") in rev_options:
+            default_copy_id = latest_rev["id"]
+        else:
+            rev_with_shapes = next((r["id"] for r in all_revisions if r.get("shape_count", 0) > 0), None)
+            default_copy_id = rev_with_shapes or all_revisions[0]["id"]
+
+        selected_copy_choice = st.selectbox(
+            "Copy forward shapes / annotations from",
+            options=list(rev_options.keys()),
+            format_func=lambda rid: rev_options[rid],
+            index=list(rev_options.keys()).index(default_copy_id) if default_copy_id in rev_options else 0,
+            key="rev_copy_shapes_selector",
+            help="Copy equipment footprints, workstation pitches, and annotations from an earlier revision. Shapes are automatically scaled and positioned in the exact same spots on the new drawing.",
         )
+        if selected_copy_choice != "none":
+            copy_from_rev_id = selected_copy_choice
+            target_copy_rev = next((r for r in all_revisions if r["id"] == copy_from_rev_id), None)
+            copy_shapes_count = int(target_copy_rev.get("shape_count", 0)) if target_copy_rev else 0
+            if copy_shapes_count > 0:
+                st.info(
+                    f":material/content_copy: **{copy_shapes_count} shape annotation(s)** from Rev {target_copy_rev['revision_number']} "
+                    f"will be imported into the exact same spots on this new drawing. "
+                    f"You can then edit, resize, or move them without starting from scratch."
+                )
+            else:
+                st.caption(f"Rev {target_copy_rev['revision_number']} currently has no shapes placed on it.")
 
     notes = st.text_input(
         "Revision notes / CAD version (optional)",
@@ -400,9 +683,81 @@ def _create_revision_dialog(
         key="rev_notes",
     )
 
+    # Live Preview before Save
+    st.markdown("##### Drawing Preview & Calibration Guides")
+    if preview_img:
+        rev_target_num = (latest_rev["revision_number"] + 1) if latest_rev else 1
+        st.caption(
+            f"Review the oriented and cropped drawing that will be saved to Revision {rev_target_num}."
+        )
+        with st.container(border=True):
+            # Dimension Orientation Cards
+            st.markdown(
+                f"""
+                <div style="display:flex; gap:12px; margin-bottom:12px;">
+                    <div style="flex:1; background:#e3f2fd; border-left:4px solid #1976d2; padding:8px 12px; border-radius:4px;">
+                        <div style="font-size:0.75rem; font-weight:600; color:#0d47a1; text-transform:uppercase; letter-spacing:0.5px;">↔ Horizontal Dimension (Width)</div>
+                        <div style="font-size:1.05rem; font-weight:700; color:#1565c0;">{width_val:g} {unit}</div>
+                        <div style="font-size:0.8rem; color:#546e7a;">Mapped across <b>{preview_img.width} px</b> horizontally</div>
+                    </div>
+                    <div style="flex:1; background:#f3e5f5; border-left:4px solid #7b1fa2; padding:8px 12px; border-radius:4px;">
+                        <div style="font-size:0.75rem; font-weight:600; color:#4a148c; text-transform:uppercase; letter-spacing:0.5px;">↕ Vertical Dimension (Height / Length)</div>
+                        <div style="font-size:1.05rem; font-weight:700; color:#6a1b9a;">{height_val:g} {unit}</div>
+                        <div style="font-size:0.8rem; color:#546e7a;">Mapped across <b>{preview_img.height} px</b> vertically</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            is_cropped = (crop_l > 0 or crop_r > 0 or crop_t > 0 or crop_b > 0)
+            if is_cropped and uncropped_img:
+                st.caption(
+                    f":material/crop: **Cropped drawing:** `{preview_img.width} × {preview_img.height} px` "
+                    f"(trimmed {crop_l}% left, {crop_r}% right, {crop_t}% top, {crop_b}% bottom from original `{uncropped_img.width} × {uncropped_img.height} px`). "
+                    f"Scale: **{(preview_img.width / to_canonical_inches(width_val, unit) * 12.0):.1f} px/ft**."
+                )
+
+            if copy_from_rev_id and target_copy_rev and copy_shapes_count > 0:
+                st.caption(
+                    f":material/check: Will import and align **{copy_shapes_count} shape(s)** from Rev {target_copy_rev['revision_number']} in the exact spots on this drawing."
+                )
+
+            show_guides = st.checkbox(
+                "Show dimension guides on preview (Width ↔ on top, Height/Length ↕ on left)",
+                value=bool(st.session_state.get("rev_show_dim_guides", True)),
+                key="rev_show_dim_guides",
+                help="Draws architectural dimension markers on the preview frame to visually verify width and length orientation.",
+            )
+
+            if show_guides:
+                display_img = annotate_preview_with_dimensions(
+                    preview_img,
+                    width_val=width_val,
+                    height_val=height_val,
+                    unit=unit,
+                )
+            else:
+                display_img = preview_img
+
+            st.image(
+                display_img,
+                caption=f"Preview: {filename or 'Clipboard'} ({preview_img.width} × {preview_img.height} px, {rotation_angle}° orientation)",
+                width="stretch",
+            )
+    elif preview_error:
+        st.warning(f"Could not load drawing preview: {preview_error}")
+    else:
+        st.info("Upload or paste a drawing above to preview it in its correct orientation and crop here before saving.")
+
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("Cancel", width="stretch", key="cancel_new_rev"):
+            st.session_state.pop("rev_crop_left", None)
+            st.session_state.pop("rev_crop_top", None)
+            st.session_state.pop("rev_crop_right", None)
+            st.session_state.pop("rev_crop_bottom", None)
+            st.session_state.pop("rev_show_dim_guides", None)
             st.rerun()
     with col2:
         if st.button(
@@ -412,13 +767,16 @@ def _create_revision_dialog(
             key="submit_new_rev",
         ):
             if not image_file:
-                st.error("Please provide an image by upload or paste.")
+                st.error("Please provide a drawing or image by upload or paste.")
                 return
             if not editor_name.strip():
                 st.error("Please specify a Current editor attribution.")
                 return
             try:
-                copy_rev_id = str(latest_rev["id"]) if (latest_rev and copy_shapes) else None
+                src_shapes = None
+                if current_draft_shapes and latest_rev and copy_from_rev_id == latest_rev.get("id"):
+                    src_shapes = current_draft_shapes
+
                 new_rev = create_layout_revision(
                     project_id=project_id,
                     layout_id=str(layout["id"]),
@@ -428,11 +786,96 @@ def _create_revision_dialog(
                     unit=unit,
                     notes=notes,
                     editor_name=editor_name,
-                    copy_from_revision_id=copy_rev_id,
+                    copy_from_revision_id=copy_from_rev_id,
+                    rotation_angle=rotation_angle,
+                    pdf_page=selected_page,
+                    source_shapes=src_shapes,
+                    crop_left_pct=crop_l,
+                    crop_top_pct=crop_t,
+                    crop_right_pct=crop_r,
+                    crop_bottom_pct=crop_b,
                 )
+                st.session_state.pop("rev_crop_left", None)
+                st.session_state.pop("rev_crop_top", None)
+                st.session_state.pop("rev_crop_right", None)
+                st.session_state.pop("rev_crop_bottom", None)
+                st.session_state.pop("rev_show_dim_guides", None)
+
                 st.session_state["active_revision_id"] = new_rev["id"]
+                st.session_state["layout_revision_selector"] = new_rev["id"]
+                st.session_state["_last_seen_active_rev_id"] = new_rev["id"]
                 st.toast(
                     f"Created Revision {new_rev['revision_number']} for '{layout['name']}'",
+                    icon=":material/check_circle:",
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+@st.dialog("Import shapes from previous revision", width="medium")
+def _import_shapes_dialog(
+    project_id: str,
+    layout: dict[str, Any],
+    active_rev: dict[str, Any],
+    other_revs: list[dict[str, Any]],
+    editor_name: str,
+) -> None:
+    st.write(
+        f"Import existing equipment, pitches, and annotations into **Rev {active_rev['revision_number']}**."
+    )
+    st.caption(
+        "Shapes will be automatically scaled to align with this revision's drawing resolution "
+        "so they land in the exact same spots and can be edited directly."
+    )
+
+    rev_choices = {
+        r["id"]: f"Rev {r['revision_number']} ({r.get('shape_count', 0)} shapes — {r['created_at'][:10]})"
+        for r in other_revs
+    }
+    selected_source_id = st.selectbox(
+        "Select source revision to import from",
+        options=list(rev_choices.keys()),
+        format_func=lambda rid: rev_choices[rid],
+        key="dlg_import_shapes_source",
+    )
+
+    curr_shapes = list_layout_shapes(str(active_rev["id"]))
+    replace_existing = False
+    if curr_shapes:
+        replace_existing = st.checkbox(
+            f"Replace existing {len(curr_shapes)} shape(s) currently on Rev {active_rev['revision_number']}",
+            value=True,
+            key="dlg_import_shapes_replace",
+            help="Check to clear current shapes before importing. Uncheck to append imported shapes.",
+        )
+
+    st.info(
+        ":material/info: After importing, you can click, drag, resize, and edit the annotations right on the canvas."
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Cancel", width="stretch", key="btn_cancel_import_dlg"):
+            st.rerun()
+    with col2:
+        if st.button("Import & align shapes", type="primary", width="stretch", key="btn_confirm_import_dlg"):
+            if not editor_name:
+                st.error("Please enter Current editor attribution.")
+                return
+            try:
+                count = import_shapes_from_revision(
+                    project_id=project_id,
+                    target_revision_id=str(active_rev["id"]),
+                    source_revision_id=selected_source_id,
+                    editor_name=editor_name,
+                    replace_existing=replace_existing,
+                )
+                st.session_state.pop(f"layout_shapes_draft_{active_rev['id']}", None)
+                st.session_state.pop(f"layout_shapes_has_unsaved_{active_rev['id']}", None)
+                st.session_state.pop(f"layout_selected_shape_{active_rev['id']}", None)
+                st.toast(
+                    f"Successfully imported {count} shape(s) into Rev {active_rev['revision_number']}!",
                     icon=":material/check_circle:",
                 )
                 st.rerun()
@@ -448,11 +891,14 @@ def _delete_layout_dialog(
     st.write(
         f"Are you sure you want to permanently delete **{layout['name']}**?"
     )
+    rev_count = impact.get("revision_count", impact.get("revisions_count", 0))
+    s_count = impact.get("shape_count", impact.get("shapes_count", 0))
+    img_count = impact.get("image_count", impact.get("images_count", 0))
     st.error(
         f"**Deletion Impact:**\n"
-        f"- **{impact['revisions_count']}** revision(s) will be deleted\n"
-        f"- **{impact['shapes_count']}** annotation shape(s) will be deleted\n"
-        f"- **{impact['images_count']}** uploaded drawing image(s) will be permanently purged"
+        f"- **{rev_count}** revision(s) will be deleted\n"
+        f"- **{s_count}** annotation shape(s) will be deleted\n"
+        f"- **{img_count}** uploaded drawing image(s) will be permanently purged"
     )
     st.caption("This action is immediate and cannot be undone.")
 
@@ -473,7 +919,11 @@ def _delete_layout_dialog(
             try:
                 delete_layout(project_id, str(layout["id"]), editor_name)
                 st.session_state.pop("active_layout_id", None)
+                st.session_state.pop("layout_plan_selector", None)
+                st.session_state.pop("_last_seen_active_layout_id", None)
                 st.session_state.pop("active_revision_id", None)
+                st.session_state.pop("layout_revision_selector", None)
+                st.session_state.pop("_last_seen_active_rev_id", None)
                 st.toast(
                     f"Deleted layout '{layout['name']}'",
                     icon=":material/delete_forever:",
@@ -490,11 +940,19 @@ def _delete_revision_dialog(
     revision: dict[str, Any],
     editor_name: str,
 ) -> None:
+    rev_num = revision.get("revision_number", 1)
+    s_count = revision.get("shape_count")
+    if s_count is None:
+        try:
+            s_count = len(list_layout_shapes(str(revision["id"])))
+        except Exception:
+            s_count = 0
+
     st.write(
-        f"Delete **Revision {revision['revision_number']}** of **{layout_name}**?"
+        f"Delete **Revision {rev_num}** of **{layout_name}**?"
     )
     st.warning(
-        f"This revision has **{revision['shape_count']}** shape annotation(s). "
+        f"This revision has **{s_count}** shape annotation(s). "
         f"Deleting it will remove this revision and delete its uploaded drawing file."
     )
 
@@ -517,6 +975,8 @@ def _delete_revision_dialog(
                     project_id, str(revision["id"]), editor_name
                 )
                 st.session_state.pop("active_revision_id", None)
+                st.session_state.pop("layout_revision_selector", None)
+                st.session_state.pop("_last_seen_active_rev_id", None)
                 st.toast(
                     f"Deleted Revision {revision['revision_number']}",
                     icon=":material/delete:",
@@ -615,6 +1075,7 @@ def _add_shape_dialog(
     has_unsaved_shapes_key: str,
     selected_shape_id_key: str,
 ) -> None:
+    st.markdown(_COLOR_PICKER_CSS, unsafe_allow_html=True)
     st.write("Configure and place a scaled footprint annotation on this floor plan.")
 
     preset_name = st.selectbox(
@@ -677,10 +1138,10 @@ def _add_shape_dialog(
     st.markdown("##### Visual Styling & Contrast")
     cs1, cs2, cs3 = st.columns(3)
     with cs1:
-        stroke_color = st.color_picker(
+        stroke_color = _render_color_selector(
             "Line / Border Color",
-            value=preset["stroke_color"],
-            key="add_shape_stroke_color",
+            preset["stroke_color"],
+            key_prefix=f"add_shape_stroke_{preset_name}",
         )
         stroke_width = st.selectbox(
             "Line Thickness",
@@ -696,10 +1157,10 @@ def _add_shape_dialog(
             key="add_shape_stroke_style",
         )
     with cs2:
-        fill_color = st.color_picker(
+        fill_color = _render_color_selector(
             "Fill Color",
-            value=preset["fill_color"],
-            key="add_shape_fill_color",
+            preset["fill_color"],
+            key_prefix=f"add_shape_fill_{preset_name}",
         )
         fill_opacity = st.slider(
             "Fill Opacity / Transparency",
@@ -719,10 +1180,10 @@ def _add_shape_dialog(
             format_func=lambda fs: f"{fs} pt",
             key="add_shape_font_size",
         )
-        font_color = st.color_picker(
+        font_color = _render_color_selector(
             "Font Color",
-            value=preset["font_color"],
-            key="add_shape_font_color",
+            preset["font_color"],
+            key_prefix=f"add_shape_font_{preset_name}",
         )
         col_b1, col_b2 = st.columns(2)
         with col_b1:
@@ -934,6 +1395,7 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
         scope="project",
         help_text="Project-wide 2D architectural drawings, scaling, and equipment footprints",
     )
+    st.markdown(_COLOR_PICKER_CSS, unsafe_allow_html=True)
 
     layouts = list_layouts(project_id)
 
@@ -952,14 +1414,21 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
             saved_layout_id = layouts[0]["id"]
             st.session_state["active_layout_id"] = saved_layout_id
 
+        if st.session_state.get("_last_seen_active_layout_id") != saved_layout_id:
+            st.session_state["layout_plan_selector"] = saved_layout_id
+            st.session_state["_last_seen_active_layout_id"] = saved_layout_id
+        elif st.session_state.get("layout_plan_selector") not in layout_options:
+            st.session_state["layout_plan_selector"] = saved_layout_id
+            st.session_state["_last_seen_active_layout_id"] = saved_layout_id
+
         selected_layout_id = st.selectbox(
             "Selected layout",
             options=list(layout_options.keys()),
             format_func=lambda lid: layout_options[lid],
-            index=list(layout_options.keys()).index(saved_layout_id),
             key="layout_plan_selector",
         )
         st.session_state["active_layout_id"] = selected_layout_id
+        st.session_state["_last_seen_active_layout_id"] = selected_layout_id
 
     with top_col2:
         if st.button("+ New layout", icon=":material/add:", width="stretch", key="btn_open_new_layout"):
@@ -997,19 +1466,29 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
             saved_rev_id = revisions[0]["id"]
             st.session_state["active_revision_id"] = saved_rev_id
 
+        if st.session_state.get("_last_seen_active_rev_id") != saved_rev_id:
+            st.session_state["layout_revision_selector"] = saved_rev_id
+            st.session_state["_last_seen_active_rev_id"] = saved_rev_id
+        elif st.session_state.get("layout_revision_selector") not in rev_map:
+            st.session_state["layout_revision_selector"] = saved_rev_id
+            st.session_state["_last_seen_active_rev_id"] = saved_rev_id
+
         selected_rev_id = st.selectbox(
             "Revision",
             options=list(rev_map.keys()),
             format_func=lambda rid: rev_map[rid],
-            index=list(rev_map.keys()).index(saved_rev_id),
             key="layout_revision_selector",
         )
         st.session_state["active_revision_id"] = selected_rev_id
+        st.session_state["_last_seen_active_rev_id"] = selected_rev_id
 
     with rev_bar2:
-        latest_rev = revisions[0] if revisions else None
+        current_view_rev = get_layout_revision(selected_rev_id) or (revisions[0] if revisions else None)
+        active_drafts = st.session_state.get(f"layout_shapes_draft_{selected_rev_id}")
         if st.button("+ New revision", icon=":material/upload:", width="stretch", key="btn_open_new_rev"):
-            _create_revision_dialog(project_id, current_layout, latest_rev, editor_name)
+            _create_revision_dialog(
+                project_id, current_layout, current_view_rev, editor_name, current_draft_shapes=active_drafts
+            )
 
     active_rev = get_layout_revision(selected_rev_id)
     if not active_rev:
@@ -1101,38 +1580,91 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                 f"Drag canvas to pan · Scroll to zoom · Click shape to select / drag to move"
             )
         with tb3:
-            btn_col1, btn_col2 = st.columns([1, 1])
-            with btn_col1:
-                if st.button(
-                    "Pitch Standards",
-                    icon=":material/straighten:",
-                    width="stretch",
-                    help="Configure section pitch dimensions (Length × Width)",
-                    key=f"btn_open_standards_{active_rev['id']}",
-                ):
-                    _section_standards_dialog(
-                        project_id=project_id,
-                        layout_id=selected_layout_id,
-                        unit=unit,
-                        editor_name=editor_name,
-                    )
-            with btn_col2:
-                if st.button(
-                    "+ Add Shape",
-                    type="primary",
-                    icon=":material/add:",
-                    width="stretch",
-                    key=f"btn_open_add_shape_{active_rev['id']}",
-                ):
-                    _add_shape_dialog(
-                        active_rev=active_rev,
-                        px_per_in_x=px_per_in_x,
-                        px_per_in_y=px_per_in_y,
-                        unit=unit,
-                        draft_shapes_key=draft_shapes_key,
-                        has_unsaved_shapes_key=has_unsaved_shapes_key,
-                        selected_shape_id_key=selected_shape_id_key,
-                    )
+            other_revs_with_shapes = [
+                r for r in revisions
+                if r["id"] != active_rev["id"] and r.get("shape_count", 0) > 0
+            ]
+            if other_revs_with_shapes:
+                btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
+                with btn_col1:
+                    if st.button(
+                        "Pitch Standards",
+                        icon=":material/straighten:",
+                        width="stretch",
+                        help="Configure section pitch dimensions (Length × Width)",
+                        key=f"btn_open_standards_{active_rev['id']}",
+                    ):
+                        _section_standards_dialog(
+                            project_id=project_id,
+                            layout_id=selected_layout_id,
+                            unit=unit,
+                            editor_name=editor_name,
+                        )
+                with btn_col2:
+                    if st.button(
+                        "Import Shapes",
+                        icon=":material/content_copy:",
+                        width="stretch",
+                        help="Import shapes from another revision into this revision with automatic scale alignment",
+                        key=f"btn_open_import_shapes_{active_rev['id']}",
+                    ):
+                        _import_shapes_dialog(
+                            project_id=project_id,
+                            layout=current_layout,
+                            active_rev=active_rev,
+                            other_revs=other_revs_with_shapes,
+                            editor_name=editor_name,
+                        )
+                with btn_col3:
+                    if st.button(
+                        "+ Add Shape",
+                        type="primary",
+                        icon=":material/add:",
+                        width="stretch",
+                        key=f"btn_open_add_shape_{active_rev['id']}",
+                    ):
+                        _add_shape_dialog(
+                            active_rev=active_rev,
+                            px_per_in_x=px_per_in_x,
+                            px_per_in_y=px_per_in_y,
+                            unit=unit,
+                            draft_shapes_key=draft_shapes_key,
+                            has_unsaved_shapes_key=has_unsaved_shapes_key,
+                            selected_shape_id_key=selected_shape_id_key,
+                        )
+            else:
+                btn_col1, btn_col2 = st.columns([1, 1])
+                with btn_col1:
+                    if st.button(
+                        "Pitch Standards",
+                        icon=":material/straighten:",
+                        width="stretch",
+                        help="Configure section pitch dimensions (Length × Width)",
+                        key=f"btn_open_standards_{active_rev['id']}",
+                    ):
+                        _section_standards_dialog(
+                            project_id=project_id,
+                            layout_id=selected_layout_id,
+                            unit=unit,
+                            editor_name=editor_name,
+                        )
+                with btn_col2:
+                    if st.button(
+                        "+ Add Shape",
+                        type="primary",
+                        icon=":material/add:",
+                        width="stretch",
+                        key=f"btn_open_add_shape_{active_rev['id']}",
+                    ):
+                        _add_shape_dialog(
+                            active_rev=active_rev,
+                            px_per_in_x=px_per_in_x,
+                            px_per_in_y=px_per_in_y,
+                            unit=unit,
+                            draft_shapes_key=draft_shapes_key,
+                            has_unsaved_shapes_key=has_unsaved_shapes_key,
+                            selected_shape_id_key=selected_shape_id_key,
+                        )
 
     # Cross-Scenario Yamazumi Pitches Palette
     project_pitches = list_project_yamazumi_pitches(project_id)
@@ -1410,10 +1942,10 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
             with ec2:
                 st.caption("**Border & Fill Styling**")
                 cur_stroke = style.get("stroke_color") or selected_shape.get("color") or "#1976d2"
-                new_stroke = st.color_picker(
+                new_stroke = _render_color_selector(
                     "Border Color",
-                    value=cur_stroke,
-                    key=f"insp_stroke_{selected_shape['id']}",
+                    cur_stroke,
+                    key_prefix=f"insp_stroke_{selected_shape['id']}",
                 )
                 cur_thick = int(style.get("stroke_width", 2))
                 thick_idx = (
@@ -1441,10 +1973,10 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                     key=f"insp_lstyle_{selected_shape['id']}",
                 )
                 cur_fill = style.get("fill_color") or selected_shape.get("color") or "#1976d2"
-                new_fill = st.color_picker(
+                new_fill = _render_color_selector(
                     "Fill Color",
-                    value=cur_fill,
-                    key=f"insp_fill_{selected_shape['id']}",
+                    cur_fill,
+                    key_prefix=f"insp_fill_{selected_shape['id']}",
                 )
                 cur_opac = int(float(style.get("fill_opacity", 0.25)) * 100)
                 new_opac = st.slider(
@@ -1473,10 +2005,10 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                     key=f"insp_fsize_{selected_shape['id']}",
                 )
                 cur_fcolor = style.get("font_color", "#1a1a1a")
-                new_fcolor = st.color_picker(
+                new_fcolor = _render_color_selector(
                     "Font Color",
-                    value=cur_fcolor,
-                    key=f"insp_fcolor_{selected_shape['id']}",
+                    cur_fcolor,
+                    key_prefix=f"insp_fcolor_{selected_shape['id']}",
                 )
                 new_bold = st.checkbox(
                     "Bold",
@@ -1782,7 +2314,7 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                     "Scale": f"{r['width_value']:g} × {r['height_value']:g} {r['unit']}",
                     "Dimensions (in)": f"{r['scale_width_in']:,.0f} × {r['scale_height_in']:,.0f} in",
                     "Resolution": f"{r['image_width_px']} × {r['image_height_px']} px",
-                    "Shapes": r["shape_count"],
+                    "Shapes": r.get("shape_count", 0),
                     "Author": r["created_by"] or "Unknown",
                     "Date": str(r["created_at"])[:19].replace("T", " "),
                     "Notes": r["notes"],

@@ -17,12 +17,15 @@ import utils.layout_store as layout_store
 import utils.store as store
 from utils.layout_ui import (
     FOOTPRINT_PRESETS,
+    LAYOUT_SWATCH_PALETTE,
     LINE_STYLE_OPTIONS,
     LINE_THICKNESS_OPTIONS,
     SHAPE_TYPES,
     _calculate_shape_area,
     _format_shape_dim,
+    _normalize_hex_color,
     _px_to_units,
+    _render_color_selector,
     _units_to_px,
 )
 
@@ -551,6 +554,79 @@ class LayoutShapesAppSmokeTests(unittest.TestCase):
         reloaded_h_units = _px_to_units(saved_shape["height"], px_per_in_y, unit)
         self.assertAlmostEqual(reloaded_w_units, 25.0, places=1)
         self.assertAlmostEqual(reloaded_h_units, 15.0, places=1)
+
+    def test_hex_normalization(self) -> None:
+        self.assertEqual(_normalize_hex_color("#1976D2"), "#1976d2")
+        self.assertEqual(_normalize_hex_color("1976d2"), "#1976d2")
+        self.assertEqual(_normalize_hex_color("#fff"), "#ffffff")
+        self.assertEqual(_normalize_hex_color("fff"), "#ffffff")
+        self.assertEqual(_normalize_hex_color("#123"), "#112233")
+        self.assertEqual(_normalize_hex_color(None, default="#d32f2f"), "#d32f2f")
+        self.assertEqual(_normalize_hex_color("invalid", default="#1976d2"), "#1976d2")
+        self.assertEqual(_normalize_hex_color(12345, default="#1976d2"), "#1976d2")
+
+    def test_palette_validity(self) -> None:
+        self.assertGreaterEqual(len(LAYOUT_SWATCH_PALETTE), 9)
+        for emoji, hex_code in LAYOUT_SWATCH_PALETTE.items():
+            self.assertTrue(hex_code.startswith("#"), f"{hex_code} must start with #")
+            self.assertEqual(len(hex_code), 7, f"{hex_code} must be 7 chars")
+            int(hex_code[1:], 16)  # must parse as valid hex
+
+    def test_inspector_color_selector_interaction(self) -> None:
+        shape_id = str(uuid4())
+        shape = {
+            "id": shape_id,
+            "shape_type": "rectangle",
+            "label": "Test Workstation",
+            "x": 100.0,
+            "y": 100.0,
+            "width": 120.0,
+            "height": 80.0,
+            "rotation": 0.0,
+            "color": "#1976d2",
+            "pitch_id": None,
+            "style_json": json.dumps({
+                "stroke_color": "#1976d2",
+                "fill_color": "#ffffff",
+                "stroke_width": 2,
+                "stroke_style": "solid",
+                "fill_opacity": 0.25,
+                "font_size": 14,
+                "font_color": "#1a1a1a",
+                "font_weight": "bold",
+                "bg_pill": True,
+            }),
+        }
+        layout_store.save_layout_shapes(self.project_id, self.rev_id, [shape], self.editor)
+
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/functional_equipment.py"),
+            default_timeout=30,
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["current_editor"] = self.editor
+        app.session_state["active_equipment_subtab"] = "Layouts"
+        app.session_state["active_layout_id"] = self.layout_id
+        app.session_state["active_revision_id"] = self.rev_id
+        app.session_state[f"layout_selected_shape_{self.rev_id}"] = shape_id
+        app.run(timeout=30)
+        self.assertEqual([], list(app.exception))
+
+        # Check color pickers and pills exist for this shape
+        color_pickers = [cp for cp in app.color_picker]
+        self.assertGreaterEqual(len(color_pickers), 3)
+
+        # Trigger quick palette selection on border color (e.g. Conveyor Orange 🟠)
+        pill_key = f"insp_stroke_{shape_id}_pill"
+        self.assertIn(pill_key, app.session_state)
+        app.session_state[pill_key] = "🟠"
+        app.run(timeout=30)
+        self.assertEqual([], list(app.exception))
+
+        # Verify that the color updated to orange
+        drafts = app.session_state[f"layout_shapes_draft_{self.rev_id}"]
+        matched = next(s for s in drafts if s["id"] == shape_id)
+        self.assertEqual(matched["color"], "#f57c00")
 
 
 if __name__ == "__main__":

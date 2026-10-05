@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sqlite3
 from io import BytesIO
 from pathlib import Path
@@ -10,7 +11,16 @@ from typing import Any
 from uuid import uuid4
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+SUPPORTED_LAYOUT_EXTENSIONS: tuple[str, ...] = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".pdf",
+    ".dxf",
+)
 
 LAYOUT_UNITS: tuple[str, ...] = ("feet", "inches", "yards", "miles")
 
@@ -309,6 +319,9 @@ def layout_deletion_impact(project_id: str, layout_id: str) -> dict[str, Any]:
             "shape_count": shape_count,
             "image_count": len(image_paths),
             "image_paths": image_paths,
+            "revisions_count": len(revisions),
+            "shapes_count": shape_count,
+            "images_count": len(image_paths),
         }
 
 
@@ -358,17 +371,20 @@ def list_layout_revisions(layout_id: str) -> list[dict[str, Any]]:
 
 
 def get_layout_revision(revision_id: str) -> dict[str, Any] | None:
-    """Return a single revision by ID."""
+    """Return a single revision by ID with its shape count."""
     store = _store_module()
     with store.connection() as conn:
         row = conn.execute(
             """
             SELECT r.*,
                    p.name AS layout_name,
-                   p.project_id
+                   p.project_id,
+                   COUNT(s.id) AS shape_count
             FROM layout_revisions r
             JOIN layout_plans p ON p.id = r.layout_id
+            LEFT JOIN layout_shapes s ON s.revision_id = r.id
             WHERE r.id = ?
+            GROUP BY r.id
             """,
             (revision_id,),
         ).fetchone()
@@ -376,23 +392,282 @@ def get_layout_revision(revision_id: str) -> dict[str, Any] | None:
 
 
 def get_latest_layout_revision(layout_id: str) -> dict[str, Any] | None:
-    """Return the latest revision for a layout."""
+    """Return the latest revision for a layout with its shape count."""
     store = _store_module()
     with store.connection() as conn:
         row = conn.execute(
             """
             SELECT r.*,
                    p.name AS layout_name,
-                   p.project_id
+                   p.project_id,
+                   COUNT(s.id) AS shape_count
             FROM layout_revisions r
             JOIN layout_plans p ON p.id = r.layout_id
+            LEFT JOIN layout_shapes s ON s.revision_id = r.id
             WHERE r.layout_id = ?
+            GROUP BY r.id
             ORDER BY r.revision_number DESC
             LIMIT 1
             """,
             (layout_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_pdf_page_count(content: bytes) -> int:
+    """Return the total number of pages in a PDF document."""
+    try:
+        import pypdfium2 as pdfium
+
+        with pdfium.PdfDocument(content) as pdf:
+            return len(pdf)
+    except Exception as exc:
+        raise ValueError(f"Could not read PDF document: {exc}") from exc
+
+
+def render_pdf_page_to_image(
+    content: bytes, page_number: int = 1, scale: float = 2.0
+) -> Image.Image:
+    """Render a specific PDF page (1-based index) into a PIL RGB Image."""
+    try:
+        import pypdfium2 as pdfium
+
+        with pdfium.PdfDocument(content) as pdf:
+            num_pages = len(pdf)
+            if num_pages == 0:
+                raise ValueError("The PDF document contains no pages.")
+            idx = max(0, min(page_number - 1, num_pages - 1))
+            page = pdf[idx]
+            pil_img = page.render(scale=scale).to_pil()
+            return pil_img.convert("RGB")
+    except Exception as exc:
+        raise ValueError(f"Failed to render PDF page: {exc}") from exc
+
+
+def render_dxf_to_image(content: bytes, dpi: int = 150) -> Image.Image:
+    """Render a 2D DXF file modelspace into a PIL RGB Image."""
+    try:
+        import io
+        import ezdxf
+        from ezdxf.addons.drawing import Frontend, RenderContext
+        from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        text_content = content.decode("utf-8", errors="replace")
+        stream = io.StringIO(text_content)
+        doc = ezdxf.read(stream)
+        msp = doc.modelspace()
+
+        fig = plt.figure()
+        ax = fig.add_axes([0, 0, 1, 1])
+        ctx = RenderContext(doc)
+        out = MatplotlibBackend(ax)
+        Frontend(ctx, out).draw_layout(msp, finalize=True)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        return Image.open(buf).convert("RGB")
+    except Exception as exc:
+        raise ValueError(f"Failed to render DXF layout: {exc}") from exc
+
+
+def apply_image_orientation(
+    image: Image.Image, rotation_angle: int = 0
+) -> Image.Image:
+    """Rotate image by 0, 90, 180, or 270 degrees clockwise."""
+    deg = (int(rotation_angle) % 360 + 360) % 360
+    if deg == 90:
+        return image.transpose(Image.Transpose.ROTATE_270)
+    elif deg == 180:
+        return image.transpose(Image.Transpose.ROTATE_180)
+    elif deg == 270:
+        return image.transpose(Image.Transpose.ROTATE_90)
+    return image
+
+
+def apply_image_crop(
+    image: Image.Image,
+    crop_left_pct: float = 0.0,
+    crop_top_pct: float = 0.0,
+    crop_right_pct: float = 0.0,
+    crop_bottom_pct: float = 0.0,
+) -> Image.Image:
+    """Crop an image using edge margin percentages (0.0% to 45.0%)."""
+    cl = max(0.0, min(45.0, float(crop_left_pct or 0.0)))
+    ct = max(0.0, min(45.0, float(crop_top_pct or 0.0)))
+    cr = max(0.0, min(45.0, float(crop_right_pct or 0.0)))
+    cb = max(0.0, min(45.0, float(crop_bottom_pct or 0.0)))
+
+    if cl <= 0.001 and ct <= 0.001 and cr <= 0.001 and cb <= 0.001:
+        return image
+
+    w, h = image.size
+    left_px = int(round(w * (cl / 100.0)))
+    top_px = int(round(h * (ct / 100.0)))
+    right_px = int(round(w * (1.0 - (cr / 100.0))))
+    bottom_px = int(round(h * (1.0 - (cb / 100.0))))
+
+    if right_px > left_px + 20 and bottom_px > top_px + 20:
+        return image.crop((left_px, top_px, right_px, bottom_px))
+    return image
+
+
+def auto_detect_whitespace_crop(
+    image: Image.Image,
+    threshold: int = 240,
+    padding: int = 10,
+) -> tuple[int, int, int, int]:
+    """Find the bounding box of non-white content in an image with outer padding."""
+    if not image:
+        return (0, 0, 0, 0)
+    img_rgb = image.convert("RGB") if image.mode != "RGB" else image
+    gray_inv = ImageOps.invert(img_rgb.convert("L"))
+    cutoff = 255 - max(0, min(255, int(threshold)))
+    thresh = gray_inv.point(lambda p: 255 if p > cutoff else 0)
+    bbox = thresh.getbbox()
+    if not bbox:
+        return (0, 0, image.width, image.height)
+    left = max(0, bbox[0] - padding)
+    top = max(0, bbox[1] - padding)
+    right = min(image.width, bbox[2] + padding)
+    bottom = min(image.height, bbox[3] + padding)
+    if right > left + 20 and bottom > top + 20:
+        return (left, top, right, bottom)
+    return (0, 0, image.width, image.height)
+
+
+def _get_preview_font(size: int = 16) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    """Load a clean system font or fallback to default."""
+    for font_name in ("arial.ttf", "calibri.ttf", "segoeui.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(font_name, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def annotate_preview_with_dimensions(
+    img: Image.Image,
+    width_val: float,
+    height_val: float,
+    unit: str,
+) -> Image.Image:
+    """Frame the preview image with architectural dimension lines and labels for Width and Height."""
+    w = img.width
+    h = img.height
+    ruler = max(44, min(72, int(max(w, h) * 0.05)))
+    font_size = max(12, min(20, int(ruler * 0.35)))
+    font = _get_preview_font(font_size)
+
+    total_w = w + ruler
+    total_h = h + ruler
+
+    framed = Image.new("RGB", (total_w, total_h), (255, 255, 255))
+    framed.paste(img, (ruler, ruler))
+    draw = ImageDraw.Draw(framed)
+
+    # 1. Top Ruler (Horizontal - Physical Width)
+    draw.rectangle([(ruler, 0), (total_w, ruler)], fill=(227, 242, 253), outline=(144, 202, 249), width=1)
+    # 2. Left Ruler (Vertical - Physical Height / Length)
+    draw.rectangle([(0, ruler), (ruler, total_h)], fill=(243, 229, 245), outline=(206, 147, 216), width=1)
+    # 3. Top-left corner box
+    draw.rectangle([(0, 0), (ruler, ruler)], fill=(236, 239, 241), outline=(176, 190, 197), width=1)
+    c_font = _get_preview_font(max(10, font_size - 2))
+    draw.text((ruler // 4, ruler // 3), "(0,0)", fill=(90, 100, 110), font=c_font)
+
+    # Drawing boundary border
+    draw.rectangle([(ruler, ruler), (total_w - 1, total_h - 1)], outline=(120, 144, 156), width=1)
+
+    # Top Arrow & Text: Horizontal Width
+    w_label = f"  <-- Width: {width_val:g} {unit} ({w} px) -->  "
+    arrow_y = ruler // 2
+    draw.line([(ruler + 12, arrow_y), (total_w - 12, arrow_y)], fill=(13, 71, 161), width=2)
+    draw.polygon([(ruler + 4, arrow_y), (ruler + 14, arrow_y - 5), (ruler + 14, arrow_y + 5)], fill=(13, 71, 161))
+    draw.polygon([(total_w - 4, arrow_y), (total_w - 14, arrow_y - 5), (total_w - 14, arrow_y + 5)], fill=(13, 71, 161))
+
+    t_box = draw.textbbox((0, 0), w_label, font=font)
+    tw = t_box[2] - t_box[0]
+    th = t_box[3] - t_box[1]
+    tx = ruler + max(0, (w - tw) // 2)
+    ty = max(0, (ruler - th) // 2)
+    draw.rectangle([(tx - 6, ty - 2), (tx + tw + 6, ty + th + 2)], fill=(227, 242, 253), outline=(144, 202, 249), width=1)
+    draw.text((tx, ty), w_label, fill=(13, 71, 161), font=font)
+
+    # Left Arrow & Text: Vertical Height / Length
+    arrow_x = ruler // 2
+    draw.line([(arrow_x, ruler + 12), (arrow_x, total_h - 12)], fill=(74, 20, 140), width=2)
+    draw.polygon([(arrow_x, ruler + 4), (arrow_x - 5, ruler + 14), (arrow_x + 5, ruler + 14)], fill=(74, 20, 140))
+    draw.polygon([(arrow_x, total_h - 4), (arrow_x - 5, total_h - 14), (arrow_x + 5, total_h - 14)], fill=(74, 20, 140))
+
+    h_label = f"  Height/Length: {height_val:g} {unit} ({h} px)  "
+    txt_img = Image.new("RGBA", (max(10, h - 30), ruler), (243, 229, 245, 0))
+    txt_draw = ImageDraw.Draw(txt_img)
+    lh_box = txt_draw.textbbox((0, 0), h_label, font=font)
+    htw = lh_box[2] - lh_box[0]
+    hth = lh_box[3] - lh_box[1]
+    tx_l = max(0, (txt_img.width - htw) // 2)
+    ty_l = max(0, (ruler - hth) // 2)
+    txt_draw.rectangle([(tx_l - 4, ty_l - 2), (tx_l + htw + 4, ty_l + hth + 2)], fill=(243, 229, 245), outline=(206, 147, 216), width=1)
+    txt_draw.text((tx_l, ty_l), h_label, fill=(74, 20, 140), font=font)
+    rotated = txt_img.rotate(90, expand=True)
+    rx = max(0, (ruler - rotated.width) // 2)
+    ry = ruler + max(0, (h - rotated.height) // 2)
+    framed.paste(rotated, (rx, ry), rotated)
+
+    return framed
+
+
+def load_and_orient_layout_preview(
+    image_file: Any,
+    rotation_angle: int = 0,
+    pdf_page: int = 1,
+    crop_left_pct: float = 0.0,
+    crop_top_pct: float = 0.0,
+    crop_right_pct: float = 0.0,
+    crop_bottom_pct: float = 0.0,
+) -> Image.Image | None:
+    """Load an uploaded file or clipboard image, apply page, rotation, and crop, and return PIL Image for UI preview."""
+    if not image_file:
+        return None
+    if isinstance(image_file, Image.Image):
+        img = image_file.copy().convert("RGB")
+        img = apply_image_orientation(img, rotation_angle)
+        return apply_image_crop(img, crop_left_pct, crop_top_pct, crop_right_pct, crop_bottom_pct)
+
+    filename = str(getattr(image_file, "name", "screenshot.png"))
+    suffix = Path(filename).suffix.lower()
+    content = (
+        image_file.getvalue()
+        if hasattr(image_file, "getvalue")
+        else image_file.read()
+    )
+    if not content:
+        return None
+    if hasattr(image_file, "seek"):
+        image_file.seek(0)
+
+    if suffix == ".pdf":
+        img = render_pdf_page_to_image(content, page_number=pdf_page, scale=2.0)
+    elif suffix == ".dxf":
+        img = render_dxf_to_image(content, dpi=100)
+    else:
+        try:
+            img = Image.open(BytesIO(content))
+            img = ImageOps.exif_transpose(img)
+            img = img.convert("RGB")
+        except Exception as exc:
+            raise ValueError(f"Could not decode image file: {exc}") from exc
+
+    img = apply_image_orientation(img, rotation_angle)
+    return apply_image_crop(img, crop_left_pct, crop_top_pct, crop_right_pct, crop_bottom_pct)
 
 
 def create_layout_revision(
@@ -405,8 +680,15 @@ def create_layout_revision(
     notes: str = "",
     copy_from_revision_id: str | None = None,
     editor_name: str = "",
+    rotation_angle: int = 0,
+    pdf_page: int = 1,
+    source_shapes: list[dict[str, Any]] | None = None,
+    crop_left_pct: float = 0.0,
+    crop_top_pct: float = 0.0,
+    crop_right_pct: float = 0.0,
+    crop_bottom_pct: float = 0.0,
 ) -> dict[str, Any]:
-    """Create a new versioned layout revision with an image and scale specifications."""
+    """Create a new versioned layout revision with an image/drawing and scale specifications."""
     store = _store_module()
     editor = _require_editor(editor_name)
     cleaned_unit = unit.lower().strip()
@@ -420,25 +702,80 @@ def create_layout_revision(
     if w_val <= 0 or h_val <= 0:
         raise ValueError("Width and Height must be greater than zero.")
 
-    # Image validation & processing
-    suffix = Path(str(getattr(image_file, "name", "screenshot.png"))).suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-        raise ValueError("Use PNG, JPG, JPEG, or WEBP image files.")
-    content = image_file.getvalue() if hasattr(image_file, "getvalue") else image_file.read()
-    if not content:
-        raise ValueError("Choose or paste a non-empty image.")
-
-    try:
-        with Image.open(BytesIO(content)) as img:
-            img.verify()
-        with Image.open(BytesIO(content)) as img:
-            img_w_px, img_h_px = img.size
-    except Exception as exc:
-        raise ValueError("The provided file is not a readable image.") from exc
-
+    # Image / document validation & processing
+    normalized_rot = (int(rotation_angle) % 360 + 360) % 360
+    has_crops = (
+        float(crop_left_pct or 0.0) > 0.001
+        or float(crop_top_pct or 0.0) > 0.001
+        or float(crop_right_pct or 0.0) > 0.001
+        or float(crop_bottom_pct or 0.0) > 0.001
+    )
     store.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}{suffix}"
-    target_path.write_bytes(content)
+
+    if isinstance(image_file, Image.Image):
+        img = image_file.copy().convert("RGB")
+        img = apply_image_orientation(img, normalized_rot)
+        img = apply_image_crop(img, crop_left_pct, crop_top_pct, crop_right_pct, crop_bottom_pct)
+        suffix = ".png"
+        img_w_px, img_h_px = img.size
+        target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}.png"
+        img.save(target_path, "PNG")
+    else:
+        filename = str(getattr(image_file, "name", "screenshot.png"))
+        suffix = Path(filename).suffix.lower()
+        if suffix not in SUPPORTED_LAYOUT_EXTENSIONS:
+            allowed = ", ".join(ext.upper().lstrip(".") for ext in SUPPORTED_LAYOUT_EXTENSIONS)
+            raise ValueError(f"Unsupported file type '{suffix}'. Use: {allowed}.")
+
+        content = (
+            image_file.getvalue()
+            if hasattr(image_file, "getvalue")
+            else image_file.read()
+        )
+        if not content:
+            raise ValueError("Choose or paste a non-empty image or drawing.")
+        if hasattr(image_file, "seek"):
+            image_file.seek(0)
+
+        if suffix == ".pdf":
+            img = render_pdf_page_to_image(content, page_number=pdf_page, scale=2.0)
+            img = apply_image_orientation(img, normalized_rot)
+            img = apply_image_crop(img, crop_left_pct, crop_top_pct, crop_right_pct, crop_bottom_pct)
+            img_w_px, img_h_px = img.size
+            target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}.png"
+            img.save(target_path, "PNG")
+        elif suffix == ".dxf":
+            img = render_dxf_to_image(content, dpi=150)
+            img = apply_image_orientation(img, normalized_rot)
+            img = apply_image_crop(img, crop_left_pct, crop_top_pct, crop_right_pct, crop_bottom_pct)
+            img_w_px, img_h_px = img.size
+            target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}.png"
+            img.save(target_path, "PNG")
+        else:
+            try:
+                with Image.open(BytesIO(content)) as raw_img:
+                    raw_img.verify()
+                with Image.open(BytesIO(content)) as loaded_img:
+                    loaded_img = ImageOps.exif_transpose(loaded_img)
+                    loaded_img = loaded_img.convert("RGB")
+                    if normalized_rot != 0 or has_crops:
+                        loaded_img = apply_image_orientation(loaded_img, normalized_rot)
+                        loaded_img = apply_image_crop(
+                            loaded_img,
+                            crop_left_pct=crop_left_pct,
+                            crop_top_pct=crop_top_pct,
+                            crop_right_pct=crop_right_pct,
+                            crop_bottom_pct=crop_bottom_pct,
+                        )
+                        img_w_px, img_h_px = loaded_img.size
+                        target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}.png"
+                        loaded_img.save(target_path, "PNG")
+                    else:
+                        img_w_px, img_h_px = loaded_img.size
+                        target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}{suffix}"
+                        target_path.write_bytes(content)
+            except Exception as exc:
+                raise ValueError("The provided file is not a readable image.") from exc
 
     scale_width_in = to_canonical_inches(w_val, cleaned_unit)
     scale_height_in = to_canonical_inches(h_val, cleaned_unit)
@@ -488,10 +825,47 @@ def create_layout_revision(
             # Copy forward shapes from previous revision if requested
             copied_shapes_count = 0
             if copy_from_revision_id:
-                old_shapes = conn.execute(
-                    "SELECT * FROM layout_shapes WHERE revision_id=?", (copy_from_revision_id,)
-                ).fetchall()
-                for old_shape in old_shapes:
+                old_rev = conn.execute(
+                    "SELECT image_width_px, image_height_px FROM layout_revisions WHERE id=?",
+                    (copy_from_revision_id,),
+                ).fetchone()
+                scale_x = 1.0
+                scale_y = 1.0
+                if old_rev and old_rev["image_width_px"] and old_rev["image_height_px"]:
+                    old_w = float(old_rev["image_width_px"])
+                    old_h = float(old_rev["image_height_px"])
+                    if old_w > 0 and old_h > 0 and img_w_px > 0 and img_h_px > 0:
+                        scale_x = float(img_w_px) / old_w
+                        scale_y = float(img_h_px) / old_h
+
+                shapes_to_copy = source_shapes
+                if shapes_to_copy is None:
+                    shapes_to_copy = conn.execute(
+                        "SELECT * FROM layout_shapes WHERE revision_id=?", (copy_from_revision_id,)
+                    ).fetchall()
+
+                for old_shape in shapes_to_copy:
+                    old_s = dict(old_shape)
+                    new_x = round(float(old_s.get("x") or 0.0) * scale_x, 2)
+                    new_y = round(float(old_s.get("y") or 0.0) * scale_y, 2)
+                    new_w = max(1.0, round(float(old_s.get("width") or 10.0) * scale_x, 2))
+                    new_h = max(1.0, round(float(old_s.get("height") or 10.0) * scale_y, 2))
+
+                    new_style_json = old_s.get("style_json")
+                    if new_style_json and (abs(scale_x - 1.0) > 0.001 or abs(scale_y - 1.0) > 0.001):
+                        try:
+                            sdict = json.loads(new_style_json) if isinstance(new_style_json, str) else dict(new_style_json)
+                            avg_scale = (scale_x + scale_y) / 2.0
+                            if "stroke_width" in sdict and sdict["stroke_width"] is not None:
+                                sdict["stroke_width"] = max(1, round(float(sdict["stroke_width"]) * avg_scale))
+                            if "font_size" in sdict and sdict["font_size"] is not None:
+                                sdict["font_size"] = max(8, round(float(sdict["font_size"]) * avg_scale))
+                            new_style_json = json.dumps(sdict)
+                        except Exception:
+                            new_style_json = old_s.get("style_json")
+                    elif isinstance(new_style_json, dict):
+                        new_style_json = json.dumps(new_style_json)
+
                     conn.execute(
                         """
                         INSERT INTO layout_shapes
@@ -502,17 +876,17 @@ def create_layout_revision(
                         (
                             str(uuid4()),
                             new_revision_id,
-                            old_shape["shape_type"],
-                            old_shape["label"],
-                            old_shape["x"],
-                            old_shape["y"],
-                            old_shape["width"],
-                            old_shape["height"],
-                            old_shape["rotation"],
-                            old_shape["color"],
-                            old_shape["style_json"],
-                            old_shape["pitch_id"],
-                            old_shape["equipment_id"],
+                            _text(old_s.get("shape_type") or "rectangle"),
+                            _text(old_s.get("label")),
+                            new_x,
+                            new_y,
+                            new_w,
+                            new_h,
+                            float(old_s.get("rotation") or 0.0),
+                            _text(old_s.get("color") or "#1976d2"),
+                            _text(new_style_json or "{}"),
+                            _text(old_s.get("pitch_id")) or None,
+                            _text(old_s.get("equipment_id")) or None,
                             timestamp,
                             timestamp,
                         ),
@@ -536,6 +910,8 @@ def create_layout_revision(
                     "width": f"{w_val} {cleaned_unit}",
                     "height": f"{h_val} {cleaned_unit}",
                     "copied_shapes_count": copied_shapes_count,
+                    "orientation_deg": normalized_rot,
+                    "source_format": suffix.lstrip("."),
                 },
                 _conn=conn,
             )
@@ -755,6 +1131,139 @@ def save_layout_shapes(
         )
 
 
+def import_shapes_from_revision(
+    project_id: str,
+    target_revision_id: str,
+    source_revision_id: str,
+    editor_name: str,
+    replace_existing: bool = False,
+    source_shapes: list[dict[str, Any]] | None = None,
+) -> int:
+    """Import and auto-scale shapes from a source revision into a target revision.
+
+    Calculates proportional scaling between the source drawing pixel resolution and
+    the target drawing pixel resolution so that equipment footprints and annotations
+    land in the exact same positions and sizes on the target layout revision.
+    """
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    timestamp = store.now_iso()
+
+    with store.connection() as conn:
+        target_rev = conn.execute(
+            """
+            SELECT r.*, p.name AS layout_name
+            FROM layout_revisions r
+            JOIN layout_plans p ON p.id = r.layout_id
+            WHERE r.id=? AND p.project_id=?
+            """,
+            (target_revision_id, project_id),
+        ).fetchone()
+        if not target_rev:
+            raise ValueError("Target layout revision not found in active project.")
+
+        source_rev = conn.execute(
+            """
+            SELECT r.*, p.name AS layout_name
+            FROM layout_revisions r
+            JOIN layout_plans p ON p.id = r.layout_id
+            WHERE r.id=? AND p.project_id=?
+            """,
+            (source_revision_id, project_id),
+        ).fetchone()
+        if not source_rev:
+            raise ValueError("Source layout revision not found in active project.")
+
+        if replace_existing:
+            conn.execute(
+                "DELETE FROM layout_shapes WHERE revision_id=?", (target_revision_id,)
+            )
+
+        target_w = float(target_rev["image_width_px"] or 1)
+        target_h = float(target_rev["image_height_px"] or 1)
+        source_w = float(source_rev["image_width_px"] or 1)
+        source_h = float(source_rev["image_height_px"] or 1)
+
+        scale_x = (target_w / source_w) if source_w > 0 and target_w > 0 else 1.0
+        scale_y = (target_h / source_h) if source_h > 0 and target_h > 0 else 1.0
+
+        shapes_to_copy = source_shapes
+        if shapes_to_copy is None:
+            shapes_to_copy = conn.execute(
+                "SELECT * FROM layout_shapes WHERE revision_id=?", (source_revision_id,)
+            ).fetchall()
+
+        imported_count = 0
+        for s in shapes_to_copy:
+            old_s = dict(s)
+            new_x = round(float(old_s.get("x") or 0.0) * scale_x, 2)
+            new_y = round(float(old_s.get("y") or 0.0) * scale_y, 2)
+            new_w = max(1.0, round(float(old_s.get("width") or 10.0) * scale_x, 2))
+            new_h = max(1.0, round(float(old_s.get("height") or 10.0) * scale_y, 2))
+
+            new_style_json = old_s.get("style_json")
+            if new_style_json and (abs(scale_x - 1.0) > 0.001 or abs(scale_y - 1.0) > 0.001):
+                try:
+                    sdict = json.loads(new_style_json) if isinstance(new_style_json, str) else dict(new_style_json)
+                    avg_scale = (scale_x + scale_y) / 2.0
+                    if "stroke_width" in sdict and sdict["stroke_width"] is not None:
+                        sdict["stroke_width"] = max(1, round(float(sdict["stroke_width"]) * avg_scale))
+                    if "font_size" in sdict and sdict["font_size"] is not None:
+                        sdict["font_size"] = max(8, round(float(sdict["font_size"]) * avg_scale))
+                    new_style_json = json.dumps(sdict)
+                except Exception:
+                    new_style_json = old_s.get("style_json")
+            elif isinstance(new_style_json, dict):
+                new_style_json = json.dumps(new_style_json)
+
+            conn.execute(
+                """
+                INSERT INTO layout_shapes
+                (id, revision_id, shape_type, label, x, y, width, height,
+                 rotation, color, style_json, pitch_id, equipment_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    target_revision_id,
+                    _text(old_s.get("shape_type") or "rectangle"),
+                    _text(old_s.get("label")),
+                    new_x,
+                    new_y,
+                    new_w,
+                    new_h,
+                    float(old_s.get("rotation") or 0.0),
+                    _text(old_s.get("color") or "#1976d2"),
+                    _text(new_style_json or "{}"),
+                    _text(old_s.get("pitch_id")) or None,
+                    _text(old_s.get("equipment_id")) or None,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            imported_count += 1
+
+        store.record_audit_event(
+            project_id,
+            "Layouts",
+            "Import layout shapes",
+            imported_count,
+            editor,
+            {
+                "layout_id": str(target_rev["layout_id"]),
+                "target_revision_number": int(target_rev["revision_number"]),
+                "source_revision_number": int(source_rev["revision_number"]),
+                "imported_count": imported_count,
+                "scale_x": round(scale_x, 4),
+                "scale_y": round(scale_y, 4),
+                "replace_existing": replace_existing,
+            },
+            _conn=conn,
+        )
+
+    return imported_count
+
+
 # --- Section Pitch Dimensional Standards ---
 
 
@@ -967,11 +1476,21 @@ __domain_exports__ = [
     "list_layout_revisions",
     "get_layout_revision",
     "get_latest_layout_revision",
+    "SUPPORTED_LAYOUT_EXTENSIONS",
+    "get_pdf_page_count",
+    "render_pdf_page_to_image",
+    "render_dxf_to_image",
+    "apply_image_orientation",
+    "apply_image_crop",
+    "auto_detect_whitespace_crop",
+    "annotate_preview_with_dimensions",
+    "load_and_orient_layout_preview",
     "create_layout_revision",
     "update_layout_revision_scale",
     "delete_layout_revision",
     "list_layout_shapes",
     "save_layout_shapes",
+    "import_shapes_from_revision",
     "get_section_pitch_standards",
     "set_section_pitch_standard",
     "list_project_yamazumi_pitches",
