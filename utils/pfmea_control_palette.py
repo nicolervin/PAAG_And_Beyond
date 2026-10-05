@@ -656,11 +656,22 @@ def pfmea_control_palette(
     )
 
 
+def _plain_text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
 def _cause_target_key(row: pd.Series) -> str:
-    cause_id = str(row.get("cause_id") or "").strip()
+    cause_id = _plain_text(row.get("cause_id"))
     if cause_id:
         return f"cause:{cause_id}"
-    draft_id = str(row.get("draft_row_id") or row.get("id") or "").strip()
+    draft_id = _plain_text(row.get("draft_row_id")) or _plain_text(row.get("id"))
     return f"draft:{draft_id}"
 
 
@@ -693,7 +704,7 @@ def render_pfmea_control_drawer(
         # Identify targets
         targets: dict[str, pd.Series] = {}
         for _, row in rows.iterrows():
-            work_element_id = str(row.get("work_element_id") or "").strip()
+            work_element_id = _plain_text(row.get("work_element_id"))
             if work_element_id:
                 t_key = _cause_target_key(row)
                 if t_key and t_key != "draft:":
@@ -708,10 +719,10 @@ def render_pfmea_control_drawer(
 
         def _format_target(k: str) -> str:
             target_row = targets[k]
-            step = step_by_id.get(str(target_row.get("work_element_id") or "").strip(), {})
-            step_name = step.get("work_element") or target_row.get("process_function") or "Op"
-            cause = target_row.get("potential_causes") or "Unspecified Cause"
-            item = target_row.get("item_number") or step.get("pitch") or ""
+            step = step_by_id.get(_plain_text(target_row.get("work_element_id")), {})
+            step_name = _plain_text(step.get("work_element")) or _plain_text(target_row.get("process_function")) or "Op"
+            cause = _plain_text(target_row.get("potential_causes")) or "Unspecified Cause"
+            item = _plain_text(target_row.get("item_number")) or _plain_text(step.get("pitch"))
             prefix = f"[{item}] " if item else ""
             return f"{prefix}{step_name} — Cause: {cause}"
 
@@ -727,11 +738,18 @@ def render_pfmea_control_drawer(
             return
 
         target_row = targets[selected_target_key]
-        work_element_id = str(target_row.get("work_element_id") or "").strip()
+        work_element_id = _plain_text(target_row.get("work_element_id"))
         cause_label = _format_target(selected_target_key)
 
         # Current selections on target
         def _to_list(val) -> list[str]:
+            if val is None:
+                return []
+            try:
+                if bool(pd.isna(val)):
+                    return []
+            except (TypeError, ValueError):
+                pass
             if isinstance(val, (list, tuple)):
                 return [str(v) for v in val if str(v).strip()]
             if isinstance(val, str) and val.strip():
@@ -746,14 +764,17 @@ def render_pfmea_control_drawer(
         available_quality: list[dict] = []
         for _, qrow in quality_df.iterrows():
             source_key = f"quality:{qrow['id']}"
-            q_label = f"Quality — {qrow['unique_identifier']} ({qrow['requirement_type']}) {qrow['description'] or ''}"
+            ident = _plain_text(qrow.get("unique_identifier")) or "Drawing Req"
+            req_type = _plain_text(qrow.get("requirement_type")) or "Specification"
+            desc = _plain_text(qrow.get("description"))
+            q_label = f"Quality — {ident} ({req_type}) {desc}".strip()
             control_labels[source_key] = q_label
             available_quality.append(
                 {
                     "source_key": source_key,
-                    "identifier": str(qrow.get("unique_identifier") or "Drawing Req"),
-                    "type": str(qrow.get("requirement_type") or "Specification"),
-                    "description": str(qrow.get("description") or ""),
+                    "identifier": ident,
+                    "type": req_type,
+                    "description": desc,
                     "label": q_label,
                 }
             )
@@ -783,12 +804,20 @@ def render_pfmea_control_drawer(
         seen_manual_keys: set[str] = set()
 
         for _, opt in prev_opts.iterrows():
-            if not bool(opt.get("active", True)):
+            active_val = opt.get("active")
+            is_active = True
+            if active_val is not None:
+                try:
+                    if not pd.isna(active_val):
+                        is_active = bool(active_val)
+                except (TypeError, ValueError):
+                    pass
+            if not is_active:
                 continue
             skey = f"manual:{opt['id']}"
             if skey not in seen_manual_keys:
                 seen_manual_keys.add(skey)
-                lbl = str(opt.get("label") or "")
+                lbl = _plain_text(opt.get("label"))
                 control_labels[skey] = lbl
                 available_manual.append(
                     {
@@ -799,12 +828,20 @@ def render_pfmea_control_drawer(
                 )
 
         for _, opt in det_opts.iterrows():
-            if not bool(opt.get("active", True)):
+            active_val = opt.get("active")
+            is_active = True
+            if active_val is not None:
+                try:
+                    if not pd.isna(active_val):
+                        is_active = bool(active_val)
+                except (TypeError, ValueError):
+                    pass
+            if not is_active:
                 continue
             skey = f"manual:{opt['id']}"
             if skey not in seen_manual_keys:
                 seen_manual_keys.add(skey)
-                lbl = str(opt.get("label") or "")
+                lbl = _plain_text(opt.get("label"))
                 control_labels[skey] = lbl
                 available_manual.append(
                     {

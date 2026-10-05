@@ -1451,6 +1451,27 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         row_raw = pd.Series({"id": "raw_789", "cause_id": "", "draft_row_id": ""})
         self.assertEqual(_cause_target_key(row_raw), "draft:raw_789")
 
+    def test_pfmea_control_palette_handles_pd_na_and_missing_values(self) -> None:
+        from utils.pfmea_control_palette import _cause_target_key, _plain_text
+        import numpy as np
+
+        # Ensure _plain_text never evaluates pd.NA as a boolean
+        self.assertEqual(_plain_text(pd.NA), "")
+        self.assertEqual(_plain_text(np.nan), "")
+        self.assertEqual(_plain_text(None), "")
+        self.assertEqual(_plain_text("  valid text  "), "valid text")
+        self.assertEqual(_plain_text(123), "123")
+
+        # Ensure row with pd.NA in cause_id / draft_row_id / id does not raise TypeError
+        row_na_empty = pd.Series({"id": pd.NA, "cause_id": pd.NA, "draft_row_id": pd.NA})
+        self.assertEqual(_cause_target_key(row_na_empty), "draft:")
+
+        row_na_with_draft = pd.Series({"id": pd.NA, "cause_id": pd.NA, "draft_row_id": "draft_999"})
+        self.assertEqual(_cause_target_key(row_na_with_draft), "draft:draft_999")
+
+        row_na_with_cause = pd.Series({"id": pd.NA, "cause_id": "c_555", "draft_row_id": pd.NA})
+        self.assertEqual(_cause_target_key(row_na_with_cause), "cause:c_555")
+
 
 if __name__ == "__main__":
     unittest.main()
