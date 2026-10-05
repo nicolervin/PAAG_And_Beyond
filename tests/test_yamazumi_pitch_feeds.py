@@ -275,6 +275,209 @@ class YamazumiPitchFeedTests(unittest.TestCase):
             0,
         )
 
+    def test_import_replacement_rebuilds_target_area_dataset(self) -> None:
+        target_id = self.add_pitch("OLD-1")
+        feeder_id = self.add_pitch(
+            "OLD-FEED", pitch_type="Kitter", target_id=target_id
+        )
+        old_element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            target_id,
+            {
+                "description": "Old work",
+                "time_s": 3,
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+
+        counts = store.import_yamazumi_rows(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame(
+                [self.import_row("Main", "NEW-1", "Replacement work")]
+            ),
+            {},
+            replace_existing_elements=True,
+            source_label="PDF import",
+        )
+
+        self.assertEqual(counts, (1, 1, 1))
+        self.assertEqual(
+            store.query(
+                "SELECT pitch_number FROM yamazumi_pitches WHERE area_id=?",
+                (self.area_id,),
+            ),
+            [{"pitch_number": "NEW-1"}],
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT description, source FROM yamazumi_elements WHERE area_id=?",
+                (self.area_id,),
+            ),
+            [{"description": "Replacement work", "source": "PDF import"}],
+        )
+        self.assertEqual(
+            store.query(
+                """SELECT COUNT(*) AS count FROM yamazumi_pitches
+                   WHERE id IN (?, ?)""",
+                (target_id, feeder_id),
+            )[0]["count"],
+            0,
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT COUNT(*) AS count FROM yamazumi_elements WHERE id=?",
+                (old_element_id,),
+            )[0]["count"],
+            0,
+        )
+
+    def test_import_replacement_rolls_back_cleared_dataset_on_conflict(self) -> None:
+        target_id = self.add_pitch("OLD-1")
+        self.add_pitch("TAKEN-1", area_id=self.same_scenario_other_area_id)
+        old_element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            target_id,
+            {
+                "description": "Old work",
+                "time_s": 3,
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "unique across the scenario"):
+            store.import_yamazumi_rows(
+                self.project_id,
+                self.scenario_id,
+                pd.DataFrame(
+                    [self.import_row("Main", "taken-1", "Replacement work")]
+                ),
+                {},
+                replace_existing_elements=True,
+                source_label="PDF import",
+            )
+
+        self.assertEqual(
+            store.query(
+                "SELECT pitch_number FROM yamazumi_pitches WHERE id=?",
+                (target_id,),
+            ),
+            [{"pitch_number": "OLD-1"}],
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT description FROM yamazumi_elements WHERE id=?",
+                (old_element_id,),
+            ),
+            [{"description": "Old work"}],
+        )
+
+    def test_bulk_element_delete_spans_areas_and_writes_one_audit_event(self) -> None:
+        main_pitch_id = self.add_pitch("MAIN-DELETE")
+        other_pitch_id = self.add_pitch(
+            "OTHER-DELETE", area_id=self.same_scenario_other_area_id
+        )
+        main_element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            main_pitch_id,
+            {
+                "description": "Main delete",
+                "time_s": 1,
+                "model_variants": ["Base"],
+            },
+        )
+        other_element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.same_scenario_other_area_id,
+            other_pitch_id,
+            {
+                "description": "Other delete",
+                "time_s": 1,
+                "model_variants": ["Base"],
+            },
+        )
+
+        result = store.delete_yamazumi_elements(
+            self.project_id,
+            self.scenario_id,
+            [main_element_id, other_element_id],
+            audit_editor_name="Test editor",
+        )
+
+        self.assertEqual(result["deleted_count"], 2)
+        self.assertEqual(
+            store.query(
+                """SELECT COUNT(*) AS count FROM yamazumi_elements
+                   WHERE id IN (?, ?)""",
+                (main_element_id, other_element_id),
+            )[0]["count"],
+            0,
+        )
+        events = store.query(
+            """SELECT action, row_count, editor_name FROM audit_log
+               WHERE project_id=? AND table_name='Yamazumi elements'
+               ORDER BY id""",
+            (self.project_id,),
+        )
+        self.assertEqual(
+            events,
+            [{
+                "action": "Bulk delete",
+                "row_count": 2,
+                "editor_name": "Test editor",
+            }],
+        )
+
+    def test_bulk_element_delete_rejects_cross_scenario_selection_atomically(self) -> None:
+        main_pitch_id = self.add_pitch("MAIN-KEEP")
+        other_pitch_id = self.add_pitch(
+            "OTHER-KEEP", area_id=self.other_area_id
+        )
+        main_element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            main_pitch_id,
+            {
+                "description": "Main keep",
+                "time_s": 1,
+                "model_variants": ["Base"],
+            },
+        )
+        other_element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.other_area_id,
+            other_pitch_id,
+            {
+                "description": "Other keep",
+                "time_s": 1,
+                "model_variants": ["Base"],
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "No work elements were deleted"):
+            store.delete_yamazumi_elements(
+                self.project_id,
+                self.scenario_id,
+                [main_element_id, other_element_id],
+                audit_editor_name="Test editor",
+            )
+
+        self.assertEqual(
+            store.query(
+                """SELECT COUNT(*) AS count FROM yamazumi_elements
+                   WHERE id IN (?, ?)""",
+                (main_element_id, other_element_id),
+            )[0]["count"],
+            2,
+        )
+
     def test_legacy_conflicts_are_reported_and_block_cloning_and_new_pitches(self) -> None:
         self.install_legacy_address_conflict("LEGACY-1")
 
@@ -551,6 +754,160 @@ class YamazumiPitchFeedTests(unittest.TestCase):
         self.assertEqual(
             store.delete_yamazumi_pitch(self.project_id, self.area_id, target_id), 0
         )
+
+    def test_move_pitches_moves_assigned_work_and_audits_atomically(self) -> None:
+        self.add_pitch(
+            "DEST-1", area_id=self.same_scenario_other_area_id
+        )
+        target_id = self.add_pitch("P-MOVE")
+        feeder_id = self.add_pitch(
+            "SUB-MOVE", pitch_type="Subassembly", target_id=target_id
+        )
+        element_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            target_id,
+            {
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+                "description": "Move with pitch",
+                "time_s": 3.5,
+                "work_region": "Legacy region",
+            },
+        )
+        self.conn.execute(
+            """UPDATE yamazumi_elements
+               SET process_element_id='linked-process', process_sync_status='Synced'
+               WHERE id=?""",
+            (element_id,),
+        )
+
+        preview = store.preview_yamazumi_pitch_move(
+            self.project_id,
+            self.scenario_id,
+            self.area_id,
+            self.same_scenario_other_area_id,
+            [feeder_id, target_id],
+        )
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["assigned_element_count"], 1)
+        self.assertEqual(preview["linked_process_count"], 1)
+
+        result = store.move_yamazumi_pitches(
+            self.project_id,
+            self.scenario_id,
+            self.area_id,
+            self.same_scenario_other_area_id,
+            [feeder_id, target_id],
+            editor_name="Move tester",
+        )
+
+        moved_pitches = self.conn.execute(
+            """SELECT id, area_id, sequence, feeds_into_pitch_id
+               FROM yamazumi_pitches WHERE id IN (?, ?) ORDER BY sequence""",
+            (target_id, feeder_id),
+        ).fetchall()
+        self.assertEqual(
+            [str(row["id"]) for row in moved_pitches],
+            [target_id, feeder_id],
+        )
+        self.assertTrue(all(
+            str(row["area_id"]) == self.same_scenario_other_area_id
+            for row in moved_pitches
+        ))
+        self.assertEqual([int(row["sequence"]) for row in moved_pitches], [20, 30])
+        moved_feeder = next(row for row in moved_pitches if row["id"] == feeder_id)
+        self.assertEqual(str(moved_feeder["feeds_into_pitch_id"]), target_id)
+        moved_element = self.conn.execute(
+            """SELECT area_id, pitch_id, process_element_id, process_sync_status
+               FROM yamazumi_elements WHERE id=?""",
+            (element_id,),
+        ).fetchone()
+        self.assertEqual(str(moved_element["area_id"]), self.same_scenario_other_area_id)
+        self.assertEqual(str(moved_element["pitch_id"]), target_id)
+        self.assertEqual(str(moved_element["process_element_id"]), "linked-process")
+        self.assertEqual(str(moved_element["process_sync_status"]), "Needs IE review")
+        self.assertEqual(result["pitch_count"], 2)
+        self.assertEqual(result["element_count"], 1)
+        event = self.conn.execute(
+            """SELECT action, row_count, editor_name, details
+               FROM audit_log WHERE table_name='Yamazumi pitches'
+               ORDER BY rowid DESC LIMIT 1"""
+        ).fetchone()
+        self.assertEqual(str(event["action"]), "Move to another area")
+        self.assertEqual(int(event["row_count"]), 2)
+        self.assertEqual(str(event["editor_name"]), "Move tester")
+        self.assertIn('"work_elements_moved": 1', str(event["details"]))
+
+    def test_move_pitches_blocks_a_feed_relationship_split_across_areas(self) -> None:
+        target_id = self.add_pitch("P-SPLIT")
+        feeder_id = self.add_pitch(
+            "SUB-SPLIT", pitch_type="Subassembly", target_id=target_id
+        )
+
+        preview = store.preview_yamazumi_pitch_move(
+            self.project_id,
+            self.scenario_id,
+            self.area_id,
+            self.same_scenario_other_area_id,
+            [target_id],
+        )
+        self.assertFalse(preview["ready"])
+        self.assertEqual(len(preview["feed_blockers"]), 1)
+        with self.assertRaisesRegex(ValueError, "Move every pitch"):
+            store.move_yamazumi_pitches(
+                self.project_id,
+                self.scenario_id,
+                self.area_id,
+                self.same_scenario_other_area_id,
+                [feeder_id],
+                editor_name="Move tester",
+            )
+        saved = self.conn.execute(
+            "SELECT area_id FROM yamazumi_pitches WHERE id IN (?, ?)",
+            (target_id, feeder_id),
+        ).fetchall()
+        self.assertTrue(all(str(row["area_id"]) == self.area_id for row in saved))
+
+    def test_move_pitches_rejects_destinations_outside_the_active_scenario(self) -> None:
+        pitch_id = self.add_pitch("P-SCENARIO")
+        with self.assertRaisesRegex(ValueError, "active planning scenario"):
+            store.move_yamazumi_pitches(
+                self.project_id,
+                self.scenario_id,
+                self.area_id,
+                self.other_area_id,
+                [pitch_id],
+                editor_name="Move tester",
+            )
+        with self.assertRaisesRegex(ValueError, "Current editor"):
+            store.move_yamazumi_pitches(
+                self.project_id,
+                self.scenario_id,
+                self.area_id,
+                self.same_scenario_other_area_id,
+                [pitch_id],
+                editor_name="",
+            )
+
+    def test_move_pitches_rolls_back_when_audit_fails(self) -> None:
+        pitch_id = self.add_pitch("P-MOVE-ROLLBACK")
+        with patch.object(
+            store, "record_audit_event", side_effect=RuntimeError("audit failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "audit failed"):
+                store.move_yamazumi_pitches(
+                    self.project_id,
+                    self.scenario_id,
+                    self.area_id,
+                    self.same_scenario_other_area_id,
+                    [pitch_id],
+                    editor_name="Move tester",
+                )
+        saved = self.conn.execute(
+            "SELECT area_id FROM yamazumi_pitches WHERE id=?", (pitch_id,)
+        ).fetchone()
+        self.assertEqual(str(saved["area_id"]), self.area_id)
 
     def test_gui_pitch_delete_unassigns_elements_and_audits_atomically(self) -> None:
         pitch_id = self.add_pitch("P-GUI")

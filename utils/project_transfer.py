@@ -32,6 +32,7 @@ class TransferTable:
 PROJECT_TRANSFER_TABLES = (
     TransferTable("projects"), TransferTable("planning_scenarios"),
     TransferTable("parts"), TransferTable("part_scenario_activity"),
+    TransferTable("table_view_preferences"),
     TransferTable("work_elements"), TransferTable("concerns"),
     TransferTable("fishbone_nodes"),
     TransferTable("pits_bom_imports"),

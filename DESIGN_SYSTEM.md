@@ -45,6 +45,12 @@ For Task 09 specifically:
 
 All destructive confirmation widget keys still begin with `destructive_`. No other custom component or screen inherits this exception; every other table continues to require the native Streamlit deletion entry point.
 
+### Approved Yamazumi combined-view deletion exception
+
+The read-only combined-area **Yamazumi work elements** table is an approved exception to the native-toolbar entry-point requirement in items 1, 2, and 4 above. Its native far-left row-selection checkboxes must drive a clearly labeled **Delete selected (N)** action immediately below the table because Streamlit's icon-only toolbar action is not sufficiently discoverable in this read-only multi-area workflow. The action remains disabled when no persisted work elements are selected.
+
+This exception changes only the deletion entry point. Clicking **Delete selected (N)** must reset and rerun the selection surface before opening the same non-dismissible, relationship-aware confirmation required by the universal standard. Confirmation validates all selected IDs against the active project and scenario, deletes atomically through the store layer, records Current editor history, resets the table, shows a toast, and reruns. Cancel clears the pending request without deleting any record. The editable single-area Work elements table retains the universal native-toolbar workflow, and no other table inherits this exception.
+
 ## Universal Table Row Selection Standard
 
 Every data table in this app must show Streamlit's native row-selection checkboxes on the far left. The unlabeled checkbox in the upper-left corner must select or clear all rows currently visible in the table with one click.
@@ -81,7 +87,7 @@ Use `utils/table_ui.py` and `utils/table_filters.py` for every new or modernized
 - Read editable-table deletion targets with `native_selected_rows()`; do not use this helper for ordinary bulk actions. Treat deletion selection as transient UI state and exclude it from change detection with `table_has_unsaved_changes(..., native_row_selection=True)` where applicable.
 - Refuse a normal save while editable-table deletion targets remain selected; ordinary bulk actions use their separate read-only selection surface.
 - Keep native Sort ascending and Sort descending on read-only tables and editable tables that do not create rows. For `num_rows="dynamic"`, call `direct_entry_editor_rows(..., editor_key=...)` immediately before `st.data_editor()` and use its locked external sort controls.
-- When saving a filtered editor, use `merge_filtered_edits()` so rows hidden by filters are preserved. Filters affect only the visible and exported view; they must never delete or overwrite hidden records.
+- When saving a filtered editor, use `merge_filtered_edits()` so rows hidden by filters are preserved. Filters affect only the visible and exported view; they must never delete or overwrite hidden records. If an editable value can change the current filter result or external sort position, capture the positional Streamlit change under the row's hidden stable ID before reapplying filters or sorting. Keep that ID-keyed browser-session draft until Save & Refresh or Undo so a row cannot move, disappear, or transfer its edit to another record between the edit rerun and save rerun.
 - Mark required fields in `st.column_config` and validate them again with `required_field_errors()` or store-layer validation.
 - Convert multi-value database fields to lists for `MultiselectColumn`, then convert them back to their persisted representation before saving. Use `universal_values` in `filter_table()` for values such as All models that match every specific choice.
 - Keep stable identifiers separate from friendly display values. Hide internal IDs visually while retaining them for callback and write resolution; remove genuinely sensitive values before data reaches the browser.
@@ -107,6 +113,12 @@ Use this normal save sequence:
 Treat `st.session_state` as browser-session state, not permanent storage. Apply `apply_pending_table_editor_reset(editor_key)` before constructing an editor whose prior state may need clearing. After a successful save or approved destructive action, call `request_table_editor_reset(editor_key)` before rerunning so stale edits and selections cannot replay.
 
 Unsaved-change Undo normally clears the editor's session-state entry and reruns. A complex multi-table workflow may retain a pre-save snapshot in session state when it genuinely needs saved-state Undo; follow the existing Model definitions and Fishbone patterns. Session-state Undo remains limited to the current browser session and is not an audit or version-control mechanism.
+
+### Parts Catalog saved table view
+
+The Parts Catalog provides an explicit, initially expanded **Saved table view — hide and move columns here** expander above its filters. **Columns shown in saved view** controls visibility, and **Move earlier** / **Move later** control left-to-right order. The expander must plainly state that hide and drag actions from a column's menu inside the table are temporary. Do not rely on the native table column menu for persistence because Streamlit does not expose that browser-only state to the application.
+
+The table view is project-wide per free-text Current editor and applies across the project's scenarios. Layout changes are drafts and participate in the same orange unsaved indicator, Undo action, and **Save & Refresh** transaction as Parts Catalog cell edits. **Reset to default** stages the standard layout but does not persist it immediately. At least one column must remain visible. Ordinary cell edits must retain their mounted editor state and stable row identity without replacing the table's data source on each edit rerun; saved data, filters, and external sort order refresh only after **Save & Refresh**.
 
 ## Deferred decisions
 
@@ -186,13 +198,29 @@ Project and planning-scenario takt values have separate saved display-unit prefe
 
 ### Guided Yamazumi pitch initialization
 
-Selecting a Yamazumi area with no pitch addresses opens one non-dismissible native setup dialog per area visit. The dialog and the persistent **Generate pitch addresses** expander share the same project line code, editable Fishbone-derived section code, inclusive numeric range, odd/even option, status, pitch type, feed target, and model-variant controls. Cancel suppresses the prompt until the contributor leaves and returns to that area. Subassembly and Kitter remain unavailable until the area has a receiving pitch.
+Selecting a Yamazumi area with no pitch addresses automatically expands the persistent **Generate pitch addresses** controls on the page; it must not open a setup dialog on page load or area selection. The controls provide the saved project line code, editable Fishbone-derived section code, inclusive numeric range, odd/even option, status, pitch type, feed target, and model-variant choices. Subassembly and Kitter remain unavailable until the area has a receiving pitch.
 
 Generated address suggestions use `LL-SSS-NNN`: a saved two-character project line code, an editable three-character section abbreviation, and a minimum three-digit sequential suffix that expands naturally at 1000. This is guidance rather than a universal address validator; imports, existing values, and direct edits retain their established compatibility and scenario-wide uniqueness rules. A changed project line code affects future suggestions only and never rewrites saved addresses.
+
+### Yamazumi PDF import preview
+
+The PDF preview must show **Work type** alongside the parsed pitch, variant, duration, description, and work region. Work type is derived from the approved PDF element fills: red is Fluctuation, yellow is Periodic, and every other color is Cycle. A PDF work element requires description text beside its duration in the same visual stack row. Pitch ownership follows the description anchor rather than the right-aligned duration or a midpoint between variable-width header labels; an unpaired duration is ignored. Pitch headers are counted and imported separately so an empty source pitch remains an empty pitch without work borrowed from its neighbor. This preview is evidence for the pending import; no work element is persisted until the contributor applies the import or replacement action.
+
+**Target Fishbone section** is required and lists only existing active sections. It has no default or auto-match option, and the import action remains disabled until the contributor makes a selection. If no active section exists, the import surface directs the contributor to create one first. After a successful PDF or Excel import, rotate the complete import widget group so the uploaded file, preview, replacement choice, target-section choice, and prior action state are cleared for the next upload. A parse, validation, or import failure must retain the file and preview so the contributor can review and retry.
+
+### Move pitches between Yamazumi areas
+
+Place **Move pitches** immediately before Undo and **Save & Refresh** beneath the editable single-area Pitch addresses table. The action is unavailable while the pitch table, balancing board, or native deletion selection contains unresolved changes, and when the active scenario has no other destination area. It opens a native dialog with a separate read-only checkbox table for selecting saved source pitches and a required **Destination Yamazumi area** selector limited to the active planning scenario.
+
+The dialog previews the number of pitches, assigned work elements, and linked Process steps affected. A complete feed-connected set may move together, but the action must block any selection that would leave a Subassembly or Kitter feed relationship crossing area boundaries. The atomic move preserves stable pitch, work-element, and Process links; appends pitches to the destination order; marks moved linked work for IE review; records Current editor history; resets stale table state; and switches the page to the destination area after success. The action does not copy records, move unassigned work or work-region definitions, or change another planning scenario.
 
 The interactive board renders its **Unassigned** lane only while at least one persisted or drafted work element is unassigned. The regular work-element editor and Edit element dialog retain Unassigned as a destination even while that empty lane is hidden.
 
 The **Edit Yamazumi work element** dialog uses its native X, outside-click, and Escape behavior instead of a redundant Cancel button. **Model variants** occupies its own line above the Work type and Work region row. Its red **Delete element** action is a standalone destructive workflow, not a second table-deletion control: it hands off to a non-dismissible confirmation with an explicit Cancel action, identifies the element, and discloses the preserved Process at a Glance step and the Yamazumi relationship and legacy-dependent effects. Cancel restores the edit dialog and its unsaved field values. Confirmation preserves other browser-session board moves, records Current editor history, resets the work-element editor, shows a toast, and reruns.
+
+### Process part-requirement source work
+
+The **Yamazumi work elements** selection table inside Process at a Glance's **Create Part requirements** section shows Cycle work only. Explicit Periodic and Fluctuation elements remain available in Yamazumi but must not appear or be selectable in this Process pairing surface. A missing or blank legacy work type is treated as Cycle for compatibility. This display rule does not delete Yamazumi work or remove an existing Process at a Glance step.
 
 Rule: any new linear dimensional field added to this app must store and display in inches by default. Do not introduce a metric storage column unless explicitly approved by the project owner.
 
@@ -243,6 +271,16 @@ Content rules for help text:
 
 ## Fishbone Section Ordering and Sidebar Context Standard
 
+### Interactive assembly fishbone controls
+
+Place the complete **Fishbone framework** visualization inside a native Streamlit expander that is expanded by default. Its left-side chevron collapses and restores the feature filter, Edit parts & photos action, and complete interactive visual together, matching the numbered workflow expanders on the same page. The interactive visual retains Zoom out, Zoom in, Fit, and Full screen in its own toolbar. Expansion is browser-session presentation state only and must not change Fishbone sections, part uses, feature filtering, audit history, or any persisted planning record.
+
+### Session split-view workspace
+
+The application sidebar supports one browser-session split workspace. Every visible page entry remains clickable for normal navigation and draggable into the labeled split target. A split contains the current routed page and at most one secondary page. Both panes share the active project, active scenario, Current editor, and applicable Fishbone view; a page must not create a pane-local scope selector or alternate write path.
+
+The center divider is draggable between 25% and 75% of the workspace width. The sidebar split status and the secondary-pane Close action both close the secondary pane without changing the current route. Split selection and divider position are session state only and are never audited or persisted. Each rendered page retains its normal title, scope badge, help, validation, save, deletion, confirmation, audit, and history behavior. A rerun caused by a successful write refreshes both panes from current stored data.
+
 Every Fishbone-section option list must follow the deterministic depth-first order returned by `assembly_section_walk_order()`: each main-spine section, its recursively nested subassemblies, then the next main-spine section. Siblings retain `(sequence, name)` ordering. Do not substitute alphabetical order or the flat raw `assembly_sections.sequence` order in a selector.
 
 Dropdowns use ancestry breadcrumbs such as **Main line 2 › Wheel Assembly** so nested sections remain understandable without relying on indentation alone. Stable section UUIDs remain the widget values. Special choices such as **All active sections**, **Unlinked**, **Not assigned**, and **Product / main assembly** appear before the ordered business choices. Each workflow retains its established eligibility rules: active-only controls remain active-only, while existing-record and continuity workflows may retain inactive current values.
@@ -258,6 +296,8 @@ An already linked Yamazumi area must not show a redundant read-only Fishbone fie
 ## Yamazumi Board Pitch Order Standard
 
 The interactive board presents pitch stacks in numeric-aware, case-insensitive pitch-address order, which is the pitch tier of the area's Op ID sequence. A complete Subassembly or Kitter feed chain appears immediately before its receiving pitch; sibling feeders retain pitch-address order. This ordering is derived UI state only. It must not update `yamazumi_pitches.sequence`, addresses, feed targets, stack contents, audit history, or any other persisted record. The established north/top odd-address and south/bottom even-address rendering remains unchanged.
+
+Place a **Pitch types shown** multi-select beside the **Interactive balancing board** heading. Its options are Pitch, Waterspider, Subassembly, Kitter, and Repacker, with all types included by default. Deselected types hide their pitch cards and assigned work from the board only, after the complete feed-aware order has been derived; they must not move work to Unassigned, change feed relationships, alter metrics, modify a saved or draft stack, or create audit history. The Unassigned lane retains its established visibility and destination behavior because Unassigned is not a pitch type. The selection is browser-session UI state scoped to the active project, scenario, and Yamazumi area.
 
 Draw one continuous red takt line across each assigned-pitch lane using the effective area takt. Element heights must be proportional to time so a stack crosses the line only when its model-variant total exceeds takt. Mirror the scale from the assembly-flow centerline: north grows upward and south grows downward. Hide the line for zero or invalid takt and on Unassigned work. The line is read-only derived presentation and must not add a saved over-takt status or audit event.
 

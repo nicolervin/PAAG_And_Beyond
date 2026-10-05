@@ -118,7 +118,7 @@ metrics = tree_data["metrics"]
 if not nodes:
     st.info(
         ":material/account_tree: No PITS BOM occurrences found for this project. "
-        "Import a PITS workbook with a BOM tab via **Import/Export Projects** to explore the Model Tree."
+        "Import a PITS workbook with a BOM tab via **Import/Export PITS** to explore the Model Tree."
     )
     st.stop()
 

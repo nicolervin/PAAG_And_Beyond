@@ -440,6 +440,56 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertTrue(mini_bom_tables)
         self.assertFalse(mini_bom_tables[0].empty)
 
+    def test_parts_catalog_saved_table_view_round_trip(self) -> None:
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app = self.run_page("app_pages/parts.py")
+        columns = next(
+            widget
+            for widget in app.multiselect
+            if widget.label == "Columns shown in saved view"
+        )
+        columns.set_value(["part_number", "active", "description"])
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app.run(timeout=30)
+        self.assertIsNone(
+            store.table_view_preference(
+                self.project_id, "AppTest smoke", "parts_catalog"
+            )
+        )
+        move_column = next(
+            widget for widget in app.selectbox if widget.label == "Column to move"
+        )
+        move_column.set_value("active")
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app.run(timeout=30)
+        move_later = next(
+            button for button in app.button if button.label == "Move later"
+        )
+        move_later.click()
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app.run(timeout=30)
+        columns = next(
+            widget
+            for widget in app.multiselect
+            if widget.label == "Columns shown in saved view"
+        )
+        self.assertEqual(
+            columns.value, ["part_number", "description", "active"]
+        )
+        save = next(button for button in app.button if button.label == "Save & Refresh")
+        save.click()
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        preference = store.table_view_preference(
+            self.project_id, "AppTest smoke", "parts_catalog"
+        )
+        self.assertIsNotNone(preference)
+        self.assertEqual(
+            preference["column_order"],
+            ["part_number", "description", "active"],
+        )
+
     def test_assemblies_smoke(self) -> None:
         app = self.run_page("app_pages/assemblies.py")
         self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
@@ -563,10 +613,49 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         self.assertEqual(process_section.value, self.section_id)
 
+    def test_split_workspace_renders_two_pages_in_one_shared_session(self) -> None:
+        app = AppTest.from_file(
+            str(store.ROOT / "streamlit_app.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest split workspace"
+        app.session_state["split_workspace_secondary_url_path"] = "bom_tree"
+        app.session_state["split_workspace_ratio"] = 0.6
+
+        app.run(timeout=30)
+
+        rendered_titles = [title.value for title in app.title]
+        self.assertIn("Project overview", rendered_titles)
+        self.assertIn("Model Tree", rendered_titles)
+        self.assertEqual(list(app.exception), [])
+
     def test_parts_to_fishbone_smoke(self) -> None:
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
             app = self.run_page("app_pages/fishbone.py")
         self.assertTrue(any(title.value == "Parts to fishbone" for title in app.title))
+        framework_expanders = [
+            status
+            for status in app.status
+            if status.label == "Fishbone framework"
+        ]
+        self.assertTrue(
+            framework_expanders,
+            [status.label for status in app.status],
+        )
+        framework_expander = framework_expanders[0]
+        self.assertTrue(
+            any(
+                widget.label == "View fishbone for features"
+                for widget in framework_expander.multiselect
+            )
+        )
+        self.assertTrue(
+            any(
+                button.label == "Edit parts & photos"
+                for button in framework_expander.button
+            )
+        )
 
     def test_new_fishbone_section_audits_automatic_yamazumi_area(self) -> None:
         app = AppTest.from_file(
@@ -779,6 +868,31 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             "Define element flags", [expander.label for expander in app.expander]
         )
         self.assertNotIn("Save area settings", [button.label for button in app.button])
+
+    def test_yamazumi_pitch_table_opens_move_dialog(self) -> None:
+        store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Move destination area"
+        )
+        app = self.run_page("app_pages/yamazumi.py")
+        request_move = next(
+            button
+            for button in app.button
+            if str(button.key).startswith("yamazumi_move_pitches_request_")
+        )
+        self.assertFalse(request_move.disabled)
+
+        app = request_move.click().run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(any(
+            selectbox.label == "Destination Yamazumi area"
+            for selectbox in app.selectbox
+        ))
+        self.assertTrue(any(
+            button.label == "Move pitches"
+            and str(button.key).startswith("confirm_move_pitches_")
+            for button in app.button
+        ))
 
     def test_yamazumi_edit_dialog_restores_draft_and_confirms_single_delete(self) -> None:
         area_id = store.upsert_yamazumi_area(
@@ -1113,7 +1227,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ["Safety"],
         )
 
-    def test_empty_yamazumi_area_prompts_once_per_area_visit(self) -> None:
+    def test_empty_yamazumi_area_uses_on_page_controls_without_prompt(self) -> None:
         first_area_id = store.upsert_yamazumi_area(
             self.project_id, self.scenario_id, "Empty prompt one"
         )
@@ -1131,32 +1245,37 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
 
         with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
             app.run(timeout=30)
-            cancel_key = (
-                f"cancel_empty_pitch_setup_{self.project_id}_{self.scenario_id}_"
-                f"{first_area_id}"
+            first_generate_key = (
+                f"generate_yamazumi_range_expander_{self.project_id}_{first_area_id}"
             )
-            self.assertTrue(any(button.key == cancel_key for button in app.button))
-            next(button for button in app.button if button.key == cancel_key).click()
-            app.run(timeout=30)
-            self.assertFalse(any(button.key == cancel_key for button in app.button))
+            self.assertTrue(
+                any(button.key == first_generate_key for button in app.button)
+            )
+            self.assertFalse(
+                any(
+                    str(button.key).startswith("cancel_empty_pitch_setup_")
+                    for button in app.button
+                )
+            )
 
             app.session_state[area_key] = second_area_id
             app.run(timeout=30)
-            second_cancel_key = (
-                f"cancel_empty_pitch_setup_{self.project_id}_{self.scenario_id}_"
-                f"{second_area_id}"
+            second_generate_key = (
+                f"generate_yamazumi_range_expander_{self.project_id}_{second_area_id}"
             )
             self.assertTrue(
-                any(button.key == second_cancel_key for button in app.button)
+                any(button.key == second_generate_key for button in app.button)
             )
-
-            app.session_state[area_key] = first_area_id
-            app.run(timeout=30)
-            self.assertTrue(any(button.key == cancel_key for button in app.button))
+            self.assertFalse(
+                any(
+                    str(button.key).startswith("cancel_empty_pitch_setup_")
+                    for button in app.button
+                )
+            )
 
         self.assertEqual(list(app.exception), [])
 
-    def test_empty_yamazumi_prompt_generates_guided_range_and_audit(self) -> None:
+    def test_empty_yamazumi_controls_generate_guided_range_and_audit(self) -> None:
         area_id = store.upsert_yamazumi_area(
             self.project_id, self.scenario_id, "Guided range area"
         )
@@ -1167,7 +1286,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "AppTest smoke"
         app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
-        surface = "empty_dialog"
+        surface = "expander"
 
         with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
             app.run(timeout=30)
@@ -1794,6 +1913,46 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
             )
             for text_input in app.text_input
+        ))
+
+    def test_process_pairing_source_shows_cycle_work_only(self) -> None:
+        cycle_id = self.add_process_pairing_source()
+        source = store.query(
+            """SELECT area_id, pitch_id FROM yamazumi_elements
+               WHERE id=? AND project_id=?""",
+            (cycle_id, self.project_id),
+        )[0]
+        for description, work_type in (
+            ("Periodic pairing source", "Periodic"),
+            ("Fluctuation pairing source", "Fluctuation"),
+        ):
+            store.add_yamazumi_element(
+                self.project_id,
+                str(source["area_id"]),
+                str(source["pitch_id"]),
+                {
+                    "description": description,
+                    "time_s": 1,
+                    "model_variants": ["Base"],
+                    "work_type": work_type,
+                },
+            )
+
+        app = self.run_page("app_pages/process.py")
+        source_table = next(
+            table.value
+            for table in app.dataframe
+            if "material_group_count" in table.value.columns
+        )
+        visible_descriptions = set(source_table["description"].astype(str))
+
+        self.assertIn("Pair smoke component", visible_descriptions)
+        self.assertNotIn("Periodic pairing source", visible_descriptions)
+        self.assertNotIn("Fluctuation pairing source", visible_descriptions)
+        self.assertTrue(any(
+            "Periodic and Fluctuation work is managed in Yamazumi"
+            in caption.value
+            for caption in app.caption
         ))
 
     def test_process_pairing_without_parts_remains_unclassified(self) -> None:

@@ -20,7 +20,11 @@ class DirectEntryEditorRowsTests(unittest.TestCase):
         })
 
     def render_rows(
-        self, *, sort_column: str = "", descending: bool = False
+        self,
+        *,
+        sort_column: str = "",
+        descending: bool = False,
+        additional_unsaved_changes: bool = False,
     ) -> tuple[pd.DataFrame, Mock]:
         controls = Mock()
         controls.selectbox.return_value = sort_column
@@ -33,6 +37,7 @@ class DirectEntryEditorRowsTests(unittest.TestCase):
                 self.dataframe,
                 editor_key="example_editor",
                 sort_columns=["name", "active", "tags"],
+                additional_unsaved_changes=additional_unsaved_changes,
             )
         return rows, controls
 
@@ -57,6 +62,14 @@ class DirectEntryEditorRowsTests(unittest.TestCase):
         }
 
         _, controls = self.render_rows(sort_column="name")
+
+        self.assertTrue(controls.selectbox.call_args.kwargs["disabled"])
+        self.assertTrue(controls.toggle.call_args.kwargs["disabled"])
+
+    def test_sort_controls_lock_for_id_keyed_draft_changes(self) -> None:
+        _, controls = self.render_rows(
+            sort_column="name", additional_unsaved_changes=True
+        )
 
         self.assertTrue(controls.selectbox.call_args.kwargs["disabled"])
         self.assertTrue(controls.toggle.call_args.kwargs["disabled"])
@@ -200,6 +213,62 @@ class TableEditorResetTests(unittest.TestCase):
         self.assertEqual(first_key, second_key)
 
 
+class StableIdEditorDraftTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.saved = pd.DataFrame(
+            {
+                "id": ["part-1", "part-2"],
+                "part_number": ["P-001", "P-002"],
+                "active": [True, True],
+                "description": ["First", "Second"],
+            }
+        )
+
+    def test_active_edit_survives_when_changed_row_is_filtered_out(self) -> None:
+        draft, captured = table_filters.capture_id_keyed_editor_draft(
+            self.saved,
+            {"edited_rows": {0: {"active": False}}},
+        )
+        filtered_next_run = self.saved.iloc[[1]].reset_index(drop=True)
+
+        draft, captured = table_filters.capture_id_keyed_editor_draft(
+            filtered_next_run,
+            {"edited_rows": {0: {"active": False}}},
+            draft,
+            captured,
+        )
+        merged = table_filters.apply_id_keyed_editor_draft(self.saved, draft)
+
+        self.assertFalse(bool(merged.loc[merged["id"].eq("part-1"), "active"].iloc[0]))
+        self.assertTrue(bool(merged.loc[merged["id"].eq("part-2"), "active"].iloc[0]))
+
+    def test_manual_edits_for_multiple_parts_are_retained_by_id(self) -> None:
+        draft, captured = table_filters.capture_id_keyed_editor_draft(
+            self.saved,
+            {"edited_rows": {0: {"description": "Updated first"}}},
+        )
+        draft, captured = table_filters.capture_id_keyed_editor_draft(
+            self.saved.iloc[[1]].reset_index(drop=True),
+            {"edited_rows": {}},
+            draft,
+            captured,
+        )
+        draft, _ = table_filters.capture_id_keyed_editor_draft(
+            self.saved.iloc[[1]].reset_index(drop=True),
+            {"edited_rows": {0: {"active": False}}},
+            draft,
+            captured,
+        )
+
+        merged = table_filters.apply_id_keyed_editor_draft(self.saved, draft)
+
+        self.assertEqual(
+            merged.loc[merged["id"].eq("part-1"), "description"].iloc[0],
+            "Updated first",
+        )
+        self.assertFalse(bool(merged.loc[merged["id"].eq("part-2"), "active"].iloc[0]))
+
+
 class EditableTableFooterTests(unittest.TestCase):
     def test_footer_is_right_aligned_and_uses_standard_save_action(self) -> None:
         footer = Mock()
@@ -229,6 +298,27 @@ class EditableTableFooterTests(unittest.TestCase):
         self.assertEqual(save_call.kwargs["type"], "primary")
         self.assertEqual(save_call.kwargs["icon"], ":material/save:")
         self.assertTrue(actions.save_and_refresh)
+
+    def test_footer_can_render_one_additional_action_before_undo(self) -> None:
+        footer = Mock()
+        footer.button.side_effect = [True, False, False]
+
+        with (
+            patch.object(table_ui.st, "session_state", {"example_editor": {}}),
+            patch.object(table_ui.st, "container", return_value=footer),
+        ):
+            actions = table_ui.editable_table_footer(
+                editor_key="example_editor",
+                key_prefix="example",
+                additional_action_label="Move pitches",
+                additional_action_icon=":material/drive_file_move:",
+                additional_action_key="move_pitches",
+            )
+
+        move_call = footer.button.call_args_list[0]
+        self.assertEqual(move_call.args[0], "Move pitches")
+        self.assertEqual(move_call.kwargs["key"], "move_pitches")
+        self.assertTrue(actions.additional_action)
 
 
 if __name__ == "__main__":

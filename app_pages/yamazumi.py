@@ -18,12 +18,15 @@ from utils.store import (
     complexity_features,
     copy_yamazumi_records,
     delete_yamazumi_element,
+    delete_yamazumi_elements,
     delete_yamazumi_pitch,
     get_planning_scenario,
     generate_yamazumi_pitch_range,
     import_yamazumi_rows,
+    move_yamazumi_pitches,
     parse_yamazumi_model_variants,
     planning_scenarios,
+    preview_yamazumi_pitch_move,
     preview_yamazumi_copy,
     record_audit_event,
     rename_yamazumi_variants,
@@ -72,7 +75,10 @@ from utils.table_ui import (
     table_has_unsaved_changes,
 )
 from utils.yamazumi_board import yamazumi_board
-from utils.yamazumi_order import order_yamazumi_pitches_for_board
+from utils.yamazumi_order import (
+    filter_yamazumi_pitches_for_board,
+    order_yamazumi_pitches_for_board,
+)
 from utils.time_units import (
     TIME_UNITS,
     display_to_seconds,
@@ -88,6 +94,8 @@ from utils.yamazumi_stack import (
     draft_differs,
     remove_element_from_stack_draft,
 )
+from utils.yamazumi_pdf import parse_yamazumi_pdf
+
 
 
 project_id = st.session_state.get("project_id")
@@ -250,41 +258,193 @@ def order_areas_by_fishbone(rows: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
-with st.expander("Import Yamazumi workbook", icon=":material/upload_file:"):
+yamazumi_import_generation_key = (
+    f"yamazumi_import_generation_{project_id}_{scenario_id}"
+)
+yamazumi_import_generation = int(
+    st.session_state.get(yamazumi_import_generation_key, 0) or 0
+)
+yamazumi_import_widget_scope = (
+    f"{project_id}_{scenario_id}_{yamazumi_import_generation}"
+)
+
+with st.expander("Import Yamazumi file (Excel or PDF)", icon=":material/upload_file:"):
     uploaded = st.file_uploader(
-        "Yamazumi Excel file", type=["xlsx"], key=f"yamazumi_import_file_{scenario_id}"
+        "Yamazumi Excel or PDF file",
+        type=["xlsx", "pdf"],
+        key=f"yamazumi_import_file_{yamazumi_import_widget_scope}",
+        help="Upload an Excel workbook (.xlsx) or a PDF exported from yamazumi.sc.geappl.io.",
     )
     st.caption(
-        f"Imports the current system-style fields. Pitch_Takt_time is interpreted as {takt_config.label.lower()}, "
+        f"Imports pitches, variants, work elements, and cycle times. "
+        f"Pitch_Takt_time is interpreted as {takt_config.label.lower()}, "
         f"and Work_Time_to_complete as {time_config.label.lower()}. "
-        "Sub-Line is matched to a Fishbone section by name when possible; "
-        "unmatched areas remain available to link manually."
+        "Choose an existing active Fishbone section as the required import target."
     )
-    if st.button("Import workbook", type="primary", icon=":material/upload:", disabled=uploaded is None):
+    if uploaded is not None:
+        is_pdf = uploaded.name.lower().endswith(".pdf")
+        parsed_df = None
+        parsed_pitch_df = None
+        pdf_meta = None
+        parse_error = None
         try:
-            rows = pd.read_excel(uploaded)
-            area_count, pitch_count, element_count = import_yamazumi_rows(
-                project_id, scenario_id, rows, section_id_by_name
+            if is_pdf:
+                pdf_res = parse_yamazumi_pdf(uploaded)
+                parsed_df = pdf_res["dataframe"]
+                parsed_pitch_df = pdf_res["pitch_dataframe"]
+                pdf_meta = pdf_res["metadata"]
+            else:
+                parsed_df = pd.read_excel(uploaded)
+        except Exception as exc:
+            parse_error = str(exc)
+
+        if parse_error:
+            st.error(f"Could not parse file: {parse_error}")
+        elif parsed_df is not None and (
+            not parsed_df.empty
+            or (parsed_pitch_df is not None and not parsed_pitch_df.empty)
+        ):
+            parsed_pitch_count = (
+                len(parsed_pitch_df["Pitch_number"].unique())
+                if parsed_pitch_df is not None
+                else len(parsed_df["Pitch_number"].unique())
             )
-            record_audit_event(
-                project_id, "Yamazumi", "Excel import", element_count,
-                st.session_state.get("current_editor", ""),
-                {
-                    "areas": area_count,
-                    "pitches": pitch_count,
-                    "file": uploaded.name,
-                    "takt_time_unit": takt_time_unit,
-                    "work_time_unit": yamazumi_time_unit,
-                },
+            if is_pdf and pdf_meta:
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                with m_col1:
+                    st.metric("Detected Sub-Line", pdf_meta.get("subline") or "—")
+                with m_col2:
+                    st.metric("Pitches", parsed_pitch_count)
+                with m_col3:
+                    st.metric("Work Elements", len(parsed_df))
+                with m_col4:
+                    takt_display = f"{pdf_meta.get('takt_time')} s" if pdf_meta.get("takt_time") else "—"
+                    st.metric("Detected Takt", takt_display)
+
+            replace_elements = st.checkbox(
+                "Replace existing pitch addresses and work elements in target area",
+                value=False,
+                key=f"yamazumi_import_replace_{yamazumi_import_widget_scope}",
+                help=(
+                    "When checked, removes all existing pitch addresses, feed links, and work elements "
+                    "from the target Yamazumi area before importing. The Yamazumi area and its Fishbone "
+                    "pairing remain in place."
+                ),
             )
-            st.toast(f"Imported {element_count} work elements into {pitch_count} pitches", icon=":material/check_circle:")
-            st.rerun()
-        except (ValueError, TypeError) as exc:
-            st.error(str(exc))
+
+            chosen_section_id = None
+            if not active_sections.empty:
+                chosen_section_id = st.selectbox(
+                    "Target Fishbone section",
+                    options=active_sections["id"].astype(str).tolist(),
+                    index=None,
+                    placeholder="Select a Fishbone section",
+                    format_func=lambda value: section_option_labels.get(
+                        value, section_name_by_id.get(value, value)
+                    ),
+                    help=(
+                        "Required. Imported pitches and work elements will be placed "
+                        "in the selected existing active Fishbone section."
+                    ),
+                    key=f"yamazumi_import_dest_{yamazumi_import_widget_scope}",
+                )
+                if chosen_section_id is not None:
+                    parsed_df = parsed_df.copy()
+                    parsed_df["Sub-Line"] = section_name_by_id[chosen_section_id]
+                    if parsed_pitch_df is not None:
+                        parsed_pitch_df = parsed_pitch_df.copy()
+                        parsed_pitch_df["Sub-Line"] = section_name_by_id[
+                            chosen_section_id
+                        ]
+            else:
+                st.error(
+                    "Create an active Fishbone section before importing Yamazumi data."
+                )
+
+            with st.expander("Preview parsed data", expanded=is_pdf, icon=":material/visibility:"):
+                if parsed_pitch_df is not None:
+                    st.caption(
+                        "Pitch totals include detected pitch addresses with no work elements."
+                    )
+                display_cols = [
+                    c for c in [
+                        "Sub-Line", "Pitch_number", "Pitch_name", "Model_variant",
+                        "Work_Type", "Work_Time_to_complete", "Work_Description",
+                        "Work_region"
+                    ] if c in parsed_df.columns
+                ]
+                st.dataframe(
+                    parsed_df[display_cols],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            import_source_label = "PDF import" if is_pdf else "Excel import"
+            action_btn_text = (
+                f"Replace and import {parsed_pitch_count} pitches and "
+                f"{len(parsed_df)} elements"
+                if replace_elements
+                else f"Import {parsed_pitch_count} pitches and {len(parsed_df)} elements"
+            )
+            import_button_key = (
+                f"destructive_yamazumi_import_replace_{yamazumi_import_widget_scope}"
+                if replace_elements
+                else f"yamazumi_import_apply_{yamazumi_import_widget_scope}"
+            )
+            if st.button(
+                action_btn_text,
+                type="primary",
+                icon=":material/upload:",
+                key=import_button_key,
+                disabled=chosen_section_id is None,
+            ):
+                try:
+                    area_count, pitch_count, element_count = import_yamazumi_rows(
+                        project_id,
+                        scenario_id,
+                        parsed_df,
+                        section_id_by_name,
+                        replace_existing_elements=replace_elements,
+                        source_label=import_source_label,
+                        pitch_rows=parsed_pitch_df,
+                    )
+                    record_audit_event(
+                        project_id,
+                        "Yamazumi",
+                        import_source_label,
+                        element_count,
+                        st.session_state.get("current_editor", ""),
+                        {
+                            "areas": area_count,
+                            "pitches": pitch_count,
+                            "file": uploaded.name,
+                            "replace_existing_dataset": replace_elements,
+                            "takt_time_unit": takt_time_unit,
+                            "work_time_unit": yamazumi_time_unit,
+                            "target_subline": str(
+                                section_name_by_id.get(chosen_section_id, "")
+                            ),
+                        },
+                    )
+                    toast_prefix = "Replaced and imported" if replace_elements else "Imported"
+                    st.session_state[yamazumi_import_generation_key] = (
+                        yamazumi_import_generation + 1
+                    )
+                    st.toast(
+                        f"{toast_prefix} {element_count} work elements into {pitch_count} pitches",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except (ValueError, TypeError) as exc:
+                    st.error(str(exc))
+        elif parsed_df is not None and parsed_df.empty:
+            st.warning("No work elements or pitches were found in the uploaded file.")
 
 areas = order_areas_by_fishbone(yamazumi_areas(project_id, scenario_id))
 if fishbone_sections.empty and areas.empty:
-    st.info("Build an active Fishbone section first, or import a Yamazumi workbook to create an unlinked Yamazumi area.")
+    st.info(
+        "Build an active Fishbone section before importing or planning Yamazumi data."
+    )
     st.stop()
 
 if not fishbone_sections.empty:
@@ -334,6 +494,10 @@ for _, row in areas.iterrows():
         f"{row['name']} · Fishbone: {fishbone_label}" if section_name
         else f"{row['name']} · Unlinked"
     )
+pending_area_selector_key = f"yamazumi_pending_area_{scenario_id}"
+pending_area_id = str(st.session_state.pop(pending_area_selector_key, "") or "")
+if pending_area_id in area_labels:
+    st.session_state[area_selector_key] = pending_area_id
 area_id = st.selectbox(
     "Yamazumi area",
     options=list(area_labels),
@@ -344,13 +508,14 @@ area_id = st.selectbox(
 area = areas.loc[areas["id"].astype(str) == str(area_id)].iloc[0].to_dict()
 pitch_editor_key = f"yamazumi_pitch_editor_{scenario_id}_{area_id}"
 element_editor_key = f"yamazumi_element_editor_{scenario_id}_{area_id}"
+combined_element_editor_key = f"yamazumi_combined_element_editor_{scenario_id}"
 pitch_delete_key = f"yamazumi_pitches_pending_delete_{scenario_id}_{area_id}"
 element_delete_key = f"yamazumi_elements_pending_delete_{scenario_id}_{area_id}"
-empty_pitch_dialog_key = (
-    f"yamazumi_empty_pitch_prompt_{project_id}_{scenario_id}_{area_id}"
-)
 pitch_editor_key = apply_pending_table_editor_reset(pitch_editor_key)
 element_editor_key = apply_pending_table_editor_reset(element_editor_key)
+combined_element_editor_key = apply_pending_table_editor_reset(
+    combined_element_editor_key
+)
 
 default_takt = float(scenario.get("takt_time_s") or 0)
 if not math.isfinite(default_takt):
@@ -540,13 +705,6 @@ if st.session_state.get("yamazumi_reset_scope") in {"area", "all"}:
 
 pitches = yamazumi_pitches(project_id, area_id)
 pitch_address_suggestion = yamazumi_pitch_address_suggestion(project_id, area_id)
-empty_pitch_visit_key = f"yamazumi_empty_pitch_visit_{project_id}_{scenario_id}"
-if st.session_state.get(empty_pitch_visit_key) != str(area_id):
-    st.session_state[empty_pitch_visit_key] = str(area_id)
-    if pitches.empty:
-        st.session_state[empty_pitch_dialog_key] = True
-if not pitches.empty:
-    st.session_state.pop(empty_pitch_dialog_key, None)
 if not pitches.empty:
     pitches["model_variants"] = pitches["model_variants"].apply(
         lambda value: [stored_variant_labels.get(item, item) for item in json.loads(value or '["Base"]')]
@@ -829,21 +987,6 @@ def pitch_range_controls(surface: str) -> bool:
         return False
 
 
-@st.dialog("Set up pitch addresses", dismissible=False)
-def empty_pitch_setup_dialog() -> None:
-    st.write("This Yamazumi area has no pitch addresses yet.")
-    if pitch_range_controls("empty_dialog"):
-        st.session_state.pop(empty_pitch_dialog_key, None)
-        request_table_editor_reset(pitch_editor_key)
-        st.rerun()
-    if st.button(
-        "Cancel",
-        key=f"cancel_empty_pitch_setup_{project_id}_{scenario_id}_{area_id}",
-    ):
-        st.session_state.pop(empty_pitch_dialog_key, None)
-        st.rerun()
-
-
 setup_columns = st.columns(2)
 with setup_columns[0].expander(
     "Generate pitch addresses",
@@ -1091,17 +1234,20 @@ gui_element_delete_key = f"yamazumi_gui_element_pending_delete_{project_id}_{sce
 pitch_edit_restore_key = f"yamazumi_gui_pitch_edit_restore_{project_id}_{scenario_id}_{area_id}"
 element_edit_restore_key = f"yamazumi_gui_element_edit_restore_{project_id}_{scenario_id}_{area_id}"
 delete_element_dialog_key = f"yamazumi_delete_element_target_{project_id}_{area_id}"
+move_pitch_dialog_key = (
+    f"yamazumi_move_pitches_{project_id}_{scenario_id}_{area_id}"
+)
 
 
 def close_other_yamazumi_dialogs(keep: str) -> None:
     """Guarantee that only one Streamlit dialog is eligible in a script run."""
     for dialog_key in (
-        empty_pitch_dialog_key,
         add_pitch_dialog_key,
         add_element_dialog_key,
         edit_pitch_dialog_key,
         edit_element_dialog_key,
         delete_element_dialog_key,
+        move_pitch_dialog_key,
     ):
         if dialog_key != keep:
             st.session_state.pop(dialog_key, None)
@@ -1451,6 +1597,181 @@ def edit_pitch_dialog() -> None:
 
 def close_edit_element_dialog() -> None:
     st.session_state.pop(edit_element_dialog_key, None)
+
+
+def close_move_pitch_dialog() -> None:
+    st.session_state.pop(move_pitch_dialog_key, None)
+
+
+@st.dialog("Move pitches to another Yamazumi area", on_dismiss=close_move_pitch_dialog)
+def move_pitch_dialog() -> None:
+    source_pitches = yamazumi_pitches(project_id, area_id)
+    if source_pitches.empty:
+        st.info("There are no pitches in this Yamazumi area to move.")
+        if st.button("Close", key=f"close_empty_pitch_move_{area_id}"):
+            close_move_pitch_dialog()
+            st.rerun()
+        return
+
+    destination_ids = [
+        candidate_id for candidate_id in area_labels if candidate_id != str(area_id)
+    ]
+    if not destination_ids:
+        st.info("Create another Yamazumi area before moving pitches.")
+        if st.button("Close", key=f"close_no_destination_pitch_move_{area_id}"):
+            close_move_pitch_dialog()
+            st.rerun()
+        return
+
+    assigned_counts = (
+        elements["pitch_id"].fillna("").astype(str).value_counts().to_dict()
+        if not elements.empty else {}
+    )
+    linked_counts = (
+        elements.loc[
+            elements["process_element_id"].notna()
+            & elements["process_element_id"].astype(str).str.strip().ne("")
+        ]["pitch_id"].fillna("").astype(str).value_counts().to_dict()
+        if not elements.empty else {}
+    )
+    pitch_label_by_id = {
+        str(row["id"]): yamazumi_pitch_label(
+            row.get("pitch_number"), row.get("pitch_name")
+        )
+        for _, row in source_pitches.iterrows()
+    }
+    move_rows = source_pitches.copy()
+    move_rows["feed_target"] = move_rows["feeds_into_pitch_id"].apply(
+        lambda value: pitch_label_by_id.get(str(value), "")
+        if value is not None and not pd.isna(value) else ""
+    )
+    move_rows["assigned_work"] = move_rows["id"].astype(str).map(
+        assigned_counts
+    ).fillna(0).astype(int)
+    move_rows["linked_process"] = move_rows["id"].astype(str).map(
+        linked_counts
+    ).fillna(0).astype(int)
+    move_event = selectable_dataframe(
+        move_rows,
+        key=f"yamazumi_move_pitch_selection_{scenario_id}_{area_id}",
+        hide_index=True,
+        height=260,
+        column_order=[
+            "pitch_number", "pitch_name", "pitch_type", "feed_target",
+            "assigned_work", "linked_process",
+        ],
+        column_config={
+            "id": None,
+            "project_id": None,
+            "area_id": None,
+            "pitch_number": st.column_config.TextColumn("Pitch address", pinned=True),
+            "pitch_name": st.column_config.TextColumn("Pitch name"),
+            "pitch_type": st.column_config.TextColumn("Pitch type"),
+            "feed_target": st.column_config.TextColumn("Feeds into pitch"),
+            "assigned_work": st.column_config.NumberColumn("Work elements"),
+            "linked_process": st.column_config.NumberColumn("Linked Process steps"),
+            "updated_at": None,
+        },
+    )
+    selected_rows = selected_dataframe_rows(move_rows, move_event)
+    selected_ids = selected_rows["id"].astype(str).tolist()
+    target_area_id = st.selectbox(
+        "Destination Yamazumi area",
+        options=destination_ids,
+        index=None,
+        placeholder="Select a destination area",
+        format_func=lambda value: area_labels.get(value, value),
+        key=f"yamazumi_move_pitch_target_{scenario_id}_{area_id}",
+    )
+
+    move_preview = None
+    preview_error = ""
+    if selected_ids and target_area_id:
+        try:
+            move_preview = preview_yamazumi_pitch_move(
+                project_id,
+                scenario_id,
+                str(area_id),
+                str(target_area_id),
+                selected_ids,
+            )
+        except ValueError as exc:
+            preview_error = str(exc)
+            st.error(preview_error)
+    if move_preview:
+        st.info(
+            f"Move {len(move_preview['pitch_ids'])} pitch(es) and "
+            f"{move_preview['assigned_element_count']} assigned work element(s) to "
+            f"{move_preview['target_area_name']}."
+        )
+        if move_preview["linked_process_count"]:
+            st.caption(
+                f"{move_preview['linked_process_count']} linked Process at a Glance step(s) "
+                "will remain linked and return to Needs IE review because their Yamazumi "
+                "area context changed."
+            )
+        if move_preview["feed_blockers"]:
+            relationships = ", ".join(
+                f"{row['source_pitch_label']} → {row['target_pitch_label']}"
+                for row in move_preview["feed_blockers"]
+            )
+            st.error(
+                "Move every pitch in each feed relationship together, or re-point it "
+                f"first: {relationships}."
+            )
+        if move_preview["address_conflicts"]:
+            st.error(
+                "The destination already contains: "
+                + ", ".join(
+                    row["pitch_label"]
+                    for row in move_preview["address_conflicts"]
+                )
+                + "."
+            )
+
+    editor_name = str(st.session_state.get("current_editor") or "").strip()
+    if not editor_name:
+        st.warning("Enter the Current editor before moving pitches.")
+    actions = st.container(horizontal=True, horizontal_alignment="right")
+    if actions.button("Cancel", key=f"cancel_move_pitches_{scenario_id}_{area_id}"):
+        close_move_pitch_dialog()
+        st.rerun()
+    if actions.button(
+        "Move pitches",
+        type="primary",
+        icon=":material/drive_file_move:",
+        key=f"confirm_move_pitches_{scenario_id}_{area_id}",
+        disabled=(
+            not selected_ids
+            or not target_area_id
+            or not editor_name
+            or bool(preview_error)
+            or not bool(move_preview and move_preview["ready"])
+        ),
+    ):
+        try:
+            result = move_yamazumi_pitches(
+                project_id,
+                scenario_id,
+                str(area_id),
+                str(target_area_id),
+                selected_ids,
+                editor_name=editor_name,
+            )
+            close_move_pitch_dialog()
+            st.session_state[pending_area_selector_key] = str(target_area_id)
+            st.session_state[f"yamazumi_pitch_table_area_manual_{scenario_id}"] = False
+            request_table_editor_reset(pitch_editor_key)
+            request_table_editor_reset(element_editor_key)
+            st.toast(
+                f"Moved {result['pitch_count']} pitch(es) and "
+                f"{result['element_count']} work element(s) to "
+                f"{result['target_area_name']}",
+                icon=":material/drive_file_move:",
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 
 @st.dialog("Edit Yamazumi work element", on_dismiss=close_edit_element_dialog)
@@ -1859,7 +2180,22 @@ def confirm_interactive_element_delete() -> None:
 
 
 
-st.subheader("Interactive balancing board")
+board_heading, board_filter = st.columns([3, 2], vertical_alignment="bottom")
+with board_heading:
+    st.subheader("Interactive balancing board")
+with board_filter:
+    included_board_pitch_types = st.multiselect(
+        "Pitch types shown",
+        options=PITCH_TYPES,
+        default=PITCH_TYPES,
+        key=(
+            f"yamazumi_board_pitch_types_{project_id}_{scenario_id}_{area_id}"
+        ),
+        help=(
+            "Selected pitch types appear on this board. This display filter does "
+            "not change saved pitches, assignments, feed relationships, or metrics."
+        ),
+    )
 if len(defined_variant_options) == 1:
     st.info(
         "Only Base is available. Add active feature definitions and allowed choices on Model Definitions to create additional Yamazumi variants."
@@ -1884,7 +2220,11 @@ board_elements = (
     apply_stack_draft_to_elements(persisted_board_elements, board_draft)
     if has_board_draft else persisted_board_elements
 )
-board_pitches = order_yamazumi_pitches_for_board(pitches)
+ordered_board_pitches = order_yamazumi_pitches_for_board(pitches)
+board_pitches = filter_yamazumi_pitches_for_board(
+    ordered_board_pitches,
+    included_board_pitch_types,
+)
 yamazumi_board(
     board_pitches.to_dict("records"),
     board_elements,
@@ -1949,9 +2289,6 @@ if st.session_state.get(gui_pitch_delete_key):
     confirm_gui_pitch_delete()
 elif st.session_state.get(gui_element_delete_key):
     confirm_gui_element_delete()
-elif st.session_state.get(empty_pitch_dialog_key):
-    close_other_yamazumi_dialogs(empty_pitch_dialog_key)
-    empty_pitch_setup_dialog()
 elif st.session_state.get(add_pitch_dialog_key):
     add_pitch_dialog()
 elif st.session_state.get(add_element_dialog_key):
@@ -1960,6 +2297,8 @@ elif st.session_state.get(edit_pitch_dialog_key):
     edit_pitch_dialog()
 elif st.session_state.get(delete_element_dialog_key):
     confirm_interactive_element_delete()
+elif st.session_state.get(move_pitch_dialog_key):
+    move_pitch_dialog()
 elif edit_element_target := st.session_state.get(edit_element_dialog_key):
     if isinstance(edit_element_target, dict):
         edit_element_dialog(
@@ -2189,17 +2528,39 @@ else:
         column_order=pitch_column_order,
         column_config=pitch_column_config,
     )
+    selected_pitches = native_selected_rows(
+        pitch_editor_rows, editor_key=pitch_editor_key
+    )
+    pitch_has_unsaved_edits = table_has_unsaved_changes(
+        pitch_editor_key, native_row_selection=True
+    )
+    move_pitch_disabled = (
+        len(area_labels) < 2
+        or pitch_has_unsaved_edits
+        or not selected_pitches.empty
+        or has_board_draft
+    )
     pitch_actions = editable_table_footer(
         editor_key=pitch_editor_key,
         key_prefix="yamazumi_pitches",
         native_row_selection=True,
+        additional_action_label="Move pitches",
+        additional_action_icon=":material/drive_file_move:",
+        additional_action_key=f"yamazumi_move_pitches_request_{scenario_id}_{area_id}",
+        additional_action_disabled=move_pitch_disabled,
+        additional_action_help=(
+            "Save or undo other Yamazumi changes and clear delete selections first."
+            if move_pitch_disabled and len(area_labels) >= 2
+            else "Move saved pitches and their assigned work to another area in this scenario."
+        ),
     )
+    if pitch_actions.additional_action:
+        close_other_yamazumi_dialogs(move_pitch_dialog_key)
+        st.session_state[move_pitch_dialog_key] = True
+        st.rerun()
     if pitch_actions.undo:
         request_table_editor_reset(pitch_editor_key)
         st.rerun()
-    selected_pitches = native_selected_rows(
-        pitch_editor_rows, editor_key=pitch_editor_key
-    )
     request_pitch_delete = not selected_pitches.empty
     if request_pitch_delete:
         selected_pitch_ids = set(selected_pitches["id"].astype(str))
@@ -2364,12 +2725,13 @@ else:
 active_pitches = pitches.loc[pitches["status"] == "Active"].copy() if not pitches.empty else pitches
 pitch_label_by_id = dict(zip(active_pitches["id"].astype(str), active_pitches["pitch_number"].astype(str))) if not active_pitches.empty else {}
 element_columns = [
-    "id", "area_name", "pitch_id", "model_variants", "work_type", "description", "time_s", "work_region",
+    "id", "area_id", "area_name", "pitch_id", "model_variants", "work_type", "description", "time_s", "work_region",
     "criticality", "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
 ]
 if element_table_source.empty:
     element_rows = pd.DataFrame({
         "id": pd.Series(dtype="string"),
+        "area_id": pd.Series(dtype="string"),
         "area_name": pd.Series(dtype="string"),
         "pitch_id": pd.Series(dtype="string"),
         # MultiselectColumn values are lists, so this column deliberately uses object dtype.
@@ -2419,6 +2781,7 @@ element_column_order = [
 ]
 element_column_config = {
     "id": None,
+    "area_id": None,
     "area_name": st.column_config.TextColumn("Yamazumi area"),
     "pitch_id": None,
     "pitch": st.column_config.SelectboxColumn("Pitch", options=pitch_options, required=True, default="Unassigned"),
@@ -2465,14 +2828,68 @@ if element_combined_view:
         "work_region": st.column_config.TextColumn("Work region"),
         "criticality": st.column_config.ListColumn("Criticality"),
     }
-    selectable_dataframe(
-        visible_elements,
-        key=f"yamazumi_combined_elements_{scenario_id}",
+    combined_element_editor_rows = visible_elements.reset_index(drop=True)
+    combined_element_selection = selectable_dataframe(
+        combined_element_editor_rows,
+        key=combined_element_editor_key,
         hide_index=True,
         height=420,
         column_order=element_column_order,
         column_config=element_read_only_config,
     )
+    selected_elements = selected_dataframe_rows(
+        combined_element_editor_rows,
+        combined_element_selection,
+    )
+    combined_delete_actions = selected_rows_action_bar()
+    request_combined_element_delete = combined_delete_actions.button(
+        f"Delete selected ({len(selected_elements)})",
+        icon=":material/delete:",
+        disabled=selected_elements.empty,
+        key=f"destructive_yamazumi_delete_selected_elements_{scenario_id}",
+        help="Select one or more work elements using the checkboxes at left.",
+    )
+    if request_combined_element_delete:
+        close_other_yamazumi_dialogs("")
+        st.session_state.pop(pitch_delete_key, None)
+        selected_element_impacts = [
+            yamazumi_element_delete_impact(
+                project_id,
+                scenario_id,
+                str(row["area_id"]),
+                str(row["id"]),
+            )
+            for _, row in selected_elements.iterrows()
+        ]
+        st.session_state[element_delete_key] = {
+            "combined_view": True,
+            "elements": [
+                {
+                    "id": str(row["id"]),
+                    "area_id": str(row.get("area_id") or ""),
+                    "area_name": str(row.get("area_name") or ""),
+                    "description": str(row.get("description") or ""),
+                    "pitch": str(row.get("pitch") or "Unassigned"),
+                    "process_element_id": str(
+                        row.get("process_element_id") or ""
+                    ),
+                    "process_step_exists": bool(impact["process_step_exists"]),
+                    "legacy_material_group_count": int(
+                        impact["legacy_material_group_count"] or 0
+                    ),
+                    "legacy_material_option_count": int(
+                        impact["legacy_material_option_count"] or 0
+                    ),
+                }
+                for (_, row), impact in zip(
+                    selected_elements.iterrows(), selected_element_impacts
+                )
+            ],
+            "other_element_edits": False,
+            "other_pitch_edits": False,
+        }
+        request_table_editor_reset(combined_element_editor_key)
+        st.rerun()
     edited_elements = visible_elements
 else:
     element_editor_rows = direct_entry_editor_rows(
@@ -2514,6 +2931,15 @@ else:
     if request_element_delete:
         close_other_yamazumi_dialogs("")
         st.session_state.pop(pitch_delete_key, None)
+        selected_element_impacts = [
+            yamazumi_element_delete_impact(
+                project_id,
+                scenario_id,
+                str(area_id),
+                str(row["id"]),
+            )
+            for _, row in selected_elements.iterrows()
+        ]
         st.session_state[element_delete_key] = {
             "elements": [
                 {
@@ -2523,8 +2949,17 @@ else:
                     "process_element_id": str(
                         row.get("process_element_id") or ""
                     ),
+                    "process_step_exists": bool(impact["process_step_exists"]),
+                    "legacy_material_group_count": int(
+                        impact["legacy_material_group_count"] or 0
+                    ),
+                    "legacy_material_option_count": int(
+                        impact["legacy_material_option_count"] or 0
+                    ),
                 }
-                for _, row in selected_elements.iterrows()
+                for (_, row), impact in zip(
+                    selected_elements.iterrows(), selected_element_impacts
+                )
             ],
             "element_draft": current_editor_draft(
                 element_editor_rows, element_editor_key
@@ -2818,13 +3253,25 @@ def confirm_element_bulk_delete() -> None:
     for element in selected_rows:
         linked_note = (
             " — its linked Process at a Glance step will not be deleted automatically"
-            if element.get("process_element_id")
+            if element.get("process_step_exists")
             else ""
         )
         st.write(
-            f"- {element.get('description') or 'Unnamed work element'} "
+            f"- {element.get('area_name') + ': ' if element.get('area_name') else ''}"
+            f"{element.get('description') or 'Unnamed work element'} "
             f"({element.get('pitch') or 'Unassigned'}){linked_note}"
         )
+        legacy_group_count = int(
+            element.get("legacy_material_group_count") or 0
+        )
+        legacy_option_count = int(
+            element.get("legacy_material_option_count") or 0
+        )
+        if legacy_group_count or legacy_option_count:
+            st.caption(
+                f"This element also removes {legacy_group_count} legacy material "
+                f"group(s) and {legacy_option_count} legacy material option(s)."
+            )
     if pending.get("other_pitch_edits") or pending.get("other_element_edits"):
         st.info(
             "Other unsaved pitch or work-element edits will be saved at the same time "
@@ -2833,7 +3280,11 @@ def confirm_element_bulk_delete() -> None:
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_element_bulk_delete_{scenario_id}_{area_id}"):
         st.session_state.pop(element_delete_key, None)
-        request_table_editor_reset(element_editor_key)
+        request_table_editor_reset(
+            combined_element_editor_key
+            if pending.get("combined_view")
+            else element_editor_key
+        )
         st.rerun()
     if actions.button(
         "Delete work elements",
@@ -2844,6 +3295,21 @@ def confirm_element_bulk_delete() -> None:
         try:
             editor_name = st.session_state.get("current_editor", "")
             selected_ids = {str(row["id"]) for row in selected_rows}
+            if pending.get("combined_view"):
+                result = delete_yamazumi_elements(
+                    project_id,
+                    scenario_id,
+                    list(selected_ids),
+                    audit_editor_name=editor_name,
+                )
+                st.session_state.pop(element_delete_key, None)
+                request_table_editor_reset(combined_element_editor_key)
+                request_table_editor_reset(element_editor_key)
+                st.toast(
+                    f"Deleted {result['deleted_count']} Yamazumi work element(s)",
+                    icon=":material/delete:",
+                )
+                st.rerun()
             element_save_rows = prepared_element_rows(
                 pending.get("element_draft", []), selected_ids
             )

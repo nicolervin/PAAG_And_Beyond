@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from copy import deepcopy
 
 import pandas as pd
 import streamlit as st
@@ -138,6 +139,70 @@ def merge_filtered_edits(
     visible_ids = set(filtered_dataframe[id_column].dropna().astype(str))
     hidden = full_dataframe[~full_dataframe[id_column].fillna("").astype(str).isin(visible_ids)].copy()
     return pd.concat([hidden, edited_dataframe], ignore_index=True, sort=False)
+
+
+def capture_id_keyed_editor_draft(
+    previous_editor_rows: pd.DataFrame,
+    editor_state: dict,
+    draft_by_id: dict[str, dict] | None = None,
+    captured_editor_state: dict[str, dict] | None = None,
+    *,
+    id_column: str = "id",
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Capture new positional editor changes under stable persisted row IDs.
+
+    Streamlit reports edited cells by visible row position. Persisting the
+    resulting field patches by hidden ID prevents a filter or external sort
+    from moving a row between the edit rerun and the later save rerun.
+    """
+    draft = deepcopy(draft_by_id or {})
+    prior_state = captured_editor_state or {}
+    current_state: dict[str, dict] = {}
+    for raw_position, raw_changes in (editor_state.get("edited_rows") or {}).items():
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            continue
+        changes = dict(raw_changes or {})
+        position_key = str(position)
+        current_state[position_key] = deepcopy(changes)
+        if not (0 <= position < len(previous_editor_rows)):
+            continue
+        stable_id = previous_editor_rows.iloc[position].get(id_column)
+        if stable_id is None or pd.isna(stable_id) or not str(stable_id).strip():
+            continue
+        stable_id = str(stable_id).strip()
+        prior_changes = prior_state.get(position_key, {}) or {}
+        for column, value in changes.items():
+            if column in prior_changes and prior_changes[column] == value:
+                continue
+            draft.setdefault(stable_id, {})[column] = deepcopy(value)
+    return draft, current_state
+
+
+def apply_id_keyed_editor_draft(
+    dataframe: pd.DataFrame,
+    draft_by_id: dict[str, dict] | None,
+    *,
+    id_column: str = "id",
+) -> pd.DataFrame:
+    """Overlay stable-ID field patches without changing row order or visibility."""
+    result = dataframe.copy()
+    if result.empty or id_column not in result.columns or not draft_by_id:
+        return result
+    row_by_id = {
+        str(value).strip(): index
+        for index, value in result[id_column].items()
+        if value is not None and not pd.isna(value) and str(value).strip()
+    }
+    for stable_id, changes in draft_by_id.items():
+        row_index = row_by_id.get(str(stable_id).strip())
+        if row_index is None:
+            continue
+        for column, value in (changes or {}).items():
+            if column in result.columns and column != id_column:
+                result.at[row_index, column] = value
+    return result
 
 
 def has_unsaved_table_changes(key: str) -> bool:

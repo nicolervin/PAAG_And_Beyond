@@ -154,8 +154,12 @@ placed_catalog_parts = assignments["part_id"].nunique() if not assignments.empty
 metrics[2].metric("Fishbone uses placed", len(assignments), border=True)
 metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_parts), border=True)
 
-st.subheader("Fishbone framework")
-fishbone_visual_slot = st.empty()
+with st.expander(
+    "Fishbone framework",
+    icon=":material/account_tree:",
+    expanded=True,
+):
+    fishbone_visual_slot = st.empty()
 
 with st.expander(
     "1 · Build the Fishbone framework",

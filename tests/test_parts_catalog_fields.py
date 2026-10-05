@@ -28,6 +28,104 @@ class PartsCatalogFieldTests(unittest.TestCase):
     def edited_parts(self):
         return store.project_table("parts", self.project_id, "part_number").copy()
 
+    def test_parts_table_view_round_trip_is_project_and_editor_scoped(self) -> None:
+        self.assertIsNone(
+            store.table_view_preference(
+                self.project_id, "Layout editor", "parts_catalog"
+            )
+        )
+        saved = store.save_table_view_preference(
+            self.project_id,
+            "Layout editor",
+            "parts_catalog",
+            ["part_number", "active", "description"],
+            ["part_number", "active", "description"],
+        )
+        self.assertTrue(saved["changed"])
+        preference = store.table_view_preference(
+            self.project_id, "Layout editor", "parts_catalog"
+        )
+        self.assertEqual(
+            preference["column_order"],
+            ["part_number", "active", "description"],
+        )
+        self.assertIsNone(
+            store.table_view_preference(
+                self.project_id, "Another editor", "parts_catalog"
+            )
+        )
+
+        updated = store.save_table_view_preference(
+            self.project_id,
+            "Layout editor",
+            "parts_catalog",
+            ["description", "part_number"],
+            ["description", "part_number"],
+        )
+        self.assertTrue(updated["changed"])
+        self.assertEqual(
+            store.table_view_preference(
+                self.project_id, "Layout editor", "parts_catalog"
+            )["column_order"],
+            ["description", "part_number"],
+        )
+
+        package = export_project_package(self.project_id, "Layout editor")
+        imported = import_project_package(package["data"], "Create new", "Layout editor")
+        copied = store.table_view_preference(
+            imported["project_id"], "Layout editor", "parts_catalog"
+        )
+        self.assertIsNotNone(copied)
+        self.assertEqual(copied["column_order"], ["description", "part_number"])
+
+    def test_parts_table_view_validation_and_transaction_rollback(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one column"):
+            store.save_table_view_preference(
+                self.project_id, "Layout editor", "parts_catalog", [], []
+            )
+        with self.assertRaisesRegex(ValueError, "same columns"):
+            store.save_table_view_preference(
+                self.project_id,
+                "Layout editor",
+                "parts_catalog",
+                ["part_number"],
+                ["description"],
+            )
+
+        edited = self.edited_parts()
+        part_id = str(edited.iloc[0]["id"])
+        original_description = str(edited.iloc[0]["description"])
+        edited.loc[edited.index[0], "description"] = "Unsaved transaction value"
+        with self.assertRaisesRegex(RuntimeError, "cancel transaction"):
+            with store.connection() as conn:
+                store.update_part_rows(
+                    self.project_id,
+                    edited,
+                    scenario_id=self.scenario_id,
+                    activity_by_part={
+                        str(row["id"]): True for _, row in edited.iterrows()
+                    },
+                    _conn=conn,
+                )
+                store.save_table_view_preference(
+                    self.project_id,
+                    "Layout editor",
+                    "parts_catalog",
+                    ["part_number"],
+                    ["part_number"],
+                    _conn=conn,
+                )
+                raise RuntimeError("cancel transaction")
+        self.assertIsNone(
+            store.table_view_preference(
+                self.project_id, "Layout editor", "parts_catalog"
+            )
+        )
+        saved_part = store.query(
+            "SELECT description FROM parts WHERE id=?", (part_id,)
+        )[0]
+        self.assertEqual(saved_part["description"], original_description)
+
     def test_new_row_display_only_columns_have_blank_defaults(self) -> None:
         page_source = (store.ROOT / "app_pages" / "parts.py").read_text(
             encoding="utf-8"
@@ -135,6 +233,35 @@ class PartsCatalogFieldTests(unittest.TestCase):
             (part_id,),
         )[0]
         self.assertEqual(set(cleared.values()), {""})
+
+    def test_manual_part_edit_and_active_change_save_together(self) -> None:
+        edited = self.edited_parts()
+        target_id = str(edited.iloc[0]["id"])
+        edited.loc[edited["id"].astype(str).eq(target_id), "description"] = (
+            "Manually reviewed part"
+        )
+        activity = {
+            str(row["id"]): str(row["id"]) != target_id
+            for _, row in edited.iterrows()
+        }
+
+        store.update_part_rows(
+            self.project_id,
+            edited,
+            scenario_id=self.scenario_id,
+            activity_by_part=activity,
+        )
+
+        saved_part = store.query(
+            "SELECT description FROM parts WHERE id=? AND project_id=?",
+            (target_id, self.project_id),
+        )[0]
+        self.assertEqual(saved_part["description"], "Manually reviewed part")
+        self.assertFalse(
+            store.part_scenario_activity(self.project_id, self.scenario_id)[
+                target_id
+            ]
+        )
 
     def test_validation_rejects_duplicate_tracker_and_invalid_controlled_values(self) -> None:
         edited = self.edited_parts()

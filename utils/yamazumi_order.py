@@ -98,3 +98,24 @@ def order_yamazumi_pitches_for_board(pitches: pd.DataFrame) -> pd.DataFrame:
     indexed = pitches.copy()
     indexed.index = indexed["id"].astype(str)
     return indexed.loc[ordered_ids].reset_index(drop=True)
+
+
+def filter_yamazumi_pitches_for_board(
+    pitches: pd.DataFrame,
+    included_pitch_types: list[str] | tuple[str, ...] | set[str],
+) -> pd.DataFrame:
+    """Return board pitches whose type is included, preserving display order.
+
+    Empty legacy pitch types use the established ``Pitch`` fallback. This is a
+    presentation-only filter; it does not change assignments or feed links.
+    """
+    if pitches.empty:
+        return pitches.copy()
+    included = {
+        str(value).strip().casefold()
+        for value in included_pitch_types
+        if str(value).strip()
+    }
+    pitch_types = pitches["pitch_type"].fillna("").astype(str).str.strip()
+    normalized_types = pitch_types.mask(pitch_types.eq(""), "Pitch").str.casefold()
+    return pitches.loc[normalized_types.isin(included)].reset_index(drop=True)

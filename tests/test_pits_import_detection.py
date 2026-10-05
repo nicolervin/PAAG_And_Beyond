@@ -678,6 +678,51 @@ class PitsImportDetectionTests(unittest.TestCase):
         self.assertEqual(bom_snapshot["duplicates"][0]["first_source_row"], 4)
         self.assertEqual(bom_snapshot["duplicates"][0]["duplicate_source_row"], 5)
 
+    def test_combined_parser_accepts_level_two_roots_and_ignores_metadata_columns(self):
+        tracker = pd.DataFrame([
+            ["ID Number", "Part Number", "Description"],
+            ["0001", "P-1", "Top-level component"],
+            ["0002", "P-2", "Child component"],
+            ["0003", "P-3", "Metadata-only row"],
+        ])
+        models = pd.DataFrame([
+            ["Model Number", "Item"],
+            ["M-1", "Item"],
+        ])
+        bom = pd.DataFrame([
+            [
+                "In Tracker", "Part Number", "Description", "Level 1", "Level 2",
+                "Level 3", "Engineer", "Tariff Impact",
+            ],
+            ["0001", "P-1", "Top-level component", "", 2, "", "Engineer A", 1.5],
+            ["0002", "P-2", "Child component", "", "", 3, "Engineer B", 2.5],
+            ["0003", "P-3", "Metadata-only row", "", "", "", "Engineer C", 3.5],
+        ])
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            tracker.to_excel(writer, sheet_name="Tracker", index=False, header=False)
+            models.to_excel(writer, sheet_name="Models", index=False, header=False)
+            bom.to_excel(writer, sheet_name="BOM", index=False, header=False)
+        uploaded = type(
+            "Uploaded",
+            (),
+            {"name": "level_two_root.xlsm", "getvalue": lambda self: buffer.getvalue()},
+        )()
+
+        _, _, bom_snapshot = parse_pits_combined_workbook(uploaded)
+
+        self.assertEqual(bom_snapshot["source_root_depth"], 2)
+        self.assertEqual(bom_snapshot["level_columns"], [1, 2, 3])
+        self.assertEqual(len(bom_snapshot["occurrences"]), 2)
+        root, child = bom_snapshot["occurrences"]
+        self.assertEqual(root["proposed_depth"], 2)
+        self.assertEqual(root["parent_tracker_number"], "")
+        self.assertEqual(child["proposed_depth"], 3)
+        self.assertEqual(child["parent_tracker_number"], "0001")
+        self.assertEqual(len(bom_snapshot["issues"]), 1)
+        self.assertEqual(bom_snapshot["issues"][0]["issue"], "No Level 1-11 value")
+        self.assertFalse(bom_snapshot["issues"][0]["blocking"])
+
 
 if __name__ == "__main__":
     unittest.main()
