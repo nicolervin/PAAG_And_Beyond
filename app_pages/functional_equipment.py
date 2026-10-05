@@ -17,13 +17,13 @@ page_title_with_scope(
     scope="scenario-aware",
     scenario_name=str((scenario or {}).get("name") or "") or None,
     help_text=(
-        "Equipment identity and type management are project-wide. Station / Pitch "
-        "and Process Function relationships use the active planning scenario."
+        "Equipment identity, types, and shared assets are project-wide. "
+        "Station / Pitch and Process Function relationships use the active planning scenario."
     ),
 )
 st.caption(
-    "Manage the project-wide Equipment Type catalog and review all shared equipment. "
-    "Station / Pitch and Process links use the active planning scenario."
+    "Manage the project-wide Equipment Type catalog, shared equipment assets, "
+    "and workstation assignments. Station / Pitch links use the active planning scenario."
 )
 if not project_id:
     st.stop()

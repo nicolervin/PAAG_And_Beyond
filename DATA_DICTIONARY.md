@@ -855,6 +855,34 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### 2D Plant Floor Plan Layouts (Pin Map -> Layouts)
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** September 29, 2026
+- **Purpose:** Provide a 2D plant floor plan layout workspace within the Pin Map module (under the Layouts sub-tab). Allows collaborators to upload or paste plant layout screenshots/drawings, establish real-world physical scale (e.g., width × height in feet, inches, yards, or miles), draw scaled footprints and annotations (rectangles, circles, ovals, triangles, hexagons, arrows, text boxes) for machines, equipment, conveyors, material storage, and workstation pitches, and drag and drop available pitches from Yamazumi onto the layout to establish physical workstation boundaries as the geometric foundation for the Pin Map.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (owning project), `yamazumi_pitches` (workstation pitches dropped/scaled onto layout), and `equipment_assets` (equipment/machines placed on the layout).
+  2. *Critical thread relationship:* Connects scenario-specific Yamazumi pitches (`yamazumi_pitches`) and project equipment assets (`equipment_assets`) to real-world 2D spatial coordinates and scaled footprints on an imported plant floor plan. This establishes the physical geometric basis for the downstream derived **Pin Map** (*Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance -> 2D Layouts -> Pin Map*).
+  3. *Scope:* Project-wide. A project supports multiple named layouts (e.g., "Main Line", "Subassembly Area", "Building 2"). Each layout maintains versioned revisions (`layout_revisions`) so users can update the floor plan drawing with new revisions while retaining the ability to review historical revisions. When creating an updated revision with a new image, previously drawn shapes and footprints are retained (copied forward) so the user can reposition or resize them on the new layout drawing.
+  4. *Table requirement:* Requires new dedicated tables because existing tables cannot store multi-revision floor plan images, real-world physical scale dimensions, 2D vector shapes, or section pitch dimensional standards:
+     - `layout_plans`: project-wide container for a named layout (`id`, `project_id`, `name`, `description`, `created_at`, `updated_at`).
+     - `layout_revisions`: versioned floor plan snapshots (`id`, `layout_id`, `revision_number`, `image_path`, `width_value`, `height_value`, `unit`, `scale_width_in`, `scale_height_in`, `notes`, `created_at`, `created_by`).
+     - `layout_shapes`: drawn shapes, annotations, and workstation/equipment footprints (`id`, `revision_id`, `shape_type`, `label`, `x`, `y`, `width`, `height`, `rotation`, `color`, `style_json`, `pitch_id`, `equipment_id`, `created_at`, `updated_at`).
+     - `layout_section_pitch_standards`: section-level standard workstation pitch dimensions (`id`, `layout_id`, `section_id`, `pitch_width`, `pitch_height`, `unit`, `created_at`, `updated_at`).
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Deletion Standard: confirmed deletion dialog for layouts, revisions, and shapes with destructive button styling (`destructive_` key).
+     - Universal Save Action Standard: single primary **Save & Refresh** button with footer and Undo for draft edits.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Layouts"`.
+     - Universal History Display Standard: bottom History expander using `audit_history()`.
+     - Scope Badge: `page_title_with_scope("Pin Map", scope="scenario")` on the parent page, with project-wide scope clearly identified in the Layouts workspace heading.
+     - Imperial Units Standard: storage in inches (`scale_width_in`, `scale_height_in`), user entry and display supporting inches, feet, yards, or miles.
+  6. *Phase 3 Yamazumi Pitch & Pin Map Integration:*
+     - Cross-scenario Pitches Palette: Lists unique workstation pitches across scenarios with a badge indicating the parent scenario.
+     - Section Pitch Standards: Prompts for and sets standard pitch length & width per Yamazumi section so placed pitches automatically match cell boundaries.
+     - Magnetic Snapping: Interactive magnetic edge alignment snapping contiguous workstation pitches into straight lines.
+     - Two-Way Coordinate Sync: Placed workstation pitch footprints (`x`, `y`, `width`, `height`) feed directly into the derived Pin Map to position stations to scale.
+- **Approval status:** Approved by Nicole Ervin, project owner, on September 29, 2026 for phased implementation starting with Phase 1, Phase 2, and Phase 3 on branch `NE_2D_Layout_Imports`.
+
 ### PITS BOM-tab structure import (parent-child occurrences and quantities)
 
 - **Proposed by:** Project owner
