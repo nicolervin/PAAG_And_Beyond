@@ -1141,6 +1141,49 @@ class PfmeaStoreTests(unittest.TestCase):
         cause = pfmea_store.pfmea_causes(self.project_id, self.scenario_id, entry_id).iloc[0]
         self.assertTrue(bool(cause["control_source_review_required"]))
 
+    def test_sequential_add_control_options_succeeds_without_deletion_error(self) -> None:
+        first_id = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Prevention", "First option"
+        )
+        self.assertTrue(first_id)
+        # Adding a second option when one already exists must succeed and not raise
+        # "Remove Prevention options through the confirmed deletion workflow."
+        second_id = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Prevention", "Add alignment feature for wheel installation"
+        )
+        self.assertTrue(second_id)
+        self.assertNotEqual(first_id, second_id)
+
+        # Adding a detection option sequentially
+        det_1 = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Detection", "Vision inspection camera"
+        )
+        det_2 = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Detection", "Laser height verification"
+        )
+        self.assertTrue(det_1)
+        self.assertTrue(det_2)
+
+        prev_opts = pfmea_store.pfmea_control_options(self.project_id, "Prevention")
+        self.assertEqual(len(prev_opts), 2)
+        det_opts = pfmea_store.pfmea_control_options(self.project_id, "Detection")
+        self.assertEqual(len(det_opts), 2)
+
+        # Casefold duplicate check
+        with self.assertRaisesRegex(ValueError, "unique"):
+            pfmea_store.add_pfmea_control_option(
+                self.project_id, "Prevention", "first OPTION"
+            )
+
+        # Unconfirmed deletion in full save is still prevented
+        with self.assertRaisesRegex(ValueError, "confirmed deletion workflow"):
+            pfmea_store.save_pfmea_control_option_rows(
+                self.project_id,
+                "Prevention",
+                pd.DataFrame([{"id": first_id, "label": "First option", "active": True}]),
+                allow_partial=False,
+            )
+
     def test_quality_source_can_be_in_both_lists_but_not_duplicated_within_one(self) -> None:
         entry_id = self.create_entry()
         pfmea_store.save_pfmea_cause_rows(

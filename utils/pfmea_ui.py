@@ -17,6 +17,7 @@ from utils.pfmea_store import (
     PFMEA_CLASSIFICATION_MEANINGS,
     PFMEA_RATINGS,
     delete_pfmea_records,
+    add_pfmea_control_option,
     delete_pfmea_control_options,
     migrate_legacy_pfmea_controls,
     migrate_pfmea_classifications,
@@ -1606,10 +1607,10 @@ def _render_control_catalogs(project_id: str) -> None:
                 key=f"pfmea_overview_add_btn_{project_id}",
             ):
                 try:
-                    save_pfmea_control_option_rows(
+                    add_pfmea_control_option(
                         project_id,
                         add_type,
-                        pd.DataFrame([{"id": "", "label": add_label.strip(), "active": True}]),
+                        add_label.strip(),
                     )
                     st.toast(f"Added manual {add_type.casefold()} option!", icon=":material/check_circle:")
                     st.rerun()
@@ -2321,10 +2322,10 @@ def _render_control_selection_panel(
                     key=f"pfmea_inline_btn_{control_type.casefold()}_{project_id}_{scenario_id}_{target_key}",
                 ):
                     try:
-                        save_pfmea_control_option_rows(
+                        add_pfmea_control_option(
                             project_id,
                             control_type,
-                            pd.DataFrame([{"id": "", "label": new_opt_val.strip(), "active": True}]),
+                            new_opt_val.strip(),
                         )
                         st.toast(f"Added manual {control_type.casefold()} option!", icon=":material/check_circle:")
                         st.rerun()

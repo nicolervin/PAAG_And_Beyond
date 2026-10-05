@@ -506,8 +506,25 @@ def pfmea_control_options(project_id: str, control_type: str) -> pd.DataFrame:
     return pd.DataFrame([dict(row) for row in rows])
 
 
+def add_pfmea_control_option(
+    project_id: str, control_type: str, label: str, active: bool = True
+) -> str:
+    """Add a single manual Prevention or Detection control option to the project catalog."""
+    clean_label = _text(label)
+    if not clean_label:
+        raise ValueError(f"Every {control_type} option requires a Label.")
+    df = pd.DataFrame([{"id": "", "label": clean_label, "active": active}])
+    result = save_pfmea_control_option_rows(
+        project_id, control_type, df, allow_partial=True
+    )
+    return result["created_ids"][0]
+
+
 def save_pfmea_control_option_rows(
-    project_id: str, control_type: str, edited: pd.DataFrame
+    project_id: str,
+    control_type: str,
+    edited: pd.DataFrame,
+    allow_partial: bool = False,
 ) -> dict:
     option_table, selection_table, option_column = _control_tables(control_type)
     timestamp = _source_version_timestamp()
@@ -525,10 +542,22 @@ def save_pfmea_control_option_rows(
             ).fetchall()
         }
         supplied = {_text(row.get("id")) for row in rows if _text(row.get("id"))}
-        if set(existing) - supplied:
+        if not allow_partial and (set(existing) - supplied):
             raise ValueError(
                 f"Remove {control_type} options through the confirmed deletion workflow."
             )
+        existing_label_map = {
+            str(item["label"]).casefold(): str(item["id"])
+            for item in existing.values()
+        }
+        for row in rows:
+            row_id = _text(row.get("id"))
+            label = _text(row.get("label"))
+            match_id = existing_label_map.get(label.casefold())
+            if match_id and match_id != row_id:
+                raise ValueError(
+                    f"{control_type} option labels must be unique within this project."
+                )
         created: list[str] = []
         updated: list[str] = []
         for row in rows:
