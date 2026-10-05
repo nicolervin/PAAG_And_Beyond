@@ -4,7 +4,10 @@ import unittest
 
 import pandas as pd
 
-from utils.yamazumi_order import order_yamazumi_pitches_for_board
+from utils.yamazumi_order import (
+    filter_yamazumi_pitches_for_board,
+    order_yamazumi_pitches_for_board,
+)
 
 
 class YamazumiPitchOrderTests(unittest.TestCase):
@@ -92,6 +95,45 @@ class YamazumiPitchOrderTests(unittest.TestCase):
 
         self.assertTrue(ordered.empty)
         self.assertEqual(list(ordered.columns), ["id"])
+
+    def test_pitch_type_filter_preserves_feed_aware_display_order(self) -> None:
+        pitches = self.pitches(
+            {"id": "pitch", "pitch_number": "OP-4", "pitch_type": "Pitch"},
+            {
+                "id": "subassembly",
+                "pitch_number": "SA-1",
+                "pitch_type": "Subassembly",
+                "feeds_into_pitch_id": "pitch",
+            },
+            {"id": "kitter", "pitch_number": "KT-2", "pitch_type": "Kitter"},
+        )
+
+        ordered = order_yamazumi_pitches_for_board(pitches)
+        filtered = filter_yamazumi_pitches_for_board(
+            ordered, ["Subassembly", "Pitch"]
+        )
+
+        self.assertEqual(list(filtered["id"]), ["subassembly", "pitch"])
+
+    def test_pitch_type_filter_treats_blank_legacy_type_as_pitch(self) -> None:
+        pitches = self.pitches(
+            {"id": "blank", "pitch_number": "OP-1", "pitch_type": ""},
+            {"id": "kit", "pitch_number": "KT-2", "pitch_type": "Kitter"},
+        )
+
+        filtered = filter_yamazumi_pitches_for_board(pitches, ["Pitch"])
+
+        self.assertEqual(list(filtered["id"]), ["blank"])
+
+    def test_pitch_type_filter_can_exclude_every_pitch(self) -> None:
+        pitches = self.pitches(
+            {"id": "pitch", "pitch_number": "OP-1", "pitch_type": "Pitch"}
+        )
+
+        filtered = filter_yamazumi_pitches_for_board(pitches, [])
+
+        self.assertTrue(filtered.empty)
+        self.assertEqual(list(filtered.columns), list(pitches.columns))
 
 
 if __name__ == "__main__":

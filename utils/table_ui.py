@@ -102,6 +102,7 @@ def direct_entry_editor_rows(
     editor_key: str,
     sort_columns: Iterable[str] | None = None,
     labels: dict[str, str] | None = None,
+    additional_unsaved_changes: bool = False,
 ) -> pd.DataFrame:
     """Sort saved rows before a direct-entry, multi-row-paste editor renders.
 
@@ -133,6 +134,7 @@ def direct_entry_editor_rows(
         editor_state.get("edited_rows")
         or editor_state.get("added_rows")
         or editor_state.get("deleted_rows")
+        or additional_unsaved_changes
     )
     controls = st.container(horizontal=True, vertical_alignment="bottom")
     sort_column = controls.selectbox(
@@ -221,6 +223,7 @@ class TableHeaderActions:
 
     save_and_refresh: bool
     undo: bool
+    additional_action: bool = False
 
 
 def table_has_unsaved_changes(
@@ -361,6 +364,11 @@ def editable_table_footer(
     undo_available: bool = False,
     native_row_selection: bool = False,
     additional_unsaved_changes: bool = False,
+    additional_action_label: str | None = None,
+    additional_action_icon: str | None = None,
+    additional_action_key: str | None = None,
+    additional_action_disabled: bool = False,
+    additional_action_help: str | None = None,
 ) -> TableHeaderActions:
     """Render the standard warning and actions below an editable table."""
     unsaved = (
@@ -376,6 +384,15 @@ def editable_table_footer(
     )
     if unsaved:
         footer.markdown(":orange[:material/warning: **Unsaved changes**]")
+    additional_action = False
+    if additional_action_label:
+        additional_action = footer.button(
+            additional_action_label,
+            icon=additional_action_icon,
+            disabled=additional_action_disabled,
+            help=additional_action_help,
+            key=additional_action_key or f"{key_prefix}_additional_action",
+        )
     undo = footer.button(
         "Undo",
         icon=":material/undo:",
@@ -388,4 +405,8 @@ def editable_table_footer(
         icon=":material/save:",
         key=f"{key_prefix}_save_refresh",
     )
-    return TableHeaderActions(save_and_refresh=save_and_refresh, undo=undo)
+    return TableHeaderActions(
+        save_and_refresh=save_and_refresh,
+        undo=undo,
+        additional_action=additional_action,
+    )

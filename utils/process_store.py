@@ -231,6 +231,9 @@ def yamazumi_elements_for_section(
              ON group_row.work_element_id=element.process_element_id
             AND group_row.scenario_id=area.scenario_id
            WHERE element.project_id=? AND area.scenario_id=? AND area.section_id=?
+             AND LOWER(
+                   COALESCE(NULLIF(TRIM(element.work_type), ''), 'Cycle')
+                 )='cycle'
            GROUP BY element.id
            ORDER BY area.name, pitch.sequence, element.sequence""",
         (project_id, scenario_id, section_id),

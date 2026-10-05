@@ -519,6 +519,19 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(scenario_id, part_id)
             );
+            CREATE TABLE IF NOT EXISTS table_view_preferences (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                editor_name TEXT NOT NULL DEFAULT '',
+                view_key TEXT NOT NULL,
+                visible_columns_json TEXT NOT NULL DEFAULT '[]',
+                column_order_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, editor_name, view_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_table_view_preferences_project
+                ON table_view_preferences(project_id, view_key, editor_name);
             CREATE TABLE IF NOT EXISTS work_elements (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,

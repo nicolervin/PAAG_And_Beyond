@@ -1,3 +1,5 @@
+import hashlib
+
 import streamlit as st
 import pandas as pd
 
@@ -7,7 +9,7 @@ from utils.excel_io import (
     is_pits_format,
     mapped_bom,
     parse_pits,
-    parse_pits_id_workbook,
+    parse_pits_combined_workbook,
     read_bom,
     suggest_mapping,
 )
@@ -28,6 +30,32 @@ from utils.table_filters import filter_table, split_filter_values
 from utils.table_ui import selectable_dataframe
 
 
+def _save_pits_workbook_snapshot(
+    project_id: str,
+    scenario_id: str | None,
+    records: list[dict],
+    models: list[dict],
+    bom_snapshot: dict,
+    uploaded,
+    *,
+    overwrite_manual: bool,
+    editor_name: str,
+) -> dict:
+    """Persist every recognized PITS worksheet through the combined import."""
+    workbook_data = uploaded.getvalue()
+    return import_pits_id_snapshot(
+        project_id,
+        records,
+        models,
+        scenario_id=scenario_id,
+        overwrite_manual=overwrite_manual,
+        bom_snapshot=bom_snapshot,
+        workbook_name=uploaded.name,
+        workbook_sha256=hashlib.sha256(workbook_data).hexdigest(),
+        editor_name=editor_name,
+    )
+
+
 def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
     defined_models = project_models(project_id)
     model_labels = {
@@ -42,7 +70,7 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
         if uploaded:
             try:
                 if has_pits_id_sheets(uploaded):
-                    records, models = parse_pits_id_workbook(uploaded)
+                    records, models, bom_snapshot = parse_pits_combined_workbook(uploaded)
                     id_resolution = pits_catalog_id_resolution(records)
                     st.success("ID-based PITS tracker detected", icon=":material/key:")
                     summary_cols = st.columns(3)
@@ -78,6 +106,112 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                             search_columns=["model_number", "appearance", "sku_upc"],
                         )
                         selectable_dataframe(model_preview_table, key="pits_model_preview_table", hide_index=True)
+                    bom_occurrences = list(bom_snapshot.get("occurrences") or [])
+                    bom_issues = list(bom_snapshot.get("issues") or [])
+                    bom_duplicates = list(bom_snapshot.get("duplicates") or [])
+                    blocking_bom_issues = [
+                        issue for issue in bom_issues if issue.get("blocking")
+                    ]
+                    if bom_snapshot.get("sheet_name"):
+                        source_root_depth = int(bom_snapshot.get("source_root_depth") or 1)
+                        if source_root_depth > 1:
+                            st.info(
+                                f"This BOM starts at Level {source_root_depth}; that level will be "
+                                "treated as the workbook's root while its original level is preserved.",
+                                icon=":material/account_tree:",
+                            )
+                        with st.expander(
+                            f"BOM structure in this workbook ({len(bom_occurrences):,} occurrences)",
+                            icon=":material/account_tree:",
+                        ):
+                            bom_preview = pd.DataFrame(bom_occurrences)
+                            if not bom_preview.empty:
+                                selectable_dataframe(
+                                    bom_preview.head(50),
+                                    key=f"pits_bom_preview_{project_id}",
+                                    hide_index=True,
+                                    height=360,
+                                    column_config={
+                                        "parent_tracker_number": "Parent tracker number",
+                                        "child_tracker_number": "Child tracker number",
+                                        "part_number": "Part number",
+                                        "description": "Part Name",
+                                        "proposed_depth": "Level",
+                                        "raw_quantity_text": "PITS quantity source",
+                                        "proposed_quantity": "PITS quantity",
+                                        "source_row": "BOM row",
+                                        "raw_levels": None,
+                                    },
+                                )
+                            if bom_issues:
+                                issue_message = (
+                                    f"Import is blocked by {len(blocking_bom_issues):,} BOM row issue(s)."
+                                    if blocking_bom_issues
+                                    else f"Found {len(bom_issues):,} nonblocking BOM row issue(s)."
+                                )
+                                if blocking_bom_issues:
+                                    st.error(issue_message, icon=":material/error:")
+                                else:
+                                    st.warning(issue_message, icon=":material/warning:")
+                                issue_preview = pd.DataFrame(
+                                    [
+                                        {
+                                            "result": (
+                                                "Blocks import"
+                                                if issue.get("blocking")
+                                                else "Flagged only"
+                                            ),
+                                            "source_row": issue.get("source_row"),
+                                            "issue": issue.get("issue"),
+                                            "child_tracker_number": issue.get(
+                                                "child_tracker_number", ""
+                                            ),
+                                            "part_number": issue.get("part_number", ""),
+                                            "description": issue.get("description", ""),
+                                            "proposed_depth": issue.get("proposed_depth"),
+                                            "expected_parent_level": issue.get(
+                                                "expected_parent_level"
+                                            ),
+                                            "raw_quantity_text": issue.get(
+                                                "raw_quantity_text", ""
+                                            ),
+                                        }
+                                        for issue in bom_issues
+                                    ]
+                                )
+                                selectable_dataframe(
+                                    issue_preview,
+                                    key=f"pits_bom_issue_preview_{project_id}",
+                                    hide_index=True,
+                                    height=360,
+                                    column_config={
+                                        "result": "Import result",
+                                        "source_row": st.column_config.NumberColumn(
+                                            "Excel row", format="%d"
+                                        ),
+                                        "issue": st.column_config.TextColumn(
+                                            "Issue", width="large"
+                                        ),
+                                        "child_tracker_number": "Tracker number (Column A)",
+                                        "part_number": "Part number (Column B)",
+                                        "description": "Description (Column C)",
+                                        "proposed_depth": "Populated level",
+                                        "expected_parent_level": "Expected parent level",
+                                        "raw_quantity_text": "Level-cell value",
+                                    },
+                                )
+                            if bom_duplicates:
+                                st.warning(
+                                    f"Found {len(bom_duplicates):,} additional duplicate BOM occurrence row(s). "
+                                    "The retained occurrences will be flagged for review.",
+                                    icon=":material/warning:",
+                                )
+                    else:
+                        st.warning(
+                            "This PITS workbook has no recognized BOM worksheet. Tracker and Models "
+                            "can still be imported, but Model Tree will remain unchanged.",
+                            icon=":material/warning:",
+                        )
                     excluded_records = [
                         record for record in records
                         if str(record.get("used_bom") or "").strip().casefold() in {"n", "no"}
@@ -111,18 +245,22 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                         "Import PITS snapshot",
                         type="primary",
                         icon=":material/upload:",
+                        disabled=bool(blocking_bom_issues),
                     ):
                         existing_pits = pits_records(project_id)
                         previous_revisions = {
                             str(row["pits_id"]): int(row["revision_no"])
                             for _, row in existing_pits.iterrows()
                         }
-                        summary = import_pits_id_snapshot(
+                        summary = _save_pits_workbook_snapshot(
                             project_id,
+                            scenario_id,
                             records,
                             models,
-                            scenario_id=scenario_id,
+                            bom_snapshot,
+                            uploaded,
                             overwrite_manual=confirm_overwrite_manual,
+                            editor_name=st.session_state.get("current_editor", ""),
                         )
                         imported_pits = pits_records(project_id)
                         imported_ids = {str(record["pits_id"]).strip() for record in records}
@@ -155,15 +293,22 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                                 "catalog_pits_ids_resolved_from_bom": summary["pits_ids_resolved_from_bom"],
                                 "catalog_part_number_conflicts": summary["pits_id_conflicts"],
                                 "bom_part_numbers_with_multiple_pits_ids": summary["bom_pits_id_conflicts"],
+                                "pits_bom_import": summary.get("bom"),
                             },
                         )
-                        st.success(
+                        success_message = (
                             f"Imported {summary['new']} new IDs, detected {summary['changed']} revised IDs, "
                             f"left {summary['unchanged']} unchanged, synchronized {summary['models']} models, "
                             f"and linked {summary['pits_ids_linked']} PITS IDs to catalog parts "
-                            f"({summary['pits_ids_resolved_from_bom']} resolved from the BOM sheet).",
-                            icon=":material/check_circle:",
+                            f"({summary['pits_ids_resolved_from_bom']} resolved from the BOM sheet)."
                         )
+                        bom_summary = summary.get("bom")
+                        if bom_summary:
+                            success_message += (
+                                f" Staged {bom_summary['new']} new, {bom_summary['changed']} changed, "
+                                f"and {bom_summary['missing']} missing BOM occurrence(s) for Model Tree."
+                            )
+                        st.success(success_message, icon=":material/check_circle:")
                         if summary["bom_pits_id_conflicts"]:
                             st.warning(
                                 "Multiple PITS IDs are assigned to "

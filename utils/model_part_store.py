@@ -335,6 +335,7 @@ def update_part_rows(
     *,
     scenario_id: str | None = None,
     activity_by_part: dict[str, bool] | None = None,
+    _conn: sqlite3.Connection | None = None,
 ) -> int:
     required = {"id", "part_number", "description", "quantity", "revision", "model_applicability", "notes"}
     if not required.issubset(edited.columns):
@@ -361,7 +362,8 @@ def update_part_rows(
         return "" if value is None or pd.isna(value) else str(value).strip()
 
     timestamp = now_iso()
-    with connection() as conn:
+    context = nullcontext(_conn) if _conn is not None else connection()
+    with context as conn:
         if scenario_id and not conn.execute(
             "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
             (scenario_id, project_id),
@@ -791,15 +793,28 @@ def part_feature_rules(project_id: str) -> pd.DataFrame:
         (project_id, project_id),
     ))
 
-def update_part_feature_rules(project_id: str, selections_by_part: dict[str, list[str]]) -> int:
+def update_part_feature_rules(
+    project_id: str,
+    selections_by_part: dict[str, list[str]],
+    *,
+    _conn: sqlite3.Connection | None = None,
+) -> int:
     """Save feature rules and resolve them to official model numbers for downstream use."""
     features = complexity_features(project_id)
     feature_by_id = {str(row["id"]): row for _, row in features.iterrows()}
     tree = complexity_tree(project_id)
-    valid_parts = {str(row["id"]) for row in query("SELECT id FROM parts WHERE project_id=?", (project_id,))}
+    read_rows = (
+        lambda sql, params=(): [dict(row) for row in _conn.execute(sql, params).fetchall()]
+        if _conn is not None
+        else query(sql, params)
+    )
+    valid_parts = {
+        str(row["id"])
+        for row in read_rows("SELECT id FROM parts WHERE project_id=?", (project_id,))
+    }
     linked_parts = {
         str(row["part_id"]): str(row["assembly_number"])
-        for row in query(
+        for row in read_rows(
             """SELECT catalog_part_id AS part_id, assembly_number
                FROM manufacturing_assemblies
                WHERE project_id=? AND catalog_part_id IS NOT NULL""",
@@ -807,7 +822,7 @@ def update_part_feature_rules(project_id: str, selections_by_part: dict[str, lis
         )
     }
     derived_tokens: dict[str, set[str]] = {part_id: set() for part_id in linked_parts}
-    for row in query(
+    for row in read_rows(
         """SELECT assembly.catalog_part_id AS part_id, value.feature_id, value.value
            FROM manufacturing_assemblies assembly
            JOIN assembly_grid_model_mappings mapping
@@ -825,7 +840,8 @@ def update_part_feature_rules(project_id: str, selections_by_part: dict[str, lis
         )
     timestamp = now_iso()
     updated = 0
-    with connection() as conn:
+    context = nullcontext(_conn) if _conn is not None else connection()
+    with context as conn:
         for part_id, raw_tokens in selections_by_part.items():
             if part_id not in valid_parts:
                 continue
@@ -1534,6 +1550,7 @@ def _import_pits_bom_snapshot(
         parent_tracker = str(source.get("parent_tracker_number") or "").strip()
         child_tracker = str(source.get("child_tracker_number") or "").strip()
         depth = int(source.get("proposed_depth") or 0)
+        source_root_depth = int(source.get("source_root_depth") or 1)
         if depth < 1 or depth > 11:
             raise ValueError(f"BOM row {source.get('source_row')} has an invalid Level depth.")
         raw_quantity_text = str(source.get("raw_quantity_text") or "").strip()
@@ -1549,10 +1566,14 @@ def _import_pits_bom_snapshot(
         parent_part = part_by_tracker.get(parent_tracker) if parent_tracker else None
         child_part = part_by_tracker.get(child_tracker)
         source_row = int(source["source_row"])
-        if depth > 1 and parent_part is None:
+        if parent_tracker and parent_part is None:
             validation_issues.append(
                 f"BOM row {source_row}: Parent tracker {parent_tracker or '[blank]'} is not "
                 "matched to a Parts Catalog record"
+            )
+        if not parent_tracker and depth != source_root_depth:
+            validation_issues.append(
+                f"BOM row {source_row}: Level {depth} has no parent at Level {depth - 1}"
             )
         if child_part is None:
             validation_issues.append(

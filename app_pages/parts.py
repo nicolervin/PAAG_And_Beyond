@@ -15,6 +15,7 @@ from utils.store import (
     pits_assembly_mini_bom,
     audit_history,
     complexity_features,
+    connection,
     delete_project_part,
     part_delete_impact,
     get_planning_scenario,
@@ -24,13 +25,17 @@ from utils.store import (
     project_models,
     project_table,
     record_audit_event,
+    save_table_view_preference,
     set_part_image,
+    table_view_preference,
     update_part_feature_rules,
     update_part_rows,
 )
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
+    apply_id_keyed_editor_draft,
     apply_pending_table_editor_reset,
+    capture_id_keyed_editor_draft,
     filter_table,
     merge_filtered_edits,
     request_table_editor_reset,
@@ -66,10 +71,35 @@ def _hash_filtered_export(dataframe: pd.DataFrame) -> str:
     return hashlib.sha256(serialized).hexdigest()
 
 
+PARTS_VIEW_KEY = "parts_catalog"
+DEFAULT_PARTS_COLUMN_ORDER = [
+    "view_details", "active", "photo_status", "part_number", "description",
+    "subsystem", "design_maturity", "factory_nickname", "design_engineer",
+    "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
+    "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
+    "applicability_status", "notes", "source", "updated_display",
+]
+PARTS_COLUMN_LABELS = {
+    "view_details": "Details", "active": "Active", "photo_status": "Photo status",
+    "part_number": "Part number", "description": "Part name", "subsystem": "Subsystem",
+    "design_maturity": "Design Maturity", "factory_nickname": "Factory Nickname",
+    "design_engineer": "Design Engineer", "ppm": "PPM", "buyer_gcl": "Buyer / GCL",
+    "pmqe_aqe": "PMQE / AQE", "ame_tooling_engineer": "AME / Tooling Engineer",
+    "part_code": "Part Code", "pits_tracker_number": "PITS ID",
+    "source_code": "Source Code", "make_buy": "Make vs Buy",
+    "feature_applicability": "Feature applicability",
+    "applicability_status": "Applicability status", "notes": "Notes",
+    "source": "Source", "updated_display": "Updated",
+}
+
+
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 parts_editor_key = f"parts_catalog_editor_v7_{scenario_id}"
 parts_draft_key = f"parts_catalog_draft_{project_id}_{scenario_id}"
+parts_draft_values_key = f"{parts_draft_key}_values"
+parts_draft_state_key = f"{parts_draft_key}_captured_state"
+parts_draft_visible_key = f"{parts_draft_key}_visible"
 page_title_with_scope(
     "Parts Catalog",
     scope="scenario-aware",
@@ -90,6 +120,35 @@ if not scenario:
     st.stop()
 st.caption(f"Active scenario: Rev {scenario['revision_label']} · {scenario['name']}")
 parts_editor_key = apply_pending_table_editor_reset(parts_editor_key)
+current_editor = str(st.session_state.get("current_editor", "") or "").strip()
+editor_view_scope = hashlib.sha256(current_editor.encode("utf-8")).hexdigest()[:12]
+parts_view_draft_key = f"parts_catalog_view_columns_{project_id}_{editor_view_scope}"
+parts_view_pending_key = f"{parts_view_draft_key}_pending_reset"
+parts_view_move_key = f"{parts_view_draft_key}_move"
+saved_parts_view = table_view_preference(project_id, current_editor, PARTS_VIEW_KEY)
+saved_parts_column_order = [
+    column
+    for column in (
+        (saved_parts_view or {}).get("column_order")
+        or (saved_parts_view or {}).get("visible_columns")
+        or DEFAULT_PARTS_COLUMN_ORDER
+    )
+    if column in DEFAULT_PARTS_COLUMN_ORDER
+]
+if not saved_parts_column_order:
+    saved_parts_column_order = DEFAULT_PARTS_COLUMN_ORDER.copy()
+pending_view_reset = st.session_state.pop(parts_view_pending_key, None)
+if pending_view_reset is not None:
+    st.session_state[parts_view_draft_key] = list(pending_view_reset)
+current_view_draft = st.session_state.get(parts_view_draft_key)
+if not isinstance(current_view_draft, list):
+    st.session_state[parts_view_draft_key] = saved_parts_column_order.copy()
+else:
+    st.session_state[parts_view_draft_key] = [
+        column
+        for column in dict.fromkeys(current_view_draft)
+        if column in DEFAULT_PARTS_COLUMN_ORDER
+    ]
 
 parts = project_table("parts", project_id, "part_number")
 models = project_models(project_id)
@@ -170,6 +229,96 @@ st.caption(
     "Edit catalog fields directly, then save. Select View details on a row to open its "
     "photos, full information, and completed-subassembly mini-BOM below."
 )
+with st.expander(
+    "Saved table view — hide and move columns here",
+    icon=":material/view_column:",
+    expanded=True,
+):
+    st.info(
+        "Use these controls for any layout you want to keep. Hiding or dragging a "
+        "column from its menu inside the table is temporary and cannot be captured "
+        "by Save & Refresh."
+    )
+    selected_parts_columns = st.multiselect(
+        "Columns shown in saved view",
+        options=DEFAULT_PARTS_COLUMN_ORDER,
+        format_func=lambda column: PARTS_COLUMN_LABELS[column],
+        key=parts_view_draft_key,
+        help=(
+            "Choose the columns to display. Their order here is the left-to-right table "
+            "order and is saved for the Current editor in this project."
+        ),
+    )
+
+    def move_parts_view_column(offset: int) -> None:
+        columns = list(st.session_state.get(parts_view_draft_key, []))
+        selected = st.session_state.get(parts_view_move_key)
+        if selected not in columns:
+            return
+        current_index = columns.index(selected)
+        target_index = current_index + offset
+        if not 0 <= target_index < len(columns):
+            return
+        columns[current_index], columns[target_index] = (
+            columns[target_index], columns[current_index]
+        )
+        st.session_state[parts_view_draft_key] = columns
+
+    def reset_parts_view_columns() -> None:
+        st.session_state[parts_view_draft_key] = DEFAULT_PARTS_COLUMN_ORDER.copy()
+
+    if st.session_state.get(parts_view_move_key) not in selected_parts_columns:
+        st.session_state[parts_view_move_key] = (
+            selected_parts_columns[0] if selected_parts_columns else None
+        )
+    view_actions = st.container(horizontal=True, vertical_alignment="bottom")
+    view_actions.selectbox(
+        "Column to move",
+        options=selected_parts_columns,
+        format_func=lambda column: PARTS_COLUMN_LABELS[column],
+        key=parts_view_move_key,
+        disabled=not selected_parts_columns,
+        width=260,
+    )
+    selected_move_index = (
+        selected_parts_columns.index(st.session_state.get(parts_view_move_key))
+        if st.session_state.get(parts_view_move_key) in selected_parts_columns
+        else -1
+    )
+    view_actions.button(
+        "Move earlier",
+        icon=":material/arrow_back:",
+        key=f"{parts_view_draft_key}_move_earlier",
+        disabled=selected_move_index <= 0,
+        on_click=move_parts_view_column,
+        args=(-1,),
+    )
+    view_actions.button(
+        "Move later",
+        icon=":material/arrow_forward:",
+        key=f"{parts_view_draft_key}_move_later",
+        disabled=(
+            selected_move_index < 0
+            or selected_move_index >= len(selected_parts_columns) - 1
+        ),
+        on_click=move_parts_view_column,
+        args=(1,),
+    )
+    view_actions.button(
+        "Reset to default",
+        icon=":material/restart_alt:",
+        key=f"{parts_view_draft_key}_default",
+        on_click=reset_parts_view_columns,
+    )
+    st.caption(
+        "Changes appear in the table immediately but remain a draft until you select "
+        "Save & Refresh below. Undo restores the last saved layout and discards unsaved "
+        "part edits."
+    )
+if not selected_parts_columns:
+    st.warning("Show at least one column before saving the table view.")
+parts_column_order = selected_parts_columns or ["part_number"]
+parts_view_has_unsaved_changes = selected_parts_columns != saved_parts_column_order
 editable_columns = [
     "id", "part_number", "description", "subsystem", "design_maturity",
     "factory_nickname", "official_windchill_part_name",
@@ -240,35 +389,35 @@ parts_for_editing["updated_display"] = updated_values.dt.strftime(
 
 
 def merge_parts_editor_draft(source: pd.DataFrame) -> pd.DataFrame:
-    """Overlay the prior visible editor draft onto the full Parts Catalog view."""
+    """Capture positional edits by part ID and overlay the complete pending draft."""
     state = st.session_state.get(parts_editor_key, {}) or {}
     previous_visible = pd.DataFrame(
-        st.session_state.get(f"{parts_draft_key}_visible", [])
+        st.session_state.get(parts_draft_visible_key, [])
     )
-    if previous_visible.empty or "id" not in previous_visible.columns:
-        return source
-    draft = previous_visible.copy()
-    for raw_position, changes in (state.get("edited_rows") or {}).items():
-        position = int(raw_position)
-        if 0 <= position < len(draft):
-            for column, value in (changes or {}).items():
-                if column in draft.columns:
-                    draft.at[draft.index[position], column] = value
-    if not state.get("edited_rows"):
-        return source
-    source_by_id = source.copy()
-    draft_by_id = draft.set_index(draft["id"].astype(str))
-    for row_index, row in source_by_id.iterrows():
-        part_id = str(row.get("id") or "")
-        if part_id in draft_by_id.index:
-            for column in source_by_id.columns:
-                if column in draft_by_id.columns:
-                    source_by_id.at[row_index, column] = draft_by_id.at[part_id, column]
-    return source_by_id
+    draft_by_id, captured_state = capture_id_keyed_editor_draft(
+        previous_visible,
+        state,
+        st.session_state.get(parts_draft_values_key, {}),
+        st.session_state.get(parts_draft_state_key, {}),
+    )
+    st.session_state[parts_draft_values_key] = draft_by_id
+    st.session_state[parts_draft_state_key] = captured_state
+    return apply_id_keyed_editor_draft(source, draft_by_id)
 
 
-parts_for_editing = merge_parts_editor_draft(parts_for_editing)
-parts_full_for_editing = parts_for_editing.copy()
+def clear_parts_editor_draft() -> None:
+    for key in (
+        parts_draft_values_key,
+        parts_draft_state_key,
+        parts_draft_visible_key,
+    ):
+        st.session_state.pop(key, None)
+
+
+parts_saved_for_editing = parts_for_editing.copy()
+parts_full_for_editing = merge_parts_editor_draft(parts_saved_for_editing)
+has_parts_draft = bool(st.session_state.get(parts_draft_values_key, {}))
+parts_for_editing = parts_saved_for_editing
 with st.expander("Filter columns", icon=":material/filter_list:", expanded=True):
     parts_for_editing = filter_table(
         parts_for_editing,
@@ -353,7 +502,22 @@ parts_editor_rows = direct_entry_editor_rows(
         "feature_applicability": "Feature applicability",
         "applicability_status": "Applicability status", "updated_at": "Updated",
     },
+    additional_unsaved_changes=has_parts_draft,
 )
+# Let the mounted editor retain ordinary cell changes without replacing its
+# data source on every edit rerun. Reapply the stable-ID draft only after
+# another control has remounted the editor, such as a filter or view change.
+current_editor_state = st.session_state.get(parts_editor_key, {}) or {}
+if not (
+    current_editor_state.get("edited_rows")
+    or current_editor_state.get("added_rows")
+    or current_editor_state.get("deleted_rows")
+):
+    parts_editor_rows = apply_id_keyed_editor_draft(
+        parts_editor_rows,
+        st.session_state.get(parts_draft_values_key, {}),
+    )
+parts_for_editing = parts_editor_rows.copy()
 parts_action_slot = st.empty()
 edited_parts = st.data_editor(
     parts_editor_rows,
@@ -362,14 +526,7 @@ edited_parts = st.data_editor(
     num_rows="dynamic",
     height=430,
     disabled=["id", "subsystem", "part_code", "model_applicability", "photo_status", "applicability_status", "source", "image_path", "updated_at", "updated_display", "assembly_id", "assembly_number"],
-    column_order=[
-        "view_details", "active", "photo_status", "part_number", "description",
-        "subsystem", "design_maturity",
-        "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
-        "pmqe_aqe", "ame_tooling_engineer", "part_code", "pits_tracker_number",
-        "source_code", "make_buy", "feature_applicability",
-        "applicability_status", "notes", "source", "updated_display",
-    ],
+    column_order=parts_column_order,
     column_config={
         "id": None,
         "official_windchill_part_name": None,
@@ -478,17 +635,24 @@ edited_parts = st.data_editor(
         "updated_display": st.column_config.TextColumn("Updated", default=""),
     },
 )
-st.session_state[parts_draft_key + "_visible"] = parts_editor_rows.to_dict("records")
+st.session_state[parts_draft_visible_key] = parts_editor_rows.to_dict("records")
 parts_actions = editable_table_footer(
     editor_key=parts_editor_key,
     key_prefix="parts_catalog",
     native_row_selection=True,
+    additional_unsaved_changes=(
+        has_parts_draft or parts_view_has_unsaved_changes
+    ),
 )
 save_part_table = parts_actions.save_and_refresh
 if parts_actions.undo:
-    st.session_state.pop(parts_draft_key + "_visible", None)
+    clear_parts_editor_draft()
+    st.session_state[parts_view_pending_key] = saved_parts_column_order.copy()
     request_table_editor_reset(parts_editor_key)
-    st.toast("Discarded the unsaved Parts Catalog edits", icon=":material/undo:")
+    st.toast(
+        "Discarded the unsaved Parts Catalog edits and table view",
+        icon=":material/undo:",
+    )
     st.rerun()
 st.caption(
     "Type or paste new parts directly into the blank entry row, then save. Use View details to manage its Primary CAD image "
@@ -531,7 +695,9 @@ apply_bulk_applicability = bulk_controls.button(
 request_delete_bulk_parts = not selected_saved_parts.empty
 
 if apply_bulk_applicability:
-    if table_has_unsaved_changes(parts_editor_key, native_row_selection=True):
+    if has_parts_draft or table_has_unsaved_changes(
+        parts_editor_key, native_row_selection=True
+    ):
         st.warning("Save or undo other table edits before applying a bulk feature change.")
     elif not bulk_applicability:
         st.warning("Choose All models or at least one feature value.")
@@ -558,7 +724,9 @@ if apply_bulk_applicability:
             st.error(str(exc))
 
 if request_delete_bulk_parts:
-    if table_has_unsaved_changes(parts_editor_key, native_row_selection=True):
+    if has_parts_draft or table_has_unsaved_changes(
+        parts_editor_key, native_row_selection=True
+    ):
         st.warning("Save or undo other table edits before deleting selected parts.")
     else:
         st.session_state.parts_pending_bulk_delete = selected_saved_parts["id"].astype(str).tolist()
@@ -621,6 +789,8 @@ if st.session_state.get("parts_pending_bulk_delete"):
 
 if save_part_table:
     try:
+        if not selected_parts_columns:
+            raise ValueError("Show at least one column before saving the table view.")
         if not selected_saved_parts.empty:
             raise ValueError("Clear the selected rows before saving table edits. Selection is reserved for bulk actions.")
         edited_parts = drop_untouched_new_rows(
@@ -700,41 +870,66 @@ if save_part_table:
                         "fields": changed_fields,
                     }
                 )
-        count = update_part_rows(
-            project_id,
-            parts_to_save,
-            scenario_id=scenario_id,
-            activity_by_part={
-                str(row["id"]): (
-                    True
-                    if row.get("active") is None or pd.isna(row.get("active"))
-                    else bool(row.get("active"))
-                )
-                for _, row in edited_parts.iterrows()
-            },
-        )
-        update_part_feature_rules(
-            project_id,
-            {
-                str(row["id"]): [
-                    feature_token_by_label[label]
-                    for label in (row["feature_applicability"] or [])
-                    if label in feature_token_by_label
-                ]
-                for _, row in edited_parts.iterrows()
-            },
-        )
-        record_audit_event(
-            project_id,
-            "Parts",
-            "Save & Refresh",
-            count,
-            st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id, "catalog_field_changes": field_changes},
-        )
-        st.session_state.pop(parts_draft_key + "_visible", None)
+        audit_details = {
+            "scenario_id": scenario_id,
+            "catalog_field_changes": field_changes,
+        }
+        if parts_view_has_unsaved_changes:
+            audit_details["table_view_change"] = {
+                "old_column_order": saved_parts_column_order,
+                "new_column_order": selected_parts_columns,
+            }
+        with connection() as conn:
+            count = update_part_rows(
+                project_id,
+                parts_to_save,
+                scenario_id=scenario_id,
+                activity_by_part={
+                    str(row["id"]): (
+                        True
+                        if row.get("active") is None or pd.isna(row.get("active"))
+                        else bool(row.get("active"))
+                    )
+                    for _, row in edited_parts.iterrows()
+                },
+                _conn=conn,
+            )
+            update_part_feature_rules(
+                project_id,
+                {
+                    str(row["id"]): [
+                        feature_token_by_label[label]
+                        for label in (row["feature_applicability"] or [])
+                        if label in feature_token_by_label
+                    ]
+                    for _, row in edited_parts.iterrows()
+                },
+                _conn=conn,
+            )
+            save_table_view_preference(
+                project_id,
+                current_editor,
+                PARTS_VIEW_KEY,
+                selected_parts_columns,
+                selected_parts_columns,
+                _conn=conn,
+            )
+            record_audit_event(
+                project_id,
+                "Parts",
+                "Save & Refresh",
+                count,
+                current_editor,
+                audit_details,
+                _conn=conn,
+            )
+        clear_parts_editor_draft()
+        st.session_state[parts_view_pending_key] = selected_parts_columns.copy()
         request_table_editor_reset(parts_editor_key)
-        st.toast(f"Saved {count} parts", icon=":material/check_circle:")
+        st.toast(
+            f"Saved {count} parts and the table view",
+            icon=":material/check_circle:",
+        )
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))

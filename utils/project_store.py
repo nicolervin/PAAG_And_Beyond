@@ -32,6 +32,137 @@ def get_planning_scenario(project_id: str, scenario_id: str) -> dict | None:
     )
     return rows[0] if rows else None
 
+def table_view_preference(
+    project_id: str,
+    editor_name: str,
+    view_key: str,
+) -> dict | None:
+    """Return one project/editor table-layout preference with decoded columns."""
+    normalized_view_key = str(view_key or "").strip()
+    if not normalized_view_key:
+        raise ValueError("A table view name is required.")
+    rows = query(
+        """SELECT id, project_id, editor_name, view_key,
+                  visible_columns_json, column_order_json, created_at, updated_at
+           FROM table_view_preferences
+           WHERE project_id=? AND editor_name=? AND view_key=?""",
+        (
+            project_id,
+            str(editor_name or "").strip(),
+            normalized_view_key,
+        ),
+    )
+    if not rows:
+        return None
+    result = dict(rows[0])
+    try:
+        result["visible_columns"] = json.loads(
+            result.pop("visible_columns_json") or "[]"
+        )
+        result["column_order"] = json.loads(
+            result.pop("column_order_json") or "[]"
+        )
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("The saved table view is invalid. Reset it to the default view.") from exc
+    return result
+
+def save_table_view_preference(
+    project_id: str,
+    editor_name: str,
+    view_key: str,
+    visible_columns: list[str],
+    column_order: list[str],
+    *,
+    _conn: sqlite3.Connection | None = None,
+) -> dict:
+    """Validate and upsert one project/editor table layout."""
+    normalized_view_key = str(view_key or "").strip()
+    if not normalized_view_key:
+        raise ValueError("A table view name is required.")
+    normalized_visible = list(
+        dict.fromkeys(
+            str(column).strip()
+            for column in (visible_columns or [])
+            if str(column).strip()
+        )
+    )
+    normalized_order = list(
+        dict.fromkeys(
+            str(column).strip()
+            for column in (column_order or [])
+            if str(column).strip()
+        )
+    )
+    if not normalized_visible:
+        raise ValueError("Show at least one column in the saved table view.")
+    if set(normalized_visible) != set(normalized_order):
+        raise ValueError("The visible columns and column order must contain the same columns.")
+
+    normalized_editor = str(editor_name or "").strip()
+    timestamp = now_iso()
+    context = nullcontext(_conn) if _conn is not None else connection()
+    with context as conn:
+        if not conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (project_id,)
+        ).fetchone():
+            raise ValueError("The active project no longer exists.")
+        existing = conn.execute(
+            """SELECT id, visible_columns_json, column_order_json
+               FROM table_view_preferences
+               WHERE project_id=? AND editor_name=? AND view_key=?""",
+            (project_id, normalized_editor, normalized_view_key),
+        ).fetchone()
+        previous_visible = (
+            json.loads(existing["visible_columns_json"] or "[]") if existing else []
+        )
+        previous_order = (
+            json.loads(existing["column_order_json"] or "[]") if existing else []
+        )
+        preference_id = str(existing["id"]) if existing else str(uuid4())
+        created_at = timestamp
+        if existing:
+            conn.execute(
+                """UPDATE table_view_preferences
+                   SET visible_columns_json=?, column_order_json=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    json.dumps(normalized_visible),
+                    json.dumps(normalized_order),
+                    timestamp,
+                    preference_id,
+                    project_id,
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO table_view_preferences
+                   (id, project_id, editor_name, view_key, visible_columns_json,
+                    column_order_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    preference_id,
+                    project_id,
+                    normalized_editor,
+                    normalized_view_key,
+                    json.dumps(normalized_visible),
+                    json.dumps(normalized_order),
+                    created_at,
+                    timestamp,
+                ),
+            )
+    return {
+        "id": preference_id,
+        "changed": (
+            previous_visible != normalized_visible
+            or previous_order != normalized_order
+        ),
+        "old_visible_columns": previous_visible,
+        "old_column_order": previous_order,
+        "visible_columns": normalized_visible,
+        "column_order": normalized_order,
+        "updated_at": timestamp,
+    }
+
 def next_scenario_revision_label(project_id: str, current_label: str) -> str:
     """Suggest the next numeric or alphabetic label without using labels as identifiers."""
     label = str(current_label or "").strip()
@@ -633,7 +764,7 @@ def replace_concerns(project_id: str, edited: pd.DataFrame) -> None:
                  str(row.get("created_at")) if row.get("created_at") and not pd.isna(row.get("created_at")) else timestamp, timestamp),
             )
 
-__domain_exports__ = ['projects', 'get_project', 'planning_scenarios', 'get_planning_scenario', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns']
+__domain_exports__ = ['projects', 'get_project', 'planning_scenarios', 'get_planning_scenario', 'table_view_preference', 'save_table_view_preference', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

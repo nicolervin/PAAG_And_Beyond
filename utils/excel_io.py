@@ -190,7 +190,45 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
     header_row = _detect_header_row(raw_df, {"intracker", "partnumber", "level1", "level2"})
     header = raw_df.iloc[header_row].tolist()
     data = raw_df.iloc[header_row + 1:].copy().reset_index(drop=True)
-    data.columns = [_clean_excel_header(value, index) for index, value in enumerate(header)]
+    data.columns = [_clean_excel_header(value, index) for index, value in enumerate(header)]
+
+    level_columns: dict[int, int] = {}
+    for column_index, column_name in enumerate(data.columns):
+        match = re.fullmatch(r"level(\d+)", normalize_header(column_name))
+        if match:
+            level_number = int(match.group(1))
+            if 1 <= level_number <= 11 and level_number not in level_columns:
+                level_columns[level_number] = column_index
+    if not level_columns:
+        return {
+            "sheet_name": sheet_name,
+            "source_row_count": len(data),
+            "occurrences": [],
+            "issues": [{
+                "source_row": int(header_row) + 1,
+                "issue": "No Level 1-11 hierarchy columns",
+                "blocking": False,
+                "child_tracker_number": "",
+                "part_number": "",
+                "description": "",
+                "proposed_depth": None,
+                "raw_quantity_text": "",
+            }],
+            "duplicates": [],
+            "source_root_depth": 1,
+            "level_columns": [],
+        }
+
+    populated_source_levels = [
+        level_number
+        for _, row in data.iterrows()
+        for level_number, column_index in level_columns.items()
+        if column_index < len(row)
+        and row.iloc[column_index] is not None
+        and not pd.isna(row.iloc[column_index])
+        and str(row.iloc[column_index]).strip()
+    ]
+    source_root_depth = min(populated_source_levels) if populated_source_levels else 1
     occurrences: list[dict] = []
     issues: list[dict] = []
     stack: dict[int, str] = {}
@@ -219,12 +257,15 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
         child_tracker = _clean_tracker_number(row.iloc[0] if len(row) else "")
         part_number = _clean_tracker_number(row.iloc[1] if len(row) > 1 else "")
         description = _clean_tracker_number(row.iloc[2] if len(row) > 2 else "")
-        level_values = [row.iloc[index] if index < len(row) else None for index in range(3, 14)]
-        populated_levels = [
-            index + 1
-            for index, value in enumerate(level_values)
-            if value is not None and not pd.isna(value) and str(value).strip()
-        ]
+        level_values = {
+            level_number: row.iloc[column_index] if column_index < len(row) else None
+            for level_number, column_index in level_columns.items()
+        }
+        populated_levels = [
+            level_number
+            for level_number, value in level_values.items()
+            if value is not None and not pd.isna(value) and str(value).strip()
+        ]
         if not child_tracker and not part_number and not description and not populated_levels:
             continue
         if not populated_levels:
@@ -241,8 +282,8 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
             continue
 
         depth = populated_levels[0]
-        parent_tracker = "" if depth == 1 else stack.get(depth - 1, "")
-        raw_quantity = level_values[depth - 1]
+        parent_tracker = "" if depth == source_root_depth else stack.get(depth - 1, "")
+        raw_quantity = level_values[depth]
         raw_quantity_text = _clean_tracker_number(raw_quantity)
         if not child_tracker:
             issues.append({
@@ -256,7 +297,7 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
                 "raw_quantity_text": raw_quantity_text,
             })
             continue
-        if depth > 1 and not parent_tracker:
+        if depth > source_root_depth and not parent_tracker:
             issues.append({
                 "source_row": source_row,
                 "issue": "Missing parent tracker number",
@@ -293,11 +334,11 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
                     proposed_quantity = numeric_quantity
             except (TypeError, ValueError):
                 pass
-        raw_levels = {
-            f"Level {index + 1}": _clean_value(value)
-            for index, value in enumerate(level_values)
-            if value is not None and not pd.isna(value) and str(value).strip()
-        }
+        raw_levels = {
+            f"Level {level_number}": _clean_value(value)
+            for level_number, value in level_values.items()
+            if value is not None and not pd.isna(value) and str(value).strip()
+        }
         if model_usages:
             raw_levels["model_usages"] = model_usages
         occurrence = {
@@ -308,8 +349,9 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
             "proposed_depth": depth,
             "raw_quantity_text": raw_quantity_text,
             "proposed_quantity": proposed_quantity,
-            "source_row": source_row,
-            "raw_levels": raw_levels,
+            "source_row": source_row,
+            "raw_levels": raw_levels,
+            "source_root_depth": source_root_depth,
         }
         key = (parent_tracker, child_tracker)
         if key in seen_keys:
@@ -333,9 +375,11 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
         "sheet_name": sheet_name,
         "source_row_count": len(data),
         "occurrences": occurrences,
-        "issues": issues,
-        "duplicates": duplicate_keys,
-    }
+        "issues": issues,
+        "duplicates": duplicate_keys,
+        "source_root_depth": source_root_depth,
+        "level_columns": sorted(level_columns),
+    }
 
 
 def parse_pits_combined_workbook(uploaded_file) -> tuple[list[dict], list[dict], dict]:

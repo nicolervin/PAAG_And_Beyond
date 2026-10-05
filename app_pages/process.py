@@ -178,14 +178,17 @@ else:
     part_selection_expired = False
     with work_column.container(border=True, height="stretch"):
         st.markdown("#### Yamazumi work elements")
-        st.caption("Select the work element that uses the parts.")
+        st.caption(
+            "Select the Cycle work element that uses the parts. Periodic and "
+            "Fluctuation work is managed in Yamazumi and is not shown here."
+        )
         if yamazumi_rows.empty:
             if pairing_search and section_has_available_yamazumi_work:
                 st.info("No available Yamazumi work matches this filter.")
             elif section_has_yamazumi_work:
-                st.info("All Yamazumi work in this section is already reflected below.")
+                st.info("All Cycle work in this section is already reflected below.")
             else:
-                st.info("No Yamazumi work is linked to this fishbone section.")
+                st.info("No Cycle work is linked to this fishbone section.")
             selected_yamazumi = yamazumi_rows
         else:
             work_event = selectable_dataframe(

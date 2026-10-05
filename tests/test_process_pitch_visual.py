@@ -109,6 +109,51 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertTrue(rows["process_sync_status"].eq("Needs IE review").all())
         self.assertTrue(rows["process_reflected"].astype(bool).all())
 
+    def test_process_part_requirement_source_includes_only_cycle_work(self) -> None:
+        cycle_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            self.pitch_id,
+            {
+                "description": "Cycle source",
+                "time_s": 1,
+                "model_variants": ["Base"],
+                "work_type": "Cycle",
+            },
+        )
+        periodic_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            self.pitch_id,
+            {
+                "description": "Periodic source",
+                "time_s": 1,
+                "model_variants": ["Base"],
+                "work_type": "Periodic",
+            },
+        )
+        fluctuation_id = store.add_yamazumi_element(
+            self.project_id,
+            self.area_id,
+            self.pitch_id,
+            {
+                "description": "Fluctuation source",
+                "time_s": 1,
+                "model_variants": ["Base"],
+                "work_type": "Fluctuation",
+            },
+        )
+
+        rows = store.yamazumi_elements_for_section(
+            self.project_id, self.scenario_id, self.section_id
+        )
+        element_ids = set(rows["id"].astype(str))
+
+        self.assertIn(cycle_id, element_ids)
+        self.assertNotIn(periodic_id, element_ids)
+        self.assertNotIn(fluctuation_id, element_ids)
+        self.assertTrue(rows["work_type"].fillna("Cycle").eq("Cycle").all())
+
     def test_summary_rejects_pitch_from_another_scenario(self) -> None:
         other_scenario = store.clone_planning_scenario(
             self.project_id,
