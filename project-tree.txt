@@ -1,0 +1,123 @@
+﻿PAAG_And_Beyond
+|-- .tmp
+|   +-- pr11-review
+|-- app_pages
+|   |-- assemblies.py
+|   |-- assembly_sequence.py
+|   |-- bom_tree.py
+|   |-- concerns.py
+|   |-- exchange.py
+|   |-- fishbone.py
+|   |-- functional_equipment.py
+|   |-- functional_ergonomics.py
+|   |-- functional_materials.py
+|   |-- functional_quality.py
+|   |-- functional_safety.py
+|   |-- models.py
+|   |-- overview.py
+|   |-- parts.py
+|   |-- pin_map.py
+|   |-- pits_exchange.py
+|   |-- process.py
+|   +-- yamazumi.py
+|-- tests
+|   |-- test_assembly_catalog.py
+|   |-- test_assembly_grid_component.py
+|   |-- test_assembly_grid_store.py
+|   |-- test_assembly_section_walk.py
+|   |-- test_control_plan_page.py
+|   |-- test_control_plan_store.py
+|   |-- test_equipment_pages.py
+|   |-- test_equipment_store.py
+|   |-- test_ergonomics_page.py
+|   |-- test_ergonomics_store.py
+|   |-- test_fishbone_quantities.py
+|   |-- test_fishbone_ui.py
+|   |-- test_fishbone_yamazumi_areas.py
+|   |-- test_model_duplicates.py
+|   |-- test_model_tree.py
+|   |-- test_page_smoke.py
+|   |-- test_parts_catalog_fields.py
+|   |-- test_pfmea_page.py
+|   |-- test_pfmea_patterns.py
+|   |-- test_pfmea_store.py
+|   |-- test_pin_map.py
+|   |-- test_pits_bom_structure_import.py
+|   |-- test_pits_import_detection.py
+|   |-- test_process_pitch_visual.py
+|   |-- test_quality_help.py
+|   |-- test_quality_page.py
+|   |-- test_quality_store.py
+|   |-- test_safety_store.py
+|   |-- test_scenarios.py
+|   |-- test_scope_ui.py
+|   |-- test_section_deletion.py
+|   |-- test_store_facade.py
+|   |-- test_table_ui.py
+|   |-- test_time_units.py
+|   |-- test_work_element_op_ids.py
+|   |-- test_yamazumi_component.py
+|   |-- test_yamazumi_copy.py
+|   |-- test_yamazumi_element_deletion.py
+|   |-- test_yamazumi_flag_retirement.py
+|   |-- test_yamazumi_gui_deletion.py
+|   |-- test_yamazumi_naming.py
+|   |-- test_yamazumi_pitch_feeds.py
+|   |-- test_yamazumi_pitch_order.py
+|   |-- test_yamazumi_settings.py
+|   |-- test_yamazumi_stack_order.py
+|   +-- test_yamazumi_time_units.py
+|-- utils
+|   |-- __init__.py
+|   |-- assembly_grid.py
+|   |-- assembly_store.py
+|   |-- cad_tree.py
+|   |-- clipboard_image.py
+|   |-- component_payload.py
+|   |-- control_plan_flow.py
+|   |-- control_plan_store.py
+|   |-- control_plan_ui.py
+|   |-- db_core.py
+|   |-- equipment_store.py
+|   |-- equipment_ui.py
+|   |-- ergonomics_store.py
+|   |-- excel_io.py
+|   |-- exchange_ui.py
+|   |-- fishbone_store.py
+|   |-- fishbone_ui.py
+|   |-- fishbone_visual.py
+|   |-- functional_review_ui.py
+|   |-- model_part_store.py
+|   |-- pfmea_pattern_store.py
+|   |-- pfmea_store.py
+|   |-- pfmea_ui.py
+|   |-- process_pitch_visual.py
+|   |-- process_store.py
+|   |-- project_store.py
+|   |-- project_transfer.py
+|   |-- quality_help.py
+|   |-- quality_store.py
+|   |-- safety_store.py
+|   |-- scope_ui.py
+|   |-- store.py
+|   |-- table_filters.py
+|   |-- table_ui.py
+|   |-- time_units.py
+|   |-- yamazumi_board.py
+|   |-- yamazumi_naming.py
+|   |-- yamazumi_order.py
+|   |-- yamazumi_stack.py
+|   +-- yamazumi_store.py
+|-- .gitignore
+|-- AGENTS.md
+|-- DATA_DICTIONARY.md
+|-- DESIGN_SYSTEM.md
+|-- ONBOARDING.md
+|-- Open_Questions.md
+|-- PAAG_ROADMAP.md
+|-- PFMEA_CONTROL_PLAN.md
+|-- PROJECT_STATUS.md
+|-- QUALITY_MODULE.md
+|-- README.md
+|-- requirements.txt
++-- streamlit_app.py
