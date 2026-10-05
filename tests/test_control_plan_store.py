@@ -417,6 +417,9 @@ class ControlPlanStoreTests(unittest.TestCase):
         self.assertEqual(len(projection), 1)
 
     def test_classified_entry_without_quality_control_gets_fallback(self) -> None:
+        quality_store.delete_quality_requirement_assignments(
+            self.project_id, self.scenario_id, [self.assignment_id]
+        )
         flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
         flat.at[0, "prevention_controls"] = []
         pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
@@ -848,5 +851,114 @@ class ControlPlanStoreTests(unittest.TestCase):
         )
 
 
+    def test_list_and_add_control_methods(self) -> None:
+        methods = control_plan_store.list_control_methods(self.conn, self.project_id)
+        self.assertIn("Visual Inspection", methods)
+        self.assertIn("DC Tool Torque Control", methods)
+
+        # Add project-specific custom control method
+        control_plan_store.add_custom_control_method(
+            self.conn, self.project_id, "Optical Measurement System", is_global=False
+        )
+        updated = control_plan_store.list_control_methods(self.conn, self.project_id)
+        self.assertIn("Optical Measurement System", updated)
+
+        # Add global custom control method
+        control_plan_store.add_custom_control_method(
+            self.conn, self.project_id, "Global Laser Sensor Scan", is_global=True
+        )
+        other_project_methods = control_plan_store.list_control_methods(self.conn, "other-project-id")
+        self.assertIn("Global Laser Sensor Scan", other_project_methods)
+
+        detailed = control_plan_store.list_control_methods_detailed(self.conn, self.project_id)
+        self.assertIn("Visual Inspection", detailed["name"].values)
+        self.assertIn("Optical Measurement System", detailed["name"].values)
+
+        # Test deleting custom control method
+        custom_row = detailed[detailed["name"] == "Optical Measurement System"].iloc[0]
+        control_plan_store.delete_custom_control_method(self.conn, self.project_id, custom_row["id"])
+        after_delete = control_plan_store.list_control_methods(self.conn, self.project_id)
+        self.assertNotIn("Optical Measurement System", after_delete)
+
+        # Test deleting a global control method
+        global_row = detailed[detailed["name"] == "Global Laser Sensor Scan"].iloc[0]
+        control_plan_store.delete_custom_control_method(self.conn, self.project_id, global_row["id"])
+        after_global_delete = control_plan_store.list_control_methods(self.conn, "other-project-id")
+        self.assertNotIn("Global Laser Sensor Scan", after_global_delete)
+
+        with self.assertRaisesRegex(ValueError, "cannot be blank"):
+            control_plan_store.add_custom_control_method(self.conn, self.project_id, "  ")
+
+    def test_equipment_link_defaults_control_method_and_triggers_review(self) -> None:
+        # Create an equipment asset (Torque Tool) and link it to the work element
+        type_id = "eq-type-1"
+        asset_id = "eq-asset-1"
+        placement_id = "eq-placement-1"
+        timestamp = store.now_iso()
+        self.conn.execute(
+            "INSERT INTO equipment_types (id, project_id, label, created_at, updated_at) VALUES (?, ?, 'Torque tool', ?, ?)",
+            (type_id, self.project_id, timestamp, timestamp),
+        )
+        self.conn.execute(
+            "INSERT INTO equipment_assets (id, project_id, equipment_type_id, name, created_at, updated_at) VALUES (?, ?, ?, 'Atlas Copco DC Tool', ?, ?)",
+            (asset_id, self.project_id, type_id, timestamp, timestamp),
+        )
+        self.conn.execute(
+            "INSERT INTO equipment_placements (id, project_id, scenario_id, equipment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (placement_id, self.project_id, self.scenario_id, asset_id, timestamp, timestamp),
+        )
+        self.conn.execute(
+            "INSERT INTO equipment_process_links (id, project_id, scenario_id, placement_id, work_element_id, created_at, updated_at) VALUES ('proc-link-1', ?, ?, ?, ?, ?, ?)",
+            (self.project_id, self.scenario_id, placement_id, self.work_id, timestamp, timestamp),
+        )
+        self.conn.commit()
+
+        projection = control_plan_store.control_plan_projection(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(projection.iloc[0]["control_method"], "DC Tool Torque Control")
+
+        # Save rows so fingerprint snapshot is recorded
+        control_plan_store.save_control_plan_rows(
+            self.project_id, self.scenario_id, projection
+        )
+
+        # Unlink or replace equipment link to simulate equipment change
+        self.conn.execute("DELETE FROM equipment_process_links WHERE id='proc-link-1'")
+        self.conn.commit()
+
+        # The subsequent projection should flag source_review_required
+        reloaded = control_plan_store.control_plan_projection(
+            self.project_id, self.scenario_id
+        )
+        self.assertTrue(bool(reloaded.iloc[0]["source_review_required"]))
+
+    def test_legacy_control_method_catalog_migration_removes_fk_constraint(self) -> None:
+        # Recreate table with FK constraint to simulate legacy database schema
+        self.conn.executescript(
+            """
+            DROP TABLE IF EXISTS control_method_catalog;
+            CREATE TABLE control_method_catalog (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                name TEXT NOT NULL COLLATE NOCASE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, name)
+            );
+            """
+        )
+        # Calling init_control_plan_schema should automatically migrate and strip the FK constraint
+        control_plan_store.init_control_plan_schema(self.conn)
+        # Inserting a GLOBAL method should now succeed without foreign key error
+        control_plan_store.add_custom_control_method(
+            self.conn, self.project_id, "Migrated Global Method", is_global=True
+        )
+        methods = control_plan_store.list_control_methods(self.conn, self.project_id)
+        self.assertIn("Migrated Global Method", methods)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+

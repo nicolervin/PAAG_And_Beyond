@@ -8,12 +8,16 @@ import streamlit as st
 from utils.control_plan_store import (
     PROCESS_NUMBERING_VERSION,
     PLACEMENTS,
+    add_custom_control_method,
     control_plan_evidence,
     control_plan_flow_projection,
     control_plan_projection,
     control_plan_relink_candidates,
     control_plan_review_items,
+    delete_custom_control_method,
     exclude_control_plan_projection_keys,
+    list_control_methods,
+    list_control_methods_detailed,
     migrate_control_plan_pr_numbers,
     normalize_control_plan_characteristic_suffix,
     normalize_control_plan_pr_number,
@@ -23,6 +27,7 @@ from utils.control_plan_store import (
     save_control_plan_rows,
 )
 from utils.control_plan_flow import control_plan_process_flow
+from utils.db_core import get_db_connection
 from utils.pfmea_store import PFMEA_CLASSIFICATION_MEANINGS, migrate_pfmea_classifications
 from utils.scope_ui import scope_badge
 from utils.store import record_audit_event
@@ -44,15 +49,16 @@ from utils.table_ui import (
 
 
 VISIBLE_COLUMNS = [
-    "pr_number", "station_pitch", "op_id", "machine_fixture", "operation",
-    "characteristic_suffix", "characteristic_placement",
+    "pr_number", "station_pitch", "op_id", "machine_fixture_operation",
+    "characteristic_placement",
     "product_part_characteristic", "process_characteristic", "classification",
     "specification_requirement", "measurement_evaluation", "sample_size",
     "sample_frequency", "who", "control_method", "decision_rule",
     "source_review_required",
 ]
 EDITABLE_COLUMNS = {
-    "pr_number", "machine_fixture", "characteristic_suffix", "characteristic_placement",
+    "pr_number", "characteristic_placement",
+    "specification_requirement",
     "sample_size", "sample_frequency",
     "who", "control_method", "decision_rule",
 }
@@ -100,7 +106,7 @@ def _render_classification_legend() -> None:
         st.dataframe(legend, hide_index=True)
 
 
-def _column_config() -> dict:
+def _column_config(control_methods: list[str] | None = None) -> dict:
     return {
         "id": None,
         "projection_key": None,
@@ -147,6 +153,12 @@ def _column_config() -> dict:
                 "within the Pitch. It is derived live and controls the displayed Process order."
             ),
         ),
+        "machine_fixture_operation": st.column_config.TextColumn(
+            "Machine/Fixt. & Operation",
+            disabled=True,
+            width="large",
+            help="Operation description from PAAG/PFMEA and any associated machine or fixture details.",
+        ),
         "machine_fixture": st.column_config.TextColumn("Machine / fixture", width="medium"),
         "operation": st.column_config.TextColumn("Operation", disabled=True, width="large"),
         "characteristic_suffix": st.column_config.NumberColumn(
@@ -175,7 +187,11 @@ def _column_config() -> dict:
             help="The current short Classification code from the linked PFMEA entry.",
         ),
         "specification_requirement": st.column_config.TextColumn(
-            "Specification / Requirement", disabled=True, width="large"
+            "Specification / Requirement", width="large",
+            help=(
+                "Populated automatically from the Requirements Repository for this "
+                "Work Element. Double-click to append additional notes or customize."
+            ),
         ),
         "measurement_evaluation": st.column_config.TextColumn(
             "Measurement / Evaluation", disabled=True, width="large"
@@ -183,7 +199,12 @@ def _column_config() -> dict:
         "sample_size": st.column_config.TextColumn("Sample size"),
         "sample_frequency": st.column_config.TextColumn("Sample frequency"),
         "who": st.column_config.TextColumn("Who"),
-        "control_method": st.column_config.TextColumn(
+        "control_method": st.column_config.SelectboxColumn(
+            "Control method",
+            options=control_methods,
+            width="large",
+            help="Select a standard or project control method, or add new custom methods below.",
+        ) if control_methods else st.column_config.TextColumn(
             "Control method", width="large",
             help="Collaborator-authored MCP text; PFMEA control evidence is shown separately.",
         ),
@@ -206,6 +227,15 @@ def _grouped_control_plan_display(rows: pd.DataFrame) -> pd.DataFrame:
         display["operation"] = ""
     if "machine_fixture" not in display:
         display["machine_fixture"] = ""
+    if "machine_fixture_operation" not in display:
+        display["machine_fixture_operation"] = display.apply(
+            lambda row: (
+                f"[{row['machine_fixture']}] {row['operation']}"
+                if row.get("machine_fixture")
+                else row.get("operation") or ""
+            ),
+            axis=1,
+        )
     display["pr_number"] = None
     for work_id, indexes in display.groupby(
         display["work_element_id"].astype(str), sort=False
@@ -217,15 +247,6 @@ def _grouped_control_plan_display(rows: pd.DataFrame) -> pd.DataFrame:
         display.at[first, "pr_number"] = normalize_control_plan_pr_number(
             display.at[first, "operation_pr_number"]
         )
-        for index in group_indexes[1:]:
-            display.at[index, "operation"] = ""
-        machine_values = {
-            str(display.at[index, "machine_fixture"] or "").strip()
-            for index in group_indexes
-        }
-        if len(machine_values) <= 1:
-            for index in group_indexes[1:]:
-                display.at[index, "machine_fixture"] = ""
     return display
 
 
@@ -334,7 +355,7 @@ def _restore_grouped_display_values(
     }
     for position in range(min(len(visible_rows), len(restored))):
         changes = changes_by_position.get(position, {})
-        for column in ("operation", "machine_fixture"):
+        for column in ("operation", "machine_fixture", "machine_fixture_operation"):
             if column not in changes and column in restored and column in visible_rows:
                 restored.iat[position, restored.columns.get_loc(column)] = (
                     visible_rows.iloc[position].get(column)
@@ -705,6 +726,37 @@ def _render_review_area(project_id: str, scenario_id: str) -> None:
                     st.rerun()
 
 
+@st.dialog("Remove Control Method from Catalog?", dismissible=False)
+def _confirm_delete_control_method(
+    project_id: str, method_id: str, method_name: str, scope: str
+) -> None:
+    st.warning(
+        f"Are you sure you want to remove the **{scope}** Control Method **'{method_name}'** from the catalog?"
+    )
+    st.markdown(
+        "Removing this Control Method will remove it from the catalog across relevant projects."
+    )
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("Cancel", key=f"dlg_cancel_del_cm_{method_id}", use_container_width=True):
+            st.rerun()
+    with c2:
+        if st.button(
+            "Confirm Remove",
+            type="primary",
+            icon=":material/delete:",
+            key=f"dlg_confirm_del_cm_{method_id}",
+            use_container_width=True,
+        ):
+            with get_db_connection() as conn:
+                try:
+                    delete_custom_control_method(conn, project_id, method_id)
+                    st.toast(f"Removed '{method_name}' from catalog", icon=":material/delete:")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+
 def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> None:
     """Render the editable Characteristics table peer view."""
     source = control_plan_projection(project_id, scenario_id)
@@ -720,7 +772,18 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
     editor_key = apply_pending_table_editor_reset(logical_key)
     draft_key = f"control_plan_draft_{project_id}_{scenario_id}"
     draft = st.session_state.get(draft_key)
-    active = draft.copy() if isinstance(draft, pd.DataFrame) else persisted_active
+    if isinstance(draft, pd.DataFrame) and not draft.empty and "projection_key" in draft:
+        existing_keys = set(draft["projection_key"].astype(str))
+        missing_rows = persisted_active[
+            ~persisted_active["projection_key"].astype(str).isin(existing_keys)
+        ]
+        if not missing_rows.empty:
+            active = pd.concat([draft, missing_rows], ignore_index=True)
+            st.session_state[draft_key] = active
+        else:
+            active = draft.copy()
+    else:
+        active = persisted_active
     for column, default in (
         ("characteristic_suffix", None),
         ("effective_characteristic_suffix", None),
@@ -741,8 +804,9 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
         key=f"control_plan_filters_{project_id}_{scenario_id}",
         dropdown_columns=["classification", "characteristic_type_filter", "source_review_required"],
         search_columns=[
-            "op_id", "operation", "product_part_characteristic", "process_characteristic",
-            "machine_fixture", "control_method", "decision_rule",
+            "op_id", "operation", "machine_fixture", "machine_fixture_operation",
+            "product_part_characteristic", "process_characteristic",
+            "control_method", "decision_rule",
         ],
         labels={
             "classification": "CL", "characteristic_type_filter": "Characteristic type",
@@ -750,16 +814,18 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
         },
         reset_widget_keys=[editor_key],
     )
+    conn = get_db_connection()
+    control_methods = list_control_methods(conn, project_id)
     editor_rows = _grouped_control_plan_display(visible)
     edited = st.data_editor(
         editor_rows,
         key=editor_key,
         num_rows="dynamic",
         hide_index=True,
-        height=520,
+        height=696,
         row_height=88,
         column_order=VISIBLE_COLUMNS,
-        column_config=_column_config(),
+        column_config=_column_config(control_methods=control_methods),
         disabled=[column for column in VISIBLE_COLUMNS if column not in EDITABLE_COLUMNS],
     )
     editor_state = st.session_state.get(editor_key, {}) or {}
@@ -862,6 +928,85 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
         native_row_selection=True,
         additional_unsaved_changes=isinstance(draft, pd.DataFrame),
     )
+    with st.expander("➕ Manage Custom Control Methods", expanded=False):
+        st.markdown(
+            "Add custom Control Methods or view all available Control Methods. "
+            "Choose whether to make new methods available **Globally** across all projects or **Current Project Only**."
+        )
+        col1, col2, col3 = st.columns([3, 2, 1])
+        with col1:
+            new_method = st.text_input(
+                "New Control Method Name",
+                key=f"new_control_method_input_{project_id}",
+                placeholder="e.g., Optical Measurement System",
+            )
+        with col2:
+            scope_choice = st.radio(
+                "Scope",
+                options=["Current Project Only", "Global (All Projects)"],
+                index=0,
+                key=f"control_method_scope_{project_id}",
+                horizontal=True,
+            )
+        with col3:
+            st.write("")
+            st.write("")
+            if st.button("Add Control Method", key=f"btn_add_control_method_{project_id}"):
+                if new_method.strip():
+                    try:
+                        is_global = scope_choice == "Global (All Projects)"
+                        add_custom_control_method(
+                            conn, project_id, new_method.strip(), is_global=is_global
+                        )
+                        scope_label = "Globally" if is_global else "to Current Project"
+                        st.toast(f"Added '{new_method.strip()}' {scope_label}", icon=":material/add:")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+                else:
+                    st.warning("Enter a Control Method name.")
+
+        st.divider()
+        st.markdown("##### Control Methods Catalog")
+        methods_df = list_control_methods_detailed(conn, project_id)
+        if not methods_df.empty:
+            st.dataframe(
+                methods_df[["name", "scope", "usage_count"]],
+                column_config={
+                    "name": st.column_config.TextColumn("Control Method Name"),
+                    "scope": st.column_config.TextColumn("Scope / Type"),
+                    "usage_count": st.column_config.NumberColumn(
+                        "Control Plan Usage",
+                        help="Number of Control Plan characteristics currently using this method.",
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=260,
+            )
+
+            catalog_methods = methods_df[methods_df["is_catalog"] == True]
+            if not catalog_methods.empty:
+                del_col1, del_col2 = st.columns([3, 1])
+                with del_col1:
+                    to_delete_id = st.selectbox(
+                        "Select a Control Method to remove from catalog",
+                        options=catalog_methods["id"].tolist(),
+                        format_func=lambda cid: f"{catalog_methods.loc[catalog_methods['id'] == cid, 'name'].values[0]} ({catalog_methods.loc[catalog_methods['id'] == cid, 'scope'].values[0]})",
+                        key=f"select_delete_control_method_{project_id}",
+                    )
+                with del_col2:
+                    st.write("")
+                    st.write("")
+                    if st.button("Remove Control Method", icon=":material/delete:", key=f"btn_delete_control_method_{project_id}"):
+                        if to_delete_id:
+                            target_row = catalog_methods[catalog_methods["id"] == to_delete_id].iloc[0]
+                            _confirm_delete_control_method(
+                                project_id,
+                                to_delete_id,
+                                str(target_row["name"]),
+                                str(target_row["scope"]),
+                            )
     if footer.undo:
         st.session_state.pop(draft_key, None)
         st.session_state.pop(f"{draft_key}_pr_conflicts", None)
@@ -904,8 +1049,8 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
     export = editor_rows[VISIBLE_COLUMNS].rename(columns={
         "pr_number": "Pr. Nº", "station_pitch": "Station / Pitch",
         "op_id": "Op ID",
-        "machine_fixture": "Machine / fixture",
-        "operation": "Operation", "characteristic_suffix": "Characteristic suffix",
+        "machine_fixture_operation": "Machine/Fixt. & Operation",
+        "characteristic_suffix": "Characteristic suffix",
         "characteristic_placement": "Characteristic type",
         "product_part_characteristic": "Product / Part characteristic",
         "process_characteristic": "Process characteristic", "classification": "CL",

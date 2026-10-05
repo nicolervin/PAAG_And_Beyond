@@ -92,7 +92,7 @@ class PfmeaPageSmokeTests(unittest.TestCase):
         )[1].split('"potential_failure_mode":', 1)[0]
 
         self.assertIn("pinned=True", process_function_config)
-        self.assertIn("height=754", source)
+        self.assertIn("height=658", source)
         self.assertIn("row_height=96", source)
         editor_position = source.index("edited = st.data_editor(")
         footer_position = source.index("footer = editable_table_footer(")

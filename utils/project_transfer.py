@@ -75,6 +75,7 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("pfmea_actions"), TransferTable("pfmea_prevention_options"),
     TransferTable("pfmea_detection_options"), TransferTable("pfmea_prevention_selections"),
     TransferTable("pfmea_detection_selections"), TransferTable("control_plan_items"),
+    TransferTable("control_method_catalog"),
     TransferTable("project_transfer_events"),
 )
 

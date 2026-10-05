@@ -16,6 +16,7 @@ from utils.equipment_store import (
     detach_equipment_from_function,
     equipment_assets,
     equipment_deletion_impact,
+    equipment_needs_vs_placements_matrix,
     equipment_pitch_options,
     equipment_placement_detail,
     equipment_placement_mismatches,
@@ -1048,6 +1049,80 @@ def render_torque_requirement_specifications(project_id: str) -> None:
                 st.error(str(exc))
 
 
+def render_equipment_needs_vs_placements_matrix(
+    project_id: str, scenario_id: str | None
+) -> None:
+    """Render the unified Equipment Needs vs Placements Audit Matrix table."""
+    with st.expander("Equipment Needs vs. Placements Audit Matrix", icon=":material/fact_check:"):
+        st.caption(
+            "Verify that every Drawing Requirement (e.g. Torque specs) and PFMEA Control method "
+            "(e.g. Vision systems, Scanners, Poka-Yoke, ESD) has matching Equipment placed."
+        )
+        if not scenario_id:
+            st.caption("Select an active planning scenario to review the Equipment Audit Matrix.")
+            return
+
+        matrix = equipment_needs_vs_placements_matrix(project_id, scenario_id)
+        if matrix.empty:
+            st.info("No equipment requirements or controls detected for the active scenario.")
+            return
+
+        missing_count = int((~matrix["is_satisfied"]).sum())
+        if missing_count > 0:
+            st.warning(
+                f"⚠️ **{missing_count} Equipment Requirement(s) / Control(s) are missing placed Equipment Assets.**"
+            )
+        else:
+            st.success("🟢 **All Drawing Requirements and PFMEA Controls have placed Equipment Assets.**")
+
+        filter_col1, filter_col2 = st.columns(2)
+        status_filter = filter_col1.selectbox(
+            "Filter by Coverage Status",
+            options=["All", "Missing Equipment Only", "Satisfied Only"],
+            key=f"equipment_matrix_status_filter_{project_id}_{scenario_id}",
+        )
+        source_filter = filter_col2.selectbox(
+            "Filter by Source Stage",
+            options=["All", "Drawing Requirement Only", "PFMEA Control Only"],
+            key=f"equipment_matrix_source_filter_{project_id}_{scenario_id}",
+        )
+
+        filtered = matrix.copy()
+        if status_filter == "Missing Equipment Only":
+            filtered = filtered.loc[~filtered["is_satisfied"]]
+        elif status_filter == "Satisfied Only":
+            filtered = filtered.loc[filtered["is_satisfied"]]
+
+        if source_filter == "Drawing Requirement Only":
+            filtered = filtered.loc[filtered["source_stage"].eq("Drawing Requirement")]
+        elif source_filter == "PFMEA Control Only":
+            filtered = filtered.loc[filtered["source_stage"].eq("PFMEA Control")]
+
+        st.dataframe(
+            filtered,
+            key=f"equipment_matrix_table_{project_id}_{scenario_id}",
+            hide_index=True,
+            column_order=[
+                "op_id", "pitch_station", "operation", "source_stage",
+                "requirement_control_desc", "expected_equipment_type",
+                "linked_asset_names", "coverage_status",
+            ],
+            column_config={
+                "op_id": "Op ID",
+                "pitch_station": "Pitch / Station",
+                "operation": "Operation",
+                "source_stage": "Source Stage",
+                "requirement_control_desc": "Requirement / Control",
+                "expected_equipment_type": "Expected Equipment Type",
+                "linked_asset_names": "Linked Equipment Asset",
+                "coverage_status": "Coverage Status",
+                "work_element_id": None,
+                "is_satisfied": None,
+            },
+            use_container_width=True,
+        )
+
+
 def render_functional_equipment_tab(
     project_id: str,
     scenario_id: str | None,
@@ -1106,6 +1181,7 @@ def render_functional_equipment_tab(
         _render_mismatch_review(project_id, scenario_id, functional_area, linked_assets)
         if functional_area == "Quality":
             render_torque_requirement_specifications(project_id)
+            render_equipment_needs_vs_placements_matrix(project_id, scenario_id)
     if render_history:
         render_equipment_history(
             project_id, key_prefix=f"{functional_area.lower()}_equipment"

@@ -2287,15 +2287,20 @@ def _render_control_selection_panel(
                 str(candidate["source_key"]): str(candidate["label"])
                 for _, candidate in candidates.iterrows()
             }
+            picker_key = (
+                f"pfmea_{control_type.casefold()}_picker_"
+                f"{project_id}_{scenario_id}_{target_key}"
+            )
+            editor_state = st.session_state.get(editor_key, {}) or {}
+            if editor_state.get("edited_rows") or editor_state.get("added_rows"):
+                st.session_state[picker_key] = [value for value in current if value in labels]
+
             selected = st.multiselect(
                 f"{control_type} controls",
                 options=list(labels),
                 default=[value for value in current if value in labels],
                 format_func=lambda value, choices=labels: choices.get(value, value),
-                key=(
-                    f"pfmea_{control_type.casefold()}_picker_"
-                    f"{project_id}_{scenario_id}_{target_key}"
-                ),
+                key=picker_key,
                 help=(
                     "Choose linked published Quality requirements or project-wide "
                     f"manual {control_type} options. Changes remain staged until "
@@ -3563,7 +3568,6 @@ def _sanitize_pfmea_row_controls(
     control_labels = control_labels or {}
     sanitized = rows.copy()
     warnings: list[str] = []
-    candidate_cache: dict[tuple[str, str], set[str]] = {}
 
     for idx, row in sanitized.iterrows():
         work_element_id = _plain_text(row.get("work_element_id"))
@@ -3576,19 +3580,27 @@ def _sanitize_pfmea_row_controls(
             current = _list_values(row.get(column))
             if not current:
                 continue
-            cache_key = (work_element_id, control_type)
-            if cache_key not in candidate_cache:
-                c_df = pfmea_control_candidates(
-                    project_id, scenario_id, work_element_id, control_type, current
-                )
-                candidate_cache[cache_key] = set(c_df["source_key"].astype(str)) if not c_df.empty else set()
+            c_df = pfmea_control_candidates(
+                project_id, scenario_id, work_element_id, control_type, current
+            )
+            key_map = {str(r["source_key"]): str(r["source_key"]) for _, r in c_df.iterrows()} if not c_df.empty else {}
+            label_map = {str(r["label"]): str(r["source_key"]) for _, r in c_df.iterrows()} if not c_df.empty else {}
 
-            allowed = candidate_cache[cache_key]
-            valid = [key for key in current if key in allowed]
-            removed = [key for key in current if key not in allowed]
+            valid: list[str] = []
+            removed: list[str] = []
+
+            for item in current:
+                item_str = str(item).strip()
+                if item_str in key_map:
+                    valid.append(key_map[item_str])
+                elif item_str in label_map:
+                    valid.append(label_map[item_str])
+                else:
+                    removed.append(item_str)
+
+            sanitized.at[idx, column] = list(dict.fromkeys(valid))
 
             if removed:
-                sanitized.at[idx, column] = valid
                 for r_key in removed:
                     lbl = control_labels.get(r_key, r_key)
                     step_name = _plain_text(row.get("process_function")) or "this step"
@@ -3726,10 +3738,7 @@ def _render_flat_pfmea_table(
                 accept_new_options=False,
                 disabled=False,
                 width="large",
-                help=(
-                    "This is a read-only summary. Edit or copy Prevention controls in "
-                    "Select Current Process Controls below the completion assistant."
-                ),
+                help="Select or view Prevention controls for this PFMEA line item.",
             ),
             "detection_controls": st.column_config.MultiselectColumn(
                 "Current Process Controls — Detection",
@@ -3738,10 +3747,7 @@ def _render_flat_pfmea_table(
                 accept_new_options=False,
                 disabled=False,
                 width="large",
-                help=(
-                    "This is a read-only summary. Edit or copy Detection controls in "
-                    "Select Current Process Controls below the completion assistant."
-                ),
+                help="Select or view Detection controls for this PFMEA line item.",
             ),
             "rpn": st.column_config.NumberColumn("RPN", disabled=True, format="%d"),
             "recommended_action": st.column_config.TextColumn(
@@ -3794,7 +3800,7 @@ def _render_flat_pfmea_table(
         ),
         num_rows="dynamic",
         hide_index=True,
-        height=754,
+        height=658,
         row_height=96,
         disabled=[
             "item_number", "rpn",

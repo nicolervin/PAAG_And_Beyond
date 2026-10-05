@@ -679,18 +679,23 @@ def pfmea_control_candidates(
 ) -> pd.DataFrame:
     option_table, _, _ = _control_tables(control_type)
     include = set(include_source_keys or [])
+    quality_include_ids = [
+        k.split("quality:", 1)[1] for k in include if k.startswith("quality:")
+    ]
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
         _work_element(conn, project_id, scenario_id, work_element_id)
-        assignments = [
-            dict(row)
-            for row in conn.execute(
-                """SELECT * FROM quality_requirement_assignments
-                   WHERE project_id=? AND scenario_id=? AND work_element_id=?
-                   ORDER BY description COLLATE NOCASE, unique_identifier COLLATE NOCASE, id""",
-                (project_id, scenario_id, work_element_id),
-            ).fetchall()
-        ]
+        assignments = []
+        if quality_include_ids:
+            placeholders = ",".join("?" for _ in quality_include_ids)
+            assignments = [
+                dict(row)
+                for row in conn.execute(
+                    f"""SELECT * FROM quality_requirement_assignments
+                       WHERE project_id=? AND id IN ({placeholders})""",
+                    (project_id, *quality_include_ids),
+                ).fetchall()
+            ]
         options = [
             dict(row)
             for row in conn.execute(
@@ -718,7 +723,7 @@ def pfmea_control_candidates(
             "source_key": _source_key("manual_option", str(row["id"])),
             "source_type": "manual_option",
             "source_id": str(row["id"]),
-            "label": f"Manual — {row['label']}",
+            "label": str(row["label"]),
             "active": bool(row["active"]),
             "updated_at": str(row["updated_at"]),
         }

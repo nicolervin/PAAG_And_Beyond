@@ -75,6 +75,7 @@ LINKED_STEP_FILTER_COLUMNS = [
 ]
 LINKED_STEP_VISIBLE_COLUMNS = [
     "Scenario",
+    "Op ID",
     "Pitch",
     "Pitch Name",
     "Work Element",
@@ -91,6 +92,7 @@ LINKED_STEP_VISIBLE_COLUMNS = [
 ]
 LINKED_STEP_DIALOG_COLUMNS = [
     "Scenario",
+    "Op ID",
     "Pitch",
     "Pitch Name",
     "Work Element",
@@ -152,6 +154,7 @@ def _linked_step_display_rows(source: pd.DataFrame) -> pd.DataFrame:
     )
     linked_steps = linked_steps.rename(
         columns={
+            "op_id": "Op ID",
             "pitch": "Pitch",
             "pitch_name": "Pitch Name",
             "work_element": "Work Element",
@@ -172,7 +175,8 @@ def _linked_step_display_rows(source: pd.DataFrame) -> pd.DataFrame:
     linked_steps["Repository update pending"] = (
         linked_steps["Repository update pending"].fillna(0).astype(bool)
     )
-    return linked_steps.reindex(columns=LINKED_STEP_VISIBLE_COLUMNS)
+    cols = [col for col in LINKED_STEP_VISIBLE_COLUMNS if col in linked_steps.columns]
+    return linked_steps.reindex(columns=cols)
 
 
 def _requirement_friendly_values(requirement: pd.Series) -> tuple[str, str]:
@@ -328,7 +332,6 @@ def render_quality_requirement_type_catalog(
             .fillna(0)
             .astype(int)
         )
-
     logical_key = f"quality_requirement_types_editor_{project_id}"
     type_editor_key = apply_pending_table_editor_reset(logical_key)
     pending_rename_key = f"quality_requirement_types_pending_rename_{project_id}"
@@ -337,7 +340,7 @@ def render_quality_requirement_type_catalog(
     def save_types(edited_rows: pd.DataFrame, *, confirm_renames: bool) -> None:
         result = save_quality_requirement_type_rows(
             project_id,
-            edited_rows.reindex(columns=["id", "label", "active"]),
+            edited_rows.reindex(columns=["id", "label", "units_available", "active"]),
             confirm_in_use_renames=confirm_renames,
         )
         changed_count = int(result["row_count"])
@@ -379,16 +382,17 @@ def render_quality_requirement_type_catalog(
             types,
             key=f"quality_requirement_types_filters_{project_id}",
             dropdown_columns=["active"],
-            search_columns=["label"],
-            labels={"label": "Label", "active": "Active"},
+            search_columns=["label", "units_available"],
+            labels={"label": "Label", "units_available": "Units available", "active": "Active"},
             reset_widget_keys=[type_editor_key],
         )
         type_editor_rows = direct_entry_editor_rows(
             visible_types,
             editor_key=type_editor_key,
-            sort_columns=["label", "active", "requirement_count"],
+            sort_columns=["label", "units_available", "active", "requirement_count"],
             labels={
                 "label": "Label",
+                "units_available": "Units available",
                 "active": "Active",
                 "requirement_count": "Quality requirements",
             },
@@ -400,7 +404,7 @@ def render_quality_requirement_type_catalog(
             key=type_editor_key,
             num_rows="dynamic",
             hide_index=True,
-            column_order=["label", "active", "requirement_count"],
+            column_order=["label", "units_available", "active", "requirement_count"],
             disabled=["requirement_count"],
             column_config={
                 "id": None,
@@ -413,6 +417,13 @@ def render_quality_requirement_type_catalog(
                     help=(
                         "This text appears in the Quality requirement Type dropdown. "
                         "Renaming an in-use label requires confirmation."
+                    ),
+                ),
+                "units_available": st.column_config.TextColumn(
+                    "Units available",
+                    help=(
+                        "Enter allowed units for this Type separated by semicolons "
+                        "(e.g., inch;mm;mil or in-lbs;ft-lbs;N·m)."
                     ),
                 ),
                 "active": st.column_config.CheckboxColumn(
@@ -744,6 +755,36 @@ preserved_type_labels = [
     if str(value).strip()
 ]
 type_options = list(dict.fromkeys([*active_type_labels, *preserved_type_labels]))
+
+catalog_units: list[str] = []
+for _, row in requirement_type_catalog.iterrows():
+    if bool(row.get("active")):
+        raw = str(row.get("units_available") or "").strip()
+        if raw:
+            for u in raw.split(";"):
+                cleaned_u = u.strip()
+                if cleaned_u:
+                    catalog_units.append(cleaned_u)
+
+preserved_units = [
+    str(value).strip()
+    for value in requirements.get("unit", pd.Series(dtype="string"))
+    if str(value).strip()
+]
+
+if catalog_units:
+    unit_options = list(dict.fromkeys(["", *catalog_units, *preserved_units]))
+else:
+    COMMON_QUALITY_UNITS = [
+        "",
+        "inch", "in", "mm", "cm", "m", "ft", "yd", "µm", "mil",
+        "in-lbs", "ft-lbs", "N·m", "cN·m", "in-oz",
+        "deg", "°", "rad",
+        "lbf", "N", "kN", "psi", "bar", "kPa", "MPa",
+        "V", "mV", "A", "mA", "Ω", "kΩ", "Hz",
+        "s", "sec", "min", "°C", "°F", "%", "pcs", "kg", "g",
+    ]
+    unit_options = list(dict.fromkeys(["", *COMMON_QUALITY_UNITS, *preserved_units]))
 type_status_warnings: list[str] = []
 for _, row in requirements.iterrows():
     current_type = str(row.get("requirement_type") or "").strip()
@@ -849,11 +890,12 @@ edited_requirements = st.data_editor(
         "tolerances": st.column_config.TextColumn(
             "Tolerances", help="Describe the permitted variation around the target value.",
         ),
-        "unit": st.column_config.TextColumn(
+        "unit": st.column_config.SelectboxColumn(
             "Unit",
+            options=unit_options,
             help=(
-                "Use the measurement unit appropriate to the requirement. Linear "
-                "dimensions must use inches."
+                "Choose a unit for the requirement (e.g. mm or in for Dimensions; "
+                "in-lbs, ft-lbs, or N·m for Torque)."
             ),
         ),
         "assignment_count": st.column_config.ButtonColumn(
@@ -1477,11 +1519,9 @@ if active_scenario and selected_requirement_id:
     process_steps = quality_process_steps(project_id, scenario_id)
     step_labels = {
         str(row["id"]): (
-            f"Pitch {str(row.get('pitch') or 'Unassigned')} · "
-            f"{str(row.get('pitch_name') or 'No pitch name')} · "
-            f"{str(row.get('work_element') or 'Unnamed work element')} · "
-            f"{str(row.get('status') or 'No status')} · "
-            f"Seq {int(row['sequence']) if pd.notna(row.get('sequence')) else '—'}"
+            f"{str(row.get('op_id') or 'No Op ID')} - "
+            f"{str(row.get('work_element') or 'Unnamed work element')}"
+            f"{' (' + str(row['pitch_name']) + ')' if row.get('pitch_name') else ''}"
         )
         for _, row in process_steps.iterrows()
     }
@@ -1565,83 +1605,37 @@ if active_scenario and selected_requirement_id:
         except ValueError as exc:
             st.error(str(exc))
 
-    unlink_labels = {
-        str(row["assignment_id"]): (
-            f"Pitch {str(row.get('pitch') or 'Unassigned')} · "
-            f"{str(row.get('pitch_name') or 'No pitch name')} · "
-            f"{str(row.get('work_element') or 'Unnamed work element')} · "
-            f"Seq {int(row['sequence']) if pd.notna(row.get('sequence')) else '—'}"
-        )
-        for _, row in active_links.iterrows()
-    }
-    selected_assignment_id = st.selectbox(
-        "Linked Process at a Glance step to unlink",
-        options=list(unlink_labels),
-        index=None,
-        placeholder="Choose an existing link",
-        format_func=lambda assignment_id: unlink_labels.get(
-            str(assignment_id), "Unavailable linked Process at a Glance step"
-        ),
-        disabled=not unlink_labels,
-        key=f"quality_requirement_unlink_assignment_{project_id}_{scenario_id}",
-        help=(
-            "Unlinking removes only this scenario-specific connection. It preserves "
-            "the repository requirement and the Process at a Glance step."
-        ),
-    )
-    if st.button(
-        "Unlink selected Process at a Glance step",
-        icon=":material/link_off:",
-        disabled=not selected_assignment_id or has_unsaved_edits,
-        key=f"quality_requirement_request_unlink_{project_id}_{scenario_id}",
-    ):
-        try:
-            selected_assignment_id = str(selected_assignment_id)
-            if selected_assignment_id not in unlink_labels:
-                raise ValueError(
-                    "That Quality requirement assignment is not available in the active scenario."
-                )
-            selected_assignment = quality_requirement_assignment(
-                project_id, selected_assignment_id
-            )
-            if str(selected_assignment["quality_requirement_id"]) != str(
-                selected_requirement_id
-            ):
-                raise ValueError(
-                    "That assignment does not belong to the selected Quality requirement."
-                )
-            st.session_state[pending_unlink_key] = {
-                "assignment_id": selected_assignment_id,
-                "scenario_id": str(selected_assignment["scenario_id"]),
-                "quality_requirement_id": str(selected_requirement_id),
-                "requirement": requirement_labels[str(selected_requirement_id)],
-                "process_step": unlink_labels[selected_assignment_id],
-                "pfmea_impact": quality_assignment_pfmea_impact(
-                    project_id,
-                    str(selected_assignment["scenario_id"]),
-                    [selected_assignment_id],
-                ),
-                "control_plan_impact": control_plan_assignment_impact(
-                    project_id,
-                    str(selected_assignment["scenario_id"]),
-                    [selected_assignment_id],
-                ),
-            }
-        except ValueError as exc:
-            st.error(str(exc))
-
-
-@st.dialog("Unlink Quality requirement?", dismissible=False)
+@st.dialog("Unlink Quality requirement process link(s)?", dismissible=False)
 def confirm_quality_requirement_unlink() -> None:
     pending = st.session_state.get(pending_unlink_key, {})
+    assignment_ids = [
+        str(aid)
+        for aid in (
+            pending.get("assignment_ids")
+            or ([pending["assignment_id"]] if pending.get("assignment_id") else [])
+        )
+    ]
+    count = len(assignment_ids)
     st.warning(
-        f"Unlink {pending.get('requirement', 'this Quality requirement')} from "
-        f"{pending.get('process_step', 'the selected Process at a Glance step')}?"
+        f"Unlink {count} selected Process at a Glance link{'s' if count != 1 else ''}?"
     )
     st.write(
-        "Only this scenario-specific link will be removed. The saved Quality requirement "
-        "and Process at a Glance step will be preserved."
+        "Only scenario-specific connection(s) will be removed. Saved Quality requirements "
+        "and Process at a Glance steps will be preserved."
     )
+    items = pending.get("items") or []
+    if items:
+        for item in items[:10]:
+            req = item.get("requirement", "Quality requirement")
+            step = item.get("process_step", "Process step")
+            st.write(f"- **{req}** linked to **{step}**")
+        if len(items) > 10:
+            st.caption(f"...and {len(items) - 10} more link(s)")
+    elif pending.get("requirement") and pending.get("process_step"):
+        st.write(
+            f"- **{pending['requirement']}** linked to **{pending['process_step']}**"
+        )
+
     pfmea_impact = pending.get("pfmea_impact") or {}
     control_plan_impact = pending.get("control_plan_impact") or {}
     if int(pfmea_impact.get("selection_count", 0)):
@@ -1670,17 +1664,17 @@ def confirm_quality_requirement_unlink() -> None:
         "Unlink",
         type="primary",
         icon=":material/link_off:",
-        disabled=scenario_changed,
+        disabled=scenario_changed or not assignment_ids,
         key=(
             f"destructive_confirm_quality_requirement_unlink_{project_id}_"
-            f"{pending.get('assignment_id', 'missing')}"
+            f"{'_'.join(assignment_ids[:3])}"
         ),
     ):
         try:
             deleted_count = delete_quality_requirement_assignments(
                 project_id,
                 str(pending["scenario_id"]),
-                [str(pending["assignment_id"])],
+                assignment_ids,
                 st.session_state.get("current_editor", ""),
             )
             record_audit_event(
@@ -1700,13 +1694,13 @@ def confirm_quality_requirement_unlink() -> None:
                     st.session_state.get("current_editor", ""),
                     {
                         "scenario_id": pending["scenario_id"],
-                        "quality_requirement_assignment_id": pending["assignment_id"],
+                        "assignment_ids": assignment_ids,
                         "cause_count": pfmea_impact.get("cause_count", 0),
                     },
                 )
             st.session_state.pop(pending_unlink_key, None)
             st.toast(
-                "Quality requirement unlinked from the Process at a Glance step",
+                f"Unlinked {deleted_count} Quality requirement link{'s' if deleted_count != 1 else ''}",
                 icon=":material/check_circle:",
             )
             st.rerun()
@@ -1886,12 +1880,15 @@ with st.expander(
                 "Quality requirement Unique identifier": "Quality requirement",
             },
         )
-        selectable_dataframe(
+        linked_steps_table_key = f"quality_requirement_linked_steps_{project_id}"
+        selection_event = selectable_dataframe(
             visible_linked_steps,
-            key=f"quality_requirement_linked_steps_{project_id}",
+            key=linked_steps_table_key,
             hide_index=True,
+            column_order=LINKED_STEP_VISIBLE_COLUMNS,
             column_config={
                 "Scenario": st.column_config.TextColumn("Scenario", pinned=True),
+                "Op ID": st.column_config.TextColumn("Op ID", pinned=True),
                 "Pitch": st.column_config.TextColumn("Pitch", pinned=True),
                 "Pitch Name": st.column_config.TextColumn("Pitch Name"),
                 "Work Element": st.column_config.TextColumn("Work Element", width="large"),
@@ -1917,6 +1914,49 @@ with st.expander(
                 ),
             },
         )
+        selected_links = selected_dataframe_rows(
+            visible_linked_steps, selection_event, id_column="Quality requirement Unique identifier"
+        )
+        if not selected_links.empty:
+            action_bar = selected_rows_action_bar()
+            unlink_count = len(selected_links)
+            if action_bar.button(
+                f"Unlink {unlink_count} selected link{'s' if unlink_count != 1 else ''}",
+                type="primary",
+                icon=":material/link_off:",
+                disabled=has_unsaved_edits,
+                key=f"quality_requirement_request_bulk_unlink_{project_id}",
+            ):
+                items = []
+                for s_idx, s_row in selected_links.iterrows():
+                    source_row = linked_steps_source.loc[s_idx]
+                    op = str(s_row.get("Op ID") or "No Op ID")
+                    we = str(s_row.get("Work Element") or "Unnamed work element")
+                    pn = str(s_row.get("Pitch Name") or "")
+                    step_str = f"{op} - {we}{' (' + pn + ')' if pn else ''}"
+                    req_id_val = str(s_row.get("Quality requirement Unique identifier") or "")
+                    desc_val = str(s_row.get("Description") or "")
+                    req_str = f"{req_id_val} — {desc_val}" if desc_val else req_id_val
+                    items.append({
+                        "assignment_id": str(source_row["assignment_id"]),
+                        "scenario_id": str(source_row["scenario_id"]),
+                        "requirement": req_str,
+                        "process_step": step_str,
+                    })
+                sc_id = str(items[0]["scenario_id"])
+                ass_ids = [str(r["assignment_id"]) for r in items]
+                st.session_state[pending_unlink_key] = {
+                    "assignment_ids": ass_ids,
+                    "scenario_id": sc_id,
+                    "items": items,
+                    "pfmea_impact": quality_assignment_pfmea_impact(
+                        project_id, sc_id, ass_ids
+                    ),
+                    "control_plan_impact": control_plan_assignment_impact(
+                        project_id, sc_id, ass_ids
+                    ),
+                }
+                st.rerun()
 
 linked_process_section.__exit__(None, None, None)
 

@@ -25,6 +25,8 @@ DEFAULT_EQUIPMENT_TYPES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Vision equipment", ("Quality",)),
     ("Scan/Compare equipment", ("Quality",)),
     ("Test equipment", ("Quality",)),
+    ("Dimensional measurement equipment", ("Quality",)),
+    ("Poka-Yoke / Fixture equipment", ("Quality", "Assembly")),
     ("Conveyor", ("Assembly",)),
 )
 
@@ -166,12 +168,16 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -> None:
-    if conn.execute(
-        "SELECT 1 FROM equipment_types WHERE project_id=? LIMIT 1", (project_id,)
-    ).fetchone():
-        return
     timestamp = _store_module().now_iso()
+    existing_types = {
+        str(row["label"]).strip().casefold()
+        for row in conn.execute(
+            "SELECT label FROM equipment_types WHERE project_id=?", (project_id,)
+        ).fetchall()
+    }
     for label, functional_areas in DEFAULT_EQUIPMENT_TYPES:
+        if label.strip().casefold() in existing_types:
+            continue
         type_id = str(uuid4())
         conn.execute(
             """INSERT INTO equipment_types
@@ -186,6 +192,7 @@ def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (str(uuid4()), project_id, type_id, functional_area, timestamp, timestamp),
             )
+        existing_types.add(label.strip().casefold())
 
 
 def equipment_types(project_id: str, functional_area: str | None = None) -> pd.DataFrame:
@@ -1248,3 +1255,207 @@ def clone_equipment_scenario(
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (str(uuid4()), project_id, target_scenario_id, new_placement_id, new_work_id, timestamp, timestamp),
             )
+
+
+def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Return a unified Equipment Needs vs Placements matrix DataFrame."""
+    store = _store_module()
+    with store.connection() as conn:
+        init_equipment_schema(conn)
+
+        work_rows = conn.execute(
+            """SELECT id, station, operation, sequence
+               FROM work_elements
+               WHERE project_id=? AND scenario_id=?
+               ORDER BY sequence, id""",
+            (project_id, scenario_id),
+        ).fetchall()
+        if not work_rows:
+            return pd.DataFrame(columns=[
+                "work_element_id", "op_id", "pitch_station", "operation",
+                "source_stage", "requirement_control_desc", "expected_equipment_type",
+                "linked_asset_names", "coverage_status", "is_satisfied",
+            ])
+
+        work_ids = [str(r["id"]) for r in work_rows]
+        op_contexts = store.work_element_op_contexts(project_id, scenario_id, work_ids)
+
+        placed_rows = conn.execute(
+            """SELECT link.work_element_id, asset.id AS equipment_id, asset.name AS asset_name,
+                      eqtype.label AS equipment_type
+               FROM equipment_process_links link
+               JOIN equipment_placements placement
+                 ON placement.id = link.placement_id
+                AND placement.project_id = link.project_id
+                AND placement.scenario_id = link.scenario_id
+               JOIN equipment_assets asset
+                 ON asset.id = placement.equipment_id
+                AND asset.project_id = link.project_id
+               JOIN equipment_types eqtype
+                 ON eqtype.id = asset.equipment_type_id
+                AND eqtype.project_id = link.project_id
+               WHERE link.project_id=? AND link.scenario_id=?""",
+            (project_id, scenario_id),
+        ).fetchall()
+
+        placed_by_work: dict[str, list[dict]] = {}
+        for r in placed_rows:
+            placed_by_work.setdefault(str(r["work_element_id"]), []).append(dict(r))
+
+        torque_linked_req_ids = {
+            str(r[0])
+            for r in conn.execute(
+                """SELECT quality_requirement_id FROM equipment_torque_requirement_links
+                   WHERE project_id=?""",
+                (project_id,),
+            ).fetchall()
+        }
+
+        assignments = conn.execute(
+            """SELECT a.id AS assignment_id, a.work_element_id, a.quality_requirement_id,
+                      a.requirement_type, a.description, a.unique_identifier,
+                      a.target_value, a.tolerances, a.unit
+               FROM quality_requirement_assignments a
+               WHERE a.project_id=? AND a.scenario_id=?""",
+            (project_id, scenario_id),
+        ).fetchall()
+
+        matrix_records: list[dict] = []
+        drawing_matched_keys: set[tuple[str, str]] = set()
+
+        for a in assignments:
+            work_id = str(a["work_element_id"])
+            req_type = _text(a["requirement_type"])
+            desc = _text(a["description"])
+            uid = _text(a["unique_identifier"])
+            target = _text(a["target_value"])
+            tol = _text(a["tolerances"])
+            unit = _text(a["unit"])
+            req_id = str(a["quality_requirement_id"])
+
+            expected_type = ""
+            if req_type.casefold() == "torque" or "torque" in desc.casefold():
+                expected_type = "Torque tool"
+            elif "vision" in req_type.casefold() or "vision" in desc.casefold():
+                expected_type = "Vision equipment"
+            elif "esd" in req_type.casefold() or "esd" in desc.casefold():
+                expected_type = "ESD equipment"
+            elif "scan" in req_type.casefold() or "scan" in desc.casefold():
+                expected_type = "Scan/Compare equipment"
+            elif "test" in req_type.casefold() or "test" in desc.casefold():
+                expected_type = "Test equipment"
+
+            if not expected_type:
+                continue
+
+            op_ctx = op_contexts.get(work_id, {})
+            op_id = _text(op_ctx.get("op_id")) or "Op ID unavailable"
+            pitch_st = _text(op_ctx.get("pitch_number")) or _text(op_ctx.get("station")) or "Unassigned"
+            op_text = _text(op_ctx.get("operation"))
+
+            spec_parts = [p for p in [uid, desc, target, tol, unit] if p]
+            spec_str = " — ".join(spec_parts) if spec_parts else f"{req_type} Requirement"
+
+            placed_assets = placed_by_work.get(work_id, [])
+            matching_assets = [
+                eq["asset_name"] for eq in placed_assets
+                if _text(eq.get("equipment_type")).casefold() == expected_type.casefold()
+                or (expected_type == "Torque tool" and "torque" in _text(eq.get("equipment_type")).casefold())
+            ]
+            if req_id in torque_linked_req_ids and expected_type == "Torque tool":
+                t_rows = conn.execute(
+                    """SELECT asset.name FROM equipment_torque_requirement_links link
+                       JOIN equipment_assets asset ON asset.id=link.equipment_id
+                       WHERE link.project_id=? AND link.quality_requirement_id=?""",
+                    (project_id, req_id),
+                ).fetchall()
+                for tr in t_rows:
+                    aname = _text(tr[0])
+                    if aname and aname not in matching_assets:
+                        matching_assets.append(aname)
+
+            is_satisfied = len(matching_assets) > 0
+            matrix_records.append({
+                "work_element_id": work_id,
+                "op_id": op_id,
+                "pitch_station": pitch_st,
+                "operation": op_text,
+                "source_stage": "Drawing Requirement",
+                "requirement_control_desc": spec_str,
+                "expected_equipment_type": expected_type,
+                "linked_asset_names": ", ".join(matching_assets) if is_satisfied else "⚠️ [No Asset Attached]",
+                "coverage_status": "Satisfied" if is_satisfied else "Missing Equipment",
+                "is_satisfied": is_satisfied,
+            })
+            drawing_matched_keys.add((work_id, expected_type.casefold()))
+
+        pfmea_items = conn.execute(
+            """SELECT item.*, entry.work_element_id, entry.process_operation_snapshot
+               FROM control_plan_items item
+               JOIN pfmea_entries entry ON entry.id=item.pfmea_entry_id
+               WHERE item.project_id=? AND item.scenario_id=? AND item.excluded=0""",
+            (project_id, scenario_id),
+        ).fetchall()
+
+        for item in pfmea_items:
+            item_dict = dict(item)
+            work_id = str(item_dict.get("work_element_id") or "")
+            method = _text(item_dict.get("control_method"))
+            if not method:
+                continue
+
+            m_lower = method.lower()
+            expected_type = ""
+            if "vision" in m_lower:
+                expected_type = "Vision equipment"
+            elif "scan" in m_lower or "genealogy" in m_lower or "plc" in m_lower:
+                expected_type = "Scan/Compare equipment"
+            elif "poka" in m_lower or "fixture" in m_lower:
+                expected_type = "Poka-Yoke / Fixture equipment"
+            elif "esd" in m_lower or "frm-ap1-qys-029" in m_lower:
+                expected_type = "ESD equipment"
+            elif "torque" in m_lower:
+                expected_type = "Torque tool"
+            elif "test" in m_lower:
+                expected_type = "Test equipment"
+
+            if not expected_type:
+                continue
+
+            if (work_id, expected_type.casefold()) in drawing_matched_keys:
+                continue
+
+            op_ctx = op_contexts.get(work_id, {})
+            op_id = _text(op_ctx.get("op_id")) or "Op ID unavailable"
+            pitch_st = _text(op_ctx.get("pitch_number")) or _text(op_ctx.get("station")) or "Unassigned"
+            op_text = _text(op_ctx.get("operation")) or _text(item_dict.get("process_operation_snapshot"))
+
+            placed_assets = placed_by_work.get(work_id, [])
+            matching_assets = [
+                eq["asset_name"] for eq in placed_assets
+                if _text(eq.get("equipment_type")).casefold() == expected_type.casefold()
+            ]
+            is_satisfied = len(matching_assets) > 0
+
+            matrix_records.append({
+                "work_element_id": work_id,
+                "op_id": op_id,
+                "pitch_station": pitch_st,
+                "operation": op_text,
+                "source_stage": "PFMEA Control",
+                "requirement_control_desc": method,
+                "expected_equipment_type": expected_type,
+                "linked_asset_names": ", ".join(matching_assets) if is_satisfied else "⚠️ [No Asset Attached]",
+                "coverage_status": "Satisfied" if is_satisfied else "Missing Equipment",
+                "is_satisfied": is_satisfied,
+            })
+
+    df = pd.DataFrame(matrix_records)
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "work_element_id", "op_id", "pitch_station", "operation",
+            "source_stage", "requirement_control_desc", "expected_equipment_type",
+            "linked_asset_names", "coverage_status", "is_satisfied",
+        ])
+    return df.sort_values(by=["op_id", "source_stage"], kind="stable").reset_index(drop=True)
+
