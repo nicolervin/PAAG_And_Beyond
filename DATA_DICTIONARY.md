@@ -891,6 +891,50 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### PAAG Visualizer Revision 2 — Landscape Slide Presentation and Scenario Visual Guides
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 7, 2026
+- **Purpose:** Transform the scenario-specific Process at a Glance (PAAG) visualizer from the former portrait-oriented 5-card stack into an automated, interactive 16:9 landscape PowerPoint-style slide presentation for shop-floor standard work, pitch reviews, and printing. Extends Process at a Glance with a Parts-catalog-style visual aids management workflow to upload supplemental photos and videos, assign callout captions, and tag media to one or more PAAG work elements within a pitch.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (owning project), `planning_scenarios` (active scenario), `yamazumi_pitches` (workstation pitch owning the slide), `work_elements` (Process at a Glance elements), `parts` (consumed and handled parts paired to work elements), `equipment_assets` & `equipment_placements` / `equipment_process_links` (tools and PPE assigned to the pitch or linked to work elements), and Functional Review alert sources (`quality_requirements` / torque / PFMEA, `ergonomics_reviews`, `safety_requirements`, materials, and equipment).
+  2. *Critical thread relationship:* Connects directly to the downstream visualization and standard work layer of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*). Each slide is generated from a scenario-owned pitch (`yamazumi_pitches`) and its ordered work elements (`work_elements`), with supplemental visual media linked to the pitch and tagged many-to-many to work elements.
+  3. *Scope:* Scenario-specific. Uploaded visual aids and element tag associations belong to the active planning scenario. Scenario cloning copies visual aids and re-maps tags to the cloned pitch and work elements.
+  4. *Table requirement:* Requires new dedicated scenario-owned tables because existing tables cannot store multi-format visual media (photos & videos), custom callout captions, or many-to-many tags linking one visual aid to multiple PAAG elements in a pitch:
+     - `process_visual_media`: stores uploaded media files and callout metadata for a pitch (`id`, `project_id`, `scenario_id`, `pitch_id`, `media_type`, `file_path`, `caption`, `created_at`, `created_by`, `updated_at`). `media_type` supports `'image'` or `'video'`.
+     - `process_visual_media_tags`: junction table linking visual media to specific work elements (`id`, `media_id`, `work_element_id`, `project_id`, `scenario_id`, `created_at`), allowing one photo or video to be tagged to multiple PAAG elements.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Deletion Standard: confirmed deletion dialog for visual aids with cleanup of owned media files in `data/uploads/`.
+     - Universal Save Action Standard: standard upload and tag submission in the visual aids manager below the Process table.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Process visual aids"`.
+     - Universal History Display Standard: bottom History expander using `audit_history()`.
+     - Scope Badges: scenario-specific scope badge on Process at a Glance and the visualizer.
+     - Presentation & Print: Full-screen presentation mode with pitch-by-pitch and slide-by-slide navigation; print-to-PDF / print CSS optimized for 8.5 × 11 and 11 × 17 landscape.
+- **Slide Layout & Visualizer Capabilities:**
+  1. *Top Header Banner:*
+     - Top-left: Automated facility branding stating `Process at a Glance for [Project Name]`.
+     - Center title: `[Pitch Number] — [Pitch Name]`.
+     - Right Document Control: Box displaying Op ID range, generated date, and scenario name/ID pulled from the active scenario.
+  2. *Left Information Column:*
+     - Slide and pitch page indicator (`Page X of Y`).
+     - *Tools required:* Aggregates tools and PPE placed on that pitch and/or linked to its work elements via the Equipment module, deduplicated to list each tool once, displaying 1-line summary and clickable hyperlink to open equipment details.
+     - *Parts table:* Displays all parts both handled and consumed across work elements on the slide, with columns `PART #`, `DESCRIPTION`, and `QTY`, plus factory nickname and part thumbnail from the Parts Catalog.
+     - *Mini Yamazumi pitch stack:* Scaled visual pitch stack faithfully mirroring the Yamazumi board appearance, including side-by-side variant columns (when model variants exist), stack element descriptions, times, and takt line.
+  3. *Right Visual Aids Area:*
+     - Dynamic 3×2 landscape grid (up to 6 visual items per slide) displaying photos and inline playable videos (`.mp4`, `.mov`, `.webm` with `<video controls>`).
+     - Automatically expands / stretches to fill available slide space when fewer than 6 visuals exist.
+     - Visuals ordered by the sequence of their tagged PAAG elements in the Yamazumi stack.
+     - Deduplication: Each visual aid appears only once on the slide, even when tagged to multiple PAAG elements.
+     - Pagination: If a pitch has more than 6 visual aids, a subsequent slide (`Page 2 of 2`) is automatically created for that pitch.
+     - Callout captions: Yellow-bordered callout box below each visual aid.
+  4. *Functional Alerts Banner:*
+     - Positioned along the top or bottom of the slide: `Functional Alerts: Quality, Ergo, Safety, Materials, Equipment`.
+     - Displays 1-line summaries below each function if an alert or requirement is triggered on that pitch or its PAAG elements (e.g. Quality CTQ / torque specifications, Ergonomics high-risk assessments, Safety PPE/hazards, Equipment unplaced/missing tools, Materials packaging/unassigned parts).
+     - Hyperlink / hover / click dialog window displaying detailed alert information.
+  5. *Process at a Glance Management UI:*
+     - Located below the Process at a Glance table (mirroring the Parts Catalog additional views pattern).
+     - Allows selecting a pitch, viewing existing attached visual aids, uploading supplemental photos or videos (or pasting screenshots from clipboard), entering callout caption, and multi-selecting the applicable PAAG elements in that pitch.
+
 ### 2D Plant Floor Plan Layouts (Pin Map -> Layouts)
 
 - **Proposed by:** Nicole Ervin, project owner
