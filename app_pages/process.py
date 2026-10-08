@@ -1469,19 +1469,13 @@ def edit_visual_media_dialog(
         col1, col2 = st.columns([1, 1])
         if col1.form_submit_button("Save changes", icon=":material/save:", type="primary"):
             update_pitch_visual_media(
+                project_id=project_id,
+                scenario_id=scenario_id,
                 media_id=media_id,
                 caption=new_caption,
                 sequence=new_sequence,
                 tagged_work_element_ids=new_tags,
                 current_editor=st.session_state.get("current_editor", ""),
-            )
-            record_audit_event(
-                project_id,
-                "Process",
-                "Update visual aid",
-                1,
-                st.session_state.get("current_editor", ""),
-                {"media_id": media_id, "caption": new_caption},
             )
             st.toast("Visual aid updated", icon=":material/check_circle:")
             st.rerun()
@@ -1490,7 +1484,12 @@ def edit_visual_media_dialog(
 
 
 @st.dialog("Delete Visual Aid?", dismissible=False)
-def delete_visual_media_dialog(media_id: str, caption: str, project_id: str) -> None:
+def delete_visual_media_dialog(
+    media_id: str,
+    caption: str,
+    project_id: str,
+    scenario_id: str,
+) -> None:
     st.write("Are you sure you want to permanently delete this visual aid?")
     if caption:
         st.info(f"Caption: **{caption}**")
@@ -1498,16 +1497,10 @@ def delete_visual_media_dialog(media_id: str, caption: str, project_id: str) -> 
     col1, col2 = st.columns([1, 1])
     if col1.button("Confirm Delete", icon=":material/delete:", type="primary", key=f"conf_del_{media_id}"):
         delete_pitch_visual_media(
+            project_id=project_id,
+            scenario_id=scenario_id,
             media_id=media_id,
             current_editor=st.session_state.get("current_editor", ""),
-        )
-        record_audit_event(
-            project_id,
-            "Process",
-            "Delete visual aid",
-            1,
-            st.session_state.get("current_editor", ""),
-            {"media_id": media_id},
         )
         st.toast("Visual aid deleted", icon=":material/check_circle:")
         st.rerun()
@@ -1839,6 +1832,7 @@ if selected_pitch_id:
                                     media_id=media_item["id"],
                                     caption=media_item.get("caption", ""),
                                     project_id=project_id,
+                                    scenario_id=scenario_id,
                                 )
 
 export_actions = st.container(horizontal=True)
