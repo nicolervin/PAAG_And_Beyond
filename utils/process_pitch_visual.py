@@ -353,11 +353,28 @@ def render_pitch_canvas(
             e_color = str(e.get("motion_color") or "gray")
             if e_color not in {"green", "orange", "gray"}:
                 e_color = "gray"
+
+            work_type = str(e.get("work_type") or "").strip()
+            work_type_lower = work_type.lower()
+            if work_type_lower == "periodic":
+                type_class = "type-periodic"
+            elif work_type_lower == "fluctuation":
+                type_class = "type-fluctuation"
+            elif work_type_lower == "cycle":
+                type_class = "type-cycle"
+            else:
+                if e_color == "green":
+                    type_class = "type-cycle"
+                elif e_color == "orange":
+                    type_class = "type-periodic"
+                else:
+                    type_class = "type-cycle"
+
             # Height in px proportional to time
             b_height = max(14, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 20
             blocks_html.append(
                 f"""
-                <div class="stack-block motion-bar {e_color}" style="height:{b_height}px" title="{e_desc} · {_clean_number(e_time)} s">
+                <div class="stack-block {type_class} motion-bar {e_color}" style="height:{b_height}px" title="{e_desc} · {_clean_number(e_time)} s · {work_type or 'Cycle'}">
                   <span class="block-label">{e_desc}</span>
                   <span class="block-time">{_clean_number(e_time)}s</span>
                 </div>
@@ -369,10 +386,26 @@ def render_pitch_canvas(
             takt_bottom_px = min(chart_px_height, int(chart_px_height * (eff_takt_s / ref_time)))
             takt_line_html = f'<div class="takt-line" style="bottom:{takt_bottom_px}px"><span class="takt-label">Takt: {_clean_number(eff_takt_s)}s</span></div>'
 
+        # Metrics: variant time, takt time, percent utilized
+        if eff_takt_s > 0:
+            util_pct = (v_total_s / eff_takt_s) * 100.0
+            is_over = util_pct > 100.0
+            util_class = "over-takt" if is_over else "under-takt"
+            metrics_html = (
+                f'<span class="variant-time">{_clean_number(v_total_s)}s</span> '
+                f'<span class="variant-takt">/ Takt {_clean_number(eff_takt_s)}s</span> '
+                f'<span class="variant-util {util_class}">({util_pct:.0f}% util)</span>'
+            )
+        else:
+            metrics_html = f'<span class="variant-time">{_clean_number(v_total_s)}s</span>'
+
         variant_columns_html.append(
             f"""
             <div class="variant-stack-col">
-              <div class="variant-header">{_text(v_name)}: {_clean_number(v_total_s)}s</div>
+              <div class="variant-header">
+                <span class="variant-name">{_text(v_name)}:</span>
+                {metrics_html}
+              </div>
               <div class="stack-track" style="height:{chart_px_height}px">
                 {takt_line_html}
                 <div class="stack-blocks-wrapper">{"".join(blocks_html)}</div>
@@ -651,12 +684,36 @@ def render_pitch_canvas(
       .part-placeholder.no-parts {{ padding: 12px; text-align: center; font-size: 0.65rem; color: #94a3b8; font-style: italic; }}
       /* Mini Yamazumi Stack */
       .stack-panel {{
-        height: 165px;
+        height: 180px;
       }}
+      .yam-legend {{
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.52rem;
+        font-weight: 600;
+        text-transform: none;
+      }}
+      .yam-legend-item {{
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        color: #475569;
+      }}
+      .swatch-mini {{
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+      }}
+      .swatch-mini.cycle {{ background: #35c84a; }}
+      .swatch-mini.periodic {{ background: #ffd54f; border: 1px solid rgba(0,0,0,0.15); }}
+      .swatch-mini.fluctuation {{ background: #ef5350; }}
+
       .stacks-container {{
         display: flex;
         gap: 8px;
-        height: 140px;
+        height: 150px;
         overflow-x: auto;
       }}
       .variant-stack-col {{
@@ -666,11 +723,47 @@ def render_pitch_canvas(
         flex-direction: column;
       }}
       .variant-header {{
-        font-size: 0.6rem;
+        font-size: 0.58rem;
         font-weight: 700;
         text-align: center;
         color: #334155;
-        margin-bottom: 2px;
+        margin-bottom: 3px;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        gap: 2px;
+        line-height: 1.2;
+      }}
+      .variant-name {{
+        font-weight: 800;
+        color: #0f172a;
+      }}
+      .variant-time {{
+        font-weight: 800;
+        color: #1e293b;
+      }}
+      .variant-takt {{
+        color: #64748b;
+        font-weight: 600;
+        font-size: 0.52rem;
+      }}
+      .variant-util {{
+        display: inline-block;
+        padding: 0 3px;
+        border-radius: 3px;
+        font-weight: 800;
+        font-size: 0.52rem;
+      }}
+      .variant-util.under-takt {{
+        background: #dcfce7;
+        color: #166534;
+        border: 1px solid #86efac;
+      }}
+      .variant-util.over-takt {{
+        background: #fee2e2;
+        color: #991b1b;
+        border: 1px solid #fca5a5;
       }}
       .stack-track {{
         position: relative;
@@ -695,16 +788,28 @@ def render_pitch_canvas(
         justify-content: space-between;
         align-items: center;
         padding: 0 4px;
-        color: white;
         font-size: 0.55rem;
-        font-weight: 600;
+        font-weight: 700;
         overflow: hidden;
+      }}
+      .stack-block.type-cycle {{
+        background: #35c84a;
+        color: #ffffff;
+      }}
+      .stack-block.type-periodic {{
+        background: #ffd54f;
+        color: #1e293b;
+        border-bottom: 1px solid rgba(0,0,0,0.15);
+      }}
+      .stack-block.type-fluctuation {{
+        background: #ef5350;
+        color: #ffffff;
       }}
       .motion-bar.green {{ background: #16a34a; }}
       .motion-bar.orange {{ background: #ea580c; }}
       .motion-bar.gray {{ background: #64748b; }}
       .block-label {{ max-width: 70%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-      .block-time {{ font-weight: 700; }}
+      .block-time {{ font-weight: 800; }}
       .takt-line {{
         position: absolute;
         left: 0;
@@ -914,6 +1019,11 @@ def render_pitch_canvas(
           <div class="panel-section stack-panel">
             <div class="panel-title-bar">
               <span>Yamazumi Pitch Stack</span>
+              <div class="yam-legend">
+                <span class="yam-legend-item"><i class="swatch-mini cycle"></i>Cycle</span>
+                <span class="yam-legend-item"><i class="swatch-mini periodic"></i>Periodic</span>
+                <span class="yam-legend-item"><i class="swatch-mini fluctuation"></i>Fluct.</span>
+              </div>
             </div>
             <div class="stacks-container">
               {"".join(variant_columns_html)}

@@ -1538,7 +1538,7 @@ def process_pitch_visual_summary(
         # Mini Yamazumi pitch stack
         yamazumi_pitch_elements = conn.execute(
             """SELECT yamazumi.id, yamazumi.description, yamazumi.time_s, yamazumi.sequence,
-                      yamazumi.model_variants, yamazumi.work_type,
+                      yamazumi.model_variants, COALESCE(yamazumi.work_type, 'Cycle') AS work_type,
                       yamazumi.process_element_id
                FROM yamazumi_elements yamazumi
                WHERE yamazumi.project_id=? AND yamazumi.pitch_id=?

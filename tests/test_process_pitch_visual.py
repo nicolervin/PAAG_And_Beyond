@@ -387,19 +387,50 @@ class ProcessPitchVisualTests(unittest.TestCase):
                     "thumbnail_path": "",
                 }
             ],
+            "scenario_takt_s": 50.0,
             "yamazumi_stacks": {
                 "Base": {
-                    "total_time_s": 45.0,
+                    "total_time_s": 35.0,
                     "elements": [
                         {
                             "op_id": "10",
                             "yamazumi_description": "Mount Bracket",
                             "time_s": 15.0,
+                            "work_type": "Cycle",
+                            "motion_classification": "Value-Added (VA)",
+                            "motion_color": "green",
+                        },
+                        {
+                            "op_id": "11",
+                            "yamazumi_description": "Periodic Maintenance",
+                            "time_s": 10.0,
+                            "work_type": "Periodic",
+                            "motion_classification": "Non-Value-Added but Necessary (NVAN)",
+                            "motion_color": "orange",
+                        },
+                        {
+                            "op_id": "12",
+                            "yamazumi_description": "Fluctuation Adjustment",
+                            "time_s": 10.0,
+                            "work_type": "Fluctuation",
+                            "motion_classification": "Unclassified",
+                            "motion_color": "gray",
+                        },
+                    ],
+                },
+                "Heavy": {
+                    "total_time_s": 60.0,
+                    "elements": [
+                        {
+                            "op_id": "13",
+                            "yamazumi_description": "Heavy Weld",
+                            "time_s": 60.0,
+                            "work_type": "Cycle",
                             "motion_classification": "Value-Added (VA)",
                             "motion_color": "green",
                         }
                     ],
-                }
+                },
             },
             "alerts": {
                 "quality": [{"label": "Torque Critical", "detail": "12.5 Nm +/- 0.5"}],
@@ -438,6 +469,17 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("<video class=\"visual-player\" controls", html)
         self.assertIn("Verify alignment before cycling", html)
         self.assertIn("caption-callout", html)
+        self.assertIn("type-cycle", html)
+        self.assertIn("type-periodic", html)
+        self.assertIn("type-fluctuation", html)
+        self.assertIn("swatch-mini cycle", html)
+        self.assertIn("swatch-mini periodic", html)
+        self.assertIn("swatch-mini fluctuation", html)
+        self.assertIn("Takt: 50s", html)
+        self.assertIn("70% util", html)
+        self.assertIn("under-takt", html)
+        self.assertIn("120% util", html)
+        self.assertIn("over-takt", html)
 
     def test_visual_media_file_size_limits(self) -> None:
         oversized_image = b"\x89PNG\r\n\x1a\n" + b"A" * (10 * 1024 * 1024 + 100)
