@@ -2055,10 +2055,24 @@ if selected_pitch_id:
         total_pages = max(page_count(len(pitch_rows)), pitch_summary.get("slide_count", 1))
 
         # Anchor for scroll
-        st.html('<div id="process-pitch-visual-summary"></div>')
+        st.html("""
+        <div id="process-pitch-visual-summary"></div>
+        <style>
+        /* PAAG visualizer toolbar button styling: prevent text wrapping and vertical squishing */
+        div[data-testid="stHorizontalBlock"] button[kind="secondary"],
+        div[data-testid="stHorizontalBlock"] button {
+            white-space: nowrap !important;
+        }
+        div[data-testid="stHorizontalBlock"] button p {
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+        </style>
+        """)
 
-        # Navigation & Control Bar (Hierarchy: Section -> Pitch -> Slide -> Actions)
-        nav_col_sec, nav_col_p, nav_col_sl, nav_col_act = st.columns([1.6, 1.8, 1.1, 1.8], vertical_alignment="center")
+        # Clean, unified toolbar: [ Fishbone Section ] [ Back | Pitch | Next ] [ Present | Print | Alerts | Tools ]
+        nav_col_sec, nav_col_p, nav_col_act = st.columns([1.8, 2.7, 2.2], vertical_alignment="center")
 
         with nav_col_sec:
             curr_sec_idx = list(sec_filter_dict.keys()).index(current_sec_filter) if current_sec_filter in sec_filter_dict else 0
@@ -2068,6 +2082,7 @@ if selected_pitch_id:
                 index=curr_sec_idx,
                 format_func=lambda sid: sec_filter_dict.get(sid, sid),
                 key=f"sec_active_select_{scenario_id}",
+                label_visibility="collapsed",
                 help="Filter pitches by Fishbone Section hierarchy",
             )
             if new_sec != current_sec_filter:
@@ -2087,64 +2102,75 @@ if selected_pitch_id:
                 st.rerun()
 
         with nav_col_p:
-            # Pitch Selector & Pitch Prev/Next
             vis_pids = list(visible_pitch_dict.keys())
             curr_p_idx = vis_pids.index(selected_pitch_id) if selected_pitch_id in vis_pids else 0
-            p_sub_col1, p_sub_col2, p_sub_col3 = st.columns([0.35, 2.1, 0.35])
-            with p_sub_col1:
-                if st.button("⏮", disabled=curr_p_idx <= 0, help="Previous Pitch in Section", key=f"btn_prev_pitch_{scenario_id}"):
-                    st.session_state[selected_pitch_key] = vis_pids[curr_p_idx - 1]
-                    st.session_state[pitch_page_key] = 1
+            is_first_nav = (curr_p_idx <= 0 and current_page <= 1)
+            is_last_nav = (curr_p_idx >= len(vis_pids) - 1 and current_page >= total_pages)
+
+            p_col_back, p_col_sel, p_col_next = st.columns([0.8, 3.2, 0.8], vertical_alignment="center")
+            with p_col_back:
+                if st.button(
+                    "Back",
+                    icon=":material/arrow_back:",
+                    disabled=is_first_nav,
+                    help=f"Previous slide / pitch (Slide {current_page}/{total_pages})" if total_pages > 1 else "Previous pitch",
+                    key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
+                ):
+                    if current_page > 1:
+                        st.session_state[pitch_page_key] = current_page - 1
+                    else:
+                        if curr_p_idx > 0:
+                            prev_pid = vis_pids[curr_p_idx - 1]
+                            st.session_state[selected_pitch_key] = prev_pid
+                            try:
+                                prev_sum = process_pitch_visual_summary(project_id, scenario_id, prev_pid)
+                                prev_tot = max(page_count(len(prev_sum.get("elements", []))), prev_sum.get("slide_count", 1), 1)
+                            except Exception:
+                                prev_tot = 1
+                            st.session_state[pitch_page_key] = prev_tot
                     st.rerun()
-            with p_sub_col2:
+
+            with p_col_sel:
+                def _format_pitch_label(pid: str) -> str:
+                    lbl = visible_pitch_dict.get(pid, pid)
+                    if pid == selected_pitch_id and total_pages > 1:
+                        return f"{lbl} · Slide {current_page}/{total_pages}"
+                    return lbl
+
                 new_sel = st.selectbox(
                     "Pitch",
                     options=vis_pids,
                     index=curr_p_idx,
-                    format_func=lambda pid: visible_pitch_dict.get(pid, pid),
+                    format_func=_format_pitch_label,
                     key=f"pitch_active_select_{scenario_id}",
                     label_visibility="collapsed",
+                    help="Select pitch",
                 )
                 if new_sel != selected_pitch_id:
                     st.session_state[selected_pitch_key] = new_sel
                     st.session_state[pitch_page_key] = 1
                     st.rerun()
-            with p_sub_col3:
-                if st.button("⏭", disabled=curr_p_idx >= len(vis_pids) - 1, help="Next Pitch in Section", key=f"btn_next_pitch_{scenario_id}"):
-                    st.session_state[selected_pitch_key] = vis_pids[curr_p_idx + 1]
-                    st.session_state[pitch_page_key] = 1
-                    st.rerun()
 
-        with nav_col_sl:
-            # Slide Pagination
-            sl_col1, sl_col2, sl_col3 = st.columns([1, 1.8, 1])
-            with sl_col1:
-                if st.button(
-                    "Back",
-                    icon=":material/arrow_back:",
-                    disabled=current_page <= 1,
-                    key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
-                ):
-                    st.session_state[pitch_page_key] = current_page - 1
-                    st.rerun()
-            with sl_col2:
-                st.html(
-                    f"<div style='text-align:center; font-weight:700; font-size:0.85rem; padding-top:6px;'>"
-                    f"Page {current_page} of {total_pages}</div>"
-                )
-            with sl_col3:
+            with p_col_next:
                 if st.button(
                     "Next",
                     icon=":material/arrow_forward:",
-                    disabled=current_page >= total_pages,
+                    disabled=is_last_nav,
+                    help=f"Next slide / pitch (Slide {current_page}/{total_pages})" if total_pages > 1 else "Next pitch",
                     key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
                 ):
-                    st.session_state[pitch_page_key] = current_page + 1
+                    if current_page < total_pages:
+                        st.session_state[pitch_page_key] = current_page + 1
+                    else:
+                        if curr_p_idx < len(vis_pids) - 1:
+                            next_pid = vis_pids[curr_p_idx + 1]
+                            st.session_state[selected_pitch_key] = next_pid
+                            st.session_state[pitch_page_key] = 1
                     st.rerun()
 
         with nav_col_act:
             # Presentation, Print, Alerts, Equipment action buttons
-            act_col1, act_col2, act_col3, act_col4 = st.columns([1.2, 1.2, 1, 1])
+            act_col1, act_col2, act_col3, act_col4 = st.columns([1, 1, 1.3, 1], vertical_alignment="center")
             with act_col1:
                 if st.button("Present", icon=":material/slideshow:", key=f"btn_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
                     st.session_state[f"paag_present_active_{scenario_id}"] = True
