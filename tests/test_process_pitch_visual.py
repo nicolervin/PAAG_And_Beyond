@@ -15,6 +15,7 @@ from utils.process_pitch_visual import (
     page_elements,
     page_for_element,
     render_pitch_canvas,
+    render_presentation_deck,
 )
 
 
@@ -503,6 +504,75 @@ class ProcessPitchVisualTests(unittest.TestCase):
                 file_bytes=oversized_video,
             )
         self.assertIn("under 25 MB", str(cm_vid.exception))
+
+    def test_render_presentation_deck_empty(self) -> None:
+        deck_html = render_presentation_deck([])
+        self.assertIn("No pitch slides available to present", deck_html)
+
+    def test_render_presentation_deck_flow(self) -> None:
+        slides_data = [
+            {
+                "pitch_id": "p1",
+                "pitch_idx": 0,
+                "pitch_label": "01-SW1-010 Base Frame",
+                "page_num": 1,
+                "total_pages": 1,
+                "slide_html": "<section class='paag-slide'>Slide 1 Content</section>",
+            },
+            {
+                "pitch_id": "p2",
+                "pitch_idx": 1,
+                "pitch_label": "01-SW1-020 Front Axle",
+                "page_num": 1,
+                "total_pages": 2,
+                "slide_html": "<section class='paag-slide'>Slide 2 Part A</section>",
+            },
+            {
+                "pitch_id": "p2",
+                "pitch_idx": 1,
+                "pitch_label": "01-SW1-020 Front Axle",
+                "page_num": 2,
+                "total_pages": 2,
+                "slide_html": "<section class='paag-slide'>Slide 2 Part B</section>",
+            },
+        ]
+
+        deck_html = render_presentation_deck(
+            slides_data=slides_data,
+            initial_pitch_id="p2",
+            total_pitches=2,
+        )
+
+        # Toolbar controls
+        self.assertIn("paag-presentation-player", deck_html)
+        self.assertIn("pres-btn-prev-pitch", deck_html)
+        self.assertIn("pres-btn-prev-slide", deck_html)
+        self.assertIn("pres-btn-next-slide", deck_html)
+        self.assertIn("pres-btn-next-pitch", deck_html)
+        self.assertIn("pres-pitch-selector", deck_html)
+        self.assertIn("pres-btn-fullscreen", deck_html)
+        self.assertIn("pres-btn-close", deck_html)
+        self.assertIn("pres-shortcuts", deck_html)
+
+        # Initial counter for initial pitch p2
+        self.assertIn("Pitch 2 of 2 (Page 1/2) · 01-SW1-020 Front Axle", deck_html)
+
+        # Dropdown options
+        self.assertIn('value="p1"', deck_html)
+        self.assertIn('value="p2" selected', deck_html)
+
+        # Slides and display state (slide 0 hidden, slide 1 active)
+        self.assertIn('id="deck-slide-0"', deck_html)
+        self.assertIn('data-pitch-id="p1"', deck_html)
+        self.assertIn('style="display: none;"', deck_html)
+
+        self.assertIn('id="deck-slide-1"', deck_html)
+        self.assertIn('data-pitch-id="p2"', deck_html)
+        self.assertIn('style="display: block;"', deck_html)
+
+        # Keyboard event handler present
+        self.assertIn("handleKeyDown", deck_html)
+        self.assertIn("requestFullscreen", deck_html)
 
 
 if __name__ == "__main__":

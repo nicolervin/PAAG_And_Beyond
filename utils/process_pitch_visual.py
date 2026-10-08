@@ -1062,3 +1062,398 @@ def render_pitch_canvas(
     </section>
     """
 
+
+def render_presentation_deck(
+    slides_data: list[dict],
+    initial_pitch_id: str = "",
+    total_pitches: int = 1,
+) -> str:
+    """Render a standalone, zero-lag client-side presentation deck for PowerPoint-style slideshow."""
+    if not slides_data:
+        return """
+        <div class="empty-media-canvas" style="padding: 40px; text-align: center; background: #0f172a; color: #94a3b8; border-radius: 8px;">
+          <div class="empty-media-title" style="color: #f8fafc; font-size: 1.2rem; font-weight: 700;">No pitch slides available to present</div>
+          <div class="empty-media-desc" style="margin-top: 8px;">Add work elements or visual aids to the pitch sequence to begin presentation.</div>
+        </div>
+        """
+
+    # Identify initial slide
+    initial_slide_idx = 0
+    if initial_pitch_id:
+        for idx, s in enumerate(slides_data):
+            if str(s.get("pitch_id") or "") == str(initial_pitch_id):
+                initial_slide_idx = idx
+                break
+
+    # Extract unique pitches for dropdown
+    seen_pitches = set()
+    pitch_options_html = []
+    for s in slides_data:
+        p_id = str(s.get("pitch_id") or "")
+        p_idx = int(s.get("pitch_idx") or 0)
+        p_label = str(s.get("pitch_label") or f"Pitch {p_idx + 1}")
+        if p_id not in seen_pitches:
+            seen_pitches.add(p_id)
+            selected_attr = "selected" if p_id == initial_pitch_id else ""
+            pitch_options_html.append(
+                f'<option value="{p_id}" {selected_attr}>Pitch {p_idx + 1}: {html.escape(p_label)}</option>'
+            )
+
+    # Build slides HTML
+    slides_html = []
+    for idx, s in enumerate(slides_data):
+        p_id = str(s.get("pitch_id") or "")
+        p_idx = int(s.get("pitch_idx") or 0)
+        p_label = str(s.get("pitch_label") or "")
+        p_num = int(s.get("page_num") or 1)
+        tot_pages = int(s.get("total_pages") or 1)
+        slide_content = s.get("slide_html") or ""
+        display_style = "block" if idx == initial_slide_idx else "none"
+
+        slides_html.append(
+            f"""
+            <div class="deck-slide"
+                 id="deck-slide-{idx}"
+                 data-slide-index="{idx}"
+                 data-pitch-id="{p_id}"
+                 data-pitch-idx="{p_idx}"
+                 data-pitch-label="{html.escape(p_label)}"
+                 data-page="{p_num}"
+                 data-total-pages="{tot_pages}"
+                 style="display: {display_style};">
+              {slide_content}
+            </div>
+            """
+        )
+
+    # Initial slide metadata
+    init_slide = slides_data[initial_slide_idx]
+    init_pitch_idx = int(init_slide.get("pitch_idx") or 0)
+    init_label = str(init_slide.get("pitch_label") or "")
+    init_page = int(init_slide.get("page_num") or 1)
+    init_tot_pages = int(init_slide.get("total_pages") or 1)
+    init_page_part = f" (Page {init_page}/{init_tot_pages})" if init_tot_pages > 1 else ""
+    counter_initial = f"Pitch {init_pitch_idx + 1} of {total_pitches}{init_page_part} · {init_label}"
+
+    return f"""
+    <style>
+      /* Expand Streamlit Dialog for Presentation */
+      div[data-testid="stDialog"] div[role="dialog"] {{
+        width: 95vw !important;
+        max-width: 95vw !important;
+        max-height: 96vh !important;
+        padding: 8px 12px !important;
+        background: #0f172a !important;
+        border: 1px solid #334155 !important;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7) !important;
+      }}
+      div[data-testid="stDialog"] div[data-testid="stDialogHeader"] {{
+        display: none !important;
+      }}
+
+      #paag-presentation-player {{
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        box-sizing: border-box;
+        background: #0f172a;
+        border-radius: 8px;
+        overflow: hidden;
+      }}
+
+      /* Presentation Control Bar */
+      .pres-toolbar {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: #1e293b;
+        border-bottom: 1px solid #334155;
+        padding: 6px 12px;
+        gap: 8px;
+        flex-wrap: nowrap;
+        user-select: none;
+      }}
+      .pres-btn-group {{
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }}
+      .pres-btn {{
+        background: #334155;
+        color: #f8fafc;
+        border: 1px solid #475569;
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-size: 0.82rem;
+        font-weight: 700;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+      }}
+      .pres-btn:hover:not(:disabled) {{
+        background: #475569;
+        border-color: #64748b;
+        color: #ffffff;
+      }}
+      .pres-btn:disabled {{
+        opacity: 0.35;
+        cursor: not-allowed;
+      }}
+      .pres-btn.primary {{
+        background: #0284c7;
+        border-color: #0369a1;
+      }}
+      .pres-btn.primary:hover:not(:disabled) {{
+        background: #0369a1;
+      }}
+      .pres-btn.danger {{
+        background: #b91c1c;
+        border-color: #991b1b;
+      }}
+      .pres-btn.danger:hover:not(:disabled) {{
+        background: #991b1b;
+      }}
+
+      .pres-select {{
+        background: #334155;
+        color: #f8fafc;
+        border: 1px solid #475569;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+        max-width: 280px;
+        text-overflow: ellipsis;
+      }}
+
+      .pres-counter {{
+        font-size: 0.9rem;
+        font-weight: 800;
+        color: #38bdf8;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-align: center;
+        flex: 1 1 auto;
+        padding: 0 8px;
+      }}
+
+      .pres-shortcuts {{
+        font-size: 0.72rem;
+        color: #94a3b8;
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 4px;
+        padding: 3px 8px;
+        white-space: nowrap;
+      }}
+
+      /* Slides Viewport */
+      .pres-slides-viewport {{
+        position: relative;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px;
+        background: #0b1120;
+        overflow-y: auto;
+      }}
+
+      .deck-slide {{
+        width: 100%;
+        box-sizing: border-box;
+      }}
+
+      /* Fullscreen styles */
+      #paag-presentation-player:fullscreen {{
+        width: 100vw;
+        height: 100vh;
+        border-radius: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+      }}
+      #paag-presentation-player:fullscreen .pres-slides-viewport {{
+        flex: 1 1 0;
+        height: calc(100vh - 50px);
+        padding: 12px;
+      }}
+      #paag-presentation-player:fullscreen .paag-slide {{
+        max-height: calc(100vh - 72px);
+      }}
+    </style>
+
+    <div id="paag-presentation-player"
+         data-initial-pitch-id="{initial_pitch_id}"
+         data-total-pitches="{total_pitches}"
+         data-total-slides="{len(slides_data)}"
+         aria-label="Process at a Glance Presentation Player">
+      <!-- Player Toolbar -->
+      <nav class="pres-toolbar" aria-label="Presentation Controls">
+        <div class="pres-btn-group">
+          <button id="pres-btn-prev-pitch" class="pres-btn" title="Previous Pitch (P / Up Arrow)">⏮ Prev Pitch</button>
+          <button id="pres-btn-prev-slide" class="pres-btn primary" title="Previous Slide (Left Arrow / Backspace)">◀ Back</button>
+          <select id="pres-pitch-selector" class="pres-select" title="Jump to Pitch">
+            {"".join(pitch_options_html)}
+          </select>
+          <button id="pres-btn-next-slide" class="pres-btn primary" title="Next Slide (Right Arrow / Space)">Next ▶</button>
+          <button id="pres-btn-next-pitch" class="pres-btn" title="Next Pitch (N / Down Arrow)">Next Pitch ⏭</button>
+        </div>
+
+        <div id="pres-slide-counter" class="pres-counter">{counter_initial}</div>
+
+        <div class="pres-btn-group">
+          <span class="pres-shortcuts">⌨ [←/→] Slide · [P/N] Pitch · [F] Fullscreen</span>
+          <button id="pres-btn-fullscreen" class="pres-btn" title="Toggle Fullscreen (F)">⛶ Fullscreen</button>
+          <button id="pres-btn-close" class="pres-btn danger" title="Exit Presentation (Esc)">✕ Exit</button>
+        </div>
+      </nav>
+
+      <!-- Slides Container -->
+      <main class="pres-slides-viewport">
+        {"".join(slides_html)}
+      </main>
+    </div>
+
+    <script>
+    (function() {{
+      const container = document.getElementById("paag-presentation-player");
+      if (!container) return;
+
+      const slides = Array.from(container.querySelectorAll(".deck-slide"));
+      if (slides.length === 0) return;
+
+      let currentIndex = {initial_slide_idx};
+      const totalPitches = parseInt(container.getAttribute("data-total-pitches") || "1", 10);
+
+      const prevSlideBtn = container.querySelector("#pres-btn-prev-slide");
+      const nextSlideBtn = container.querySelector("#pres-btn-next-slide");
+      const prevPitchBtn = container.querySelector("#pres-btn-prev-pitch");
+      const nextPitchBtn = container.querySelector("#pres-btn-next-pitch");
+      const pitchSelect = container.querySelector("#pres-pitch-selector");
+      const counterText = container.querySelector("#pres-slide-counter");
+      const fullscreenBtn = container.querySelector("#pres-btn-fullscreen");
+      const closeBtn = container.querySelector("#pres-btn-close");
+
+      function updateSlide(newIndex) {{
+        if (newIndex < 0) newIndex = 0;
+        if (newIndex >= slides.length) newIndex = slides.length - 1;
+        currentIndex = newIndex;
+
+        slides.forEach((slide, idx) => {{
+          slide.style.display = (idx === currentIndex) ? "block" : "none";
+        }});
+
+        const curSlide = slides[currentIndex];
+        const pitchId = curSlide.getAttribute("data-pitch-id");
+        const pitchIdx = parseInt(curSlide.getAttribute("data-pitch-idx") || "0", 10);
+        const pitchLabel = curSlide.getAttribute("data-pitch-label") || "";
+        const pageNum = curSlide.getAttribute("data-page") || "1";
+        const totalPages = curSlide.getAttribute("data-total-pages") || "1";
+
+        let pagePart = (parseInt(totalPages, 10) > 1) ? (" (Page " + pageNum + "/" + totalPages + ")") : "";
+        if (counterText) {{
+          counterText.textContent = "Pitch " + (pitchIdx + 1) + " of " + totalPitches + pagePart + " · " + pitchLabel;
+        }}
+
+        if (pitchSelect && pitchSelect.value !== pitchId) {{
+          pitchSelect.value = pitchId;
+        }}
+
+        if (prevSlideBtn) prevSlideBtn.disabled = (currentIndex === 0);
+        if (nextSlideBtn) nextSlideBtn.disabled = (currentIndex === slides.length - 1);
+        if (prevPitchBtn) prevPitchBtn.disabled = (pitchIdx === 0 && pageNum === "1");
+        if (nextPitchBtn) nextPitchBtn.disabled = (pitchIdx >= totalPitches - 1 && pageNum === totalPages);
+
+        try {{
+          const url = new URL(window.location);
+          url.searchParams.set("active_pitch", pitchId);
+          window.history.replaceState({{}}, "", url);
+        }} catch (e) {{}}
+      }}
+
+      if (prevSlideBtn) prevSlideBtn.onclick = () => updateSlide(currentIndex - 1);
+      if (nextSlideBtn) nextSlideBtn.onclick = () => updateSlide(currentIndex + 1);
+
+      if (prevPitchBtn) {{
+        prevPitchBtn.onclick = () => {{
+          const curPitchIdx = parseInt(slides[currentIndex].getAttribute("data-pitch-idx") || "0", 10);
+          const targetPitchIdx = curPitchIdx - 1;
+          const targetSlideIdx = slides.findIndex(s => parseInt(s.getAttribute("data-pitch-idx"), 10) === targetPitchIdx);
+          if (targetSlideIdx >= 0) updateSlide(targetSlideIdx);
+        }};
+      }}
+
+      if (nextPitchBtn) {{
+        nextPitchBtn.onclick = () => {{
+          const curPitchIdx = parseInt(slides[currentIndex].getAttribute("data-pitch-idx") || "0", 10);
+          const targetPitchIdx = curPitchIdx + 1;
+          const targetSlideIdx = slides.findIndex(s => parseInt(s.getAttribute("data-pitch-idx"), 10) === targetPitchIdx);
+          if (targetSlideIdx >= 0) updateSlide(targetSlideIdx);
+        }};
+      }}
+
+      if (pitchSelect) {{
+        pitchSelect.onchange = () => {{
+          const targetPitchId = pitchSelect.value;
+          const targetSlideIdx = slides.findIndex(s => s.getAttribute("data-pitch-id") === targetPitchId);
+          if (targetSlideIdx >= 0) updateSlide(targetSlideIdx);
+        }};
+      }}
+
+      if (fullscreenBtn) {{
+        fullscreenBtn.onclick = () => {{
+          if (!document.fullscreenElement) {{
+            container.requestFullscreen().catch(() => {{}});
+          }} else {{
+            document.exitFullscreen().catch(() => {{}});
+          }}
+        }};
+      }}
+
+      if (closeBtn) {{
+        closeBtn.onclick = () => {{
+          try {{
+            const stCloseBtn = document.querySelector("div[data-testid='stDialog'] button[aria-label='Close']")
+                            || window.parent.document.querySelector("div[data-testid='stDialog'] button[aria-label='Close']")
+                            || document.querySelector("button[aria-label='Close']");
+            if (stCloseBtn) {{
+              stCloseBtn.click();
+              return;
+            }}
+          }} catch (e) {{}}
+          window.location.reload();
+        }};
+      }}
+
+      function handleKeyDown(e) {{
+        if (!container.isConnected || container.offsetParent === null) return;
+        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+
+        if (e.key === "ArrowRight" || e.key === " " || e.key === "PageDown") {{
+          e.preventDefault();
+          updateSlide(currentIndex + 1);
+        }} else if (e.key === "ArrowLeft" || e.key === "PageUp" || e.key === "Backspace") {{
+          e.preventDefault();
+          updateSlide(currentIndex - 1);
+        }} else if (e.key === "ArrowDown" || e.key.toLowerCase() === "n") {{
+          e.preventDefault();
+          if (nextPitchBtn && !nextPitchBtn.disabled) nextPitchBtn.click();
+        }} else if (e.key === "ArrowUp" || e.key.toLowerCase() === "p") {{
+          e.preventDefault();
+          if (prevPitchBtn && !prevPitchBtn.disabled) prevPitchBtn.click();
+        }} else if (e.key.toLowerCase() === "f") {{
+          e.preventDefault();
+          if (fullscreenBtn) fullscreenBtn.click();
+        }}
+      }}
+
+      document.addEventListener("keydown", handleKeyDown);
+      updateSlide(currentIndex);
+    }})();
+    </script>
+    """
+
