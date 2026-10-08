@@ -371,7 +371,7 @@ def render_pitch_canvas(
                     type_class = "type-cycle"
 
             # Height in px proportional to time
-            b_height = max(14, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 20
+            b_height = max(18, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 22
             blocks_html.append(
                 f"""
                 <div class="stack-block {type_class} motion-bar {e_color}" style="height:{b_height}px" title="{e_desc} · {_clean_number(e_time)} s · {work_type or 'Cycle'}">
@@ -523,15 +523,15 @@ def render_pitch_canvas(
         box-sizing: border-box;
         width: 100%;
         max-width: 100%;
-        min-height: 600px;
-        padding: 12px 16px;
+        min-height: 640px;
+        padding: 14px 18px;
         border: 1px solid rgba(128,128,128,0.3);
         border-radius: 12px;
         background: #ffffff;
         color: #1a1f2c;
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 10px;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         box-shadow: 0 4px 16px rgba(0,0,0,0.06);
         overflow: hidden;
@@ -539,27 +539,27 @@ def render_pitch_canvas(
       /* Header Banner */
       .slide-header {{
         display: grid;
-        grid-template-columns: 1.2fr 1.8fr 1.2fr;
+        grid-template-columns: 1.3fr 1.6fr 1.3fr;
         align-items: center;
-        padding-bottom: 6px;
+        padding-bottom: 8px;
         border-bottom: 2px solid #e2e8f0;
       }}
       .brand-title {{
-        font-size: 0.95rem;
+        font-size: 1.15rem;
         font-weight: 800;
         color: #0f172a;
         letter-spacing: -0.01em;
       }}
       .brand-sub {{
-        font-size: 0.65rem;
-        font-weight: 600;
+        font-size: 0.75rem;
+        font-weight: 700;
         color: #64748b;
         text-transform: uppercase;
         letter-spacing: 0.05em;
       }}
       .pitch-center-title {{
         text-align: center;
-        font-size: 1.25rem;
+        font-size: 1.45rem;
         font-weight: 800;
         color: #1e293b;
       }}
@@ -568,10 +568,10 @@ def render_pitch_canvas(
         border: 1px solid #cbd5e1;
         border-radius: 6px;
         background: #f8fafc;
-        padding: 3px 8px;
-        font-size: 0.63rem;
+        padding: 4px 10px;
+        font-size: 0.76rem;
         color: #334155;
-        line-height: 1.35;
+        line-height: 1.4;
         text-align: right;
       }}
       .doc-control-box strong {{
@@ -588,7 +588,7 @@ def render_pitch_canvas(
       .left-col {{
         display: flex;
         flex-direction: column;
-        gap: 7px;
+        gap: 8px;
         min-height: 0;
         overflow: hidden;
       }}
@@ -603,7 +603,7 @@ def render_pitch_canvas(
         border: 1px solid #e2e8f0;
         border-radius: 6px;
         background: #fdfdfe;
-        padding: 5px 8px;
+        padding: 6px 10px;
         display: flex;
         flex-direction: column;
         min-height: 0;
@@ -612,31 +612,31 @@ def render_pitch_canvas(
         display: flex;
         justify-content: space-between;
         align-items: center;
-        font-size: 0.68rem;
-        font-weight: 700;
+        font-size: 0.82rem;
+        font-weight: 800;
         text-transform: uppercase;
         color: #475569;
-        margin-bottom: 4px;
+        margin-bottom: 6px;
         letter-spacing: 0.03em;
       }}
       .page-badge {{
         background: #0284c7;
         color: white;
-        padding: 1px 6px;
+        padding: 2px 7px;
         border-radius: 999px;
-        font-size: 0.6rem;
+        font-size: 0.72rem;
         font-weight: 700;
       }}
       .tools-list {{
         margin: 0;
-        padding-left: 14px;
-        font-size: 0.65rem;
+        padding-left: 16px;
+        font-size: 0.8rem;
         color: #1e293b;
-        max-height: 60px;
+        max-height: 70px;
         overflow-y: auto;
       }}
       .tool-item {{
-        margin-bottom: 2px;
+        margin-bottom: 3px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -645,9 +645,9 @@ def render_pitch_canvas(
         background: #e0f2fe;
         color: #0369a1;
         font-weight: 700;
-        padding: 0 4px;
+        padding: 1px 5px;
         border-radius: 3px;
-        font-size: 0.58rem;
+        font-size: 0.7rem;
       }}
       /* Parts Table */
       .parts-panel {{
@@ -657,53 +657,54 @@ def render_pitch_canvas(
       .parts-table {{
         width: 100%;
         border-collapse: collapse;
-        font-size: 0.63rem;
+        font-size: 0.78rem;
       }}
       .parts-table th {{
         text-align: left;
         background: #f1f5f9;
-        padding: 2px 4px;
+        padding: 4px 6px;
         color: #475569;
-        font-size: 0.58rem;
+        font-size: 0.72rem;
+        font-weight: 700;
       }}
       .parts-table td {{
-        padding: 2px 4px;
+        padding: 3px 6px;
         border-bottom: 1px solid #f1f5f9;
         vertical-align: middle;
       }}
-      .col-thumb {{ width: 24px; text-align: center; }}
-      .part-thumb {{ width: 22px; height: 20px; object-fit: contain; border-radius: 2px; background: #eee; }}
-      .thumb-ph {{ width: 22px; height: 18px; line-height: 18px; text-align: center; background: #e2e8f0; font-size: 0.45rem; color: #64748b; border-radius: 2px; }}
-      .col-pnum {{ white-space: nowrap; }}
-      .h-badge {{ font-size: 0.52rem; padding: 0 3px; border-radius: 2px; font-weight: 700; }}
+      .col-thumb {{ width: 28px; text-align: center; }}
+      .part-thumb {{ width: 26px; height: 24px; object-fit: contain; border-radius: 2px; background: #eee; }}
+      .thumb-ph {{ width: 26px; height: 22px; line-height: 22px; text-align: center; background: #e2e8f0; font-size: 0.55rem; color: #64748b; border-radius: 2px; }}
+      .col-pnum {{ white-space: nowrap; font-weight: 600; }}
+      .h-badge {{ font-size: 0.65rem; padding: 1px 4px; border-radius: 2px; font-weight: 700; }}
       .h-badge.va {{ background: #dcfce7; color: #166534; }}
       .h-badge.nvan {{ background: #ffedd5; color: #9a3412; }}
-      .col-desc {{ max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-      .nick-label {{ color: #0284c7; font-weight: 600; }}
-      .col-qty {{ text-align: right; font-weight: 700; }}
-      .part-placeholder.no-parts {{ padding: 12px; text-align: center; font-size: 0.65rem; color: #94a3b8; font-style: italic; }}
+      .col-desc {{ max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+      .nick-label {{ color: #0284c7; font-weight: 700; font-size: 0.78rem; }}
+      .col-qty {{ text-align: right; font-weight: 800; }}
+      .part-placeholder.no-parts {{ padding: 14px; text-align: center; font-size: 0.78rem; color: #94a3b8; font-style: italic; }}
       /* Mini Yamazumi Stack */
       .stack-panel {{
-        height: 180px;
+        height: 195px;
       }}
       .yam-legend {{
         display: flex;
         align-items: center;
-        gap: 6px;
-        font-size: 0.52rem;
-        font-weight: 600;
+        gap: 8px;
+        font-size: 0.68rem;
+        font-weight: 700;
         text-transform: none;
       }}
       .yam-legend-item {{
         display: inline-flex;
         align-items: center;
-        gap: 2px;
+        gap: 3px;
         color: #475569;
       }}
       .swatch-mini {{
         display: inline-block;
-        width: 7px;
-        height: 7px;
+        width: 9px;
+        height: 9px;
         border-radius: 2px;
       }}
       .swatch-mini.cycle {{ background: #35c84a; }}
@@ -712,28 +713,28 @@ def render_pitch_canvas(
 
       .stacks-container {{
         display: flex;
-        gap: 8px;
-        height: 150px;
+        gap: 10px;
+        height: 160px;
         overflow-x: auto;
       }}
       .variant-stack-col {{
         flex: 1 1 0;
-        min-width: 80px;
+        min-width: 90px;
         display: flex;
         flex-direction: column;
       }}
       .variant-header {{
-        font-size: 0.58rem;
+        font-size: 0.72rem;
         font-weight: 700;
         text-align: center;
         color: #334155;
-        margin-bottom: 3px;
+        margin-bottom: 4px;
         display: flex;
         flex-wrap: wrap;
         justify-content: center;
         align-items: center;
-        gap: 2px;
-        line-height: 1.2;
+        gap: 3px;
+        line-height: 1.25;
       }}
       .variant-name {{
         font-weight: 800;
@@ -746,14 +747,14 @@ def render_pitch_canvas(
       .variant-takt {{
         color: #64748b;
         font-weight: 600;
-        font-size: 0.52rem;
+        font-size: 0.68rem;
       }}
       .variant-util {{
         display: inline-block;
-        padding: 0 3px;
+        padding: 1px 4px;
         border-radius: 3px;
         font-weight: 800;
-        font-size: 0.52rem;
+        font-size: 0.68rem;
       }}
       .variant-util.under-takt {{
         background: #dcfce7;
@@ -787,8 +788,8 @@ def render_pitch_canvas(
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 0 4px;
-        font-size: 0.55rem;
+        padding: 0 5px;
+        font-size: 0.68rem;
         font-weight: 700;
         overflow: hidden;
       }}
@@ -820,13 +821,14 @@ def render_pitch_canvas(
       }}
       .takt-label {{
         position: absolute;
-        right: 2px;
-        top: -10px;
-        font-size: 0.5rem;
+        right: 3px;
+        top: -12px;
+        font-size: 0.65rem;
         font-weight: 800;
         color: #dc2626;
-        background: rgba(255,255,255,0.85);
-        padding: 0 2px;
+        background: rgba(255,255,255,0.9);
+        padding: 0 3px;
+        border-radius: 2px;
       }}
       /* Right Area Visual Media Grid */
       .visual-grid {{
@@ -853,8 +855,8 @@ def render_pitch_canvas(
       .visual-step-tag {{
         background: #1e293b;
         color: #f8fafc;
-        padding: 2px 6px;
-        font-size: 0.6rem;
+        padding: 3px 8px;
+        font-size: 0.78rem;
         font-weight: 700;
         white-space: nowrap;
         overflow: hidden;
@@ -884,16 +886,16 @@ def render_pitch_canvas(
       }}
       .media-missing {{
         color: #94a3b8;
-        font-size: 0.65rem;
+        font-size: 0.78rem;
       }}
       .caption-callout {{
         background: #fef08a;
         color: #713f12;
         border-top: 2px solid #eab308;
-        padding: 4px 8px;
-        font-size: 0.65rem;
+        padding: 6px 10px;
+        font-size: 0.82rem;
         font-weight: 700;
-        line-height: 1.25;
+        line-height: 1.3;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -919,27 +921,27 @@ def render_pitch_canvas(
         background: #f8fafc;
         color: #64748b;
       }}
-      .empty-media-icon {{ font-size: 2rem; margin-bottom: 6px; }}
-      .empty-media-title {{ font-size: 0.95rem; font-weight: 700; color: #334155; margin-bottom: 4px; }}
-      .empty-media-desc {{ font-size: 0.72rem; max-width: 380px; line-height: 1.35; }}
+      .empty-media-icon {{ font-size: 2.2rem; margin-bottom: 8px; }}
+      .empty-media-title {{ font-size: 1.15rem; font-weight: 700; color: #334155; margin-bottom: 6px; }}
+      .empty-media-desc {{ font-size: 0.85rem; max-width: 420px; line-height: 1.4; }}
 
       /* Bottom Functional Alerts Banner */
       .functional-alerts-bar {{
         border: 1px solid #cbd5e1;
         border-radius: 6px;
         background: #f8fafc;
-        padding: 3px 8px;
+        padding: 5px 10px;
         display: grid;
         grid-template-columns: repeat(5, 1fr);
-        gap: 6px;
+        gap: 8px;
         align-items: center;
-        font-size: 0.62rem;
+        font-size: 0.78rem;
       }}
       .alert-block {{
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        padding: 2px 4px;
+        padding: 3px 6px;
         border-radius: 4px;
       }}
       .alert-block.active {{
@@ -956,13 +958,29 @@ def render_pitch_canvas(
         font-weight: 600;
       }}
       .subtle-empty {{
-        font-size: 0.62rem;
+        font-size: 0.76rem;
         color: #94a3b8;
         font-style: italic;
         padding: 4px 0;
       }}
 
       /* Presentation & Print rules */
+      .paag-slide.presentation-active {{
+        min-height: 720px;
+        padding: 16px 20px;
+        gap: 12px;
+      }}
+      .paag-slide.presentation-active .brand-title {{ font-size: 1.35rem; }}
+      .paag-slide.presentation-active .pitch-center-title {{ font-size: 1.75rem; }}
+      .paag-slide.presentation-active .doc-control-box {{ font-size: 0.85rem; }}
+      .paag-slide.presentation-active .panel-title-bar {{ font-size: 0.92rem; }}
+      .paag-slide.presentation-active .tools-list {{ font-size: 0.9rem; max-height: 85px; }}
+      .paag-slide.presentation-active .parts-table {{ font-size: 0.88rem; }}
+      .paag-slide.presentation-active .parts-table th {{ font-size: 0.82rem; }}
+      .paag-slide.presentation-active .caption-callout {{ font-size: 0.95rem; }}
+      .paag-slide.presentation-active .visual-step-tag {{ font-size: 0.9rem; }}
+      .paag-slide.presentation-active .functional-alerts-bar {{ font-size: 0.88rem; }}
+
       @media print {{
         .paag-slide {{
           aspect-ratio: 16 / 9;
