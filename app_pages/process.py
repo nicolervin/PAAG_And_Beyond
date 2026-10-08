@@ -1445,6 +1445,9 @@ def print_slide_dialog(
     pitch_options: list[tuple[str, str]] | None = None,
     selected_pitch_id: str = "",
     model_labels: dict[str, str] | None = None,
+    scenario_pitches_df: pd.DataFrame | None = None,
+    sections: pd.DataFrame | None = None,
+    section_labels: dict[str, str] | None = None,
 ) -> None:
     # Hide the default gray X button to ensure dialog state stays in sync
     st.markdown(
@@ -1460,10 +1463,59 @@ def print_slide_dialog(
 
     labels_map = model_labels or {}
     pitch_opts = pitch_options or []
-    pitch_ids = [pid for pid, _ in pitch_opts]
-    pitch_dict = dict(pitch_opts)
-    curr_pitch_name = pitch_dict.get(selected_pitch_id, pitch_summary.get("pitch_number", "Pitch"))
-    curr_pitch_idx = pitch_ids.index(selected_pitch_id) if selected_pitch_id in pitch_ids else 0
+    all_pitch_ids = [pid for pid, _ in pitch_opts]
+    all_pitch_dict = dict(pitch_opts)
+
+    pitches_df = (
+        scenario_pitches_df
+        if scenario_pitches_df is not None
+        else yamazumi_pitches_for_scenario(project_id, scenario_id)
+    )
+    if not all_pitch_ids and not pitches_df.empty:
+        all_pitch_ids = pitches_df["id"].astype(str).tolist()
+        all_pitch_dict = {
+            str(r["id"]): f"{r['pitch_number']} — {r['pitch_name'] or 'Pitch'}"
+            for _, r in pitches_df.iterrows()
+        }
+
+    # Group pitches by section
+    sec_pitch_map: dict[str, list[str]] = {}
+    for _, r in pitches_df.iterrows():
+        s_id = str(r.get("section_id") or "").strip()
+        sec_pitch_map.setdefault(s_id, []).append(str(r["id"]))
+
+    sec_df = (
+        sections
+        if sections is not None
+        else assembly_section_walk_order(project_id)
+    )
+    labels_dict = (
+        section_labels
+        if section_labels is not None
+        else (section_breadcrumb_labels(sec_df) if not sec_df.empty else {})
+    )
+
+    curr_pitch_name = all_pitch_dict.get(
+        selected_pitch_id, pitch_summary.get("pitch_number", "Pitch")
+    )
+    curr_pitch_idx = (
+        all_pitch_ids.index(selected_pitch_id)
+        if selected_pitch_id in all_pitch_ids
+        else 0
+    )
+
+    # Determine current pitch's Fishbone section
+    curr_pitch_sec_id = str(pitch_summary.get("section_id") or "").strip()
+    if not curr_pitch_sec_id:
+        p_match = pitches_df.loc[pitches_df["id"].astype(str) == selected_pitch_id]
+        if not p_match.empty:
+            curr_pitch_sec_id = str(p_match.iloc[0].get("section_id") or "").strip()
+
+    curr_pitch_sec_name = str(pitch_summary.get("section_name") or "").strip()
+    if not curr_pitch_sec_name and curr_pitch_sec_id:
+        curr_pitch_sec_name = labels_dict.get(curr_pitch_sec_id, "Current Section")
+
+    curr_sec_pitch_count = len(sec_pitch_map.get(curr_pitch_sec_id, []))
 
     top_col1, top_col2 = st.columns([5, 1], vertical_alignment="center")
     with top_col1:
@@ -1478,13 +1530,20 @@ def print_slide_dialog(
     col_scope, col_fmt = st.columns([1.5, 1.2])
 
     with col_scope:
-        if pitch_ids:
+        if all_pitch_ids:
             scope_choices = [
                 f"Current slide only (Pitch {curr_pitch_idx + 1}, Slide {current_page}/{total_pages})",
                 f"Current pitch (All {total_pages} slide{'s' if total_pages > 1 else ''})",
-                f"All pitches in scenario (Complete deck - {len(pitch_ids)} pitches)",
-                "Select specific pitches...",
             ]
+            if curr_pitch_sec_id and curr_sec_pitch_count > 0:
+                scope_choices.append(
+                    f"Current section: {curr_pitch_sec_name} ({curr_sec_pitch_count} pitch{'es' if curr_sec_pitch_count != 1 else ''})"
+                )
+            scope_choices.append("Select specific section(s)...")
+            scope_choices.append(
+                f"All pitches in scenario / entire project ({len(all_pitch_ids)} pitches)"
+            )
+            scope_choices.append("Select specific pitches...")
         else:
             scope_choices = [
                 f"Current slide only (Slide {current_page}/{total_pages})",
@@ -1496,16 +1555,47 @@ def print_slide_dialog(
             scope_choices,
             index=0,
             key=f"paag_print_scope_{scenario_id}",
-            help="Choose to print just the active slide, all slides for this pitch, or multiple pitches across the scenario.",
+            help="Choose to print just the active slide, all slides for this pitch, a Fishbone section, or multiple pitches across the scenario.",
         )
 
+        selected_sec_ids = []
+        if "specific section" in chosen_scope:
+            available_sec_ids = [
+                str(r["id"])
+                for _, r in sec_df.iterrows()
+                if str(r["id"]) in sec_pitch_map
+            ]
+            if "" in sec_pitch_map and "" not in available_sec_ids:
+                available_sec_ids.append("")
+
+            def _fmt_sec_opt(sid: str) -> str:
+                if not sid:
+                    return f"(Unassigned Pitches) ({len(sec_pitch_map.get('', []))} pitches)"
+                lbl = labels_dict.get(sid, sid)
+                cnt = len(sec_pitch_map.get(sid, []))
+                return f"{lbl} ({cnt} pitch{'es' if cnt != 1 else ''})"
+
+            def_secs = (
+                [curr_pitch_sec_id]
+                if curr_pitch_sec_id in available_sec_ids
+                else available_sec_ids[:1]
+            )
+            selected_sec_ids = st.multiselect(
+                "Choose Fishbone Section(s) to Print",
+                options=available_sec_ids,
+                default=def_secs,
+                format_func=_fmt_sec_opt,
+                key=f"paag_print_sec_multiselect_{scenario_id}",
+                help="Select one or more Fishbone sections to print all pitches and slides within them.",
+            )
+
         selected_pids = []
-        if "specific" in chosen_scope and pitch_ids:
+        if "specific pitches" in chosen_scope and all_pitch_ids:
             selected_pids = st.multiselect(
                 "Choose Pitches to Include",
-                options=pitch_ids,
-                default=[selected_pitch_id] if selected_pitch_id in pitch_ids else pitch_ids[:1],
-                format_func=lambda pid: f"Pitch {pitch_ids.index(pid) + 1}: {pitch_dict.get(pid, pid)}",
+                options=all_pitch_ids,
+                default=[selected_pitch_id] if selected_pitch_id in all_pitch_ids else all_pitch_ids[:1],
+                format_func=lambda pid: f"Pitch {all_pitch_ids.index(pid) + 1}: {all_pitch_dict.get(pid, pid)}",
                 key=f"paag_print_multiselect_{scenario_id}",
                 help="Select one or more pitches to include in this print job.",
             )
@@ -1534,10 +1624,21 @@ def print_slide_dialog(
         targets = [(selected_pitch_id, [current_page])]
     elif "Current pitch" in chosen_scope:
         targets = [(selected_pitch_id, None)]
+    elif "Current section" in chosen_scope:
+        sec_pids = sec_pitch_map.get(curr_pitch_sec_id, [selected_pitch_id])
+        targets = [(pid, None) for pid in sec_pids]
+    elif "specific section" in chosen_scope:
+        targets = []
+        for sid in selected_sec_ids:
+            for pid in sec_pitch_map.get(sid, []):
+                if (pid, None) not in targets:
+                    targets.append((pid, None))
+        if not targets:
+            targets = [(selected_pitch_id, None)]
     elif "All pitches" in chosen_scope:
-        targets = [(pid, None) for pid in pitch_ids] if pitch_ids else [(selected_pitch_id, None)]
-    else:  # specific
-        effective_pids = selected_pids if selected_pids else ([selected_pitch_id] if selected_pitch_id else pitch_ids[:1])
+        targets = [(pid, None) for pid in all_pitch_ids] if all_pitch_ids else [(selected_pitch_id, None)]
+    else:  # specific pitches
+        effective_pids = selected_pids if selected_pids else ([selected_pitch_id] if selected_pitch_id else all_pitch_ids[:1])
         targets = [(pid, None) for pid in effective_pids]
 
     slides_html: list[str] = []
@@ -1813,6 +1914,55 @@ pitch_options = [
 ]
 pitch_dict = dict(pitch_options)
 
+# Fishbone section hierarchy and pitch counts
+section_pitch_counts: dict[str, int] = {}
+for _, p_row in scenario_pitches_df.iterrows():
+    s_id = str(p_row.get("section_id") or "").strip()
+    section_pitch_counts[s_id] = section_pitch_counts.get(s_id, 0) + 1
+
+sec_filter_choices: list[tuple[str, str]] = [
+    ("__ALL__", f"All Fishbone Sections ({len(scenario_pitches_df)} pitches)"),
+]
+
+if not sections.empty:
+    for _, s_row in sections.iterrows():
+        s_id = str(s_row["id"])
+        count = section_pitch_counts.get(s_id, 0)
+        if count > 0:
+            depth = int(s_row.get("depth") or 0)
+            indent = "  " * depth + ("└─ " if depth > 0 else "")
+            sec_name = str(s_row.get("name") or "")
+            sec_filter_choices.append((s_id, f"{indent}{sec_name} ({count} pitch{'es' if count != 1 else ''})"))
+
+unassigned_count = section_pitch_counts.get("", 0)
+if unassigned_count > 0:
+    sec_filter_choices.append(("__UNASSIGNED__", f"(Unassigned Pitches) ({unassigned_count} pitches)"))
+
+sec_filter_dict = dict(sec_filter_choices)
+sec_filter_key = f"paag_section_filter_{scenario_id}"
+current_sec_filter = str(st.session_state.get(sec_filter_key) or "__ALL__")
+if current_sec_filter not in sec_filter_dict:
+    current_sec_filter = "__ALL__"
+    st.session_state[sec_filter_key] = current_sec_filter
+
+# Filter pitches by section
+if current_sec_filter == "__ALL__":
+    visible_pitches_df = scenario_pitches_df
+elif current_sec_filter == "__UNASSIGNED__":
+    visible_pitches_df = scenario_pitches_df.loc[
+        scenario_pitches_df["section_id"].isna() | (scenario_pitches_df["section_id"] == "")
+    ]
+else:
+    visible_pitches_df = scenario_pitches_df.loc[
+        scenario_pitches_df["section_id"].astype(str) == current_sec_filter
+    ]
+
+visible_pitch_options = [
+    (str(row["id"]), f"{row['pitch_number']} — {row['pitch_name'] or 'Pitch'}")
+    for _, row in visible_pitches_df.iterrows()
+]
+visible_pitch_dict = dict(visible_pitch_options)
+
 selected_pitch_key = "selected_pitch_id"
 pitch_page_key = "pitch_page_num"
 
@@ -1826,22 +1976,63 @@ if qp_pitch and qp_pitch in pitch_dict:
 
 selected_pitch_id = str(st.session_state.get(selected_pitch_key) or "").strip()
 
+if selected_pitch_id and selected_pitch_id in pitch_dict:
+    if selected_pitch_id not in visible_pitch_dict:
+        p_match = scenario_pitches_df.loc[scenario_pitches_df["id"].astype(str) == selected_pitch_id]
+        if not p_match.empty:
+            pitch_sec = str(p_match.iloc[0].get("section_id") or "").strip()
+            if pitch_sec in sec_filter_dict:
+                current_sec_filter = pitch_sec
+            else:
+                current_sec_filter = "__ALL__"
+            st.session_state[sec_filter_key] = current_sec_filter
+
+            if current_sec_filter == "__ALL__":
+                visible_pitches_df = scenario_pitches_df
+            elif current_sec_filter == "__UNASSIGNED__":
+                visible_pitches_df = scenario_pitches_df.loc[
+                    scenario_pitches_df["section_id"].isna() | (scenario_pitches_df["section_id"] == "")
+                ]
+            else:
+                visible_pitches_df = scenario_pitches_df.loc[
+                    scenario_pitches_df["section_id"].astype(str) == current_sec_filter
+                ]
+            visible_pitch_options = [
+                (str(row["id"]), f"{row['pitch_number']} — {row['pitch_name'] or 'Pitch'}")
+                for _, row in visible_pitches_df.iterrows()
+            ]
+            visible_pitch_dict = dict(visible_pitch_options)
+
 if not selected_pitch_id and pitch_options:
     with st.container(border=True):
         st.markdown("### Process at a Glance Visualizer")
-        st.caption("Select a pitch or click any row in the Process table to view its 16:9 slide presentation and manage visual aids.")
-        p_pick_col1, p_pick_col2 = st.columns([3, 1])
-        with p_pick_col1:
+        st.caption("Filter by Fishbone section, select a pitch, or click any row in the Process table to view its 16:9 slide presentation.")
+        p_sec_col, p_pick_col, p_btn_col = st.columns([1.5, 2, 1])
+        with p_sec_col:
+            new_sec = st.selectbox(
+                "Fishbone Section",
+                options=list(sec_filter_dict.keys()),
+                index=list(sec_filter_dict.keys()).index(current_sec_filter),
+                format_func=lambda sid: sec_filter_dict.get(sid, sid),
+                key=f"sec_picker_empty_{scenario_id}",
+                help="Filter pitches by Fishbone Section hierarchy",
+            )
+            if new_sec != current_sec_filter:
+                st.session_state[sec_filter_key] = new_sec
+                st.rerun()
+        with p_pick_col:
+            empty_opts = list(visible_pitch_dict.keys())
             chosen_p = st.selectbox(
                 "Choose Pitch",
-                options=list(pitch_dict.keys()),
-                format_func=lambda pid: pitch_dict.get(pid, pid),
+                options=empty_opts,
+                format_func=lambda pid: visible_pitch_dict.get(pid, pid),
                 key=f"pitch_picker_empty_{scenario_id}",
+                disabled=not empty_opts,
             )
-        with p_pick_col2:
+        with p_btn_col:
             st.write("")
             st.write("")
-            if st.button("Open Process Slide", icon=":material/slideshow:", type="primary", key=f"open_slide_btn_{scenario_id}"):
+            if st.button("Open Process Slide", icon=":material/slideshow:", type="primary", disabled=not chosen_p, key=f"open_slide_btn_{scenario_id}"):
                 st.session_state[selected_pitch_key] = chosen_p
                 st.session_state[pitch_page_key] = 1
                 st.rerun()
@@ -1866,24 +2057,51 @@ if selected_pitch_id:
         # Anchor for scroll
         st.html('<div id="process-pitch-visual-summary"></div>')
 
-        # Navigation & Control Bar
-        nav_col1, nav_col2, nav_col3 = st.columns([1.8, 1.5, 2.2])
+        # Navigation & Control Bar (Hierarchy: Section -> Pitch -> Slide -> Actions)
+        nav_col_sec, nav_col_p, nav_col_sl, nav_col_act = st.columns([1.6, 1.8, 1.1, 1.8], vertical_alignment="center")
 
-        with nav_col1:
+        with nav_col_sec:
+            curr_sec_idx = list(sec_filter_dict.keys()).index(current_sec_filter) if current_sec_filter in sec_filter_dict else 0
+            new_sec = st.selectbox(
+                "Fishbone Section",
+                options=list(sec_filter_dict.keys()),
+                index=curr_sec_idx,
+                format_func=lambda sid: sec_filter_dict.get(sid, sid),
+                key=f"sec_active_select_{scenario_id}",
+                help="Filter pitches by Fishbone Section hierarchy",
+            )
+            if new_sec != current_sec_filter:
+                st.session_state[sec_filter_key] = new_sec
+                # Switch to first pitch of newly selected section
+                if new_sec == "__ALL__":
+                    next_df = scenario_pitches_df
+                elif new_sec == "__UNASSIGNED__":
+                    next_df = scenario_pitches_df.loc[
+                        scenario_pitches_df["section_id"].isna() | (scenario_pitches_df["section_id"] == "")
+                    ]
+                else:
+                    next_df = scenario_pitches_df.loc[scenario_pitches_df["section_id"].astype(str) == new_sec]
+                if not next_df.empty:
+                    st.session_state[selected_pitch_key] = str(next_df.iloc[0]["id"])
+                st.session_state[pitch_page_key] = 1
+                st.rerun()
+
+        with nav_col_p:
             # Pitch Selector & Pitch Prev/Next
-            curr_p_idx = list(pitch_dict.keys()).index(selected_pitch_id) if selected_pitch_id in pitch_dict else 0
-            p_sub_col1, p_sub_col2, p_sub_col3 = st.columns([0.4, 2, 0.4])
+            vis_pids = list(visible_pitch_dict.keys())
+            curr_p_idx = vis_pids.index(selected_pitch_id) if selected_pitch_id in vis_pids else 0
+            p_sub_col1, p_sub_col2, p_sub_col3 = st.columns([0.35, 2.1, 0.35])
             with p_sub_col1:
-                if st.button("⏮", disabled=curr_p_idx <= 0, help="Previous Pitch", key=f"btn_prev_pitch_{scenario_id}"):
-                    st.session_state[selected_pitch_key] = list(pitch_dict.keys())[curr_p_idx - 1]
+                if st.button("⏮", disabled=curr_p_idx <= 0, help="Previous Pitch in Section", key=f"btn_prev_pitch_{scenario_id}"):
+                    st.session_state[selected_pitch_key] = vis_pids[curr_p_idx - 1]
                     st.session_state[pitch_page_key] = 1
                     st.rerun()
             with p_sub_col2:
                 new_sel = st.selectbox(
                     "Pitch",
-                    options=list(pitch_dict.keys()),
+                    options=vis_pids,
                     index=curr_p_idx,
-                    format_func=lambda pid: pitch_dict.get(pid, pid),
+                    format_func=lambda pid: visible_pitch_dict.get(pid, pid),
                     key=f"pitch_active_select_{scenario_id}",
                     label_visibility="collapsed",
                 )
@@ -1892,12 +2110,12 @@ if selected_pitch_id:
                     st.session_state[pitch_page_key] = 1
                     st.rerun()
             with p_sub_col3:
-                if st.button("⏭", disabled=curr_p_idx >= len(pitch_dict) - 1, help="Next Pitch", key=f"btn_next_pitch_{scenario_id}"):
-                    st.session_state[selected_pitch_key] = list(pitch_dict.keys())[curr_p_idx + 1]
+                if st.button("⏭", disabled=curr_p_idx >= len(vis_pids) - 1, help="Next Pitch in Section", key=f"btn_next_pitch_{scenario_id}"):
+                    st.session_state[selected_pitch_key] = vis_pids[curr_p_idx + 1]
                     st.session_state[pitch_page_key] = 1
                     st.rerun()
 
-        with nav_col2:
+        with nav_col_sl:
             # Slide Pagination
             sl_col1, sl_col2, sl_col3 = st.columns([1, 1.8, 1])
             with sl_col1:
@@ -1924,7 +2142,7 @@ if selected_pitch_id:
                     st.session_state[pitch_page_key] = current_page + 1
                     st.rerun()
 
-        with nav_col3:
+        with nav_col_act:
             # Presentation, Print, Alerts, Equipment action buttons
             act_col1, act_col2, act_col3, act_col4 = st.columns([1.2, 1.2, 1, 1])
             with act_col1:
@@ -1954,7 +2172,7 @@ if selected_pitch_id:
                 scenario_id=scenario_id,
                 scenario_name=str(scenario["name"]),
                 project_name=str(pitch_summary.get("project_name", "")),
-                pitch_options=pitch_options,
+                pitch_options=visible_pitch_options if visible_pitch_options else pitch_options,
                 model_labels=model_labels,
             )
 
@@ -1971,6 +2189,9 @@ if selected_pitch_id:
                 pitch_options=pitch_options,
                 selected_pitch_id=selected_pitch_id,
                 model_labels=model_labels,
+                scenario_pitches_df=scenario_pitches_df,
+                sections=sections,
+                section_labels=section_labels,
             )
 
         # Model applicability resolution for elements

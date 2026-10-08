@@ -706,7 +706,82 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertEqual(list(app.exception), [])
         self.assertFalse(app.session_state.get(f"paag_print_active_{self.scenario_id}"))
 
+    def test_fishbone_section_included_in_pitch_summary_and_canvas(self) -> None:
+        # Verify yamazumi_pitches_for_scenario includes section_id and section_name
+        pitches_df = store.yamazumi_pitches_for_scenario(self.project_id, self.scenario_id)
+        self.assertFalse(pitches_df.empty)
+        self.assertIn("section_id", pitches_df.columns)
+        self.assertIn("section_name", pitches_df.columns)
+        match_row = pitches_df.loc[pitches_df["id"] == self.pitch_id].iloc[0]
+        self.assertEqual(str(match_row["section_id"]), self.section_id)
+        self.assertEqual(str(match_row["section_name"]), "Main")
+
+        # Verify process_pitch_visual_summary includes section_id and section_name
+        summary = store.process_pitch_visual_summary(self.project_id, self.scenario_id, self.pitch_id)
+        self.assertEqual(str(summary.get("section_id")), self.section_id)
+        self.assertEqual(str(summary.get("section_name")), "Main")
+
+        # Verify render_pitch_canvas outputs the section name in slide header
+        html = render_pitch_canvas(summary, summary["elements"][:1], scenario_name="Test Scenario", project_name="Test Project")
+        self.assertIn("Process at a Glance · Main", html)
+        self.assertIn("<div><strong>Section:</strong> Main</div>", html)
+
+    def test_fishbone_section_filtering_in_viewer_and_print_dialog(self) -> None:
+        # Create a second section and pitch
+        sec2_id = store.add_assembly_section(self.project_id, "Subassembly Front", "Subassembly", self.section_id, "")
+        area2_id = str(uuid4())
+        pitch2_id = str(uuid4())
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_areas
+                   (id, project_id, scenario_id, section_id, name, updated_at)
+                   VALUES (?, ?, ?, ?, 'Front Sub Area', ?)""",
+                (area2_id, self.project_id, self.scenario_id, sec2_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                   VALUES (?, ?, ?, '02-FR-001', 'Front subassembly pitch', ?)""",
+                (pitch2_id, self.project_id, area2_id, timestamp),
+            )
+
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/process.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Section test"
+        app.session_state["selected_pitch_id"] = self.pitch_id
+        app.session_state["pitch_page_num"] = 1
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Verify Fishbone Section filter dropdown exists in visualizer navigation bar
+        sec_selectbox = next(s for s in app.selectbox if s.label == "Fishbone Section" and "sec_active_select" in str(s.key))
+        self.assertTrue(any("All Fishbone Sections" in opt for opt in sec_selectbox.options))
+        self.assertTrue(any("Main" in opt for opt in sec_selectbox.options))
+        self.assertTrue(any("Subassembly Front" in opt for opt in sec_selectbox.options))
+
+        # Click Print to open export dialog
+        print_btn = next(b for b in app.button if b.label == "Print")
+        app = print_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(app.session_state.get(f"paag_print_active_{self.scenario_id}"))
+
+        # Verify section printing options exist in Print Selection
+        scope_radio = next(r for r in app.radio if "Print Selection" in r.label)
+        self.assertTrue(any("Current section" in opt for opt in scope_radio.options))
+        self.assertTrue(any("Select specific section(s)..." in opt for opt in scope_radio.options))
+        self.assertTrue(any("All pitches in scenario" in opt for opt in scope_radio.options))
+
+        # Close dialog
+        close_btn = next(b for b in app.button if "Close Print Window" in b.label)
+        app = close_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

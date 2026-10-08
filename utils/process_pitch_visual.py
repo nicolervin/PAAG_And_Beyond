@@ -147,6 +147,7 @@ def render_pitch_canvas(
     elements_list = elements or []
     pitch_number = _text(pitch.get("pitch_number") or "Unassigned Pitch")
     pitch_name = _text(pitch.get("pitch_name") or "Process Station")
+    section_name = _text(pitch.get("section_name") or "")
     eff_project_name = _text(project_name or pitch.get("project_name") or "Project")
     eff_scenario_name = _text(scenario_name or pitch.get("scenario_name") or "Scenario")
 
@@ -1085,7 +1086,7 @@ def render_pitch_canvas(
       <!-- Header Banner -->
       <header class="slide-header">
         <div class="header-left">
-          <div class="brand-sub">Process at a Glance</div>
+          <div class="brand-sub">Process at a Glance{f' · {section_name}' if section_name else ''}</div>
           <div class="brand-title">Process at a Glance for {eff_project_name}</div>
         </div>
         <div class="pitch-center-title">
@@ -1093,6 +1094,7 @@ def render_pitch_canvas(
         </div>
         <div class="doc-control-box">
           <div><strong>Op ID:</strong> {op_id_summary}</div>
+          {f'<div><strong>Section:</strong> {section_name}</div>' if section_name else ''}
           <div><strong>Date:</strong> {generated_label}</div>
           <div><strong>Scenario:</strong> {eff_scenario_name}</div>
           <!-- Exact string assertion support for audit and tests -->

@@ -1378,10 +1378,13 @@ def process_pitch_visual_summary(
 
         pitch = conn.execute(
             """SELECT pitch.id, pitch.pitch_number, pitch.pitch_name, pitch.sequence,
-                      area.id AS area_id, area.section_id, area.name AS area_name
+                      area.id AS area_id, area.section_id, area.name AS area_name,
+                      sec.name AS section_name
                FROM yamazumi_pitches pitch
                JOIN yamazumi_areas area
                  ON area.id=pitch.area_id AND area.project_id=pitch.project_id
+               LEFT JOIN assembly_sections sec
+                 ON sec.id=area.section_id AND sec.project_id=pitch.project_id
                WHERE pitch.id=? AND pitch.project_id=? AND area.scenario_id=?""",
             (normalized_pitch_id, project_id, scenario_id),
         ).fetchone()

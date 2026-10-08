@@ -106,9 +106,10 @@ def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
 def yamazumi_pitches_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load pitch addresses across every Yamazumi area in one scenario."""
     rows = pd.DataFrame(query(
-        """SELECT p.*, a.name AS area_name
+        """SELECT p.*, a.name AS area_name, a.section_id, s.name AS section_name
            FROM yamazumi_pitches p
            JOIN yamazumi_areas a ON a.id=p.area_id
+           LEFT JOIN assembly_sections s ON s.id=a.section_id
            WHERE p.project_id=? AND a.scenario_id=?
            ORDER BY a.name, p.sequence, p.pitch_number""",
         (project_id, scenario_id),
@@ -127,8 +128,11 @@ def yamazumi_pitches_for_scenario(project_id: str, scenario_id: str) -> pd.DataF
             "feeds_into_pitch_id": pd.Series(dtype="string"),
             "updated_at": pd.Series(dtype="string"),
             "area_name": pd.Series(dtype="string"),
+            "section_id": pd.Series(dtype="string"),
+            "section_name": pd.Series(dtype="string"),
         })
     return rows
+
 
 def yamazumi_elements_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load work elements across every Yamazumi area in one scenario."""
