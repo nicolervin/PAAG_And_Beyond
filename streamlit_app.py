@@ -19,6 +19,10 @@ st.html(
         border-color: #c62828 !important;
         color: #ffffff !important;
     }
+    div[class*="st-key-destructive_"] button p,
+    div[class*="st-key-destructive_"] button span {
+        color: #ffffff !important;
+    }
     div[class*="st-key-destructive_"] button:hover {
         background-color: #a71919 !important;
         border-color: #a71919 !important;

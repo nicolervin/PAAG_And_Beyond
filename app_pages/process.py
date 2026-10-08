@@ -1894,7 +1894,7 @@ def delete_visual_media_dialog(
         st.info(f"Caption: **{caption}**")
     st.caption("This will remove the media file and unpair all associated work element tags.")
     col1, col2 = st.columns([1, 1])
-    if col1.button("Confirm Delete", icon=":material/delete:", type="primary", key=f"conf_del_{media_id}"):
+    if col1.button("Confirm Delete", icon=":material/delete:", type="primary", key=f"destructive_conf_del_{media_id}"):
         delete_pitch_visual_media(
             project_id=project_id,
             scenario_id=scenario_id,
@@ -2067,6 +2067,44 @@ if selected_pitch_id:
             white-space: nowrap !important;
             overflow: hidden !important;
             text-overflow: ellipsis !important;
+        }
+        /* Alerts button: orange background fill */
+        div[class*="st-key-btn_alerts_"] button {
+            background-color: #ea580c !important;
+            border-color: #ea580c !important;
+            color: #ffffff !important;
+        }
+        div[class*="st-key-btn_alerts_"] button:hover {
+            background-color: #c2410c !important;
+            border-color: #c2410c !important;
+            color: #ffffff !important;
+        }
+        div[class*="st-key-btn_alerts_"] button p,
+        div[class*="st-key-btn_alerts_"] button span {
+            color: #ffffff !important;
+        }
+        /* Delete buttons: red background fill */
+        div[class*="st-key-destructive_"] button,
+        div[class*="st-key-btn_del_"] button,
+        div[class*="st-key-conf_del_"] button {
+            background-color: #c62828 !important;
+            border-color: #c62828 !important;
+            color: #ffffff !important;
+        }
+        div[class*="st-key-destructive_"] button:hover,
+        div[class*="st-key-btn_del_"] button:hover,
+        div[class*="st-key-conf_del_"] button:hover {
+            background-color: #a71919 !important;
+            border-color: #a71919 !important;
+            color: #ffffff !important;
+        }
+        div[class*="st-key-destructive_"] button p,
+        div[class*="st-key-destructive_"] button span,
+        div[class*="st-key-btn_del_"] button p,
+        div[class*="st-key-btn_del_"] button span,
+        div[class*="st-key-conf_del_"] button p,
+        div[class*="st-key-conf_del_"] button span {
+            color: #ffffff !important;
         }
         </style>
         """)
@@ -2263,8 +2301,8 @@ if selected_pitch_id:
             ]
             tag_dict_elem = dict(element_options)
 
-            # Upload Form
-            with st.form(f"add_visual_aid_form_{selected_pitch_id}"):
+            # Upload / Paste Visual Aid Container
+            with st.container(border=True):
                 up_col1, up_col2 = st.columns([1.5, 1])
                 with up_col1:
                     uploaded_media = st.file_uploader(
@@ -2274,6 +2312,10 @@ if selected_pitch_id:
                         help="Photos: max 10 MB (PNG, JPG, WEBP) • Videos: max 25 MB (MP4, MOV, WEBM)",
                     )
                     st.caption("Photos: max **10 MB** (PNG, JPG, WEBP) • Videos: max **25 MB** (MP4, MOV, WEBM)")
+
+                    st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+                    pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}")
+
                     aid_caption = st.text_input(
                         "Caption / Yellow Callout Note",
                         key=f"input_caption_visual_{selected_pitch_id}",
@@ -2295,10 +2337,10 @@ if selected_pitch_id:
                         key=f"input_seq_visual_{selected_pitch_id}",
                     )
 
-                submit_add = st.form_submit_button("Add Visual Aid", icon=":material/add_photo_alternate:", type="primary")
+                submit_add = st.button("Add Visual Aid", icon=":material/add_photo_alternate:", type="primary", key=f"btn_add_visual_{selected_pitch_id}")
                 if submit_add:
                     if not uploaded_media:
-                        st.error("Please choose an image or video file to upload, or use the clipboard paste below.")
+                        st.error("Please choose an image or video file to upload, or paste a screenshot using the button above.")
                     else:
                         try:
                             file_bytes = uploaded_media.getvalue()
@@ -2330,36 +2372,34 @@ if selected_pitch_id:
                         except Exception as exc:
                             st.error(str(exc))
 
-            # Clipboard paste
-            st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
-            pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}")
-            pasted_payload = getattr(pasted, "image", None)
-            if pasted_payload:
-                try:
-                    primary_image = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
-                    save_pitch_visual_media(
-                        project_id=project_id,
-                        scenario_id=scenario_id,
-                        pitch_id=selected_pitch_id,
-                        filename=primary_image.filename,
-                        file_bytes=primary_image.data,
-                        caption="Clipboard Screenshot",
-                        tagged_work_element_ids=[],
-                        sequence=10,
-                        current_editor=st.session_state.get("current_editor", ""),
-                    )
-                    record_audit_event(
-                        project_id,
-                        "Process",
-                        "Paste visual aid screenshot",
-                        1,
-                        st.session_state.get("current_editor", ""),
-                        {"pitch_id": selected_pitch_id},
-                    )
-                    st.toast("Screenshot added as visual aid!", icon=":material/check_circle:")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
+                # Handle clipboard paste
+                pasted_payload = getattr(pasted, "image", None)
+                if pasted_payload:
+                    try:
+                        primary_image = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
+                        save_pitch_visual_media(
+                            project_id=project_id,
+                            scenario_id=scenario_id,
+                            pitch_id=selected_pitch_id,
+                            filename=primary_image.filename,
+                            file_bytes=primary_image.data,
+                            caption=aid_caption or "Clipboard Screenshot",
+                            tagged_work_element_ids=tagged_element_ids or [],
+                            sequence=aid_sequence or 10,
+                            current_editor=st.session_state.get("current_editor", ""),
+                        )
+                        record_audit_event(
+                            project_id,
+                            "Process",
+                            "Paste visual aid screenshot",
+                            1,
+                            st.session_state.get("current_editor", ""),
+                            {"pitch_id": selected_pitch_id},
+                        )
+                        st.toast("Screenshot added as visual aid!", icon=":material/check_circle:")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
             # Gallery of existing visual aids on this pitch
             current_media_items = get_pitch_visual_media(project_id, scenario_id, selected_pitch_id)
@@ -2396,7 +2436,7 @@ if selected_pitch_id:
                                     project_id=project_id,
                                     scenario_id=scenario_id,
                                 )
-                            if st.button("Delete", icon=":material/delete:", key=f"btn_del_media_{media_item['id']}"):
+                            if st.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{media_item['id']}"):
                                 delete_visual_media_dialog(
                                     media_id=media_item["id"],
                                     caption=media_item.get("caption", ""),
