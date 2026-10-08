@@ -554,6 +554,15 @@ def clone_planning_scenario(
                 process_id_map,
                 timestamp,
             )
+            clone_process_visual_media_scenario(
+                conn,
+                project_id,
+                source_scenario_id,
+                new_scenario_id,
+                pitch_id_map,
+                process_id_map,
+                timestamp,
+            )
 
             for source_group in conn.execute(
                 """SELECT * FROM work_element_material_groups

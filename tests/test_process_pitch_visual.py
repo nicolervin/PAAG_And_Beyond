@@ -260,5 +260,186 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertFalse(next(button for button in app.button if button.label == "Back").disabled)
 
 
+    def test_visual_media_crud_and_video_handling(self) -> None:
+        img_res = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="demo.png",
+            file_bytes=b"\x89PNG\r\n\x1a\nfakeimagecontent",
+            caption="Bracket mounting orientation",
+            tagged_work_element_ids=[self.work_ids[0]],
+            sequence=10,
+            current_editor="Tester",
+        )
+        img_id = img_res["id"]
+        vid_res = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="action.mp4",
+            file_bytes=b"\x00\x00\x00\x20ftypisomfakevideocontent",
+            caption="Operator harness installation video",
+            tagged_work_element_ids=[self.work_ids[1]],
+            sequence=20,
+            current_editor="Tester",
+        )
+        vid_id = vid_res["id"]
+        items = store.get_pitch_visual_media(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["id"], img_id)
+        self.assertEqual(items[0]["media_type"], "image")
+        self.assertEqual(items[1]["id"], vid_id)
+        self.assertEqual(items[1]["media_type"], "video")
+        self.assertTrue(Path(items[0]["file_path"]).exists())
+        self.assertTrue(Path(items[1]["file_path"]).exists())
+
+        # Update visual media
+        store.update_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            media_id=img_id,
+            caption="Updated bracket caption",
+            sequence=5,
+            tagged_work_element_ids=[self.work_ids[0], self.work_ids[1]],
+            current_editor="Tester",
+        )
+        updated_items = store.get_pitch_visual_media(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        self.assertEqual(updated_items[0]["id"], img_id)
+        self.assertEqual(updated_items[0]["caption"], "Updated bracket caption")
+        self.assertEqual(len(updated_items[0]["tagged_work_elements"]), 2)
+
+        # Delete visual media
+        file_to_check = Path(items[1]["file_path"])
+        store.delete_pitch_visual_media(
+            self.project_id, self.scenario_id, vid_id, current_editor="Tester"
+        )
+        self.assertFalse(file_to_check.exists())
+        remaining = store.get_pitch_visual_media(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["id"], img_id)
+
+    def test_scenario_cloning_copies_visual_media_and_tags(self) -> None:
+        store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="diagram.png",
+            file_bytes=b"\x89PNG\r\n\x1a\nclonetest",
+            caption="Base scenario visual",
+            tagged_work_element_ids=[self.work_ids[0]],
+            sequence=10,
+            current_editor="Tester",
+        )
+        new_scenario_id = store.clone_planning_scenario(
+            self.project_id,
+            self.scenario_id,
+            name="Cloned Scenario",
+            revision_label="Rev B",
+            takt_time_s=60.0,
+            created_by="Tester",
+        )
+        # Find cloned pitch in new scenario
+        cloned_pitches = store.yamazumi_pitches_for_scenario(
+            self.project_id, new_scenario_id
+        )
+        self.assertFalse(cloned_pitches.empty)
+        cloned_pitch_id = str(cloned_pitches.iloc[0]["id"])
+        cloned_media = store.get_pitch_visual_media(
+            self.project_id, new_scenario_id, cloned_pitch_id
+        )
+        self.assertEqual(len(cloned_media), 1)
+        self.assertEqual(cloned_media[0]["caption"], "Base scenario visual")
+
+    def test_render_pitch_canvas_includes_video_tools_alerts_and_parts_nickname(self) -> None:
+        summary = {
+            "pitch_number": "01-SW1-051",
+            "pitch_name": "Main Spindle",
+            "project_name": "Project Alpha",
+            "op_id_summary": "10 - 60",
+            "tools": [
+                {
+                    "name": "DC Torque Tool 15Nm",
+                    "type_name": "Torque Driver",
+                    "description": "Atlas Copco inline driver",
+                    "is_ppe": False,
+                },
+                {
+                    "name": "Safety Glasses (ANSI Z87.1)",
+                    "type_name": "PPE",
+                    "description": "Clear impact shield",
+                    "is_ppe": True,
+                },
+            ],
+            "parts": [
+                {
+                    "part_number": "BRKT-001",
+                    "part_name": "Support Bracket",
+                    "factory_nickname": "Dog Bone",
+                    "qty": 2,
+                    "handling_type": "Consume",
+                    "thumbnail_path": "",
+                }
+            ],
+            "yamazumi_stacks": {
+                "Base": {
+                    "total_time_s": 45.0,
+                    "elements": [
+                        {
+                            "op_id": "10",
+                            "yamazumi_description": "Mount Bracket",
+                            "time_s": 15.0,
+                            "motion_classification": "Value-Added (VA)",
+                            "motion_color": "green",
+                        }
+                    ],
+                }
+            },
+            "alerts": {
+                "quality": [{"label": "Torque Critical", "detail": "12.5 Nm +/- 0.5"}],
+                "safety": [{"label": "Pinch Hazard", "detail": "Keep hands clear during clamp"}],
+            },
+            "visual_media": [
+                {
+                    "id": "v1",
+                    "media_type": "video",
+                    "file_path": str(Path(__file__).resolve()),
+                    "caption": "Verify alignment before cycling",
+                }
+            ],
+            "slide_count": 1,
+        }
+        html = render_pitch_canvas(
+            summary,
+            [{"op_id": "10", "yamazumi_description": "Mount Bracket", "time_s": 15, "models": ["All"]}],
+            scenario_name="Rev A Plan",
+            project_name="Project Alpha",
+            page_num=1,
+            total_pages=1,
+        )
+        self.assertIn("Process at a Glance for Project Alpha", html)
+        self.assertIn("01-SW1-051", html)
+        self.assertIn("Main Spindle", html)
+        self.assertIn("DC Torque Tool 15Nm", html)
+        self.assertIn("badge-ppe", html)
+        self.assertIn("PPE", html)
+        self.assertIn("Safety Glasses", html)
+        self.assertIn("Dog Bone", html)
+        self.assertIn("BRKT-001", html)
+        self.assertIn("Functional Alerts", html)
+        self.assertIn("Torque Critical", html)
+        self.assertIn("Pinch Hazard", html)
+        self.assertIn("<video class=\"visual-player\" controls", html)
+        self.assertIn("Verify alignment before cycling", html)
+        self.assertIn("caption-callout", html)
+
+
 if __name__ == "__main__":
     unittest.main()
+

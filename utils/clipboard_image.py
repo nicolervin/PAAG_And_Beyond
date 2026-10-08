@@ -108,7 +108,10 @@ _CLIPBOARD_IMAGE = st.components.v2.component(
 
 
 def clipboard_image(*, key: str):
-    return _CLIPBOARD_IMAGE(key=key, on_image_change=lambda: None, height="content")
+    try:
+        return _CLIPBOARD_IMAGE(key=key, on_image_change=lambda: None, height="content")
+    except Exception:
+        return None
 
 
 def decode_clipboard_image(payload: Any, *, max_bytes: int = 50 * 1024 * 1024) -> dict[str, Any]:

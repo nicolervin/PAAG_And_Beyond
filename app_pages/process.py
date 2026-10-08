@@ -1,5 +1,5 @@
+import json
 import pandas as pd
-#test
 import streamlit as st
 
 from utils.fishbone_ui import section_breadcrumb_labels
@@ -31,13 +31,22 @@ from utils.store import (
     work_element_op_ids,
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
+    yamazumi_pitches_for_scenario,
+    delete_pitch_visual_media,
+    get_pitch_visual_media,
+    save_pitch_visual_media,
+    update_pitch_visual_media,
 )
+from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.scope_ui import page_title_with_scope
 from utils.process_pitch_visual import (
+    clamp_media_page,
     clamp_page,
+    media_page_count,
     page_count,
     page_elements,
     page_for_element,
+    page_media,
     render_pitch_canvas,
 )
 from utils.table_filters import (
@@ -1274,9 +1283,269 @@ pitch_visual_blocked = st.session_state.pop(
 if pitch_visual_blocked:
     st.warning(pitch_visual_blocked)
 
+@st.dialog("Process at a Glance Presentation", width="large")
+def presentation_mode_dialog(
+    pitch_summary: dict,
+    active_page_rows: list[dict],
+    current_page: int,
+    total_pages: int,
+    scenario_name: str,
+    project_name: str,
+    pitch_options: list[tuple[str, str]],
+) -> None:
+    curr_pitch_id = str(pitch_summary.get("pitch_id") or "")
+    pitch_ids = [pid for pid, _ in pitch_options]
+    curr_pitch_idx = pitch_ids.index(curr_pitch_id) if curr_pitch_id in pitch_ids else 0
+
+    p_col1, p_col2, p_col3, p_col4 = st.columns([1.5, 2, 1.5, 1])
+    with p_col1:
+        if st.button("⏮ Previous Pitch", disabled=curr_pitch_idx <= 0, key="pres_prev_p"):
+            st.session_state["selected_pitch_id"] = pitch_ids[curr_pitch_idx - 1]
+            st.session_state["pitch_page_num"] = 1
+            st.rerun()
+    with p_col2:
+        st.html(
+            f"<div style='text-align:center; font-weight:700; font-size:0.9rem; padding-top:4px;'>"
+            f"Pitch {curr_pitch_idx + 1} of {len(pitch_options)} · Slide {current_page} of {total_pages}"
+            f"</div>"
+        )
+    with p_col3:
+        if st.button("Next Pitch ⏭", disabled=curr_pitch_idx >= len(pitch_options) - 1, key="pres_next_p"):
+            st.session_state["selected_pitch_id"] = pitch_ids[curr_pitch_idx + 1]
+            st.session_state["pitch_page_num"] = 1
+            st.rerun()
+    with p_col4:
+        if st.button("Close", icon=":material/close:", key="pres_close"):
+            st.rerun()
+
+    slide_html = render_pitch_canvas(
+        pitch_summary,
+        active_page_rows,
+        scenario_name=scenario_name,
+        project_name=project_name,
+        page_num=current_page,
+        total_pages=total_pages,
+        presentation_mode=True,
+    )
+    st.html(slide_html)
+
+
+@st.dialog("Print / Export Process at a Glance", width="large")
+def print_slide_dialog(
+    pitch_summary: dict,
+    active_page_rows: list[dict],
+    current_page: int,
+    total_pages: int,
+    scenario_name: str,
+    project_name: str,
+) -> None:
+    st.markdown("#### Export and Print Settings")
+    format_choice = st.radio(
+        "Page Format",
+        ["8.5 × 11 in (Letter Landscape)", "11 × 17 in (Tabloid Landscape)"],
+        horizontal=True,
+        key="print_format_choice",
+    )
+    paper_size = "letter" if "8.5" in format_choice else "tabloid"
+    html_slide = render_pitch_canvas(
+        pitch_summary,
+        active_page_rows,
+        scenario_name=scenario_name,
+        project_name=project_name,
+        page_num=current_page,
+        total_pages=total_pages,
+        print_format=paper_size,
+    )
+    css_page_size = "letter landscape" if paper_size == "letter" else "11in 17in landscape"
+    full_html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>PAAG - {pitch_summary.get('pitch_number', '')} {pitch_summary.get('pitch_name', '')}</title>
+  <style>
+    @page {{
+      size: {css_page_size};
+      margin: 0.25in;
+    }}
+    body {{
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }}
+  </style>
+</head>
+<body>
+  {html_slide}
+</body>
+</html>"""
+    dl_col, pr_col = st.columns([1, 1])
+    dl_col.download_button(
+        "Download HTML Presentation Slide",
+        data=full_html,
+        file_name=f"PAAG_{pitch_summary.get('pitch_number', 'Pitch')}_Slide_{current_page}.html",
+        mime="text/html",
+        icon=":material/download:",
+        type="primary",
+        key="dl_slide_btn",
+    )
+    if pr_col.button("Print to PDF / Printer", icon=":material/print:", key="trigger_print_btn"):
+        st.html(
+            f"""<script>
+            const printWin = window.open('', '_blank');
+            printWin.document.write({json.dumps(full_html)});
+            printWin.document.close();
+            printWin.focus();
+            setTimeout(() => {{ printWin.print(); }}, 600);
+            </script>"""
+        )
+
+
+@st.dialog("Functional Alerts & Quality Reviews", width="medium")
+def alerts_detail_dialog(alerts: dict[str, list[dict]]) -> None:
+    st.markdown("#### Functional Alerts & Constraints")
+    categories = [
+        ("Quality (Torque & PFMEA)", "quality"),
+        ("Ergonomics (Risk Reviews)", "ergo"),
+        ("Safety Constraints", "safety"),
+        ("Materials Planning", "materials"),
+        ("Equipment & Tools", "equipment"),
+    ]
+    for cat_title, cat_key in categories:
+        items = alerts.get(cat_key, [])
+        with st.expander(f"{cat_title} ({len(items)})", expanded=bool(items)):
+            if items:
+                for it in items:
+                    lbl = it.get("label") or "Alert"
+                    det = it.get("detail") or ""
+                    st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
+            else:
+                st.success("✓ No active alerts.")
+
+
+@st.dialog("Tools & Equipment Required", width="medium")
+def tools_detail_dialog(tools: list[dict]) -> None:
+    st.markdown("#### Tools, Equipment & PPE")
+    if not tools:
+        st.info("No equipment or PPE assigned to this pitch.")
+        return
+    for tool in tools:
+        t_name = tool.get("name") or "Tool"
+        t_type = tool.get("type_name") or ""
+        is_ppe = tool.get("is_ppe", False)
+        prefix = "[PPE] " if is_ppe else ""
+        with st.expander(f"{prefix}{t_name}" + (f" ({t_type})" if t_type else ""), expanded=True):
+            if tool.get("description"):
+                st.write(tool["description"])
+            mfg = tool.get("manufacturer")
+            mdl = tool.get("model")
+            if mfg or mdl:
+                st.caption(f"Manufacturer: {mfg or 'N/A'} | Model: {mdl or 'N/A'}")
+            if tool.get("notes"):
+                st.info(tool["notes"])
+
+
+@st.dialog("Edit Visual Aid", width="medium")
+def edit_visual_media_dialog(
+    media_id: str,
+    current_caption: str,
+    current_sequence: int,
+    current_tags: list[str],
+    element_options: list[tuple[str, str]],
+    project_id: str,
+    scenario_id: str,
+) -> None:
+    st.markdown("#### Edit Visual Aid Details")
+    with st.form(f"form_edit_media_{media_id}"):
+        new_caption = st.text_input("Caption / Yellow Callout Note", value=current_caption)
+        new_sequence = st.number_input("Sequence Order", value=int(current_sequence), step=5)
+        tag_dict = dict(element_options)
+        new_tags = st.multiselect(
+            "Tag to PAAG Work Elements",
+            options=list(tag_dict.keys()),
+            default=[t for t in current_tags if t in tag_dict],
+            format_func=lambda tid: tag_dict.get(tid, tid),
+        )
+        col1, col2 = st.columns([1, 1])
+        if col1.form_submit_button("Save changes", icon=":material/save:", type="primary"):
+            update_pitch_visual_media(
+                media_id=media_id,
+                caption=new_caption,
+                sequence=new_sequence,
+                tagged_work_element_ids=new_tags,
+                current_editor=st.session_state.get("current_editor", ""),
+            )
+            record_audit_event(
+                project_id,
+                "Process",
+                "Update visual aid",
+                1,
+                st.session_state.get("current_editor", ""),
+                {"media_id": media_id, "caption": new_caption},
+            )
+            st.toast("Visual aid updated", icon=":material/check_circle:")
+            st.rerun()
+        if col2.form_submit_button("Cancel"):
+            st.rerun()
+
+
+@st.dialog("Delete Visual Aid?", dismissible=False)
+def delete_visual_media_dialog(media_id: str, caption: str, project_id: str) -> None:
+    st.write("Are you sure you want to permanently delete this visual aid?")
+    if caption:
+        st.info(f"Caption: **{caption}**")
+    st.caption("This will remove the media file and unpair all associated work element tags.")
+    col1, col2 = st.columns([1, 1])
+    if col1.button("Confirm Delete", icon=":material/delete:", type="primary", key=f"conf_del_{media_id}"):
+        delete_pitch_visual_media(
+            media_id=media_id,
+            current_editor=st.session_state.get("current_editor", ""),
+        )
+        record_audit_event(
+            project_id,
+            "Process",
+            "Delete visual aid",
+            1,
+            st.session_state.get("current_editor", ""),
+            {"media_id": media_id},
+        )
+        st.toast("Visual aid deleted", icon=":material/check_circle:")
+        st.rerun()
+    if col2.button("Cancel", key=f"cancel_del_{media_id}"):
+        st.rerun()
+
+
+scenario_pitches_df = yamazumi_pitches_for_scenario(project_id, scenario_id)
+pitch_options = [
+    (str(row["id"]), f"{row['pitch_number']} — {row['pitch_name'] or 'Pitch'}")
+    for _, row in scenario_pitches_df.iterrows()
+]
+pitch_dict = dict(pitch_options)
+
 selected_pitch_key = "selected_pitch_id"
 pitch_page_key = "pitch_page_num"
 selected_pitch_id = str(st.session_state.get(selected_pitch_key) or "").strip()
+
+if not selected_pitch_id and pitch_options:
+    with st.container(border=True):
+        st.markdown("### Process at a Glance Visualizer")
+        st.caption("Select a pitch or click any row in the Process table to view its 16:9 slide presentation and manage visual aids.")
+        p_pick_col1, p_pick_col2 = st.columns([3, 1])
+        with p_pick_col1:
+            chosen_p = st.selectbox(
+                "Choose Pitch",
+                options=list(pitch_dict.keys()),
+                format_func=lambda pid: pitch_dict.get(pid, pid),
+                key=f"pitch_picker_empty_{scenario_id}",
+            )
+        with p_pick_col2:
+            st.write("")
+            st.write("")
+            if st.button("Open Process Slide", icon=":material/slideshow:", type="primary", key=f"open_slide_btn_{scenario_id}"):
+                st.session_state[selected_pitch_key] = chosen_p
+                st.session_state[pitch_page_key] = 1
+                st.rerun()
+
 if selected_pitch_id:
     try:
         pitch_summary = process_pitch_visual_summary(
@@ -1292,35 +1561,105 @@ if selected_pitch_id:
             st.session_state.get(pitch_page_key, 1), len(pitch_rows)
         )
         st.session_state[pitch_page_key] = current_page
-        total_pages = page_count(len(pitch_rows))
-        st.html('<div id="process-pitch-visual-summary"></div>')
-        navigation = st.container(
-            horizontal=True,
-            vertical_alignment="center",
-            horizontal_alignment="distribute",
-        )
-        navigation.markdown(
-            f"**{pitch_summary['pitch_number']} — "
-            f"{pitch_summary['pitch_name'] or 'Unnamed pitch'} — Page {current_page} of {total_pages}**"
-        )
-        controls = navigation.container(horizontal=True, gap="small")
-        if controls.button(
-            "Back",
-            icon=":material/arrow_back:",
-            disabled=current_page <= 1,
-            key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
-        ):
-            st.session_state[pitch_page_key] = current_page - 1
-            st.rerun()
-        if controls.button(
-            "Next",
-            icon=":material/arrow_forward:",
-            disabled=current_page >= total_pages,
-            key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
-        ):
-            st.session_state[pitch_page_key] = current_page + 1
-            st.rerun()
+        total_pages = max(page_count(len(pitch_rows)), pitch_summary.get("slide_count", 1))
 
+        # Anchor for scroll
+        st.html('<div id="process-pitch-visual-summary"></div>')
+
+        # Navigation & Control Bar
+        nav_col1, nav_col2, nav_col3 = st.columns([1.8, 1.5, 2.2])
+
+        with nav_col1:
+            # Pitch Selector & Pitch Prev/Next
+            curr_p_idx = list(pitch_dict.keys()).index(selected_pitch_id) if selected_pitch_id in pitch_dict else 0
+            p_sub_col1, p_sub_col2, p_sub_col3 = st.columns([0.4, 2, 0.4])
+            with p_sub_col1:
+                if st.button("⏮", disabled=curr_p_idx <= 0, help="Previous Pitch", key=f"btn_prev_pitch_{scenario_id}"):
+                    st.session_state[selected_pitch_key] = list(pitch_dict.keys())[curr_p_idx - 1]
+                    st.session_state[pitch_page_key] = 1
+                    st.rerun()
+            with p_sub_col2:
+                new_sel = st.selectbox(
+                    "Pitch",
+                    options=list(pitch_dict.keys()),
+                    index=curr_p_idx,
+                    format_func=lambda pid: pitch_dict.get(pid, pid),
+                    key=f"pitch_active_select_{scenario_id}",
+                    label_visibility="collapsed",
+                )
+                if new_sel != selected_pitch_id:
+                    st.session_state[selected_pitch_key] = new_sel
+                    st.session_state[pitch_page_key] = 1
+                    st.rerun()
+            with p_sub_col3:
+                if st.button("⏭", disabled=curr_p_idx >= len(pitch_dict) - 1, help="Next Pitch", key=f"btn_next_pitch_{scenario_id}"):
+                    st.session_state[selected_pitch_key] = list(pitch_dict.keys())[curr_p_idx + 1]
+                    st.session_state[pitch_page_key] = 1
+                    st.rerun()
+
+        with nav_col2:
+            # Slide Pagination
+            sl_col1, sl_col2, sl_col3 = st.columns([1, 1.8, 1])
+            with sl_col1:
+                if st.button(
+                    "Back",
+                    icon=":material/arrow_back:",
+                    disabled=current_page <= 1,
+                    key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
+                ):
+                    st.session_state[pitch_page_key] = current_page - 1
+                    st.rerun()
+            with sl_col2:
+                st.html(
+                    f"<div style='text-align:center; font-weight:700; font-size:0.85rem; padding-top:6px;'>"
+                    f"Page {current_page} of {total_pages}</div>"
+                )
+            with sl_col3:
+                if st.button(
+                    "Next",
+                    icon=":material/arrow_forward:",
+                    disabled=current_page >= total_pages,
+                    key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
+                ):
+                    st.session_state[pitch_page_key] = current_page + 1
+                    st.rerun()
+
+        with nav_col3:
+            # Presentation, Print, Alerts, Equipment action buttons
+            act_col1, act_col2, act_col3, act_col4 = st.columns([1.2, 1.2, 1, 1])
+            with act_col1:
+                if st.button("Present", icon=":material/slideshow:", key=f"btn_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
+                    presentation_mode_dialog(
+                        pitch_summary,
+                        pitch_rows,
+                        current_page,
+                        total_pages,
+                        str(scenario["name"]),
+                        str(pitch_summary.get("project_name", "")),
+                        pitch_options,
+                    )
+            with act_col2:
+                if st.button("Print", icon=":material/print:", key=f"btn_print_{scenario_id}", help="Print or export 8.5x11 or 11x17 landscape slide"):
+                    print_slide_dialog(
+                        pitch_summary,
+                        pitch_rows,
+                        current_page,
+                        total_pages,
+                        str(scenario["name"]),
+                        str(pitch_summary.get("project_name", "")),
+                    )
+            with act_col3:
+                alerts_cnt = sum(len(v) for v in pitch_summary.get("alerts", {}).values())
+                a_label = f"Alerts ({alerts_cnt})" if alerts_cnt > 0 else "Alerts"
+                if st.button(a_label, icon=":material/notification_important:", key=f"btn_alerts_{scenario_id}", help="View functional alerts detail"):
+                    alerts_detail_dialog(pitch_summary.get("alerts", {}))
+            with act_col4:
+                tools_cnt = len(pitch_summary.get("tools", []))
+                t_label = f"Tools ({tools_cnt})" if tools_cnt > 0 else "Tools"
+                if st.button(t_label, icon=":material/construction:", key=f"btn_tools_{scenario_id}", help="View tools and equipment details"):
+                    tools_detail_dialog(pitch_summary.get("tools", []))
+
+        # Model applicability resolution for elements
         active_page_rows = page_elements(pitch_rows, current_page)
         for row in active_page_rows:
             row["models"] = [
@@ -1328,21 +1667,179 @@ if selected_pitch_id:
                 else model_labels.get(model, model)
                 for model in (split_filter_values(row.get("model_applicability")) or ["All"])
             ]
+
+        # Render 16:9 Landscape Canvas
         st.html(
             render_pitch_canvas(
                 pitch_summary,
                 active_page_rows,
                 scenario_name=str(scenario["name"]),
+                project_name=str(pitch_summary.get("project_name", "")),
+                page_num=current_page,
+                total_pages=total_pages,
             )
         )
+
         if st.session_state.pop(f"pitch_visual_scroll_{scenario_id}", False):
             st.html(
                 """<script>
                 const target = window.parent.document.getElementById('process-pitch-visual-summary');
                 if (target) target.scrollIntoView({behavior: 'smooth', block: 'start'});
-                </script>""",
-                unsafe_allow_javascript=True,
+                </script>"""
             )
+
+        # Visual Aids Management Section
+        with st.expander("Process Visual Aids Management (Photos & Videos)", expanded=True):
+            st.markdown("Add photos or demonstration videos (`.mp4`, `.mov`, `.webm`) and tag them to work elements for this pitch.")
+
+            element_options = [
+                (
+                    str(el.get("work_element_id") or el.get("id")),
+                    f"{el.get('op_id', '')} — {el.get('operation') or el.get('yamazumi_description') or 'Work Step'}"
+                )
+                for el in pitch_rows
+                if el.get("work_element_id") or el.get("id")
+            ]
+            tag_dict_elem = dict(element_options)
+
+            # Upload Form
+            with st.form(f"add_visual_aid_form_{selected_pitch_id}"):
+                up_col1, up_col2 = st.columns([1.5, 1])
+                with up_col1:
+                    uploaded_media = st.file_uploader(
+                        "Upload photo or video",
+                        type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
+                        key=f"file_upload_visual_{selected_pitch_id}",
+                        help="Supports images and playable video files (.mp4, .mov, .webm)",
+                    )
+                    aid_caption = st.text_input(
+                        "Caption / Yellow Callout Note",
+                        key=f"input_caption_visual_{selected_pitch_id}",
+                        placeholder="e.g. Ensure bracket is flush against locator pin before torquing",
+                    )
+                with up_col2:
+                    tagged_element_ids = st.multiselect(
+                        "Tag to Work Elements",
+                        options=list(tag_dict_elem.keys()),
+                        format_func=lambda tid: tag_dict_elem.get(tid, tid),
+                        key=f"select_tags_visual_{selected_pitch_id}",
+                        help="Tags link this visual aid to specific PAAG work elements on this pitch.",
+                    )
+                    aid_sequence = st.number_input(
+                        "Sequence Order",
+                        min_value=1,
+                        value=10,
+                        step=5,
+                        key=f"input_seq_visual_{selected_pitch_id}",
+                    )
+
+                submit_add = st.form_submit_button("Add Visual Aid", icon=":material/add_photo_alternate:", type="primary")
+                if submit_add:
+                    if not uploaded_media:
+                        st.error("Please choose an image or video file to upload, or use the clipboard paste below.")
+                    else:
+                        try:
+                            file_bytes = uploaded_media.getvalue()
+                            save_pitch_visual_media(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                pitch_id=selected_pitch_id,
+                                filename=uploaded_media.name,
+                                file_bytes=file_bytes,
+                                caption=aid_caption,
+                                tagged_work_element_ids=tagged_element_ids,
+                                sequence=aid_sequence,
+                                current_editor=st.session_state.get("current_editor", ""),
+                            )
+                            record_audit_event(
+                                project_id,
+                                "Process",
+                                "Upload visual aid",
+                                1,
+                                st.session_state.get("current_editor", ""),
+                                {
+                                    "pitch_id": selected_pitch_id,
+                                    "filename": uploaded_media.name,
+                                    "caption": aid_caption,
+                                },
+                            )
+                            st.toast("Visual aid saved!", icon=":material/check_circle:")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
+
+            # Clipboard paste
+            st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+            pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}")
+            pasted_payload = getattr(pasted, "image", None)
+            if pasted_payload:
+                try:
+                    primary_image = decode_clipboard_image(pasted_payload)
+                    save_pitch_visual_media(
+                        project_id=project_id,
+                        scenario_id=scenario_id,
+                        pitch_id=selected_pitch_id,
+                        filename=primary_image.filename,
+                        file_bytes=primary_image.data,
+                        caption="Clipboard Screenshot",
+                        tagged_work_element_ids=[],
+                        sequence=10,
+                        current_editor=st.session_state.get("current_editor", ""),
+                    )
+                    record_audit_event(
+                        project_id,
+                        "Process",
+                        "Paste visual aid screenshot",
+                        1,
+                        st.session_state.get("current_editor", ""),
+                        {"pitch_id": selected_pitch_id},
+                    )
+                    st.toast("Screenshot added as visual aid!", icon=":material/check_circle:")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+            # Gallery of existing visual aids on this pitch
+            current_media_items = get_pitch_visual_media(project_id, scenario_id, selected_pitch_id)
+            if not current_media_items:
+                st.info("No visual aids uploaded for this pitch yet. Use the form above to add photos or videos.")
+            else:
+                st.markdown(f"**Current Visual Aids ({len(current_media_items)})**")
+                for m_idx, media_item in enumerate(current_media_items):
+                    with st.container(border=True):
+                        g_col1, g_col2, g_col3 = st.columns([1.5, 4, 1.5])
+                        with g_col1:
+                            m_path = media_item.get("file_path", "")
+                            if media_item.get("media_type") == "video":
+                                st.video(m_path)
+                            else:
+                                st.image(m_path, width=140)
+                        with g_col2:
+                            st.markdown(f"**Caption:** {media_item.get('caption') or '*(None)*'}")
+                            st.caption(f"Type: `{media_item.get('media_type')}` | Sequence: `{media_item.get('sequence', 10)}`")
+                            tags = media_item.get("tagged_work_elements", [])
+                            if tags:
+                                tag_str = ", ".join(t.get("operation") or f"Step {t.get('work_sequence', '')}" for t in tags)
+                                st.caption(f"Tagged Steps: **{tag_str}**")
+                            else:
+                                st.caption("Tagged Steps: *General pitch visual (all steps)*")
+                        with g_col3:
+                            if st.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
+                                edit_visual_media_dialog(
+                                    media_id=media_item["id"],
+                                    current_caption=media_item.get("caption", ""),
+                                    current_sequence=media_item.get("sequence", 10),
+                                    current_tags=[t["work_element_id"] for t in tags if "work_element_id" in t],
+                                    element_options=element_options,
+                                    project_id=project_id,
+                                    scenario_id=scenario_id,
+                                )
+                            if st.button("Delete", icon=":material/delete:", key=f"btn_del_media_{media_item['id']}"):
+                                delete_visual_media_dialog(
+                                    media_id=media_item["id"],
+                                    caption=media_item.get("caption", ""),
+                                    project_id=project_id,
+                                )
 
 export_actions = st.container(horizontal=True)
 export_actions.download_button(

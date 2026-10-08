@@ -416,6 +416,108 @@ def _clone_ergonomics_reviews(
             )
     return len(source_reviews)
 
+
+def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
+    """Initialize database tables for scenario-owned pitch visual aids and element tags."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS process_visual_media (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+            pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
+            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+            file_path TEXT NOT NULL,
+            caption TEXT NOT NULL DEFAULT '',
+            sequence INTEGER NOT NULL DEFAULT 10,
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS process_visual_media_tags (
+            id TEXT PRIMARY KEY,
+            media_id TEXT NOT NULL REFERENCES process_visual_media(id) ON DELETE CASCADE,
+            work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE CASCADE,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            UNIQUE(media_id, work_element_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_process_visual_media_pitch
+            ON process_visual_media(project_id, scenario_id, pitch_id);
+        CREATE INDEX IF NOT EXISTS idx_process_visual_media_tags_media
+            ON process_visual_media_tags(media_id);
+        CREATE INDEX IF NOT EXISTS idx_process_visual_media_tags_element
+            ON process_visual_media_tags(work_element_id);
+        """
+    )
+
+
+def clone_process_visual_media_scenario(
+    conn: sqlite3.Connection,
+    project_id: str,
+    source_scenario_id: str,
+    new_scenario_id: str,
+    pitch_id_map: dict[str, str],
+    process_id_map: dict[str, str],
+    timestamp: str,
+) -> None:
+    """Clone scenario visual aids and re-link element tags to cloned pitch and work elements."""
+    media_id_map: dict[str, str] = {}
+    source_media_rows = conn.execute(
+        """SELECT * FROM process_visual_media
+           WHERE project_id=? AND scenario_id=?
+           ORDER BY sequence, created_at, id""",
+        (project_id, source_scenario_id),
+    ).fetchall()
+    for row in source_media_rows:
+        item = dict(row)
+        old_id = str(item["id"])
+        old_pitch_id = str(item["pitch_id"])
+        new_pitch_id = pitch_id_map.get(old_pitch_id)
+        if not new_pitch_id:
+            continue
+        new_media_id = str(uuid4())
+        media_id_map[old_id] = new_media_id
+        item.update(
+            id=new_media_id,
+            scenario_id=new_scenario_id,
+            pitch_id=new_pitch_id,
+            updated_at=timestamp,
+        )
+        columns = list(item)
+        conn.execute(
+            f"INSERT INTO process_visual_media ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            tuple(item[col] for col in columns),
+        )
+
+    source_tag_rows = conn.execute(
+        """SELECT * FROM process_visual_media_tags
+           WHERE project_id=? AND scenario_id=?""",
+        (project_id, source_scenario_id),
+    ).fetchall()
+    for row in source_tag_rows:
+        tag = dict(row)
+        old_media_id = str(tag["media_id"])
+        old_work_id = str(tag["work_element_id"])
+        new_media_id = media_id_map.get(old_media_id)
+        new_work_id = process_id_map.get(old_work_id)
+        if not new_media_id or not new_work_id:
+            continue
+        tag.update(
+            id=str(uuid4()),
+            media_id=new_media_id,
+            work_element_id=new_work_id,
+            scenario_id=new_scenario_id,
+            created_at=timestamp,
+        )
+        columns = list(tag)
+        conn.execute(
+            f"INSERT INTO process_visual_media_tags ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            tuple(tag[col] for col in columns),
+        )
+
+
 def parse_yamazumi_model_variants(value, fallback: str | None = "Base") -> list[str]:
     """Return a clean model-variant list from stored JSON, a list, or legacy text."""
     if isinstance(value, str):
@@ -992,6 +1094,7 @@ def init_db() -> None:
         init_control_plan_schema(conn)
         init_equipment_schema(conn)
         init_layout_schema(conn)
+        init_process_visual_media_schema(conn)
         project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "product_line" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
@@ -1832,4 +1935,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']
