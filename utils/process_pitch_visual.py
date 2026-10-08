@@ -141,6 +141,7 @@ def render_pitch_canvas(
     generated_on: date | None = None,
     presentation_mode: bool = False,
     print_format: str | None = None,
+    image_fit: str = "contain",
 ) -> str:
     """Render a 16:9 landscape PowerPoint-style Process at a Glance slide."""
     elements_list = elements or []
@@ -515,6 +516,7 @@ def render_pitch_canvas(
 
     presentation_class = "presentation-active" if presentation_mode else ""
     print_class = f"print-{print_format}" if print_format else ""
+    fit_class = f"fit-{image_fit}" if image_fit else "fit-contain"
 
     return f"""
     <style>
@@ -535,6 +537,59 @@ def render_pitch_canvas(
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         box-shadow: 0 4px 16px rgba(0,0,0,0.06);
         overflow: hidden;
+      }}
+      .paag-slide.print-tabloid {{
+        aspect-ratio: 17 / 11 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        min-height: 680px;
+      }}
+      .paag-slide.print-tabloid .slide-body {{
+        grid-template-columns: 32% 68%;
+        gap: 14px;
+      }}
+      .paag-slide.print-tabloid .right-col {{
+        height: 100%;
+        flex: 1 1 auto;
+      }}
+      .paag-slide.print-tabloid .visual-grid {{
+        height: 100%;
+        min-height: 480px;
+        flex: 1 1 auto;
+      }}
+      .paag-slide.print-tabloid .visual-card {{
+        height: 100%;
+        min-height: 0;
+        flex: 1 1 auto;
+      }}
+      .paag-slide.print-tabloid .visual-media-box {{
+        height: 100%;
+        min-height: 0;
+        flex: 1 1 auto;
+      }}
+      .paag-slide.fit-stretch .visual-image,
+      .paag-slide.fit-fill .visual-image,
+      .paag-slide.print-tabloid.fit-stretch .visual-image,
+      .paag-slide.print-tabloid.fit-fill .visual-image {{
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: fill !important;
+      }}
+      .paag-slide.fit-cover .visual-image {{
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover !important;
+      }}
+      .paag-slide.fit-contain .visual-image {{
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: contain !important;
+      }}
+      .paag-slide.print-letter {{
+        aspect-ratio: 11 / 8.5 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        min-height: 600px;
       }}
       /* Header Banner */
       .slide-header {{
@@ -982,18 +1037,51 @@ def render_pitch_canvas(
       .paag-slide.presentation-active .functional-alerts-bar {{ font-size: 0.88rem; }}
 
       @media print {{
+        @page {{
+          size: {"17in 11in landscape" if print_format == "tabloid" else "11in 8.5in landscape"};
+          margin: 0.25in;
+        }}
+        html, body {{
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #ffffff !important;
+        }}
         .paag-slide {{
-          aspect-ratio: 16 / 9;
-          page-break-after: always;
-          break-inside: avoid;
-          min-height: 0;
-          box-shadow: none;
-          border: 1px solid #94a3b8;
+          page-break-after: always !important;
+          break-after: page !important;
+          page-break-inside: avoid !important;
+          break-inside: avoid !important;
+          min-height: 0 !important;
+          box-shadow: none !important;
+          border: 1px solid #94a3b8 !important;
+          margin: 0 !important;
+        }}
+        .paag-slide:last-child {{
+          page-break-after: auto !important;
+          break-after: auto !important;
+        }}
+        .paag-slide.print-tabloid {{
+          width: 100% !important;
+          height: 10.5in !important;
+          max-height: 10.5in !important;
+          aspect-ratio: 17 / 11 !important;
+        }}
+        .paag-slide.print-letter {{
+          width: 100% !important;
+          height: 8.0in !important;
+          max-height: 8.0in !important;
+          aspect-ratio: 11 / 8.5 !important;
+        }}
+        .visual-media-box {{
+          background: #ffffff !important;
+        }}
+        .visual-card {{
+          border: 1px solid #94a3b8 !important;
         }}
       }}
     </style>
 
-    <section class="paag-slide {presentation_class} {print_class}" aria-label="Process at a Glance Slide">
+    <section class="paag-slide {presentation_class} {print_class} {fit_class}" aria-label="Process at a Glance Slide">
       <!-- Header Banner -->
       <header class="slide-header">
         <div class="header-left">
@@ -1456,4 +1544,191 @@ def render_presentation_deck(
     }})();
     </script>
     """
+
+
+def render_printable_paag_deck(
+    slides_html: list[str],
+    *,
+    paper_size: str = "tabloid",
+    image_fit: str = "fill",
+    title: str = "PAAG Print Deck",
+) -> str:
+    """Render a standalone, multi-page HTML document containing all slides ready for native print or export to PDF."""
+    css_page_size = "17in 11in landscape" if paper_size == "tabloid" else "11in 8.5in landscape"
+    paper_label = "11 × 17 in (Tabloid Landscape)" if paper_size == "tabloid" else "8.5 × 11 in (Letter Landscape)"
+    total_slides = len(slides_html)
+
+    joined_slides = "\n".join(slides_html)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    @page {{
+      size: {css_page_size};
+      margin: 0.25in;
+    }}
+    * {{
+      box-sizing: border-box;
+    }}
+    html, body {{
+      margin: 0;
+      padding: 0;
+      background: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }}
+    .print-banner {{
+      position: sticky;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 99999;
+      background: #0f172a;
+      color: #ffffff;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    }}
+    .print-banner-left {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .btn-action-print {{
+      background: #0284c7;
+      color: #ffffff !important;
+      border: none;
+      padding: 8px 18px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 0.95rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+    }}
+    .btn-action-print:hover {{
+      background: #0369a1;
+    }}
+    .btn-action-close {{
+      background: #334155;
+      color: #f1f5f9 !important;
+      border: 1px solid #475569;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      text-decoration: none;
+    }}
+    .btn-action-close:hover {{
+      background: #475569;
+    }}
+    .print-status-tag {{
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.2);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      color: #e2e8f0;
+    }}
+    .deck-container {{
+      max-width: 1400px;
+      margin: 20px auto;
+      padding: 0 16px 40px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }}
+    .deck-container > .paag-slide {{
+      margin-bottom: 24px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+    }}
+
+    @media print {{
+      .no-print {{
+        display: none !important;
+      }}
+      html, body {{
+        background: #ffffff !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }}
+      .deck-container {{
+        max-width: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        gap: 0 !important;
+      }}
+      .paag-slide {{
+        margin: 0 !important;
+        box-shadow: none !important;
+        border: 1px solid #94a3b8 !important;
+        page-break-after: always !important;
+        break-after: page !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+      }}
+      .paag-slide:last-child {{
+        page-break-after: auto !important;
+        break-after: auto !important;
+      }}
+      .paag-slide.print-tabloid {{
+        width: 100% !important;
+        height: 10.5in !important;
+        max-height: 10.5in !important;
+        aspect-ratio: 17 / 11 !important;
+      }}
+      .paag-slide.print-letter {{
+        width: 100% !important;
+        height: 8.0in !important;
+        max-height: 8.0in !important;
+        aspect-ratio: 11 / 8.5 !important;
+      }}
+      .visual-media-box {{
+        background: #ffffff !important;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="print-banner no-print">
+    <div class="print-banner-left">
+      <button class="btn-action-print" onclick="window.print()">
+        <span>🖨️</span> Print Now (or press Ctrl+P)
+      </button>
+      <span class="print-status-tag">📄 {paper_label}</span>
+      <span class="print-status-tag">📑 {total_slides} Slide{'' if total_slides == 1 else 's'}</span>
+      <span style="font-size: 0.8rem; color: #94a3b8;">Tip: Set destination to "Save as PDF" or select your printer.</span>
+    </div>
+    <div>
+      <button class="btn-action-close" onclick="window.close()">✕ Close</button>
+    </div>
+  </div>
+
+  <main class="deck-container">
+    {joined_slides}
+  </main>
+
+  <script>
+    window.addEventListener("load", function() {{
+      setTimeout(function() {{
+        try {{
+          window.print();
+        }} catch(e) {{
+          console.error("Print trigger failed:", e);
+        }}
+      }}, 450);
+    }});
+  </script>
+</body>
+</html>"""
 

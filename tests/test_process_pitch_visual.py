@@ -16,6 +16,7 @@ from utils.process_pitch_visual import (
     page_for_element,
     render_pitch_canvas,
     render_presentation_deck,
+    render_printable_paag_deck,
 )
 
 
@@ -610,6 +611,100 @@ class ProcessPitchVisualTests(unittest.TestCase):
         app = pres_exit_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
         self.assertFalse(app.session_state.get(f"paag_present_active_{self.scenario_id}"))
+
+    def test_render_pitch_canvas_print_tabloid_and_fit(self) -> None:
+        pitch = {
+            "pitch_number": "01-SW1-010",
+            "pitch_name": "Engine Drop",
+            "project_name": "Project Apollo",
+            "scenario_name": "Line 1 Ramp",
+        }
+        elements = [
+            {
+                "work_element_id": "we1",
+                "element_name": "Position powertrain hoist",
+                "description": "Align hoist pins with crossmember",
+                "station_criticality": "Critical",
+                "manual_s": 22.0,
+                "walk_s": 3.0,
+                "parts": [{"part_number": "P-100", "description": "Engine Mount", "quantity": 2.0}],
+                "images": ["data/uploads/mount.png"],
+            }
+        ]
+        html_tabloid = render_pitch_canvas(
+            pitch,
+            elements,
+            page_num=1,
+            total_pages=1,
+            print_format="tabloid",
+            image_fit="fill",
+        )
+        self.assertIn("print-tabloid", html_tabloid)
+        self.assertIn("fit-fill", html_tabloid)
+        self.assertIn("17 / 11", html_tabloid)
+        self.assertIn("17in 11in landscape", html_tabloid)
+        self.assertIn("object-fit: fill", html_tabloid)
+
+        html_letter = render_pitch_canvas(
+            pitch,
+            elements,
+            page_num=1,
+            total_pages=1,
+            print_format="letter",
+            image_fit="contain",
+        )
+        self.assertIn("print-letter", html_letter)
+        self.assertIn("fit-contain", html_letter)
+        self.assertIn("11 / 8.5", html_letter)
+        self.assertIn("11in 8.5in landscape", html_letter)
+
+    def test_render_printable_paag_deck(self) -> None:
+        slide_1 = "<section class='paag-slide print-tabloid fit-fill'>Slide 1 Content</section>"
+        slide_2 = "<section class='paag-slide print-tabloid fit-fill'>Slide 2 Content</section>"
+        deck = render_printable_paag_deck([slide_1, slide_2], paper_size="tabloid", title="Test PAAG Deck")
+        self.assertIn("<!DOCTYPE html>", deck)
+        self.assertIn("17in 11in landscape", deck)
+        self.assertIn("Print Now (or press Ctrl+P)", deck)
+        self.assertIn("window.print()", deck)
+        self.assertIn("Slide 1 Content", deck)
+        self.assertIn("Slide 2 Content", deck)
+        self.assertIn("2 Slides", deck)
+        self.assertIn("page-break-after: always", deck)
+
+    def test_print_dialog_export_workflow(self) -> None:
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/process.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Print test"
+        app.session_state["selected_pitch_id"] = self.pitch_id
+        app.session_state["pitch_page_num"] = 1
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Click Print button
+        print_btn = next(b for b in app.button if b.label == "Print")
+        app = print_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(app.session_state.get(f"paag_print_active_{self.scenario_id}"))
+
+        # Verify radio widgets for Print Selection, Page Format, and Image Fit exist
+        scope_radio = next(r for r in app.radio if "Print Selection" in r.label)
+        self.assertTrue(any("Current slide only" in opt for opt in scope_radio.options))
+        self.assertTrue(any("All pitches in scenario" in opt for opt in scope_radio.options))
+
+        fmt_radio = next(r for r in app.radio if "Page Format" in r.label)
+        self.assertTrue(any("11 × 17" in opt for opt in fmt_radio.options))
+
+        fit_radio = next(r for r in app.radio if "Image Fit in Print" in r.label)
+        self.assertTrue(any("Stretch to Fill Box" in opt for opt in fit_radio.options))
+
+        # Close dialog via button
+        close_btn = next(b for b in app.button if "Close Print Window" in b.label)
+        app = close_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertFalse(app.session_state.get(f"paag_print_active_{self.scenario_id}"))
 
 
 if __name__ == "__main__":

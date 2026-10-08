@@ -1,6 +1,7 @@
 import json
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from utils.fishbone_ui import section_breadcrumb_labels
 from utils.store import (
@@ -49,6 +50,7 @@ from utils.process_pitch_visual import (
     page_media,
     render_pitch_canvas,
     render_presentation_deck,
+    render_printable_paag_deck,
 )
 from utils.table_filters import (
     apply_pending_table_editor_reset,
@@ -1430,7 +1432,7 @@ def presentation_mode_dialog(
     st.html(slide_html)
 
 
-@st.dialog("Print / Export Process at a Glance", width="large")
+@st.dialog("Export & Print Process at a Glance", width="large")
 def print_slide_dialog(
     pitch_summary: dict,
     active_page_rows: list[dict],
@@ -1438,67 +1440,263 @@ def print_slide_dialog(
     total_pages: int,
     scenario_name: str,
     project_name: str,
+    project_id: str = "",
+    scenario_id: str = "",
+    pitch_options: list[tuple[str, str]] | None = None,
+    selected_pitch_id: str = "",
+    model_labels: dict[str, str] | None = None,
 ) -> None:
+    # Hide the default gray X button to ensure dialog state stays in sync
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] button[aria-label="Close"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    labels_map = model_labels or {}
+    pitch_opts = pitch_options or []
+    pitch_ids = [pid for pid, _ in pitch_opts]
+    pitch_dict = dict(pitch_opts)
+    curr_pitch_name = pitch_dict.get(selected_pitch_id, pitch_summary.get("pitch_number", "Pitch"))
+    curr_pitch_idx = pitch_ids.index(selected_pitch_id) if selected_pitch_id in pitch_ids else 0
+
+    top_col1, top_col2 = st.columns([5, 1], vertical_alignment="center")
+    with top_col1:
+        st.markdown("### Export and Print Process at a Glance")
+    with top_col2:
+        if st.button("✕ Close", key=f"print_dialog_exit_top_{scenario_id}", help="Close print window"):
+            st.session_state[f"paag_print_active_{scenario_id}"] = False
+            st.rerun()
+
     st.markdown("#### Export and Print Settings")
-    format_choice = st.radio(
-        "Page Format",
-        ["8.5 × 11 in (Letter Landscape)", "11 × 17 in (Tabloid Landscape)"],
-        horizontal=True,
-        key="print_format_choice",
+
+    col_scope, col_fmt = st.columns([1.5, 1.2])
+
+    with col_scope:
+        if pitch_ids:
+            scope_choices = [
+                f"Current slide only (Pitch {curr_pitch_idx + 1}, Slide {current_page}/{total_pages})",
+                f"Current pitch (All {total_pages} slide{'s' if total_pages > 1 else ''})",
+                f"All pitches in scenario (Complete deck - {len(pitch_ids)} pitches)",
+                "Select specific pitches...",
+            ]
+        else:
+            scope_choices = [
+                f"Current slide only (Slide {current_page}/{total_pages})",
+                f"Current pitch (All {total_pages} slide{'s' if total_pages > 1 else ''})",
+            ]
+
+        chosen_scope = st.radio(
+            "Print Selection",
+            scope_choices,
+            index=0,
+            key=f"paag_print_scope_{scenario_id}",
+            help="Choose to print just the active slide, all slides for this pitch, or multiple pitches across the scenario.",
+        )
+
+        selected_pids = []
+        if "specific" in chosen_scope and pitch_ids:
+            selected_pids = st.multiselect(
+                "Choose Pitches to Include",
+                options=pitch_ids,
+                default=[selected_pitch_id] if selected_pitch_id in pitch_ids else pitch_ids[:1],
+                format_func=lambda pid: f"Pitch {pitch_ids.index(pid) + 1}: {pitch_dict.get(pid, pid)}",
+                key=f"paag_print_multiselect_{scenario_id}",
+                help="Select one or more pitches to include in this print job.",
+            )
+
+    with col_fmt:
+        format_choice = st.radio(
+            "Page Format",
+            ["11 × 17 in (Tabloid Landscape)", "8.5 × 11 in (Letter Landscape)"],
+            index=0,
+            key=f"paag_print_fmt_{scenario_id}",
+            help="11x17 Tabloid gives more space for visual work instructions and high-resolution layout.",
+        )
+        paper_size = "tabloid" if "11 × 17" in format_choice else "letter"
+
+        fit_choice = st.radio(
+            "Image Fit in Print",
+            ["Stretch to Fill Box", "Preserve Aspect Ratio"],
+            index=0,
+            key=f"paag_print_fit_{scenario_id}",
+            help="Stretch to Fill Box expands step photos to fill the 11x17 aspect ratio with zero letterbox bars.",
+        )
+        image_fit = "fill" if "Stretch" in fit_choice else "contain"
+
+    # Resolve target list of pitches and pages
+    if "Current slide only" in chosen_scope:
+        targets = [(selected_pitch_id, [current_page])]
+    elif "Current pitch" in chosen_scope:
+        targets = [(selected_pitch_id, None)]
+    elif "All pitches" in chosen_scope:
+        targets = [(pid, None) for pid in pitch_ids] if pitch_ids else [(selected_pitch_id, None)]
+    else:  # specific
+        effective_pids = selected_pids if selected_pids else ([selected_pitch_id] if selected_pitch_id else pitch_ids[:1])
+        targets = [(pid, None) for pid in effective_pids]
+
+    slides_html: list[str] = []
+    with st.spinner("Compiling print slides..."):
+        for pid, page_filter in targets:
+            if pid == selected_pitch_id and pitch_summary:
+                p_sum = pitch_summary
+            else:
+                try:
+                    p_sum = process_pitch_visual_summary(project_id, scenario_id, pid)
+                except Exception:
+                    continue
+
+            p_elements = p_sum.get("elements", [])
+            p_tot_pages = max(page_count(len(p_elements)), p_sum.get("slide_count", 1), 1)
+            pages_to_render = page_filter if page_filter is not None else list(range(1, p_tot_pages + 1))
+
+            for pg in pages_to_render:
+                p_rows = page_elements(p_elements, pg)
+                for row in p_rows:
+                    row["models"] = [
+                        "All models" if model.casefold() in {"all", "all models"}
+                        else labels_map.get(model, model)
+                        for model in (split_filter_values(row.get("model_applicability")) or ["All"])
+                    ]
+                s_html = render_pitch_canvas(
+                    p_sum,
+                    p_rows,
+                    scenario_name=scenario_name,
+                    project_name=project_name,
+                    page_num=pg,
+                    total_pages=p_tot_pages,
+                    print_format=paper_size,
+                    image_fit=image_fit,
+                )
+                slides_html.append(s_html)
+
+    if not slides_html:
+        st.warning("No slides were selected for printing.")
+        return
+
+    total_deck_slides = len(slides_html)
+    deck_title = f"PAAG - {scenario_name} - {paper_size.title()} Landscape"
+    full_deck_html = render_printable_paag_deck(
+        slides_html,
+        paper_size=paper_size,
+        image_fit=image_fit,
+        title=deck_title,
     )
-    paper_size = "letter" if "8.5" in format_choice else "tabloid"
-    html_slide = render_pitch_canvas(
-        pitch_summary,
-        active_page_rows,
-        scenario_name=scenario_name,
-        project_name=project_name,
-        page_num=current_page,
-        total_pages=total_pages,
-        print_format=paper_size,
-    )
-    css_page_size = "letter landscape" if paper_size == "letter" else "11in 17in landscape"
-    full_html = f"""<!DOCTYPE html>
+
+    paper_label = "11 × 17 in (Tabloid Landscape)" if paper_size == "tabloid" else "8.5 × 11 in (Letter Landscape)"
+    st.info(f"Ready to print **{total_deck_slides} slide{'s' if total_deck_slides > 1 else ''}** on **{paper_label}** · Image Fit: **{fit_choice}**")
+
+    # Action Toolbar
+    act_col1, act_col2 = st.columns([1.6, 1.4], vertical_alignment="center")
+    with act_col1:
+        escaped_deck_html = json.dumps(full_deck_html).replace("</script>", "<\\/script>").replace("</Script>", "<\\/Script>")
+        action_btn_html = f"""<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>PAAG - {pitch_summary.get('pitch_number', '')} {pitch_summary.get('pitch_name', '')}</title>
-  <style>
-    @page {{
-      size: {css_page_size};
-      margin: 0.25in;
-    }}
-    body {{
-      margin: 0;
-      padding: 0;
-      background: #ffffff;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    }}
-  </style>
+<style>
+  body {{
+    margin: 0;
+    padding: 2px 0;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }}
+  .btn-print {{
+    background: #0284c7;
+    color: #ffffff !important;
+    text-decoration: none;
+    font-size: 0.95rem;
+    font-weight: 700;
+    padding: 8px 18px;
+    border-radius: 6px;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }}
+  .btn-print:hover {{
+    background: #0369a1;
+  }}
+  .btn-open {{
+    background: #f1f5f9;
+    color: #0f172a !important;
+    text-decoration: none;
+    font-size: 0.95rem;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }}
+  .btn-open:hover {{
+    background: #e2e8f0;
+  }}
+</style>
 </head>
 <body>
-  {html_slide}
+  <a id="lnkPrint" href="#" target="_blank" class="btn-print" title="Opens print preview immediately for 1-click printing or PDF export">
+    <span>🖨️</span> Print to PDF / Printer
+  </a>
+  <a id="lnkOpen" href="#" target="_blank" class="btn-open" title="Open full multi-slide deck in new browser tab">
+    <span>↗️</span> Open in New Tab
+  </a>
+
+  <script>
+    const deckContent = {escaped_deck_html};
+    const blob = new Blob([deckContent], {{ type: "text/html;charset=utf-8" }});
+    const blobUrl = URL.createObjectURL(blob);
+
+    const lnkPrint = document.getElementById("lnkPrint");
+    const lnkOpen = document.getElementById("lnkOpen");
+
+    lnkPrint.href = blobUrl;
+    lnkOpen.href = blobUrl;
+
+    lnkPrint.onclick = function(e) {{
+      const win = window.open(blobUrl, "_blank");
+      if (win) {{
+        e.preventDefault();
+        win.focus();
+      }}
+    }};
+  </script>
 </body>
 </html>"""
-    dl_col, pr_col = st.columns([1, 1])
-    dl_col.download_button(
-        "Download HTML Presentation Slide",
-        data=full_html,
-        file_name=f"PAAG_{pitch_summary.get('pitch_number', 'Pitch')}_Slide_{current_page}.html",
-        mime="text/html",
-        icon=":material/download:",
-        type="primary",
-        key="dl_slide_btn",
-    )
-    if pr_col.button("Print to PDF / Printer", icon=":material/print:", key="trigger_print_btn"):
-        st.html(
-            f"""<script>
-            const printWin = window.open('', '_blank');
-            printWin.document.write({json.dumps(full_html)});
-            printWin.document.close();
-            printWin.focus();
-            setTimeout(() => {{ printWin.print(); }}, 600);
-            </script>"""
+        components.html(action_btn_html, height=45)
+
+    with act_col2:
+        safe_fn = f"PAAG_{scenario_name}_{paper_size}_{total_deck_slides}_slides.html".replace(" ", "_")
+        st.download_button(
+            f"Download HTML Deck ({total_deck_slides} Slides)",
+            data=full_deck_html,
+            file_name=safe_fn,
+            mime="text/html",
+            icon=":material/download:",
+            type="secondary",
+            key=f"dl_deck_btn_{scenario_id}",
         )
+
+    # Preview slide
+    st.divider()
+    st.caption(f"Preview (Slide 1 of {total_deck_slides} on {paper_label}):")
+    st.html(slides_html[0])
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    if st.button("✕ Close Print Window", key=f"print_dialog_exit_bottom_{scenario_id}"):
+        st.session_state[f"paag_print_active_{scenario_id}"] = False
+        st.rerun()
 
 
 @st.dialog("Functional Alerts & Quality Reviews", width="medium")
@@ -1737,14 +1935,8 @@ if selected_pitch_id:
                     st.rerun()
             with act_col2:
                 if st.button("Print", icon=":material/print:", key=f"btn_print_{scenario_id}", help="Print or export 8.5x11 or 11x17 landscape slide"):
-                    print_slide_dialog(
-                        pitch_summary,
-                        pitch_rows,
-                        current_page,
-                        total_pages,
-                        str(scenario["name"]),
-                        str(pitch_summary.get("project_name", "")),
-                    )
+                    st.session_state[f"paag_print_active_{scenario_id}"] = True
+                    st.rerun()
             with act_col3:
                 alerts_cnt = sum(len(v) for v in pitch_summary.get("alerts", {}).values())
                 a_label = f"Alerts ({alerts_cnt})" if alerts_cnt > 0 else "Alerts"
@@ -1763,6 +1955,21 @@ if selected_pitch_id:
                 scenario_name=str(scenario["name"]),
                 project_name=str(pitch_summary.get("project_name", "")),
                 pitch_options=pitch_options,
+                model_labels=model_labels,
+            )
+
+        if st.session_state.get(f"paag_print_active_{scenario_id}"):
+            print_slide_dialog(
+                pitch_summary=pitch_summary,
+                active_page_rows=pitch_rows,
+                current_page=current_page,
+                total_pages=total_pages,
+                scenario_name=str(scenario["name"]),
+                project_name=str(pitch_summary.get("project_name", "")),
+                project_id=project_id,
+                scenario_id=scenario_id,
+                pitch_options=pitch_options,
+                selected_pitch_id=selected_pitch_id,
                 model_labels=model_labels,
             )
 
