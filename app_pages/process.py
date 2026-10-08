@@ -1288,53 +1288,146 @@ if pitch_visual_blocked:
 def presentation_mode_dialog(
     project_id: str,
     scenario_id: str,
-    selected_pitch_id: str,
     scenario_name: str,
     project_name: str,
     pitch_options: list[tuple[str, str]],
     model_labels: dict[str, str],
 ) -> None:
-    slides_data: list[dict] = []
-    total_pitches = len(pitch_options)
-    for p_idx, (p_id, p_label) in enumerate(pitch_options):
-        try:
-            p_summary = process_pitch_visual_summary(project_id, scenario_id, p_id)
-        except Exception:
-            continue
-        p_elements = p_summary.get("elements", [])
-        total_p_pages = max(page_count(len(p_elements)), p_summary.get("slide_count", 1))
-        for pg in range(1, total_p_pages + 1):
-            active_p_rows = page_elements(p_elements, pg)
-            for row in active_p_rows:
-                row["models"] = [
-                    "All models" if model.casefold() in {"all", "all models"}
-                    else model_labels.get(model, model)
-                    for model in (split_filter_values(row.get("model_applicability")) or ["All"])
-                ]
-            slide_html = render_pitch_canvas(
-                p_summary,
-                active_p_rows,
-                scenario_name=scenario_name,
-                project_name=project_name,
-                page_num=pg,
-                total_pages=total_p_pages,
-                presentation_mode=True,
-            )
-            slides_data.append({
-                "pitch_id": p_id,
-                "pitch_idx": p_idx,
-                "pitch_label": p_label,
-                "page_num": pg,
-                "total_pages": total_p_pages,
-                "slide_html": slide_html,
-            })
+    pitch_ids = [pid for pid, _ in pitch_options]
+    pitch_dict = dict(pitch_options)
+    if not pitch_ids:
+        st.info("No pitches available to present.")
+        return
 
-    deck_html = render_presentation_deck(
-        slides_data=slides_data,
-        initial_pitch_id=selected_pitch_id,
-        total_pitches=total_pitches,
+    curr_pitch_id = str(st.session_state.get(f"pres_pitch_id_{scenario_id}") or "")
+    if curr_pitch_id not in pitch_dict:
+        curr_pitch_id = pitch_ids[0]
+        st.session_state[f"pres_pitch_id_{scenario_id}"] = curr_pitch_id
+
+    curr_pitch_idx = pitch_ids.index(curr_pitch_id)
+    curr_page = int(st.session_state.get(f"pres_page_num_{scenario_id}", 1))
+
+    try:
+        curr_summary = process_pitch_visual_summary(project_id, scenario_id, curr_pitch_id)
+    except Exception:
+        curr_summary = {"pitch_number": "", "pitch_name": "", "elements": []}
+
+    curr_elements = curr_summary.get("elements", [])
+    total_pages = max(page_count(len(curr_elements)), curr_summary.get("slide_count", 1), 1)
+    curr_page = min(max(1, curr_page), total_pages)
+    st.session_state[f"pres_page_num_{scenario_id}"] = curr_page
+
+    is_first_slide = (curr_pitch_idx == 0 and curr_page == 1)
+    is_last_slide = (curr_pitch_idx >= len(pitch_ids) - 1 and curr_page >= total_pages)
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] div[role="dialog"] {
+            width: 96vw !important;
+            max-width: 96vw !important;
+            max-height: 96vh !important;
+        }
+        div[data-testid="stDialog"] div[data-testid="stDialogHeader"] {
+            padding-bottom: 2px !important;
+        }
+        div[data-testid="stDialog"] button[aria-label="Close"] {
+            display: none !important;
+        }
+        .pres-nav-counter {
+            text-align: center;
+            font-weight: 700;
+            font-size: 0.95rem;
+            color: #0369a1;
+            padding-top: 6px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    st.html(deck_html)
+
+    # Simplified, non-redundant controls:
+    # ◀ Back | Jump to Pitch dropdown | Pitch & Slide counter | Next ▶ | ✕ Exit
+    nav_col1, nav_col2, nav_col3, nav_col4, nav_col5 = st.columns(
+        [1.1, 2.8, 2.5, 1.1, 0.9],
+        vertical_alignment="center",
+    )
+
+    with nav_col1:
+        if st.button("◀ Back", disabled=is_first_slide, key=f"pres_btn_back_{scenario_id}", help="Previous slide or pitch"):
+            if curr_page > 1:
+                st.session_state[f"pres_page_num_{scenario_id}"] = curr_page - 1
+            else:
+                prev_pid = pitch_ids[curr_pitch_idx - 1]
+                st.session_state[f"pres_pitch_id_{scenario_id}"] = prev_pid
+                try:
+                    prev_sum = process_pitch_visual_summary(project_id, scenario_id, prev_pid)
+                    prev_tot = max(page_count(len(prev_sum.get("elements", []))), prev_sum.get("slide_count", 1), 1)
+                except Exception:
+                    prev_tot = 1
+                st.session_state[f"pres_page_num_{scenario_id}"] = prev_tot
+            st.rerun()
+
+    with nav_col2:
+        new_choice = st.selectbox(
+            "Jump to pitch",
+            options=pitch_ids,
+            index=curr_pitch_idx,
+            format_func=lambda pid: f"Pitch {pitch_ids.index(pid) + 1}: {pitch_dict.get(pid, pid)}",
+            key=f"pres_sel_p_{scenario_id}_{curr_pitch_id}",
+            label_visibility="collapsed",
+        )
+        if new_choice != curr_pitch_id:
+            st.session_state[f"pres_pitch_id_{scenario_id}"] = new_choice
+            st.session_state[f"pres_page_num_{scenario_id}"] = 1
+            st.rerun()
+
+    with nav_col3:
+        page_suffix = f" (Page {curr_page}/{total_pages})" if total_pages > 1 else ""
+        st.html(
+            f"<div class='pres-nav-counter' title='Pitch {curr_pitch_idx + 1} of {len(pitch_ids)}'>"
+            f"Pitch {curr_pitch_idx + 1} of {len(pitch_ids)}{page_suffix} · {pitch_dict.get(curr_pitch_id, '')}"
+            f"</div>"
+        )
+
+    with nav_col4:
+        if st.button("Next ▶", type="primary", disabled=is_last_slide, key=f"pres_btn_next_{scenario_id}", help="Next slide or pitch"):
+            if curr_page < total_pages:
+                st.session_state[f"pres_page_num_{scenario_id}"] = curr_page + 1
+            else:
+                next_pid = pitch_ids[curr_pitch_idx + 1]
+                st.session_state[f"pres_pitch_id_{scenario_id}"] = next_pid
+                st.session_state[f"pres_page_num_{scenario_id}"] = 1
+            st.rerun()
+
+    with nav_col5:
+        if st.button("✕ Exit", key=f"pres_btn_exit_{scenario_id}", help="Exit presentation mode"):
+            st.session_state[f"paag_present_active_{scenario_id}"] = False
+            st.session_state["selected_pitch_id"] = curr_pitch_id
+            st.session_state["pitch_page_num"] = curr_page
+            st.rerun()
+
+    active_page_rows = page_elements(curr_elements, curr_page)
+    for row in active_page_rows:
+        row["models"] = [
+            "All models" if model.casefold() in {"all", "all models"}
+            else model_labels.get(model, model)
+            for model in (split_filter_values(row.get("model_applicability")) or ["All"])
+        ]
+
+    slide_html = render_pitch_canvas(
+        curr_summary,
+        active_page_rows,
+        scenario_name=scenario_name,
+        project_name=project_name,
+        page_num=curr_page,
+        total_pages=total_pages,
+        presentation_mode=True,
+    )
+    st.html(slide_html)
 
 
 @st.dialog("Print / Export Process at a Glance", width="large")
@@ -1638,15 +1731,10 @@ if selected_pitch_id:
             act_col1, act_col2, act_col3, act_col4 = st.columns([1.2, 1.2, 1, 1])
             with act_col1:
                 if st.button("Present", icon=":material/slideshow:", key=f"btn_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
-                    presentation_mode_dialog(
-                        project_id=project_id,
-                        scenario_id=scenario_id,
-                        selected_pitch_id=selected_pitch_id,
-                        scenario_name=str(scenario["name"]),
-                        project_name=str(pitch_summary.get("project_name", "")),
-                        pitch_options=pitch_options,
-                        model_labels=model_labels,
-                    )
+                    st.session_state[f"paag_present_active_{scenario_id}"] = True
+                    st.session_state[f"pres_pitch_id_{scenario_id}"] = selected_pitch_id
+                    st.session_state[f"pres_page_num_{scenario_id}"] = current_page
+                    st.rerun()
             with act_col2:
                 if st.button("Print", icon=":material/print:", key=f"btn_print_{scenario_id}", help="Print or export 8.5x11 or 11x17 landscape slide"):
                     print_slide_dialog(
@@ -1667,6 +1755,16 @@ if selected_pitch_id:
                 t_label = f"Tools ({tools_cnt})" if tools_cnt > 0 else "Tools"
                 if st.button(t_label, icon=":material/construction:", key=f"btn_tools_{scenario_id}", help="View tools and equipment details"):
                     tools_detail_dialog(pitch_summary.get("tools", []))
+
+        if st.session_state.get(f"paag_present_active_{scenario_id}"):
+            presentation_mode_dialog(
+                project_id=project_id,
+                scenario_id=scenario_id,
+                scenario_name=str(scenario["name"]),
+                project_name=str(pitch_summary.get("project_name", "")),
+                pitch_options=pitch_options,
+                model_labels=model_labels,
+            )
 
         # Model applicability resolution for elements
         active_page_rows = page_elements(pitch_rows, current_page)

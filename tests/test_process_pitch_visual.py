@@ -574,6 +574,43 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("handleKeyDown", deck_html)
         self.assertIn("requestFullscreen", deck_html)
 
+    def test_presentation_mode_dialog_navigation(self) -> None:
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/process.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Presentation test"
+        app.session_state["selected_pitch_id"] = self.pitch_id
+        app.session_state["pitch_page_num"] = 1
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Click Present button
+        present_btn = next(b for b in app.button if b.label == "Present")
+        app = present_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(app.session_state.get(f"paag_present_active_{self.scenario_id}"))
+
+        # In presentation dialog, find Next ▶ button
+        pres_next_btn = next(b for b in app.button if "Next" in b.label and "pres_btn_next" in str(b.key))
+        app = pres_next_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state.get(f"pres_page_num_{self.scenario_id}"), 2)
+        self.assertTrue(app.session_state.get(f"paag_present_active_{self.scenario_id}"))
+
+        # In presentation dialog, find ◀ Back button
+        pres_back_btn = next(b for b in app.button if "Back" in b.label and "pres_btn_back" in str(b.key))
+        app = pres_back_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state.get(f"pres_page_num_{self.scenario_id}"), 1)
+
+        # In presentation dialog, find ✕ Exit button
+        pres_exit_btn = next(b for b in app.button if "Exit" in b.label and "pres_btn_exit" in str(b.key))
+        app = pres_exit_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertFalse(app.session_state.get(f"paag_present_active_{self.scenario_id}"))
+
 
 if __name__ == "__main__":
     unittest.main()
