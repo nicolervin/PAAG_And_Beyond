@@ -439,6 +439,29 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("Verify alignment before cycling", html)
         self.assertIn("caption-callout", html)
 
+    def test_visual_media_file_size_limits(self) -> None:
+        oversized_image = b"\x89PNG\r\n\x1a\n" + b"A" * (10 * 1024 * 1024 + 100)
+        with self.assertRaises(ValueError) as cm_img:
+            store.save_pitch_visual_media(
+                project_id=self.project_id,
+                scenario_id=self.scenario_id,
+                pitch_id=self.pitch_id,
+                filename="huge_photo.png",
+                file_bytes=oversized_image,
+            )
+        self.assertIn("under 10 MB", str(cm_img.exception))
+
+        oversized_video = b"\x00\x00\x00\x20ftypisom" + b"B" * (25 * 1024 * 1024 + 100)
+        with self.assertRaises(ValueError) as cm_vid:
+            store.save_pitch_visual_media(
+                project_id=self.project_id,
+                scenario_id=self.scenario_id,
+                pitch_id=self.pitch_id,
+                filename="huge_video.mp4",
+                file_bytes=oversized_video,
+            )
+        self.assertIn("under 25 MB", str(cm_vid.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -129,8 +129,11 @@ def decode_clipboard_image(payload: Any, *, max_bytes: int = 50 * 1024 * 1024) -
         content = base64.b64decode(encoded, validate=True)
     except ValueError as exc:
         raise ValueError("The clipboard image was not valid.") from exc
-    if not content or len(content) > max_bytes:
-        raise ValueError("The clipboard image is empty or larger than 50 MB.")
+    if not content:
+        raise ValueError("The clipboard image is empty.")
+    if len(content) > max_bytes:
+        limit_mb = max_bytes // (1024 * 1024)
+        raise ValueError(f"The clipboard image is larger than {limit_mb} MB.")
     return {"bytes": content, "name": f"clipboard-screenshot{allowed[mime_type]}", "mime_type": mime_type}
 
 

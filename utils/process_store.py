@@ -1100,6 +1100,10 @@ def get_pitch_visual_media(
         return results
 
 
+MAX_VISUAL_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_VISUAL_VIDEO_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
 def save_pitch_visual_media(
     project_id: str,
     scenario_id: str,
@@ -1124,11 +1128,21 @@ def save_pitch_visual_media(
     video_suffixes = {".mp4", ".mov", ".webm"}
     if suffix in image_suffixes:
         detected_type = "image"
+        if len(file_bytes) > MAX_VISUAL_IMAGE_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"Image is {size_mb:.1f} MB. Photos and screenshots must be under 10 MB for fast slide rendering."
+            )
     elif suffix in video_suffixes:
         detected_type = "video"
+        if len(file_bytes) > MAX_VISUAL_VIDEO_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"Video is {size_mb:.1f} MB. For fast slide loading and smooth presentation playback, please trim or compress clips under 25 MB."
+            )
     else:
         raise ValueError(
-            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP, MP4, MOV, WEBM."
+            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB)."
         )
 
     resolved_media_type = media_type or detected_type
@@ -1793,7 +1807,7 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
                 (project_id, scenario_id, *removed),
             )
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'update_pitch_visual_media', 'delete_pitch_visual_media']
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'update_pitch_visual_media', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

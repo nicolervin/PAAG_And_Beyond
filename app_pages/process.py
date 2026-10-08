@@ -1703,8 +1703,9 @@ if selected_pitch_id:
                         "Upload photo or video",
                         type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
                         key=f"file_upload_visual_{selected_pitch_id}",
-                        help="Supports images and playable video files (.mp4, .mov, .webm)",
+                        help="Photos: max 10 MB (PNG, JPG, WEBP) • Videos: max 25 MB (MP4, MOV, WEBM)",
                     )
+                    st.caption("Photos: max **10 MB** (PNG, JPG, WEBP) • Videos: max **25 MB** (MP4, MOV, WEBM)")
                     aid_caption = st.text_input(
                         "Caption / Yellow Callout Note",
                         key=f"input_caption_visual_{selected_pitch_id}",
@@ -1767,7 +1768,7 @@ if selected_pitch_id:
             pasted_payload = getattr(pasted, "image", None)
             if pasted_payload:
                 try:
-                    primary_image = decode_clipboard_image(pasted_payload)
+                    primary_image = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
                     save_pitch_visual_media(
                         project_id=project_id,
                         scenario_id=scenario_id,
