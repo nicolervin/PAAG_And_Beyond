@@ -461,11 +461,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
 
         self.assertEqual(list(app.exception), [])
         self.assertEqual(
-            app.session_state.get(f"parts_selected_id_{self.project_id}"),
+            app.session_state.filtered_state.get(f"parts_selected_id_{self.project_id}"),
             target_id,
         )
         self.assertEqual(
-            app.session_state.get("part_catalog_filters_keyword"),
+            app.session_state.filtered_state.get("part_catalog_filters_keyword"),
             target_pnum,
         )
         self.assertTrue(any(f"Part Details · {target_pnum}" in h.value for h in app.subheader))

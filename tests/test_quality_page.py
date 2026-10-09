@@ -12,6 +12,7 @@ from utils import quality_store, store, table_ui
 
 
 PAGE_PATH = Path(__file__).resolve().parents[1] / "app_pages" / "functional_quality.py"
+REQUIREMENTS_UI_PATH = PAGE_PATH.parents[1] / "utils" / "requirements_ui.py"
 
 
 class QualityPageSmokeTests(unittest.TestCase):
@@ -97,6 +98,8 @@ class QualityPageSmokeTests(unittest.TestCase):
             app = AppTest.from_file(str(PAGE_PATH))
             app.session_state["project_id"] = "project-1"
             app.session_state["current_editor"] = "Quality tester"
+            if "quality_page_tabs_project-1" not in app.session_state:
+                app.session_state["quality_page_tabs_project-1"] = "Requirements repository"
             if scenarios:
                 app.session_state["scenario_id"] = str(scenarios[0]["id"])
             if selected_torque_requirement_id:
@@ -213,16 +216,16 @@ class QualityPageSmokeTests(unittest.TestCase):
 
         self.assertEqual(len(app.exception), 0)
         self.assertIn(
-            "Attach to Process at a Glance step",
+            "🔗 Assign Steps...",
             [button.label for button in app.button],
         )
+        requirements_source = REQUIREMENTS_UI_PATH.read_text(encoding="utf-8")
         self.assertIn(
             '"View Quality requirements linked to Process steps"',
-            PAGE_PATH.read_text(encoding="utf-8"),
+            requirements_source,
         )
-        page_source = PAGE_PATH.read_text(encoding="utf-8")
-        self.assertIn('"Quality requirement Unique identifier"', page_source)
-        self.assertIn('"Repository update pending"', page_source)
+        self.assertIn('"Quality requirement Unique identifier"', requirements_source)
+        self.assertIn('"Repository update pending"', requirements_source)
         linked_tables = [
             table.value
             for table in app.dataframe
@@ -271,11 +274,10 @@ class QualityPageSmokeTests(unittest.TestCase):
             [selectbox.label for selectbox in app.selectbox],
         )
         self.assertIn("Equipment", [tab.label for tab in app.tabs])
-        page_source = PAGE_PATH.read_text(encoding="utf-8")
-        self.assertIn('accept_new_options=True', page_source)
-        self.assertIn('"Tool type"', page_source)
-        self.assertIn('"Tool orientation"', page_source)
-        self.assertNotIn('"Type",\n                options=TORQUE_TOOL_TYPES', page_source)
+        self.assertIn('accept_new_options=True', requirements_source)
+        self.assertIn('"Tool type"', requirements_source)
+        self.assertIn('"Tool orientation"', requirements_source)
+        self.assertNotIn('"Type",\n                options=TORQUE_TOOL_TYPES', requirements_source)
 
     def test_link_count_click_resolves_saved_row_identity_and_ignores_blank_row(self) -> None:
         editor_rows = pd.DataFrame(
@@ -496,7 +498,7 @@ class QualityPageSmokeTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertIn("Quality requirements", [heading.value for heading in app.subheader])
 
-    def test_bulk_pass_fail_uses_separate_read_only_selection_surface(self) -> None:
+    def test_requirements_repository_renders_pass_fail_in_table_without_bulk_expander(self) -> None:
         requirements = pd.DataFrame(
             [
                 {
@@ -508,7 +510,7 @@ class QualityPageSmokeTests(unittest.TestCase):
                     "pass_fail": index == 1,
                     "target_value": 32.0,
                     "tolerances": "+/- 3",
-                    "unit": "NÂ·m",
+                    "unit": "N·m",
                     "created_at": "2026-09-04T12:00:00+00:00",
                     "updated_at": "2026-09-04T12:00:00+00:00",
                     "assignment_count": 0,
@@ -522,142 +524,12 @@ class QualityPageSmokeTests(unittest.TestCase):
         app = self.run_page(requirements)
 
         self.assertEqual(len(app.exception), 0)
-        self.assertIn("Apply to selected (0)", [button.label for button in app.button])
-        bulk_tables = [
-            table.value
-            for table in app.dataframe
-            if len(table.value) == 2
-            and {
-                "unique_identifier", "description", "requirement_type", "pass_fail",
-            }.issubset(table.value.columns)
-        ]
-        self.assertGreaterEqual(len(bulk_tables), 1)
-        source = PAGE_PATH.read_text(encoding="utf-8")
-        self.assertIn('with st.expander("Bulk edit Pass/fail"):', source)
-        self.assertIn("bulk_selection_event = selectable_dataframe(", source)
-        self.assertIn("bulk_selected_requirements = selected_dataframe_rows(", source)
-        self.assertIn(
-            'f"Apply to selected ({len(bulk_selected_requirements)})"', source
-        )
-        self.assertIn(
-            "selected_requirements_for_deletion = native_selected_rows(", source
-        )
-        self.assertIn(
-            "reset_widget_keys=[editor_key, bulk_selector_key]", source
-        )
+        self.assertFalse(any("Apply to selected" in button.label for button in app.button))
+        source = REQUIREMENTS_UI_PATH.read_text(encoding="utf-8")
+        self.assertNotIn('with st.expander("Bulk edit Pass/fail"):', source)
+        self.assertNotIn("bulk_selector_key", source)
+        self.assertIn('"pass_fail": st.column_config.CheckboxColumn(', source)
 
-    def test_bulk_pass_fail_updates_selected_ids_and_records_one_audit_event(self) -> None:
-        requirements = pd.DataFrame(
-            [
-                {
-                    "id": f"quality-{index}",
-                    "project_id": "project-1",
-                    "requirement_type": "Torque",
-                    "description": f"Tighten screw {index}",
-                    "unique_identifier": f"TQ-{index:03d}",
-                    "pass_fail": 0,
-                    "target_value": 32.0,
-                    "tolerances": "+/- 3",
-                    "unit": "NÂ·m",
-                    "created_at": "2026-09-04T12:00:00+00:00",
-                    "updated_at": "2026-09-04T12:00:00+00:00",
-                    "assignment_count": 0,
-                    "pending_assignment_count": 0,
-                    "torque_detail_count": 0,
-                }
-                for index in [1, 2]
-            ]
-        )
-        requirement_types = pd.DataFrame(
-            [
-                {
-                    "id": "type-torque",
-                    "project_id": "project-1",
-                    "label": "Torque",
-                    "active": 1,
-                    "created_at": "2026-09-04T12:00:00+00:00",
-                    "updated_at": "2026-09-04T12:00:00+00:00",
-                    "requirement_count": 2,
-                }
-            ]
-        )
-        original_selectable_dataframe = table_ui.selectable_dataframe
-
-        def selectable_with_bulk_rows(data, *, key: str, **kwargs):
-            if "quality_requirements_bulk_selector" in key:
-                selected_rows = [] if key.endswith("__editor_instance_1") else [0, 1]
-                return SimpleNamespace(selection=SimpleNamespace(rows=selected_rows))
-            return original_selectable_dataframe(data, key=key, **kwargs)
-
-        bulk_result = {
-            "row_count": 2,
-            "updated_ids": ["quality-1", "quality-2"],
-            "timestamp": "2026-09-04T13:00:00+00:00",
-        }
-        with (
-            patch.object(quality_store, "quality_requirements", return_value=requirements),
-            patch.object(
-                quality_store, "quality_requirement_types", return_value=requirement_types
-            ),
-            patch.object(quality_store, "quality_process_steps", return_value=pd.DataFrame()),
-            patch.object(quality_store, "quality_requirement_links", return_value=pd.DataFrame()),
-            patch.object(
-                quality_store,
-                "quality_requirement_torque_details",
-                return_value=pd.DataFrame(),
-            ),
-            patch.object(quality_store, "torque_screw_bit_types", return_value=[]),
-            patch.object(
-                quality_store,
-                "bulk_update_quality_requirement_pass_fail",
-                return_value=bulk_result,
-            ) as bulk_update,
-            patch.object(store, "planning_scenarios", return_value=[]),
-            patch("utils.scope_ui.planning_scenarios", return_value=[]),
-            patch.object(store, "audit_history", return_value=pd.DataFrame()),
-            patch.object(store, "record_audit_event") as record_audit,
-            patch.object(
-                table_ui,
-                "selectable_dataframe",
-                side_effect=selectable_with_bulk_rows,
-            ),
-        ):
-            app = AppTest.from_file(str(PAGE_PATH))
-            app.session_state["project_id"] = "project-1"
-            app.session_state["current_editor"] = "Quality tester"
-            app.session_state[
-                "quality_requirements_bulk_pass_fail_project-1"
-            ] = "Pass/fail check"
-            app.run(timeout=10)
-            apply_button = next(
-                button for button in app.button
-                if button.label == "Apply to selected (2)"
-            )
-            self.assertFalse(apply_button.disabled)
-            apply_button.click().run(timeout=10)
-            cleared_button = next(
-                button for button in app.button
-                if button.label == "Apply to selected (0)"
-            )
-            self.assertTrue(cleared_button.disabled)
-
-        self.assertEqual(len(app.exception), 0)
-        bulk_update.assert_called_once_with(
-            "project-1", ["quality-1", "quality-2"], pass_fail=True
-        )
-        record_audit.assert_called_once()
-        audit_args = record_audit.call_args.args
-        self.assertEqual(audit_args[:5], (
-            "project-1", "Quality requirements", "Bulk edit", 2, "Quality tester",
-        ))
-        self.assertEqual(
-            audit_args[5],
-            {
-                "requirement_ids": ["quality-1", "quality-2"],
-                "pass_fail": True,
-                "store_timestamp": "2026-09-04T13:00:00+00:00",
-            },
-        )
 
     def test_type_catalog_dropdown_management_and_inactive_warning_render(self) -> None:
         requirements = pd.DataFrame(
@@ -712,7 +584,7 @@ class QualityPageSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(
             [button.label for button in app.button].count("Save & Refresh"), 2
         )
-        source = PAGE_PATH.read_text(encoding="utf-8")
+        source = REQUIREMENTS_UI_PATH.read_text(encoding="utf-8")
         self.assertIn('st.expander("Manage Quality requirement types"', source)
         self.assertIn('"requirement_type": st.column_config.SelectboxColumn(', source)
         self.assertIn('"requirement_count": st.column_config.NumberColumn(', source)
@@ -769,7 +641,7 @@ class QualityPageSmokeTests(unittest.TestCase):
         )
 
     def test_pending_unlink_uses_assignment_scenario_not_session_scenario(self) -> None:
-        page_source = PAGE_PATH.read_text(encoding="utf-8")
+        page_source = REQUIREMENTS_UI_PATH.read_text(encoding="utf-8")
         self.assertIn('sc_id = str(items[0]["scenario_id"])', page_source)
         self.assertIn(
             'scenario_changed = str(pending.get("scenario_id") or "") != scenario_id',

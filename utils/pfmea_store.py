@@ -52,7 +52,7 @@ def init_pfmea_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE RESTRICT,
+            work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
             source_pfmea_entry_id TEXT REFERENCES pfmea_entries(id) ON DELETE SET NULL,
             potential_failure_mode TEXT NOT NULL,
             class_code TEXT NOT NULL DEFAULT '',
@@ -211,6 +211,16 @@ def init_pfmea_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS uq_pfmea_detection_manual_selection
             ON pfmea_detection_selections(pfmea_cause_id, detection_option_id)
             WHERE detection_option_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS pfmea_assignees (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_pfmea_assignee_name
+            ON pfmea_assignees(project_id, name COLLATE NOCASE);
         """
     )
     cause_columns = {
@@ -233,6 +243,12 @@ def init_pfmea_schema(conn: sqlite3.Connection) -> None:
     }
     if "legacy_class_code" not in entry_columns:
         conn.execute("ALTER TABLE pfmea_entries ADD COLUMN legacy_class_code TEXT")
+    conn.execute(
+        "DELETE FROM pfmea_prevention_selections WHERE source_type='quality_assignment' OR quality_requirement_assignment_id IS NOT NULL"
+    )
+    conn.execute(
+        "DELETE FROM pfmea_detection_selections WHERE source_type='quality_assignment' OR quality_requirement_assignment_id IS NOT NULL"
+    )
 
 
 def _store():
@@ -506,8 +522,25 @@ def pfmea_control_options(project_id: str, control_type: str) -> pd.DataFrame:
     return pd.DataFrame([dict(row) for row in rows])
 
 
+def add_pfmea_control_option(
+    project_id: str, control_type: str, label: str, active: bool = True
+) -> str:
+    """Add a single manual Prevention or Detection control option to the project catalog."""
+    clean_label = _text(label)
+    if not clean_label:
+        raise ValueError(f"Every {control_type} option requires a Label.")
+    df = pd.DataFrame([{"id": "", "label": clean_label, "active": active}])
+    result = save_pfmea_control_option_rows(
+        project_id, control_type, df, allow_partial=True
+    )
+    return result["created_ids"][0]
+
+
 def save_pfmea_control_option_rows(
-    project_id: str, control_type: str, edited: pd.DataFrame
+    project_id: str,
+    control_type: str,
+    edited: pd.DataFrame,
+    allow_partial: bool = False,
 ) -> dict:
     option_table, selection_table, option_column = _control_tables(control_type)
     timestamp = _source_version_timestamp()
@@ -525,10 +558,22 @@ def save_pfmea_control_option_rows(
             ).fetchall()
         }
         supplied = {_text(row.get("id")) for row in rows if _text(row.get("id"))}
-        if set(existing) - supplied:
+        if not allow_partial and (set(existing) - supplied):
             raise ValueError(
                 f"Remove {control_type} options through the confirmed deletion workflow."
             )
+        existing_label_map = {
+            str(item["label"]).casefold(): str(item["id"])
+            for item in existing.values()
+        }
+        for row in rows:
+            row_id = _text(row.get("id"))
+            label = _text(row.get("label"))
+            match_id = existing_label_map.get(label.casefold())
+            if match_id and match_id != row_id:
+                raise ValueError(
+                    f"{control_type} option labels must be unique within this project."
+                )
         created: list[str] = []
         updated: list[str] = []
         for row in rows:
@@ -679,23 +724,9 @@ def pfmea_control_candidates(
 ) -> pd.DataFrame:
     option_table, _, _ = _control_tables(control_type)
     include = set(include_source_keys or [])
-    quality_include_ids = [
-        k.split("quality:", 1)[1] for k in include if k.startswith("quality:")
-    ]
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
         _work_element(conn, project_id, scenario_id, work_element_id)
-        assignments = []
-        if quality_include_ids:
-            placeholders = ",".join("?" for _ in quality_include_ids)
-            assignments = [
-                dict(row)
-                for row in conn.execute(
-                    f"""SELECT * FROM quality_requirement_assignments
-                       WHERE project_id=? AND id IN ({placeholders})""",
-                    (project_id, *quality_include_ids),
-                ).fetchall()
-            ]
         options = [
             dict(row)
             for row in conn.execute(
@@ -709,17 +740,6 @@ def pfmea_control_candidates(
         ]
     records = [
         {
-            "source_key": _source_key("quality_assignment", str(row["id"])),
-            "source_type": "quality_assignment",
-            "source_id": str(row["id"]),
-            "label": _quality_control_label(row),
-            "active": True,
-            "updated_at": str(row["updated_at"]),
-        }
-        for row in assignments
-    ]
-    records.extend(
-        {
             "source_key": _source_key("manual_option", str(row["id"])),
             "source_type": "manual_option",
             "source_id": str(row["id"]),
@@ -728,7 +748,7 @@ def pfmea_control_candidates(
             "updated_at": str(row["updated_at"]),
         }
         for row in options
-    )
+    ]
     return pd.DataFrame(records)
 
 
@@ -771,7 +791,7 @@ def _selection_rows_conn(
         else:
             source_id = str(row[option_column])
             current_updated_at = _text(row.get("manual_updated_at"))
-            label = f"Manual — {_text(row.get('manual_label')) or 'Removed option'}"
+            label = _text(row.get("manual_label")) or "Removed option"
             active = bool(row.get("manual_active"))
         review_required = (
             not current_updated_at
@@ -822,24 +842,8 @@ def _sync_control_selections(
     resolved: list[dict] = []
     for source_key in desired:
         if source_key.startswith("quality:"):
-            source_id = source_key.removeprefix("quality:")
-            source = conn.execute(
-                """SELECT id, updated_at FROM quality_requirement_assignments
-                   WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id=?""",
-                (source_id, project_id, scenario_id, work_element_id),
-            ).fetchone()
-            if not source:
-                raise ValueError(
-                    f"A selected {control_type} Quality requirement is not linked to this "
-                    "Process Function in the active scenario."
-                )
-            resolved.append(
-                {
-                    "source_key": source_key,
-                    "source_type": "quality_assignment",
-                    "source_id": source_id,
-                    "source_updated_at": str(source["updated_at"]),
-                }
+            raise ValueError(
+                f"Quality Requirements are Product Characteristics and cannot be selected as {control_type} controls in PFMEA."
             )
         elif source_key.startswith("manual:"):
             source_id = source_key.removeprefix("manual:")
@@ -1019,8 +1023,17 @@ def pfmea_entries(project_id: str, scenario_id: str, work_element_id: str | None
         result = []
         for raw in rows:
             row = dict(raw)
-            work = _work_element(conn, project_id, scenario_id, str(row["work_element_id"]))
-            row["upstream_changes"] = _process_hash(work) != row["process_source_hash"]
+            work_id = str(row.get("work_element_id") or "").strip()
+            if work_id:
+                work_row = conn.execute(
+                    "SELECT * FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+                    (work_id, project_id, scenario_id),
+                ).fetchone()
+                work = dict(work_row) if work_row else None
+            else:
+                work = None
+            row["is_unlinked"] = work is None
+            row["upstream_changes"] = bool(work is None or _process_hash(work) != row.get("process_source_hash"))
             result.append(row)
     return pd.DataFrame(result)
 
@@ -1073,6 +1086,166 @@ def _parse_responsibility_target(value) -> tuple[str, str]:
                 "after |, using YYYY-MM-DD."
             ) from exc
     return responsibility, target
+
+
+def pfmea_known_responsibilities(project_id: str, include_inactive: bool = False) -> list[str]:
+    """Harvest all known assignees/roles across PFMEA and Control Plan for dropdown selection.
+    
+    If include_inactive is False (default), assignees marked inactive are filtered out.
+    """
+    responsibilities: set[str] = set()
+    inactive_names: set[str] = set()
+    with _store().connection() as conn:
+        if _table_exists(conn, "pfmea_assignees"):
+            for row in conn.execute(
+                "SELECT name, active FROM pfmea_assignees WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                val = _text(row["name"])
+                if val:
+                    if row["active"]:
+                        responsibilities.add(val)
+                    else:
+                        inactive_names.add(val.casefold())
+        for row in conn.execute(
+            "SELECT DISTINCT responsibility FROM pfmea_actions WHERE project_id=? AND trim(responsibility) != ''",
+            (project_id,),
+        ).fetchall():
+            val = _text(row["responsibility"])
+            if val and (include_inactive or val.casefold() not in inactive_names):
+                responsibilities.add(val)
+        if _table_exists(conn, "control_plan_items"):
+            for row in conn.execute(
+                "SELECT DISTINCT who FROM control_plan_items WHERE project_id=? AND trim(who) != ''",
+                (project_id,),
+            ).fetchall():
+                val = _text(row["who"])
+                if val and (include_inactive or val.casefold() not in inactive_names):
+                    responsibilities.add(val)
+    default_roles = [
+        "AQE",
+        "Industrial Engineer",
+        "Manufacturing Engineer",
+        "Operations Lead",
+        "Product Engineer",
+        "Quality Engineer",
+        "Quality Tech",
+        "Team Leader",
+        "Tooling Engineer",
+    ]
+    for role in default_roles:
+        if include_inactive or role.casefold() not in inactive_names:
+            responsibilities.add(role)
+    return sorted(responsibilities, key=str.casefold)
+
+
+def pfmea_inactive_assignees(project_id: str) -> list[str]:
+    """Return all assignees explicitly marked inactive for this project."""
+    with _store().connection() as conn:
+        if not _table_exists(conn, "pfmea_assignees"):
+            return []
+        rows = conn.execute(
+            "SELECT name FROM pfmea_assignees WHERE project_id=? AND active=0 ORDER BY name COLLATE NOCASE",
+            (project_id,),
+        ).fetchall()
+        return [_text(row["name"]) for row in rows if _text(row["name"])]
+
+
+def add_pfmea_assignee(project_id: str, name: str) -> str:
+    """Add or reactivate an assignee in the persistent catalog for this project."""
+    clean_name = _text(name)
+    if not clean_name:
+        raise ValueError("Assignee name is required.")
+    timestamp = _source_version_timestamp()
+    with _store().connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM pfmea_assignees WHERE project_id=? AND name=? COLLATE NOCASE",
+            (project_id, clean_name),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE pfmea_assignees SET active=1, updated_at=? WHERE id=?",
+                (timestamp, existing["id"]),
+            )
+            return str(existing["id"])
+        new_id = str(uuid4())
+        conn.execute(
+            """INSERT INTO pfmea_assignees (id, project_id, name, active, created_at, updated_at)
+               VALUES (?, ?, ?, 1, ?, ?)""",
+            (new_id, project_id, clean_name, timestamp, timestamp),
+        )
+        return new_id
+
+
+def set_pfmea_assignee_active(project_id: str, name: str, active: bool) -> None:
+    """Mark an assignee active or inactive."""
+    clean_name = _text(name)
+    if not clean_name:
+        raise ValueError("Assignee name is required.")
+    timestamp = _source_version_timestamp()
+    with _store().connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM pfmea_assignees WHERE project_id=? AND name=? COLLATE NOCASE",
+            (project_id, clean_name),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE pfmea_assignees SET active=?, updated_at=? WHERE id=?",
+                (1 if active else 0, timestamp, existing["id"]),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO pfmea_assignees (id, project_id, name, active, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (str(uuid4()), project_id, clean_name, 1 if active else 0, timestamp, timestamp),
+            )
+
+
+def pfmea_assignee_usage(project_id: str, name: str) -> int:
+    """Count how many PFMEA actions and Control Plan items reference this assignee."""
+    clean_name = _text(name)
+    if not clean_name:
+        return 0
+    with _store().connection() as conn:
+        count = conn.execute(
+            """SELECT COUNT(*) FROM pfmea_actions
+               WHERE project_id=? AND trim(responsibility)=? COLLATE NOCASE""",
+            (project_id, clean_name),
+        ).fetchone()[0]
+        if _table_exists(conn, "control_plan_items"):
+            count += conn.execute(
+                """SELECT COUNT(*) FROM control_plan_items
+                   WHERE project_id=? AND trim(who)=? COLLATE NOCASE""",
+                (project_id, clean_name),
+            ).fetchone()[0]
+    return int(count)
+
+
+def reassign_pfmea_actions(project_id: str, from_name: str, to_name: str) -> int:
+    """Bulk-transfer all actions from one assignee to another across PFMEA and Control Plan."""
+    clean_from = _text(from_name)
+    clean_to = _text(to_name)
+    if not clean_from or not clean_to:
+        raise ValueError("Both current and replacement assignees must be specified.")
+    timestamp = _source_version_timestamp()
+    count = 0
+    with _store().connection() as conn:
+        cursor = conn.execute(
+            """UPDATE pfmea_actions
+               SET responsibility=?, updated_at=?
+               WHERE project_id=? AND trim(responsibility)=? COLLATE NOCASE""",
+            (clean_to, timestamp, project_id, clean_from),
+        )
+        count += cursor.rowcount
+        if _table_exists(conn, "control_plan_items"):
+            cursor_cp = conn.execute(
+                """UPDATE control_plan_items
+                   SET who=?, updated_at=?
+                   WHERE project_id=? AND trim(who)=? COLLATE NOCASE""",
+                (clean_to, timestamp, project_id, clean_from),
+            )
+            count += cursor_cp.rowcount
+    return count
 
 
 def _pfmea_flat_rows_conn(
@@ -1208,6 +1381,8 @@ def _pfmea_flat_rows_conn(
                             "detection": cause.get("detection") if cause else None,
                             "rpn": risk.get("rpn") if risk else None,
                             "recommended_action": action.get("recommended_action") if action else "",
+                            "responsibility": _text(action.get("responsibility")) if action else "",
+                            "target_completion_date": _text(action.get("target_completion_date")) if action else "",
                             "responsibility_target": _responsibility_target(action),
                             "actions_taken": action.get("actions_taken") if action else "",
                             "resulting_severity": action.get("resulting_severity") if action else None,
@@ -1228,6 +1403,19 @@ def pfmea_flat_rows(project_id: str, scenario_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
         rows = _pfmea_flat_rows_conn(conn, project_id, scenario_id)
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "id", "entry_id", "effect_id", "cause_id", "risk_row_id", "action_id",
+                "work_element_id", "item_number", "process_function", "potential_failure_mode",
+                "potential_effects", "severity", "classification", "legacy_classification",
+                "potential_causes", "occurrence", "prevention_controls", "detection_controls",
+                "detection", "rpn", "recommended_action", "responsibility", "target_completion_date",
+                "responsibility_target", "actions_taken", "resulting_severity",
+                "resulting_occurrence", "resulting_detection", "resulting_rpn",
+                "upstream_changes", "detection_review_required", "control_source_review_required",
+            ]
+        )
     return pd.DataFrame(rows)
 
 
@@ -1755,11 +1943,27 @@ def save_pfmea_flat_rows(
                 action_rows, "recommended_action", action["recommended_action"],
                 "Recommended Action", _text,
             )
-            responsibility_target = _repeated_edit_value(
-                action_rows, "responsibility_target", _responsibility_target(action),
-                "Responsibility & Target Completion Date", _text,
-            )
-            responsibility, target_date = _parse_responsibility_target(responsibility_target)
+            has_decoupled = any("responsibility" in r or "target_completion_date" in r for r in action_rows)
+            if has_decoupled:
+                responsibility = _repeated_edit_value(
+                    action_rows, "responsibility", action.get("responsibility"), "Responsibility", _text,
+                )
+                target_raw = _repeated_edit_value(
+                    action_rows, "target_completion_date", action.get("target_completion_date"),
+                    "Target Completion Date", _text,
+                )
+                target_date = ""
+                if target_raw:
+                    try:
+                        target_date = pd.to_datetime(target_raw).date().isoformat()
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("Target Completion Date must be a valid date, using YYYY-MM-DD.") from exc
+            else:
+                responsibility_target = _repeated_edit_value(
+                    action_rows, "responsibility_target", _responsibility_target(action),
+                    "Responsibility & Target Completion Date", _text,
+                )
+                responsibility, target_date = _parse_responsibility_target(responsibility_target)
             actions_taken = _repeated_edit_value(
                 action_rows, "actions_taken", action.get("actions_taken"), "Actions Taken", _text,
             )
@@ -1890,9 +2094,21 @@ def save_pfmea_flat_rows(
                 continue
             cause_id = _text(row.get("cause_id"))
             recommended = _text(row.get("recommended_action"))
-            responsibility, target_date = _parse_responsibility_target(
-                row.get("responsibility_target")
-            )
+            if "responsibility" in row or "target_completion_date" in row:
+                responsibility = _text(row.get("responsibility"))
+                target_raw = _text(row.get("target_completion_date"))
+                target_date = ""
+                if target_raw:
+                    try:
+                        target_date = pd.to_datetime(target_raw).date().isoformat()
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            "Target Completion Date must be a valid date, using YYYY-MM-DD."
+                        ) from exc
+            else:
+                responsibility, target_date = _parse_responsibility_target(
+                    row.get("responsibility_target")
+                )
             actions_taken = _text(row.get("actions_taken"))
             ratings = (
                 _rating(row.get("resulting_severity"), "Resulting Severity"),
@@ -2112,9 +2328,21 @@ def save_pfmea_flat_rows(
             row["cause_id"] = cause_id
 
             recommended = _text(row.get("recommended_action"))
-            responsibility, target_date = _parse_responsibility_target(
-                row.get("responsibility_target")
-            )
+            if "responsibility" in row or "target_completion_date" in row:
+                responsibility = _text(row.get("responsibility"))
+                target_raw = _text(row.get("target_completion_date"))
+                target_date = ""
+                if target_raw:
+                    try:
+                        target_date = pd.to_datetime(target_raw).date().isoformat()
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            "Target Completion Date must be a valid date, using YYYY-MM-DD."
+                        ) from exc
+            else:
+                responsibility, target_date = _parse_responsibility_target(
+                    row.get("responsibility_target")
+                )
             actions_taken = _text(row.get("actions_taken"))
             resulting_ratings = (
                 _rating(row.get("resulting_severity"), "Resulting Severity"),
@@ -2435,3 +2663,266 @@ def clone_pfmea_scenario(conn: sqlite3.Connection, project_id: str,
     if entry_id_map is not None:
         entry_id_map.update(entry_map)
     return cloned
+
+
+def upstream_modified_pfmea_entries(project_id: str, scenario_id: str) -> list[dict]:
+    """Return linked PFMEA entries whose upstream PAAG work elements have changed since last review."""
+    work_element_labels = _process_work_element_labels(project_id, scenario_id)
+    with _store().connection() as conn:
+        try:
+            _validate_context(conn, project_id, scenario_id)
+        except ValueError:
+            return []
+        rows = conn.execute(
+            """SELECT e.id AS entry_id,
+                      e.work_element_id,
+                      e.potential_failure_mode,
+                      e.class_code,
+                      e.process_operation_snapshot,
+                      e.process_description_snapshot,
+                      e.process_location_snapshot,
+                      e.process_pitch_snapshot,
+                      e.process_sequence_snapshot,
+                      e.process_source_hash,
+                      w.operation AS live_operation,
+                      w.description AS live_description,
+                      w.location AS live_location,
+                      w.station AS live_pitch,
+                      w.sequence AS live_sequence
+               FROM pfmea_entries e
+               JOIN work_elements w
+                 ON w.id=e.work_element_id
+                AND w.project_id=e.project_id
+                AND w.scenario_id=e.scenario_id
+               WHERE e.project_id=? AND e.scenario_id=?
+                 AND e.work_element_id IS NOT NULL AND e.work_element_id != ''
+               ORDER BY w.sequence, e.id""",
+            (project_id, scenario_id),
+        ).fetchall()
+
+        modified = []
+        for raw in rows:
+            row = dict(raw)
+            work_id = str(row["work_element_id"])
+            live_op = work_element_labels.get(work_id) or _text(row.get("live_operation"))
+            live_desc = _text(row.get("live_description"))
+            live_pitch = _text(row.get("live_pitch"))
+            live_loc = _text(row.get("live_location"))
+            live_seq = int(row.get("live_sequence") or 0)
+
+            snap_op = _text(row.get("process_operation_snapshot"))
+            snap_desc = _text(row.get("process_description_snapshot"))
+            snap_pitch = _text(row.get("process_pitch_snapshot"))
+            snap_loc = _text(row.get("process_location_snapshot"))
+            snap_seq = int(row.get("process_sequence_snapshot") or 0)
+
+            changes = []
+            if snap_pitch != live_pitch and (snap_pitch != "" or live_pitch != ""):
+                changes.append({
+                    "field": "station_pitch",
+                    "label": "Station / Pitch",
+                    "snapshot": snap_pitch or "(empty)",
+                    "live": live_pitch or "(empty)",
+                })
+            if snap_op != live_op and (snap_op != "" or live_op != ""):
+                changes.append({
+                    "field": "operation",
+                    "label": "Operation",
+                    "snapshot": snap_op or "(empty)",
+                    "live": live_op or "(empty)",
+                })
+            if snap_desc != live_desc and (snap_desc != "" or live_desc != ""):
+                changes.append({
+                    "field": "description",
+                    "label": "Description",
+                    "snapshot": snap_desc or "(empty)",
+                    "live": live_desc or "(empty)",
+                })
+            if snap_loc != live_loc and (snap_loc != "" or live_loc != ""):
+                changes.append({
+                    "field": "location",
+                    "label": "Location",
+                    "snapshot": snap_loc or "(empty)",
+                    "live": live_loc or "(empty)",
+                })
+            if snap_seq != live_seq and snap_seq != 0 and live_seq != 0:
+                changes.append({
+                    "field": "sequence",
+                    "label": "Sequence",
+                    "snapshot": str(snap_seq),
+                    "live": str(live_seq),
+                })
+
+            if changes:
+                modified.append({
+                    "entry_id": str(row["entry_id"]),
+                    "work_element_id": work_id,
+                    "potential_failure_mode": _text(row.get("potential_failure_mode")),
+                    "class_code": _text(row.get("class_code")),
+                    "snapshot_pitch": snap_pitch,
+                    "snapshot_operation": snap_op,
+                    "snapshot_description": snap_desc,
+                    "snapshot_location": snap_loc,
+                    "snapshot_sequence": snap_seq,
+                    "live_pitch": live_pitch,
+                    "live_operation": live_op,
+                    "live_description": live_desc,
+                    "live_location": live_loc,
+                    "live_sequence": live_seq,
+                    "changes": changes,
+                })
+    return modified
+
+
+def bulk_review_pfmea_sources(
+    project_id: str,
+    scenario_id: str,
+    entry_ids: list[str],
+    editor_name: str = "",
+) -> dict:
+    """Synchronize multiple PFMEA entries with their live PAAG work elements and record audit events."""
+    timestamp = _store().now_iso()
+    work_element_labels = _process_work_element_labels(project_id, scenario_id)
+    clean_ids = list(dict.fromkeys(_text(aid) for aid in entry_ids if _text(aid)))
+    if not clean_ids:
+        return {"row_count": 0, "timestamp": timestamp, "entry_ids": []}
+
+    with _store().connection() as conn:
+        _validate_context(conn, project_id, scenario_id)
+        updated = []
+        for entry_id in clean_ids:
+            entry = conn.execute(
+                "SELECT * FROM pfmea_entries WHERE id=? AND project_id=? AND scenario_id=?",
+                (entry_id, project_id, scenario_id),
+            ).fetchone()
+            if not entry or not entry["work_element_id"]:
+                continue
+            work = conn.execute(
+                "SELECT * FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+                (entry["work_element_id"], project_id, scenario_id),
+            ).fetchone()
+            if not work:
+                continue
+            work_dict = dict(work)
+            op_label = work_element_labels.get(str(entry["work_element_id"])) or _text(work_dict.get("operation"))
+            conn.execute(
+                """UPDATE pfmea_entries SET process_operation_snapshot=?,
+                   process_description_snapshot=?, process_location_snapshot=?,
+                   process_pitch_snapshot=?, process_sequence_snapshot=?, process_source_hash=?,
+                   source_reviewed_at=?, updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (
+                    op_label,
+                    _text(work_dict.get("description")),
+                    _text(work_dict.get("location")),
+                    _text(work_dict.get("station")),
+                    int(work_dict.get("sequence") or 0),
+                    _process_hash(work_dict),
+                    timestamp,
+                    timestamp,
+                    entry_id,
+                    project_id,
+                    scenario_id,
+                ),
+            )
+            updated.append(entry_id)
+            _store().record_audit_event(
+                project_id,
+                "PFMEA",
+                "Synchronize upstream PAAG changes",
+                1,
+                editor_name,
+                {
+                    "scenario_id": scenario_id,
+                    "pfmea_entry_id": entry_id,
+                    "potential_failure_mode": _text(entry["potential_failure_mode"]),
+                    "synced_operation": op_label,
+                    "synced_pitch": _text(work_dict.get("station")),
+                },
+                _conn=conn,
+            )
+        return {"row_count": len(updated), "timestamp": timestamp, "entry_ids": updated}
+
+
+def reassign_pfmea_entry(
+    project_id: str,
+    scenario_id: str,
+    entry_id: str,
+    target_work_element_id: str,
+    editor_name: str = "",
+) -> dict:
+    """Move a PFMEA entry to another Process step in the scenario and update snapshots."""
+    timestamp = _store().now_iso()
+    work_element_labels = _process_work_element_labels(project_id, scenario_id)
+    with _store().connection() as conn:
+        _validate_context(conn, project_id, scenario_id)
+        entry = conn.execute(
+            "SELECT * FROM pfmea_entries WHERE id=? AND project_id=? AND scenario_id=?",
+            (entry_id, project_id, scenario_id),
+        ).fetchone()
+        if not entry:
+            raise ValueError("PFMEA entry not found in this scenario.")
+
+        target_step = conn.execute(
+            "SELECT * FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+            (target_work_element_id, project_id, scenario_id),
+        ).fetchone()
+        if not target_step:
+            raise ValueError("Target Process step was not found in this scenario.")
+
+        target_dict = dict(target_step)
+        op_label = work_element_labels.get(target_work_element_id) or _text(target_dict.get("operation"))
+        prev_work_id = str(entry["work_element_id"] or "")
+
+        conn.execute(
+            """UPDATE pfmea_entries SET work_element_id=?,
+               process_operation_snapshot=?, process_description_snapshot=?,
+               process_location_snapshot=?, process_pitch_snapshot=?,
+               process_sequence_snapshot=?, process_source_hash=?,
+               source_reviewed_at=?, updated_at=?
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (
+                target_work_element_id,
+                op_label,
+                _text(target_dict.get("description")),
+                _text(target_dict.get("location")),
+                _text(target_dict.get("station")),
+                int(target_dict.get("sequence") or 0),
+                _process_hash(target_dict),
+                timestamp,
+                timestamp,
+                entry_id,
+                project_id,
+                scenario_id,
+            ),
+        )
+
+        conn.execute(
+            """UPDATE pfmea_causes
+               SET control_source_review_required=1, updated_at=?
+               WHERE pfmea_entry_id=? AND project_id=? AND scenario_id=?""",
+            (timestamp, entry_id, project_id, scenario_id),
+        )
+
+        _store().record_audit_event(
+            project_id,
+            "PFMEA",
+            "Reassign step",
+            1,
+            editor_name,
+            {
+                "scenario_id": scenario_id,
+                "pfmea_entry_id": entry_id,
+                "potential_failure_mode": _text(entry["potential_failure_mode"]),
+                "previous_work_element_id": prev_work_id,
+                "target_work_element_id": target_work_element_id,
+                "target_operation": op_label,
+            },
+            _conn=conn,
+        )
+        return {
+            "entry_id": entry_id,
+            "target_work_element_id": target_work_element_id,
+            "timestamp": timestamp,
+        }
+

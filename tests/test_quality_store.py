@@ -832,6 +832,84 @@ class QualityStoreTests(unittest.TestCase):
                 ),
             )
 
+    def test_upstream_modified_quality_assignments_and_sync(self) -> None:
+        req_id = quality_store.save_quality_requirement(
+            self.project_id, self.requirement_values()
+        )
+        ass_id = quality_store.assign_quality_requirement(
+            self.project_id,
+            self.scenario_id,
+            self.work_element_id,
+            req_id,
+        )
+        self.assertEqual(
+            quality_store.upstream_modified_quality_assignments(self.project_id, self.scenario_id),
+            [],
+        )
+
+        with store.connection() as conn:
+            conn.execute(
+                """UPDATE work_elements
+                   SET operation='Fasten bracket screw', station='ST-050', description='Updated desc'
+                   WHERE id=?""",
+                (self.work_element_id,),
+            )
+
+        modified = quality_store.upstream_modified_quality_assignments(self.project_id, self.scenario_id)
+        self.assertEqual(len(modified), 1)
+        item = modified[0]
+        self.assertEqual(item["assignment_id"], ass_id)
+        self.assertEqual(item["snapshot_operation"], "Install screw")
+        self.assertEqual(item["live_operation"], "Fasten bracket screw")
+        self.assertEqual(item["live_pitch"], "ST-050")
+        field_names = [c["field"] for c in item["changes"]]
+        self.assertIn("operation", field_names)
+        self.assertIn("station_pitch", field_names)
+        self.assertIn("description", field_names)
+
+        result = quality_store.accept_quality_upstream_changes(
+            self.project_id, self.scenario_id, [ass_id], editor_name="QA Engineer"
+        )
+        self.assertEqual(result["row_count"], 1)
+
+        self.assertEqual(
+            quality_store.upstream_modified_quality_assignments(self.project_id, self.scenario_id),
+            [],
+        )
+
+    def test_reassign_quality_assignment(self) -> None:
+        timestamp = store.now_iso()
+        target_step_id = "target-step-002"
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, description, updated_at)
+                   VALUES (?, ?, ?, 20, 'ST-020', 'Torque bolt', 'Target step description', ?)""",
+                (target_step_id, self.project_id, self.scenario_id, timestamp),
+            )
+        req_id = quality_store.save_quality_requirement(
+            self.project_id, self.requirement_values()
+        )
+        ass_id = quality_store.assign_quality_requirement(
+            self.project_id,
+            self.scenario_id,
+            self.work_element_id,
+            req_id,
+        )
+
+        res = quality_store.reassign_quality_assignment(
+            self.project_id, self.scenario_id, ass_id, target_step_id, editor_name="QA Engineer"
+        )
+        self.assertEqual(res["assignment_id"], ass_id)
+        self.assertEqual(res["target_work_element_id"], target_step_id)
+
+        ass_record = quality_store.quality_requirement_assignment(self.project_id, ass_id)
+        self.assertEqual(ass_record["work_element_id"], target_step_id)
+        self.assertEqual(ass_record["process_operation_snapshot"], "Torque bolt")
+        self.assertEqual(ass_record["process_description_snapshot"], "Target step description")
+        self.assertEqual(ass_record["station_pitch_snapshot"], "ST-020")
+
 
 if __name__ == "__main__":
     unittest.main()
+

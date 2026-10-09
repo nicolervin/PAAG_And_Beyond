@@ -570,6 +570,8 @@ class ErgonomicsStoreTests(unittest.TestCase):
             )
 
     def test_classified_pairing_requires_a_fishbone_placement(self) -> None:
+        with store.connection() as conn:
+            conn.execute("DELETE FROM fishbone_part_assignments WHERE part_id=?", (self.part_id,))
         for handling_type in ("Consume", "Handle"):
             with self.subTest(handling_type=handling_type):
                 with self.assertRaisesRegex(ValueError, "Fishbone placement is required"):

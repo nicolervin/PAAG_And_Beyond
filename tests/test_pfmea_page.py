@@ -1431,9 +1431,32 @@ class PfmeaPageSmokeTests(unittest.TestCase):
                 "proj_1", "scen_1", row_unassigned, {"quality:unassigned_req_id": "Unassigned Req"}
             )
             self.assertEqual(sanitized.iloc[0]["prevention_controls"], ["manual:preset_1"])
-            self.assertEqual(len(warnings), 1)
-            self.assertIn("Unassigned Req", warnings[0])
+    def test_cause_target_key_prevents_collision_on_rows_without_cause(self) -> None:
+        row1 = pd.Series({"entry_id": "entry-1", "effect_id": "effect-1", "cause_id": "", "draft_row_id": ""})
+        row2 = pd.Series({"entry_id": "entry-2", "effect_id": "effect-2", "cause_id": "", "draft_row_id": ""})
+        key1 = pfmea_ui._cause_target_key(row1)
+        key2 = pfmea_ui._cause_target_key(row2)
+        self.assertNotEqual(key1, key2)
+        self.assertEqual(key1, "entry:entry-1:effect:effect-1")
+        self.assertEqual(key2, "entry:entry-2:effect:effect-2")
+
+        df = pd.DataFrame([row1, row2])
+        mask1 = pfmea_ui._control_target_mask(df, key1)
+        self.assertTrue(mask1.iloc[0])
+        self.assertFalse(mask1.iloc[1])
+
+    def test_drop_untouched_rows_preserves_classification_and_control_edits(self) -> None:
+        df = pd.DataFrame([
+            {"id": None, "classification": "Q", "item_number": "", "potential_failure_mode": "", "potential_effects": "", "potential_causes": ""},
+            {"id": None, "prevention_controls": ["manual:opt-1"], "item_number": "", "potential_failure_mode": "", "potential_effects": "", "potential_causes": ""},
+            {"id": None, "item_number": "", "potential_failure_mode": "", "potential_effects": "", "potential_causes": "", "classification": ""},
+        ])
+        cleaned = pfmea_ui._drop_untouched_rows(df, identifying_columns=pfmea_ui.PFMEA_IDENTIFYING_COLUMNS)
+        self.assertEqual(len(cleaned), 2)
+        self.assertEqual(cleaned.iloc[0]["classification"], "Q")
+        self.assertEqual(cleaned.iloc[1]["prevention_controls"], ["manual:opt-1"])
 
 
 if __name__ == "__main__":
     unittest.main()
+

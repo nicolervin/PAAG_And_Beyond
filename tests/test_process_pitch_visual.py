@@ -682,26 +682,26 @@ class ProcessPitchVisualTests(unittest.TestCase):
         present_btn = next(b for b in app.button if b.label == "Present")
         app = present_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertTrue(app.session_state.get(f"paag_present_active_{self.scenario_id}"))
+        self.assertTrue(app.session_state.filtered_state.get(f"paag_present_active_{self.scenario_id}"))
 
         # In presentation dialog, find Next ▶ button
         pres_next_btn = next(b for b in app.button if "Next" in b.label and "pres_btn_next" in str(b.key))
         app = pres_next_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertEqual(app.session_state.get(f"pres_page_num_{self.scenario_id}"), 2)
-        self.assertTrue(app.session_state.get(f"paag_present_active_{self.scenario_id}"))
+        self.assertEqual(app.session_state.filtered_state.get(f"pres_page_num_{self.scenario_id}"), 2)
+        self.assertTrue(app.session_state.filtered_state.get(f"paag_present_active_{self.scenario_id}"))
 
         # In presentation dialog, find ◀ Back button
         pres_back_btn = next(b for b in app.button if "Back" in b.label and "pres_btn_back" in str(b.key))
         app = pres_back_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertEqual(app.session_state.get(f"pres_page_num_{self.scenario_id}"), 1)
+        self.assertEqual(app.session_state.filtered_state.get(f"pres_page_num_{self.scenario_id}"), 1)
 
         # In presentation dialog, find ✕ Exit button
         pres_exit_btn = next(b for b in app.button if "Exit" in b.label and "pres_btn_exit" in str(b.key))
         app = pres_exit_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertFalse(app.session_state.get(f"paag_present_active_{self.scenario_id}"))
+        self.assertFalse(app.session_state.filtered_state.get(f"paag_present_active_{self.scenario_id}"))
 
     def test_render_pitch_canvas_print_tabloid_and_fit(self) -> None:
         pitch = {
@@ -781,7 +781,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         print_btn = next(b for b in app.button if b.label == "Print")
         app = print_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertTrue(app.session_state.get(f"paag_print_active_{self.scenario_id}"))
+        self.assertTrue(app.session_state.filtered_state.get(f"paag_print_active_{self.scenario_id}"))
 
         # Verify radio widgets for Print Selection, Page Format, and Image Fit exist
         scope_radio = next(r for r in app.radio if "Print Selection" in r.label)
@@ -805,7 +805,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         close_btn = next(b for b in app.button if "Close Print Window" in b.label)
         app = close_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertFalse(app.session_state.get(f"paag_print_active_{self.scenario_id}"))
+        self.assertFalse(app.session_state.filtered_state.get(f"paag_print_active_{self.scenario_id}"))
 
     def test_fishbone_section_included_in_pitch_summary_and_canvas(self) -> None:
         # Verify yamazumi_pitches_for_scenario includes section_id and section_name
@@ -868,7 +868,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         print_btn = next(b for b in app.button if b.label == "Print")
         app = print_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertTrue(app.session_state.get(f"paag_print_active_{self.scenario_id}"))
+        self.assertTrue(app.session_state.filtered_state.get(f"paag_print_active_{self.scenario_id}"))
 
         # Verify section printing options exist in Print Selection
         scope_radio = next(r for r in app.radio if "Print Selection" in r.label)

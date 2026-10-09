@@ -125,71 +125,77 @@ def _upgrade_ergonomics_reviews_work_element_link(
         if "risk_classification" in columns
         else "'Not yet assessed'"
     )
-    conn.executescript(
-        f"""
-        ALTER TABLE ergonomics_review_hazard_selections
-            RENAME TO ergonomics_review_hazard_selections_legacy;
-        ALTER TABLE ergonomics_reviews RENAME TO ergonomics_reviews_legacy;
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        conn.executescript(
+            f"""
+            ALTER TABLE ergonomics_review_hazard_selections
+                RENAME TO ergonomics_review_hazard_selections_legacy;
+            ALTER TABLE ergonomics_reviews RENAME TO ergonomics_reviews_legacy;
 
-        CREATE TABLE ergonomics_reviews (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
-            process_part_option_id TEXT
-                REFERENCES process_part_options(id) ON DELETE SET NULL,
-            status TEXT NOT NULL DEFAULT 'Started'
-                CHECK (status IN ('Started', 'Open', 'Pending', 'Validation',
-                                  'Closed (admin)', 'Closed (engineering)')),
-            risk_classification TEXT NOT NULL DEFAULT 'Not yet assessed'
-                CHECK (risk_classification IN ('Not yet assessed',
-                                               'Favorable Red', 'Favorable Green',
-                                               'Red', 'Green')),
-            reviewer TEXT DEFAULT '',
-            notes TEXT DEFAULT '',
-            requested_due_date TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        INSERT INTO ergonomics_reviews
-            (id, project_id, scenario_id, work_element_id,
-             process_part_option_id, status, reviewer, notes,
-             requested_due_date, created_at, updated_at, risk_classification)
-        SELECT id, project_id, scenario_id, work_element_id,
-               process_part_option_id, status, reviewer, notes,
-               requested_due_date, created_at, updated_at, {risk_select}
-        FROM ergonomics_reviews_legacy;
-
-        CREATE TABLE ergonomics_review_hazard_selections (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            ergonomics_review_id TEXT NOT NULL
-                REFERENCES ergonomics_reviews(id) ON DELETE CASCADE,
-            hazard_option_id TEXT NOT NULL
-                REFERENCES ergonomic_hazard_options(id) ON DELETE CASCADE,
-            sequence INTEGER NOT NULL DEFAULT 10,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(ergonomics_review_id, hazard_option_id)
-        );
-        INSERT INTO ergonomics_review_hazard_selections
-            (id, project_id, scenario_id, ergonomics_review_id,
-             hazard_option_id, sequence, created_at, updated_at)
-        SELECT id, project_id, scenario_id, ergonomics_review_id,
-               hazard_option_id, sequence, created_at, updated_at
-        FROM ergonomics_review_hazard_selections_legacy;
-
-        DROP TABLE ergonomics_review_hazard_selections_legacy;
-        DROP TABLE ergonomics_reviews_legacy;
-        CREATE INDEX idx_ergonomics_reviews_scenario
-            ON ergonomics_reviews(project_id, scenario_id, work_element_id);
-        CREATE INDEX idx_ergonomics_review_hazards
-            ON ergonomics_review_hazard_selections(
-                project_id, scenario_id, ergonomics_review_id, sequence
+            CREATE TABLE ergonomics_reviews (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                process_part_option_id TEXT
+                    REFERENCES process_part_options(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'Started'
+                    CHECK (status IN ('Started', 'Open', 'Pending', 'Validation',
+                                      'Closed (admin)', 'Closed (engineering)')),
+                risk_classification TEXT NOT NULL DEFAULT 'Not yet assessed'
+                    CHECK (risk_classification IN ('Not yet assessed',
+                                                   'Favorable Red', 'Favorable Green',
+                                                   'Red', 'Green')),
+                reviewer TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                requested_due_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
-        """
-    )
+            INSERT INTO ergonomics_reviews
+                (id, project_id, scenario_id, work_element_id,
+                 process_part_option_id, status, reviewer, notes,
+                 requested_due_date, created_at, updated_at, risk_classification)
+            SELECT id, project_id, scenario_id, work_element_id,
+                   process_part_option_id, status, reviewer, notes,
+                   requested_due_date, created_at, updated_at, {risk_select}
+            FROM ergonomics_reviews_legacy;
+
+            CREATE TABLE ergonomics_review_hazard_selections (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                ergonomics_review_id TEXT NOT NULL
+                    REFERENCES ergonomics_reviews(id) ON DELETE CASCADE,
+                hazard_option_id TEXT NOT NULL
+                    REFERENCES ergonomic_hazard_options(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL DEFAULT 10,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(ergonomics_review_id, hazard_option_id)
+            );
+            INSERT INTO ergonomics_review_hazard_selections
+                (id, project_id, scenario_id, ergonomics_review_id,
+                 hazard_option_id, sequence, created_at, updated_at)
+            SELECT id, project_id, scenario_id, ergonomics_review_id,
+                   hazard_option_id, sequence, created_at, updated_at
+            FROM ergonomics_review_hazard_selections_legacy;
+
+            DROP TABLE ergonomics_review_hazard_selections_legacy;
+            DROP TABLE ergonomics_reviews_legacy;
+            CREATE INDEX idx_ergonomics_reviews_scenario
+                ON ergonomics_reviews(project_id, scenario_id, work_element_id);
+            CREATE INDEX idx_ergonomics_review_hazards
+                ON ergonomics_review_hazard_selections(
+                    project_id, scenario_id, ergonomics_review_id, sequence
+                );
+            """
+        )
+    finally:
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.execute("PRAGMA foreign_keys = ON")
 
 def _upgrade_ergonomics_reviews_risk_classification(
     conn: sqlite3.Connection,
@@ -212,6 +218,606 @@ def _upgrade_ergonomics_reviews_risk_classification(
         """UPDATE ergonomics_reviews
            SET risk_classification='Not yet assessed'"""
     )
+
+
+def _upgrade_pfmea_entries_work_element_link(conn: sqlite3.Connection) -> None:
+    """Make the pfmea_entries work_element_id link nullable with ON DELETE SET NULL."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pfmea_entries'").fetchone():
+        return
+    columns = {str(row[1]): row for row in conn.execute("PRAGMA table_info(pfmea_entries)").fetchall()}
+    foreign_keys = {str(row[3]): row for row in conn.execute("PRAGMA foreign_key_list(pfmea_entries)").fetchall()}
+    work_column = columns.get("work_element_id")
+    work_fk = foreign_keys.get("work_element_id")
+    if (
+        work_column is not None
+        and int(work_column[3]) == 0
+        and work_fk is not None
+        and str(work_fk[6]).upper() == "SET NULL"
+    ):
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        conn.executescript(
+            """
+            ALTER TABLE pfmea_entries RENAME TO pfmea_entries_legacy;
+
+            CREATE TABLE pfmea_entries (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                source_pfmea_entry_id TEXT REFERENCES pfmea_entries(id) ON DELETE SET NULL,
+                potential_failure_mode TEXT NOT NULL,
+                class_code TEXT NOT NULL DEFAULT '',
+                process_operation_snapshot TEXT NOT NULL DEFAULT '',
+                process_description_snapshot TEXT NOT NULL DEFAULT '',
+                process_location_snapshot TEXT NOT NULL DEFAULT '',
+                process_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                process_sequence_snapshot INTEGER NOT NULL DEFAULT 0,
+                process_source_hash TEXT NOT NULL,
+                quality_source_hash TEXT NOT NULL,
+                source_reviewed_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT INTO pfmea_entries
+                (id, project_id, scenario_id, work_element_id, source_pfmea_entry_id,
+                 potential_failure_mode, class_code, process_operation_snapshot,
+                 process_description_snapshot, process_location_snapshot,
+                 process_pitch_snapshot, process_sequence_snapshot, process_source_hash,
+                 quality_source_hash, source_reviewed_at, created_at, updated_at)
+            SELECT id, project_id, scenario_id, work_element_id, source_pfmea_entry_id,
+                   potential_failure_mode, class_code, process_operation_snapshot,
+                   process_description_snapshot, process_location_snapshot,
+                   process_pitch_snapshot, process_sequence_snapshot, process_source_hash,
+                   quality_source_hash, source_reviewed_at, created_at, updated_at
+            FROM pfmea_entries_legacy;
+
+            DROP TABLE pfmea_entries_legacy;
+
+            CREATE INDEX IF NOT EXISTS idx_pfmea_entries_scenario
+                ON pfmea_entries(project_id, scenario_id, work_element_id);
+            """
+        )
+    finally:
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _upgrade_quality_assignments_work_element_link(conn: sqlite3.Connection) -> None:
+    """Make quality_requirement_assignments work_element_id link nullable with ON DELETE SET NULL and snapshot columns."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='quality_requirement_assignments'").fetchone():
+        return
+    columns = {str(row[1]): row for row in conn.execute("PRAGMA table_info(quality_requirement_assignments)").fetchall()}
+    foreign_keys = {str(row[3]): row for row in conn.execute("PRAGMA foreign_key_list(quality_requirement_assignments)").fetchall()}
+    work_column = columns.get("work_element_id")
+    work_fk = foreign_keys.get("work_element_id")
+    has_snapshots = "process_operation_snapshot" in columns and "unlinked_at" in columns
+    if (
+        work_column is not None
+        and int(work_column[3]) == 0
+        and work_fk is not None
+        and str(work_fk[6]).upper() == "SET NULL"
+        and has_snapshots
+    ):
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        op_col = "process_operation_snapshot" if "process_operation_snapshot" in columns else "''"
+        desc_col = "process_description_snapshot" if "process_description_snapshot" in columns else "''"
+        pitch_col = "station_pitch_snapshot" if "station_pitch_snapshot" in columns else "''"
+        unlinked_col = "unlinked_at" if "unlinked_at" in columns else "''"
+        conn.executescript(
+            f"""
+            ALTER TABLE quality_requirement_assignments RENAME TO quality_requirement_assignments_legacy;
+
+            CREATE TABLE quality_requirement_assignments (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                quality_requirement_id TEXT NOT NULL
+                    REFERENCES quality_requirements(id) ON DELETE RESTRICT,
+                requirement_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                unique_identifier TEXT NOT NULL,
+                pass_fail INTEGER NOT NULL DEFAULT 0 CHECK (pass_fail IN (0, 1)),
+                target_value REAL,
+                tolerances TEXT NOT NULL DEFAULT '',
+                unit TEXT NOT NULL DEFAULT '',
+                process_operation_snapshot TEXT NOT NULL DEFAULT '',
+                process_description_snapshot TEXT NOT NULL DEFAULT '',
+                station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                unlinked_at TEXT NOT NULL DEFAULT '',
+                source_updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(work_element_id, quality_requirement_id)
+            );
+
+            INSERT INTO quality_requirement_assignments
+                (id, project_id, scenario_id, work_element_id, quality_requirement_id,
+                 requirement_type, description, unique_identifier, pass_fail,
+                 target_value, tolerances, unit, process_operation_snapshot,
+                 process_description_snapshot, station_pitch_snapshot, unlinked_at,
+                 source_updated_at, created_at, updated_at)
+            SELECT id, project_id, scenario_id, work_element_id, quality_requirement_id,
+                   requirement_type, description, unique_identifier, pass_fail,
+                   target_value, tolerances, unit, {op_col},
+                   {desc_col}, {pitch_col}, {unlinked_col},
+                   source_updated_at, created_at, updated_at
+            FROM quality_requirement_assignments_legacy;
+
+            DROP TABLE quality_requirement_assignments_legacy;
+
+            CREATE INDEX IF NOT EXISTS idx_quality_assignments_scenario
+                ON quality_requirement_assignments(project_id, scenario_id, work_element_id);
+            CREATE INDEX IF NOT EXISTS idx_quality_assignments_requirement
+                ON quality_requirement_assignments(project_id, quality_requirement_id);
+            """
+        )
+    finally:
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _upgrade_equipment_process_links_work_element_link(conn: sqlite3.Connection) -> None:
+    """Make equipment_process_links work_element_id link nullable with ON DELETE SET NULL and snapshot columns."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='equipment_process_links'").fetchone():
+        return
+    columns = {str(row[1]): row for row in conn.execute("PRAGMA table_info(equipment_process_links)").fetchall()}
+    foreign_keys = {str(row[3]): row for row in conn.execute("PRAGMA foreign_key_list(equipment_process_links)").fetchall()}
+    work_column = columns.get("work_element_id")
+    work_fk = foreign_keys.get("work_element_id")
+    has_snapshots = "process_operation_snapshot" in columns and "unlinked_at" in columns
+    if (
+        work_column is not None
+        and int(work_column[3]) == 0
+        and work_fk is not None
+        and str(work_fk[6]).upper() == "SET NULL"
+        and has_snapshots
+    ):
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        op_col = "process_operation_snapshot" if "process_operation_snapshot" in columns else "''"
+        desc_col = "process_description_snapshot" if "process_description_snapshot" in columns else "''"
+        pitch_col = "station_pitch_snapshot" if "station_pitch_snapshot" in columns else "''"
+        unlinked_col = "unlinked_at" if "unlinked_at" in columns else "''"
+        conn.executescript(
+            f"""
+            ALTER TABLE equipment_process_links RENAME TO equipment_process_links_legacy;
+
+            CREATE TABLE equipment_process_links (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                placement_id TEXT NOT NULL REFERENCES equipment_placements(id) ON DELETE CASCADE,
+                work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                process_operation_snapshot TEXT NOT NULL DEFAULT '',
+                process_description_snapshot TEXT NOT NULL DEFAULT '',
+                station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                unlinked_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(placement_id, work_element_id)
+            );
+
+            INSERT INTO equipment_process_links
+                (id, project_id, scenario_id, placement_id, work_element_id,
+                 process_operation_snapshot, process_description_snapshot,
+                 station_pitch_snapshot, unlinked_at, created_at, updated_at)
+            SELECT id, project_id, scenario_id, placement_id, work_element_id,
+                   {op_col}, {desc_col},
+                   {pitch_col}, {unlinked_col}, created_at, updated_at
+            FROM equipment_process_links_legacy;
+
+            DROP TABLE equipment_process_links_legacy;
+
+            CREATE INDEX IF NOT EXISTS idx_equipment_process_links_scenario
+                ON equipment_process_links(project_id, scenario_id, work_element_id);
+            """
+        )
+    finally:
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _repair_dangling_legacy_foreign_keys(conn: sqlite3.Connection) -> None:
+    """Repair foreign keys rewritten to *_legacy tables by past migrations without legacy_alter_table."""
+    legacy_tables = conn.execute(
+        """SELECT name FROM sqlite_master
+           WHERE type='table'
+             AND (sql LIKE '%pfmea_entries_legacy%' OR sql LIKE '%quality_requirement_assignments_legacy%')"""
+    ).fetchall()
+    if not legacy_tables:
+        return
+
+    tables_to_repair = {str(row[0]) for row in legacy_tables}
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        # 1. pfmea_effects
+        if "pfmea_effects" in tables_to_repair:
+            conn.execute(
+                "DELETE FROM pfmea_effects WHERE pfmea_entry_id NOT IN (SELECT id FROM pfmea_entries)"
+            )
+            conn.executescript(
+                """
+                CREATE TABLE pfmea_effects_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pfmea_entry_id TEXT NOT NULL REFERENCES pfmea_entries(id) ON DELETE CASCADE,
+                    effect_description TEXT NOT NULL,
+                    severity REAL,
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO pfmea_effects_new
+                    (id, project_id, scenario_id, pfmea_entry_id, effect_description,
+                     severity, sequence, created_at, updated_at)
+                SELECT id, project_id, scenario_id, pfmea_entry_id, effect_description,
+                       severity, sequence, created_at, updated_at
+                FROM pfmea_effects;
+                DROP TABLE pfmea_effects;
+                ALTER TABLE pfmea_effects_new RENAME TO pfmea_effects;
+                CREATE INDEX IF NOT EXISTS idx_pfmea_effects_entry ON pfmea_effects(pfmea_entry_id, sequence);
+                """
+            )
+
+        # 2. pfmea_causes
+        if "pfmea_causes" in tables_to_repair:
+            conn.execute(
+                "DELETE FROM pfmea_causes WHERE pfmea_entry_id NOT IN (SELECT id FROM pfmea_entries)"
+            )
+            cause_cols = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(pfmea_causes)").fetchall()
+            }
+            has_csrr = "control_source_review_required" in cause_cols
+            csrr_col_def = (
+                ", control_source_review_required INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (control_source_review_required IN (0, 1))"
+                if has_csrr else ""
+            )
+            csrr_select = ", control_source_review_required" if has_csrr else ""
+            conn.executescript(
+                f"""
+                CREATE TABLE pfmea_causes_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pfmea_entry_id TEXT NOT NULL REFERENCES pfmea_entries(id) ON DELETE CASCADE,
+                    cause_description TEXT NOT NULL,
+                    occurrence REAL,
+                    detection REAL,
+                    detection_review_required INTEGER NOT NULL DEFAULT 0
+                        CHECK (detection_review_required IN (0, 1)),
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                    {csrr_col_def}
+                );
+                INSERT INTO pfmea_causes_new
+                    (id, project_id, scenario_id, pfmea_entry_id, cause_description,
+                     occurrence, detection, detection_review_required, sequence,
+                     created_at, updated_at {csrr_select})
+                SELECT id, project_id, scenario_id, pfmea_entry_id, cause_description,
+                       occurrence, detection, detection_review_required, sequence,
+                       created_at, updated_at {csrr_select}
+                FROM pfmea_causes;
+                DROP TABLE pfmea_causes;
+                ALTER TABLE pfmea_causes_new RENAME TO pfmea_causes;
+                CREATE INDEX IF NOT EXISTS idx_pfmea_causes_entry ON pfmea_causes(pfmea_entry_id, sequence);
+                """
+            )
+
+        # 3. pfmea_risk_rows
+        if "pfmea_risk_rows" in tables_to_repair:
+            conn.execute(
+                """DELETE FROM pfmea_risk_rows
+                   WHERE pfmea_entry_id NOT IN (SELECT id FROM pfmea_entries)
+                      OR pfmea_effect_id NOT IN (SELECT id FROM pfmea_effects)
+                      OR pfmea_cause_id NOT IN (SELECT id FROM pfmea_causes)"""
+            )
+            conn.executescript(
+                """
+                CREATE TABLE pfmea_risk_rows_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pfmea_entry_id TEXT NOT NULL REFERENCES pfmea_entries(id) ON DELETE CASCADE,
+                    pfmea_effect_id TEXT NOT NULL REFERENCES pfmea_effects(id) ON DELETE CASCADE,
+                    pfmea_cause_id TEXT NOT NULL REFERENCES pfmea_causes(id) ON DELETE CASCADE,
+                    rpn REAL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(pfmea_effect_id, pfmea_cause_id)
+                );
+                INSERT INTO pfmea_risk_rows_new
+                    (id, project_id, scenario_id, pfmea_entry_id, pfmea_effect_id,
+                     pfmea_cause_id, rpn, created_at, updated_at)
+                SELECT id, project_id, scenario_id, pfmea_entry_id, pfmea_effect_id,
+                       pfmea_cause_id, rpn, created_at, updated_at
+                FROM pfmea_risk_rows;
+                DROP TABLE pfmea_risk_rows;
+                ALTER TABLE pfmea_risk_rows_new RENAME TO pfmea_risk_rows;
+                """
+            )
+
+        # 4. pfmea_actions
+        if "pfmea_actions" in tables_to_repair:
+            conn.execute(
+                """DELETE FROM pfmea_actions
+                   WHERE pfmea_entry_id NOT IN (SELECT id FROM pfmea_entries)
+                      OR (pfmea_cause_id IS NOT NULL AND pfmea_cause_id != ''
+                          AND pfmea_cause_id NOT IN (SELECT id FROM pfmea_causes))"""
+            )
+            conn.executescript(
+                """
+                CREATE TABLE pfmea_actions_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pfmea_entry_id TEXT NOT NULL REFERENCES pfmea_entries(id) ON DELETE CASCADE,
+                    pfmea_cause_id TEXT REFERENCES pfmea_causes(id) ON DELETE CASCADE,
+                    recommended_action TEXT NOT NULL,
+                    responsibility TEXT NOT NULL DEFAULT '',
+                    target_completion_date TEXT NOT NULL DEFAULT '',
+                    actions_taken TEXT NOT NULL DEFAULT '',
+                    resulting_severity REAL,
+                    resulting_occurrence REAL,
+                    resulting_detection REAL,
+                    resulting_rpn REAL,
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO pfmea_actions_new
+                    (id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id,
+                     recommended_action, responsibility, target_completion_date,
+                     actions_taken, resulting_severity, resulting_occurrence,
+                     resulting_detection, resulting_rpn, sequence, created_at, updated_at)
+                SELECT id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id,
+                       recommended_action, responsibility, target_completion_date,
+                       actions_taken, resulting_severity, resulting_occurrence,
+                       resulting_detection, resulting_rpn, sequence, created_at, updated_at
+                FROM pfmea_actions;
+                DROP TABLE pfmea_actions;
+                ALTER TABLE pfmea_actions_new RENAME TO pfmea_actions;
+                CREATE INDEX IF NOT EXISTS idx_pfmea_actions_entry ON pfmea_actions(pfmea_entry_id, sequence);
+                """
+            )
+
+        # 5. pfmea_prevention_selections
+        if "pfmea_prevention_selections" in tables_to_repair:
+            conn.execute(
+                """DELETE FROM pfmea_prevention_selections
+                   WHERE pfmea_entry_id NOT IN (SELECT id FROM pfmea_entries)
+                      OR pfmea_cause_id NOT IN (SELECT id FROM pfmea_causes)
+                      OR (source_type='quality_assignment' AND (
+                          quality_requirement_assignment_id IS NULL OR
+                          quality_requirement_assignment_id NOT IN (SELECT id FROM quality_requirement_assignments)
+                      ))
+                      OR (source_type='manual_option' AND (
+                          prevention_option_id IS NULL OR
+                          prevention_option_id NOT IN (SELECT id FROM pfmea_prevention_options)
+                      ))"""
+            )
+            conn.executescript(
+                """
+                CREATE TABLE pfmea_prevention_selections_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pfmea_entry_id TEXT NOT NULL REFERENCES pfmea_entries(id) ON DELETE CASCADE,
+                    pfmea_cause_id TEXT NOT NULL REFERENCES pfmea_causes(id) ON DELETE CASCADE,
+                    source_type TEXT NOT NULL
+                        CHECK (source_type IN ('quality_assignment', 'manual_option')),
+                    quality_requirement_assignment_id TEXT
+                        REFERENCES quality_requirement_assignments(id) ON DELETE CASCADE,
+                    prevention_option_id TEXT
+                        REFERENCES pfmea_prevention_options(id) ON DELETE CASCADE,
+                    source_updated_at_snapshot TEXT NOT NULL,
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        (source_type='quality_assignment'
+                         AND quality_requirement_assignment_id IS NOT NULL
+                         AND prevention_option_id IS NULL)
+                        OR
+                        (source_type='manual_option'
+                         AND quality_requirement_assignment_id IS NULL
+                         AND prevention_option_id IS NOT NULL)
+                    )
+                );
+                INSERT INTO pfmea_prevention_selections_new
+                    (id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id,
+                     source_type, quality_requirement_assignment_id, prevention_option_id,
+                     source_updated_at_snapshot, sequence, created_at, updated_at)
+                SELECT id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id,
+                       source_type, quality_requirement_assignment_id, prevention_option_id,
+                       source_updated_at_snapshot, sequence, created_at, updated_at
+                FROM pfmea_prevention_selections;
+                DROP TABLE pfmea_prevention_selections;
+                ALTER TABLE pfmea_prevention_selections_new RENAME TO pfmea_prevention_selections;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_pfmea_prevention_quality_selection
+                    ON pfmea_prevention_selections(pfmea_cause_id, quality_requirement_assignment_id)
+                    WHERE quality_requirement_assignment_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_pfmea_prevention_manual_selection
+                    ON pfmea_prevention_selections(pfmea_cause_id, prevention_option_id)
+                    WHERE prevention_option_id IS NOT NULL;
+                """
+            )
+
+        # 6. pfmea_detection_selections
+        if "pfmea_detection_selections" in tables_to_repair:
+            conn.execute(
+                """DELETE FROM pfmea_detection_selections
+                   WHERE pfmea_entry_id NOT IN (SELECT id FROM pfmea_entries)
+                      OR pfmea_cause_id NOT IN (SELECT id FROM pfmea_causes)
+                      OR (source_type='quality_assignment' AND (
+                          quality_requirement_assignment_id IS NULL OR
+                          quality_requirement_assignment_id NOT IN (SELECT id FROM quality_requirement_assignments)
+                      ))
+                      OR (source_type='manual_option' AND (
+                          detection_option_id IS NULL OR
+                          detection_option_id NOT IN (SELECT id FROM pfmea_detection_options)
+                      ))"""
+            )
+            conn.executescript(
+                """
+                CREATE TABLE pfmea_detection_selections_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pfmea_entry_id TEXT NOT NULL REFERENCES pfmea_entries(id) ON DELETE CASCADE,
+                    pfmea_cause_id TEXT NOT NULL REFERENCES pfmea_causes(id) ON DELETE CASCADE,
+                    source_type TEXT NOT NULL
+                        CHECK (source_type IN ('quality_assignment', 'manual_option')),
+                    quality_requirement_assignment_id TEXT
+                        REFERENCES quality_requirement_assignments(id) ON DELETE CASCADE,
+                    detection_option_id TEXT
+                        REFERENCES pfmea_detection_options(id) ON DELETE CASCADE,
+                    source_updated_at_snapshot TEXT NOT NULL,
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        (source_type='quality_assignment'
+                         AND quality_requirement_assignment_id IS NOT NULL
+                         AND detection_option_id IS NULL)
+                        OR
+                        (source_type='manual_option'
+                         AND quality_requirement_assignment_id IS NULL
+                         AND detection_option_id IS NOT NULL)
+                    )
+                );
+                INSERT INTO pfmea_detection_selections_new
+                    (id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id,
+                     source_type, quality_requirement_assignment_id, detection_option_id,
+                     source_updated_at_snapshot, sequence, created_at, updated_at)
+                SELECT id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id,
+                       source_type, quality_requirement_assignment_id, detection_option_id,
+                       source_updated_at_snapshot, sequence, created_at, updated_at
+                FROM pfmea_detection_selections;
+                DROP TABLE pfmea_detection_selections;
+                ALTER TABLE pfmea_detection_selections_new RENAME TO pfmea_detection_selections;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_pfmea_detection_quality_selection
+                    ON pfmea_detection_selections(pfmea_cause_id, quality_requirement_assignment_id)
+                    WHERE quality_requirement_assignment_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_pfmea_detection_manual_selection
+                    ON pfmea_detection_selections(pfmea_cause_id, detection_option_id)
+                    WHERE detection_option_id IS NOT NULL;
+                """
+            )
+
+        # 7. control_plan_items
+        if "control_plan_items" in tables_to_repair:
+            conn.execute(
+                """UPDATE control_plan_items
+                   SET quality_requirement_assignment_id = NULL
+                   WHERE quality_requirement_assignment_id IS NOT NULL
+                     AND quality_requirement_assignment_id NOT IN (SELECT id FROM quality_requirement_assignments)"""
+            )
+            conn.execute(
+                "DELETE FROM control_plan_items WHERE pfmea_entry_id NOT IN (SELECT id FROM pfmea_entries)"
+            )
+            cp_cols = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(control_plan_items)").fetchall()
+            }
+            extra_defs = []
+            extra_cols = []
+            if "sequence" in cp_cols:
+                extra_defs.append("sequence INTEGER NOT NULL DEFAULT 10")
+                extra_cols.append("sequence")
+            if "pr_number" in cp_cols:
+                extra_defs.append("pr_number REAL")
+                extra_cols.append("pr_number")
+            if "characteristic_suffix" in cp_cols:
+                extra_defs.append(
+                    "characteristic_suffix INTEGER CHECK (characteristic_suffix IS NULL OR "
+                    "(typeof(characteristic_suffix)='integer' AND characteristic_suffix > 0))"
+                )
+                extra_cols.append("characteristic_suffix")
+            if "specification_requirement" in cp_cols:
+                extra_defs.append("specification_requirement TEXT NOT NULL DEFAULT ''")
+                extra_cols.append("specification_requirement")
+
+            extra_defs_sql = (",\n" + ",\n".join(extra_defs)) if extra_defs else ""
+            extra_cols_sql = (", " + ", ".join(extra_cols)) if extra_cols else ""
+
+            conn.executescript(
+                f"""
+                CREATE TABLE control_plan_items_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pfmea_entry_id TEXT NOT NULL REFERENCES pfmea_entries(id) ON DELETE CASCADE,
+                    source_kind TEXT NOT NULL CHECK (source_kind IN ('quality','pfmea_only')),
+                    quality_requirement_assignment_id TEXT
+                        REFERENCES quality_requirement_assignments(id) ON DELETE SET NULL,
+                    quality_requirement_id TEXT REFERENCES quality_requirements(id) ON DELETE SET NULL,
+                    source_quality_requirement_id_snapshot TEXT NOT NULL DEFAULT '',
+                    source_unique_identifier_snapshot TEXT NOT NULL DEFAULT '',
+                    source_description_snapshot TEXT NOT NULL DEFAULT '',
+                    characteristic_placement TEXT NOT NULL DEFAULT ''
+                        CHECK (characteristic_placement IN ('','Product / Part','Process')),
+                    machine_fixture TEXT NOT NULL DEFAULT '',
+                    sample_size TEXT NOT NULL DEFAULT '',
+                    sample_frequency TEXT NOT NULL DEFAULT '',
+                    who TEXT NOT NULL DEFAULT '',
+                    control_method TEXT NOT NULL DEFAULT '',
+                    decision_rule TEXT NOT NULL DEFAULT '',
+                    excluded INTEGER NOT NULL DEFAULT 0 CHECK (excluded IN (0,1)),
+                    source_fingerprint_snapshot TEXT NOT NULL DEFAULT '',
+                    source_review_required INTEGER NOT NULL DEFAULT 0
+                        CHECK (source_review_required IN (0,1)),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                    {extra_defs_sql}
+                );
+                INSERT INTO control_plan_items_new
+                    (id, project_id, scenario_id, pfmea_entry_id, source_kind,
+                     quality_requirement_assignment_id, quality_requirement_id,
+                     source_quality_requirement_id_snapshot, source_unique_identifier_snapshot,
+                     source_description_snapshot, characteristic_placement,
+                     machine_fixture, sample_size, sample_frequency, who,
+                     control_method, decision_rule, excluded, source_fingerprint_snapshot,
+                     source_review_required, created_at, updated_at {extra_cols_sql})
+                SELECT id, project_id, scenario_id, pfmea_entry_id, source_kind,
+                       quality_requirement_assignment_id, quality_requirement_id,
+                       source_quality_requirement_id_snapshot, source_unique_identifier_snapshot,
+                       source_description_snapshot, characteristic_placement,
+                       machine_fixture, sample_size, sample_frequency, who,
+                       control_method, decision_rule, excluded, source_fingerprint_snapshot,
+                       source_review_required, created_at, updated_at {extra_cols_sql}
+                FROM control_plan_items;
+                DROP TABLE control_plan_items;
+                ALTER TABLE control_plan_items_new RENAME TO control_plan_items;
+                CREATE INDEX IF NOT EXISTS idx_control_plan_items_scenario
+                    ON control_plan_items(project_id, scenario_id, pfmea_entry_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_control_plan_quality_item
+                    ON control_plan_items(project_id, scenario_id, pfmea_entry_id,
+                                          source_quality_requirement_id_snapshot)
+                    WHERE source_kind='quality';
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_control_plan_fallback_item
+                    ON control_plan_items(project_id, scenario_id, pfmea_entry_id)
+                    WHERE source_kind='pfmea_only';
+                """
+            )
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.execute("PRAGMA foreign_keys = ON")
+
 
 def _create_started_ergonomics_review(
     conn: sqlite3.Connection,
@@ -1110,6 +1716,7 @@ def init_db() -> None:
         _drop_yamazumi_flags_schema(conn)
         _upgrade_ergonomics_reviews_work_element_link(conn)
         _upgrade_ergonomics_reviews_risk_classification(conn)
+        _repair_dangling_legacy_foreign_keys(conn)
         init_quality_schema(conn)
         init_pfmea_schema(conn)
         init_pfmea_pattern_schema(conn)
@@ -1117,6 +1724,10 @@ def init_db() -> None:
         init_equipment_schema(conn)
         init_layout_schema(conn)
         init_process_visual_media_schema(conn)
+        _upgrade_pfmea_entries_work_element_link(conn)
+        _upgrade_quality_assignments_work_element_link(conn)
+        _upgrade_equipment_process_links_work_element_link(conn)
+        _repair_dangling_legacy_foreign_keys(conn)
         project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "product_line" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN product_line TEXT DEFAULT ''")
@@ -1287,27 +1898,33 @@ def init_db() -> None:
         if "use_description" not in assignment_columns:
             # The original table allowed only one fishbone placement per catalog part.
             # Rebuild it so each row represents one use/installation occurrence.
-            conn.executescript(
-                """
-                CREATE TABLE fishbone_part_assignments_new (
-                    id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                    part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
-                    section_id TEXT NOT NULL REFERENCES assembly_sections(id),
-                    sequence INTEGER NOT NULL DEFAULT 10,
-                    quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0),
-                    use_description TEXT DEFAULT '',
-                    notes TEXT DEFAULT '',
-                    updated_at TEXT NOT NULL
-                );
-                INSERT INTO fishbone_part_assignments_new
-                    (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
-                SELECT id, project_id, part_id, section_id, sequence, quantity, '', notes, updated_at
-                FROM fishbone_part_assignments;
-                DROP TABLE fishbone_part_assignments;
-                ALTER TABLE fishbone_part_assignments_new RENAME TO fishbone_part_assignments;
-                """
-            )
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("PRAGMA legacy_alter_table = ON")
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE fishbone_part_assignments_new (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                        section_id TEXT NOT NULL REFERENCES assembly_sections(id),
+                        sequence INTEGER NOT NULL DEFAULT 10,
+                        quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0),
+                        use_description TEXT DEFAULT '',
+                        notes TEXT DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO fishbone_part_assignments_new
+                        (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
+                    SELECT id, project_id, part_id, section_id, sequence, quantity, '', notes, updated_at
+                    FROM fishbone_part_assignments;
+                    DROP TABLE fishbone_part_assignments;
+                    ALTER TABLE fishbone_part_assignments_new RENAME TO fishbone_part_assignments;
+                    """
+                )
+            finally:
+                conn.execute("PRAGMA legacy_alter_table = OFF")
+                conn.execute("PRAGMA foreign_keys = ON")
         assignment_quantity_type = next(
             (
                 str(row[2]).upper()
@@ -1327,30 +1944,36 @@ def init_db() -> None:
                     "Fishbone quantities must all be positive numbers before the decimal-quantity "
                     "schema upgrade can run."
                 )
-            conn.executescript(
-                """
-                CREATE TABLE fishbone_part_assignments_quantity_new (
-                    id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                    part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
-                    section_id TEXT NOT NULL REFERENCES assembly_sections(id),
-                    sequence INTEGER NOT NULL DEFAULT 10,
-                    quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0),
-                    use_description TEXT DEFAULT '',
-                    notes TEXT DEFAULT '',
-                    updated_at TEXT NOT NULL
-                );
-                INSERT INTO fishbone_part_assignments_quantity_new
-                    (id, project_id, part_id, section_id, sequence, quantity,
-                     use_description, notes, updated_at)
-                SELECT id, project_id, part_id, section_id, sequence, CAST(quantity AS REAL),
-                       use_description, notes, updated_at
-                FROM fishbone_part_assignments;
-                DROP TABLE fishbone_part_assignments;
-                ALTER TABLE fishbone_part_assignments_quantity_new
-                    RENAME TO fishbone_part_assignments;
-                """
-            )
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("PRAGMA legacy_alter_table = ON")
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE fishbone_part_assignments_quantity_new (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                        section_id TEXT NOT NULL REFERENCES assembly_sections(id),
+                        sequence INTEGER NOT NULL DEFAULT 10,
+                        quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0),
+                        use_description TEXT DEFAULT '',
+                        notes TEXT DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO fishbone_part_assignments_quantity_new
+                        (id, project_id, part_id, section_id, sequence, quantity,
+                         use_description, notes, updated_at)
+                    SELECT id, project_id, part_id, section_id, sequence, CAST(quantity AS REAL),
+                           use_description, notes, updated_at
+                    FROM fishbone_part_assignments;
+                    DROP TABLE fishbone_part_assignments;
+                    ALTER TABLE fishbone_part_assignments_quantity_new
+                        RENAME TO fishbone_part_assignments;
+                    """
+                )
+            finally:
+                conn.execute("PRAGMA legacy_alter_table = OFF")
+                conn.execute("PRAGMA foreign_keys = ON")
         assignment_columns = {
             row[1]
             for row in conn.execute(
@@ -1681,29 +2304,33 @@ def init_db() -> None:
             # carrying the same balancing areas, so rebuild this one parent table.
             conn.commit()
             conn.execute("PRAGMA foreign_keys = OFF")
-            conn.executescript(
-                """
-                CREATE TABLE yamazumi_areas_new (
-                    id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                    scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-                    section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
-                    name TEXT NOT NULL, takt_override_s REAL, updated_at TEXT NOT NULL,
-                    UNIQUE(project_id, scenario_id, name)
-                );
-                INSERT INTO yamazumi_areas_new
-                    (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
-                SELECT a.id, a.project_id,
-                       (SELECT s.id FROM planning_scenarios s
-                        WHERE s.project_id=a.project_id
-                        ORDER BY s.revision_sequence, s.created_at LIMIT 1),
-                       a.section_id, a.name, a.takt_override_s, a.updated_at
-                FROM yamazumi_areas a;
-                DROP TABLE yamazumi_areas;
-                ALTER TABLE yamazumi_areas_new RENAME TO yamazumi_areas;
-                """
-            )
-            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA legacy_alter_table = ON")
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE yamazumi_areas_new (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                        section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
+                        name TEXT NOT NULL, takt_override_s REAL, updated_at TEXT NOT NULL,
+                        UNIQUE(project_id, scenario_id, name)
+                    );
+                    INSERT INTO yamazumi_areas_new
+                        (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                    SELECT a.id, a.project_id,
+                           (SELECT s.id FROM planning_scenarios s
+                            WHERE s.project_id=a.project_id
+                            ORDER BY s.revision_sequence, s.created_at LIMIT 1),
+                           a.section_id, a.name, a.takt_override_s, a.updated_at
+                    FROM yamazumi_areas a;
+                    DROP TABLE yamazumi_areas;
+                    ALTER TABLE yamazumi_areas_new RENAME TO yamazumi_areas;
+                    """
+                )
+            finally:
+                conn.execute("PRAGMA legacy_alter_table = OFF")
+                conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_yamazumi_areas_scenario ON yamazumi_areas(project_id, scenario_id, name)"
         )
@@ -1967,4 +2594,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']

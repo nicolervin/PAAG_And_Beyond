@@ -106,6 +106,7 @@ class PfmeaStoreTests(unittest.TestCase):
                 "pfmea_pattern_actions",
                 "pfmea_pattern_prevention_sources",
                 "pfmea_pattern_detection_sources",
+                "pfmea_assignees",
             },
         )
 
@@ -369,9 +370,9 @@ class PfmeaStoreTests(unittest.TestCase):
         self.assertFalse(bool(reviewed["upstream_changes"]))
         self.assertEqual(reviewed["process_pitch_snapshot"], "ST-020")
 
-    def test_quality_push_flags_structured_control_without_changing_selection(self) -> None:
+    def test_quality_requirement_cannot_be_selected_as_pfmea_control(self) -> None:
         entry_id = self.create_entry()
-        cause_id = pfmea_store.save_pfmea_cause_rows(
+        pfmea_store.save_pfmea_cause_rows(
             self.project_id,
             self.scenario_id,
             entry_id,
@@ -380,39 +381,12 @@ class PfmeaStoreTests(unittest.TestCase):
         )["created_ids"][0]
         flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
         flat.at[0, "prevention_controls"] = [f"quality:{self.assignment_id}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
-        self.assertEqual(
-            self.conn.execute(
-                "SELECT COUNT(*) FROM quality_requirement_assignments WHERE id=?",
-                (self.assignment_id,),
-            ).fetchone()[0],
-            1,
-        )
-        requirement_id = self.conn.execute(
-            "SELECT quality_requirement_id FROM quality_requirement_assignments WHERE id=?",
-            (self.assignment_id,),
-        ).fetchone()[0]
-        quality_store.save_quality_requirement(
-            self.project_id,
-            {
-                "requirement_type": "Torque",
-                "description": "Updated repository requirement",
-                "unique_identifier": "TQ-001",
-                "pass_fail": False,
-                "target_value": 35,
-                "tolerances": "+/- 3",
-                "unit": "N·m",
-            },
-            requirement_id,
-        )
-        quality_store.push_quality_requirements(self.project_id, [requirement_id])
-        cause = pfmea_store.pfmea_causes(
-            self.project_id, self.scenario_id, entry_id
-        ).iloc[0]
-        self.assertTrue(bool(cause["control_source_review_required"]))
-        selections = pfmea_store.pfmea_control_selections(self.project_id, self.scenario_id)
-        self.assertEqual(selections.iloc[0]["source_key"], f"quality:{self.assignment_id}")
-        self.assertTrue(bool(selections.iloc[0]["review_required"]))
+        with self.assertRaisesRegex(ValueError, "cannot be selected as Prevention controls in PFMEA"):
+            pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
+        flat.at[0, "prevention_controls"] = []
+        flat.at[0, "detection_controls"] = [f"quality:{self.assignment_id}"]
+        with self.assertRaisesRegex(ValueError, "cannot be selected as Detection controls in PFMEA"):
+            pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
 
     def test_action_resulting_rpn_is_calculated_and_saved(self) -> None:
         entry_id = self.create_entry()
@@ -912,20 +886,19 @@ class PfmeaStoreTests(unittest.TestCase):
             0,
         )
 
-    def test_process_step_deletion_is_restricted_until_pfmea_is_removed(self) -> None:
+    def test_process_step_deletion_unlinks_pfmea_entries(self) -> None:
         entry_id = self.create_entry()
         steps = store.project_table(
             "work_elements", self.project_id, "sequence", scenario_id=self.scenario_id
         ).iloc[0:0]
-        with self.assertRaisesRegex(ValueError, "linked PFMEA entries"):
-            store.replace_work_elements(self.project_id, self.scenario_id, steps)
-        pfmea_store.delete_pfmea_records(
-            self.project_id, self.scenario_id, "pfmea_entries", [entry_id]
-        )
         store.replace_work_elements(self.project_id, self.scenario_id, steps)
         self.assertEqual(len(store.project_table(
             "work_elements", self.project_id, "sequence", scenario_id=self.scenario_id
         )), 0)
+        entry = self.conn.execute(
+            "SELECT work_element_id FROM pfmea_entries WHERE id=?", (entry_id,)
+        ).fetchone()
+        self.assertIsNone(entry["work_element_id"])
 
     def test_confirmed_multi_entry_delete_cascades_pfmea_only(self) -> None:
         work_element_count = self.conn.execute(
@@ -1141,28 +1114,80 @@ class PfmeaStoreTests(unittest.TestCase):
         cause = pfmea_store.pfmea_causes(self.project_id, self.scenario_id, entry_id).iloc[0]
         self.assertTrue(bool(cause["control_source_review_required"]))
 
-    def test_quality_source_can_be_in_both_lists_but_not_duplicated_within_one(self) -> None:
+    def test_sequential_add_control_options_succeeds_without_deletion_error(self) -> None:
+        first_id = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Prevention", "First option"
+        )
+        self.assertTrue(first_id)
+        # Adding a second option when one already exists must succeed and not raise
+        # "Remove Prevention options through the confirmed deletion workflow."
+        second_id = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Prevention", "Add alignment feature for wheel installation"
+        )
+        self.assertTrue(second_id)
+        self.assertNotEqual(first_id, second_id)
+
+        # Adding a detection option sequentially
+        det_1 = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Detection", "Vision inspection camera"
+        )
+        det_2 = pfmea_store.add_pfmea_control_option(
+            self.project_id, "Detection", "Laser height verification"
+        )
+        self.assertTrue(det_1)
+        self.assertTrue(det_2)
+
+        prev_opts = pfmea_store.pfmea_control_options(self.project_id, "Prevention")
+        self.assertEqual(len(prev_opts), 2)
+        det_opts = pfmea_store.pfmea_control_options(self.project_id, "Detection")
+        self.assertEqual(len(det_opts), 2)
+
+        # Casefold duplicate check
+        with self.assertRaisesRegex(ValueError, "unique"):
+            pfmea_store.add_pfmea_control_option(
+                self.project_id, "Prevention", "first OPTION"
+            )
+
+        # Unconfirmed deletion in full save is still prevented
+        with self.assertRaisesRegex(ValueError, "confirmed deletion workflow"):
+            pfmea_store.save_pfmea_control_option_rows(
+                self.project_id,
+                "Prevention",
+                pd.DataFrame([{"id": first_id, "label": "First option", "active": True}]),
+                allow_partial=False,
+            )
+
+    def test_manual_source_can_be_in_both_lists_but_not_duplicated_within_one(self) -> None:
         entry_id = self.create_entry()
         pfmea_store.save_pfmea_cause_rows(
             self.project_id, self.scenario_id, entry_id,
             pd.DataFrame([{"id": "", "cause_description": "Low torque", "sequence": 10}]),
         )
+        prev_option_id = pfmea_store.save_pfmea_control_option_rows(
+            self.project_id, "Prevention",
+            pd.DataFrame([{"id": "", "label": "Torque limiter", "active": True}]),
+        )["created_ids"][0]
+        det_option_id = pfmea_store.save_pfmea_control_option_rows(
+            self.project_id, "Detection",
+            pd.DataFrame([{"id": "", "label": "Torque limiter check", "active": True}]),
+        )["created_ids"][0]
         flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        source = f"quality:{self.assignment_id}"
-        flat.at[0, "prevention_controls"] = [source]
-        flat.at[0, "detection_controls"] = [source]
+        prev_source = f"manual:{prev_option_id}"
+        det_source = f"manual:{det_option_id}"
+        flat.at[0, "prevention_controls"] = [prev_source]
+        flat.at[0, "detection_controls"] = [det_source]
         pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         selections = pfmea_store.pfmea_control_selections(self.project_id, self.scenario_id)
         self.assertEqual(set(selections["control_type"]), {"Prevention", "Detection"})
         flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "prevention_controls"] = [source, source]
+        flat.at[0, "prevention_controls"] = [prev_source, prev_source]
         with self.assertRaisesRegex(ValueError, "Duplicate Prevention"):
             pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         self.assertEqual(len(pfmea_store.pfmea_control_selections(
             self.project_id, self.scenario_id
         )), 2)
 
-    def test_control_candidates_are_limited_to_the_pfmea_process_step(self) -> None:
+    def test_control_candidates_exclude_quality_requirements(self) -> None:
         timestamp = store.now_iso()
         with store.connection() as conn:
             conn.execute(
@@ -1181,6 +1206,11 @@ class PfmeaStoreTests(unittest.TestCase):
         other_assignment = quality_store.assign_quality_requirement(
             self.project_id, self.scenario_id, "other-step", requirement_id
         )
+        option_id = pfmea_store.save_pfmea_control_option_rows(
+            self.project_id,
+            "Prevention",
+            pd.DataFrame([{"id": "", "label": "Torque checker", "active": True}]),
+        )["created_ids"][0]
         current = pfmea_store.pfmea_control_candidates(
             self.project_id, self.scenario_id, self.work_element_id, "Prevention",
             include_source_keys=[f"quality:{self.assignment_id}"]
@@ -1189,9 +1219,9 @@ class PfmeaStoreTests(unittest.TestCase):
             self.project_id, self.scenario_id, "other-step", "Prevention",
             include_source_keys=[f"quality:{other_assignment}"]
         )
-        self.assertIn(f"quality:{self.assignment_id}", set(current["source_key"]))
-        self.assertNotIn(f"quality:{other_assignment}", set(current["source_key"]))
-        self.assertIn(f"quality:{other_assignment}", set(other["source_key"]))
+        self.assertIn(f"manual:{option_id}", set(current["source_key"]))
+        self.assertNotIn(f"quality:{self.assignment_id}", set(current["source_key"]))
+        self.assertNotIn(f"quality:{other_assignment}", set(other["source_key"]))
 
     def test_invalid_cross_step_control_selection_rolls_back_atomically(self) -> None:
         entry_id = self.create_entry()
@@ -1220,45 +1250,41 @@ class PfmeaStoreTests(unittest.TestCase):
         flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
         flat.loc[0, "occurrence"] = 7
         flat.at[0, "prevention_controls"] = [f"quality:{wrong_assignment}"]
-        with self.assertRaisesRegex(ValueError, "not linked to this Process Function"):
+        with self.assertRaisesRegex(ValueError, "cannot be selected as Prevention controls in PFMEA"):
             pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         reloaded = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id).iloc[0]
         self.assertEqual(reloaded["occurrence"], 2)
         self.assertEqual(reloaded["prevention_controls"], [])
 
-    def test_quality_unlink_cascades_only_dependent_selections_and_flags_cause(self) -> None:
+    def test_quality_unlink_has_zero_pfmea_control_impact(self) -> None:
         entry_id = self.create_entry()
         pfmea_store.save_pfmea_cause_rows(
             self.project_id, self.scenario_id, entry_id,
             pd.DataFrame([{"id": "", "cause_description": "Low torque", "detection": 4, "sequence": 10}]),
         )
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "detection_controls"] = [f"quality:{self.assignment_id}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         impact = quality_store.quality_assignment_pfmea_impact(
             self.project_id, self.scenario_id, [self.assignment_id]
         )
-        self.assertEqual(impact["detection_count"], 1)
+        self.assertEqual(impact["selection_count"], 0)
+        self.assertEqual(impact["prevention_count"], 0)
+        self.assertEqual(impact["detection_count"], 0)
         quality_store.delete_quality_requirement_assignments(
             self.project_id, self.scenario_id, [self.assignment_id]
         )
         self.assertTrue(pfmea_store.pfmea_control_selections(
             self.project_id, self.scenario_id
         ).empty)
-        cause = pfmea_store.pfmea_causes(self.project_id, self.scenario_id, entry_id).iloc[0]
-        self.assertEqual(cause["detection"], 4)
-        self.assertTrue(bool(cause["control_source_review_required"]))
-        self.assertTrue(bool(cause["detection_review_required"]))
 
-    def test_draft_blank_cause_preserves_control_order_and_clone_remaps_quality(self) -> None:
+    def test_draft_blank_cause_preserves_control_order_and_scenario_clone(self) -> None:
         option_ids = pfmea_store.save_pfmea_control_option_rows(
             self.project_id, "Prevention",
             pd.DataFrame([
                 {"id": "", "label": "First manual control", "active": True},
                 {"id": "", "label": "Second manual control", "active": True},
+                {"id": "", "label": "Third manual control", "active": True},
             ]),
         )["created_ids"]
-        ordered = [f"manual:{option_ids[1]}", f"quality:{self.assignment_id}", f"manual:{option_ids[0]}"]
+        ordered = [f"manual:{option_ids[1]}", f"manual:{option_ids[2]}", f"manual:{option_ids[0]}"]
         pfmea_store.save_pfmea_flat_rows(
             self.project_id, self.scenario_id,
             pd.DataFrame([{
@@ -1280,11 +1306,7 @@ class PfmeaStoreTests(unittest.TestCase):
         cloned = pfmea_store.pfmea_control_selections(self.project_id, cloned_scenario)
         self.assertEqual(len(cloned), 3)
         self.assertTrue(old_selection_ids.isdisjoint(set(cloned["id"].astype(str))))
-        cloned_quality = cloned.loc[cloned["source_type"].eq("quality_assignment")].iloc[0]
-        self.assertNotEqual(cloned_quality["source_key"], f"quality:{self.assignment_id}")
-        self.assertEqual(cloned.sort_values("sequence")["source_type"].tolist(), [
-            "manual_option", "quality_assignment", "manual_option"
-        ])
+        self.assertEqual(cloned.sort_values("sequence")["source_key"].tolist(), ordered)
 
     def test_multiline_pfmea_text_is_preserved(self) -> None:
         entry_id = pfmea_store.save_pfmea_entry_rows(
@@ -1330,10 +1352,20 @@ class PfmeaStoreTests(unittest.TestCase):
         self.assertEqual(saved["actions_taken"], "Sensor added\nLogic validated")
 
     def test_forced_duplicate_creates_an_independent_graph_and_control_selections(self) -> None:
-        manual_option_id = pfmea_store.save_pfmea_control_option_rows(
+        prevention_ids = pfmea_store.save_pfmea_control_option_rows(
             self.project_id,
             "Prevention",
-            pd.DataFrame([{"id": "", "label": "Fixture interlock", "active": True}]),
+            pd.DataFrame([
+                {"id": "", "label": "Fixture interlock", "active": True},
+                {"id": "", "label": "Torque shutoff", "active": True},
+            ]),
+        )["created_ids"]
+        manual_option_id = prevention_ids[0]
+        second_prevention_id = prevention_ids[1]
+        detection_option_id = pfmea_store.save_pfmea_control_option_rows(
+            self.project_id,
+            "Detection",
+            pd.DataFrame([{"id": "", "label": "Camera inspection", "active": True}]),
         )["created_ids"][0]
         original = pd.DataFrame(
             [{
@@ -1348,10 +1380,10 @@ class PfmeaStoreTests(unittest.TestCase):
                 "occurrence": 3,
                 "detection": 4,
                 "prevention_controls": [
-                    f"quality:{self.assignment_id}",
+                    f"manual:{second_prevention_id}",
                     f"manual:{manual_option_id}",
                 ],
-                "detection_controls": [f"quality:{self.assignment_id}"],
+                "detection_controls": [f"manual:{detection_option_id}"],
                 "recommended_action": "Add rundown monitor",
                 "responsibility_target": "AQE | 2026-10-01",
             }]
@@ -1389,16 +1421,59 @@ class PfmeaStoreTests(unittest.TestCase):
         self.assertEqual(len(selections), 6)
         self.assertEqual(len(set(selections["id"].astype(str))), 6)
         self.assertEqual(
-            set(selections.loc[
-                selections["source_type"].eq("quality_assignment"),
-                "quality_requirement_assignment_id",
-            ].astype(str)),
-            {self.assignment_id},
+            set(selections["source_type"]),
+            {"manual_option"},
+        )
+        self.assertEqual(
+            set(selections["source_id"].dropna().astype(str)),
+            {manual_option_id, second_prevention_id, detection_option_id},
         )
         source_links = self.conn.execute(
             "SELECT source_pfmea_entry_id FROM pfmea_entries ORDER BY created_at, id"
         ).fetchall()
         self.assertTrue(all(row[0] is None for row in source_links))
+
+    def test_init_pfmea_db_purges_legacy_quality_controls(self) -> None:
+        entry_id = self.create_entry()
+        cause_id = pfmea_store.save_pfmea_cause_rows(
+            self.project_id,
+            self.scenario_id,
+            entry_id,
+            pd.DataFrame([{"id": "", "cause_description": "Legacy cause", "occurrence": 3, "sequence": 10}]),
+        )["created_ids"][0]
+        timestamp = store.now_iso()
+        self.conn.execute(
+            """INSERT INTO pfmea_prevention_selections
+               (id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id, source_type,
+                quality_requirement_assignment_id, source_updated_at_snapshot, sequence, created_at, updated_at)
+               VALUES ('prev-legacy', ?, ?, ?, ?, 'quality_assignment', ?, ?, 10, ?, ?)""",
+            (self.project_id, self.scenario_id, entry_id, cause_id, self.assignment_id, timestamp, timestamp, timestamp),
+        )
+        self.conn.execute(
+            """INSERT INTO pfmea_detection_selections
+               (id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id, source_type,
+                quality_requirement_assignment_id, source_updated_at_snapshot, sequence, created_at, updated_at)
+               VALUES ('det-legacy', ?, ?, ?, ?, 'quality_assignment', ?, ?, 10, ?, ?)""",
+            (self.project_id, self.scenario_id, entry_id, cause_id, self.assignment_id, timestamp, timestamp, timestamp),
+        )
+        self.conn.commit()
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM pfmea_prevention_selections WHERE id='prev-legacy'").fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM pfmea_detection_selections WHERE id='det-legacy'").fetchone()[0],
+            1,
+        )
+        pfmea_store.init_pfmea_schema(self.conn)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM pfmea_prevention_selections WHERE id='prev-legacy'").fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM pfmea_detection_selections WHERE id='det-legacy'").fetchone()[0],
+            0,
+        )
 
     def test_unknown_forced_duplicate_id_fails_without_writing(self) -> None:
         rows = pd.DataFrame(
@@ -1420,6 +1495,166 @@ class PfmeaStoreTests(unittest.TestCase):
             self.conn.execute("SELECT COUNT(*) FROM pfmea_entries").fetchone()[0], 0
         )
 
+    def test_upstream_modified_pfmea_entries_and_sync(self) -> None:
+        entry_id = self.create_entry()
+        self.assertEqual(
+            pfmea_store.upstream_modified_pfmea_entries(self.project_id, self.scenario_id),
+            [],
+        )
+
+        with store.connection() as conn:
+            conn.execute(
+                """UPDATE work_elements
+                   SET operation='Fasten bracket screw', station='ST-050', description='Updated desc'
+                   WHERE id=?""",
+                (self.work_element_id,),
+            )
+
+        modified = pfmea_store.upstream_modified_pfmea_entries(self.project_id, self.scenario_id)
+        self.assertEqual(len(modified), 1)
+        item = modified[0]
+        self.assertEqual(item["entry_id"], entry_id)
+        self.assertEqual(item["snapshot_operation"], "Install screw")
+        self.assertEqual(item["live_operation"], "Fasten bracket screw")
+        self.assertEqual(item["live_pitch"], "ST-050")
+        field_names = [c["field"] for c in item["changes"]]
+        self.assertIn("operation", field_names)
+        self.assertIn("station_pitch", field_names)
+        self.assertIn("description", field_names)
+
+        result = pfmea_store.bulk_review_pfmea_sources(
+            self.project_id, self.scenario_id, [entry_id], editor_name="QA Engineer"
+        )
+        self.assertEqual(result["row_count"], 1)
+
+        self.assertEqual(
+            pfmea_store.upstream_modified_pfmea_entries(self.project_id, self.scenario_id),
+            [],
+        )
+
+    def test_reassign_pfmea_entry(self) -> None:
+        timestamp = store.now_iso()
+        target_step_id = "target-step-pfmea"
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, description, updated_at)
+                   VALUES (?, ?, ?, 20, 'ST-020', 'Torque bolt', 'Target step description', ?)""",
+                (target_step_id, self.project_id, self.scenario_id, timestamp),
+            )
+        entry_id = self.create_entry()
+
+        res = pfmea_store.reassign_pfmea_entry(
+            self.project_id, self.scenario_id, entry_id, target_step_id, editor_name="QA Engineer"
+        )
+        self.assertEqual(res["entry_id"], entry_id)
+        self.assertEqual(res["target_work_element_id"], target_step_id)
+
+        with store.connection() as conn:
+            row = dict(conn.execute(
+                "SELECT * FROM pfmea_entries WHERE id=?", (entry_id,)
+            ).fetchone())
+        self.assertEqual(row["work_element_id"], target_step_id)
+        self.assertEqual(row["process_operation_snapshot"], "Torque bolt")
+        self.assertEqual(row["process_pitch_snapshot"], "ST-020")
+        self.assertEqual(row["process_description_snapshot"], "Target step description")
+
+    def test_decoupled_responsibility_and_target_date(self) -> None:
+        self.create_entry()
+        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
+        self.assertIn("responsibility", flat.columns)
+        self.assertIn("target_completion_date", flat.columns)
+        self.assertIn("responsibility_target", flat.columns)
+
+        # Update using decoupled columns
+        flat.loc[0, "potential_effects"] = "Bracket separates"
+        flat.loc[0, "severity"] = 8
+        flat.loc[0, "potential_causes"] = "Wrong setup"
+        flat.loc[0, "occurrence"] = 3
+        flat.loc[0, "recommended_action"] = "Add setup verification"
+        flat.loc[0, "responsibility"] = "Jane Doe"
+        flat.loc[0, "target_completion_date"] = "2026-11-15"
+        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
+
+        reloaded = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
+        self.assertEqual(reloaded.loc[0, "responsibility"], "Jane Doe")
+        self.assertEqual(reloaded.loc[0, "target_completion_date"], "2026-11-15")
+        self.assertEqual(reloaded.loc[0, "responsibility_target"], "Jane Doe | 2026-11-15")
+
+        # Test options harvester
+        options = pfmea_store.pfmea_known_responsibilities(self.project_id)
+        self.assertIn("Jane Doe", options)
+        self.assertIn("Quality Engineer", options)
+
+    def test_export_pfmea_to_company_template_and_export_workbook(self) -> None:
+        import io
+        import openpyxl
+        from utils.excel_io import export_pfmea_to_company_template, export_workbook
+
+        self.create_entry()
+        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
+        flat.loc[0, "responsibility"] = "John Smith"
+        flat.loc[0, "target_completion_date"] = "2026-12-01"
+        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
+
+        excel_bytes = export_pfmea_to_company_template(
+            self.project_id, self.scenario_id, prepared_by="Lead Engineer"
+        )
+        self.assertGreater(len(excel_bytes), 1000)
+
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+        self.assertIn("PFMEA-A", wb.sheetnames)
+        ws = wb["PFMEA-A"]
+        self.assertEqual(ws["O8"].value, "Lead Engineer")
+        self.assertEqual(ws.cell(21, 14).value, "John Smith | 2026-12-01")
+        self.assertIn("E21*H21*K21", str(ws.cell(21, 12).value))
+
+        # Test project export workbook
+        wb_bytes = export_workbook(self.project_id, self.scenario_id)
+        proj_wb = openpyxl.load_workbook(io.BytesIO(wb_bytes))
+        self.assertIn("PFMEA", proj_wb.sheetnames)
+        pfmea_ws = proj_wb["PFMEA"]
+        headers = [c.value for c in pfmea_ws[1]]
+        self.assertIn("Responsibility & Target Completion Date", headers)
+
+    def test_manage_pfmea_assignees_and_deactivation(self) -> None:
+        self.create_entry()
+        # Add new assignee explicitly
+        pfmea_store.add_pfmea_assignee(self.project_id, "Alice Smith")
+        options = pfmea_store.pfmea_known_responsibilities(self.project_id)
+        self.assertIn("Alice Smith", options)
+
+        # Assign task to Alice
+        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
+        flat.loc[0, "responsibility"] = "Alice Smith"
+        flat.loc[0, "target_completion_date"] = "2026-11-20"
+        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
+
+        self.assertEqual(pfmea_store.pfmea_assignee_usage(self.project_id, "Alice Smith"), 1)
+
+        # Deactivate Alice
+        pfmea_store.set_pfmea_assignee_active(self.project_id, "Alice Smith", active=False)
+        active_options = pfmea_store.pfmea_known_responsibilities(self.project_id)
+        self.assertNotIn("Alice Smith", active_options)
+
+        inactive_list = pfmea_store.pfmea_inactive_assignees(self.project_id)
+        self.assertIn("Alice Smith", inactive_list)
+
+        # Historical row still preserves Alice's name in database
+        reloaded = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
+        self.assertEqual(reloaded.loc[0, "responsibility"], "Alice Smith")
+
+        # Reassign tasks from Alice to Bob
+        pfmea_store.add_pfmea_assignee(self.project_id, "Bob Jones")
+        reassigned_count = pfmea_store.reassign_pfmea_actions(self.project_id, "Alice Smith", "Bob Jones")
+        self.assertEqual(reassigned_count, 1)
+
+        reloaded_after_reassign = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
+        self.assertEqual(reloaded_after_reassign.loc[0, "responsibility"], "Bob Jones")
+        self.assertEqual(pfmea_store.pfmea_assignee_usage(self.project_id, "Alice Smith"), 0)
+        self.assertEqual(pfmea_store.pfmea_assignee_usage(self.project_id, "Bob Jones"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

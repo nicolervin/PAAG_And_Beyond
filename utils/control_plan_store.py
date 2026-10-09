@@ -192,24 +192,31 @@ def init_control_plan_schema(conn: sqlite3.Connection) -> None:
             catalog_fk = True
             break
     if catalog_fk:
-        conn.executescript(
-            """
-            CREATE TABLE control_method_catalog_new (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL DEFAULT 'GLOBAL',
-                name TEXT NOT NULL COLLATE NOCASE,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(project_id, name)
-            );
-            INSERT INTO control_method_catalog_new (id, project_id, name, created_at, updated_at)
-            SELECT id, project_id, name, created_at, updated_at FROM control_method_catalog;
-            DROP TABLE control_method_catalog;
-            ALTER TABLE control_method_catalog_new RENAME TO control_method_catalog;
-            CREATE INDEX IF NOT EXISTS idx_control_method_catalog_project
-                ON control_method_catalog(project_id, name);
-            """
-        )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE control_method_catalog_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL DEFAULT 'GLOBAL',
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, name)
+                );
+                INSERT INTO control_method_catalog_new (id, project_id, name, created_at, updated_at)
+                SELECT id, project_id, name, created_at, updated_at FROM control_method_catalog;
+                DROP TABLE control_method_catalog;
+                ALTER TABLE control_method_catalog_new RENAME TO control_method_catalog;
+                CREATE INDEX IF NOT EXISTS idx_control_method_catalog_project
+                    ON control_method_catalog(project_id, name);
+                """
+            )
+        finally:
+            conn.execute("PRAGMA legacy_alter_table = OFF")
+            conn.execute("PRAGMA foreign_keys = ON")
     has_seeded = conn.execute(
         "SELECT 1 FROM control_method_catalog WHERE id='__seeded_defaults__' OR name='__seeded_defaults__' LIMIT 1"
     ).fetchone()
@@ -558,25 +565,6 @@ def _validate_context(conn: sqlite3.Connection, project_id: str, scenario_id: st
 
 
 def _quality_sources(conn: sqlite3.Connection, project_id: str, scenario_id: str) -> list[dict]:
-    pfmea_selected_map: dict[str, list[str]] = {}
-    unions: list[str] = []
-    for table in ("pfmea_prevention_selections", "pfmea_detection_selections"):
-        if _table_exists(conn, table):
-            unions.append(
-                f"SELECT pfmea_entry_id, quality_requirement_assignment_id FROM {table} "
-                "WHERE project_id=? AND scenario_id=? AND source_type='quality_assignment'"
-            )
-    if unions:
-        params: list[str] = []
-        for _ in unions:
-            params.extend([project_id, scenario_id])
-        sel_rows = conn.execute(
-            f"SELECT DISTINCT pfmea_entry_id, quality_requirement_assignment_id FROM ({' UNION ALL '.join(unions)})",
-            params,
-        ).fetchall()
-        for row in sel_rows:
-            pfmea_selected_map.setdefault(str(row["quality_requirement_assignment_id"]), []).append(str(row["pfmea_entry_id"]))
-
     first_entry_by_work: dict[str, str] = {}
     entry_rows = conn.execute(
         """SELECT id, work_element_id FROM pfmea_entries
@@ -608,21 +596,16 @@ def _quality_sources(conn: sqlite3.Connection, project_id: str, scenario_id: str
         assignment_id = str(a_dict["assignment_id"])
         work_id = str(a_dict["work_element_id"])
 
-        target_entry_ids = pfmea_selected_map.get(assignment_id)
-        if not target_entry_ids:
-            first_entry_id = first_entry_by_work.get(work_id)
-            target_entry_ids = [first_entry_id] if first_entry_id else []
-
-        for entry_id in target_entry_ids:
-            if not entry_id:
-                continue
-            pair = (entry_id, assignment_id)
-            if pair in seen_entry_assignment:
-                continue
-            seen_entry_assignment.add(pair)
-            item = dict(a_dict)
-            item["pfmea_entry_id"] = entry_id
-            result.append(item)
+        entry_id = first_entry_by_work.get(work_id)
+        if not entry_id:
+            continue
+        pair = (entry_id, assignment_id)
+        if pair in seen_entry_assignment:
+            continue
+        seen_entry_assignment.add(pair)
+        item = dict(a_dict)
+        item["pfmea_entry_id"] = entry_id
+        result.append(item)
 
     return result
 
@@ -1786,20 +1769,6 @@ def relink_control_plan_item(
         expected_quality_id = _text(item["source_quality_requirement_id_snapshot"])
         if expected_quality_id != str(assignment["quality_requirement_id"]):
             raise ValueError("The replacement assignment must use the same Quality definition.")
-        selected_as_control = any(
-            conn.execute(
-                f"""SELECT 1 FROM {table}
-                    WHERE project_id=? AND scenario_id=? AND pfmea_entry_id=?
-                      AND quality_requirement_assignment_id=?""",
-                (project_id, scenario_id, item["pfmea_entry_id"], assignment_id),
-            ).fetchone()
-            for table in ("pfmea_prevention_selections", "pfmea_detection_selections")
-        )
-        if not selected_as_control:
-            raise ValueError(
-                "Select this Quality assignment as a Prevention or Detection control in "
-                "the PFMEA entry before relinking it to the Control Plan item."
-            )
         conn.execute(
             """UPDATE control_plan_items SET quality_requirement_assignment_id=?,
                quality_requirement_id=?, source_unique_identifier_snapshot=?,

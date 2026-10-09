@@ -37,6 +37,7 @@ from utils.store import (
     safety_requirement_delete_impact,
     validate_process_part_option_pairings,
     work_element_op_ids,
+    work_element_downstream_impact,
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
     yamazumi_pitches_for_scenario,
@@ -46,6 +47,7 @@ from utils.store import (
     update_pitch_visual_media,
     update_pitch_visual_annotations,
 )
+from utils.process_flow_visual import render_process_flow_diagram
 from utils.equipment_store import (
     equipment_assets,
     equipment_types,
@@ -1050,7 +1052,9 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
 
 
 
-tab_plan, tab_slides = st.tabs(["Process plan", "PAAG slides"])
+tab_plan, tab_flow, tab_slides = st.tabs(
+    ["Process plan", "Process Flow Diagram", "PAAG slides"]
+)
 
 with tab_plan:
     st.subheader("Create PAAG Elements")
@@ -2648,16 +2652,24 @@ with tab_plan:
                     for label in (assigned or ["All models"])
                 )
             )
+            impact = work_element_downstream_impact(project_id, scenario_id, list(selected_ids))
             replace_work_elements(project_id, scenario_id, updated)
             record_audit_event(
                 project_id,
                 "Process plan",
-                "Bulk edit",
+                "Apply pitch bulk update",
                 len(selected_ids),
                 st.session_state.get("current_editor", ""),
                 {"scenario_id": scenario_id, "pitch": bulk_station},
             )
             request_table_editor_reset(process_editor_key)
+            if impact.get("quality_count", 0) > 0 or impact.get("pfmea_count", 0) > 0:
+                st.toast(
+                    f"Pitch updated. {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) will be flagged as upstream changes in Quality.",
+                    icon=":material/info:",
+                )
+            else:
+                st.toast("Pitch updated", icon=":material/check_circle:")
             st.rerun()
 
     if request_bulk_delete:
@@ -2665,27 +2677,66 @@ with tab_plan:
         stage_native_delete_confirmation(process_editor_key)
 
 
-    @st.dialog("Delete Process at a Glance steps?", dismissible=False)
+    @st.dialog("Delete selected Process steps?", dismissible=False)
     def confirm_process_delete() -> None:
         pending_key = f"process_pending_delete_{scenario_id}"
         pending_ids = st.session_state.get(pending_key, [])
-        impact = safety_requirement_delete_impact(project_id, scenario_id, pending_ids)
-        warning = (
-            f"Delete {len(pending_ids)} Process step(s)? Their Part requirements will also be deleted."
-        )
-        if impact["requirement_count"]:
-            warning += (
-                f" This will also delete {impact['requirement_count']} linked Safety "
-                "requirement(s)."
-            )
-        st.warning(warning)
-        actions = st.container(horizontal=True)
-        if actions.button("Cancel", key=f"cancel_process_delete_{scenario_id}"):
+        if not pending_ids:
             st.session_state.pop(pending_key, None)
             request_table_editor_reset(process_editor_key)
             st.rerun()
+
+        impact = work_element_downstream_impact(project_id, scenario_id, pending_ids)
+        has_impact = impact["has_impact"]
+        count_steps = len(pending_ids)
+
+        st.markdown(
+            f"**Are you sure you want to delete {count_steps} Process step(s)?**"
+        )
+
+        if has_impact:
+            st.error(
+                "⚠️ **Downstream Engineering Data Impact Detected**\n\n"
+                "Industrial Engineers cannot directly delete Quality or PFMEA records. "
+                "Deleting these process steps will unlink downstream records and preserve their snapshots for "
+                "Quality Engineering review and reconciliation in the Quality workspace."
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Quality Requirements", impact["quality_count"])
+                st.metric("PFMEA Failure Modes", impact["pfmea_count"])
+            with col2:
+                st.metric("Equipment Links", impact["equipment_count"])
+                st.metric("Safety Requirements (Deleted)", impact["safety_count"])
+
+            if impact["operations_affected"]:
+                st.caption(f"Affected Operations: {', '.join(impact['operations_affected'])}")
+
+            ack = st.checkbox(
+                "I acknowledge that deleting these steps unlinks downstream Quality, PFMEA, and Equipment "
+                "records and notifies the Quality team for reconciliation.",
+                value=False,
+                key=f"ack_process_delete_{scenario_id}",
+            )
+            delete_label = "Delete steps & Notify Quality"
+            delete_disabled = not ack
+        else:
+            st.info("No downstream Quality requirements, PFMEA failure modes, or Equipment links are associated with these steps.")
+            delete_label = "Delete steps"
+            delete_disabled = False
+
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_process_delete_{scenario_id}"):
+            st.session_state.pop(pending_key, None)
+            st.session_state.pop(f"ack_process_delete_{scenario_id}", None)
+            request_table_editor_reset(process_editor_key)
+            st.rerun()
         if actions.button(
-            "Delete steps", type="primary", icon=":material/delete:",
+            delete_label,
+            type="primary",
+            icon=":material/delete:",
+            disabled=delete_disabled,
             key=f"destructive_confirm_process_delete_{scenario_id}",
         ):
             retained = elements.loc[~elements["id"].astype(str).isin(set(pending_ids))].copy()
@@ -2699,15 +2750,20 @@ with tab_plan:
             record_audit_event(
                 project_id,
                 "Process plan",
-                "Bulk delete" if len(pending_ids) > 1 else "Delete",
+                "Delete steps",
                 len(pending_ids),
                 st.session_state.get("current_editor", ""),
                 {
                     "scenario_id": scenario_id,
-                    "safety_requirements_deleted": impact["requirement_count"],
+                    "impact_quality_unlinked": impact["quality_count"],
+                    "impact_pfmea_unlinked": impact["pfmea_count"],
+                    "impact_equipment_unlinked": impact["equipment_count"],
+                    "impact_safety_deleted": impact["safety_count"],
+                    "affected_operations": impact["operations_affected"],
                 },
             )
             st.session_state.pop(pending_key, None)
+            st.session_state.pop(f"ack_process_delete_{scenario_id}", None)
             request_table_editor_reset(process_editor_key)
             st.rerun()
 
@@ -2733,6 +2789,19 @@ with tab_plan:
                     for label in (assigned or ["All models"])
                 )
             )
+            edited_raw = (st.session_state.get(process_editor_key, {}) or {}).get("edited_rows", {})
+            edited_indices = list(edited_raw.keys())
+            affected_ids = []
+            if edited_indices and not visible_elements.empty:
+                for idx in edited_indices:
+                    try:
+                        pos = int(idx)
+                        if 0 <= pos < len(visible_elements):
+                            affected_ids.append(str(visible_elements.iloc[pos]["id"]))
+                    except (ValueError, TypeError, IndexError):
+                        pass
+            impact = work_element_downstream_impact(project_id, scenario_id, affected_ids) if affected_ids else {"quality_count": 0, "pfmea_count": 0}
+
             replace_work_elements(project_id, scenario_id, combined_elements)
             record_audit_event(
                 project_id,
@@ -2743,7 +2812,13 @@ with tab_plan:
                 {"scenario_id": scenario_id},
             )
             request_table_editor_reset(process_editor_key)
-            st.toast("Process at a Glance saved", icon=":material/check_circle:")
+            if impact.get("quality_count", 0) > 0 or impact.get("pfmea_count", 0) > 0:
+                st.toast(
+                    f"Process saved. {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) will be flagged for review in Quality.",
+                    icon=":material/info:",
+                )
+            else:
+                st.toast("Process at a Glance saved", icon=":material/check_circle:")
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
@@ -2821,6 +2896,29 @@ with tab_plan:
     if st.session_state.get(pairing_delete_key):
         confirm_pairing_bulk_removal()
 
+
+with tab_flow:
+    flow_col1, flow_col2 = st.columns([3, 1], vertical_alignment="bottom")
+    with flow_col1:
+        st.caption(
+            "Visual left-to-right Process Flow Diagram mapped by Yamazumi pitch and sequence. "
+            "Click any operation box to view its full details and paired parts."
+        )
+    with flow_col2:
+        shape_choice = st.radio(
+            "Block Shapes",
+            options=["Functional Shapes", "Uniform Squares"],
+            horizontal=True,
+            key=f"pfd_shape_mode_{scenario_id}",
+            help="Choose whether operations display functional symbology (Diamond for CTQ/Safety, Rounded for feeder handoff) or uniform square outlines.",
+        )
+    shape_mode = "uniform" if shape_choice == "Uniform Squares" else "functional"
+    render_process_flow_diagram(
+        project_id,
+        scenario_id,
+        key=f"process_flow_map_{scenario_id}",
+        shape_mode=shape_mode,
+    )
 
 
 with tab_slides:

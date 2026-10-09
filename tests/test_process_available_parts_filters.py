@@ -175,7 +175,7 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
         nick_btn[0].click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
         self.assertTrue(
-            app.session_state.get(f"process_show_factory_nickname_{self.scenario_id}")
+            app.session_state.filtered_state.get(f"process_show_factory_nickname_{self.scenario_id}")
         )
 
         # Filter by Consumed -> Consumed
