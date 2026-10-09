@@ -558,7 +558,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("part-popover-bridge", html)
         self.assertIn("part-info-cue", html)
         self.assertIn("Open in Parts Catalog", html)
-        self.assertIn('href="./parts"', html)
+        self.assertIn('href="./parts?part_number=BRKT-001#part-details-section"', html)
         self.assertIn("<video class=\"visual-player\" controls", html)
         self.assertIn("Verify alignment before cycling", html)
         self.assertIn("caption-callout", html)
@@ -1318,8 +1318,94 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertEqual(len(scenario_all_after), 1)
         self.assertEqual(scenario_all_after[0]["handling_type"], "Consume")
 
+    def test_yamazumi_cycle_elements_on_pitch_are_green(self) -> None:
+        # Pitches were already populated with 6 elements defaulting to work_type='Cycle'
+        pitch_data = store.process_pitch_visual_summary(self.project_id, self.scenario_id, self.pitch_id)
+        stacks = pitch_data.get("yamazumi_stacks", {})
+        base_stack = stacks.get("Base", [])
+        self.assertGreaterEqual(len(base_stack), 1)
+        for elem in base_stack:
+            self.assertEqual(elem["motion_color"], "green")
+            self.assertEqual(elem["work_type"], "Cycle")
+
+        # Render pitch canvas and verify the rendered block is type-cycle and green
+        html = render_pitch_canvas(pitch_data, pitch_data.get("elements", []), scenario_name="Test")
+        self.assertIn("stack-block type-cycle motion-bar green", html)
+        self.assertNotIn("stack-block type-cycle motion-bar gray", html)
+        self.assertNotIn("stack-block type-cycle motion-bar orange", html)
+
+    def test_part_popover_open_in_parts_catalog_link(self) -> None:
+        part_data = {
+            "part_id": "test-uuid-1234",
+            "part_number": "BRKT-9999",
+            "part_name": "Test Bracket",
+        }
+        pitch_data = {
+            "pitch_id": "p1",
+            "parts": [part_data],
+        }
+        html = render_pitch_canvas(pitch_data, [], scenario_name="Test")
+        self.assertIn("Open in Parts Catalog", html)
+        self.assertIn('href="./parts?part_id=test-uuid-1234&part_number=BRKT-9999#part-details-section"', html)
+
+    def test_yamazumi_stack_scaling_prevents_cutoff_and_title_compact(self) -> None:
+        import re
+
+        # Pitch with 8 elements under takt (40s / takt 60s)
+        elements = [
+            {"id": f"e{i}", "yamazumi_description": f"Step {i}", "time_s": 5.0, "work_type": "Cycle"}
+            for i in range(1, 9)
+        ]
+        pitch_data = {
+            "pitch_id": "p_scale",
+            "scenario_takt_s": 60.0,
+            "yamazumi_stacks": {
+                "Base": {
+                    "total_time_s": 40.0,
+                    "elements": elements,
+                }
+            },
+        }
+        html = render_pitch_canvas(pitch_data, [], scenario_name="Test Plan")
+        self.assertIn("Yamazumi Pitch Stack", html)
+        self.assertIn("40s", html)
+        self.assertIn("Takt 60s", html)
+        self.assertIn("67% util", html)
+
+        # Extract all block heights in the rendered stack
+        block_heights = [int(m) for m in re.findall(r'class="stack-block[^"]*"[^>]*style="height:(\d+)px"', html)]
+        self.assertEqual(len(block_heights), 8)
+        # Verify the sum of all 8 blocks never exceeds the 175px track height
+        self.assertLessEqual(sum(block_heights), 175)
+
+        # Check no scrolling on parts panel and check bottom-left anchoring of stack-panel
+        self.assertIn(".parts-panel", html)
+        self.assertNotIn("parts-panel {\n        flex: 1 1 0;\n        overflow-y: auto;", html)
+        self.assertIn("margin-top: auto", html)
+
+        # Also test extreme element count (15 elements)
+        many_elements = [
+            {"id": f"m{i}", "yamazumi_description": f"Small step {i}", "time_s": 3.0, "work_type": "Cycle"}
+            for i in range(1, 16)
+        ]
+        pitch_data_many = {
+            "pitch_id": "p_many",
+            "scenario_takt_s": 60.0,
+            "yamazumi_stacks": {
+                "Base": {
+                    "total_time_s": 45.0,
+                    "elements": many_elements,
+                }
+            },
+        }
+        html_many = render_pitch_canvas(pitch_data_many, [], scenario_name="Test Plan")
+        many_heights = [int(m) for m in re.findall(r'class="stack-block[^"]*"[^>]*style="height:(\d+)px"', html_many)]
+        self.assertEqual(len(many_heights), 15)
+        self.assertLessEqual(sum(many_heights), 175)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

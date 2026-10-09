@@ -418,6 +418,52 @@ parts_saved_for_editing = parts_for_editing.copy()
 parts_full_for_editing = merge_parts_editor_draft(parts_saved_for_editing)
 has_parts_draft = bool(st.session_state.get(parts_draft_values_key, {}))
 parts_for_editing = parts_saved_for_editing
+selected_part_key = f"parts_selected_id_{project_id}"
+
+# Resolve query parameters if navigating from PAAG slide or external link
+qp_part_id = str(st.query_params.get("part_id") or "").strip()
+qp_part_number = str(st.query_params.get("part_number") or "").strip()
+if qp_part_id or qp_part_number:
+    matched_id = None
+    matched_pnum = None
+    if not parts.empty:
+        if qp_part_id:
+            m = parts.loc[parts["id"].astype(str) == qp_part_id]
+            if not m.empty:
+                matched_id = str(m.iloc[0]["id"])
+                matched_pnum = str(m.iloc[0]["part_number"] or "").strip()
+        if not matched_id and qp_part_number:
+            m = parts.loc[
+                parts["part_number"].astype(str).str.strip().str.casefold()
+                == qp_part_number.casefold()
+            ]
+            if not m.empty:
+                matched_id = str(m.iloc[0]["id"])
+                matched_pnum = str(m.iloc[0]["part_number"] or "").strip()
+
+    if matched_id:
+        st.session_state[selected_part_key] = matched_id
+        # Pre-fill keyword filter so the table displays this queried part
+        filter_kw = matched_pnum or qp_part_number
+        st.session_state["part_catalog_filters_keyword"] = filter_kw
+        # Clear conflicting dropdown filters so the part is guaranteed visible
+        for filter_column in [
+            "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
+            "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
+            "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
+            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "updated_at",
+        ]:
+            st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
+        st.session_state["parts_scroll_to_details"] = True
+
+    try:
+        if "part_id" in st.query_params:
+            del st.query_params["part_id"]
+        if "part_number" in st.query_params:
+            del st.query_params["part_number"]
+    except Exception:
+        pass
+
 with st.expander("Filter columns", icon=":material/filter_list:", expanded=True):
     parts_for_editing = filter_table(
         parts_for_editing,
@@ -472,13 +518,13 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.rerun()
-selected_part_key = f"parts_selected_id_{project_id}"
 
 
 def open_part_details() -> None:
     click = st.session_state.get("parts_view_details")
     if click and 0 <= click["row"] < len(parts_for_editing):
         st.session_state[selected_part_key] = str(parts_editor_rows.iloc[click["row"]]["id"])
+        st.session_state["parts_scroll_to_details"] = True
 
 
 parts_editor_rows = direct_entry_editor_rows(
@@ -968,7 +1014,33 @@ part_name = str(part.get("description") or "").strip()
 part_details_title = f"Part Details · {part['part_number']}"
 if part_name:
     part_details_title += f" {part_name}"
+st.html('<div id="part-details-section"></div>')
 st.subheader(part_details_title)
+if st.session_state.pop("parts_scroll_to_details", False):
+    st.html(
+        """<script>
+        function scrollToDetails() {
+            try {
+                const parentDoc = window.parent ? window.parent.document : document;
+                const elem = (parentDoc && parentDoc.getElementById('part-details-section')) || document.getElementById('part-details-section');
+                if (elem) {
+                    elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    return true;
+                }
+            } catch (e) {
+                const elem = document.getElementById('part-details-section');
+                if (elem) {
+                    elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    return true;
+                }
+            }
+            return false;
+        }
+        setTimeout(scrollToDetails, 150);
+        setTimeout(scrollToDetails, 450);
+        </script>""",
+        unsafe_allow_javascript=True,
+    )
 image_col, details_col = st.columns([2, 3])
 with image_col.container(border=True):
     st.subheader("Primary CAD image")

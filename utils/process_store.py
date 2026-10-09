@@ -2142,7 +2142,18 @@ def process_pitch_visual_summary(
     variant_stacks: dict[str, list[dict]] = {}
     for yel in yamazumi_pitch_elements:
         wid = str(yel["process_element_id"] or "")
-        m_class, m_color = card_motion_map.get(wid, ("Unclassified", "gray"))
+        w_type = str(yel["work_type"] or "Cycle").strip()
+        w_type_lower = w_type.lower()
+        if w_type_lower == "periodic":
+            m_class = "Periodic"
+            m_color = "orange"
+        elif w_type_lower == "fluctuation":
+            m_class = "Fluctuation"
+            m_color = "gray"
+        else:
+            # Cycle work on Yamazumi: keep it green, no orange or gray classifications
+            m_class = "Cycle"
+            m_color = "green"
         variants = parse_yamazumi_model_variants(yel["model_variants"], fallback="Base")
         item_data = {
             "id": yel["id"],
@@ -2153,7 +2164,7 @@ def process_pitch_visual_summary(
             "sequence": yel["sequence"],
             "motion_classification": m_class,
             "motion_color": m_color,
-            "work_type": yel["work_type"],
+            "work_type": w_type,
         }
         for v in variants:
             if v not in variant_stacks:

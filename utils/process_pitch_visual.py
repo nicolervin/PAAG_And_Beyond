@@ -6,6 +6,7 @@ import mimetypes
 from datetime import date
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import quote_plus
 
 
 ELEMENTS_PER_PAGE = 5
@@ -388,6 +389,16 @@ def _part_popover_content(part: dict) -> str:
         else ""
     )
 
+    p_id = str(part.get("part_id") or part.get("id") or "").strip()
+    raw_p_num = str(part.get("part_number") or "").strip()
+    url_params = []
+    if p_id:
+        url_params.append(f"part_id={quote_plus(p_id)}")
+    if raw_p_num and raw_p_num != "Part":
+        url_params.append(f"part_number={quote_plus(raw_p_num)}")
+    query_str = f"?{'&'.join(url_params)}" if url_params else ""
+    parts_catalog_url = f"./parts{query_str}#part-details-section"
+
     return f"""
     <div class="part-popover-card">
       <div class="part-popover-header">
@@ -410,7 +421,7 @@ def _part_popover_content(part: dict) -> str:
         {notes_html}
       </div>
       <div class="popover-footer">
-        <a href="./parts" target="_top" class="popover-action-link">Open in Parts Catalog ↗</a>
+        <a href="{parts_catalog_url}" target="_top" class="popover-action-link">Open in Parts Catalog ↗</a>
       </div>
     </div>
     """
@@ -486,15 +497,19 @@ def render_pitch_canvas(
             # Derive mini stack from elements
             stack_elements: list[dict] = []
             for el in elements_list:
-                color = str(el.get("motion_color") or "gray")
-                if color not in {"green", "orange", "gray"}:
-                    color = "gray"
+                w_type = str(el.get("work_type") or "").strip()
+                color = str(el.get("motion_color") or "").strip().lower()
+                if w_type.lower() == "cycle":
+                    color = "green"
+                elif not color or color not in {"green", "orange", "gray"}:
+                    color = "green" if not w_type or w_type.lower() == "cycle" else "gray"
                 stack_elements.append({
                     "id": el.get("work_element_id") or el.get("id"),
                     "description": el.get("yamazumi_description") or el.get("operation") or "",
                     "time_s": float(el.get("time_s") or 0.0),
                     "motion_color": color,
-                    "motion_classification": el.get("motion_classification") or "Unclassified",
+                    "motion_classification": el.get("motion_classification") or ("Cycle" if color == "green" else "Unclassified"),
+                    "work_type": w_type or ("Cycle" if color == "green" else ""),
                 })
             yamazumi_stacks = {"Base": stack_elements}
 
@@ -717,39 +732,79 @@ def render_pitch_canvas(
 
     # Chart height references
     ref_time = max(max_variant_time, eff_takt_s, 1.0)
-    chart_px_height = 130
+    chart_px_height = 175
 
     for v_name, v_data in yamazumi_stacks.items():
-        v_elements = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
-        v_total_s = sum(float(e.get("time_s") or 0.0) for e in v_elements if isinstance(e, dict))
+        v_elements = [
+            e for e in (v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else []))
+            if isinstance(e, dict)
+        ]
+        v_total_s = sum(float(e.get("time_s") or 0.0) for e in v_elements)
+        n_elems = len(v_elements)
+
+        # Properly scale element heights to ensure all blocks fit within chart_px_height without clipping
+        allocated_heights: list[int] = []
+        if n_elems > 0:
+            target_stack_h = (
+                int(round(chart_px_height * min(1.0, v_total_s / ref_time)))
+                if ref_time > 0 and v_total_s > 0
+                else min(chart_px_height, n_elems * 24)
+            )
+            target_stack_h = max(target_stack_h, n_elems * 8)
+            target_stack_h = min(target_stack_h, chart_px_height)
+
+            desired_min = 18
+            if n_elems * desired_min > target_stack_h:
+                desired_min = max(7, target_stack_h // n_elems)
+
+            raw_heights = [
+                chart_px_height * (float(e.get("time_s") or 0.0) / ref_time) if ref_time > 0 else (target_stack_h / n_elems)
+                for e in v_elements
+            ]
+            allocated_heights = [max(desired_min, int(round(h))) for h in raw_heights]
+            total_alloc = sum(allocated_heights)
+
+            if total_alloc > chart_px_height and total_alloc > 0:
+                scale_factor = chart_px_height / total_alloc
+                allocated_heights = [max(7, int(h * scale_factor)) for h in allocated_heights]
+                drift = chart_px_height - sum(allocated_heights)
+                if drift != 0 and allocated_heights:
+                    allocated_heights[-1] = max(7, allocated_heights[-1] + drift)
+            elif total_alloc > target_stack_h and target_stack_h >= n_elems * desired_min:
+                scale_factor = target_stack_h / total_alloc
+                allocated_heights = [max(desired_min, int(h * scale_factor)) for h in allocated_heights]
+
         blocks_html: list[str] = []
-        for e in v_elements:
-            if not isinstance(e, dict):
-                continue
+        for idx_e, e in enumerate(v_elements):
             e_desc = _text(e.get("description") or e.get("yamazumi_description") or "")
             e_time = float(e.get("time_s") or 0.0)
-            e_color = str(e.get("motion_color") or "gray")
-            if e_color not in {"green", "orange", "gray"}:
-                e_color = "gray"
-
             work_type = str(e.get("work_type") or "").strip()
             work_type_lower = work_type.lower()
             if work_type_lower == "periodic":
                 type_class = "type-periodic"
+                e_color = "orange"
             elif work_type_lower == "fluctuation":
                 type_class = "type-fluctuation"
+                e_color = "gray"
             elif work_type_lower == "cycle":
+                # Cycle work on Yamazumi: keep it green, no orange or gray classifications
                 type_class = "type-cycle"
+                e_color = "green"
             else:
+                e_color = str(e.get("motion_color") or "green").strip().lower()
+                if e_color not in {"green", "orange", "gray"}:
+                    e_color = "green"
                 if e_color == "green":
                     type_class = "type-cycle"
                 elif e_color == "orange":
                     type_class = "type-periodic"
+                elif e_color == "gray":
+                    type_class = "type-fluctuation"
                 else:
                     type_class = "type-cycle"
 
-            # Height in px proportional to time
-            b_height = max(20, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 22
+            b_height = allocated_heights[idx_e] if idx_e < len(allocated_heights) else (max(16, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 16)
+            compact_class = "compact" if b_height < 15 else ""
 
             e_wid = str(e.get("work_element_id") or e.get("process_element_id") or e.get("id") or "").strip()
             step_num = step_num_by_wid.get(e_wid, 0)
@@ -766,7 +821,7 @@ def render_pitch_canvas(
 
             blocks_html.append(
                 f"""
-                <div class="stack-block {type_class} motion-bar {e_color} {visual_class}" {step_attr} style="height:{b_height}px" title="{step_prefix}{e_desc} · {_clean_number(e_time)} s · {work_type or 'Cycle'}{media_info}">
+                <div class="stack-block {type_class} motion-bar {e_color} {visual_class} {compact_class}" {step_attr} style="height:{b_height}px" title="{step_prefix}{e_desc} · {_clean_number(e_time)} s · {work_type or 'Cycle'}{media_info}">
                   <div class="block-left">
                     {step_badge_html}
                     <span class="block-label">{e_desc}</span>
@@ -1021,18 +1076,19 @@ def render_pitch_canvas(
         box-sizing: border-box;
         width: 100%;
         max-width: 100%;
-        min-height: 640px;
-        padding: 14px 18px;
+        min-height: 680px;
+        height: auto;
+        padding: 10px 14px;
         border: 1px solid rgba(128,128,128,0.3);
         border-radius: 12px;
         background: #ffffff;
         color: #1a1f2c;
         display: flex;
         flex-direction: column;
-        gap: 10px;
+        gap: 8px;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         box-shadow: 0 4px 16px rgba(0,0,0,0.06);
-        overflow: hidden;
+        overflow: visible;
       }}
       .paag-slide.print-tabloid {{
         aspect-ratio: 17 / 11 !important;
@@ -1092,7 +1148,7 @@ def render_pitch_canvas(
         display: grid;
         grid-template-columns: 1.3fr 1.6fr 1.3fr;
         align-items: center;
-        padding-bottom: 8px;
+        padding-bottom: 5px;
         border-bottom: 2px solid #e2e8f0;
       }}
       .brand-title {{
@@ -1142,20 +1198,22 @@ def render_pitch_canvas(
         flex-direction: column;
         gap: 8px;
         min-height: 0;
+        height: 100%;
         overflow: visible;
       }}
       .right-col {{
         display: flex;
         flex-direction: column;
         min-height: 0;
-        overflow: hidden;
+        height: 100%;
+        overflow: visible;
       }}
       /* Left Column Subpanels */
       .panel-section {{
         border: 1px solid #e2e8f0;
         border-radius: 6px;
         background: #fdfdfe;
-        padding: 6px 10px;
+        padding: 4px 8px;
         display: flex;
         flex-direction: column;
         min-height: 0;
@@ -1164,11 +1222,11 @@ def render_pitch_canvas(
         display: flex;
         justify-content: space-between;
         align-items: center;
-        font-size: 0.82rem;
+        font-size: 0.78rem;
         font-weight: 800;
         text-transform: uppercase;
         color: #475569;
-        margin-bottom: 6px;
+        margin-bottom: 3px;
         letter-spacing: 0.03em;
       }}
       .page-badge {{
@@ -1182,9 +1240,9 @@ def render_pitch_canvas(
       .tools-list {{
         margin: 0;
         padding-left: 16px;
-        font-size: 0.8rem;
+        font-size: 0.78rem;
         color: #1e293b;
-        max-height: 70px;
+        max-height: 52px;
         overflow-y: auto;
       }}
       .tool-item {{
@@ -1203,26 +1261,25 @@ def render_pitch_canvas(
       }}
       /* Parts Table */
       .parts-panel {{
-        flex: 1 1 0;
+        flex: 0 0 auto;
         overflow: visible;
-        min-height: 120px;
       }}
       .parts-table {{
         width: 100%;
         border-collapse: collapse;
-        font-size: 0.78rem;
+        font-size: 0.76rem;
       }}
       .parts-table th {{
         text-align: left;
         background: #f1f5f9;
-        padding: 5px 6px;
+        padding: 3px 5px;
         color: #475569;
-        font-size: 0.72rem;
+        font-size: 0.70rem;
         font-weight: 700;
         border-bottom: 2px solid #e2e8f0;
       }}
       .parts-table td {{
-        padding: 4px 6px;
+        padding: 2px 5px;
         border-bottom: 1px solid #f1f5f9;
         vertical-align: middle;
       }}
@@ -1268,10 +1325,10 @@ def render_pitch_canvas(
         background: #0284c7;
         border-color: #0284c7;
       }}
-      .col-thumb {{ width: 54px; min-width: 54px; text-align: center; }}
+      .col-thumb {{ width: 44px; min-width: 44px; text-align: center; }}
       .part-thumb {{
-        width: 48px;
-        height: 42px;
+        width: 38px;
+        height: 32px;
         object-fit: contain;
         border-radius: 4px;
         background: #f8fafc;
@@ -1280,9 +1337,9 @@ def render_pitch_canvas(
         margin: 0 auto;
       }}
       .thumb-ph {{
-        width: 48px;
-        height: 42px;
-        line-height: 42px;
+        width: 38px;
+        height: 32px;
+        line-height: 32px;
         text-align: center;
         background: #f1f5f9;
         border: 1px dashed #cbd5e1;
@@ -1728,12 +1785,20 @@ def render_pitch_canvas(
       }}
       /* Mini Yamazumi Stack */
       .stack-panel {{
-        height: 180px;
+        margin-top: auto;
+        flex: 0 0 auto;
+        min-height: 230px;
+        padding: 6px 10px;
+        box-sizing: border-box;
+      }}
+      .stack-panel .panel-title-bar {{
+        margin-bottom: 4px;
+        font-size: 0.80rem;
       }}
       .yam-legend {{
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
         font-size: 0.68rem;
         font-weight: 700;
         text-transform: none;
@@ -1746,8 +1811,8 @@ def render_pitch_canvas(
       }}
       .swatch-mini {{
         display: inline-block;
-        width: 9px;
-        height: 9px;
+        width: 10px;
+        height: 10px;
         border-radius: 2px;
       }}
       .swatch-mini.cycle {{ background: #35c84a; }}
@@ -1756,8 +1821,9 @@ def render_pitch_canvas(
 
       .stacks-container {{
         display: flex;
-        gap: 10px;
-        height: 160px;
+        gap: 8px;
+        height: auto;
+        min-height: 195px;
         overflow-x: auto;
       }}
       .variant-stack-col {{
@@ -1765,19 +1831,20 @@ def render_pitch_canvas(
         min-width: 90px;
         display: flex;
         flex-direction: column;
+        justify-content: flex-end;
       }}
       .variant-header {{
-        font-size: 0.72rem;
+        font-size: 0.70rem;
         font-weight: 700;
         text-align: center;
         color: #334155;
-        margin-bottom: 4px;
+        margin-bottom: 2px;
         display: flex;
         flex-wrap: wrap;
         justify-content: center;
         align-items: center;
         gap: 3px;
-        line-height: 1.25;
+        line-height: 1.15;
       }}
       .variant-name {{
         font-weight: 800;
@@ -1838,6 +1905,20 @@ def render_pitch_canvas(
         position: relative;
         cursor: pointer;
         transition: filter 0.15s ease, outline 0.15s ease, box-shadow 0.15s ease;
+        line-height: 1.1;
+      }}
+      .stack-block.compact {{
+        padding: 0 2px;
+        font-size: 0.60rem;
+      }}
+      .stack-block.compact .stack-step-badge {{
+        font-size: 0.58rem;
+        padding: 0 2px;
+        line-height: 11px;
+        min-width: 12px;
+      }}
+      .stack-block.compact .stack-cam-icon {{
+        font-size: 0.55rem;
       }}
       .stack-block .block-left {{
         display: flex;
@@ -1900,7 +1981,7 @@ def render_pitch_canvas(
         background: #ef5350;
         color: #ffffff;
       }}
-      .motion-bar.green {{ background: #16a34a; }}
+      .motion-bar.green {{ background: #35c84a; }}
       .motion-bar.orange {{ background: #ea580c; }}
       .motion-bar.gray {{ background: #64748b; }}
       .block-label {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }}
@@ -2250,9 +2331,11 @@ def render_pitch_canvas(
 
       /* Presentation & Print rules */
       .paag-slide.presentation-active {{
-        min-height: 720px;
-        padding: 16px 20px;
-        gap: 12px;
+        min-height: 750px;
+        height: auto;
+        padding: 14px 18px;
+        gap: 10px;
+        overflow: visible;
       }}
       .paag-slide.presentation-active .brand-title {{ font-size: 1.35rem; }}
       .paag-slide.presentation-active .pitch-center-title {{ font-size: 1.75rem; }}
