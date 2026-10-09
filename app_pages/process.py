@@ -16,6 +16,7 @@ from utils.store import (
     delete_process_part_groups,
     fishbone_part_assignments,
     get_planning_scenario,
+    get_pitch_unclassified_part_options,
     move_fishbone_part_assignment,
     parse_yamazumi_model_variants,
     process_element_id_for_yamazumi,
@@ -23,6 +24,7 @@ from utils.store import (
     work_element_criticality,
     process_part_placement_options,
     process_part_groups,
+    set_process_part_option_handling_type,
     process_pitch_visual_summary,
     project_models,
     project_table,
@@ -267,7 +269,7 @@ def presentation_mode_dialog(
         total_pages=total_pages,
         presentation_mode=True,
     )
-    st.html(slide_html)
+    st.html(slide_html, unsafe_allow_javascript=True)
 
 
 @st.dialog("Export & Print Process at a Glance", width="large")
@@ -648,7 +650,7 @@ def print_slide_dialog(
     # Preview slide
     st.divider()
     st.caption(f"Preview (Slide 1 of {total_deck_slides} on {paper_label}):")
-    st.html(slides_html[0])
+    st.html(slides_html[0], unsafe_allow_javascript=True)
 
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
     if st.button("✕ Close Print Window", key=f"print_dialog_exit_bottom_{scenario_id}"):
@@ -656,26 +658,189 @@ def print_slide_dialog(
         st.rerun()
 
 
-@st.dialog("Functional Alerts & Quality Reviews", width="medium")
-def alerts_detail_dialog(alerts: dict[str, list[dict]]) -> None:
+@st.dialog("Functional Alerts & Review Links", width="large")
+def alerts_detail_dialog(
+    alerts: dict[str, list[dict]],
+    project_id: str = "",
+    scenario_id: str = "",
+    pitch_id: str = "",
+) -> None:
     st.markdown("#### Functional Alerts & Constraints")
-    categories = [
-        ("Quality (Torque & PFMEA)", "quality"),
-        ("Ergonomics (Risk Reviews)", "ergo"),
-        ("Safety Constraints", "safety"),
-        ("Materials Planning", "materials"),
-        ("Equipment & Tools", "equipment"),
+    st.caption("Inspect workstation alerts and navigate directly to functional reviews or resolve classifications.")
+
+    category_configs = [
+        {
+            "key": "quality",
+            "title": "Quality (Torque & PFMEA)",
+            "page": "app_pages/functional_quality.py",
+            "button_label": "Open Quality Review",
+            "icon": ":material/verified:",
+        },
+        {
+            "key": "ergo",
+            "title": "Ergonomics (Risk Reviews)",
+            "page": "app_pages/functional_ergonomics.py",
+            "button_label": "Open Ergonomics Review",
+            "icon": ":material/accessibility_new:",
+        },
+        {
+            "key": "safety",
+            "title": "Safety Constraints",
+            "page": "app_pages/functional_safety.py",
+            "button_label": "Open Safety Review",
+            "icon": ":material/health_and_safety:",
+        },
+        {
+            "key": "materials",
+            "title": "Materials Planning",
+            "page": "app_pages/functional_materials.py",
+            "button_label": "Open Materials Review",
+            "icon": ":material/inventory_2:",
+        },
+        {
+            "key": "equipment",
+            "title": "Equipment & Tools",
+            "page": "app_pages/functional_equipment.py",
+            "button_label": "Open Equipment Review",
+            "icon": ":material/precision_manufacturing:",
+        },
     ]
-    for cat_title, cat_key in categories:
+
+    for cfg in category_configs:
+        cat_key = cfg["key"]
+        cat_title = cfg["title"]
         items = alerts.get(cat_key, [])
         with st.expander(f"{cat_title} ({len(items)})", expanded=bool(items)):
-            if items:
-                for it in items:
-                    lbl = it.get("label") or "Alert"
-                    det = it.get("detail") or ""
-                    st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
+            c_hdr1, c_hdr2 = st.columns([2.5, 1.5], vertical_alignment="center")
+            with c_hdr1:
+                st.caption(f"Direct link to review and resolve constraints in {cat_title}.")
+            with c_hdr2:
+                if st.button(
+                    f"{cfg['button_label']} ↗",
+                    icon=cfg["icon"],
+                    key=f"btn_nav_review_{cat_key}_{pitch_id}",
+                    help=f"Navigate directly to {cat_title} review page",
+                    width="stretch",
+                ):
+                    st.switch_page(cfg["page"])
+
+            if cat_key == "materials":
+                unclassified_options = []
+                if project_id and scenario_id and pitch_id:
+                    try:
+                        unclassified_options = get_pitch_unclassified_part_options(
+                            project_id, scenario_id, pitch_id
+                        )
+                    except Exception:
+                        unclassified_options = []
+
+                if unclassified_options:
+                    st.markdown("##### 📦 Unclassified Parts on this Pitch")
+                    st.caption(
+                        "Materials Planner / IE: Assign a handling classification (**Consume** or **Handle**) "
+                        "below to resolve unclassified materials alerts directly from this slide."
+                    )
+                    for opt in unclassified_options:
+                        opt_id = opt["option_id"]
+                        p_num = opt["part_number"]
+                        p_desc = opt.get("part_description") or ""
+                        op_title = opt.get("operation") or "Operation"
+                        sec_name = opt.get("section_name") or ""
+                        placements = opt.get("placements") or []
+
+                        with st.container(border=True):
+                            st.markdown(
+                                f"**Part {p_num}**"
+                                + (f" — {p_desc}" if p_desc else "")
+                                + f"  \n`Step: {op_title}`"
+                                + (f" · Section: {sec_name}" if sec_name else "")
+                            )
+
+                            selected_placement_id = opt.get("fishbone_assignment_id")
+                            if not selected_placement_id and placements:
+                                if len(placements) == 1:
+                                    selected_placement_id = placements[0]["fishbone_assignment_id"]
+                                else:
+                                    pl_options = {
+                                        p["fishbone_assignment_id"]: (
+                                            f"{p.get('use_description') or 'Placement'} (Qty {p.get('fishbone_quantity')})"
+                                        )
+                                        for p in placements
+                                    }
+                                    selected_placement_id = st.selectbox(
+                                        "Fishbone placement / location",
+                                        options=list(pl_options.keys()),
+                                        format_func=lambda k: pl_options.get(k, k),
+                                        key=f"mat_placement_{opt_id}",
+                                    )
+
+                            c_ht, c_save = st.columns([2.5, 1], vertical_alignment="bottom")
+                            with c_ht:
+                                chosen_ht = st.selectbox(
+                                    "Handling classification",
+                                    ["(Select classification...)", "Consume", "Handle"],
+                                    index=0,
+                                    key=f"mat_ht_select_{opt_id}",
+                                    help="Consume = first time on line from container. Handle = subsequent manipulation.",
+                                )
+                            with c_save:
+                                if st.button(
+                                    "Save",
+                                    type="primary",
+                                    icon=":material/save:",
+                                    key=f"mat_save_btn_{opt_id}",
+                                    disabled=(chosen_ht == "(Select classification...)"),
+                                    width="stretch",
+                                ):
+                                    try:
+                                        editor = st.session_state.get("current_editor", "")
+                                        set_process_part_option_handling_type(
+                                            project_id=project_id,
+                                            scenario_id=scenario_id,
+                                            process_part_option_id=opt_id,
+                                            handling_type=chosen_ht,
+                                            fishbone_assignment_id=selected_placement_id,
+                                        )
+                                        record_audit_event(
+                                            project_id=project_id,
+                                            table_name="Process part pairings",
+                                            action="Classify handling",
+                                            row_count=1,
+                                            editor_name=editor,
+                                            details={
+                                                "scenario_id": scenario_id,
+                                                "option_id": opt_id,
+                                                "part_number": p_num,
+                                                "handling_type": chosen_ht,
+                                                "source": "PAAG Alerts dialog",
+                                            },
+                                        )
+                                        st.success(f"Part {p_num} classified as {chosen_ht}!")
+                                        st.rerun()
+                                    except Exception as exc:
+                                        st.error(str(exc))
+
+                non_unclass_items = [
+                    it for it in items
+                    if "Unclassified Handling" not in str(it.get("label", ""))
+                ]
+                if non_unclass_items:
+                    for it in non_unclass_items:
+                        lbl = it.get("label") or "Alert"
+                        det = it.get("detail") or ""
+                        st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
+
+                if not unclassified_options and not non_unclass_items:
+                    st.success("✓ All materials on this pitch are classified and nominal.")
+
             else:
-                st.success("✓ No active alerts.")
+                if items:
+                    for it in items:
+                        lbl = it.get("label") or "Alert"
+                        det = it.get("detail") or ""
+                        st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
+                else:
+                    st.success("✓ No active alerts.")
 
 
 @st.dialog("Tools & Equipment Required", width="medium")
@@ -715,21 +880,29 @@ def edit_visual_media_dialog(
         new_caption = st.text_input("Caption / Yellow Callout Note", value=current_caption)
         new_sequence = st.number_input("Sequence Order", value=int(current_sequence), step=5)
         tag_dict = dict(element_options)
+        current_tags_on_this_pitch = [t for t in current_tags if t in tag_dict]
+        other_pitch_tags = [t for t in current_tags if t not in tag_dict]
+
         new_tags = st.multiselect(
-            "Tag to PAAG Work Elements",
+            "Tag to PAAG Work Elements (This Pitch)",
             options=list(tag_dict.keys()),
-            default=[t for t in current_tags if t in tag_dict],
+            default=current_tags_on_this_pitch,
             format_func=lambda tid: tag_dict.get(tid, tid),
+            help="Select which work elements on this pitch this visual aid illustrates. Unchecking removes it from that element.",
         )
+        if other_pitch_tags:
+            st.caption(f"ℹ️ Also attached to {len(other_pitch_tags)} element(s) on other workstation pitches (preserved).")
+
         col1, col2 = st.columns([1, 1])
         if col1.form_submit_button("Save changes", icon=":material/save:", type="primary"):
+            final_tags = list(dict.fromkeys(new_tags + other_pitch_tags))
             update_pitch_visual_media(
                 project_id=project_id,
                 scenario_id=scenario_id,
                 media_id=media_id,
                 caption=new_caption,
                 sequence=new_sequence,
-                tagged_work_element_ids=new_tags,
+                tagged_work_element_ids=final_tags,
                 current_editor=st.session_state.get("current_editor", ""),
             )
             st.toast("Visual aid updated", icon=":material/check_circle:")
@@ -748,7 +921,7 @@ def delete_visual_media_dialog(
     st.write("Are you sure you want to permanently delete this visual aid?")
     if caption:
         st.info(f"Caption: **{caption}**")
-    st.caption("This will remove the media file and unpair all associated work element tags.")
+    st.caption("This will permanently remove the media file and unpair all associated work element tags. To remove it from an element without deleting the file, edit the visual aid and uncheck that element tag instead.")
     col1, col2 = st.columns([1, 1])
     if col1.button("Confirm Delete", icon=":material/delete:", type="primary", key=f"destructive_conf_del_{media_id}"):
         delete_pitch_visual_media(
@@ -2950,7 +3123,12 @@ with tab_slides:
                     alerts_cnt = sum(len(v) for v in pitch_summary.get("alerts", {}).values())
                     a_label = f"Alerts ({alerts_cnt})" if alerts_cnt > 0 else "Alerts"
                     if st.button(a_label, icon=":material/notification_important:", key=f"btn_alerts_{scenario_id}", help="View functional alerts detail"):
-                        alerts_detail_dialog(pitch_summary.get("alerts", {}))
+                        alerts_detail_dialog(
+                            pitch_summary.get("alerts", {}),
+                            project_id=project_id,
+                            scenario_id=scenario_id,
+                            pitch_id=selected_pitch_id,
+                        )
                 with act_col4:
                     tools_cnt = len(pitch_summary.get("tools", []))
                     t_label = f"Tools ({tools_cnt})" if tools_cnt > 0 else "Tools"
@@ -3004,7 +3182,8 @@ with tab_slides:
                     project_name=str(pitch_summary.get("project_name", "")),
                     page_num=current_page,
                     total_pages=total_pages,
-                )
+                ),
+                unsafe_allow_javascript=True,
             )
 
             if st.session_state.pop(f"pitch_visual_scroll_{scenario_id}", False):
@@ -3228,13 +3407,21 @@ with tab_slides:
                                         st.caption(f"Tagged Steps: **All elements ({nums_display})**")
                                     else:
                                         tag_parts = []
+                                        other_parts = []
                                         for t in tags:
                                             twid = str(t.get("work_element_id") or "")
                                             s_num = pitch_step_map.get(twid)
                                             op_text = t.get("operation") or f"Step {t.get('work_sequence', '')}"
-                                            tag_parts.append(f"{s_num} {op_text}" if s_num else op_text)
-                                        tag_str = ", ".join(tag_parts)
-                                        st.caption(f"Tagged Steps: **{tag_str}**")
+                                            if s_num:
+                                                tag_parts.append(f"{s_num} · {op_text}")
+                                            else:
+                                                other_pnum = t.get("element_pitch_number")
+                                                other_parts.append(f"{op_text} (on {other_pnum})" if other_pnum else op_text)
+                                        tag_str = ", ".join(tag_parts) if tag_parts else ", ".join(other_parts)
+                                        if tag_parts and other_parts:
+                                            st.caption(f"Tagged Steps: **{tag_str}** *(also on {', '.join(other_parts)})*")
+                                        else:
+                                            st.caption(f"Tagged Steps: **{tag_str}**")
                                 else:
                                     all_nums_display = ", ".join(str(idx + 1) for idx in range(len(pitch_rows)))
                                     if all_nums_display:

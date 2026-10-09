@@ -361,6 +361,82 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertEqual(len(cloned_media), 1)
         self.assertEqual(cloned_media[0]["caption"], "Base scenario visual")
 
+    def test_visual_media_follows_yamazumi_elements_across_pitches(self) -> None:
+        second_pitch_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                   VALUES (?, ?, ?, '01-SW1-052', 'Second Station Pitch', ?)""",
+                (second_pitch_id, self.project_id, self.area_id, store.now_iso()),
+            )
+
+        # Upload image on pitch 1 tied to element 1 and element 2
+        img_res = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="cross_pitch.png",
+            file_bytes=b"\x89PNG\r\n\x1a\ncrosspitchcontent",
+            caption="Multi element visual aid",
+            tagged_work_element_ids=[self.work_ids[0], self.work_ids[1]],
+            sequence=10,
+            current_editor="Tester",
+        )
+        img_id = img_res["id"]
+
+        # Before move: Image appears on pitch 1, but not pitch 2
+        p1_media = store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
+        p2_media = store.get_pitch_visual_media(self.project_id, self.scenario_id, second_pitch_id)
+        self.assertEqual(len(p1_media), 1)
+        self.assertEqual(p1_media[0]["id"], img_id)
+        self.assertEqual(len(p2_media), 0)
+
+        # Move work_ids[1] (Element 2) to second_pitch_id
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE yamazumi_elements SET pitch_id=? WHERE process_element_id=?",
+                (second_pitch_id, self.work_ids[1]),
+            )
+
+        # After moving Element 2 to pitch 2:
+        # Image is tied to Element 1 (on pitch 1) AND Element 2 (on pitch 2).
+        # It must stick with Element 2 and appear on pitch 2, while remaining on pitch 1 for Element 1.
+        p1_media = store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
+        p2_media = store.get_pitch_visual_media(self.project_id, self.scenario_id, second_pitch_id)
+        self.assertEqual(len(p1_media), 1, "Image must remain on Pitch 1 because Element 1 is still on Pitch 1")
+        self.assertEqual(p1_media[0]["id"], img_id)
+        self.assertEqual(len(p2_media), 1, "Image must stick with Element 2 on Pitch 2")
+        self.assertEqual(p2_media[0]["id"], img_id)
+
+        # Verify PAAG slide render summaries for both pitches
+        summary_1 = store.process_pitch_visual_summary(self.project_id, self.scenario_id, self.pitch_id)
+        summary_2 = store.process_pitch_visual_summary(self.project_id, self.scenario_id, second_pitch_id)
+        self.assertTrue(any(m["id"] == img_id for m in summary_1.get("visual_media", [])))
+        self.assertTrue(any(m["id"] == img_id for m in summary_2.get("visual_media", [])))
+
+        # Render canvases and verify each slide shows its own step operation & step badge
+        html_1 = render_pitch_canvas(summary_1)
+        html_2 = render_pitch_canvas(summary_2)
+        # On Pitch 1: Element 1 is Motion 1 (Step 1)
+        self.assertIn("Motion 1", html_1)
+        # On Pitch 2: Element 2 is Motion 2 (Step 1 on Pitch 2)
+        self.assertIn("Motion 2", html_2)
+
+        # Now move Element 1 (work_ids[0]) to pitch 2 as well
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE yamazumi_elements SET pitch_id=? WHERE process_element_id=?",
+                (second_pitch_id, self.work_ids[0]),
+            )
+
+        # After both elements are moved to pitch 2:
+        # None of the tagged elements are on Pitch 1, so the image should only appear on Pitch 2
+        p1_media_after = store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
+        p2_media_after = store.get_pitch_visual_media(self.project_id, self.scenario_id, second_pitch_id)
+        self.assertEqual(len(p1_media_after), 0, "No tagged elements on Pitch 1, visual aid should not appear on Pitch 1")
+        self.assertEqual(len(p2_media_after), 1, "Both tagged elements on Pitch 2, visual aid appears on Pitch 2")
+
     def test_render_pitch_canvas_includes_video_tools_alerts_and_parts_nickname(self) -> None:
         summary = {
             "pitch_number": "01-SW1-051",
@@ -478,7 +554,11 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("Open Quality Review", html)
         self.assertIn('href="./functional_quality"', html)
         self.assertIn("Open Safety Review", html)
-        self.assertIn('href="./functional_safety"', html)
+        self.assertIn("part-popover", html)
+        self.assertIn("part-popover-bridge", html)
+        self.assertIn("part-info-cue", html)
+        self.assertIn("Open in Parts Catalog", html)
+        self.assertIn('href="./parts"', html)
         self.assertIn("<video class=\"visual-player\" controls", html)
         self.assertIn("Verify alignment before cycling", html)
         self.assertIn("caption-callout", html)
@@ -1040,6 +1120,203 @@ class ProcessPitchVisualTests(unittest.TestCase):
         ppe_names = {t["name"] for t in ppe_tools}
         self.assertIn("Safety Glasses", ppe_names)
         self.assertIn("Cut-Resistant Gloves", ppe_names)
+
+    def test_part_hover_popover_rich_metadata(self) -> None:
+        part_data = {
+            "part_number": "FRM-9900",
+            "description": "Main Chassis Frame",
+            "factory_nickname": "Big Bertha",
+            "official_windchill_part_name": "FRAME_ASM_WINDCHILL_9900",
+            "revision": "B",
+            "make_buy": "Make",
+            "subsystem": "Structure",
+            "source_code": "3",
+            "pits_tracker_number": "PITS-8841",
+            "part_code": "P-CHASSIS",
+            "weight_lb": 42.5,
+            "model_applicability": "Heavy, Medium",
+            "design_engineer": "Alice DE",
+            "technology_engineer": "Bob TE",
+            "buyer_gcl": "Carol Buyer",
+            "pmqe_aqe": "Dave AQE",
+            "notes": "Ensure torque on side bolts",
+            "quantity": 2,
+            "handling_types": ["Consume"],
+            "linked_steps": ["Step 1 (Frame Align)", "Step 2 (Bolt Fix)"],
+        }
+        summary = {
+            "pitch_number": "P-01",
+            "pitch_name": "Chassis Assembly",
+            "parts": [part_data],
+        }
+        html = render_pitch_canvas(summary, [])
+        self.assertIn("FRM-9900", html)
+        self.assertIn("Rev B", html)
+        self.assertIn("Big Bertha", html)
+        self.assertIn("FRAME_ASM_WINDCHILL_9900", html)
+        self.assertIn("3 - Mfg Part", html)
+        self.assertIn("PITS-8841", html)
+        self.assertIn("P-CHASSIS", html)
+        self.assertIn("42.5 lb", html)
+        self.assertIn("Alice DE", html)
+        self.assertIn("Carol Buyer", html)
+        self.assertIn("Ensure torque on side bolts", html)
+        self.assertIn("Step 1 (Frame Align)", html)
+        self.assertIn("Step 2 (Bolt Fix)", html)
+        self.assertIn("Open in Parts Catalog", html)
+        self.assertIn("Assigned Engineers (Parts Catalog)", html)
+        self.assertIn("Design Engineer", html)
+        self.assertIn("Technology Engineer", html)
+        self.assertIn("PMQE / AQE", html)
+        self.assertIn("Buyer / GCL", html)
+
+    def test_assembly_group_minibom_and_large_image(self) -> None:
+        asm_part = {
+            "part_number": "230D6738G001",
+            "description": "Main Front Axle Assembly",
+            "factory_nickname": "Front Axle Kit",
+            "revision": "C",
+            "make_buy": "Make",
+            "is_assembly_group": True,
+            "image_path": "data/uploads/sample_axle.png",
+            "design_engineer": "Sarah Chen",
+            "technology_engineer": "Marcus Bell",
+            "ame_tooling_engineer": "Tom Bradley",
+            "pmqe_aqe": "Elena Rostova",
+            "buyer_gcl": "David Miller",
+            "quantity": 1,
+            "mini_bom": [
+                {
+                    "part_number": "123D4567P001",
+                    "description": "Teal Axle Wheel",
+                    "quantity": 4.0,
+                    "design_engineer": "Sarah Chen",
+                },
+                {
+                    "part_number": "789D1011P002",
+                    "description": "Wheel Retaining Bolt",
+                    "quantity": 8.0,
+                    "design_engineer": "Tom Bradley",
+                },
+                {
+                    "part_number": "184D8563G001",
+                    "description": "Axle Hardware Pack",
+                    "quantity": 1.0,
+                    "design_engineer": "Marcus Bell",
+                },
+            ],
+            "handling_types": ["Consume"],
+            "linked_steps": ["Step 1 (Mount Axle)"],
+        }
+        summary = {
+            "pitch_number": "P-02",
+            "pitch_name": "Axle Subassembly",
+            "parts": [asm_part],
+        }
+        html = render_pitch_canvas(summary, [])
+        # Assembly group and badges
+        self.assertIn("Assembly Group", html)
+        self.assertIn("popover-badge asm-group", html)
+        self.assertIn("Front Axle Kit", html)
+        # Large image preview banner
+        self.assertIn("popover-image-banner", html)
+        self.assertIn("popover-large-img", html)
+        # Engineers section
+        self.assertIn("Assigned Engineers (Parts Catalog)", html)
+        self.assertIn("Sarah Chen", html)
+        self.assertIn("Marcus Bell", html)
+        self.assertIn("Tom Bradley", html)
+        self.assertIn("Elena Rostova", html)
+        self.assertIn("David Miller", html)
+        # Mini BOM section
+        self.assertIn("Mini BOM Makeup", html)
+        self.assertIn("3 components", html)
+        self.assertIn("minibom-table", html)
+        self.assertIn("123D4567P001", html)
+        self.assertIn("Teal Axle Wheel", html)
+        self.assertIn("×4", html)
+        self.assertIn("789D1011P002", html)
+        self.assertIn("Wheel Retaining Bolt", html)
+        self.assertIn("×8", html)
+        self.assertIn("184D8563G001", html)
+        self.assertIn("Axle Hardware Pack", html)
+
+    def test_pitch_unclassified_part_options_and_handling_classification(self) -> None:
+        # 1. Create a part and place it in the fishbone section
+        part_id = "test-part-classification"
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, updated_at)
+                   VALUES (?, ?, 'PART-999', 'Turbo Flange', ?)""",
+                (part_id, self.project_id, timestamp),
+            )
+            assignment_id = "fb-assign-999"
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, section_id, part_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 10, 2.0, 'Primary Mounting', ?)""",
+                (assignment_id, self.project_id, self.section_id, part_id, timestamp),
+            )
+
+        # 2. Pair part to the first work element on self.pitch_id
+        group_id = "test-group-999"
+        store.save_process_part_group(
+            self.project_id,
+            self.scenario_id,
+            self.work_ids[0],
+            self.section_id,
+            group_id,
+            "Flange Group",
+            "Use all",
+            1,
+            [part_id],
+        )
+
+        # 3. Query pitch unclassified options: should return our unclassified part
+        unclassified = store.get_pitch_unclassified_part_options(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        self.assertEqual(len(unclassified), 1)
+        opt = unclassified[0]
+        self.assertEqual(opt["part_number"], "PART-999")
+        self.assertEqual(opt["part_description"], "Turbo Flange")
+        self.assertIsNone(opt["handling_type"])
+        self.assertEqual(len(opt["placements"]), 1)
+        self.assertEqual(opt["placements"][0]["fishbone_assignment_id"], assignment_id)
+
+        # 4. Scenario part handling options before classification
+        scenario_opts = store.get_scenario_part_handling_options(
+            self.project_id, self.scenario_id, unclassified_only=True
+        )
+        self.assertEqual(len(scenario_opts), 1)
+        self.assertEqual(scenario_opts[0]["part_number"], "PART-999")
+
+        # 5. Classify the option as Consume (auto-resolving placement)
+        store.set_process_part_option_handling_type(
+            self.project_id,
+            self.scenario_id,
+            opt["option_id"],
+            "Consume",
+        )
+
+        # 6. Query pitch unclassified options: should now be empty
+        unclassified_after = store.get_pitch_unclassified_part_options(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        self.assertEqual(len(unclassified_after), 0)
+
+        # 7. Scenario part handling options after classification
+        scenario_unclassified_after = store.get_scenario_part_handling_options(
+            self.project_id, self.scenario_id, unclassified_only=True
+        )
+        self.assertEqual(len(scenario_unclassified_after), 0)
+
+        scenario_all_after = store.get_scenario_part_handling_options(
+            self.project_id, self.scenario_id, unclassified_only=False
+        )
+        self.assertEqual(len(scenario_all_after), 1)
+        self.assertEqual(scenario_all_after[0]["handling_type"], "Consume")
 
 
 if __name__ == "__main__":

@@ -504,7 +504,7 @@ def set_process_part_option_handling_type(
     timestamp = now_iso()
     with connection() as conn:
         option = conn.execute(
-            """SELECT option.id, option.part_id, group_row.section_id
+            """SELECT option.id, option.part_id, option.fishbone_assignment_id, group_row.section_id
                FROM process_part_options option
                JOIN process_part_groups group_row ON group_row.id=option.group_id
                WHERE option.id=? AND group_row.project_id=? AND group_row.scenario_id=?""",
@@ -512,9 +512,41 @@ def set_process_part_option_handling_type(
         ).fetchone()
         if not option:
             raise ValueError("That Process part-use no longer exists in this scenario.")
-        normalized_assignment_id = _normalize_fishbone_assignment_id(
-            fishbone_assignment_id
+        target_assignment_id = (
+            _normalize_fishbone_assignment_id(fishbone_assignment_id)
+            or _normalize_fishbone_assignment_id(option["fishbone_assignment_id"])
         )
+        if not target_assignment_id and normalized is not None:
+            # Check if there is a fishbone placement for this part in this section
+            sec_assignments = conn.execute(
+                """SELECT id FROM fishbone_part_assignments
+                   WHERE project_id=? AND section_id=? AND part_id=?
+                   ORDER BY sequence, id""",
+                (project_id, str(option["section_id"] or ""), str(option["part_id"])),
+            ).fetchall()
+            if len(sec_assignments) == 1:
+                target_assignment_id = str(sec_assignments[0]["id"])
+            elif len(sec_assignments) > 1:
+                for sa in sec_assignments:
+                    sa_id = str(sa["id"])
+                    try:
+                        _validate_process_part_option_handling(
+                            conn,
+                            project_id=project_id,
+                            scenario_id=scenario_id,
+                            section_id=str(option["section_id"] or ""),
+                            process_part_option_id=process_part_option_id,
+                            part_id=str(option["part_id"]),
+                            handling_type=normalized,
+                            fishbone_assignment_id=sa_id,
+                        )
+                        target_assignment_id = sa_id
+                        break
+                    except ValueError:
+                        continue
+                if not target_assignment_id:
+                    target_assignment_id = str(sec_assignments[0]["id"])
+
         _validate_process_part_option_handling(
             conn,
             project_id=project_id,
@@ -523,7 +555,7 @@ def set_process_part_option_handling_type(
             process_part_option_id=process_part_option_id,
             part_id=str(option["part_id"]),
             handling_type=normalized,
-            fishbone_assignment_id=normalized_assignment_id,
+            fishbone_assignment_id=target_assignment_id,
         )
         conn.execute(
             """UPDATE process_part_options
@@ -531,7 +563,7 @@ def set_process_part_option_handling_type(
                WHERE id=?""",
             (
                 normalized,
-                normalized_assignment_id,
+                target_assignment_id,
                 timestamp,
                 process_part_option_id,
             ),
@@ -1061,18 +1093,62 @@ def work_element_op_id(project_id: str, scenario_id: str, work_element_id: str) 
 def get_pitch_visual_media(
     project_id: str, scenario_id: str, pitch_id: str
 ) -> list[dict]:
-    """Return all visual media records and their tagged work elements for a pitch."""
+    """Return all visual media records and their tagged work elements for a pitch.
+
+    A visual aid appears on this pitch if:
+    1. It is tagged to one or more work elements currently assigned to this pitch in Yamazumi, OR
+    2. It has no work element tags (general pitch visual) and its base pitch_id is this pitch.
+    """
     normalized_pitch_id = str(pitch_id or "").strip()
     if not normalized_pitch_id:
         return []
     with connection() as conn:
+        pitch = conn.execute(
+            """SELECT pitch.id, pitch.pitch_number, pitch.pitch_name
+               FROM yamazumi_pitches pitch
+               WHERE pitch.id=? AND pitch.project_id=?""",
+            (normalized_pitch_id, project_id),
+        ).fetchone()
+        if not pitch:
+            return []
+
+        pitch_number = pitch["pitch_number"]
+        pitch_name = pitch["pitch_name"]
+
         media_rows = conn.execute(
-            """SELECT m.*, pitch.pitch_number, pitch.pitch_name
+            """SELECT DISTINCT m.*
                FROM process_visual_media m
-               JOIN yamazumi_pitches pitch ON pitch.id=m.pitch_id
-               WHERE m.project_id=? AND m.scenario_id=? AND m.pitch_id=?
+               WHERE m.project_id=? AND m.scenario_id=?
+                 AND (
+                     EXISTS (
+                         SELECT 1 FROM process_visual_media_tags t
+                         JOIN yamazumi_elements y ON (
+                             y.process_element_id = t.work_element_id
+                             OR (y.process_element_id IS NULL AND y.id = t.work_element_id)
+                         )
+                         JOIN yamazumi_areas a ON a.id = y.area_id AND a.scenario_id = ?
+                         WHERE t.media_id = m.id
+                           AND t.project_id = ?
+                           AND t.scenario_id = ?
+                           AND y.project_id = ?
+                           AND y.pitch_id = ?
+                     )
+                     OR (
+                         m.pitch_id = ?
+                         AND NOT EXISTS (
+                             SELECT 1 FROM process_visual_media_tags t
+                             WHERE t.media_id = m.id
+                               AND t.project_id = ?
+                               AND t.scenario_id = ?
+                         )
+                     )
+                 )
                ORDER BY m.sequence, m.created_at, m.id""",
-            (project_id, scenario_id, normalized_pitch_id),
+            (
+                project_id, scenario_id,
+                scenario_id, project_id, scenario_id, project_id, normalized_pitch_id,
+                normalized_pitch_id, project_id, scenario_id,
+            ),
         ).fetchall()
         if not media_rows:
             return []
@@ -1080,9 +1156,15 @@ def get_pitch_visual_media(
         media_ids = [str(r["id"]) for r in media_rows]
         placeholders = ",".join("?" for _ in media_ids)
         tags_rows = conn.execute(
-            f"""SELECT t.media_id, t.work_element_id, work.operation, work.sequence AS work_sequence
+            f"""SELECT t.media_id, t.work_element_id, work.operation, work.sequence AS work_sequence,
+                       y.pitch_id AS element_pitch_id, yp.pitch_number AS element_pitch_number
                 FROM process_visual_media_tags t
                 JOIN work_elements work ON work.id=t.work_element_id
+                LEFT JOIN yamazumi_elements y ON (
+                    y.process_element_id = t.work_element_id
+                    OR (y.process_element_id IS NULL AND y.id = t.work_element_id)
+                ) AND y.project_id=t.project_id
+                LEFT JOIN yamazumi_pitches yp ON yp.id=y.pitch_id AND yp.project_id=t.project_id
                 WHERE t.project_id=? AND t.scenario_id=? AND t.media_id IN ({placeholders})
                 ORDER BY work.sequence, work.id""",
             (project_id, scenario_id, *media_ids),
@@ -1094,6 +1176,8 @@ def get_pitch_visual_media(
         results: list[dict] = []
         for mr in media_rows:
             row_dict = dict(mr)
+            row_dict["pitch_number"] = pitch_number
+            row_dict["pitch_name"] = pitch_name
             row_tags = tags_by_media.get(str(mr["id"]), [])
             row_dict["tagged_work_element_ids"] = [t["work_element_id"] for t in row_tags]
             row_dict["tagged_work_elements"] = row_tags
@@ -1443,6 +1527,182 @@ def delete_pitch_visual_media(
     )
 
 
+def _enrich_parts_with_minibom(
+    conn: sqlite3.Connection,
+    project_id: str,
+    aggregated_parts_map: dict[str, dict],
+) -> None:
+    """Enrich aggregated parts with mini-BOM components and assembly group flags."""
+    if not aggregated_parts_map:
+        return
+
+    import re
+
+    part_ids = [p["part_id"] for p in aggregated_parts_map.values() if p.get("part_id")]
+    part_numbers = [p_num for p_num in aggregated_parts_map.keys() if p_num]
+    tracker_numbers = [
+        str(p.get("pits_tracker_number") or "").strip()
+        for p in aggregated_parts_map.values()
+        if str(p.get("pits_tracker_number") or "").strip()
+    ]
+
+    mfg_components_by_pnum: dict[str, list[dict]] = {}
+    mfg_assembly_numbers: set[str] = set()
+
+    # 1. Check manufacturing_assemblies
+    if part_ids or part_numbers:
+        params: list = [project_id]
+        where_clauses: list[str] = []
+        if part_ids:
+            p_id_placeholders = ",".join("?" for _ in part_ids)
+            where_clauses.append(f"a.catalog_part_id IN ({p_id_placeholders})")
+            params.extend(part_ids)
+        if part_numbers:
+            p_num_placeholders = ",".join("?" for _ in part_numbers)
+            where_clauses.append(f"a.assembly_number IN ({p_num_placeholders})")
+            params.extend(part_numbers)
+
+        if where_clauses:
+            asm_rows = conn.execute(
+                f"""SELECT a.id AS assembly_id, a.assembly_number, a.name AS assembly_name,
+                           a.catalog_part_id,
+                           p_main.part_number AS main_part_number,
+                           c.quantity,
+                           p_comp.part_number AS component_part_number,
+                           p_comp.description AS component_description,
+                           p_comp.factory_nickname AS component_factory_nickname,
+                           p_comp.design_engineer AS component_design_engineer,
+                           p_comp.technology_engineer AS component_technology_engineer
+                    FROM manufacturing_assemblies a
+                    LEFT JOIN parts p_main ON p_main.id = a.catalog_part_id
+                    LEFT JOIN manufacturing_assembly_components c ON c.assembly_id = a.id
+                    LEFT JOIN fishbone_part_assignments f ON f.id = c.fishbone_assignment_id
+                    LEFT JOIN parts p_comp ON p_comp.id = f.part_id
+                    WHERE a.project_id = ?
+                      AND ({' OR '.join(where_clauses)})
+                    ORDER BY p_comp.part_number""",
+                params,
+            ).fetchall()
+
+            for r in asm_rows:
+                asm_num = str(r["assembly_number"] or "").strip()
+                main_pnum = str(r["main_part_number"] or "").strip()
+                if asm_num:
+                    mfg_assembly_numbers.add(asm_num)
+                if main_pnum:
+                    mfg_assembly_numbers.add(main_pnum)
+
+                key_pnum = None
+                if main_pnum and main_pnum in aggregated_parts_map:
+                    key_pnum = main_pnum
+                elif asm_num and asm_num in aggregated_parts_map:
+                    key_pnum = asm_num
+                elif r["catalog_part_id"]:
+                    for k, val in aggregated_parts_map.items():
+                        if str(val.get("part_id") or "") == str(r["catalog_part_id"]):
+                            key_pnum = k
+                            break
+
+                comp_pnum = str(r["component_part_number"] or "").strip()
+                if comp_pnum and key_pnum:
+                    mfg_components_by_pnum.setdefault(key_pnum, []).append({
+                        "part_number": comp_pnum,
+                        "description": str(r["component_description"] or ""),
+                        "factory_nickname": str(r["component_factory_nickname"] or ""),
+                        "quantity": float(r["quantity"] or 1.0),
+                        "design_engineer": str(r["component_design_engineer"] or r["component_technology_engineer"] or ""),
+                        "source": "assembly",
+                    })
+
+    # 2. Check pits_bom_occurrences for child occurrences
+    pits_components_by_pnum: dict[str, list[dict]] = {}
+    if part_ids or tracker_numbers or part_numbers:
+        params = [project_id]
+        where_clauses = []
+        if part_ids:
+            p_id_placeholders = ",".join("?" for _ in part_ids)
+            where_clauses.append(f"o.parent_part_id IN ({p_id_placeholders})")
+            params.extend(part_ids)
+        if tracker_numbers:
+            trk_placeholders = ",".join("?" for _ in tracker_numbers)
+            where_clauses.append(f"o.parent_tracker_number IN ({trk_placeholders})")
+            params.extend(tracker_numbers)
+        if part_numbers:
+            p_num_placeholders = ",".join("?" for _ in part_numbers)
+            where_clauses.append(f"parent_p.part_number IN ({p_num_placeholders})")
+            params.extend(part_numbers)
+
+        if where_clauses:
+            pits_rows = conn.execute(
+                f"""SELECT o.parent_part_id, o.parent_tracker_number,
+                           parent_p.part_number AS parent_part_number,
+                           o.proposed_quantity,
+                           child_p.part_number AS component_part_number,
+                           child_p.description AS component_description,
+                           child_p.factory_nickname AS component_factory_nickname,
+                           child_p.design_engineer AS component_design_engineer,
+                           child_p.technology_engineer AS component_technology_engineer
+                    FROM pits_bom_occurrences o
+                    LEFT JOIN parts parent_p ON parent_p.id = o.parent_part_id
+                    JOIN parts child_p ON child_p.id = o.child_part_id
+                    WHERE o.project_id = ?
+                      AND ({' OR '.join(where_clauses)})
+                    ORDER BY o.source_row""",
+                params,
+            ).fetchall()
+
+            for r in pits_rows:
+                parent_pnum = str(r["parent_part_number"] or "").strip()
+                if parent_pnum not in aggregated_parts_map:
+                    matched_key = None
+                    if r["parent_part_id"]:
+                        for k, val in aggregated_parts_map.items():
+                            if str(val.get("part_id") or "") == str(r["parent_part_id"]):
+                                matched_key = k
+                                break
+                    if not matched_key and r["parent_tracker_number"]:
+                        for k, val in aggregated_parts_map.items():
+                            if str(val.get("pits_tracker_number") or "").strip() == str(r["parent_tracker_number"]).strip():
+                                matched_key = k
+                                break
+                    if matched_key:
+                        parent_pnum = matched_key
+
+                comp_pnum = str(r["component_part_number"] or "").strip()
+                if parent_pnum and parent_pnum in aggregated_parts_map and comp_pnum:
+                    pits_components_by_pnum.setdefault(parent_pnum, []).append({
+                        "part_number": comp_pnum,
+                        "description": str(r["component_description"] or ""),
+                        "factory_nickname": str(r["component_factory_nickname"] or ""),
+                        "quantity": float(r["proposed_quantity"] or 1.0),
+                        "design_engineer": str(r["component_design_engineer"] or r["component_technology_engineer"] or ""),
+                        "source": "pits",
+                    })
+
+    # 3. Populate each part in aggregated_parts_map
+    for p_num, p_data in aggregated_parts_map.items():
+        comps = mfg_components_by_pnum.get(p_num) or []
+        if not comps and p_num in pits_components_by_pnum:
+            aggregated_pits: dict[str, dict] = {}
+            for item in pits_components_by_pnum[p_num]:
+                cp = item["part_number"]
+                if cp in aggregated_pits:
+                    aggregated_pits[cp]["quantity"] += item["quantity"]
+                else:
+                    aggregated_pits[cp] = dict(item)
+            comps = list(aggregated_pits.values())
+
+        is_asm = (
+            bool(comps)
+            or (p_num in mfg_assembly_numbers)
+            or bool(re.search(r"G\d{2,}", p_num, re.IGNORECASE))
+            or str(p_data.get("make_buy") or "").strip().casefold() in {"make", "asm", "subassembly"}
+            or str(p_data.get("source_code") or "").strip() in {"+1", "5", "6"}
+        )
+        p_data["is_assembly_group"] = is_asm
+        p_data["mini_bom"] = comps
+
+
 def process_pitch_visual_summary(
     project_id: str, scenario_id: str, pitch_id: str
 ) -> dict:
@@ -1521,6 +1781,22 @@ def process_pitch_visual_summary(
                            part.id AS part_id, part.part_number,
                            part.description AS part_description,
                            part.factory_nickname,
+                           part.official_windchill_part_name,
+                           part.revision,
+                           part.subsystem,
+                           part.make_buy,
+                           part.source_code,
+                           part.model_applicability,
+                           part.weight_lb,
+                           part.notes,
+                           part.technology_engineer,
+                           part.design_engineer,
+                           part.pits_tracker_number,
+                           part.buyer_gcl,
+                           part.pmqe_aqe,
+                           part.ame_tooling_engineer,
+                           part.part_code,
+                           part.ppm,
                            COALESCE(NULLIF(TRIM(part.image_path), ''), (
                                SELECT image.image_path FROM part_images image
                                WHERE image.part_id=part.id
@@ -1558,14 +1834,32 @@ def process_pitch_visual_summary(
                             "part_number": p_num,
                             "description": row["part_description"] or "",
                             "factory_nickname": row["factory_nickname"] or "",
+                            "official_windchill_part_name": row["official_windchill_part_name"] or "",
+                            "revision": row["revision"] or "",
+                            "subsystem": row["subsystem"] or "",
+                            "make_buy": row["make_buy"] or "",
+                            "source_code": row["source_code"] or "",
+                            "model_applicability": row["model_applicability"] or "",
+                            "weight_lb": row["weight_lb"],
+                            "notes": row["notes"] or "",
+                            "technology_engineer": row["technology_engineer"] or "",
+                            "design_engineer": row["design_engineer"] or "",
+                            "pits_tracker_number": row["pits_tracker_number"] or "",
+                            "buyer_gcl": row["buyer_gcl"] or "",
+                            "pmqe_aqe": row["pmqe_aqe"] or "",
+                            "ame_tooling_engineer": row["ame_tooling_engineer"] or "",
+                            "part_code": row["part_code"] or "",
+                            "ppm": row["ppm"] or "",
                             "image_path": row["image_path"] or "",
                             "quantity": qty,
                             "handling_types": {h_type} if h_type else set(),
+                            "work_element_ids": {work_id},
                         }
                     else:
                         aggregated_parts_map[p_num]["quantity"] += qty
                         if h_type:
                             aggregated_parts_map[p_num]["handling_types"].add(h_type)
+                        aggregated_parts_map[p_num]["work_element_ids"].add(work_id)
 
             torque_rows = conn.execute(
                 f"""SELECT assignment.work_element_id, assignment.unique_identifier,
@@ -1798,6 +2092,15 @@ def process_pitch_visual_summary(
                         "detail": f"Step {s_num} ('{s_desc}') on this pitch has no PPE assigned in Safety Functional Review.",
                     })
 
+        # Enrich parts with mini-BOM makeup and assembly group indicators
+        _enrich_parts_with_minibom(conn, project_id, aggregated_parts_map)
+        for w_parts in parts_by_work.values():
+            for pt in w_parts:
+                pnum = str(pt.get("part_number") or "").strip()
+                if pnum in aggregated_parts_map:
+                    pt["is_assembly_group"] = aggregated_parts_map[pnum].get("is_assembly_group", False)
+                    pt["mini_bom"] = aggregated_parts_map[pnum].get("mini_bom", [])
+
         # Materials alerts
         for p in aggregated_parts_map.values():
             if not p["handling_types"]:
@@ -1859,12 +2162,21 @@ def process_pitch_visual_summary(
     if not variant_stacks:
         variant_stacks["Base"] = []
 
-    # Aggregated parts list with sorted handling types
+    # Aggregated parts list with sorted handling types and linked pitch steps
     final_parts: list[dict] = []
     for p in aggregated_parts_map.values():
+        p_work_ids = set(p.get("work_element_ids") or set())
+        linked_step_labels: list[str] = []
+        for idx, card in enumerate(cards):
+            c_wid = str(card.get("work_element_id") or "")
+            if c_wid in p_work_ids:
+                s_num = idx + 1
+                op_name = card.get("operation") or card.get("yamazumi_description") or f"Step {s_num}"
+                linked_step_labels.append(f"Step {s_num} ({op_name})")
         final_parts.append({
             **p,
             "handling_types": sorted(p["handling_types"]),
+            "linked_steps": linked_step_labels,
         })
 
     # Fetch and sequence visual media
@@ -2001,7 +2313,109 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
                 (project_id, scenario_id, *removed),
             )
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES']
+def get_pitch_unclassified_part_options(
+    project_id: str,
+    scenario_id: str,
+    pitch_id: str,
+) -> list[dict]:
+    """Return unclassified process_part_options rows for work elements on this pitch."""
+    if not project_id or not scenario_id or not pitch_id:
+        return []
+    with connection() as conn:
+        y_rows = conn.execute(
+            """SELECT e.process_element_id
+               FROM yamazumi_elements e
+               JOIN yamazumi_areas a ON a.id=e.area_id
+               WHERE e.project_id=? AND a.scenario_id=? AND e.pitch_id=?
+                 AND e.process_element_id IS NOT NULL AND TRIM(e.process_element_id) != ''""",
+            (project_id, scenario_id, pitch_id),
+        ).fetchall()
+        work_ids = [str(r["process_element_id"]) for r in y_rows]
+        if not work_ids:
+            return []
+        placeholders = ",".join("?" for _ in work_ids)
+        rows = conn.execute(
+            f"""SELECT option.id AS option_id, option.part_id, option.handling_type,
+                       option.fishbone_assignment_id,
+                       group_row.id AS group_id, group_row.name AS group_name,
+                       group_row.section_id, group_row.work_element_id,
+                       part.part_number, part.description AS part_description,
+                       we.operation, we.station,
+                       sec.name AS section_name
+                FROM process_part_groups group_row
+                JOIN process_part_options option ON option.group_id=group_row.id
+                JOIN parts part ON part.id=option.part_id
+                JOIN work_elements we ON we.id=group_row.work_element_id
+                LEFT JOIN assembly_sections sec ON sec.id=group_row.section_id
+                WHERE group_row.project_id=? AND group_row.scenario_id=?
+                  AND group_row.work_element_id IN ({placeholders})
+                  AND (option.handling_type IS NULL OR TRIM(option.handling_type) = '')
+                ORDER BY we.sequence, we.id, part.part_number""",
+            (project_id, scenario_id, *work_ids),
+        ).fetchall()
+        
+        result = []
+        for r in rows:
+            opt = dict(r)
+            sec_id = str(r["section_id"] or "")
+            part_id = str(r["part_id"] or "")
+            if sec_id and part_id:
+                p_opts = process_part_placement_options(
+                    project_id, scenario_id, sec_id, part_id
+                )
+                opt["placements"] = p_opts.to_dict(orient="records") if not p_opts.empty else []
+            else:
+                opt["placements"] = []
+            result.append(opt)
+        return result
+
+def get_scenario_part_handling_options(
+    project_id: str,
+    scenario_id: str,
+    unclassified_only: bool = False,
+) -> list[dict]:
+    """Return part options with handling status across the scenario for Materials Review."""
+    if not project_id or not scenario_id:
+        return []
+    with connection() as conn:
+        condition = "AND (option.handling_type IS NULL OR TRIM(option.handling_type) = '')" if unclassified_only else ""
+        rows = conn.execute(
+            f"""SELECT option.id AS option_id, option.part_id, option.handling_type,
+                       option.fishbone_assignment_id,
+                       group_row.id AS group_id, group_row.name AS group_name,
+                       group_row.section_id, group_row.work_element_id,
+                       part.part_number, part.description AS part_description,
+                       we.operation, we.station,
+                       sec.name AS section_name,
+                       fba.use_description AS fishbone_use_description
+                FROM process_part_groups group_row
+                JOIN process_part_options option ON option.group_id=group_row.id
+                JOIN parts part ON part.id=option.part_id
+                JOIN work_elements we ON we.id=group_row.work_element_id
+                LEFT JOIN assembly_sections sec ON sec.id=group_row.section_id
+                LEFT JOIN fishbone_part_assignments fba ON fba.id=option.fishbone_assignment_id
+                WHERE group_row.project_id=? AND group_row.scenario_id=?
+                  {condition}
+                ORDER BY we.station, we.sequence, part.part_number""",
+            (project_id, scenario_id),
+        ).fetchall()
+        
+        result = []
+        for r in rows:
+            opt = dict(r)
+            sec_id = str(r["section_id"] or "")
+            part_id = str(r["part_id"] or "")
+            if sec_id and part_id:
+                p_opts = process_part_placement_options(
+                    project_id, scenario_id, sec_id, part_id
+                )
+                opt["placements"] = p_opts.to_dict(orient="records") if not p_opts.empty else []
+            else:
+                opt["placements"] = []
+            result.append(opt)
+        return result
+
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

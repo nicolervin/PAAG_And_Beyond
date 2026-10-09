@@ -123,6 +123,299 @@ def _torque_badge(requirement: dict) -> str:
     return f'<span class="tag torque">{identifier}: {detail}</span>'
 
 
+SOURCE_CODE_LABELS: dict[str, str] = {
+    "1": "1 - Purchased Part",
+    "+1": "+1 - Purchased Asm",
+    "2": "2",
+    "2.4": "2.4 - From AP3",
+    "3": "3 - Mfg Part",
+    "4": "4",
+    "5": "5 - Asm (Disassembly no)",
+    "6": "6 - Asm (Disassembly yes)",
+    "7": "7",
+    "8": "8 - Component of Purchased Asm",
+}
+
+
+def _part_popover_content(part: dict) -> str:
+    p_num = _text(part.get("part_number") or "Part")
+    p_desc = _text(part.get("description") or part.get("part_name") or "")
+    p_nick = _text(part.get("factory_nickname") or "")
+    p_windchill = _text(part.get("official_windchill_part_name") or "")
+    p_rev = _text(part.get("revision") or "")
+    p_make_buy = _text(part.get("make_buy") or "")
+    p_subsystem = _text(part.get("subsystem") or "")
+    p_src_code = str(part.get("source_code") or "").strip()
+    p_pits_id = _text(part.get("pits_tracker_number") or "")
+    p_part_code = _text(part.get("part_code") or "")
+    p_weight = part.get("weight_lb")
+    p_model_app = _text(part.get("model_applicability") or "")
+    p_de = _text(part.get("design_engineer") or "")
+    p_te = _text(part.get("technology_engineer") or "")
+    p_ame = _text(part.get("ame_tooling_engineer") or "")
+    p_buyer = _text(part.get("buyer_gcl") or "")
+    p_pmqe = _text(part.get("pmqe_aqe") or "")
+    p_notes = _text(part.get("notes") or "")
+    p_qty = _clean_number(part.get("quantity") or part.get("total_quantity") or part.get("qty") or 1)
+    p_img_url = _media_data_url(part.get("image_path") or part.get("thumbnail_path"))
+
+    is_asm_group = bool(part.get("is_assembly_group"))
+    mini_bom = part.get("mini_bom") or []
+    if not is_asm_group:
+        import re
+        if (
+            bool(mini_bom)
+            or bool(re.search(r"G\d{2,}", p_num, re.IGNORECASE))
+            or str(p_make_buy).strip().casefold() in {"make", "asm", "subassembly"}
+            or p_src_code in {"+1", "5", "6"}
+        ):
+            is_asm_group = True
+
+    # Handling classification
+    h_types = part.get("handling_types") or []
+    if not h_types and part.get("handling_type"):
+        h_types = [part.get("handling_type")]
+    h_labels = []
+    for ht in h_types:
+        ht_clean = str(ht).strip()
+        if ht_clean.casefold() in {"consume", "c"}:
+            h_labels.append("Consume (VA)")
+        elif ht_clean.casefold() in {"handle", "h"}:
+            h_labels.append("Handle (NVAN)")
+        elif ht_clean:
+            h_labels.append(ht_clean)
+    handling_str = ", ".join(h_labels) if h_labels else "Unclassified"
+
+    src_code_display = SOURCE_CODE_LABELS.get(p_src_code, p_src_code)
+
+    # Badges
+    badges_html = []
+    if is_asm_group:
+        badges_html.append('<span class="popover-badge asm-group">Assembly Group</span>')
+    if p_rev:
+        badges_html.append(f'<span class="popover-badge rev">Rev {p_rev}</span>')
+    if p_make_buy:
+        badges_html.append(f'<span class="popover-badge make-buy">{p_make_buy}</span>')
+    for ht in h_types:
+        ht_clean = str(ht).strip()
+        if ht_clean.casefold() in {"consume", "c"}:
+            badges_html.append('<span class="h-badge va">Consume</span>')
+        elif ht_clean.casefold() in {"handle", "h"}:
+            badges_html.append('<span class="h-badge nvan">Handle</span>')
+        elif ht_clean:
+            badges_html.append(f'<span class="h-badge">{_text(ht_clean)}</span>')
+
+    # Media preview (Enlarged banner)
+    img_preview_html = (
+        f'<div class="popover-image-banner"><img src="{p_img_url}" alt="{p_num}" class="popover-large-img" /></div>'
+        if p_img_url
+        else '<div class="popover-no-image-cue"><span>📷 No CAD image attached</span></div>'
+    )
+
+    # Grid items
+    grid_items = [
+        f'<div class="popover-grid-item"><span class="grid-label">Pitch Qty</span><span class="grid-val">{p_qty}</span></div>',
+        f'<div class="popover-grid-item"><span class="grid-label">Handling</span><span class="grid-val">{handling_str}</span></div>',
+    ]
+    if p_subsystem:
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Subsystem</span><span class="grid-val" title="{p_subsystem}">{p_subsystem}</span></div>'
+        )
+    if src_code_display:
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Source Code</span><span class="grid-val" title="{src_code_display}">{src_code_display}</span></div>'
+        )
+    if p_pits_id:
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">PITS ID</span><span class="grid-val">{p_pits_id}</span></div>'
+        )
+    if p_part_code:
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Part Code</span><span class="grid-val">{p_part_code}</span></div>'
+        )
+    if p_weight is not None:
+        try:
+            w_val = float(p_weight)
+            if w_val > 0:
+                grid_items.append(
+                    f'<div class="popover-grid-item"><span class="grid-label">Weight</span><span class="grid-val">{_clean_number(w_val)} lb</span></div>'
+                )
+        except (ValueError, TypeError):
+            pass
+    if p_model_app and p_model_app.strip().casefold() != "all":
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Models</span><span class="grid-val" title="{p_model_app}">{p_model_app}</span></div>'
+        )
+
+    # Dedicated Assigned Engineers Section
+    eng_items_html = [
+        f"""<div class="eng-item">
+              <span class="eng-role-tag de">DE</span>
+              <div class="eng-info">
+                <span class="eng-title">Design Engineer</span>
+                <span class="eng-val" title="{p_de or '—'}">{p_de or '—'}</span>
+              </div>
+            </div>""",
+        f"""<div class="eng-item">
+              <span class="eng-role-tag te">TE</span>
+              <div class="eng-info">
+                <span class="eng-title">Technology Engineer</span>
+                <span class="eng-val" title="{p_te or '—'}">{p_te or '—'}</span>
+              </div>
+            </div>""",
+    ]
+    if p_ame:
+        eng_items_html.append(
+            f"""<div class="eng-item">
+                  <span class="eng-role-tag ame">AME</span>
+                  <div class="eng-info">
+                    <span class="eng-title">AME / Tooling</span>
+                    <span class="eng-val" title="{p_ame}">{p_ame}</span>
+                  </div>
+                </div>"""
+        )
+    if p_pmqe:
+        eng_items_html.append(
+            f"""<div class="eng-item">
+                  <span class="eng-role-tag aqe">AQE</span>
+                  <div class="eng-info">
+                    <span class="eng-title">PMQE / AQE</span>
+                    <span class="eng-val" title="{p_pmqe}">{p_pmqe}</span>
+                  </div>
+                </div>"""
+        )
+    if p_buyer:
+        eng_items_html.append(
+            f"""<div class="eng-item">
+                  <span class="eng-role-tag buyer">Buyer</span>
+                  <div class="eng-info">
+                    <span class="eng-title">Buyer / GCL</span>
+                    <span class="eng-val" title="{p_buyer}">{p_buyer}</span>
+                  </div>
+                </div>"""
+        )
+
+    engineers_section_html = f"""
+    <div class="popover-engineers-section">
+      <div class="popover-section-label">Assigned Engineers (Parts Catalog)</div>
+      <div class="popover-engineers-grid">
+        {''.join(eng_items_html)}
+      </div>
+    </div>
+    """
+
+    # Assembly Mini-BOM Makeup Section
+    minibom_section_html = ""
+    if is_asm_group:
+        if mini_bom:
+            rows_html = []
+            for item in mini_bom:
+                c_num = _text(item.get("part_number") or "")
+                c_desc = _text(item.get("description") or item.get("factory_nickname") or "—")
+                c_qty = _clean_number(item.get("quantity") or 1)
+                c_eng = _text(item.get("design_engineer") or item.get("technology_engineer") or "")
+                rows_html.append(
+                    f"""<tr>
+                          <td class="minibom-pnum">{c_num}</td>
+                          <td class="minibom-desc" title="{c_desc}">{c_desc}</td>
+                          <td class="minibom-qty">×{c_qty}</td>
+                          <td class="minibom-eng" title="{c_eng or '—'}">{c_eng or '—'}</td>
+                        </tr>"""
+                )
+            minibom_section_html = f"""
+            <div class="popover-minibom-section">
+              <div class="popover-section-label">
+                <span>Mini BOM Makeup</span>
+                <span class="minibom-count-pill">{len(mini_bom)} component{'s' if len(mini_bom) != 1 else ''}</span>
+              </div>
+              <div class="minibom-scroll">
+                <table class="minibom-table">
+                  <thead>
+                    <tr>
+                      <th>Part #</th>
+                      <th>Description</th>
+                      <th class="qty-th">Qty</th>
+                      <th>Engineer</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {''.join(rows_html)}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            """
+        else:
+            minibom_section_html = """
+            <div class="popover-minibom-section">
+              <div class="popover-section-label">Mini BOM Makeup</div>
+              <div class="minibom-empty-note">Assembly group number — no child components defined in Assemblies or PITS BOM yet.</div>
+            </div>
+            """
+
+    # Linked steps
+    linked_steps = part.get("linked_steps") or []
+    linked_steps_html = ""
+    if linked_steps:
+        steps_badges = " ".join(
+            f'<span class="popover-step-pill">{_text(s)}</span>' for s in linked_steps
+        )
+        linked_steps_html = f"""
+        <div class="popover-steps-box">
+          <div class="popover-steps-label">Used In Process Step(s):</div>
+          <div class="popover-steps-list">{steps_badges}</div>
+        </div>
+        """
+
+    # Notes
+    notes_html = (
+        f'<div class="popover-notes-box"><strong>Notes:</strong> {p_notes}</div>'
+        if p_notes
+        else ""
+    )
+
+    # Nickname banner
+    nick_html = (
+        f'<div class="popover-nick-banner">🏷️ Factory Nickname: <strong>{p_nick}</strong></div>'
+        if p_nick
+        else ""
+    )
+
+    # Official Windchill CAD name if distinct
+    cad_html = (
+        f'<div class="popover-cad-name">Official CAD: {p_windchill}</div>'
+        if p_windchill and p_windchill != p_desc
+        else ""
+    )
+
+    return f"""
+    <div class="part-popover-card">
+      <div class="part-popover-header">
+        {img_preview_html}
+        <div class="part-popover-title-row">
+          <span class="part-popover-num">{p_num}</span>
+          <div class="part-popover-badges">{' '.join(badges_html)}</div>
+        </div>
+        {nick_html}
+      </div>
+      <div class="part-popover-body">
+        <div class="popover-part-desc">{p_desc or 'No description available'}</div>
+        {cad_html}
+        <div class="part-popover-grid">
+          {''.join(grid_items)}
+        </div>
+        {engineers_section_html}
+        {minibom_section_html}
+        {linked_steps_html}
+        {notes_html}
+      </div>
+      <div class="popover-footer">
+        <a href="./parts" target="_top" class="popover-action-link">Open in Parts Catalog ↗</a>
+      </div>
+    </div>
+    """
+
+
 def render_pitch_canvas(
     pitch: dict,
     elements: list[dict] | None = None,
@@ -321,11 +614,22 @@ def render_pitch_canvas(
             else '<div class="part-nick-space">&nbsp;</div>'
         )
 
+        popover_content = _part_popover_content(part)
+
         part_rows_html.append(
             f"""
-            <tr>
+            <tr class="part-row" data-part-num="{p_num}">
               <td class="col-thumb">{img_tag}</td>
-              <td class="col-pnum"><strong>{p_num}</strong></td>
+              <td class="col-pnum">
+                <div class="part-pnum-container">
+                  <strong>{p_num}</strong>
+                  <span class="part-info-cue" title="Hover for part details">i</span>
+                  <div class="part-popover" role="tooltip">
+                    <div class="part-popover-bridge"></div>
+                    {popover_content}
+                  </div>
+                </div>
+              </td>
               <td class="col-desc">
                 <div class="part-desc-text" title="{p_desc}">{p_desc or '—'}</div>
                 {nick_row}
@@ -563,7 +867,12 @@ def render_pitch_canvas(
             tag_badges_html = "".join(f'<span class="visual-tag-badge">{sn}</span>' for sn in tagged_steps)
             is_general = False
         elif tagged_steps:
-            tag_labels = [
+            pitch_tag_labels = [
+                _text(t.get("operation") or f"Step {step_num_by_wid.get(str(t.get('work_element_id') or '').strip(), t.get('work_sequence', ''))}")
+                for t in item.get("tagged_work_elements", [])
+                if str(t.get("work_element_id") or "").strip() in step_num_by_wid
+            ]
+            tag_labels = pitch_tag_labels or [
                 _text(t.get("operation") or f"Step {t.get('work_sequence', '')}")
                 for t in item.get("tagged_work_elements", [])
             ]
@@ -826,13 +1135,14 @@ def render_pitch_canvas(
         display: grid;
         grid-template-columns: 37% 63%;
         gap: 12px;
+        overflow: visible;
       }}
       .left-col {{
         display: flex;
         flex-direction: column;
         gap: 8px;
         min-height: 0;
-        overflow: hidden;
+        overflow: visible;
       }}
       .right-col {{
         display: flex;
@@ -894,7 +1204,7 @@ def render_pitch_canvas(
       /* Parts Table */
       .parts-panel {{
         flex: 1 1 0;
-        overflow-y: auto;
+        overflow: visible;
         min-height: 120px;
       }}
       .parts-table {{
@@ -915,6 +1225,48 @@ def render_pitch_canvas(
         padding: 4px 6px;
         border-bottom: 1px solid #f1f5f9;
         vertical-align: middle;
+      }}
+      .parts-table tr.part-row {{
+        cursor: pointer;
+        transition: background-color 0.15s ease;
+      }}
+      .parts-table tr.part-row:hover {{
+        background-color: #f1f5f9;
+      }}
+      .parts-table tr.part-row:hover .part-info-cue {{
+        opacity: 1;
+        background: #0284c7;
+        color: #ffffff;
+      }}
+      .parts-table tr.part-row:hover .part-popover,
+      .part-pnum-container:hover .part-popover {{
+        display: block;
+      }}
+      .part-pnum-container {{
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }}
+      .part-info-cue {{
+        display: inline-block;
+        font-size: 0.62rem;
+        color: #94a3b8;
+        background: #f1f5f9;
+        border: 1px solid #cbd5e1;
+        border-radius: 999px;
+        width: 13px;
+        height: 13px;
+        line-height: 11px;
+        text-align: center;
+        font-weight: 700;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }}
+      .parts-table tr.part-row:hover .part-info-cue {{
+        color: #ffffff;
+        background: #0284c7;
+        border-color: #0284c7;
       }}
       .col-thumb {{ width: 54px; min-width: 54px; text-align: center; }}
       .part-thumb {{
@@ -980,6 +1332,400 @@ def render_pitch_canvas(
       .h-badge.nvan {{ background: #ffedd5; color: #c2410c; border: 1px solid #fed7aa; }}
       .text-muted {{ color: #94a3b8; }}
       .part-placeholder.no-parts {{ padding: 14px; text-align: center; font-size: 0.78rem; color: #94a3b8; font-style: italic; }}
+
+      /* Floating Part Popover Window */
+      .part-popover {{
+        display: none;
+        position: absolute;
+        top: -10px;
+        left: calc(100% + 14px);
+        width: 410px;
+        max-width: 440px;
+        background: #ffffff;
+        color: #1e293b;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        box-shadow: 0 12px 28px -4px rgba(0, 0, 0, 0.28), 0 8px 10px -6px rgba(0, 0, 0, 0.15);
+        padding: 10px 12px;
+        z-index: 1000;
+        white-space: normal;
+        text-align: left;
+        font-weight: normal;
+        box-sizing: border-box;
+        cursor: default;
+        pointer-events: auto;
+      }}
+      .part-popover-bridge {{
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: -18px;
+        width: 18px;
+      }}
+      .parts-table tr.part-row:nth-child(n+4):nth-last-child(-n+3) .part-popover {{
+        top: auto;
+        bottom: -10px;
+      }}
+      .part-popover::before {{
+        content: "";
+        position: absolute;
+        top: 18px;
+        left: -7px;
+        width: 0;
+        height: 0;
+        border-top: 7px solid transparent;
+        border-bottom: 7px solid transparent;
+        border-right: 7px solid #cbd5e1;
+      }}
+      .part-popover::after {{
+        content: "";
+        position: absolute;
+        top: 19px;
+        left: -6px;
+        width: 0;
+        height: 0;
+        border-top: 6px solid transparent;
+        border-bottom: 6px solid transparent;
+        border-right: 6px solid #ffffff;
+      }}
+      .parts-table tr.part-row:nth-child(n+4):nth-last-child(-n+3) .part-popover::before {{
+        top: auto;
+        bottom: 18px;
+      }}
+      .parts-table tr.part-row:nth-child(n+4):nth-last-child(-n+3) .part-popover::after {{
+        top: auto;
+        bottom: 19px;
+      }}
+      .part-popover-header {{
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 6px;
+        margin-bottom: 6px;
+      }}
+      .part-popover-title-row {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        flex-wrap: wrap;
+      }}
+      .part-popover-num {{
+        font-size: 1.05rem;
+        font-weight: 800;
+        color: #0f172a;
+        letter-spacing: -0.01em;
+      }}
+      .part-popover-badges {{
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: wrap;
+      }}
+      .popover-badge {{
+        font-size: 0.68rem;
+        font-weight: 700;
+        padding: 1px 6px;
+        border-radius: 4px;
+        letter-spacing: 0.02em;
+      }}
+      .popover-badge.rev {{
+        background: #f1f5f9;
+        color: #475569;
+        border: 1px solid #cbd5e1;
+      }}
+      .popover-badge.make-buy {{
+        background: #e0f2fe;
+        color: #0369a1;
+        border: 1px solid #bae6fd;
+      }}
+      .popover-badge.asm-group {{
+        background: #eff6ff;
+        color: #1d4ed8;
+        border: 1px solid #bfdbfe;
+        font-weight: 800;
+      }}
+      .popover-nick-banner {{
+        margin-top: 4px;
+        font-size: 0.74rem;
+        font-weight: 600;
+        color: #0369a1;
+        background: #f0f9ff;
+        padding: 2px 7px;
+        border-radius: 4px;
+        border: 1px solid #bae6fd;
+      }}
+      .part-popover-body {{
+        font-size: 0.74rem;
+        color: #334155;
+        max-height: 480px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+      }}
+      .popover-image-banner {{
+        width: 100%;
+        height: 140px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        margin-bottom: 8px;
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
+      }}
+      .popover-large-img {{
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        transition: transform 0.2s ease;
+      }}
+      .popover-image-banner:hover .popover-large-img {{
+        transform: scale(1.05);
+      }}
+      .popover-no-image-cue {{
+        font-size: 0.68rem;
+        color: #94a3b8;
+        background: #f8fafc;
+        border: 1px dashed #cbd5e1;
+        border-radius: 4px;
+        padding: 4px 8px;
+        margin-bottom: 8px;
+        text-align: center;
+      }}
+      .popover-part-desc {{
+        font-weight: 600;
+        font-size: 0.78rem;
+        color: #0f172a;
+        line-height: 1.3;
+      }}
+      .popover-cad-name {{
+        font-size: 0.68rem;
+        color: #64748b;
+        margin-top: 2px;
+      }}
+      .part-popover-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px 8px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        padding: 6px 8px;
+        margin-top: 5px;
+        margin-bottom: 5px;
+      }}
+      .popover-grid-item {{
+        display: flex;
+        flex-direction: column;
+      }}
+      .grid-label {{
+        font-size: 0.65rem;
+        font-weight: 700;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }}
+      .grid-val {{
+        font-size: 0.73rem;
+        font-weight: 600;
+        color: #1e293b;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .popover-engineers-section {{
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #e2e8f0;
+      }}
+      .popover-section-label {{
+        font-size: 0.66rem;
+        font-weight: 700;
+        color: #475569;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 5px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }}
+      .popover-engineers-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px 6px;
+      }}
+      .eng-item {{
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 4px;
+        padding: 3px 6px;
+        min-width: 0;
+      }}
+      .eng-role-tag {{
+        font-size: 0.60rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        background: #0284c7;
+        color: #ffffff;
+        padding: 1px 4px;
+        border-radius: 3px;
+        flex-shrink: 0;
+      }}
+      .eng-role-tag.de {{ background: #2563eb; }}
+      .eng-role-tag.te {{ background: #0891b2; }}
+      .eng-role-tag.ame {{ background: #d97706; }}
+      .eng-role-tag.aqe {{ background: #059669; }}
+      .eng-role-tag.buyer {{ background: #7c3aed; }}
+      .eng-info {{
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }}
+      .eng-title {{
+        font-size: 0.60rem;
+        color: #64748b;
+        font-weight: 600;
+        line-height: 1;
+      }}
+      .eng-val {{
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #1e293b;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        line-height: 1.2;
+        margin-top: 1px;
+      }}
+      .popover-minibom-section {{
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #e2e8f0;
+      }}
+      .minibom-count-pill {{
+        font-size: 0.62rem;
+        font-weight: 700;
+        color: #1d4ed8;
+        background: #dbeafe;
+        padding: 1px 5px;
+        border-radius: 8px;
+      }}
+      .minibom-scroll {{
+        max-height: 140px;
+        overflow-y: auto;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        background: #ffffff;
+        scrollbar-width: thin;
+      }}
+      .minibom-table {{
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.70rem;
+      }}
+      .minibom-table th {{
+        background: #f8fafc;
+        color: #475569;
+        font-weight: 700;
+        padding: 3px 6px;
+        border-bottom: 1px solid #e2e8f0;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        text-align: left;
+      }}
+      .minibom-table th.qty-th {{
+        text-align: right;
+      }}
+      .minibom-table td {{
+        padding: 3px 6px;
+        border-bottom: 1px solid #f1f5f9;
+        color: #1e293b;
+        vertical-align: middle;
+      }}
+      .minibom-table tr:last-child td {{
+        border-bottom: none;
+      }}
+      .minibom-table tr:hover td {{
+        background: #f8fafc;
+      }}
+      .minibom-pnum {{
+        font-weight: 700;
+        color: #0284c7;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        white-space: nowrap;
+      }}
+      .minibom-desc {{
+        color: #475569;
+        max-width: 130px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .minibom-qty {{
+        font-weight: 800;
+        text-align: right;
+        white-space: nowrap;
+        color: #0f172a;
+      }}
+      .minibom-eng {{
+        color: #64748b;
+        font-size: 0.65rem;
+        max-width: 80px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .minibom-empty-note {{
+        font-size: 0.70rem;
+        color: #64748b;
+        font-style: italic;
+        padding: 6px 8px;
+        background: #f8fafc;
+        border-radius: 4px;
+        border: 1px dashed #cbd5e1;
+      }}
+      .popover-steps-box {{
+        margin-top: 5px;
+        padding: 5px 7px;
+        background: #f1f5f9;
+        border-radius: 5px;
+        font-size: 0.72rem;
+      }}
+      .popover-steps-label {{
+        font-weight: 700;
+        color: #0f172a;
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        margin-bottom: 3px;
+      }}
+      .popover-steps-list {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 3px;
+      }}
+      .popover-step-pill {{
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 3px;
+        padding: 1px 5px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: #1e293b;
+      }}
+      .popover-notes-box {{
+        margin-top: 5px;
+        padding: 4px 7px;
+        background: #fffbeb;
+        border: 1px solid #fef3c7;
+        border-radius: 4px;
+        font-size: 0.71rem;
+        color: #92400e;
+        line-height: 1.3;
+      }}
       /* Mini Yamazumi Stack */
       .stack-panel {{
         height: 180px;
@@ -1568,6 +2314,10 @@ def render_pitch_canvas(
         .alert-popover {{
           display: none !important;
         }}
+        .part-popover,
+        .part-popover-portal {{
+          display: none !important;
+        }}
         .visual-tag-badge {{
           background: #0284c7 !important;
           color: #ffffff !important;
@@ -1691,10 +2441,15 @@ def render_pitch_canvas(
             }});
           }});
         }}
-        if (document.readyState === 'loading') {{
-          document.addEventListener('DOMContentLoaded', setupHoverLinking);
-        }} else {{
+
+        function initSlideInteractions() {{
           setupHoverLinking();
+        }}
+
+        if (document.readyState === 'loading') {{
+          document.addEventListener('DOMContentLoaded', initSlideInteractions);
+        }} else {{
+          initSlideInteractions();
         }}
       }})();
       </script>

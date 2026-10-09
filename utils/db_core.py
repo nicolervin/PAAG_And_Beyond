@@ -483,7 +483,19 @@ def clone_process_visual_media_scenario(
         old_pitch_id = str(item["pitch_id"])
         new_pitch_id = pitch_id_map.get(old_pitch_id)
         if not new_pitch_id:
-            continue
+            tag_elem = conn.execute(
+                """SELECT y.pitch_id FROM process_visual_media_tags t
+                   JOIN yamazumi_elements y ON (
+                       y.process_element_id = t.work_element_id
+                       OR (y.process_element_id IS NULL AND y.id = t.work_element_id)
+                   )
+                   WHERE t.media_id=? AND y.pitch_id IS NOT NULL LIMIT 1""",
+                (old_id,),
+            ).fetchone()
+            if tag_elem and str(tag_elem[0]) in pitch_id_map:
+                new_pitch_id = pitch_id_map[str(tag_elem[0])]
+            else:
+                continue
         new_media_id = str(uuid4())
         media_id_map[old_id] = new_media_id
         item.update(
