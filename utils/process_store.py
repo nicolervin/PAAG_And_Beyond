@@ -1701,6 +1701,8 @@ def process_pitch_visual_summary(
         variants = parse_yamazumi_model_variants(yel["model_variants"], fallback="Base")
         item_data = {
             "id": yel["id"],
+            "work_element_id": wid,
+            "process_element_id": wid,
             "description": yel["description"],
             "time_s": float(yel["time_s"] or 0),
             "sequence": yel["sequence"],

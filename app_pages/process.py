@@ -2905,9 +2905,9 @@ with tab_slides:
                 element_options = [
                     (
                         str(el.get("work_element_id") or el.get("id")),
-                        f"{el.get('op_id', '')} — {el.get('operation') or el.get('yamazumi_description') or 'Work Step'}"
+                        f"{idx + 1} · {el.get('op_id') + ' — ' if el.get('op_id') and el.get('op_id') != 'Yamazumi link required' else ''}{el.get('operation') or el.get('yamazumi_description') or 'Work Step'}"
                     )
-                    for el in pitch_rows
+                    for idx, el in enumerate(pitch_rows)
                     if el.get("work_element_id") or el.get("id")
                 ]
                 tag_dict_elem = dict(element_options)
@@ -3031,11 +3031,27 @@ with tab_slides:
                                 st.markdown(f"**Caption:** {media_item.get('caption') or '*(None)*'}")
                                 st.caption(f"Type: `{media_item.get('media_type')}` | Sequence: `{media_item.get('sequence', 10)}`")
                                 tags = media_item.get("tagged_work_elements", [])
+                                pitch_step_map = {str(el.get("work_element_id") or el.get("id")): idx + 1 for idx, el in enumerate(pitch_rows)}
                                 if tags:
-                                    tag_str = ", ".join(t.get("operation") or f"Step {t.get('work_sequence', '')}" for t in tags)
-                                    st.caption(f"Tagged Steps: **{tag_str}**")
+                                    tagged_step_nums = sorted([pitch_step_map[str(t.get("work_element_id"))] for t in tags if str(t.get("work_element_id")) in pitch_step_map])
+                                    if len(pitch_rows) > 0 and len(tagged_step_nums) >= len(pitch_rows):
+                                        nums_display = ", ".join(str(n) for n in tagged_step_nums)
+                                        st.caption(f"Tagged Steps: **All elements ({nums_display})**")
+                                    else:
+                                        tag_parts = []
+                                        for t in tags:
+                                            twid = str(t.get("work_element_id") or "")
+                                            s_num = pitch_step_map.get(twid)
+                                            op_text = t.get("operation") or f"Step {t.get('work_sequence', '')}"
+                                            tag_parts.append(f"{s_num} {op_text}" if s_num else op_text)
+                                        tag_str = ", ".join(tag_parts)
+                                        st.caption(f"Tagged Steps: **{tag_str}**")
                                 else:
-                                    st.caption("Tagged Steps: *General pitch visual (all steps)*")
+                                    all_nums_display = ", ".join(str(idx + 1) for idx in range(len(pitch_rows)))
+                                    if all_nums_display:
+                                        st.caption(f"Tagged Steps: **All elements ({all_nums_display})**")
+                                    else:
+                                        st.caption("Tagged Steps: *General pitch visual (all steps)*")
                             with g_col3:
                                 if st.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
                                     edit_visual_media_dialog(

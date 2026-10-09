@@ -354,6 +354,55 @@ def render_pitch_canvas(
         parts_section_html = '<div class="part-placeholder no-parts"><span>No Parts Paired</span></div>'
 
     # 3. BUILD LEFT COLUMN: MINI YAMAZUMI STACK
+    # Map work elements on this pitch to 1-based sequential step numbers
+    all_pitch_elements = list(pitch.get("elements", []))
+    if not all_pitch_elements and elements_list:
+        all_pitch_elements = list(elements_list)
+
+    step_num_by_wid: dict[str, int] = {}
+    for idx, el in enumerate(all_pitch_elements):
+        s_num = idx + 1
+        w_id = str(el.get("work_element_id") or el.get("id") or "").strip()
+        y_id = str(el.get("yamazumi_element_id") or "").strip()
+        if w_id:
+            step_num_by_wid[w_id] = s_num
+        if y_id:
+            step_num_by_wid[y_id] = s_num
+
+    # If step_num_by_wid is still empty, populate from yamazumi_stacks
+    if not step_num_by_wid and yamazumi_stacks:
+        cur_idx = 1
+        for v_data in yamazumi_stacks.values():
+            v_els = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
+            for e in v_els:
+                if not isinstance(e, dict):
+                    continue
+                e_wid = str(e.get("work_element_id") or e.get("process_element_id") or e.get("id") or "").strip()
+                if e_wid and e_wid not in step_num_by_wid:
+                    step_num_by_wid[e_wid] = cur_idx
+                    cur_idx += 1
+
+    # Map visual media to tagged step numbers
+    media_step_numbers_map: dict[str, list[int]] = {}
+    all_tagged_step_nums: set[int] = set()
+
+    for m_item in (visual_media or []):
+        m_id = str(m_item.get("id") or "")
+        tagged_steps: list[int] = []
+        for t in m_item.get("tagged_work_elements", []):
+            t_wid = str(t.get("work_element_id") or "").strip()
+            if t_wid in step_num_by_wid:
+                tagged_steps.append(step_num_by_wid[t_wid])
+        if not tagged_steps:
+            for t_wid in m_item.get("tagged_work_element_ids", []):
+                t_clean = str(t_wid).strip()
+                if t_clean in step_num_by_wid:
+                    tagged_steps.append(step_num_by_wid[t_clean])
+        tagged_steps = sorted(list(set(tagged_steps)))
+        if m_id:
+            media_step_numbers_map[m_id] = tagged_steps
+        all_tagged_step_nums.update(tagged_steps)
+
     variant_columns_html: list[str] = []
     max_variant_time = 0.0
     for v_name, v_data in yamazumi_stacks.items():
@@ -396,12 +445,32 @@ def render_pitch_canvas(
                     type_class = "type-cycle"
 
             # Height in px proportional to time
-            b_height = max(18, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 22
+            b_height = max(20, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 22
+
+            e_wid = str(e.get("work_element_id") or e.get("process_element_id") or e.get("id") or "").strip()
+            step_num = step_num_by_wid.get(e_wid, 0)
+            if step_num == 0:
+                step_num = step_num_by_wid.get(str(e.get("id") or "").strip(), 0)
+
+            has_media = step_num > 0 and step_num in all_tagged_step_nums
+            step_badge_html = f'<span class="stack-step-badge">{step_num}</span>' if step_num > 0 else ""
+            cam_icon_html = f'<span class="stack-cam-icon" title="Visual aid attached for Step {step_num}">📷</span>' if has_media else ""
+            step_attr = f'data-step-num="{step_num}"' if step_num > 0 else ""
+            visual_class = "has-visual" if has_media else ""
+            step_prefix = f"Step {step_num} · " if step_num > 0 else ""
+            media_info = " · 📷 Visual aid attached" if has_media else ""
+
             blocks_html.append(
                 f"""
-                <div class="stack-block {type_class} motion-bar {e_color}" style="height:{b_height}px" title="{e_desc} · {_clean_number(e_time)} s · {work_type or 'Cycle'}">
-                  <span class="block-label">{e_desc}</span>
-                  <span class="block-time">{_clean_number(e_time)}s</span>
+                <div class="stack-block {type_class} motion-bar {e_color} {visual_class}" {step_attr} style="height:{b_height}px" title="{step_prefix}{e_desc} · {_clean_number(e_time)} s · {work_type or 'Cycle'}{media_info}">
+                  <div class="block-left">
+                    {step_badge_html}
+                    <span class="block-label">{e_desc}</span>
+                  </div>
+                  <div class="block-right">
+                    {cam_icon_html}
+                    <span class="block-time">{_clean_number(e_time)}s</span>
+                  </div>
                 </div>
                 """
             )
@@ -454,20 +523,66 @@ def render_pitch_canvas(
         grid_class = "grid-layout-6"
 
     media_cards_html: list[str] = []
+    total_pitch_elements_count = len(all_pitch_elements)
+
     for item in current_media_items:
         m_type = item.get("media_type") or "image"
         caption = _text(item.get("caption") or "")
         f_path = item.get("file_path") or ""
         media_src = _media_data_url(f_path)
-        tag_labels = [
-            _text(t.get("operation") or f"Step {t.get('work_sequence', '')}")
-            for t in item.get("tagged_work_elements", [])
-        ]
-        step_tag_html = (
-            f'<div class="visual-step-tag">{" · ".join(tag_labels)}</div>'
-            if tag_labels
-            else '<div class="visual-step-tag general">General Pitch Visual</div>'
-        )
+
+        m_id = str(item.get("id") or "")
+        tagged_steps = media_step_numbers_map.get(m_id)
+        if tagged_steps is None:
+            tagged_steps = []
+            for t in item.get("tagged_work_elements", []):
+                t_wid = str(t.get("work_element_id") or "").strip()
+                if t_wid in step_num_by_wid:
+                    tagged_steps.append(step_num_by_wid[t_wid])
+            if not tagged_steps:
+                for t_wid in item.get("tagged_work_element_ids", []):
+                    t_clean = str(t_wid).strip()
+                    if t_clean in step_num_by_wid:
+                        tagged_steps.append(step_num_by_wid[t_clean])
+            tagged_steps = sorted(list(set(tagged_steps)))
+
+        # Determine if selected on all elements (or general for all pitch elements)
+        is_all_elements = False
+        if total_pitch_elements_count > 0:
+            if len(tagged_steps) >= total_pitch_elements_count or len(tagged_steps) == 0:
+                is_all_elements = True
+                if not tagged_steps:
+                    tagged_steps = list(range(1, total_pitch_elements_count + 1))
+        elif not tagged_steps:
+            is_all_elements = True
+
+        nums_str = ", ".join(str(sn) for sn in tagged_steps)
+
+        if is_all_elements and tagged_steps:
+            step_title_text = f"All elements ({nums_str})"
+            tag_badges_html = "".join(f'<span class="visual-tag-badge">{sn}</span>' for sn in tagged_steps)
+            is_general = False
+        elif tagged_steps:
+            tag_labels = [
+                _text(t.get("operation") or f"Step {t.get('work_sequence', '')}")
+                for t in item.get("tagged_work_elements", [])
+            ]
+            step_title_text = " · ".join(tag_labels) if tag_labels else f"Steps {nums_str}"
+            tag_badges_html = "".join(f'<span class="visual-tag-badge">{sn}</span>' for sn in tagged_steps)
+            is_general = False
+        else:
+            step_title_text = "General Pitch Visual"
+            tag_badges_html = '<span class="visual-tag-badge general">General</span>'
+            is_general = True
+
+        step_nums_attr = ",".join(str(sn) for sn in tagged_steps)
+
+        step_tag_html = f"""
+        <div class="visual-step-tag {'general' if is_general else ''}">
+          <div class="visual-tag-badges">{tag_badges_html}</div>
+          <span class="visual-tag-title" title="{step_title_text}">{step_title_text}</span>
+        </div>
+        """
 
         if m_type == "video":
             if media_src:
@@ -488,7 +603,7 @@ def render_pitch_canvas(
 
         media_cards_html.append(
             f"""
-            <article class="visual-card">
+            <article class="visual-card" data-step-nums="{step_nums_attr}">
               {step_tag_html}
               <div class="visual-media-box">
                 {media_element_html}
@@ -511,29 +626,77 @@ def render_pitch_canvas(
 
     # 5. BUILD FUNCTIONAL ALERTS BAR
     alert_categories = [
-        ("Quality", "quality", alerts.get("quality", [])),
-        ("Ergo", "ergo", alerts.get("ergo", [])),
-        ("Safety", "safety", alerts.get("safety", [])),
-        ("Materials", "materials", alerts.get("materials", [])),
-        ("Equipment", "equipment", alerts.get("equipment", [])),
+        ("Quality", "Quality", "quality", "functional_quality", alerts.get("quality", [])),
+        ("Ergo", "Ergonomics", "ergo", "functional_ergonomics", alerts.get("ergo", [])),
+        ("Safety", "Safety", "safety", "functional_safety", alerts.get("safety", [])),
+        ("Materials", "Materials", "materials", "functional_materials", alerts.get("materials", [])),
+        ("Equipment", "Equipment", "equipment", "functional_equipment", alerts.get("equipment", [])),
     ]
     alert_blocks_html: list[str] = []
-    for cat_name, cat_key, cat_list in alert_categories:
+    for cat_name, display_name, cat_key, page_slug, cat_list in alert_categories:
         if cat_list:
             items_str = " · ".join(_text(item.get("label") or "Alert") for item in cat_list)
             first_detail = _text(cat_list[0].get("detail") or cat_list[0].get("label") or "")
+
+            popover_items_html = []
+            for item in cat_list:
+                item_label = html.escape(_text(item.get("label") or "Alert"))
+                item_detail = html.escape(_text(item.get("detail") or ""))
+                popover_items_html.append(
+                    f"""
+                    <div class="popover-item active">
+                      <div class="popover-item-title">{item_label}</div>
+                      {f'<div class="popover-item-desc">{item_detail}</div>' if item_detail and item_detail != item_label else ''}
+                    </div>
+                    """
+                )
+
+            popover_html = f"""
+            <div class="alert-popover" role="tooltip">
+              <div class="popover-header">
+                <span class="popover-category">{display_name} Alerts</span>
+                <span class="popover-count-badge active">{len(cat_list)} flagged</span>
+              </div>
+              <div class="popover-items-list">
+                {"".join(popover_items_html)}
+              </div>
+              <div class="popover-footer">
+                <a href="./{page_slug}" target="_top" class="popover-action-link">Open {display_name} Review ↗</a>
+              </div>
+            </div>
+            """
+
             alert_blocks_html.append(
                 f"""
-                <div class="alert-block active {cat_key}" title="{first_detail}">
+                <div class="alert-block active {cat_key}" title="{html.escape(first_detail)}">
                   <strong>{cat_name}:</strong> <span class="alert-summary">{items_str}</span>
+                  {popover_html}
                 </div>
                 """
             )
         else:
+            popover_html = f"""
+            <div class="alert-popover" role="tooltip">
+              <div class="popover-header">
+                <span class="popover-category">{display_name} Status</span>
+                <span class="popover-count-badge clear">✓ Nominal</span>
+              </div>
+              <div class="popover-items-list">
+                <div class="popover-item clear">
+                  <div class="popover-item-desc">All checks passed. No open risks, unclassified materials, or missing specifications detected for this pitch.</div>
+                </div>
+              </div>
+              <div class="popover-footer">
+                <a href="./{page_slug}" target="_top" class="popover-action-link">Open {display_name} Review ↗</a>
+              </div>
+            </div>
+            """
+
             alert_blocks_html.append(
                 f"""
                 <div class="alert-block clear {cat_key}">
                   <strong>{cat_name}:</strong> <span class="alert-ok">✓ None</span>
+                  {popover_html}
                 </div>
                 """
             )
@@ -922,10 +1085,61 @@ def render_pitch_canvas(
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 0 5px;
+        padding: 0 4px;
         font-size: 0.68rem;
         font-weight: 700;
         overflow: hidden;
+        position: relative;
+        cursor: pointer;
+        transition: filter 0.15s ease, outline 0.15s ease, box-shadow 0.15s ease;
+      }}
+      .stack-block .block-left {{
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+        overflow: hidden;
+        flex: 1 1 auto;
+      }}
+      .stack-step-badge {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #0f172a;
+        color: #ffffff;
+        font-size: 0.74rem;
+        font-weight: 800;
+        padding: 1px 5px;
+        min-width: 17px;
+        text-align: center;
+        border-radius: 4px;
+        line-height: 14px;
+        flex-shrink: 0;
+        border: 1px solid rgba(255, 255, 255, 0.4);
+        box-sizing: border-box;
+      }}
+      .stack-block.has-visual .stack-step-badge {{
+        background: #0284c7;
+        border-color: #bae6fd;
+      }}
+      .stack-block .block-right {{
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        flex-shrink: 0;
+        margin-left: 4px;
+      }}
+      .stack-cam-icon {{
+        font-size: 0.65rem;
+        display: inline-flex;
+        align-items: center;
+        opacity: 0.95;
+      }}
+      .stack-block.highlighted {{
+        outline: 2px solid #0284c7;
+        filter: brightness(1.2);
+        box-shadow: 0 0 8px rgba(2, 132, 199, 0.7);
+        z-index: 10;
       }}
       .stack-block.type-cycle {{
         background: #35c84a;
@@ -943,8 +1157,8 @@ def render_pitch_canvas(
       .motion-bar.green {{ background: #16a34a; }}
       .motion-bar.orange {{ background: #ea580c; }}
       .motion-bar.gray {{ background: #64748b; }}
-      .block-label {{ max-width: 70%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-      .block-time {{ font-weight: 800; }}
+      .block-label {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }}
+      .block-time {{ font-weight: 800; flex-shrink: 0; }}
       .takt-line {{
         position: absolute;
         left: 0;
@@ -985,19 +1199,57 @@ def render_pitch_canvas(
         flex-direction: column;
         overflow: hidden;
         min-height: 0;
+        position: relative;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+      }}
+      .visual-card.highlighted {{
+        border-color: #0284c7 !important;
+        box-shadow: 0 0 12px rgba(2, 132, 199, 0.45) !important;
+        transform: translateY(-1px);
       }}
       .visual-step-tag {{
         background: #1e293b;
         color: #f8fafc;
-        padding: 3px 8px;
-        font-size: 0.78rem;
+        padding: 4px 8px;
+        font-size: 0.80rem;
         font-weight: 700;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
       }}
       .visual-step-tag.general {{
         background: #475569;
+      }}
+      .visual-tag-badges {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+      }}
+      .visual-tag-badge {{
+        background: #0284c7;
+        color: #ffffff;
+        font-size: 0.78rem;
+        font-weight: 800;
+        padding: 2px 6px;
+        min-width: 18px;
+        text-align: center;
+        border-radius: 4px;
+        line-height: 15px;
+        border: 1px solid #38bdf8;
+        box-sizing: border-box;
+      }}
+      .visual-tag-badge.general {{
+        background: #64748b;
+        border-color: #94a3b8;
+      }}
+      .visual-tag-title {{
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1 1 auto;
+        min-width: 0;
       }}
       .visual-media-box {{
         flex: 1 1 0;
@@ -1007,6 +1259,7 @@ def render_pitch_canvas(
         align-items: center;
         justify-content: center;
         overflow: hidden;
+        position: relative;
       }}
       .visual-image {{
         width: 100%;
@@ -1059,7 +1312,7 @@ def render_pitch_canvas(
       .empty-media-title {{ font-size: 1.15rem; font-weight: 700; color: #334155; margin-bottom: 6px; }}
       .empty-media-desc {{ font-size: 0.85rem; max-width: 420px; line-height: 1.4; }}
 
-      /* Bottom Functional Alerts Banner */
+      /* Top Functional Alerts Banner */
       .functional-alerts-bar {{
         border: 1px solid #cbd5e1;
         border-radius: 6px;
@@ -1070,13 +1323,31 @@ def render_pitch_canvas(
         gap: 8px;
         align-items: center;
         font-size: 0.78rem;
+        position: relative;
+        z-index: 50;
+        overflow: visible;
       }}
       .alert-block {{
+        position: relative;
+        overflow: visible;
+        padding: 3px 6px;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+        cursor: pointer;
+        transition: background-color 0.15s ease, border-color 0.15s ease;
+      }}
+      .alert-block strong {{
+        flex-shrink: 0;
+      }}
+      .alert-summary {{
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        padding: 3px 6px;
-        border-radius: 4px;
+        min-width: 0;
+        flex: 1 1 auto;
       }}
       .alert-block.active {{
         background: #fee2e2;
@@ -1084,8 +1355,16 @@ def render_pitch_canvas(
         font-weight: 700;
         border: 1px solid #f87171;
       }}
+      .alert-block.active:hover {{
+        background: #fecaca;
+        border-color: #ef4444;
+      }}
       .alert-block.clear {{
         color: #475569;
+        border: 1px solid transparent;
+      }}
+      .alert-block.clear:hover {{
+        background: #e2e8f0;
       }}
       .alert-ok {{
         color: #16a34a;
@@ -1096,6 +1375,131 @@ def render_pitch_canvas(
         color: #94a3b8;
         font-style: italic;
         padding: 4px 0;
+      }}
+
+      /* Alert Hover Popovers */
+      .alert-popover {{
+        display: none;
+        position: absolute;
+        top: calc(100% + 5px);
+        left: 0;
+        width: 320px;
+        max-width: 85vw;
+        background: #ffffff;
+        color: #1e293b;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25), 0 8px 10px -6px rgba(0, 0, 0, 0.15);
+        padding: 10px 12px;
+        z-index: 1000;
+        white-space: normal;
+        text-align: left;
+        font-weight: normal;
+        box-sizing: border-box;
+        cursor: default;
+      }}
+      .alert-popover::before {{
+        content: "";
+        position: absolute;
+        top: -6px;
+        left: 0;
+        right: 0;
+        height: 6px;
+      }}
+      .functional-alerts-bar .alert-block:nth-child(4) .alert-popover,
+      .functional-alerts-bar .alert-block:nth-child(5) .alert-popover {{
+        left: auto;
+        right: 0;
+      }}
+      .alert-block:hover .alert-popover {{
+        display: block;
+      }}
+      .popover-header {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-bottom: 6px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid #e2e8f0;
+      }}
+      .popover-category {{
+        font-weight: 800;
+        font-size: 0.82rem;
+        color: #0f172a;
+      }}
+      .popover-count-badge {{
+        font-size: 0.68rem;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 10px;
+      }}
+      .popover-count-badge.active {{
+        background: #fee2e2;
+        color: #991b1b;
+        border: 1px solid #f87171;
+      }}
+      .popover-count-badge.clear {{
+        background: #dcfce7;
+        color: #166534;
+        border: 1px solid #86efac;
+      }}
+      .popover-items-list {{
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 190px;
+        overflow-y: auto;
+        margin-bottom: 8px;
+      }}
+      .popover-item {{
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        padding: 6px 8px;
+      }}
+      .popover-item.active {{
+        border-left: 3px solid #ef4444;
+      }}
+      .popover-item.clear {{
+        border-left: 3px solid #22c55e;
+        color: #475569;
+        font-size: 0.74rem;
+      }}
+      .popover-item-title {{
+        font-weight: 700;
+        font-size: 0.76rem;
+        color: #0f172a;
+        margin-bottom: 2px;
+      }}
+      .popover-item-desc {{
+        font-size: 0.72rem;
+        color: #475569;
+        line-height: 1.35;
+      }}
+      .popover-footer {{
+        padding-top: 6px;
+        border-top: 1px solid #f1f5f9;
+        display: flex;
+        justify-content: flex-end;
+      }}
+      .popover-action-link {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #0284c7;
+        text-decoration: none;
+        padding: 3px 8px;
+        border-radius: 4px;
+        background: #f0f9ff;
+        border: 1px solid #bae6fd;
+        transition: all 0.15s ease;
+      }}
+      .popover-action-link:hover {{
+        background: #0284c7;
+        color: #ffffff;
+        text-decoration: none;
       }}
 
       /* Presentation & Print rules */
@@ -1161,6 +1565,23 @@ def render_pitch_canvas(
         .visual-card {{
           border: 1px solid #94a3b8 !important;
         }}
+        .alert-popover {{
+          display: none !important;
+        }}
+        .visual-tag-badge {{
+          background: #0284c7 !important;
+          color: #ffffff !important;
+          border: 1px solid #000000 !important;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }}
+        .stack-step-badge {{
+          background: #0f172a !important;
+          color: #ffffff !important;
+          border: 1px solid #000000 !important;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }}
       }}
     </style>
 
@@ -1183,6 +1604,11 @@ def render_pitch_canvas(
           <div style="display:none">Generated on {generated_label} — Scenario: {eff_scenario_name}</div>
         </div>
       </header>
+
+      <!-- Functional Alerts Banner (Top, under header, above visual aids and parts) -->
+      <div class="functional-alerts-bar" role="region" aria-label="Functional Alerts">
+        {"".join(alert_blocks_html)}
+      </div>
 
       <!-- Main Slide Body -->
       <div class="slide-body">
@@ -1227,10 +1653,51 @@ def render_pitch_canvas(
         </main>
       </div>
 
-      <!-- Functional Alerts Bottom Bar -->
-      <footer class="functional-alerts-bar">
-        {"".join(alert_blocks_html)}
-      </footer>
+      <script>
+      (function() {{
+        function setupHoverLinking() {{
+          const blocks = document.querySelectorAll('.stack-block[data-step-num]');
+          const cards = document.querySelectorAll('.visual-card[data-step-nums]');
+          if (!blocks.length || !cards.length) return;
+
+          blocks.forEach(block => {{
+            block.addEventListener('mouseenter', () => {{
+              const num = block.getAttribute('data-step-num');
+              if (!num) return;
+              cards.forEach(card => {{
+                const nums = (card.getAttribute('data-step-nums') || '').split(',');
+                if (nums.includes(num)) {{
+                  card.classList.add('highlighted');
+                }}
+              }});
+            }});
+            block.addEventListener('mouseleave', () => {{
+              cards.forEach(card => card.classList.remove('highlighted'));
+            }});
+          }});
+
+          cards.forEach(card => {{
+            card.addEventListener('mouseenter', () => {{
+              const nums = (card.getAttribute('data-step-nums') || '').split(',');
+              blocks.forEach(block => {{
+                const num = block.getAttribute('data-step-num');
+                if (num && nums.includes(num)) {{
+                  block.classList.add('highlighted');
+                }}
+              }});
+            }});
+            card.addEventListener('mouseleave', () => {{
+              blocks.forEach(block => block.classList.remove('highlighted'));
+            }});
+          }});
+        }}
+        if (document.readyState === 'loading') {{
+          document.addEventListener('DOMContentLoaded', setupHoverLinking);
+        }} else {{
+          setupHoverLinking();
+        }}
+      }})();
+      </script>
     </section>
     """
 

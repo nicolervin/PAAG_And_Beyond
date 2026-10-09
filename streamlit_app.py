@@ -142,6 +142,11 @@ registered_pages = {
 }
 unlisted_pages = [
     st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
+    st.Page("app_pages/functional_equipment.py", title="Equipment", url_path="Equipment"),
+    st.Page("app_pages/functional_ergonomics.py", title="Ergonomics", url_path="Ergonomics"),
+    st.Page("app_pages/functional_quality.py", title="Quality", url_path="Quality"),
+    st.Page("app_pages/functional_materials.py", title="Materials", url_path="Materials"),
+    st.Page("app_pages/functional_safety.py", title="Safety", url_path="Safety"),
 ]
 navigation = st.navigation({**registered_pages, "_unlisted": unlisted_pages}, position="hidden")
 

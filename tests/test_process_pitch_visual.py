@@ -472,6 +472,11 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("Functional Alerts", html)
         self.assertIn("Torque Critical", html)
         self.assertIn("Pinch Hazard", html)
+        self.assertIn("alert-popover", html)
+        self.assertIn("Open Quality Review", html)
+        self.assertIn('href="./functional_quality"', html)
+        self.assertIn("Open Safety Review", html)
+        self.assertIn('href="./functional_safety"', html)
         self.assertIn("<video class=\"visual-player\" controls", html)
         self.assertIn("Verify alignment before cycling", html)
         self.assertIn("caption-callout", html)
@@ -829,6 +834,81 @@ class ProcessPitchVisualTests(unittest.TestCase):
         from utils.equipment_store import equipment_types
         eq_types = equipment_types(self.project_id)
         self.assertIn("Handheld equipment", eq_types["label"].tolist())
+
+    def test_yamazumi_work_element_and_visual_aid_tagging_badges(self) -> None:
+        work_id = self.work_ids[0]
+        # Save a visual aid tagged to work element #1
+        img_res = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="bracket_guide.png",
+            file_bytes=b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82",
+            caption="Align front bracket flush to chassis rail",
+            tagged_work_element_ids=[work_id],
+            sequence=10,
+            current_editor="Test IE",
+        )
+        self.assertTrue(bool(img_res.get("id")))
+
+        # Retrieve pitch summary and render slide
+        summary = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        html = render_pitch_canvas(
+            summary,
+            summary["elements"],
+            scenario_name="Rev A Plan",
+            project_name="Test Project",
+            page_num=1,
+            total_pages=1,
+        )
+
+        # 1. Yamazumi block for element #1 has step badge (without #), camera indicator, and data attribute
+        self.assertIn("stack-step-badge", html)
+        self.assertIn('<span class="stack-step-badge">1</span>', html)
+        self.assertNotIn('<span class="stack-step-badge">#1</span>', html)
+        self.assertIn("has-visual", html)
+        self.assertIn("stack-cam-icon", html)
+        self.assertIn("📷", html)
+        self.assertIn('data-step-num="1"', html)
+
+        # 2. Visual card has matching step tag badge on banner, no overlay badge on image
+        self.assertIn("visual-tag-badge", html)
+        self.assertIn('<span class="visual-tag-badge">1</span>', html)
+        self.assertNotIn("overlay-step-badge", html)
+        self.assertIn('data-step-nums="1"', html)
+        self.assertIn("Align front bracket flush to chassis rail", html)
+
+        # 3. Interactive hover linking script is included
+        self.assertIn("setupHoverLinking", html)
+        self.assertIn(".stack-block[data-step-num]", html)
+        self.assertIn(".visual-card[data-step-nums]", html)
+
+        # 4. When all elements are tagged, banner displays "All elements (1, ...)"
+        store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="overview.png",
+            file_bytes=b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82",
+            caption="Station overview guide",
+            tagged_work_element_ids=self.work_ids,
+            sequence=20,
+            current_editor="Test IE",
+        )
+        summary_all = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        html_all = render_pitch_canvas(
+            summary_all,
+            summary_all["elements"],
+            scenario_name="Rev A Plan",
+            project_name="Test Project",
+            page_num=1,
+            total_pages=1,
+        )
+        self.assertIn("All elements", html_all)
 
 
 if __name__ == "__main__":
