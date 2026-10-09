@@ -291,30 +291,47 @@ def render_pitch_canvas(
     part_rows_html: list[str] = []
     for part in parts:
         p_num = _text(part.get("part_number") or "Part")
-        p_desc = _text(part.get("description") or "")
+        p_desc = _text(part.get("description") or part.get("part_name") or "")
         p_nick = _text(part.get("factory_nickname") or "")
-        p_qty = _clean_number(part.get("quantity") or part.get("total_quantity") or 1)
-        p_img_url = _media_data_url(part.get("image_path"))
+        p_qty = _clean_number(part.get("quantity") or part.get("total_quantity") or part.get("qty") or 1)
+        p_img_url = _media_data_url(part.get("image_path") or part.get("thumbnail_path"))
         img_tag = (
             f'<img src="{p_img_url}" alt="{p_num}" class="part-thumb" />'
             if p_img_url
             else '<div class="thumb-ph">IMG</div>'
         )
-        nick_tag = f'<small class="nick-label">({p_nick})</small>' if p_nick else ''
         h_types = part.get("handling_types") or []
-        badge = ""
-        if "Consume" in h_types:
-            badge = '<span class="h-badge va">C</span>'
-        elif "Handle" in h_types:
-            badge = '<span class="h-badge nvan">H</span>'
+        if not h_types and part.get("handling_type"):
+            h_types = [part.get("handling_type")]
+
+        h_badges: list[str] = []
+        for ht in h_types:
+            ht_clean = str(ht).strip()
+            if ht_clean.casefold() in {"consume", "c"}:
+                h_badges.append('<span class="h-badge va">Consume</span>')
+            elif ht_clean.casefold() in {"handle", "h"}:
+                h_badges.append('<span class="h-badge nvan">Handle</span>')
+            elif ht_clean:
+                h_badges.append(f'<span class="h-badge">{_text(ht_clean)}</span>')
+        h_cell = " ".join(h_badges) if h_badges else '<span class="text-muted">—</span>'
+
+        nick_row = (
+            f'<div class="part-nick-text" title="Factory Nickname: {p_nick}">{p_nick}</div>'
+            if p_nick
+            else '<div class="part-nick-space">&nbsp;</div>'
+        )
 
         part_rows_html.append(
             f"""
             <tr>
               <td class="col-thumb">{img_tag}</td>
-              <td class="col-pnum"><strong>{p_num}</strong> {badge}</td>
-              <td class="col-desc">{p_desc} {nick_tag}</td>
+              <td class="col-pnum"><strong>{p_num}</strong></td>
+              <td class="col-desc">
+                <div class="part-desc-text" title="{p_desc}">{p_desc or '—'}</div>
+                {nick_row}
+              </td>
               <td class="col-qty">{p_qty}</td>
+              <td class="col-handling">{h_cell}</td>
             </tr>
             """
         )
@@ -322,7 +339,13 @@ def render_pitch_canvas(
         parts_section_html = f"""
         <table class="parts-table">
           <thead>
-            <tr><th>Img</th><th>Part #</th><th>Description</th><th>Qty</th></tr>
+            <tr>
+              <th class="col-thumb">Img</th>
+              <th class="col-pnum">Part #</th>
+              <th class="col-desc">Description</th>
+              <th class="col-qty">Qty</th>
+              <th class="col-handling">Consume / Handle</th>
+            </tr>
           </thead>
           <tbody>{"".join(part_rows_html)}</tbody>
         </table>
@@ -638,7 +661,7 @@ def render_pitch_canvas(
         flex: 1 1 auto;
         min-height: 0;
         display: grid;
-        grid-template-columns: 35% 65%;
+        grid-template-columns: 37% 63%;
         gap: 12px;
       }}
       .left-col {{
@@ -709,6 +732,7 @@ def render_pitch_canvas(
       .parts-panel {{
         flex: 1 1 0;
         overflow-y: auto;
+        min-height: 120px;
       }}
       .parts-table {{
         width: 100%;
@@ -718,30 +742,84 @@ def render_pitch_canvas(
       .parts-table th {{
         text-align: left;
         background: #f1f5f9;
-        padding: 4px 6px;
+        padding: 5px 6px;
         color: #475569;
         font-size: 0.72rem;
         font-weight: 700;
+        border-bottom: 2px solid #e2e8f0;
       }}
       .parts-table td {{
-        padding: 3px 6px;
+        padding: 4px 6px;
         border-bottom: 1px solid #f1f5f9;
         vertical-align: middle;
       }}
-      .col-thumb {{ width: 28px; text-align: center; }}
-      .part-thumb {{ width: 26px; height: 24px; object-fit: contain; border-radius: 2px; background: #eee; }}
-      .thumb-ph {{ width: 26px; height: 22px; line-height: 22px; text-align: center; background: #e2e8f0; font-size: 0.55rem; color: #64748b; border-radius: 2px; }}
-      .col-pnum {{ white-space: nowrap; font-weight: 600; }}
-      .h-badge {{ font-size: 0.65rem; padding: 1px 4px; border-radius: 2px; font-weight: 700; }}
-      .h-badge.va {{ background: #dcfce7; color: #166534; }}
-      .h-badge.nvan {{ background: #ffedd5; color: #9a3412; }}
-      .col-desc {{ max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-      .nick-label {{ color: #0284c7; font-weight: 700; font-size: 0.78rem; }}
-      .col-qty {{ text-align: right; font-weight: 800; }}
+      .col-thumb {{ width: 54px; min-width: 54px; text-align: center; }}
+      .part-thumb {{
+        width: 48px;
+        height: 42px;
+        object-fit: contain;
+        border-radius: 4px;
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+        display: block;
+        margin: 0 auto;
+      }}
+      .thumb-ph {{
+        width: 48px;
+        height: 42px;
+        line-height: 42px;
+        text-align: center;
+        background: #f1f5f9;
+        border: 1px dashed #cbd5e1;
+        font-size: 0.65rem;
+        color: #64748b;
+        font-weight: 700;
+        border-radius: 4px;
+        margin: 0 auto;
+      }}
+      .col-pnum {{ white-space: nowrap; font-weight: 700; font-size: 0.8rem; color: #1e293b; }}
+      .col-desc {{ max-width: 160px; }}
+      .part-desc-text {{
+        font-weight: 600;
+        color: #0f172a;
+        line-height: 1.25;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }}
+      .part-nick-text {{
+        font-size: 0.72rem;
+        color: #0284c7;
+        font-weight: 700;
+        line-height: 1.2;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-top: 2px;
+      }}
+      .part-nick-space {{
+        font-size: 0.72rem;
+        line-height: 1.2;
+        min-height: 14px;
+        margin-top: 2px;
+      }}
+      .col-qty {{ text-align: right; font-weight: 800; font-size: 0.82rem; white-space: nowrap; padding-right: 8px; }}
+      .col-handling {{ text-align: center; white-space: nowrap; }}
+      .h-badge {{
+        display: inline-block;
+        font-size: 0.68rem;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }}
+      .h-badge.va {{ background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }}
+      .h-badge.nvan {{ background: #ffedd5; color: #c2410c; border: 1px solid #fed7aa; }}
+      .text-muted {{ color: #94a3b8; }}
       .part-placeholder.no-parts {{ padding: 14px; text-align: center; font-size: 0.78rem; color: #94a3b8; font-style: italic; }}
       /* Mini Yamazumi Stack */
       .stack-panel {{
-        height: 195px;
+        height: 180px;
       }}
       .yam-legend {{
         display: flex;
@@ -1033,6 +1111,10 @@ def render_pitch_canvas(
       .paag-slide.presentation-active .tools-list {{ font-size: 0.9rem; max-height: 85px; }}
       .paag-slide.presentation-active .parts-table {{ font-size: 0.88rem; }}
       .paag-slide.presentation-active .parts-table th {{ font-size: 0.82rem; }}
+      .paag-slide.presentation-active .col-thumb {{ width: 62px; min-width: 62px; }}
+      .paag-slide.presentation-active .part-thumb {{ width: 56px; height: 48px; }}
+      .paag-slide.presentation-active .thumb-ph {{ width: 56px; height: 48px; line-height: 48px; font-size: 0.75rem; }}
+      .paag-slide.presentation-active .h-badge {{ font-size: 0.75rem; padding: 3px 8px; }}
       .paag-slide.presentation-active .caption-callout {{ font-size: 0.95rem; }}
       .paag-slide.presentation-active .visual-step-tag {{ font-size: 0.9rem; }}
       .paag-slide.presentation-active .functional-alerts-bar {{ font-size: 0.88rem; }}
@@ -1560,7 +1642,18 @@ def render_printable_paag_deck(
     paper_label = "11 × 17 in (Tabloid Landscape)" if paper_size == "tabloid" else "8.5 × 11 in (Letter Landscape)"
     total_slides = len(slides_html)
 
-    joined_slides = "\n".join(slides_html)
+    joined_slides = "\n".join(
+        f"""
+        <div class="slide-wrapper">
+          <div class="slide-index-label no-print">
+            <span><strong>Slide {i + 1} of {total_slides}</strong></span>
+            <span>{paper_label}</span>
+          </div>
+          {s_html}
+        </div>
+        """
+        for i, s_html in enumerate(slides_html)
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1648,10 +1741,22 @@ def render_printable_paag_deck(
       padding: 0 16px 40px 16px;
       display: flex;
       flex-direction: column;
-      gap: 24px;
+      gap: 20px;
     }}
-    .deck-container > .paag-slide {{
+    .slide-wrapper {{
       margin-bottom: 24px;
+    }}
+    .slide-index-label {{
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #475569;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 4px;
+    }}
+    .slide-wrapper > .paag-slide {{
       box-shadow: 0 6px 20px rgba(0,0,0,0.12);
     }}
 
@@ -1669,31 +1774,43 @@ def render_printable_paag_deck(
         margin: 0 !important;
         padding: 0 !important;
         gap: 0 !important;
+        display: block !important;
       }}
-      .paag-slide {{
+      .slide-wrapper {{
         margin: 0 !important;
-        box-shadow: none !important;
-        border: 1px solid #94a3b8 !important;
+        padding: 0 !important;
         page-break-after: always !important;
         break-after: page !important;
         page-break-inside: avoid !important;
         break-inside: avoid !important;
       }}
-      .paag-slide:last-child {{
+      .slide-wrapper:last-child {{
         page-break-after: auto !important;
         break-after: auto !important;
       }}
+      .slide-index-label {{
+        display: none !important;
+      }}
+      .paag-slide {{
+        margin: 0 !important;
+        box-shadow: none !important;
+        border: 1px solid #94a3b8 !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+      }}
       .paag-slide.print-tabloid {{
         width: 100% !important;
-        height: 10.5in !important;
-        max-height: 10.5in !important;
+        height: 10.45in !important;
+        max-height: 10.45in !important;
         aspect-ratio: 17 / 11 !important;
+        overflow: hidden !important;
       }}
       .paag-slide.print-letter {{
         width: 100% !important;
-        height: 8.0in !important;
-        max-height: 8.0in !important;
+        height: 7.95in !important;
+        max-height: 7.95in !important;
         aspect-ratio: 11 / 8.5 !important;
+        overflow: hidden !important;
       }}
       .visual-media-box {{
         background: #ffffff !important;
@@ -1722,13 +1839,16 @@ def render_printable_paag_deck(
 
   <script>
     window.addEventListener("load", function() {{
-      setTimeout(function() {{
-        try {{
-          window.print();
-        }} catch(e) {{
-          console.error("Print trigger failed:", e);
-        }}
-      }}, 450);
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("autoprint") === "1" || window.location.hash === "#autoprint") {{
+        setTimeout(function() {{
+          try {{
+            window.print();
+          }} catch(e) {{
+            console.error("Print trigger failed:", e);
+          }}
+        }}, 450);
+      }}
     }});
   </script>
 </body>

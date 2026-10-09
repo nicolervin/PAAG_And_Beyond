@@ -251,7 +251,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         app.session_state["pitch_page_num"] = 1
         app.run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertIn("details", next(
+        self.assertNotIn("details", next(
             editor.value for editor in app.dataframe
             if "ergonomics_risk" in editor.value.columns
         ).columns)
@@ -464,6 +464,10 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("PPE", html)
         self.assertIn("Safety Glasses", html)
         self.assertIn("Dog Bone", html)
+        self.assertIn("part-nick-text", html)
+        self.assertIn("Consume / Handle", html)
+        self.assertIn("h-badge va", html)
+        self.assertIn("part-thumb", html)
         self.assertIn("BRKT-001", html)
         self.assertIn("Functional Alerts", html)
         self.assertIn("Torque Critical", html)
@@ -666,6 +670,9 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("17in 11in landscape", deck)
         self.assertIn("Print Now (or press Ctrl+P)", deck)
         self.assertIn("window.print()", deck)
+        self.assertIn("autoprint", deck)
+        self.assertIn("Slide 1 of 2", deck)
+        self.assertIn("Slide 2 of 2", deck)
         self.assertIn("Slide 1 Content", deck)
         self.assertIn("Slide 2 Content", deck)
         self.assertIn("2 Slides", deck)
@@ -694,11 +701,18 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertTrue(any("Current slide only" in opt for opt in scope_radio.options))
         self.assertTrue(any("All pitches in scenario" in opt for opt in scope_radio.options))
 
+        # Default page format is 8.5x11 Letter Landscape
         fmt_radio = next(r for r in app.radio if "Page Format" in r.label)
         self.assertTrue(any("11 × 17" in opt for opt in fmt_radio.options))
+        self.assertTrue(any("8.5 × 11" in opt for opt in fmt_radio.options))
+        self.assertTrue("8.5 × 11" in fmt_radio.value)
 
         fit_radio = next(r for r in app.radio if "Image Fit in Print" in r.label)
         self.assertTrue(any("Stretch to Fill Box" in opt for opt in fit_radio.options))
+
+        # Download HTML Deck button exists
+        dl_btn = next(b for b in app.download_button if "Download HTML Deck" in b.label)
+        self.assertIsNotNone(dl_btn)
 
         # Close dialog via button
         close_btn = next(b for b in app.button if "Close Print Window" in b.label)

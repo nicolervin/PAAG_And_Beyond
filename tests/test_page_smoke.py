@@ -1757,7 +1757,6 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             list(process_editor.proto.column_order),
             [
                 "op_id",
-                "details",
                 "station",
                 "pitch_name",
                 "work_element",
@@ -1771,6 +1770,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("status", process_editor.proto.column_order)
+        self.assertNotIn("details", process_editor.proto.column_order)
         self.assertEqual(
             [
                 button.label
@@ -1779,7 +1779,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ],
             ["Export filtered table view", "Export filtered full data"],
         )
-        self.assertIn("details", process_table.columns)
+        self.assertNotIn("details", process_table.columns)
         self.assertNotIn(
             "Status for selected",
             {widget.label for widget in app.selectbox},
@@ -1826,7 +1826,6 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             compact.columns.tolist(),
             [
                 "op_id",
-                "details",
                 "station",
                 "pitch_name",
                 "work_element",
