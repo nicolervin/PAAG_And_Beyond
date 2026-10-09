@@ -134,7 +134,11 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
             placement_id TEXT NOT NULL REFERENCES equipment_placements(id) ON DELETE CASCADE,
-            work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE CASCADE,
+            work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+            process_operation_snapshot TEXT NOT NULL DEFAULT '',
+            process_description_snapshot TEXT NOT NULL DEFAULT '',
+            station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+            unlinked_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(placement_id, work_element_id)

@@ -11,6 +11,18 @@ from uuid import uuid4
 from PIL import Image
 
 from utils import store
+
+try:
+    import pypdfium2  # noqa: F401
+    HAS_PYPDFIUM2 = True
+except ImportError:
+    HAS_PYPDFIUM2 = False
+
+try:
+    import ezdxf  # noqa: F401
+    HAS_EZDXF = True
+except ImportError:
+    HAS_EZDXF = False
 from utils.layout_store import (
     annotate_preview_with_dimensions,
     apply_image_crop,
@@ -440,6 +452,7 @@ class LayoutStoreTests(unittest.TestCase):
         delete_layout(self.project_id, layout_id, self.editor)
         self.assertFalse(img2_path.exists())
 
+    @unittest.skipUnless(HAS_PYPDFIUM2, "pypdfium2 is not installed")
     def test_layout_revision_pdf_import(self) -> None:
         """Verify importing a PDF drawing file renders as high-res PNG revision."""
         layout = create_layout(self.project_id, "Welding Bay PDF", "", self.editor)
@@ -471,6 +484,7 @@ class LayoutStoreTests(unittest.TestCase):
         delete_layout(self.project_id, layout_id, self.editor)
         self.assertFalse(Path(rev["image_path"]).exists())
 
+    @unittest.skipUnless(HAS_PYPDFIUM2, "pypdfium2 is not installed")
     def test_layout_revision_pdf_multi_page_selection(self) -> None:
         """Verify multi-page PDF sheet selection renders the designated page."""
         layout = create_layout(self.project_id, "Multi Sheet CAD", "", self.editor)
@@ -541,6 +555,7 @@ class LayoutStoreTests(unittest.TestCase):
 
         delete_layout(self.project_id, layout_id, self.editor)
 
+    @unittest.skipUnless(HAS_EZDXF, "ezdxf is not installed")
     def test_layout_revision_dxf_import(self) -> None:
         """Verify importing a 2D DXF CAD file converts modelspace to layout image."""
         layout = create_layout(self.project_id, "AutoCAD DXF Bay", "", self.editor)
@@ -576,14 +591,16 @@ class LayoutStoreTests(unittest.TestCase):
         self.assertEqual(preview_img.size, (150, 300))
 
         # PDF preview
-        pdf_file = _create_test_pdf_file(pages=1)
-        preview_pdf = load_and_orient_layout_preview(pdf_file, rotation_angle=0)
-        self.assertIsNotNone(preview_pdf)
+        if HAS_PYPDFIUM2:
+            pdf_file = _create_test_pdf_file(pages=1)
+            preview_pdf = load_and_orient_layout_preview(pdf_file, rotation_angle=0)
+            self.assertIsNotNone(preview_pdf)
 
         # DXF preview
-        dxf_file = _create_test_dxf_file()
-        preview_dxf = load_and_orient_layout_preview(dxf_file, rotation_angle=0)
-        self.assertIsNotNone(preview_dxf)
+        if HAS_EZDXF:
+            dxf_file = _create_test_dxf_file()
+            preview_dxf = load_and_orient_layout_preview(dxf_file, rotation_angle=0)
+            self.assertIsNotNone(preview_dxf)
 
         # Preview with cropping
         cropped_preview = load_and_orient_layout_preview(

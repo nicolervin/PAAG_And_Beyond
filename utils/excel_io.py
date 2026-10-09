@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from io import BytesIO
+import copy
+from io import BytesIO
+from pathlib import Path
 import re
 from datetime import date, datetime
 
@@ -25,7 +27,10 @@ ALIASES = {
     "quantity": {"quantity", "qty", "usage", "quantityper", "qtyper"},
     "revision": {"revision", "rev", "version"},
     "model_applicability": {"model", "models", "variant", "applicability", "modelapplicability"},
-}
+}
+COMPANY_PFMEA_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent / "templates" / "FRM-GEA-QYS-033_PFMEA_Template.xlsx"
+)
 
 
 def normalize_header(value: object) -> str:
@@ -632,6 +637,33 @@ def mapped_bom(df: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFrame
     return result
 
 
+def _cell_str(val: object) -> str:
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (ValueError, TypeError):
+        pass
+    return str(val).strip()
+
+
+def _format_responsibility_target(
+    responsibility: object,
+    target_completion_date: object,
+    fallback: object = "",
+) -> str:
+    resp = _cell_str(responsibility)
+    tgt = _cell_str(target_completion_date)
+    if resp and tgt:
+        return f"{resp} | {tgt}"
+    if tgt:
+        return f"Target: {tgt}"
+    if resp:
+        return resp
+    return _cell_str(fallback)
+
+
 def export_workbook(project_id: str, scenario_id: str | None = None) -> bytes:
     project = get_project(project_id)
     scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
@@ -698,11 +730,234 @@ def export_workbook(project_id: str, scenario_id: str | None = None) -> bytes:
             material_consumption.drop(
                 columns=["group_id", "process_element_id", "section_id"], errors="ignore"
             ).to_excel(writer, sheet_name="Material Consumption", index=False)
-        lucid.to_excel(writer, sheet_name="Lucid Data Link", index=False)
+        lucid.to_excel(writer, sheet_name="Lucid Data Link", index=False)
+        # Quality Requirements & Assignments
+        try:
+            from utils import quality_store
+            qr_df = quality_store.quality_requirements_table(project_id)
+            if not qr_df.empty:
+                qr_df.drop(columns=["project_id"], errors="ignore").to_excel(
+                    writer, sheet_name="Quality Requirements", index=False
+                )
+            if scenario_id:
+                qa_df = quality_store.quality_assignments_table(project_id, scenario_id)
+                if not qa_df.empty:
+                    qa_df.drop(columns=["project_id", "scenario_id"], errors="ignore").to_excel(
+                        writer, sheet_name="Quality Assignments", index=False
+                    )
+        except Exception:
+            pass
+
+        # PFMEA
+        if scenario_id:
+            try:
+                from utils import pfmea_store
+                pfmea_df = pfmea_store.pfmea_flat_rows(project_id, scenario_id)
+                if not pfmea_df.empty:
+                    pfmea_export = pfmea_df.copy()
+                    pfmea_export["responsibility_target"] = pfmea_export.apply(
+                        lambda r: _format_responsibility_target(
+                            r.get("responsibility"),
+                            r.get("target_completion_date"),
+                            r.get("responsibility_target"),
+                        ),
+                        axis=1,
+                    )
+                    pfmea_cols = [
+                        "item_number", "process_function", "potential_failure_mode", "potential_effects",
+                        "severity", "classification", "potential_causes", "occurrence",
+                        "prevention_controls", "detection_controls", "detection", "rpn",
+                        "recommended_action", "responsibility_target", "actions_taken",
+                        "resulting_severity", "resulting_occurrence", "resulting_detection", "resulting_rpn",
+                    ]
+                    pfmea_view = pfmea_export[[c for c in pfmea_cols if c in pfmea_export.columns]].copy()
+                    pfmea_view.rename(columns={
+                        "item_number": "Item #", "process_function": "Process Function",
+                        "potential_failure_mode": "Potential Failure Mode",
+                        "potential_effects": "Potential Effect(s) of Failure", "severity": "Severity",
+                        "classification": "Classification", "potential_causes": "Potential Causes(s) of Failure",
+                        "occurrence": "Occurrence", "prevention_controls": "Current Process Controls — Prevention",
+                        "detection_controls": "Current Process Controls — Detection", "detection": "Detection",
+                        "rpn": "RPN", "recommended_action": "Recommended Action",
+                        "responsibility_target": "Responsibility & Target Completion Date",
+                        "actions_taken": "Actions Taken", "resulting_severity": "Resulting Severity",
+                        "resulting_occurrence": "Resulting Occurrence",
+                        "resulting_detection": "Resulting Detection", "resulting_rpn": "Resulting RPN",
+                    }).to_excel(writer, sheet_name="PFMEA", index=False)
+            except Exception:
+                pass
+
+        # Control Plan
+        if scenario_id:
+            try:
+                from utils import control_plan_store
+                cp_df = control_plan_store.control_plan_projection(project_id, scenario_id)
+                if not cp_df.empty:
+                    cp_cols = [
+                        "pr_number", "station_pitch", "op_id", "machine_fixture_operation",
+                        "characteristic_suffix", "characteristic_placement",
+                        "product_part_characteristic", "process_characteristic", "classification",
+                        "specification_requirement", "measurement_evaluation",
+                        "sample_size", "sample_frequency", "who", "control_method", "decision_rule",
+                    ]
+                    cp_view = cp_df[[c for c in cp_cols if c in cp_df.columns]].copy()
+                    cp_view.rename(columns={
+                        "pr_number": "Pr. Nº", "station_pitch": "Station / Pitch",
+                        "op_id": "Op ID", "machine_fixture_operation": "Machine/Fixt. & Operation",
+                        "characteristic_suffix": "Characteristic suffix",
+                        "characteristic_placement": "Characteristic type",
+                        "product_part_characteristic": "Product / Part characteristic",
+                        "process_characteristic": "Process characteristic", "classification": "CL",
+                        "specification_requirement": "Specification / Requirement",
+                        "measurement_evaluation": "Measurement / Evaluation",
+                        "sample_size": "Sample size", "sample_frequency": "Sample frequency",
+                        "who": "Who", "control_method": "Control method",
+                        "decision_rule": "Decision rule / corrective action and reference documents",
+                    }).to_excel(writer, sheet_name="Control Plan", index=False)
+            except Exception:
+                pass
+
+        # Traceability Matrix
+        if scenario_id:
+            try:
+                from utils import traceability_store
+                mat = traceability_store.cross_functional_traceability_matrix(project_id, scenario_id)
+                mat_rows = mat.get("rows", [])
+                if mat_rows:
+                    pd.DataFrame(mat_rows).drop(
+                        columns=["project_id", "scenario_id", "work_element_id", "quality_assignment_id",
+                                 "quality_requirement_id", "pfmea_entry_id", "control_plan_item_id"],
+                        errors="ignore",
+                    ).to_excel(writer, sheet_name="Traceability Matrix", index=False)
+            except Exception:
+                pass
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             worksheet.auto_filter.ref = worksheet.dimensions
             for column_cells in worksheet.columns:
                 width = min(max(len(str(cell.value or "")) for cell in column_cells) + 2, 45)
                 worksheet.column_dimensions[column_cells[0].column_letter].width = width
-    return output.getvalue()
+    return output.getvalue()
+
+
+def export_pfmea_to_company_template(
+    project_id: str,
+    scenario_id: str | None = None,
+    rows: pd.DataFrame | None = None,
+    control_labels: dict[str, str] | None = None,
+    prepared_by: str = "",
+) -> bytes:
+    """Export PFMEA rows into the official company FRM-GEA-QYS-033 Excel template (PFMEA-A sheet)."""
+    import openpyxl
+
+    project = (get_project(project_id) if project_id else None) or {}
+    if rows is None:
+        from utils.pfmea_store import pfmea_flat_rows
+        rows = pfmea_flat_rows(project_id, scenario_id) if scenario_id else pd.DataFrame()
+
+    control_labels = control_labels or {}
+    template_path = COMPANY_PFMEA_TEMPLATE_PATH
+    if template_path.exists():
+        wb = openpyxl.load_workbook(template_path)
+    else:
+        wb = openpyxl.Workbook()
+        ws_default = wb.active
+        ws_default.title = "PFMEA-A"
+
+    if "PFMEA-A" in wb.sheetnames:
+        ws = wb["PFMEA-A"]
+    else:
+        ws = wb.active
+
+    # Header block
+    proj_name = str(project.get("name") or "PFMEA")
+    ws["D10"] = proj_name
+    ws["I10"] = "Assembly"
+    ws["O6"] = f"PFMEA-{proj_name}"
+    ws["O8"] = prepared_by or str(project.get("lead") or "")
+    created = str(project.get("created_at") or "")[:10]
+    ws["O10"] = created if created else datetime.now().strftime("%Y-%m-%d")
+    ws["O12"] = datetime.now().strftime("%Y-%m-%d")
+    team = str(project.get("team") or "")
+    if team:
+        ws["C14"] = team
+
+    def _int_val(val):
+        if val is None or val == "":
+            return None
+        try:
+            if pd.isna(val):
+                return None
+        except (TypeError, ValueError):
+            pass
+        try:
+            return int(float(val))
+        except (TypeError, ValueError):
+            return None
+
+    def _fmt_ctrl(val):
+        if val is None:
+            return ""
+        if isinstance(val, (list, tuple, set)) or hasattr(val, "__iter__") and not isinstance(val, (str, bytes)):
+            res = []
+            for item in val:
+                s = str(item).strip()
+                if control_labels and s in control_labels:
+                    res.append(control_labels[s])
+                elif s.startswith("manual:"):
+                    res.append(s[7:])
+                elif s:
+                    res.append(s)
+            return "\n".join(res)
+        try:
+            if pd.isna(val):
+                return ""
+        except (ValueError, TypeError):
+            pass
+        return str(val).strip()
+
+    start_row = 21
+    for idx, (_, row) in enumerate(rows.iterrows()):
+        r = start_row + idx
+        ws.cell(r, 1, _cell_str(row.get("item_number")))
+        ws.cell(r, 2, _cell_str(row.get("process_function")))
+        ws.cell(r, 3, _cell_str(row.get("potential_failure_mode")))
+        ws.cell(r, 4, _cell_str(row.get("potential_effects")))
+        ws.cell(r, 5, _int_val(row.get("severity")))
+        ws.cell(r, 6, _cell_str(row.get("classification")))
+        ws.cell(r, 7, _cell_str(row.get("potential_causes")))
+        ws.cell(r, 8, _int_val(row.get("occurrence")))
+        ws.cell(r, 9, _fmt_ctrl(row.get("prevention_controls")))
+        ws.cell(r, 10, _fmt_ctrl(row.get("detection_controls")))
+        ws.cell(r, 11, _int_val(row.get("detection")))
+        ws.cell(r, 12, f'=IF(E{r}<>"",E{r}*H{r}*K{r},"")')
+        rec = _cell_str(row.get("recommended_action"))
+        ws.cell(r, 13, rec if rec else f'=IF(E{r}<>"","None","")')
+        ws.cell(
+            r,
+            14,
+            _format_responsibility_target(
+                row.get("responsibility"),
+                row.get("target_completion_date"),
+                row.get("responsibility_target"),
+            ),
+        )
+        ws.cell(r, 15, _cell_str(row.get("actions_taken")))
+        ws.cell(r, 16, _int_val(row.get("resulting_severity")))
+        ws.cell(r, 17, _int_val(row.get("resulting_occurrence")))
+        ws.cell(r, 18, _int_val(row.get("resulting_detection")))
+        ws.cell(r, 19, f'=IF(P{r}<>"",P{r}*Q{r}*R{r},"")')
+
+        if r > 54:
+            for c in range(1, 20):
+                ref_cell = ws.cell(54, c)
+                target_cell = ws.cell(r, c)
+                if ref_cell.has_style:
+                    target_cell.font = copy.copy(ref_cell.font)
+                    target_cell.border = copy.copy(ref_cell.border)
+                    target_cell.fill = copy.copy(ref_cell.fill)
+                    target_cell.alignment = copy.copy(ref_cell.alignment)
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 import pandas as pd
@@ -73,7 +74,7 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE CASCADE,
+            work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
             quality_requirement_id TEXT NOT NULL
                 REFERENCES quality_requirements(id) ON DELETE RESTRICT,
             requirement_type TEXT NOT NULL,
@@ -83,6 +84,10 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
             target_value REAL,
             tolerances TEXT NOT NULL DEFAULT '',
             unit TEXT NOT NULL DEFAULT '',
+            process_operation_snapshot TEXT NOT NULL DEFAULT '',
+            process_description_snapshot TEXT NOT NULL DEFAULT '',
+            station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+            unlinked_at TEXT NOT NULL DEFAULT '',
             source_updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -131,9 +136,34 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE quality_requirement_types ADD COLUMN units_available TEXT NOT NULL DEFAULT ''")
         conn.execute("UPDATE quality_requirement_types SET units_available='inch;mm;mil' WHERE LOWER(TRIM(label))='dimensional'")
         conn.execute("UPDATE quality_requirement_types SET units_available='in-lbs;ft-lbs;N·m' WHERE LOWER(TRIM(label))='torque'")
+
+    assignment_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(quality_requirement_assignments)").fetchall()
+    }
+    if "process_operation_snapshot" not in assignment_cols:
+        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN process_operation_snapshot TEXT NOT NULL DEFAULT ''")
+    if "process_description_snapshot" not in assignment_cols:
+        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN process_description_snapshot TEXT NOT NULL DEFAULT ''")
+    if "station_pitch_snapshot" not in assignment_cols:
+        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN station_pitch_snapshot TEXT NOT NULL DEFAULT ''")
+    if "unlinked_at" not in assignment_cols:
+        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN unlinked_at TEXT NOT NULL DEFAULT ''")
+
+    # Backfill snapshots for existing linked assignments where snapshots are currently blank
+    conn.execute(
+        """UPDATE quality_requirement_assignments
+           SET process_operation_snapshot = COALESCE((SELECT we.operation FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), ''),
+               process_description_snapshot = COALESCE((SELECT we.description FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), ''),
+               station_pitch_snapshot = COALESCE((SELECT we.station FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), '')
+           WHERE work_element_id IS NOT NULL AND work_element_id != ''
+             AND process_operation_snapshot = '' AND station_pitch_snapshot = ''"""
+    )
+
     project_rows = conn.execute("SELECT id FROM projects").fetchall()
     for project_row in project_rows:
         _ensure_quality_requirement_types(conn, str(project_row["id"]))
+
 
 
 def _ensure_quality_requirement_types(
@@ -1278,6 +1308,8 @@ def quality_requirement_links(
                   assignment.work_element_id, scenario.revision_label AS scenario_revision,
                   scenario.name AS scenario_name, element.sequence,
                   element.station AS pitch,
+                  element.operation AS element_operation,
+                  element.description AS element_description,
                   COALESCE((
                       SELECT pitch.pitch_name
                       FROM yamazumi_elements yamazumi
@@ -1304,6 +1336,9 @@ def quality_requirement_links(
                   assignment.description, assignment.unique_identifier,
                   assignment.pass_fail, assignment.target_value,
                   assignment.tolerances, assignment.unit,
+                  assignment.process_operation_snapshot,
+                  assignment.process_description_snapshot,
+                  assignment.station_pitch_snapshot,
                   CASE WHEN assignment.requirement_type IS requirement.requirement_type
                              AND assignment.description IS requirement.description
                              AND assignment.unique_identifier IS requirement.unique_identifier
@@ -1334,22 +1369,41 @@ def quality_requirement_links(
         columns=[
             "assignment_id", "quality_requirement_id", "scenario_id",
             "work_element_id", "scenario_revision", "scenario_name", "sequence",
-            "pitch", "pitch_name", "work_element", "status", "requirement_type",
+            "pitch", "element_operation", "element_description", "pitch_name",
+            "work_element", "status", "requirement_type",
             "description", "unique_identifier", "pass_fail", "target_value",
-            "tolerances", "unit", "repository_update_pending",
+            "tolerances", "unit", "process_operation_snapshot",
+            "process_description_snapshot", "station_pitch_snapshot",
+            "repository_update_pending",
         ],
     )
     if not frame.empty:
         p_store = _process_store()
         op_ids = []
+        upstream_mod = []
         for _, row in frame.iterrows():
             sc_id = str(row["scenario_id"])
             w_id = str(row["work_element_id"])
             contexts = p_store.work_element_op_contexts(project_id, sc_id, [w_id])
             op_ids.append(str(contexts.get(w_id, {}).get("op_id") or "No Op ID"))
+
+            snap_pitch = str(row.get("station_pitch_snapshot") or "").strip()
+            snap_op = str(row.get("process_operation_snapshot") or "").strip()
+            snap_desc = str(row.get("process_description_snapshot") or "").strip()
+            live_pitch = str(row.get("pitch") or "").strip()
+            live_op = str(row.get("element_operation") or "").strip()
+            live_desc = str(row.get("element_description") or "").strip()
+            is_mod = bool(
+                (snap_pitch and snap_pitch != live_pitch)
+                or (snap_op and snap_op != live_op)
+                or (snap_desc and snap_desc != live_desc)
+            )
+            upstream_mod.append(is_mod)
         frame["op_id"] = op_ids
+        frame["upstream_modified"] = upstream_mod
     else:
         frame["op_id"] = pd.Series(dtype="string")
+        frame["upstream_modified"] = pd.Series(dtype="bool")
     return frame
 
 
@@ -1360,48 +1414,240 @@ def assign_quality_requirement(
     quality_requirement_id: str,
 ) -> str:
     """Attach a saved repository definition to a Process step as a snapshot."""
+    result = bulk_assign_quality_requirement(
+        project_id=project_id,
+        scenario_id=scenario_id,
+        quality_requirement_id=quality_requirement_id,
+        work_element_ids=[work_element_id],
+    )
+    assignment_ids = result.get("assignment_ids", [])
+    if assignment_ids:
+        return str(assignment_ids[0])
+
+    # If not created, inspect database to provide precise ValueError
     store = _store_module()
-    assignment_id = str(uuid4())
+    with store.connection() as conn:
+        step = conn.execute(
+            """SELECT 1 FROM work_elements
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (work_element_id, project_id, scenario_id),
+        ).fetchone()
+        if not step:
+            raise ValueError("That Process at a Glance step no longer exists in this scenario.")
+        existing = conn.execute(
+            """SELECT 1 FROM quality_requirement_assignments
+               WHERE project_id=? AND scenario_id=? AND quality_requirement_id=?
+                 AND work_element_id=?""",
+            (project_id, scenario_id, quality_requirement_id, work_element_id),
+        ).fetchone()
+        if existing:
+            raise ValueError("That Quality requirement is already attached to this Process step.")
+    raise ValueError("Failed to attach Quality requirement to Process step.")
+
+
+def bulk_assign_quality_requirement(
+    project_id: str,
+    scenario_id: str,
+    quality_requirement_id: str,
+    work_element_ids: list[str],
+    editor_name: str = "",
+) -> dict[str, object]:
+    """Attach a saved repository requirement to multiple Process steps in one transaction.
+
+    Steps where the requirement is already attached are skipped.
+    Returns a dictionary summarizing newly created assignment IDs, skipped count, and created count.
+    """
+    store = _store_module()
     timestamp = store.now_iso()
-    try:
-        with store.connection() as conn:
-            if not conn.execute(
-                "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
-                (scenario_id, project_id),
-            ).fetchone():
-                raise ValueError("The active planning scenario no longer exists.")
-            if not conn.execute(
-                """SELECT 1 FROM work_elements
+    clean_step_ids = [str(wid).strip() for wid in work_element_ids if str(wid).strip()]
+    if not clean_step_ids:
+        return {"created_count": 0, "skipped_count": 0, "assignment_ids": []}
+
+    created_ids: list[str] = []
+    skipped_count = 0
+    with store.connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+
+        requirement = conn.execute(
+            "SELECT * FROM quality_requirements WHERE id=? AND project_id=?",
+            (quality_requirement_id, project_id),
+        ).fetchone()
+        if not requirement:
+            raise ValueError("That Quality requirement no longer exists in this project.")
+
+        placeholders = ",".join("?" for _ in clean_step_ids)
+        existing_rows = conn.execute(
+            f"""SELECT work_element_id FROM quality_requirement_assignments
+                WHERE project_id=? AND scenario_id=? AND quality_requirement_id=?
+                  AND work_element_id IN ({placeholders})""",
+            (project_id, scenario_id, quality_requirement_id, *clean_step_ids),
+        ).fetchall()
+        already_attached = {str(r["work_element_id"]) for r in existing_rows}
+
+        for step_id in clean_step_ids:
+            if step_id in already_attached:
+                skipped_count += 1
+                continue
+
+            step = conn.execute(
+                """SELECT operation, description, station FROM work_elements
                    WHERE id=? AND project_id=? AND scenario_id=?""",
-                (work_element_id, project_id, scenario_id),
-            ).fetchone():
-                raise ValueError("That Process at a Glance step no longer exists in this scenario.")
-            requirement = conn.execute(
-                "SELECT * FROM quality_requirements WHERE id=? AND project_id=?",
-                (quality_requirement_id, project_id),
+                (step_id, project_id, scenario_id),
             ).fetchone()
-            if not requirement:
-                raise ValueError("That Quality requirement no longer exists in this project.")
+            if not step:
+                skipped_count += 1
+                continue
+
+            pitch_row = conn.execute(
+                """SELECT pitch.pitch_name
+                   FROM yamazumi_elements yamazumi
+                   JOIN yamazumi_areas area ON area.id=yamazumi.area_id
+                   LEFT JOIN yamazumi_pitches pitch ON pitch.id=yamazumi.pitch_id
+                   WHERE yamazumi.project_id=?
+                     AND area.scenario_id=?
+                     AND yamazumi.process_element_id=?
+                   ORDER BY area.name, pitch.sequence, yamazumi.sequence
+                   LIMIT 1""",
+                (project_id, scenario_id, step_id),
+            ).fetchone()
+            pitch_snapshot = (
+                str(pitch_row["pitch_name"])
+                if pitch_row and pitch_row["pitch_name"]
+                else str(step["station"] or "")
+            )
+
+            assignment_id = str(uuid4())
             conn.execute(
                 """INSERT INTO quality_requirement_assignments
                    (id, project_id, scenario_id, work_element_id, quality_requirement_id,
                     requirement_type, description, unique_identifier, pass_fail,
-                    target_value, tolerances, unit, source_updated_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    target_value, tolerances, unit,
+                    process_operation_snapshot, process_description_snapshot, station_pitch_snapshot,
+                    source_updated_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    assignment_id, project_id, scenario_id, work_element_id,
+                    assignment_id, project_id, scenario_id, step_id,
                     quality_requirement_id, requirement["requirement_type"],
                     requirement["description"], requirement["unique_identifier"],
                     requirement["pass_fail"], requirement["target_value"],
                     requirement["tolerances"], requirement["unit"],
+                    str(step["operation"] or ""), str(step["description"] or ""), pitch_snapshot,
                     requirement["updated_at"], timestamp, timestamp,
                 ),
             )
-    except sqlite3.IntegrityError as exc:
-        raise ValueError(
-            "That Quality requirement is already attached to this Process step."
-        ) from exc
-    return assignment_id
+            created_ids.append(assignment_id)
+
+        if created_ids and editor_name and editor_name.strip():
+            store.record_audit_event(
+                project_id,
+                "Quality requirements",
+                "Bulk Attach to Process steps",
+                len(created_ids),
+                editor_name.strip(),
+                {
+                    "scenario_id": scenario_id,
+                    "quality_requirement_id": quality_requirement_id,
+                    "unique_identifier": str(requirement["unique_identifier"]),
+                    "created_count": len(created_ids),
+                    "skipped_count": skipped_count,
+                    "assignment_ids": created_ids,
+                },
+                _conn=conn,
+            )
+
+    return {
+        "created_count": len(created_ids),
+        "skipped_count": skipped_count,
+        "assignment_ids": created_ids,
+    }
+
+
+def step_equipment_tooling_status(
+    project_id: str,
+    scenario_id: str,
+    work_element_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return active placed equipment assets linked to the given work element IDs."""
+    store = _store_module()
+    clean_step_ids = [str(wid).strip() for wid in work_element_ids if str(wid).strip()]
+    if not clean_step_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in clean_step_ids)
+    with store.connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='equipment_process_links'"
+        ).fetchone():
+            return {wid: [] for wid in clean_step_ids}
+
+        rows = conn.execute(
+            f"""SELECT epl.work_element_id, ea.id AS equipment_id, ea.name AS asset_name,
+                       et.label AS equipment_type, ea.model
+                FROM equipment_process_links epl
+                JOIN equipment_placements ep ON ep.id = epl.placement_id
+                JOIN equipment_assets ea ON ea.id = ep.equipment_id
+                LEFT JOIN equipment_types et ON et.id = ea.equipment_type_id
+                WHERE epl.project_id = ?
+                  AND epl.scenario_id = ?
+                  AND (epl.unlinked_at IS NULL OR epl.unlinked_at = '')
+                  AND epl.work_element_id IN ({placeholders})""",
+            (project_id, scenario_id, *clean_step_ids),
+        ).fetchall()
+
+    result: dict[str, list[dict[str, Any]]] = {wid: [] for wid in clean_step_ids}
+    for row in rows:
+        wid = str(row["work_element_id"])
+        eq_type = str(row["equipment_type"] or "")
+        asset_name = str(row["asset_name"] or "")
+        is_torque = "torque" in eq_type.casefold() or "torque" in asset_name.casefold()
+        result.setdefault(wid, []).append({
+            "equipment_id": str(row["equipment_id"]),
+            "asset_name": asset_name,
+            "equipment_type": eq_type,
+            "model": str(row["model"] or ""),
+            "is_torque": is_torque,
+        })
+    return result
+
+
+def project_equipment_assets(
+    project_id: str, torque_only: bool = False
+) -> list[dict[str, Any]]:
+    """Return available equipment assets in the project, optionally filtered for torque tools."""
+    store = _store_module()
+    with store.connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='equipment_assets'"
+        ).fetchone():
+            return []
+        rows = conn.execute(
+            """SELECT ea.id, ea.name, et.label AS equipment_type, ea.model
+               FROM equipment_assets ea
+               LEFT JOIN equipment_types et ON et.id = ea.equipment_type_id
+               WHERE ea.project_id = ?
+               ORDER BY ea.name COLLATE NOCASE""",
+            (project_id,),
+        ).fetchall()
+    assets = [
+        {
+            "id": str(r["id"]),
+            "name": str(r["name"] or ""),
+            "equipment_type": str(r["equipment_type"] or ""),
+            "model": str(r["model"] or ""),
+            "is_torque": (
+                "torque" in str(r["equipment_type"] or "").casefold()
+                or "torque" in str(r["name"] or "").casefold()
+            ),
+        }
+        for r in rows
+    ]
+    if torque_only:
+        return [a for a in assets if a["is_torque"]]
+    return assets
 
 
 def quality_requirement_assignment(
@@ -1635,3 +1881,594 @@ def clone_quality_requirement_assignments(
         )
         cloned_count += 1
     return cloned_count
+
+
+def unlinked_quality_records(project_id: str, scenario_id: str) -> dict:
+    """Return all unlinked Quality assignments, PFMEA entries, and Equipment links for reconciliation."""
+    store = _store_module()
+    with store.connection() as conn:
+        def _has_table(tbl: str) -> bool:
+            return conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone() is not None
+
+        items = []
+
+        # 1. Quality requirement assignments
+        if _has_table("quality_requirement_assignments"):
+            q_rows = conn.execute(
+                """SELECT id, quality_requirement_id, requirement_type, description,
+                          unique_identifier, process_operation_snapshot,
+                          process_description_snapshot, station_pitch_snapshot,
+                          unlinked_at, updated_at
+                   FROM quality_requirement_assignments
+                   WHERE project_id=? AND scenario_id=? AND work_element_id IS NULL
+                   ORDER BY process_operation_snapshot, unique_identifier COLLATE NOCASE""",
+                (project_id, scenario_id),
+            ).fetchall()
+            for r in q_rows:
+                items.append({
+                    "id": str(r["id"]),
+                    "record_type": "Quality requirement",
+                    "identifier": str(r["unique_identifier"]),
+                    "name": f"{r['requirement_type']}: {r['unique_identifier']}",
+                    "detail": str(r["description"] or ""),
+                    "removed_operation": str(r["process_operation_snapshot"] or "Unknown"),
+                    "removed_description": str(r["process_description_snapshot"] or ""),
+                    "removed_pitch": str(r["station_pitch_snapshot"] or ""),
+                    "unlinked_at": str(r["unlinked_at"] or r["updated_at"] or ""),
+                })
+
+        # 2. PFMEA entries
+        if _has_table("pfmea_entries"):
+            pfmea_rows = conn.execute(
+                """SELECT id, potential_failure_mode, class_code,
+                          process_operation_snapshot, process_description_snapshot,
+                          process_pitch_snapshot, updated_at
+                   FROM pfmea_entries
+                   WHERE project_id=? AND scenario_id=? AND work_element_id IS NULL
+                   ORDER BY process_operation_snapshot, potential_failure_mode COLLATE NOCASE""",
+                (project_id, scenario_id),
+            ).fetchall()
+            for r in pfmea_rows:
+                code_str = f" [{r['class_code']}]" if r["class_code"] else ""
+                items.append({
+                    "id": str(r["id"]),
+                    "record_type": "PFMEA failure mode",
+                    "identifier": str(r["potential_failure_mode"]),
+                    "name": f"Failure Mode: {r['potential_failure_mode']}{code_str}",
+                    "detail": str(r["process_description_snapshot"] or ""),
+                    "removed_operation": str(r["process_operation_snapshot"] or "Unknown"),
+                    "removed_description": str(r["process_description_snapshot"] or ""),
+                    "removed_pitch": str(r["process_pitch_snapshot"] or ""),
+                    "unlinked_at": str(r["updated_at"] or ""),
+                })
+
+        # 3. Equipment process links
+        if (
+            _has_table("equipment_process_links")
+            and _has_table("equipment_placements")
+            and _has_table("equipment_assets")
+        ):
+            eq_rows = conn.execute(
+                """SELECT epl.id, epl.placement_id, epl.process_operation_snapshot,
+                          epl.process_description_snapshot, epl.station_pitch_snapshot,
+                          epl.unlinked_at, epl.updated_at, ea.name AS equipment_name,
+                          COALESCE(et.label, '') AS equipment_type
+                   FROM equipment_process_links epl
+                   JOIN equipment_placements ep ON ep.id = epl.placement_id
+                   JOIN equipment_assets ea ON ea.id = ep.equipment_id
+                   LEFT JOIN equipment_types et ON et.id = ea.equipment_type_id
+                   WHERE epl.project_id=? AND epl.scenario_id=? AND epl.work_element_id IS NULL
+                   ORDER BY epl.process_operation_snapshot, ea.name COLLATE NOCASE""",
+                (project_id, scenario_id),
+            ).fetchall()
+            for r in eq_rows:
+                type_prefix = f"{r['equipment_type']}: " if r["equipment_type"] else ""
+                items.append({
+                    "id": str(r["id"]),
+                    "record_type": "Equipment link",
+                    "identifier": str(r["equipment_name"]),
+                    "name": f"Tool/Equipment: {type_prefix}{r['equipment_name']}",
+                    "detail": str(r["process_description_snapshot"] or ""),
+                    "removed_operation": str(r["process_operation_snapshot"] or "Unknown"),
+                    "removed_description": str(r["process_description_snapshot"] or ""),
+                    "removed_pitch": str(r["station_pitch_snapshot"] or ""),
+                    "unlinked_at": str(r["unlinked_at"] or r["updated_at"] or ""),
+                })
+
+        # Group items by removed_operation
+        operations = {}
+        for item in items:
+            op = item["removed_operation"]
+            if op not in operations:
+                operations[op] = {
+                    "operation": op,
+                    "description": item["removed_description"],
+                    "pitch": item["removed_pitch"],
+                    "unlinked_at": item["unlinked_at"],
+                    "quality_count": 0,
+                    "pfmea_count": 0,
+                    "equipment_count": 0,
+                    "items": [],
+                }
+            operations[op]["items"].append(item)
+            if item["record_type"] == "Quality requirement":
+                operations[op]["quality_count"] += 1
+            elif item["record_type"] == "PFMEA failure mode":
+                operations[op]["pfmea_count"] += 1
+            elif item["record_type"] == "Equipment link":
+                operations[op]["equipment_count"] += 1
+
+        return {
+            "total_count": len(items),
+            "quality_count": sum(1 for x in items if x["record_type"] == "Quality requirement"),
+            "pfmea_count": sum(1 for x in items if x["record_type"] == "PFMEA failure mode"),
+            "equipment_count": sum(1 for x in items if x["record_type"] == "Equipment link"),
+            "items": items,
+            "operations": list(operations.values()),
+        }
+
+
+def relink_quality_record(
+    project_id: str,
+    scenario_id: str,
+    record_type: str,
+    record_id: str,
+    target_work_element_id: str,
+    editor: str = "",
+) -> None:
+    """Relink an individual unlinked record to an active Process step across the scenario."""
+    store = _store_module()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with store.connection() as conn:
+        step = conn.execute(
+            """SELECT id, operation, description, station, sequence, location
+               FROM work_elements
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (target_work_element_id, project_id, scenario_id),
+        ).fetchone()
+        if not step:
+            raise ValueError("Target Process step was not found in the current scenario.")
+
+        target_op = str(step["operation"] or "")
+        target_desc = str(step["description"] or "")
+        target_pitch = str(step["station"] or "")
+        target_seq = int(step["sequence"] or 0)
+        target_loc = str(step["location"] or "")
+
+        if record_type == "Quality requirement":
+            req_row = conn.execute(
+                "SELECT quality_requirement_id FROM quality_requirement_assignments WHERE id=? AND project_id=? AND scenario_id=?",
+                (record_id, project_id, scenario_id),
+            ).fetchone()
+            if not req_row:
+                raise ValueError("Quality requirement assignment not found.")
+            existing = conn.execute(
+                "SELECT id FROM quality_requirement_assignments WHERE project_id=? AND scenario_id=? AND work_element_id=? AND quality_requirement_id=?",
+                (project_id, scenario_id, target_work_element_id, req_row["quality_requirement_id"]),
+            ).fetchone()
+            if existing:
+                raise ValueError("The target step already has this Quality requirement assigned.")
+            conn.execute(
+                """UPDATE quality_requirement_assignments
+                   SET work_element_id=?,
+                       process_operation_snapshot=?,
+                       process_description_snapshot=?,
+                       station_pitch_snapshot=?,
+                       unlinked_at='', updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (target_work_element_id, target_op, target_desc, target_pitch, timestamp, record_id, project_id, scenario_id),
+            )
+        elif record_type == "PFMEA failure mode":
+            p_hash = ""
+            try:
+                from utils import pfmea_store
+                p_hash = pfmea_store._process_hash(dict(step))
+            except Exception:
+                pass
+            conn.execute(
+                """UPDATE pfmea_entries
+                   SET work_element_id=?,
+                       process_operation_snapshot=?,
+                       process_description_snapshot=?,
+                       process_pitch_snapshot=?,
+                       process_location_snapshot=?,
+                       process_sequence_snapshot=?,
+                       process_source_hash=?,
+                       source_reviewed_at=?,
+                       updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (
+                    target_work_element_id,
+                    target_op,
+                    target_desc,
+                    target_pitch,
+                    target_loc,
+                    target_seq,
+                    p_hash,
+                    timestamp,
+                    timestamp,
+                    record_id,
+                    project_id,
+                    scenario_id,
+                ),
+            )
+        elif record_type == "Equipment link":
+            eq_row = conn.execute(
+                "SELECT placement_id FROM equipment_process_links WHERE id=? AND project_id=? AND scenario_id=?",
+                (record_id, project_id, scenario_id),
+            ).fetchone()
+            if not eq_row:
+                raise ValueError("Equipment link not found.")
+            existing = conn.execute(
+                "SELECT id FROM equipment_process_links WHERE project_id=? AND scenario_id=? AND placement_id=? AND work_element_id=?",
+                (project_id, scenario_id, eq_row["placement_id"], target_work_element_id),
+            ).fetchone()
+            if existing:
+                conn.execute("DELETE FROM equipment_process_links WHERE id=?", (record_id,))
+            else:
+                conn.execute(
+                    """UPDATE equipment_process_links
+                       SET work_element_id=?,
+                           process_operation_snapshot=?,
+                           process_description_snapshot=?,
+                           station_pitch_snapshot=?,
+                           unlinked_at='', updated_at=?
+                       WHERE id=? AND project_id=? AND scenario_id=?""",
+                    (target_work_element_id, target_op, target_desc, target_pitch, timestamp, record_id, project_id, scenario_id),
+                )
+        else:
+            raise ValueError(f"Unknown record type: {record_type}")
+
+        store.record_audit_event(
+            project_id,
+            "Quality Reconciliation",
+            "Relink record",
+            1,
+            editor,
+            {
+                "scenario_id": scenario_id,
+                "record_type": record_type,
+                "record_id": record_id,
+                "target_work_element_id": target_work_element_id,
+                "target_operation": target_op,
+            },
+            _conn=conn,
+        )
+
+
+def bulk_relink_operation_records(
+    project_id: str,
+    scenario_id: str,
+    removed_operation: str,
+    target_work_element_id: str,
+    editor: str = "",
+) -> int:
+    """Relink all unlinked items belonging to a removed operation to a single target step."""
+    unlinked = unlinked_quality_records(project_id, scenario_id)
+    target_items = [
+        item for item in unlinked["items"]
+        if item["removed_operation"] == removed_operation
+    ]
+    if not target_items:
+        return 0
+    relinked_count = 0
+    for item in target_items:
+        try:
+            relink_quality_record(
+                project_id,
+                scenario_id,
+                item["record_type"],
+                item["id"],
+                target_work_element_id,
+                editor=editor,
+            )
+            relinked_count += 1
+        except Exception:
+            pass
+    return relinked_count
+
+
+def bulk_delete_unlinked_records(
+    project_id: str,
+    scenario_id: str,
+    records: list[dict],
+    editor: str = "",
+) -> int:
+    """Permanently delete unlinked records that the Quality engineer marks as obsolete."""
+    if not records:
+        return 0
+    store = _store_module()
+    deleted_count = 0
+    with store.connection() as conn:
+        for rec in records:
+            r_type = rec.get("record_type")
+            r_id = rec.get("id") or rec.get("record_id")
+            if not r_id or not r_type:
+                continue
+            if r_type == "Quality requirement":
+                conn.execute(
+                    "DELETE FROM quality_requirement_assignments WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
+                    (r_id, project_id, scenario_id),
+                )
+                deleted_count += 1
+            elif r_type == "PFMEA failure mode":
+                conn.execute(
+                    "DELETE FROM pfmea_entries WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
+                    (r_id, project_id, scenario_id),
+                )
+                deleted_count += 1
+            elif r_type == "Equipment link":
+                conn.execute(
+                    "DELETE FROM equipment_process_links WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
+                    (r_id, project_id, scenario_id),
+                )
+                deleted_count += 1
+
+        store.record_audit_event(
+            project_id,
+            "Quality Reconciliation",
+            "Bulk purge unlinked",
+            deleted_count,
+            editor,
+            {
+                "scenario_id": scenario_id,
+                "deleted_count": deleted_count,
+            },
+            _conn=conn,
+        )
+    return deleted_count
+
+
+def upstream_modified_quality_assignments(
+    project_id: str, scenario_id: str | None = None
+) -> list[dict]:
+    """Return Quality requirement assignments that have drifted from live Process at a Glance steps."""
+    store = _store_module()
+    scenario_filter = " AND assignment.scenario_id=?" if scenario_id else ""
+    params = (project_id, scenario_id) if scenario_id else (project_id,)
+    rows = store.query(
+        f"""SELECT assignment.id AS assignment_id,
+                   assignment.quality_requirement_id,
+                   assignment.scenario_id,
+                   scenario.name AS scenario_name,
+                   assignment.work_element_id,
+                   assignment.requirement_type,
+                   assignment.unique_identifier,
+                   assignment.description AS requirement_description,
+                   assignment.process_operation_snapshot,
+                   assignment.process_description_snapshot,
+                   assignment.station_pitch_snapshot,
+                   element.operation AS live_operation,
+                   element.description AS live_description,
+                   element.station AS live_pitch,
+                   element.sequence AS live_sequence
+            FROM quality_requirement_assignments assignment
+            JOIN work_elements element
+              ON element.id=assignment.work_element_id
+             AND element.project_id=assignment.project_id
+             AND element.scenario_id=assignment.scenario_id
+            JOIN planning_scenarios scenario
+              ON scenario.id=assignment.scenario_id
+             AND scenario.project_id=assignment.project_id
+            WHERE assignment.project_id=?{scenario_filter}
+              AND assignment.work_element_id IS NOT NULL
+              AND assignment.work_element_id != ''
+            ORDER BY scenario.name, element.sequence, assignment.unique_identifier COLLATE NOCASE""",
+        params,
+    )
+    modified = []
+    for row in rows:
+        snap_op = str(row["process_operation_snapshot"] or "")
+        snap_desc = str(row["process_description_snapshot"] or "")
+        snap_pitch = str(row["station_pitch_snapshot"] or "")
+        live_op = str(row["live_operation"] or "")
+        live_desc = str(row["live_description"] or "")
+        live_pitch = str(row["live_pitch"] or "")
+
+        changes = []
+        if snap_pitch != live_pitch and (snap_pitch != "" or live_pitch != ""):
+            changes.append({
+                "field": "station_pitch",
+                "label": "Station / Pitch",
+                "snapshot": snap_pitch or "(empty)",
+                "live": live_pitch or "(empty)",
+            })
+        if snap_op != live_op and (snap_op != "" or live_op != ""):
+            changes.append({
+                "field": "operation",
+                "label": "Operation",
+                "snapshot": snap_op or "(empty)",
+                "live": live_op or "(empty)",
+            })
+        if snap_desc != live_desc and (snap_desc != "" or live_desc != ""):
+            changes.append({
+                "field": "description",
+                "label": "Description",
+                "snapshot": snap_desc or "(empty)",
+                "live": live_desc or "(empty)",
+            })
+
+        if changes:
+            modified.append({
+                "assignment_id": str(row["assignment_id"]),
+                "quality_requirement_id": str(row["quality_requirement_id"]),
+                "scenario_id": str(row["scenario_id"]),
+                "scenario_name": str(row["scenario_name"]),
+                "work_element_id": str(row["work_element_id"]),
+                "requirement_type": str(row["requirement_type"]),
+                "unique_identifier": str(row["unique_identifier"]),
+                "description": str(row["requirement_description"]),
+                "snapshot_pitch": snap_pitch,
+                "snapshot_operation": snap_op,
+                "snapshot_description": snap_desc,
+                "live_pitch": live_pitch,
+                "live_operation": live_op,
+                "live_description": live_desc,
+                "live_sequence": int(row["live_sequence"] or 0),
+                "changes": changes,
+            })
+    return modified
+
+
+def accept_quality_upstream_changes(
+    project_id: str,
+    scenario_id: str,
+    assignment_ids: list[str],
+    editor_name: str = "",
+) -> dict:
+    """Synchronize quality assignment snapshots with live PAAG work elements and record audit events."""
+    store = _store_module()
+    timestamp = store.now_iso()
+    clean_ids = list(dict.fromkeys(str(aid) for aid in assignment_ids if str(aid).strip()))
+    if not clean_ids:
+        return {"row_count": 0, "timestamp": timestamp, "assignment_ids": []}
+
+    with store.connection() as conn:
+        updated = []
+        for aid in clean_ids:
+            row = conn.execute(
+                """SELECT assignment.id, assignment.work_element_id,
+                          element.operation, element.description, element.station
+                   FROM quality_requirement_assignments assignment
+                   JOIN work_elements element
+                     ON element.id=assignment.work_element_id
+                    AND element.project_id=assignment.project_id
+                    AND element.scenario_id=assignment.scenario_id
+                   WHERE assignment.id=? AND assignment.project_id=? AND assignment.scenario_id=?""",
+                (aid, project_id, scenario_id),
+            ).fetchone()
+            if not row:
+                continue
+            conn.execute(
+                """UPDATE quality_requirement_assignments
+                   SET process_operation_snapshot=?,
+                       process_description_snapshot=?,
+                       station_pitch_snapshot=?,
+                       updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (
+                    str(row["operation"] or ""),
+                    str(row["description"] or ""),
+                    str(row["station"] or ""),
+                    timestamp,
+                    aid,
+                    project_id,
+                    scenario_id,
+                ),
+            )
+            updated.append(aid)
+            store.record_audit_event(
+                project_id,
+                "quality_requirement_assignments",
+                "Synchronize upstream PAAG changes",
+                1,
+                editor_name,
+                {
+                    "scenario_id": scenario_id,
+                    "assignment_id": aid,
+                    "synced_operation": str(row["operation"] or ""),
+                    "synced_pitch": str(row["station"] or ""),
+                },
+                _conn=conn,
+            )
+        return {"row_count": len(updated), "timestamp": timestamp, "assignment_ids": updated}
+
+
+def reassign_quality_assignment(
+    project_id: str,
+    scenario_id: str,
+    assignment_id: str,
+    target_work_element_id: str,
+    editor_name: str = "",
+) -> dict:
+    """Move a quality requirement assignment to another Process step in the scenario and update snapshots."""
+    store = _store_module()
+    timestamp = store.now_iso()
+    with store.connection() as conn:
+        assignment = conn.execute(
+            """SELECT id, quality_requirement_id, work_element_id
+               FROM quality_requirement_assignments
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (assignment_id, project_id, scenario_id),
+        ).fetchone()
+        if not assignment:
+            raise ValueError("Quality requirement assignment not found in this scenario.")
+
+        target_step = conn.execute(
+            """SELECT id, operation, description, station
+               FROM work_elements
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (target_work_element_id, project_id, scenario_id),
+        ).fetchone()
+        if not target_step:
+            raise ValueError("Target Process step was not found in this scenario.")
+
+        existing = conn.execute(
+            """SELECT id FROM quality_requirement_assignments
+               WHERE project_id=? AND scenario_id=? AND work_element_id=? AND quality_requirement_id=?""",
+            (project_id, scenario_id, target_work_element_id, assignment["quality_requirement_id"]),
+        ).fetchone()
+        if existing and str(existing["id"]) != str(assignment_id):
+            raise ValueError("The target step already has this Quality requirement assigned.")
+
+        conn.execute(
+            """UPDATE quality_requirement_assignments
+               SET work_element_id=?,
+                   process_operation_snapshot=?,
+                   process_description_snapshot=?,
+                   station_pitch_snapshot=?,
+                   unlinked_at='',
+                   updated_at=?
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (
+                target_work_element_id,
+                str(target_step["operation"] or ""),
+                str(target_step["description"] or ""),
+                str(target_step["station"] or ""),
+                timestamp,
+                assignment_id,
+                project_id,
+                scenario_id,
+            ),
+        )
+
+        has_causes = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pfmea_prevention_selections'"
+        ).fetchone()
+        if has_causes:
+            conn.execute(
+                """UPDATE pfmea_causes
+                   SET control_source_review_required=1, updated_at=?
+                   WHERE id IN (
+                       SELECT pfmea_cause_id FROM pfmea_prevention_selections
+                       WHERE quality_requirement_assignment_id=?
+                       UNION
+                       SELECT pfmea_cause_id FROM pfmea_detection_selections
+                       WHERE quality_requirement_assignment_id=?
+                   )""",
+                (timestamp, assignment_id, assignment_id),
+            )
+
+        store.record_audit_event(
+            project_id,
+            "quality_requirement_assignments",
+            "Reassign step",
+            1,
+            editor_name,
+            {
+                "scenario_id": scenario_id,
+                "assignment_id": assignment_id,
+                "previous_work_element_id": str(assignment["work_element_id"] or ""),
+                "target_work_element_id": target_work_element_id,
+                "target_operation": str(target_step["operation"] or ""),
+            },
+            _conn=conn,
+        )
+        return {
+            "assignment_id": assignment_id,
+            "target_work_element_id": target_work_element_id,
+            "timestamp": timestamp,
+        }
+

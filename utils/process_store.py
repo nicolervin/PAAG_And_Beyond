@@ -1255,20 +1255,63 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
         removed = existing_ids - saved_ids
         if removed:
             placeholders = ",".join("?" for _ in removed)
-            protected_count = conn.execute(
-                f"""SELECT COUNT(*) FROM pfmea_entries
-                    WHERE project_id=? AND scenario_id=? AND work_element_id IN ({placeholders})""",
+            removed_rows = conn.execute(
+                f"""SELECT id, operation, description, station, sequence, location
+                    FROM work_elements
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
                 (project_id, scenario_id, *removed),
-            ).fetchone()[0]
-            if protected_count:
-                raise ValueError(
-                    "Remove the linked PFMEA entries before deleting this Process at a Glance step."
+            ).fetchall()
+            now_str = now_iso()
+            for r in removed_rows:
+                elem_id = r[0]
+                op_val = str(r[1] or "")
+                desc_val = str(r[2] or "")
+                pitch_val = str(r[3] or "")
+                seq_val = int(r[4] or 0)
+                loc_val = str(r[5] or "")
+
+                conn.execute(
+                    """UPDATE quality_requirement_assignments
+                       SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                           process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                           station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
+                           unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
+                           work_element_id = NULL,
+                           updated_at = ?
+                       WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
+                    (op_val, desc_val, pitch_val, now_str, now_str, project_id, scenario_id, elem_id),
                 )
+
+                conn.execute(
+                    """UPDATE equipment_process_links
+                       SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                           process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                           station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
+                           unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
+                           work_element_id = NULL,
+                           updated_at = ?
+                       WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
+                    (op_val, desc_val, pitch_val, now_str, now_str, project_id, scenario_id, elem_id),
+                )
+
+                conn.execute(
+                    """UPDATE pfmea_entries
+                       SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                           process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                           process_pitch_snapshot = CASE WHEN process_pitch_snapshot = '' THEN ? ELSE process_pitch_snapshot END,
+                           process_location_snapshot = CASE WHEN process_location_snapshot = '' THEN ? ELSE process_location_snapshot END,
+                           process_sequence_snapshot = CASE WHEN process_sequence_snapshot = 0 THEN ? ELSE process_sequence_snapshot END,
+                           work_element_id = NULL,
+                           updated_at = ?
+                       WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
+                    (op_val, desc_val, pitch_val, loc_val, seq_val, now_str, project_id, scenario_id, elem_id),
+                )
+
             conn.execute(
                 f"""UPDATE yamazumi_elements
                     SET process_element_id=NULL, process_sync_status='Needs IE review', updated_at=?
                     WHERE project_id=? AND process_element_id IN ({placeholders})""",
-                (now_iso(), project_id, *removed),
+                (now_str, project_id, *removed),
             )
             conn.execute(
                 f"""DELETE FROM work_elements WHERE project_id=? AND scenario_id=?
@@ -1276,7 +1319,149 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
                 (project_id, scenario_id, *removed),
             )
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'replace_work_elements']
+
+def work_element_downstream_impact(
+    project_id: str,
+    scenario_id: str,
+    work_element_ids: list[str] | set[str] | tuple[str, ...],
+) -> dict:
+    """Calculate the downstream impact across Quality, PFMEA, Equipment, and Safety before deleting work elements."""
+    ids = [str(x) for x in work_element_ids if str(x).strip()]
+    if not ids:
+        return {
+            "total_impact": 0,
+            "has_impact": False,
+            "quality_count": 0,
+            "pfmea_count": 0,
+            "equipment_count": 0,
+            "safety_count": 0,
+            "quality_records": [],
+            "pfmea_records": [],
+            "equipment_records": [],
+            "safety_records": [],
+            "operations_affected": [],
+        }
+    with _db_core.connection() as conn:
+        placeholders = ",".join("?" for _ in ids)
+
+        op_rows = conn.execute(
+            f"""SELECT id, operation, description, station FROM work_elements
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        ).fetchall()
+        op_map = {row[0]: {"operation": row[1] or "", "description": row[2] or "", "station": row[3] or ""} for row in op_rows}
+
+        def _has_table(tbl: str) -> bool:
+            return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone() is not None
+
+        quality_records = []
+        if _has_table("quality_requirement_assignments"):
+            q_rows = conn.execute(
+                f"""SELECT id, quality_requirement_id, requirement_type, description, unique_identifier, work_element_id
+                    FROM quality_requirement_assignments
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IN ({placeholders})""",
+                (project_id, scenario_id, *ids),
+            ).fetchall()
+            quality_records = [
+                {
+                    "id": r[0],
+                    "quality_requirement_id": r[1],
+                    "requirement_type": r[2],
+                    "description": r[3],
+                    "unique_identifier": r[4],
+                    "work_element_id": r[5],
+                    "operation": op_map.get(r[5], {}).get("operation", ""),
+                    "station": op_map.get(r[5], {}).get("station", ""),
+                }
+                for r in q_rows
+            ]
+
+        pfmea_records = []
+        if _has_table("pfmea_entries"):
+            pfmea_rows = conn.execute(
+                f"""SELECT id, potential_failure_mode, class_code, work_element_id
+                    FROM pfmea_entries
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IN ({placeholders})""",
+                (project_id, scenario_id, *ids),
+            ).fetchall()
+            pfmea_records = [
+                {
+                    "id": r[0],
+                    "potential_failure_mode": r[1],
+                    "class_code": r[2],
+                    "work_element_id": r[3],
+                    "operation": op_map.get(r[3], {}).get("operation", ""),
+                    "station": op_map.get(r[3], {}).get("station", ""),
+                }
+                for r in pfmea_rows
+            ]
+
+        equipment_records = []
+        if _has_table("equipment_process_links"):
+            eq_rows = conn.execute(
+                f"""SELECT id, placement_id, work_element_id
+                    FROM equipment_process_links
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IN ({placeholders})""",
+                (project_id, scenario_id, *ids),
+            ).fetchall()
+            equipment_records = [
+                {
+                    "id": r[0],
+                    "placement_id": r[1],
+                    "work_element_id": r[2],
+                    "operation": op_map.get(r[2], {}).get("operation", ""),
+                    "station": op_map.get(r[2], {}).get("station", ""),
+                }
+                for r in eq_rows
+            ]
+
+        safety_records = []
+        if _has_table("safety_requirements"):
+            safe_rows = conn.execute(
+                f"""SELECT id, requirement_description, work_element_id
+                    FROM safety_requirements
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IN ({placeholders}) AND active=1""",
+                (project_id, scenario_id, *ids),
+            ).fetchall()
+            safety_records = [
+                {
+                    "id": r[0],
+                    "requirement_description": r[1],
+                    "work_element_id": r[2],
+                    "operation": op_map.get(r[2], {}).get("operation", ""),
+                    "station": op_map.get(r[2], {}).get("station", ""),
+                }
+                for r in safe_rows
+            ]
+
+        ops_affected = sorted({
+            op_map[w_id]["operation"]
+            for w_id in (
+                [r["work_element_id"] for r in quality_records]
+                + [r["work_element_id"] for r in pfmea_records]
+                + [r["work_element_id"] for r in equipment_records]
+                + [r["work_element_id"] for r in safety_records]
+            )
+            if w_id in op_map and op_map[w_id]["operation"]
+        })
+
+        total = len(quality_records) + len(pfmea_records) + len(equipment_records) + len(safety_records)
+        return {
+            "total_impact": total,
+            "has_impact": total > 0,
+            "quality_count": len(quality_records),
+            "pfmea_count": len(pfmea_records),
+            "equipment_count": len(equipment_records),
+            "safety_count": len(safety_records),
+            "quality_records": quality_records,
+            "pfmea_records": pfmea_records,
+            "equipment_records": equipment_records,
+            "safety_records": safety_records,
+            "operations_affected": ops_affected,
+        }
+
+
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'replace_work_elements', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

@@ -80,9 +80,6 @@ class ControlPlanStoreTests(unittest.TestCase):
             self.project_id, self.scenario_id, self.entry_id,
             pd.DataFrame([{"id": "", "cause_description": "Bolt loose", "occurrence": 3}]),
         )
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "prevention_controls"] = [f"quality:{self.assignment_id}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
 
     @contextmanager
     def _connection(self):
@@ -188,9 +185,6 @@ class ControlPlanStoreTests(unittest.TestCase):
         second_assignment = quality_store.assign_quality_requirement(
             self.project_id, self.scenario_id, self.work_id, second_requirement
         )
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "detection_controls"] = [f"quality:{second_assignment}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         projection = control_plan_store.control_plan_projection(
             self.project_id, self.scenario_id
         )
@@ -266,9 +260,6 @@ class ControlPlanStoreTests(unittest.TestCase):
         second_assignment = quality_store.assign_quality_requirement(
             self.project_id, self.scenario_id, self.work_id, second_requirement
         )
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "detection_controls"] = [f"quality:{second_assignment}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         projection = control_plan_store.control_plan_projection(
             self.project_id, self.scenario_id
         )
@@ -286,7 +277,7 @@ class ControlPlanStoreTests(unittest.TestCase):
 
     def test_multiple_pfmea_failure_modes_share_one_operation_group(self) -> None:
         second_entry = "cp-entry-second"
-        timestamp = store.now_iso()
+        timestamp = "2099-01-01T00:00:00+00:00"
         self.conn.execute(
             """INSERT INTO pfmea_entries
                (id, project_id, scenario_id, work_element_id,
@@ -407,10 +398,7 @@ class ControlPlanStoreTests(unittest.TestCase):
         )
         self.assertTrue(projection.empty)
 
-    def test_same_quality_in_both_control_lists_deduplicates(self) -> None:
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "detection_controls"] = [f"quality:{self.assignment_id}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
+    def test_quality_requirement_projects_single_item(self) -> None:
         projection = control_plan_store.control_plan_projection(
             self.project_id, self.scenario_id
         )
@@ -420,9 +408,6 @@ class ControlPlanStoreTests(unittest.TestCase):
         quality_store.delete_quality_requirement_assignments(
             self.project_id, self.scenario_id, [self.assignment_id]
         )
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "prevention_controls"] = []
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         projection = control_plan_store.control_plan_projection(
             self.project_id, self.scenario_id
         )
@@ -468,9 +453,6 @@ class ControlPlanStoreTests(unittest.TestCase):
         replacement = quality_store.assign_quality_requirement(
             self.project_id, self.scenario_id, self.work_id, self.requirement_id
         )
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "prevention_controls"] = [f"quality:{replacement}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         self.assertTrue(
             control_plan_store.control_plan_projection(
                 self.project_id, self.scenario_id
@@ -785,9 +767,6 @@ class ControlPlanStoreTests(unittest.TestCase):
         second_assignment = quality_store.assign_quality_requirement(
             self.project_id, self.scenario_id, self.work_id, second_requirement
         )
-        flat = pfmea_store.pfmea_flat_rows(self.project_id, self.scenario_id)
-        flat.at[0, "detection_controls"] = [f"quality:{second_assignment}"]
-        pfmea_store.save_pfmea_flat_rows(self.project_id, self.scenario_id, flat)
         projection = control_plan_store.control_plan_projection(
             self.project_id, self.scenario_id
         )

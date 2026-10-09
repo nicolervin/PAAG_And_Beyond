@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from io import BytesIO
 from uuid import uuid4
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -26,6 +27,12 @@ from utils.pfmea_store import (
     pfmea_effects,
     pfmea_entries,
     pfmea_flat_rows,
+    pfmea_known_responsibilities,
+    pfmea_inactive_assignees,
+    add_pfmea_assignee,
+    set_pfmea_assignee_active,
+    pfmea_assignee_usage,
+    reassign_pfmea_actions,
     pfmea_process_steps,
     pfmea_control_candidates,
     pfmea_control_option_delete_impact,
@@ -85,7 +92,7 @@ PFMEA_CONTROL_COLUMNS = {
 PFMEA_COPY_SIGNATURE_COLUMNS = [
     "work_element_id", "potential_failure_mode", "potential_effects", "severity",
     "classification", "potential_causes", "occurrence", "detection",
-    "recommended_action", "responsibility_target",
+    "recommended_action", "responsibility", "target_completion_date", "responsibility_target",
 ]
 PFMEA_COMPLETION_COLUMNS = [
     "actions_taken", "resulting_severity", "resulting_occurrence",
@@ -96,7 +103,8 @@ PFMEA_SHARED_EDIT_COLUMNS = {
     "effect_id": ["potential_effects", "severity"],
     "cause_id": ["potential_causes", "occurrence", "detection"],
     "action_id": [
-        "recommended_action", "responsibility_target", "actions_taken",
+        "recommended_action", "responsibility", "target_completion_date",
+        "responsibility_target", "actions_taken",
         "resulting_severity", "resulting_occurrence", "resulting_detection",
     ],
 }
@@ -114,7 +122,8 @@ PFMEA_FLAT_COLUMNS = {
     "legacy_classification": "string",
     "occurrence": "float64", "prevention_controls": "list",
     "detection_controls": "list", "detection": "float64", "rpn": "float64",
-    "recommended_action": "string", "responsibility_target": "string",
+    "recommended_action": "string", "responsibility": "string",
+    "target_completion_date": "string", "responsibility_target": "string",
     "actions_taken": "string", "resulting_severity": "float64",
     "resulting_occurrence": "float64", "resulting_detection": "float64",
     "resulting_rpn": "float64", "upstream_changes": "bool",
@@ -126,8 +135,19 @@ PFMEA_VISIBLE_COLUMNS = [
     "item_number", "process_function", "potential_failure_mode", "potential_effects",
     "severity", "classification", "potential_causes", "occurrence",
     "prevention_controls", "detection_controls", "detection", "rpn",
-    "recommended_action", "responsibility_target", "actions_taken",
+    "recommended_action", "responsibility", "target_completion_date", "actions_taken",
     "resulting_severity", "resulting_occurrence", "resulting_detection", "resulting_rpn",
+]
+
+PFMEA_IDENTIFYING_COLUMNS = [
+    "item_number",
+    "process_function",
+    "potential_failure_mode",
+    "potential_effects",
+    "potential_causes",
+    "classification",
+    "prevention_controls",
+    "detection_controls",
 ]
 
 
@@ -437,9 +457,7 @@ def _stage_pfmea_process_selection(
         )
     cleaned = _drop_untouched_rows(
         normalized,
-        identifying_columns=[
-            "item_number", "potential_failure_mode", "potential_effects", "potential_causes"
-        ],
+        identifying_columns=PFMEA_IDENTIFYING_COLUMNS,
     )
     merged = _merge_pfmea_filtered_edits(rows, visible, cleaned)
     merged, pasted_copy_ids = _recognize_pasted_line_copies(rows, merged)
@@ -504,10 +522,7 @@ def _pfmea_panel_rows_from_editor_state(
     )
     cleaned = _drop_untouched_rows(
         normalized,
-        identifying_columns=[
-            "item_number", "potential_failure_mode", "potential_effects",
-            "potential_causes",
-        ],
+        identifying_columns=PFMEA_IDENTIFYING_COLUMNS,
     )
     complete = _merge_pfmea_filtered_edits(rows, visible, cleaned)
     complete, _, _ = _propagate_shared_editor_changes(
@@ -2224,7 +2239,21 @@ def _control_label_map(
 
 def _cause_target_key(row: pd.Series) -> str:
     cause_id = _plain_text(row.get("cause_id"))
-    return f"cause:{cause_id}" if cause_id else f"draft:{_plain_text(row.get('draft_row_id'))}"
+    if cause_id:
+        return f"cause:{cause_id}"
+    draft_id = _plain_text(row.get("draft_row_id"))
+    if draft_id:
+        return f"draft:{draft_id}"
+    entry_id = _plain_text(row.get("entry_id"))
+    effect_id = _plain_text(row.get("effect_id"))
+    if entry_id and effect_id:
+        return f"entry:{entry_id}:effect:{effect_id}"
+    if entry_id:
+        return f"entry:{entry_id}"
+    row_id = _plain_text(row.get("id"))
+    if row_id:
+        return f"row:{row_id}"
+    return f"ref:{id(row)}"
 
 
 def _pfmea_line_label(
@@ -2292,14 +2321,19 @@ def _render_control_selection_panel(
                 f"pfmea_{control_type.casefold()}_picker_"
                 f"{project_id}_{scenario_id}_{target_key}"
             )
+            current_valid = [value for value in current if value in labels]
             editor_state = st.session_state.get(editor_key, {}) or {}
-            if editor_state.get("edited_rows") or editor_state.get("added_rows"):
-                st.session_state[picker_key] = [value for value in current if value in labels]
+            has_grid_control_edits = False
+            for raw_pos, row_changes in (editor_state.get("edited_rows") or {}).items():
+                if column in (row_changes or {}):
+                    has_grid_control_edits = True
+                    break
+            if has_grid_control_edits or picker_key not in st.session_state:
+                st.session_state[picker_key] = current_valid
 
             selected = st.multiselect(
                 f"{control_type} controls",
                 options=list(labels),
-                default=[value for value in current if value in labels],
                 format_func=lambda value, choices=labels: choices.get(value, value),
                 key=picker_key,
                 help=(
@@ -2330,7 +2364,7 @@ def _render_control_selection_panel(
                         st.rerun()
                     except ValueError as exc:
                         st.error(str(exc))
-            if selected != current:
+            if not has_grid_control_edits and set(_list_values(selected)) != set(_list_values(current)):
                 updated.loc[target_mask, column] = pd.Series(
                     [list(selected)] * int(target_mask.sum()),
                     index=updated.index[target_mask],
@@ -3622,6 +3656,7 @@ def _render_flat_pfmea_table(
         if isinstance(draft, pd.DataFrame)
         else stored
     )
+    rows["classification"] = rows["classification"].fillna("").astype(str)
 
     invalid_classes = sorted(
         set(rows["classification"].dropna().astype(str)) - set(PFMEA_CLASSIFICATIONS)
@@ -3680,6 +3715,18 @@ def _render_flat_pfmea_table(
         project_id, scenario_id, rows, "Detection"
     )
     control_labels = prevention_labels | detection_labels
+    known_people = pfmea_known_responsibilities(project_id)
+    inactive_people = {p.casefold() for p in pfmea_inactive_assignees(project_id)}
+    for extra in st.session_state.get(f"pfmea_extra_assignees_{project_id}", []):
+        if extra and extra not in known_people and extra.casefold() not in inactive_people:
+            known_people.append(extra)
+    responsibility_options = sorted(list(set(known_people)), key=str.casefold)
+
+    if not editor_rows.empty and "target_completion_date" in editor_rows.columns:
+        editor_rows["target_completion_date"] = pd.to_datetime(
+            editor_rows["target_completion_date"], errors="coerce"
+        ).dt.date
+
     column_config = {
         column: None for column in PFMEA_FLAT_COLUMNS if column not in PFMEA_VISIBLE_COLUMNS
     }
@@ -3758,9 +3805,15 @@ def _render_flat_pfmea_table(
                     "display them as spaces."
                 ),
             ),
-            "responsibility_target": st.column_config.TextColumn(
-                "Responsibility & Target Completion Date",
-                help="Enter Responsibility, optionally followed by | and the date in YYYY-MM-DD format.",
+            "responsibility": st.column_config.SelectboxColumn(
+                "Responsibility",
+                options=responsibility_options,
+                help="Select or assign responsible person/role. Sort rows by clicking this column header. Use '+ Assignee' to register new names.",
+            ),
+            "target_completion_date": st.column_config.DateColumn(
+                "Target Completion Date",
+                format="YYYY-MM-DD",
+                help="Select target completion date from the calendar picker. Sort rows by clicking this column header.",
             ),
             "actions_taken": st.column_config.TextColumn(
                 "Actions Taken", width="large",
@@ -3816,9 +3869,7 @@ def _render_flat_pfmea_table(
 
     cleaned = _drop_untouched_rows(
         edited,
-        identifying_columns=[
-            "item_number", "potential_failure_mode", "potential_effects", "potential_causes"
-        ],
+        identifying_columns=PFMEA_IDENTIFYING_COLUMNS,
     )
     complete = _merge_pfmea_filtered_edits(rows, visible, cleaned)
     complete, governance_warnings = _sanitize_pfmea_row_controls(
@@ -3848,8 +3899,6 @@ def _render_flat_pfmea_table(
             _pfmea_copy_state_key("shared_edit_notice", project_id, scenario_id)
         ] = propagated_columns
         _clear_control_clipboard(project_id, scenario_id)
-        request_table_editor_reset(editor_key)
-        st.rerun()
     if process_selection_changed:
         st.session_state[draft_key] = complete
         if reassignment_attempted:
@@ -3857,6 +3906,8 @@ def _render_flat_pfmea_table(
         _clear_control_clipboard(project_id, scenario_id)
         request_table_editor_reset(editor_key)
         st.rerun()
+    if table_has_unsaved_changes(editor_key, native_row_selection=True):
+        st.session_state[draft_key] = complete.copy()
 
     footer = editable_table_footer(
         editor_key=editor_key,
@@ -3870,14 +3921,50 @@ def _render_flat_pfmea_table(
         _clear_pfmea_copy_state(project_id, scenario_id)
         _undo(editor_key, "Discarded the unsaved PFMEA line-item and control edits")
 
-    export_rows = visible[PFMEA_VISIBLE_COLUMNS].copy()
+    export_rows = visible.copy()
     for control_column in ("prevention_controls", "detection_controls"):
-        export_rows[control_column] = export_rows[control_column].map(
-            lambda value: "\n".join(
-                control_labels.get(source_key, "Unavailable control")
-                for source_key in _list_values(value)
+        if control_column in export_rows.columns:
+            export_rows[control_column] = export_rows[control_column].map(
+                lambda value: "\n".join(
+                    control_labels.get(source_key, "Unavailable control")
+                    for source_key in _list_values(value)
+                )
             )
-        )
+
+    def _combine_resp_target(r):
+        resp = str(r.get("responsibility") or "").strip() if pd.notna(r.get("responsibility")) else ""
+        target = str(r.get("target_completion_date") or "").strip() if pd.notna(r.get("target_completion_date")) else ""
+        if resp and target:
+            return f"{resp} | {target}"
+        if target:
+            return f"Target: {target}"
+        if resp:
+            return resp
+        return str(r.get("responsibility_target") or "").strip() if pd.notna(r.get("responsibility_target")) else ""
+
+    export_rows["responsibility_target"] = export_rows.apply(_combine_resp_target, axis=1)
+
+    export_col_order = [
+        "item_number", "process_function", "potential_failure_mode", "potential_effects",
+        "severity", "classification", "potential_causes", "occurrence",
+        "prevention_controls", "detection_controls", "detection", "rpn",
+        "recommended_action", "responsibility_target", "actions_taken",
+        "resulting_severity", "resulting_occurrence", "resulting_detection", "resulting_rpn",
+    ]
+    export_rows_final = export_rows[[c for c in export_col_order if c in export_rows.columns]].rename(columns={
+        "item_number": "Item #", "process_function": "Process Function",
+        "potential_failure_mode": "Potential Failure Mode",
+        "potential_effects": "Potential Effect(s) of Failure", "severity": "Severity",
+        "classification": "Classification", "potential_causes": "Potential Causes(s) of Failure",
+        "occurrence": "Occurrence", "prevention_controls": "Current Process Controls — Prevention",
+        "detection_controls": "Current Process Controls — Detection", "detection": "Detection",
+        "rpn": "RPN", "recommended_action": "Recommended Action",
+        "responsibility_target": "Responsibility & Target Completion Date",
+        "actions_taken": "Actions Taken", "resulting_severity": "Resulting Severity",
+        "resulting_occurrence": "Resulting Occurrence",
+        "resulting_detection": "Resulting Detection", "resulting_rpn": "Resulting RPN",
+    })
+
     with st.container(border=True):
         table_actions = st.container(horizontal=True)
         if table_actions.button(
@@ -3896,27 +3983,128 @@ def _render_flat_pfmea_table(
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
+
+        with table_actions.popover("👥 Manage Assignees", help="Add, remove, or manage team assignees"):
+            active_list = pfmea_known_responsibilities(project_id)
+            inactive_list = pfmea_inactive_assignees(project_id)
+
+            st.markdown("##### ➕ Add Assignee")
+            new_assignee_input = st.text_input(
+                "New Assignee Name / Role",
+                key=f"new_pfmea_assignee_input_{project_id}_{scenario_id}",
+                placeholder="e.g. Alex Johnson or Controls Engineer",
+            )
+            if st.button("Add Assignee", key=f"btn_add_pfmea_assignee_{project_id}_{scenario_id}"):
+                cleaned = new_assignee_input.strip()
+                if cleaned:
+                    add_pfmea_assignee(project_id, cleaned)
+                    session_key = f"pfmea_extra_assignees_{project_id}"
+                    if session_key not in st.session_state:
+                        st.session_state[session_key] = []
+                    if cleaned not in st.session_state[session_key]:
+                        st.session_state[session_key].append(cleaned)
+                    st.success(f"Added '{cleaned}' to active assignees.")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("##### 🚫 Remove / Mark Inactive")
+            st.caption("Inactive assignees are hidden from dropdowns. Historical rows preserve their names.")
+            if active_list:
+                departing = st.selectbox(
+                    "Select team member",
+                    options=[""] + active_list,
+                    key=f"departing_assignee_select_{project_id}_{scenario_id}",
+                )
+                if departing:
+                    usages = pfmea_assignee_usage(project_id, departing)
+                    if usages > 0:
+                        st.info(f"'{departing}' is currently assigned to {usages} open action(s) / control plan item(s).")
+                    if st.button(
+                        f"Mark '{departing}' Inactive",
+                        key=f"btn_deactivate_assignee_{project_id}_{scenario_id}",
+                    ):
+                        set_pfmea_assignee_active(project_id, departing, active=False)
+                        session_key = f"pfmea_extra_assignees_{project_id}"
+                        if session_key in st.session_state and departing in st.session_state[session_key]:
+                            st.session_state[session_key].remove(departing)
+                        st.success(f"Marked '{departing}' as inactive. Removed from dropdown.")
+                        request_table_editor_reset(editor_key)
+                        st.rerun()
+
+                    if usages > 0:
+                        with st.expander("🔄 Reassign open actions to someone else"):
+                            replacement_candidates = [p for p in active_list if p != departing]
+                            new_target = st.selectbox(
+                                "Transfer tasks to",
+                                options=[""] + replacement_candidates,
+                                key=f"reassign_target_{project_id}_{scenario_id}",
+                            )
+                            if st.button(
+                                f"Transfer actions to {new_target} & Deactivate" if new_target else "Transfer actions",
+                                disabled=not new_target,
+                                key=f"btn_reassign_tasks_{project_id}_{scenario_id}",
+                            ):
+                                updated_cnt = reassign_pfmea_actions(project_id, departing, new_target)
+                                set_pfmea_assignee_active(project_id, departing, active=False)
+                                session_key = f"pfmea_extra_assignees_{project_id}"
+                                if session_key in st.session_state and departing in st.session_state[session_key]:
+                                    st.session_state[session_key].remove(departing)
+                                st.success(f"Reassigned {updated_cnt} action(s) to '{new_target}' and marked '{departing}' inactive.")
+                                request_table_editor_reset(editor_key)
+                                st.rerun()
+            else:
+                st.caption("No active assignees to remove.")
+
+            if inactive_list:
+                st.divider()
+                with st.expander(f"📁 Inactive Personnel ({len(inactive_list)})"):
+                    st.caption("Reactivate a team member if they return or were marked inactive by mistake.")
+                    reactivate_choice = st.selectbox(
+                        "Select person to reactivate",
+                        options=[""] + inactive_list,
+                        key=f"reactivate_assignee_select_{project_id}_{scenario_id}",
+                    )
+                    if st.button(
+                        "Reactivate",
+                        disabled=not reactivate_choice,
+                        key=f"btn_reactivate_assignee_{project_id}_{scenario_id}",
+                    ):
+                        set_pfmea_assignee_active(project_id, reactivate_choice, active=True)
+                        st.success(f"Reactivated '{reactivate_choice}'.")
+                        st.rerun()
+
         table_actions.download_button(
             "Export filtered rows",
-            data=_pfmea_export_bytes(
-                export_rows.rename(columns={
-                    "item_number": "Item #", "process_function": "Process Function",
-                    "potential_failure_mode": "Potential Failure Mode",
-                    "potential_effects": "Potential Effect(s) of Failure", "severity": "Severity",
-                    "classification": "Classification", "potential_causes": "Potential Causes(s) of Failure",
-                    "occurrence": "Occurrence", "prevention_controls": "Current Process Controls — Prevention",
-                    "detection_controls": "Current Process Controls — Detection", "detection": "Detection",
-                    "rpn": "RPN", "recommended_action": "Recommended Action",
-                    "responsibility_target": "Responsibility & Target Completion Date",
-                    "actions_taken": "Actions Taken", "resulting_severity": "Resulting Severity",
-                    "resulting_occurrence": "Resulting Occurrence",
-                    "resulting_detection": "Resulting Detection", "resulting_rpn": "Resulting RPN",
-                }),
-            ),
+            data=_pfmea_export_bytes(export_rows_final),
             file_name="pfmea_filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             icon=":material/download:",
             key=f"pfmea_flat_export_{project_id}_{scenario_id}",
+            help="Export PFMEA table to Excel with combined Responsibility & Target Completion Date column.",
+        )
+        from utils.excel_io import export_pfmea_to_company_template
+        table_actions.download_button(
+            "Export Company Template (FRM-GEA-QYS-033)",
+            data=export_pfmea_to_company_template(
+                project_id=project_id,
+                scenario_id=scenario_id,
+                rows=export_rows,
+                control_labels=control_labels,
+            ),
+            file_name=f"PFMEA_FRM-GEA-QYS-033_{project_id[:8]}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            icon=":material/description:",
+            key=f"pfmea_company_template_export_{project_id}_{scenario_id}",
+            help="Export to official company FRM-GEA-QYS-033 checklist template with preserved formulas.",
+        )
+        table_actions.download_button(
+            "Export filtered rows (.csv)",
+            data=export_rows_final.to_csv(index=False).encode("utf-8"),
+            file_name="pfmea_filtered.csv",
+            mime="text/csv",
+            icon=":material/article:",
+            key=f"pfmea_csv_export_{project_id}_{scenario_id}",
+            help="Export PFMEA table to CSV format with combined Responsibility & Target Completion Date column.",
         )
         render_pfmea_classification_legend()
 
@@ -4216,3 +4404,73 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         _confirm_pfmea_process_change()
     elif st.session_state.get(PENDING_CONTROL_PASTE_KEY):
         _confirm_pfmea_control_paste()
+
+
+def save_staged_pfmea_draft(project_id: str, scenario_id: str) -> dict[str, Any]:
+    """Saves any staged flat PFMEA draft for the given project and scenario to the database."""
+    draft_key = f"pfmea_flat_draft_{project_id}_{scenario_id}"
+    draft = st.session_state.get(draft_key)
+    if not isinstance(draft, pd.DataFrame):
+        return {}
+
+    stored = _frame(pfmea_flat_rows(project_id, scenario_id), PFMEA_FLAT_COLUMNS)
+    save_rows = _stable_recalculated_draft(stored, draft)
+    result = save_pfmea_flat_rows(
+        project_id,
+        scenario_id,
+        save_rows,
+        force_new_draft_ids=_forced_copy_ids(project_id, scenario_id),
+    )
+    _audit(
+        project_id, "Save & Refresh", result,
+        {"scenario_id": scenario_id, "record_type": "PFMEA line items"},
+    )
+    st.session_state.pop(draft_key, None)
+    _clear_control_picker_state(project_id, scenario_id)
+    _clear_pfmea_copy_state(project_id, scenario_id)
+    request_table_editor_reset(f"pfmea_flat_editor_{project_id}_{scenario_id}")
+    return result
+
+
+def discard_staged_pfmea_draft(project_id: str, scenario_id: str) -> None:
+    """Discards staged in-flight PFMEA edits in session state."""
+    draft_key = f"pfmea_flat_draft_{project_id}_{scenario_id}"
+    st.session_state.pop(draft_key, None)
+    _clear_control_picker_state(project_id, scenario_id)
+    _clear_pfmea_copy_state(project_id, scenario_id)
+    request_table_editor_reset(f"pfmea_flat_editor_{project_id}_{scenario_id}")
+
+
+def render_pfmea_staged_draft_banner(project_id: str, scenario_id: str) -> bool:
+    """Renders a warning banner when unsaved PFMEA draft edits exist outside the PFMEA tab.
+
+    Provides 'Save Draft', 'Discard Draft', and 'Go to PFMEA' action buttons.
+    Returns True if a draft banner was rendered, False otherwise.
+    """
+    draft_key = f"pfmea_flat_draft_{project_id}_{scenario_id}"
+    draft = st.session_state.get(draft_key)
+    if not isinstance(draft, pd.DataFrame):
+        return False
+
+    with st.container(border=True):
+        col_msg, col_save, col_discard, col_nav = st.columns([5, 2, 2, 2], vertical_alignment="center")
+        with col_msg:
+            st.warning("⚠️ **Unsaved PFMEA Edits Staged**: You have unsaved changes in the PFMEA worksheet that will be lost if your session ends.")
+        with col_save:
+            if st.button("Save Draft", key=f"pfmea_draft_save_banner_{project_id}_{scenario_id}", type="primary", icon=":material/save:"):
+                try:
+                    save_staged_pfmea_draft(project_id, scenario_id)
+                    st.toast("Saved PFMEA line items successfully!", icon=":material/check_circle:")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Save failed: {exc}")
+        with col_discard:
+            if st.button("Discard Draft", key=f"pfmea_draft_discard_banner_{project_id}_{scenario_id}", icon=":material/delete:"):
+                discard_staged_pfmea_draft(project_id, scenario_id)
+                st.toast("Discarded unsaved PFMEA edits", icon=":material/delete:")
+                st.rerun()
+        with col_nav:
+            if st.button("Go to PFMEA", key=f"pfmea_draft_nav_banner_{project_id}_{scenario_id}", icon=":material/bolt:"):
+                st.session_state[f"quality_page_tabs_{project_id}"] = "PFMEA"
+                st.rerun()
+    return True

@@ -29,6 +29,7 @@ from utils.store import (
     safety_requirement_delete_impact,
     validate_process_part_option_pairings,
     work_element_op_ids,
+    work_element_downstream_impact,
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
 )
@@ -40,6 +41,7 @@ from utils.process_pitch_visual import (
     page_for_element,
     render_pitch_canvas,
 )
+from utils.process_flow_visual import render_process_flow_diagram
 from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
@@ -1126,501 +1128,599 @@ elements["model_applicability"] = elements["model_applicability"].apply(
 )
 
 editable_table_heading("Process at a Glance by pitch")
-st.caption(
-    "Select **Details** beside any Op ID to open that Work Element's pitch-level visual summary below the table."
-)
-visible_elements = filter_table(
-    elements,
-    key=f"process_filters_{scenario_id}",
-    dropdown_columns=["station", "handling", "model_applicability"],
-    search_columns=[
-        "op_id", "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
-        "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
-    ],
-    reset_widget_keys=[process_editor_key],
-    multi_value_columns=["handling", "model_applicability"],
-    universal_values={"model_applicability": ["All", "All models", ""]},
-)
-process_action_slot = st.empty()
+process_tab, flow_tab = st.tabs(["Process Table", "Process Flow Diagram"])
 
-
-def open_pitch_visual_summary() -> None:
-    blocked_key = f"process_pitch_visual_blocked_{scenario_id}"
-    if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
-        st.session_state[blocked_key] = (
-            "Save or undo table edits before opening the pitch visual summary."
-        )
-        return
-    click = st.session_state.get(f"process_details_action_{scenario_id}") or {}
-    position = click.get("row")
-    if position is None or not 0 <= int(position) < len(visible_elements):
-        return
-    clicked = visible_elements.iloc[int(position)]
-    work_element_id = str(clicked["id"])
-    current_context = yamazumi_context_for_process(project_id, scenario_id)
-    context_rows = (
-        current_context.loc[
-            current_context["process_element_id"].astype(str).eq(work_element_id)
-        ]
-        if not current_context.empty and "process_element_id" in current_context
-        else pd.DataFrame()
+with process_tab:
+    st.caption(
+        "Select **Details** beside any Op ID to open that Work Element's pitch-level visual summary below the table."
     )
-    pitch_ids = context_rows.get("pitch_id", pd.Series(dtype="string")).dropna().astype(str).unique()
-    if len(pitch_ids) != 1 or not pitch_ids[0].strip():
-        st.session_state[blocked_key] = (
-            "This Work Element needs one current Yamazumi pitch before its visual summary can open."
-        )
-        return
-    try:
-        summary = process_pitch_visual_summary(project_id, scenario_id, pitch_ids[0])
-        selected_page = page_for_element(summary["elements"], work_element_id)
-    except ValueError as exc:
-        st.session_state[blocked_key] = str(exc)
-        return
-    st.session_state.pop(blocked_key, None)
-    st.session_state["selected_pitch_id"] = pitch_ids[0]
-    st.session_state["pitch_page_num"] = selected_page
-    st.session_state[f"pitch_visual_scroll_{scenario_id}"] = True
+    visible_elements = filter_table(
+        elements,
+        key=f"process_filters_{scenario_id}",
+        dropdown_columns=["station", "handling", "model_applicability"],
+        search_columns=[
+            "op_id", "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
+            "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
+        ],
+        reset_widget_keys=[process_editor_key],
+        multi_value_columns=["handling", "model_applicability"],
+        universal_values={"model_applicability": ["All", "All models", ""]},
+    )
+    process_action_slot = st.empty()
 
 
-edited = st.data_editor(
-    visible_elements,
-    key=process_editor_key,
-    hide_index=True,
-    num_rows="delete",
-    height=470,
-    disabled=[
-        "id",
-        "op_id",
-        "pitch_name",
-        "work_element",
-        "assigned_parts",
-        "handling",
-        "ergonomics_risk",
-        "criticality",
-    ],
-    column_order=compact_columns,
-    column_config={
-        "id": None,
-        "part_number": None,
-        "details": standard_details_column_config(
-            on_click=open_pitch_visual_summary,
-            key=f"process_details_action_{scenario_id}",
-        ),
-        "op_id": st.column_config.TextColumn(
-            "Op ID",
-            pinned=True,
-            help=(
-                "Identifies this Work Element's current Fishbone lineage, Pitch, and "
-                "centerline-outward stack position. It may change if the Fishbone "
-                "structure or Yamazumi assignments change."
-            ),
-        ),
-        "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
-        "station": None,
-        "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),
-        "work_element": st.column_config.TextColumn(
-            "Work Element", required=True, pinned=True, width="large"
-        ),
-        "assigned_parts": st.column_config.TextColumn(
-            "Part requirements", width="large"
-        ),
-        "handling": st.column_config.ListColumn(
-            "Handling",
-            help=(
-                "Shows whether the parts paired to this Work Element are first consumed "
-                "or subsequently handled. Compatibility-null pairings appear as Unclassified."
-            ),
-            width="medium",
-        ),
-        "ergonomics_risk": st.column_config.MultiselectColumn(
-            "Ergonomics",
-            options=["Ergo Risk"],
-            color="red",
-            disabled=True,
-            width="medium",
-            help=(
-                "Shown when this step has an Open or Pending Ergonomics review "
-                "classified as Red or Favorable Red. Review details on the "
-                "Ergonomics page."
-            ),
-        ),
-        "criticality": st.column_config.MultiselectColumn(
-            "Criticality",
-            options=["CTQ", "Safety"],
-            color=["orange", "red"],
-            disabled=True,
-            width="medium",
-            help=(
-                "CTQ comes from a linked PFMEA Classification of E, P, P-, Q, or E-. "
-                "Safety comes from an active Safety requirement linked to this Process step."
-            ),
-        ),
-        "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
-        "model_applicability": st.column_config.MultiselectColumn(
-            "Models", options=["All models", *model_labels.values()]
-        ),
-    },
-)
-footer_actions = editable_table_footer(
-    editor_key=process_editor_key,
-    key_prefix=f"process_plan_{scenario_id}",
-    native_row_selection=True,
-)
-
-pitch_visual_blocked = st.session_state.pop(
-    f"process_pitch_visual_blocked_{scenario_id}", None
-)
-if pitch_visual_blocked:
-    st.warning(pitch_visual_blocked)
-
-selected_pitch_key = "selected_pitch_id"
-pitch_page_key = "pitch_page_num"
-selected_pitch_id = str(st.session_state.get(selected_pitch_key) or "").strip()
-if selected_pitch_id:
-    try:
-        pitch_summary = process_pitch_visual_summary(
-            project_id, scenario_id, selected_pitch_id
-        )
-    except ValueError as exc:
-        st.session_state.pop(selected_pitch_key, None)
-        st.session_state.pop(pitch_page_key, None)
-        st.warning(str(exc))
-    else:
-        pitch_rows = pitch_summary["elements"]
-        current_page = clamp_page(
-            st.session_state.get(pitch_page_key, 1), len(pitch_rows)
-        )
-        st.session_state[pitch_page_key] = current_page
-        total_pages = page_count(len(pitch_rows))
-        st.html('<div id="process-pitch-visual-summary"></div>')
-        navigation = st.container(
-            horizontal=True,
-            vertical_alignment="center",
-            horizontal_alignment="distribute",
-        )
-        navigation.markdown(
-            f"**{pitch_summary['pitch_number']} — "
-            f"{pitch_summary['pitch_name'] or 'Unnamed pitch'} — Page {current_page} of {total_pages}**"
-        )
-        controls = navigation.container(horizontal=True, gap="small")
-        if controls.button(
-            "Back",
-            icon=":material/arrow_back:",
-            disabled=current_page <= 1,
-            key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
-        ):
-            st.session_state[pitch_page_key] = current_page - 1
-            st.rerun()
-        if controls.button(
-            "Next",
-            icon=":material/arrow_forward:",
-            disabled=current_page >= total_pages,
-            key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
-        ):
-            st.session_state[pitch_page_key] = current_page + 1
-            st.rerun()
-
-        active_page_rows = page_elements(pitch_rows, current_page)
-        for row in active_page_rows:
-            row["models"] = [
-                "All models" if model.casefold() in {"all", "all models"}
-                else model_labels.get(model, model)
-                for model in (split_filter_values(row.get("model_applicability")) or ["All"])
+    def open_pitch_visual_summary() -> None:
+        blocked_key = f"process_pitch_visual_blocked_{scenario_id}"
+        if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+            st.session_state[blocked_key] = (
+                "Save or undo table edits before opening the pitch visual summary."
+            )
+            return
+        click = st.session_state.get(f"process_details_action_{scenario_id}") or {}
+        position = click.get("row")
+        if position is None or not 0 <= int(position) < len(visible_elements):
+            return
+        clicked = visible_elements.iloc[int(position)]
+        work_element_id = str(clicked["id"])
+        current_context = yamazumi_context_for_process(project_id, scenario_id)
+        context_rows = (
+            current_context.loc[
+                current_context["process_element_id"].astype(str).eq(work_element_id)
             ]
-        st.html(
-            render_pitch_canvas(
-                pitch_summary,
-                active_page_rows,
-                scenario_name=str(scenario["name"]),
-            )
+            if not current_context.empty and "process_element_id" in current_context
+            else pd.DataFrame()
         )
-        if st.session_state.pop(f"pitch_visual_scroll_{scenario_id}", False):
-            st.html(
-                """<script>
-                const target = window.parent.document.getElementById('process-pitch-visual-summary');
-                if (target) target.scrollIntoView({behavior: 'smooth', block: 'start'});
-                </script>""",
-                unsafe_allow_javascript=True,
+        pitch_ids = context_rows.get("pitch_id", pd.Series(dtype="string")).dropna().astype(str).unique()
+        if len(pitch_ids) != 1 or not pitch_ids[0].strip():
+            st.session_state[blocked_key] = (
+                "This Work Element needs one current Yamazumi pitch before its visual summary can open."
             )
-
-export_actions = st.container(horizontal=True)
-export_actions.download_button(
-    "Export filtered table view",
-    data=dataframe_to_excel(
-        visible_elements.reindex(columns=compact_columns),
-        "Process plan",
-    ),
-    file_name="process_plan_filtered_view.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    icon=":material/download:",
-    key=f"process_compact_export_{scenario_id}",
-)
-export_actions.download_button(
-    "Export filtered full data",
-    data=dataframe_to_excel(
-        visible_elements.drop(columns=["id", "details"], errors="ignore"),
-        "Process plan",
-    ),
-    file_name="process_plan_filtered_full.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    icon=":material/download:",
-    key=f"process_full_export_{scenario_id}",
-)
-
-selected = native_selected_rows(visible_elements, editor_key=process_editor_key)
+            return
+        try:
+            summary = process_pitch_visual_summary(project_id, scenario_id, pitch_ids[0])
+            selected_page = page_for_element(summary["elements"], work_element_id)
+        except ValueError as exc:
+            st.session_state[blocked_key] = str(exc)
+            return
+        st.session_state.pop(blocked_key, None)
+        st.session_state["selected_pitch_id"] = pitch_ids[0]
+        st.session_state["pitch_page_num"] = selected_page
+        st.session_state[f"pitch_visual_scroll_{scenario_id}"] = True
 
 
-def current_process_editor_rows() -> pd.DataFrame:
-    """Capture cell edits without treating native row selection as deletion."""
-    state = st.session_state.get(process_editor_key, {}) or {}
-    draft = visible_elements.copy()
-    for raw_position, changes in (state.get("edited_rows") or {}).items():
-        position = int(raw_position)
-        if not 0 <= position < len(draft):
-            continue
-        for column, value in (changes or {}).items():
-            if column in draft.columns:
-                draft.at[draft.index[position], column] = value
-    return draft
-
-
-def save_unsaved_process_table_edits(*, paired_removal: bool) -> int:
-    """Persist unrelated compact-table edits before a confirmed pairing removal."""
-    if not table_has_unsaved_changes(
-        process_editor_key, native_row_selection=True
-    ):
-        return 0
-    draft = current_process_editor_rows()
-    errors = required_field_errors(draft, {"work_element": "Work Element"})
-    if errors:
-        raise ValueError(" ".join(errors))
-    combined = merge_filtered_edits(elements, visible_elements, draft)
-    combined["model_applicability"] = combined["model_applicability"].apply(
-        lambda assigned: ", ".join(
-            "All" if label == "All models" else model_numbers_by_label.get(label, label)
-            for label in (assigned or ["All models"])
-        )
-    )
-    replace_work_elements(project_id, scenario_id, combined)
-    changed_count = len(
-        (st.session_state.get(process_editor_key, {}) or {}).get("edited_rows") or {}
-    )
-    record_audit_event(
-        project_id,
-        "Process plan",
-        "Save & Refresh",
-        changed_count,
-        st.session_state.get("current_editor", ""),
-        {
-            "scenario_id": scenario_id,
-            "saved_with_pairing_removal": paired_removal,
+    edited = st.data_editor(
+        visible_elements,
+        key=process_editor_key,
+        hide_index=True,
+        num_rows="delete",
+        height=470,
+        disabled=[
+            "id",
+            "op_id",
+            "pitch_name",
+            "work_element",
+            "assigned_parts",
+            "handling",
+            "ergonomics_risk",
+            "criticality",
+        ],
+        column_order=compact_columns,
+        column_config={
+            "id": None,
+            "part_number": None,
+            "details": standard_details_column_config(
+                on_click=open_pitch_visual_summary,
+                key=f"process_details_action_{scenario_id}",
+            ),
+            "op_id": st.column_config.TextColumn(
+                "Op ID",
+                pinned=True,
+                help=(
+                    "Identifies this Work Element's current Fishbone lineage, Pitch, and "
+                    "centerline-outward stack position. It may change if the Fishbone "
+                    "structure or Yamazumi assignments change."
+                ),
+            ),
+            "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
+            "station": None,
+            "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),
+            "work_element": st.column_config.TextColumn(
+                "Work Element", required=True, pinned=True, width="large"
+            ),
+            "assigned_parts": st.column_config.TextColumn(
+                "Part requirements", width="large"
+            ),
+            "handling": st.column_config.ListColumn(
+                "Handling",
+                help=(
+                    "Shows whether the parts paired to this Work Element are first consumed "
+                    "or subsequently handled. Compatibility-null pairings appear as Unclassified."
+                ),
+                width="medium",
+            ),
+            "ergonomics_risk": st.column_config.MultiselectColumn(
+                "Ergonomics",
+                options=["Ergo Risk"],
+                color="red",
+                disabled=True,
+                width="medium",
+                help=(
+                    "Shown when this step has an Open or Pending Ergonomics review "
+                    "classified as Red or Favorable Red. Review details on the "
+                    "Ergonomics page."
+                ),
+            ),
+            "criticality": st.column_config.MultiselectColumn(
+                "Criticality",
+                options=["CTQ", "Safety"],
+                color=["orange", "red"],
+                disabled=True,
+                width="medium",
+                help=(
+                    "CTQ comes from a linked PFMEA Classification of E, P, P-, Q, or E-. "
+                    "Safety comes from an active Safety requirement linked to this Process step."
+                ),
+            ),
+            "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
+            "model_applicability": st.column_config.MultiselectColumn(
+                "Models", options=["All models", *model_labels.values()]
+            ),
         },
     )
-    return changed_count
-
-
-bulk = selected_rows_action_bar(
-    parent=process_action_slot,
-)
-bulk_station = bulk.text_input("Pitch for selected", key=f"process_bulk_pitch_{scenario_id}")
-apply_bulk = bulk.button(
-    f"Apply to selected ({len(selected)})",
-    type="primary",
-    icon=":material/checklist:",
-    disabled=selected.empty,
-)
-request_bulk_delete = not selected.empty
-
-if apply_bulk:
-    if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
-        st.warning("Save or undo other edits before applying a bulk change.")
-    elif not bulk_station.strip():
-        st.warning("Enter a pitch to apply.")
-    else:
-        updated = elements.copy()
-        selected_ids = set(selected["id"].astype(str))
-        mask = updated["id"].astype(str).isin(selected_ids)
-        if bulk_station.strip():
-            updated.loc[mask, "station"] = bulk_station.strip()
-        updated["model_applicability"] = updated["model_applicability"].apply(
-            lambda assigned: ", ".join(
-                "All" if label == "All models" else model_numbers_by_label.get(label, label)
-                for label in (assigned or ["All models"])
-            )
-        )
-        replace_work_elements(project_id, scenario_id, updated)
-        record_audit_event(
-            project_id,
-            "Process plan",
-            "Bulk edit",
-            len(selected_ids),
-            st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id, "pitch": bulk_station},
-        )
-        request_table_editor_reset(process_editor_key)
-        st.rerun()
-
-if request_bulk_delete:
-    st.session_state[f"process_pending_delete_{scenario_id}"] = selected["id"].astype(str).tolist()
-    stage_native_delete_confirmation(process_editor_key)
-
-
-@st.dialog("Delete Process at a Glance steps?", dismissible=False)
-def confirm_process_delete() -> None:
-    pending_key = f"process_pending_delete_{scenario_id}"
-    pending_ids = st.session_state.get(pending_key, [])
-    impact = safety_requirement_delete_impact(project_id, scenario_id, pending_ids)
-    warning = (
-        f"Delete {len(pending_ids)} Process step(s)? Their Part requirements will also be deleted."
+    footer_actions = editable_table_footer(
+        editor_key=process_editor_key,
+        key_prefix=f"process_plan_{scenario_id}",
+        native_row_selection=True,
     )
-    if impact["requirement_count"]:
-        warning += (
-            f" This will also delete {impact['requirement_count']} linked Safety "
-            "requirement(s)."
-        )
-    st.warning(warning)
-    actions = st.container(horizontal=True)
-    if actions.button("Cancel", key=f"cancel_process_delete_{scenario_id}"):
-        st.session_state.pop(pending_key, None)
-        request_table_editor_reset(process_editor_key)
-        st.rerun()
-    if actions.button(
-        "Delete steps", type="primary", icon=":material/delete:",
-        key=f"destructive_confirm_process_delete_{scenario_id}",
-    ):
-        retained = elements.loc[~elements["id"].astype(str).isin(set(pending_ids))].copy()
-        retained["model_applicability"] = retained["model_applicability"].apply(
-            lambda assigned: ", ".join(
-                "All" if label == "All models" else model_numbers_by_label.get(label, label)
-                for label in (assigned or ["All models"])
+
+    pitch_visual_blocked = st.session_state.pop(
+        f"process_pitch_visual_blocked_{scenario_id}", None
+    )
+    if pitch_visual_blocked:
+        st.warning(pitch_visual_blocked)
+
+    selected_pitch_key = "selected_pitch_id"
+    pitch_page_key = "pitch_page_num"
+    selected_pitch_id = str(st.session_state.get(selected_pitch_key) or "").strip()
+    if selected_pitch_id:
+        try:
+            pitch_summary = process_pitch_visual_summary(
+                project_id, scenario_id, selected_pitch_id
             )
-        )
-        replace_work_elements(project_id, scenario_id, retained)
-        record_audit_event(
-            project_id,
+        except ValueError as exc:
+            st.session_state.pop(selected_pitch_key, None)
+            st.session_state.pop(pitch_page_key, None)
+            st.warning(str(exc))
+        else:
+            pitch_rows = pitch_summary["elements"]
+            current_page = clamp_page(
+                st.session_state.get(pitch_page_key, 1), len(pitch_rows)
+            )
+            st.session_state[pitch_page_key] = current_page
+            total_pages = page_count(len(pitch_rows))
+            st.html('<div id="process-pitch-visual-summary"></div>')
+            navigation = st.container(
+                horizontal=True,
+                vertical_alignment="center",
+                horizontal_alignment="distribute",
+            )
+            navigation.markdown(
+                f"**{pitch_summary['pitch_number']} — "
+                f"{pitch_summary['pitch_name'] or 'Unnamed pitch'} — Page {current_page} of {total_pages}**"
+            )
+            controls = navigation.container(horizontal=True, gap="small")
+            if controls.button(
+                "Back",
+                icon=":material/arrow_back:",
+                disabled=current_page <= 1,
+                key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
+            ):
+                st.session_state[pitch_page_key] = current_page - 1
+                st.rerun()
+            if controls.button(
+                "Next",
+                icon=":material/arrow_forward:",
+                disabled=current_page >= total_pages,
+                key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
+            ):
+                st.session_state[pitch_page_key] = current_page + 1
+                st.rerun()
+
+            active_page_rows = page_elements(pitch_rows, current_page)
+            for row in active_page_rows:
+                row["models"] = [
+                    "All models" if model.casefold() in {"all", "all models"}
+                    else model_labels.get(model, model)
+                    for model in (split_filter_values(row.get("model_applicability")) or ["All"])
+                ]
+            st.html(
+                render_pitch_canvas(
+                    pitch_summary,
+                    active_page_rows,
+                    scenario_name=str(scenario["name"]),
+                )
+            )
+            if st.session_state.pop(f"pitch_visual_scroll_{scenario_id}", False):
+                st.html(
+                    """<script>
+                    const target = window.parent.document.getElementById('process-pitch-visual-summary');
+                    if (target) target.scrollIntoView({behavior: 'smooth', block: 'start'});
+                    </script>""",
+                    unsafe_allow_javascript=True,
+                )
+
+    export_actions = st.container(horizontal=True)
+    export_actions.download_button(
+        "Export filtered table view",
+        data=dataframe_to_excel(
+            visible_elements.reindex(columns=compact_columns),
             "Process plan",
-            "Bulk delete" if len(pending_ids) > 1 else "Delete",
-            len(pending_ids),
-            st.session_state.get("current_editor", ""),
-            {
-                "scenario_id": scenario_id,
-                "safety_requirements_deleted": impact["requirement_count"],
-            },
-        )
-        st.session_state.pop(pending_key, None)
-        request_table_editor_reset(process_editor_key)
-        st.rerun()
+        ),
+        file_name="process_plan_filtered_view.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        icon=":material/download:",
+        key=f"process_compact_export_{scenario_id}",
+    )
+    export_actions.download_button(
+        "Export filtered full data",
+        data=dataframe_to_excel(
+            visible_elements.drop(columns=["id", "details"], errors="ignore"),
+            "Process plan",
+        ),
+        file_name="process_plan_filtered_full.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        icon=":material/download:",
+        key=f"process_full_export_{scenario_id}",
+    )
+
+    selected = native_selected_rows(visible_elements, editor_key=process_editor_key)
 
 
-if st.session_state.get(f"process_pending_delete_{scenario_id}"):
-    confirm_process_delete()
+    def current_process_editor_rows() -> pd.DataFrame:
+        """Capture cell edits without treating native row selection as deletion."""
+        state = st.session_state.get(process_editor_key, {}) or {}
+        draft = visible_elements.copy()
+        for raw_position, changes in (state.get("edited_rows") or {}).items():
+            position = int(raw_position)
+            if not 0 <= position < len(draft):
+                continue
+            for column, value in (changes or {}).items():
+                if column in draft.columns:
+                    draft.at[draft.index[position], column] = value
+        return draft
 
-if footer_actions.undo:
-    request_table_editor_reset(process_editor_key)
-    st.rerun()
 
-if footer_actions.save_and_refresh:
-    try:
-        if not selected.empty:
-            raise ValueError("Clear selected rows before saving table edits.")
-        errors = required_field_errors(edited, {"work_element": "Work Element"})
+    def save_unsaved_process_table_edits(*, paired_removal: bool) -> int:
+        """Persist unrelated compact-table edits before a confirmed pairing removal."""
+        if not table_has_unsaved_changes(
+            process_editor_key, native_row_selection=True
+        ):
+            return 0
+        draft = current_process_editor_rows()
+        errors = required_field_errors(draft, {"work_element": "Work Element"})
         if errors:
             raise ValueError(" ".join(errors))
-        combined_elements = merge_filtered_edits(elements, visible_elements, edited)
-        combined_elements["model_applicability"] = combined_elements["model_applicability"].apply(
+        combined = merge_filtered_edits(elements, visible_elements, draft)
+        combined["model_applicability"] = combined["model_applicability"].apply(
             lambda assigned: ", ".join(
                 "All" if label == "All models" else model_numbers_by_label.get(label, label)
                 for label in (assigned or ["All models"])
             )
         )
-        replace_work_elements(project_id, scenario_id, combined_elements)
+        replace_work_elements(project_id, scenario_id, combined)
+        changed_count = len(
+            (st.session_state.get(process_editor_key, {}) or {}).get("edited_rows") or {}
+        )
         record_audit_event(
             project_id,
             "Process plan",
             "Save & Refresh",
-            len(combined_elements),
+            changed_count,
             st.session_state.get("current_editor", ""),
-            {"scenario_id": scenario_id},
+            {
+                "scenario_id": scenario_id,
+                "saved_with_pairing_removal": paired_removal,
+            },
         )
-        request_table_editor_reset(process_editor_key)
-        st.toast("Process at a Glance saved", icon=":material/check_circle:")
-        st.rerun()
-    except ValueError as exc:
-        st.error(str(exc))
+        return changed_count
 
 
-@st.dialog("Remove selected Part requirements?", dismissible=False)
-def confirm_pairing_bulk_removal() -> None:
-    pending = st.session_state.get(pairing_delete_key, {})
-    groups = pending.get("groups", [])
-    st.warning(
-        f"Remove {len(groups)} selected Part requirement(s)? The parts listed below will be "
-        "removed from this work element."
+    bulk = selected_rows_action_bar(
+        parent=process_action_slot,
     )
-    for group in groups:
-        parts = ", ".join(group.get("parts", [])) or "No active parts"
-        st.write(f"- {group['requirement']}: {parts}")
-    st.info(
-        "The parts are not deleted. They will return to the available-parts table for "
-        "their Fishbone section."
-    )
-    has_other_edits = table_has_unsaved_changes(
-        process_editor_key, native_row_selection=True
-    )
-    if has_other_edits:
-        st.info(
-            "Other unsaved Process at a Glance table edits will be saved at the same "
-            "time so they are not lost."
-        )
-    actions = st.container(horizontal=True)
-    if actions.button("Cancel", key=f"cancel_pairing_bulk_remove_{scenario_id}"):
-        st.session_state.pop(pairing_delete_key, None)
-        pairing_editor_key = str(pending.get("editor_key") or "")
-        if pairing_editor_key:
-            request_table_editor_reset(pairing_editor_key)
-        st.rerun()
-    if actions.button(
-        "Remove Part requirements",
+    bulk_station = bulk.text_input("Pitch for selected", key=f"process_bulk_pitch_{scenario_id}")
+    apply_bulk = bulk.button(
+        f"Apply to selected ({len(selected)})",
         type="primary",
-        icon=":material/link_off:",
-        key=f"destructive_confirm_pairing_bulk_remove_{scenario_id}",
-    ):
-        try:
-            save_unsaved_process_table_edits(paired_removal=True)
-            group_ids = [str(group["id"]) for group in groups]
-            removed_count = delete_process_part_groups(
-                project_id, scenario_id, group_ids
+        icon=":material/checklist:",
+        disabled=selected.empty,
+    )
+    request_bulk_delete = not selected.empty
+
+    if apply_bulk:
+        if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+            st.warning("Save or undo other edits before applying a bulk change.")
+        elif not bulk_station.strip():
+            st.warning("Enter a pitch to apply.")
+        else:
+            updated = elements.copy()
+            selected_ids = set(selected["id"].astype(str))
+            mask = updated["id"].astype(str).isin(selected_ids)
+            if bulk_station.strip():
+                updated.loc[mask, "station"] = bulk_station.strip()
+            updated["model_applicability"] = updated["model_applicability"].apply(
+                lambda assigned: ", ".join(
+                    "All" if label == "All models" else model_numbers_by_label.get(label, label)
+                    for label in (assigned or ["All models"])
+                )
             )
+            impact = work_element_downstream_impact(project_id, scenario_id, list(selected_ids))
+            replace_work_elements(project_id, scenario_id, updated)
             record_audit_event(
                 project_id,
-                "Process part pairings",
-                "Remove pairing",
-                removed_count,
+                "Process plan",
+                "Bulk edit",
+                len(selected_ids),
+                st.session_state.get("current_editor", ""),
+                {"scenario_id": scenario_id, "pitch": bulk_station},
+            )
+            request_table_editor_reset(process_editor_key)
+            if impact.get("quality_count", 0) > 0 or impact.get("pfmea_count", 0) > 0:
+                st.toast(
+                    f"Pitch updated. {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) will be flagged as upstream changes in Quality.",
+                    icon=":material/info:",
+                )
+            else:
+                st.toast("Pitch updated", icon=":material/check_circle:")
+            st.rerun()
+
+    if request_bulk_delete:
+        st.session_state[f"process_pending_delete_{scenario_id}"] = selected["id"].astype(str).tolist()
+        stage_native_delete_confirmation(process_editor_key)
+
+
+    @st.dialog("Delete Process at a Glance steps?", dismissible=False)
+    def confirm_process_delete() -> None:
+        pending_key = f"process_pending_delete_{scenario_id}"
+        pending_ids = st.session_state.get(pending_key, [])
+        if not pending_ids:
+            st.session_state.pop(pending_key, None)
+            request_table_editor_reset(process_editor_key)
+            st.rerun()
+
+        impact = work_element_downstream_impact(project_id, scenario_id, pending_ids)
+        has_impact = impact["has_impact"]
+        count_steps = len(pending_ids)
+
+        st.markdown(
+            f"**Are you sure you want to delete {count_steps} Process step(s)?**"
+        )
+
+        if has_impact:
+            st.error(
+                "⚠️ **Downstream Engineering Data Impact Detected**\n\n"
+                "Industrial Engineers cannot directly delete Quality or PFMEA records. "
+                "Deleting these process steps will unlink downstream records and preserve their snapshots for "
+                "Quality Engineering review and reconciliation in the Quality workspace."
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Quality Requirements", impact["quality_count"])
+                st.metric("PFMEA Failure Modes", impact["pfmea_count"])
+            with col2:
+                st.metric("Equipment Links", impact["equipment_count"])
+                st.metric("Safety Requirements (Deleted)", impact["safety_count"])
+
+            if impact["operations_affected"]:
+                st.caption(f"Affected Operations: {', '.join(impact['operations_affected'])}")
+
+            ack = st.checkbox(
+                "I acknowledge that deleting these steps unlinks downstream Quality, PFMEA, and Equipment "
+                "records and notifies the Quality team for reconciliation.",
+                value=False,
+                key=f"ack_process_delete_{scenario_id}",
+            )
+            delete_label = "Delete steps & Notify Quality"
+            delete_disabled = not ack
+        else:
+            st.info("No downstream Quality requirements, PFMEA failure modes, or Equipment links are associated with these steps.")
+            delete_label = "Delete steps"
+            delete_disabled = False
+
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_process_delete_{scenario_id}"):
+            st.session_state.pop(pending_key, None)
+            st.session_state.pop(f"ack_process_delete_{scenario_id}", None)
+            request_table_editor_reset(process_editor_key)
+            st.rerun()
+        if actions.button(
+            delete_label,
+            type="primary",
+            icon=":material/delete:",
+            disabled=delete_disabled,
+            key=f"destructive_confirm_process_delete_{scenario_id}",
+        ):
+            retained = elements.loc[~elements["id"].astype(str).isin(set(pending_ids))].copy()
+            retained["model_applicability"] = retained["model_applicability"].apply(
+                lambda assigned: ", ".join(
+                    "All" if label == "All models" else model_numbers_by_label.get(label, label)
+                    for label in (assigned or ["All models"])
+                )
+            )
+            replace_work_elements(project_id, scenario_id, retained)
+            record_audit_event(
+                project_id,
+                "Process plan",
+                "Bulk delete" if len(pending_ids) > 1 else "Delete",
+                len(pending_ids),
                 st.session_state.get("current_editor", ""),
                 {
                     "scenario_id": scenario_id,
-                    "work_element_id": pending.get("work_element_id"),
-                    "work_element": pending.get("work_element"),
-                    "pairings": groups,
+                    "impact_quality_unlinked": impact["quality_count"],
+                    "impact_pfmea_unlinked": impact["pfmea_count"],
+                    "impact_equipment_unlinked": impact["equipment_count"],
+                    "impact_safety_deleted": impact["safety_count"],
+                    "affected_operations": impact["operations_affected"],
                 },
             )
-            st.session_state.pop(pairing_delete_key, None)
+            st.session_state.pop(pending_key, None)
+            st.session_state.pop(f"ack_process_delete_{scenario_id}", None)
             request_table_editor_reset(process_editor_key)
-            pairing_editor_key = str(pending.get("editor_key") or "")
-            if pairing_editor_key:
-                request_table_editor_reset(pairing_editor_key)
-            st.toast(
-                f"Removed {removed_count} Part requirement(s); their parts are available again.",
-                icon=":material/check_circle:",
+            st.rerun()
+
+
+    if st.session_state.get(f"process_pending_delete_{scenario_id}"):
+        confirm_process_delete()
+
+    if footer_actions.undo:
+        request_table_editor_reset(process_editor_key)
+        st.rerun()
+
+    if footer_actions.save_and_refresh:
+        try:
+            if not selected.empty:
+                raise ValueError("Clear selected rows before saving table edits.")
+            errors = required_field_errors(edited, {"work_element": "Work Element"})
+            if errors:
+                raise ValueError(" ".join(errors))
+            combined_elements = merge_filtered_edits(elements, visible_elements, edited)
+            combined_elements["model_applicability"] = combined_elements["model_applicability"].apply(
+                lambda assigned: ", ".join(
+                    "All" if label == "All models" else model_numbers_by_label.get(label, label)
+                    for label in (assigned or ["All models"])
+                )
             )
+            edited_raw = (st.session_state.get(process_editor_key, {}) or {}).get("edited_rows", {})
+            edited_indices = list(edited_raw.keys())
+            affected_ids = []
+            if edited_indices and not visible_elements.empty:
+                for idx in edited_indices:
+                    try:
+                        pos = int(idx)
+                        if 0 <= pos < len(visible_elements):
+                            affected_ids.append(str(visible_elements.iloc[pos]["id"]))
+                    except (ValueError, TypeError, IndexError):
+                        pass
+            impact = work_element_downstream_impact(project_id, scenario_id, affected_ids) if affected_ids else {"quality_count": 0, "pfmea_count": 0}
+
+            replace_work_elements(project_id, scenario_id, combined_elements)
+            record_audit_event(
+                project_id,
+                "Process plan",
+                "Save & Refresh",
+                len(combined_elements),
+                st.session_state.get("current_editor", ""),
+                {"scenario_id": scenario_id},
+            )
+            request_table_editor_reset(process_editor_key)
+            if impact.get("quality_count", 0) > 0 or impact.get("pfmea_count", 0) > 0:
+                st.toast(
+                    f"Process saved. {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) will be flagged for review in Quality.",
+                    icon=":material/info:",
+                )
+            else:
+                st.toast("Process at a Glance saved", icon=":material/check_circle:")
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
 
 
-if st.session_state.get(pairing_delete_key):
-    confirm_pairing_bulk_removal()
+    @st.dialog("Remove selected Part requirements?", dismissible=False)
+    def confirm_pairing_bulk_removal() -> None:
+        pending = st.session_state.get(pairing_delete_key, {})
+        groups = pending.get("groups", [])
+        st.warning(
+            f"Remove {len(groups)} selected Part requirement(s)? The parts listed below will be "
+            "removed from this work element."
+        )
+        for group in groups:
+            parts = ", ".join(group.get("parts", [])) or "No active parts"
+            st.write(f"- {group['requirement']}: {parts}")
+        st.info(
+            "The parts are not deleted. They will return to the available-parts table for "
+            "their Fishbone section."
+        )
+        has_other_edits = table_has_unsaved_changes(
+            process_editor_key, native_row_selection=True
+        )
+        if has_other_edits:
+            st.info(
+                "Other unsaved Process at a Glance table edits will be saved at the same "
+                "time so they are not lost."
+            )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_pairing_bulk_remove_{scenario_id}"):
+            st.session_state.pop(pairing_delete_key, None)
+            pairing_editor_key = str(pending.get("editor_key") or "")
+            if pairing_editor_key:
+                request_table_editor_reset(pairing_editor_key)
+            st.rerun()
+        if actions.button(
+            "Remove Part requirements",
+            type="primary",
+            icon=":material/link_off:",
+            key=f"destructive_confirm_pairing_bulk_remove_{scenario_id}",
+        ):
+            try:
+                save_unsaved_process_table_edits(paired_removal=True)
+                group_ids = [str(group["id"]) for group in groups]
+                removed_count = delete_process_part_groups(
+                    project_id, scenario_id, group_ids
+                )
+                record_audit_event(
+                    project_id,
+                    "Process part pairings",
+                    "Remove pairing",
+                    removed_count,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "scenario_id": scenario_id,
+                        "work_element_id": pending.get("work_element_id"),
+                        "work_element": pending.get("work_element"),
+                        "pairings": groups,
+                    },
+                )
+                st.session_state.pop(pairing_delete_key, None)
+                request_table_editor_reset(process_editor_key)
+                pairing_editor_key = str(pending.get("editor_key") or "")
+                if pairing_editor_key:
+                    request_table_editor_reset(pairing_editor_key)
+                st.toast(
+                    f"Removed {removed_count} Part requirement(s); their parts are available again.",
+                    icon=":material/check_circle:",
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+    if st.session_state.get(pairing_delete_key):
+        confirm_pairing_bulk_removal()
+
+
+with flow_tab:
+    flow_col1, flow_col2 = st.columns([3, 1], vertical_alignment="bottom")
+    with flow_col1:
+        st.caption(
+            "Visual left-to-right Process Flow Diagram mapped by Yamazumi pitch and sequence. "
+            "Click any operation box to view its full details and paired parts."
+        )
+    with flow_col2:
+        shape_choice = st.radio(
+            "Block Shapes",
+            options=["Functional Shapes", "Uniform Squares"],
+            horizontal=True,
+            key=f"pfd_shape_mode_{scenario_id}",
+            help="Choose whether operations display functional symbology (Diamond for CTQ/Safety, Rounded for feeder handoff) or uniform square outlines.",
+        )
+    shape_mode = "uniform" if shape_choice == "Uniform Squares" else "functional"
+    render_process_flow_diagram(
+        project_id,
+        scenario_id,
+        key=f"process_flow_map_{scenario_id}",
+        shape_mode=shape_mode,
+    )
 
 with st.expander("Process at a Glance history", icon=":material/history:"):
     history = audit_history(project_id, "Process plan", limit=50)
