@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 from utils import store
@@ -909,6 +911,135 @@ class ProcessPitchVisualTests(unittest.TestCase):
             total_pages=1,
         )
         self.assertIn("All elements", html_all)
+
+    def test_visual_media_annotations_and_vector_persistence(self) -> None:
+        """Verify vector annotations, original source preservation, and non-destructive updates."""
+        from pathlib import Path
+        from utils.image_annotator import decode_data_url
+
+        orig_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        comp_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x02\x00\x00\x00\x02\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        sample_annotations = json.dumps([
+            {"id": "shape-1", "type": "arrow", "x1": 10, "y1": 10, "x2": 50, "y2": 50, "color": "#ff3b30", "lineWidth": 3},
+            {"id": "shape-2", "type": "badge", "x": 60, "y": 60, "text": "1", "color": "#007aff", "radius": 14},
+        ])
+
+        created = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="bracket_assembly.png",
+            file_bytes=comp_png,
+            original_file_bytes=orig_png,
+            annotations_json=sample_annotations,
+            caption="Check bracket alignment pin",
+            tagged_work_element_ids=[self.work_ids[0]],
+            sequence=10,
+            current_editor="Test IE",
+        )
+
+        media_id = created["id"]
+        self.assertEqual(created["annotations_json"], sample_annotations)
+        self.assertTrue(created["original_file_path"])
+        self.assertNotEqual(created["file_path"], created["original_file_path"])
+
+        orig_file = Path(created["original_file_path"])
+        comp_file = Path(created["file_path"])
+        self.assertTrue(orig_file.exists())
+        self.assertTrue(comp_file.exists())
+        self.assertEqual(orig_file.read_bytes(), orig_png)
+        self.assertEqual(comp_file.read_bytes(), comp_png)
+
+        # Verify get_pitch_visual_media preserves vector JSON
+        items = store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
+        matching = [i for i in items if i["id"] == media_id]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["annotations_json"], sample_annotations)
+        self.assertEqual(matching[0]["original_file_path"], str(orig_file))
+
+        # Test updating annotations non-destructively
+        updated_annotations = json.dumps([
+            {"id": "shape-1", "type": "arrow", "x1": 10, "y1": 10, "x2": 80, "y2": 80, "color": "#ffcc00", "lineWidth": 4},
+            {"id": "shape-2", "type": "badge", "x": 60, "y": 60, "text": "1", "color": "#007aff", "radius": 14},
+            {"id": "shape-3", "type": "rect", "x": 100, "y": 100, "w": 40, "h": 30, "color": "#34c759", "lineWidth": 2},
+        ])
+        new_comp_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x03\x00\x00\x00\x03\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+
+        store.update_pitch_visual_annotations(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            media_id=media_id,
+            annotations_json=updated_annotations,
+            composite_image_bytes=new_comp_png,
+            current_editor="Test IE",
+        )
+
+        # Check that original photo is still intact and composite image was refreshed
+        self.assertEqual(orig_file.read_bytes(), orig_png)
+        self.assertEqual(comp_file.read_bytes(), new_comp_png)
+
+        updated_items = store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
+        matching_up = [i for i in updated_items if i["id"] == media_id]
+        self.assertEqual(matching_up[0]["annotations_json"], updated_annotations)
+
+        # Test decode_data_url
+        data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        decoded = decode_data_url(data_url)
+        self.assertTrue(decoded.startswith(b"\x89PNG"))
+
+        # Test deletion cleans up both original and composite files
+        store.delete_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            media_id=media_id,
+            current_editor="Test IE",
+        )
+        self.assertFalse(orig_file.exists())
+        self.assertFalse(comp_file.exists())
+
+    def test_missing_ppe_alert_and_no_equipment_alert(self) -> None:
+        # Initially, there are 6 work elements on the pitch and NO tools or PPE assigned.
+        summary = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+
+        # 1. Verify equipment alerts do NOT include "No tools or equipment placed on pitch"
+        equip_alerts = summary["alerts"].get("equipment", [])
+        self.assertFalse(
+            any("No tools or equipment placed on pitch" in a["label"] for a in equip_alerts),
+            "False equipment alert should be suppressed",
+        )
+
+        # 2. Verify safety alerts contain missing PPE alerts for each of the 6 steps
+        safety_alerts = summary["alerts"].get("safety", [])
+        missing_ppe_alerts = [a for a in safety_alerts if "No PPE Assigned" in a["label"]]
+        self.assertEqual(len(missing_ppe_alerts), 6)
+        self.assertTrue(any("Step 1" in a["label"] for a in missing_ppe_alerts))
+
+        # 3. Assign PPE to Step 1 (self.work_ids[0])
+        ppe_df = pd.DataFrame([{
+            "work_element_id": self.work_ids[0],
+            "ppe": ["Safety Glasses", "Cut-Resistant Gloves"],
+            "requirement_description": "General assembly eye and hand protection",
+            "active": True,
+        }])
+        store.save_safety_requirements(self.project_id, self.scenario_id, ppe_df, "Safety IE")
+
+        # 4. Re-check summary
+        summary2 = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        safety_alerts2 = summary2["alerts"].get("safety", [])
+        missing_ppe_alerts2 = [a for a in safety_alerts2 if "No PPE Assigned" in a["label"]]
+        # Step 1 should now be satisfied, remaining 5 steps still alert
+        self.assertEqual(len(missing_ppe_alerts2), 5)
+        self.assertFalse(any("Step 1" in a["label"] for a in missing_ppe_alerts2))
+
+        # 5. Verify assigned PPE is listed under tools with is_ppe=True
+        ppe_tools = [t for t in summary2["tools"] if t.get("is_ppe")]
+        ppe_names = {t["name"] for t in ppe_tools}
+        self.assertIn("Safety Glasses", ppe_names)
+        self.assertIn("Cut-Resistant Gloves", ppe_names)
 
 
 if __name__ == "__main__":

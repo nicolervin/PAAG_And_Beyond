@@ -2,16 +2,60 @@
 
 from __future__ import annotations
 
+import json
 import sys as _sys
 from utils import db_core as _db_core
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
+STANDARD_PPE_OPTIONS = [
+    "Safety Glasses",
+    "Cut-Resistant Gloves",
+    "Hearing Protection",
+    "Steel-Toe Shoes",
+    "Bump Cap / Hard Hat",
+    "Face Shield",
+    "Heat-Resistant Gloves",
+    "High-Vis Vest",
+    "Respirator / Dust Mask",
+    "ESD Grounding Strap",
+    "Chemical Gloves",
+    "Chemical Apron",
+]
+
+def parse_ppe(val: object) -> list[str]:
+    """Parse stored PPE value into a list of strings."""
+    if val is None:
+        return []
+    try:
+        if bool(pd.isna(val)):
+            return []
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, (list, tuple, set)):
+        return [str(item).strip() for item in val if str(item).strip()]
+    s = str(val).strip()
+    if not s:
+        return []
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+    return [p.strip() for p in s.split(",") if p.strip()]
+
+def serialize_ppe(val: object) -> str:
+    """Serialize PPE list or string into stored JSON string."""
+    items = parse_ppe(val)
+    return json.dumps(items) if items else ""
+
 def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load scenario-specific Safety requirements with current Process labels."""
     columns = [
         "id", "project_id", "scenario_id", "work_element_id",
-        "requirement_description", "active", "created_at", "updated_at",
+        "requirement_description", "ppe", "active", "created_at", "updated_at",
         "work_element_label", "pitch",
     ]
     with connection() as conn:
@@ -22,6 +66,7 @@ def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
             raise ValueError("The active planning scenario no longer exists.")
         rows = conn.execute(
             """SELECT requirement.*,
+                      COALESCE(requirement.ppe, '') AS ppe,
                       COALESCE(
                           (SELECT NULLIF(TRIM(yamazumi.description), '')
                            FROM yamazumi_elements yamazumi
@@ -46,13 +91,19 @@ def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
             "scenario_id": pd.Series(dtype="string"),
             "work_element_id": pd.Series(dtype="string"),
             "requirement_description": pd.Series(dtype="string"),
+            "ppe": pd.Series(dtype="object"),
             "active": pd.Series(dtype="bool"),
             "created_at": pd.Series(dtype="string"),
             "updated_at": pd.Series(dtype="string"),
             "work_element_label": pd.Series(dtype="string"),
             "pitch": pd.Series(dtype="string"),
         })
-    return pd.DataFrame([dict(row) for row in rows], columns=columns)
+    result_rows = []
+    for row in rows:
+        d = dict(row)
+        d["ppe"] = parse_ppe(d.get("ppe"))
+        result_rows.append(d)
+    return pd.DataFrame(result_rows, columns=columns)
 
 def save_safety_requirements(
     project_id: str,
@@ -69,12 +120,17 @@ def save_safety_requirements(
     for _, row in edited.iterrows():
         work_element_id = str(row.get("work_element_id") or "").strip()
         description = str(row.get("requirement_description") or "").strip()
-        if not work_element_id and not description:
+        raw_ppe = row.get("ppe")
+        ppe_list = parse_ppe(raw_ppe)
+        ppe_str = serialize_ppe(ppe_list)
+        if not work_element_id and not description and not ppe_list:
             continue
         if not work_element_id:
             raise ValueError("Process Function is required for every Safety requirement.")
-        if not description:
-            raise ValueError("Requirement description is required for every Safety requirement.")
+        if not description and ppe_list:
+            description = f"PPE: {', '.join(ppe_list)}"
+        elif not description:
+            raise ValueError("Requirement description or PPE is required for every Safety requirement.")
         raw_id = row.get("id")
         requirement_id = (
             str(raw_id).strip()
@@ -87,6 +143,7 @@ def save_safety_requirements(
             "id": requirement_id,
             "work_element_id": work_element_id,
             "requirement_description": description,
+            "ppe": ppe_str,
             "active": active,
         })
     if len({row["id"] for row in prepared}) != len(prepared):
@@ -123,18 +180,19 @@ def save_safety_requirements(
             previous = existing.get(row["id"])
             if previous:
                 changed = any(
-                    previous[field] != row[field]
-                    for field in ("work_element_id", "requirement_description", "active")
+                    (previous.get(field) or "") != (row[field] or "") if field == "ppe"
+                    else previous.get(field) != row[field]
+                    for field in ("work_element_id", "requirement_description", "ppe", "active")
                 )
                 if not changed:
                     continue
                 conn.execute(
                     """UPDATE safety_requirements
-                       SET work_element_id=?, requirement_description=?, active=?, updated_at=?
+                       SET work_element_id=?, requirement_description=?, ppe=?, active=?, updated_at=?
                        WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
                         row["work_element_id"], row["requirement_description"],
-                        row["active"], timestamp, row["id"], project_id, scenario_id,
+                        row["ppe"], row["active"], timestamp, row["id"], project_id, scenario_id,
                     ),
                 )
                 changed_ids.append(row["id"])
@@ -142,11 +200,11 @@ def save_safety_requirements(
                 conn.execute(
                     """INSERT INTO safety_requirements
                        (id, project_id, scenario_id, work_element_id,
-                        requirement_description, active, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        requirement_description, ppe, active, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         row["id"], project_id, scenario_id, row["work_element_id"],
-                        row["requirement_description"], row["active"], timestamp, timestamp,
+                        row["requirement_description"], row["ppe"], row["active"], timestamp, timestamp,
                     ),
                 )
                 created_ids.append(row["id"])
@@ -258,7 +316,11 @@ def safety_requirement_history(
     )
     return pd.DataFrame(rows)
 
-__domain_exports__ = ['safety_requirements', 'save_safety_requirements', 'delete_safety_requirements', 'safety_requirement_delete_impact', 'safety_requirement_history']
+__domain_exports__ = [
+    'safety_requirements', 'save_safety_requirements', 'delete_safety_requirements',
+    'safety_requirement_delete_impact', 'safety_requirement_history',
+    'STANDARD_PPE_OPTIONS', 'parse_ppe', 'serialize_ppe',
+]
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

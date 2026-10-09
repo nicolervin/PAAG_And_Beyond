@@ -1193,7 +1193,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             list(safety_editor.proto.column_order),
-            ["work_element_id", "requirement_description", "active"],
+            ["work_element_id", "ppe", "requirement_description", "active"],
         )
 
         process_app = self.run_page("app_pages/process.py")

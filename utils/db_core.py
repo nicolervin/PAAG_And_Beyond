@@ -428,6 +428,8 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
             pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
             media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
             file_path TEXT NOT NULL,
+            original_file_path TEXT NOT NULL DEFAULT '',
+            annotations_json TEXT NOT NULL DEFAULT '',
             caption TEXT NOT NULL DEFAULT '',
             sequence INTEGER NOT NULL DEFAULT 10,
             created_at TEXT NOT NULL,
@@ -451,6 +453,11 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
             ON process_visual_media_tags(work_element_id);
         """
     )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(process_visual_media)").fetchall()}
+    if "annotations_json" not in cols:
+        conn.execute("ALTER TABLE process_visual_media ADD COLUMN annotations_json TEXT NOT NULL DEFAULT ''")
+    if "original_file_path" not in cols:
+        conn.execute("ALTER TABLE process_visual_media ADD COLUMN original_file_path TEXT NOT NULL DEFAULT ''")
 
 
 def clone_process_visual_media_scenario(
@@ -654,6 +661,7 @@ def init_db() -> None:
                 scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                 work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE CASCADE,
                 requirement_description TEXT NOT NULL,
+                ppe TEXT NOT NULL DEFAULT '',
                 active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -1648,6 +1656,12 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_work_elements_scenario ON work_elements(project_id, scenario_id, sequence)"
         )
         _backfill_missing_ergonomics_reviews(conn)
+
+        safety_req_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(safety_requirements)").fetchall()
+        }
+        if "ppe" not in safety_req_columns:
+            conn.execute("ALTER TABLE safety_requirements ADD COLUMN ppe TEXT NOT NULL DEFAULT ''")
 
         area_columns = {row[1] for row in conn.execute("PRAGMA table_info(yamazumi_areas)").fetchall()}
         if "scenario_id" not in area_columns:

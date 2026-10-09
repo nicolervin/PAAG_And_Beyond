@@ -1,5 +1,8 @@
+import base64
 import hashlib
 import json
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -39,6 +42,7 @@ from utils.store import (
     get_pitch_visual_media,
     save_pitch_visual_media,
     update_pitch_visual_media,
+    update_pitch_visual_annotations,
 )
 from utils.equipment_store import (
     equipment_assets,
@@ -46,6 +50,7 @@ from utils.equipment_store import (
     save_equipment_placement,
 )
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
+from utils.image_annotator import decode_data_url, image_annotator
 from utils.scope_ui import page_title_with_scope
 from utils.process_pitch_visual import (
     clamp_media_page,
@@ -755,6 +760,118 @@ def delete_visual_media_dialog(
         st.toast("Visual aid deleted", icon=":material/check_circle:")
         st.rerun()
     if col2.button("Cancel", key=f"cancel_del_{media_id}"):
+        st.rerun()
+
+
+@st.dialog("Annotate Visual Aid", width="large")
+def annotate_visual_media_dialog(
+    media_id: str,
+    file_path: str,
+    original_file_path: str,
+    annotations_json: str,
+    caption: str,
+    project_id: str,
+    scenario_id: str,
+) -> None:
+    st.markdown(f"#### Annotate Visual Aid: {caption or 'Visual Aid'}")
+    st.caption(
+        "Add directional arrows, callout text boxes, focus boxes/circles, step number badges (1, 2, 3), "
+        "or freehand pen markup. Click **💾 Apply & Save Markup** when finished."
+    )
+
+    source_path = None
+    if original_file_path:
+        p = Path(original_file_path)
+        if p.exists() and p.is_file():
+            source_path = p
+    if not source_path and file_path:
+        p = Path(file_path)
+        if p.exists() and p.is_file():
+            source_path = p
+
+    if not source_path:
+        st.error("Image file could not be found on disk.")
+        if st.button("Close"):
+            st.rerun()
+        return
+
+    raw_bytes = source_path.read_bytes()
+    suffix = source_path.suffix.lower()
+    mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
+    b64 = base64.b64encode(raw_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64}"
+
+    annotator_res = image_annotator(
+        image_data_url=data_url,
+        annotations_json=annotations_json or "",
+        key=f"annotator_existing_{media_id}",
+    )
+
+    save_payload = getattr(annotator_res, "save", None)
+    if save_payload:
+        try:
+            new_annotations = save_payload.get("annotations_json", "")
+            new_data_url = save_payload.get("data_url", "")
+            composite_bytes = decode_data_url(new_data_url) if new_data_url else None
+            update_pitch_visual_annotations(
+                project_id=project_id,
+                scenario_id=scenario_id,
+                media_id=media_id,
+                annotations_json=new_annotations,
+                composite_image_bytes=composite_bytes,
+                current_editor=st.session_state.get("current_editor", ""),
+            )
+            st.toast("Annotations saved!", icon=":material/check_circle:")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    st.caption("Tip: Select existing shapes to move, recolor, resize, or delete them non-destructively.")
+    if st.button("Close without saving", key=f"btn_close_annotator_{media_id}"):
+        st.rerun()
+
+
+@st.dialog("Annotate Staged Visual Aid", width="large")
+def annotate_staged_media_dialog(pitch_id: str) -> None:
+    staged = st.session_state.get(f"staged_media_{pitch_id}")
+    if not staged or not staged.get("original_bytes"):
+        st.info("No staged image found to annotate.")
+        if st.button("Close"):
+            st.rerun()
+        return
+
+    st.markdown("#### Annotate Staged Visual Aid")
+    st.caption(
+        "Add arrows, callouts, shapes, and badges to this image before adding it to the PAAG slide. "
+        "Click **💾 Apply & Save Markup** to apply your changes."
+    )
+
+    raw_bytes = staged["original_bytes"]
+    mime = staged.get("mime_type", "image/png")
+    b64 = base64.b64encode(raw_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64}"
+
+    annotator_res = image_annotator(
+        image_data_url=data_url,
+        annotations_json=staged.get("annotations_json", ""),
+        key=f"annotator_staged_{pitch_id}",
+    )
+
+    save_payload = getattr(annotator_res, "save", None)
+    if save_payload:
+        try:
+            new_annotations = save_payload.get("annotations_json", "")
+            new_data_url = save_payload.get("data_url", "")
+            composite_bytes = decode_data_url(new_data_url) if new_data_url else raw_bytes
+            staged["composite_bytes"] = composite_bytes
+            staged["annotations_json"] = new_annotations
+            st.session_state[f"staged_media_{pitch_id}"] = staged
+            st.toast("Markup applied to staged image!", icon=":material/check_circle:")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    if st.button("Close without saving", key=f"btn_close_staged_{pitch_id}"):
         st.rerun()
 
 
@@ -2948,11 +3065,108 @@ with tab_slides:
                             key=f"input_seq_visual_{selected_pitch_id}",
                         )
 
+                    # Manage staged image if user uploads an image or pastes from clipboard
+                    staged_key = f"staged_media_{selected_pitch_id}"
+                    current_staged = st.session_state.get(staged_key)
+
+                    # Check clipboard paste first
+                    pasted_payload = getattr(pasted, "image", None)
+                    if pasted_payload:
+                        try:
+                            primary_image = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
+                            clip_bytes = primary_image["bytes"]
+                            clip_hash = hashlib.sha256(clip_bytes).hexdigest()
+                            if not current_staged or current_staged.get("hash") != clip_hash:
+                                st.session_state[staged_key] = {
+                                    "source": "clipboard",
+                                    "hash": clip_hash,
+                                    "filename": primary_image["name"],
+                                    "original_bytes": clip_bytes,
+                                    "composite_bytes": clip_bytes,
+                                    "mime_type": primary_image["mime_type"],
+                                    "annotations_json": "",
+                                }
+                                current_staged = st.session_state[staged_key]
+                        except Exception as exc:
+                            st.error(str(exc))
+
+                    # Check file upload (if image)
+                    if uploaded_media:
+                        up_suffix = Path(uploaded_media.name).suffix.lower()
+                        if up_suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+                            up_bytes = uploaded_media.getvalue()
+                            up_hash = hashlib.sha256(up_bytes).hexdigest()
+                            if not current_staged or current_staged.get("hash") != up_hash:
+                                up_mime = "image/png" if up_suffix == ".png" else "image/webp" if up_suffix == ".webp" else "image/jpeg"
+                                st.session_state[staged_key] = {
+                                    "source": "upload",
+                                    "hash": up_hash,
+                                    "filename": uploaded_media.name,
+                                    "original_bytes": up_bytes,
+                                    "composite_bytes": up_bytes,
+                                    "mime_type": up_mime,
+                                    "annotations_json": "",
+                                }
+                                current_staged = st.session_state[staged_key]
+
+                    # Show preview card if an image is staged
+                    if current_staged and current_staged.get("composite_bytes"):
+                        with st.container(border=True):
+                            st.markdown(f"**Image Ready:** `{current_staged.get('filename')}`")
+                            sp1, sp2 = st.columns([1, 2.5])
+                            with sp1:
+                                st.image(current_staged["composite_bytes"], width=150)
+                            with sp2:
+                                has_ann = bool(current_staged.get("annotations_json"))
+                                if has_ann:
+                                    st.success("Markup annotations applied", icon=":material/draw:")
+                                else:
+                                    st.caption("No annotations added yet. Click below to add arrows, focus boxes, callouts, or step numbers.")
+                                b_col1, b_col2 = st.columns([1.5, 1])
+                                with b_col1:
+                                    if st.button("Annotate / Add Shapes", icon=":material/draw:", key=f"btn_ann_staged_{selected_pitch_id}", type="secondary"):
+                                        annotate_staged_media_dialog(selected_pitch_id)
+                                with b_col2:
+                                    if st.button("Discard Image", icon=":material/close:", key=f"btn_discard_staged_{selected_pitch_id}"):
+                                        st.session_state.pop(staged_key, None)
+                                        st.rerun()
+
                     submit_add = st.button("Add Visual Aid", icon=":material/add_photo_alternate:", type="primary", key=f"btn_add_visual_{selected_pitch_id}")
                     if submit_add:
-                        if not uploaded_media:
-                            st.error("Please choose an image or video file to upload, or paste a screenshot using the button above.")
-                        else:
+                        if current_staged and current_staged.get("composite_bytes"):
+                            try:
+                                save_pitch_visual_media(
+                                    project_id=project_id,
+                                    scenario_id=scenario_id,
+                                    pitch_id=selected_pitch_id,
+                                    filename=current_staged["filename"],
+                                    file_bytes=current_staged["composite_bytes"],
+                                    original_file_bytes=current_staged["original_bytes"],
+                                    annotations_json=current_staged.get("annotations_json", ""),
+                                    caption=aid_caption or (current_staged["filename"] if "screenshot" not in current_staged["filename"].lower() else "Visual Aid"),
+                                    tagged_work_element_ids=tagged_element_ids or [],
+                                    sequence=aid_sequence or 10,
+                                    current_editor=st.session_state.get("current_editor", ""),
+                                )
+                                record_audit_event(
+                                    project_id,
+                                    "Process",
+                                    "Upload visual aid",
+                                    1,
+                                    st.session_state.get("current_editor", ""),
+                                    {
+                                        "pitch_id": selected_pitch_id,
+                                        "filename": current_staged["filename"],
+                                        "caption": aid_caption,
+                                        "annotated": bool(current_staged.get("annotations_json")),
+                                    },
+                                )
+                                st.session_state.pop(staged_key, None)
+                                st.toast("Visual aid saved!", icon=":material/check_circle:")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(str(exc))
+                        elif uploaded_media:
                             try:
                                 file_bytes = uploaded_media.getvalue()
                                 save_pitch_visual_media(
@@ -2962,8 +3176,8 @@ with tab_slides:
                                     filename=uploaded_media.name,
                                     file_bytes=file_bytes,
                                     caption=aid_caption,
-                                    tagged_work_element_ids=tagged_element_ids,
-                                    sequence=aid_sequence,
+                                    tagged_work_element_ids=tagged_element_ids or [],
+                                    sequence=aid_sequence or 10,
                                     current_editor=st.session_state.get("current_editor", ""),
                                 )
                                 record_audit_event(
@@ -2982,35 +3196,8 @@ with tab_slides:
                                 st.rerun()
                             except Exception as exc:
                                 st.error(str(exc))
-
-                    # Handle clipboard paste
-                    pasted_payload = getattr(pasted, "image", None)
-                    if pasted_payload:
-                        try:
-                            primary_image = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
-                            save_pitch_visual_media(
-                                project_id=project_id,
-                                scenario_id=scenario_id,
-                                pitch_id=selected_pitch_id,
-                                filename=primary_image.filename,
-                                file_bytes=primary_image.data,
-                                caption=aid_caption or "Clipboard Screenshot",
-                                tagged_work_element_ids=tagged_element_ids or [],
-                                sequence=aid_sequence or 10,
-                                current_editor=st.session_state.get("current_editor", ""),
-                            )
-                            record_audit_event(
-                                project_id,
-                                "Process",
-                                "Paste visual aid screenshot",
-                                1,
-                                st.session_state.get("current_editor", ""),
-                                {"pitch_id": selected_pitch_id},
-                            )
-                            st.toast("Screenshot added as visual aid!", icon=":material/check_circle:")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
+                        else:
+                            st.error("Please choose an image or video file to upload, or paste a screenshot using the button above.")
 
                 # Gallery of existing visual aids on this pitch
                 current_media_items = get_pitch_visual_media(project_id, scenario_id, selected_pitch_id)
@@ -3030,6 +3217,8 @@ with tab_slides:
                             with g_col2:
                                 st.markdown(f"**Caption:** {media_item.get('caption') or '*(None)*'}")
                                 st.caption(f"Type: `{media_item.get('media_type')}` | Sequence: `{media_item.get('sequence', 10)}`")
+                                if media_item.get("annotations_json"):
+                                    st.caption("Markup: :material/draw: **Annotated** (editable shapes)")
                                 tags = media_item.get("tagged_work_elements", [])
                                 pitch_step_map = {str(el.get("work_element_id") or el.get("id")): idx + 1 for idx, el in enumerate(pitch_rows)}
                                 if tags:
@@ -3053,6 +3242,17 @@ with tab_slides:
                                     else:
                                         st.caption("Tagged Steps: *General pitch visual (all steps)*")
                             with g_col3:
+                                if media_item.get("media_type") == "image":
+                                    if st.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Add or edit arrows, text callouts, shapes, and badges"):
+                                        annotate_visual_media_dialog(
+                                            media_id=media_item["id"],
+                                            file_path=media_item.get("file_path", ""),
+                                            original_file_path=media_item.get("original_file_path", ""),
+                                            annotations_json=media_item.get("annotations_json", ""),
+                                            caption=media_item.get("caption", ""),
+                                            project_id=project_id,
+                                            scenario_id=scenario_id,
+                                        )
                                 if st.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
                                     edit_visual_media_dialog(
                                         media_id=media_item["id"],

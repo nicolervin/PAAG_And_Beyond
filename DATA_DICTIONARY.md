@@ -952,6 +952,42 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
      - Located below the Process at a Glance table (mirroring the Parts Catalog additional views pattern).
      - Allows selecting a pitch, viewing existing attached visual aids, uploading supplemental photos or videos (or pasting screenshots from clipboard), entering callout caption, and multi-selecting the applicable PAAG elements in that pitch.
 
+### PAAG Visual Aids: In-App Image Annotation & Vector Markup Tool
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 9, 2026
+- **Purpose:** Empower Industrial Engineers to annotate photos and screenshots directly within Process at a Glance. When uploading or pasting an image, IEs can add shapes, arrows, callout text boxes, numbered step badges, and freehand pen markup. Annotations are stored as non-destructive vector layers so IEs can re-open and edit, move, recolor, or remove annotations later without degrading or re-uploading the original image.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects directly to `process_visual_media`, which belongs to `yamazumi_pitches`, `planning_scenarios`, and `projects`, and is linked many-to-many to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the PAAG slide visualization and standard work layer of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:* Scenario-specific. Belongs to the active planning scenario through `process_visual_media.scenario_id`.
+  4. *Table requirement:* Existing table `process_visual_media` serves it directly by adding:
+     - `annotations_json TEXT NOT NULL DEFAULT ''`: JSON array of editable vector annotation objects (type, geometry, coordinates, stroke color, fill color, line width, text, step number).
+     - `original_file_path TEXT NOT NULL DEFAULT ''`: Relative path to the original unannotated base image in `data/uploads/`, preserving source fidelity for re-editing.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: Saving from the annotation modal updates `annotations_json`, re-renders the flattened presentation composite to `file_path`, updates `updated_at`, and triggers an audited save.
+     - Universal Deletion Standard: Deleting an annotation layer or clearing markup restores the original base image. Deleting the visual aid removes both composite and original files from `data/uploads/`.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Process visual aids"` with action `"Annotate image"`.
+     - Universal History Display Standard: Captured in the visual aids audit history expander.
+
+### Safety Functional Review: PPE Assignment & PAAG Missing PPE Alerts
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 9, 2026
+- **Purpose:** Allow Safety reviewers to assign required Personal Protective Equipment (PPE) to individual Process at a Glance (PAAG) work elements within the Safety Functional Review page. Standardizes assembly PPE categories (e.g. Safety Glasses, Cut-Resistant Gloves, Hearing Protection, Steel-Toe Shoes, Face Shield, etc.) and automatically validates slide safety compliance on Process at a Glance slides by raising a dedicated Safety Alert for any individual PAAG work element that lacks an assigned PPE.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects directly to `safety_requirements` and `work_elements` (PAAG work elements), belonging to `planning_scenarios` and `projects`.
+  2. *Critical thread relationship:* Links Safety Functional Review to the Process at a Glance layer of the critical thread (*Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance -> Safety Review*).
+  3. *Scope:* Scenario-specific through `safety_requirements.scenario_id` and `work_elements.scenario_id`.
+  4. *Table requirement:* The existing `safety_requirements` table serves this requirement by adding:
+     - `ppe TEXT NOT NULL DEFAULT ''`: Stores the assigned PPE items (as a JSON list or comma-delimited string of selected standard PPE options). An existing table is sufficient; a new table is unnecessary because safety requirements already maintain the scenario-scoped relationship to `work_elements`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: Save & Refresh and direct entry data editor in `functional_safety.py`.
+     - Universal Deletion Standard: Checked delete confirmation modal for safety requirement rows.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Safety requirements"`.
+     - Universal History Display Standard: Exposes changes in the Safety review audit history expander.
+     - Scenario Badges: Uses scenario-specific scope badge on Safety page and PAAG visualizer.
+
 ### 2D Plant Floor Plan Layouts (Pin Map -> Layouts)
 
 - **Proposed by:** Nicole Ervin, project owner
