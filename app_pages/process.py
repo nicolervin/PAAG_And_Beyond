@@ -26,6 +26,7 @@ from utils.store import (
     reconcile_yamazumi_to_process,
     record_audit_event,
     replace_work_elements,
+    update_work_element_tool_and_resource,
     save_process_part_group,
     search_parts_and_fishbone,
     safety_requirement_delete_impact,
@@ -38,6 +39,11 @@ from utils.store import (
     get_pitch_visual_media,
     save_pitch_visual_media,
     update_pitch_visual_media,
+)
+from utils.equipment_store import (
+    equipment_assets,
+    equipment_types,
+    save_equipment_placement,
 )
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.scope_ui import page_title_with_scope
@@ -92,7 +98,7 @@ page_title_with_scope(
     "Process at a Glance", scope="scenario", scenario_name=scenario["name"]
 )
 st.caption(
-    "Create Part requirements for Yamazumi work elements section by section, classify each selected "
+    "Create PAAG Elements for Yamazumi work elements section by section, classify each selected "
     "part as Consume or Handle, then complete the ordered Process at a Glance by pitch. A purchased "
     "assembly is handled as one catalog part."
 )
@@ -757,13 +763,13 @@ def delete_visual_media_dialog(
 tab_plan, tab_slides = st.tabs(["Process plan", "PAAG slides"])
 
 with tab_plan:
-    st.subheader("Create Part requirements")
+    st.subheader("Create PAAG Elements")
     st.caption(
         "The selected fishbone section controls both lists. Use **Choose one** for alternatives such "
         "as black or silver versions of the same panel."
     )
     if not section_ids:
-        st.info("Create and populate the Fishbone framework before adding Part requirements to process work.")
+        st.info("Create and populate the Fishbone framework before adding PAAG Elements to process work.")
     else:
         process_section_key = f"process_pairing_section_{scenario_id}"
         section_id = st.selectbox(
@@ -810,6 +816,37 @@ with tab_plan:
             available_parts["fishbone_use_count"] = (
                 available_parts["part_id"].map(placement_counts).astype(int)
             )
+
+        consumed_part_ids: set[str] = set()
+        handled_part_ids: set[str] = set()
+        for group in process_part_groups(project_id, scenario_id, active_only=True):
+            for option in group.get("options", []):
+                opt_pid = str(option.get("part_id"))
+                htype = str(option.get("handling_type") or "").strip().capitalize()
+                if htype == "Consume":
+                    consumed_part_ids.add(opt_pid)
+                elif htype == "Handle":
+                    handled_part_ids.add(opt_pid)
+
+        def _calc_part_handling(part_id_val: object) -> str:
+            pid = str(part_id_val)
+            is_c = pid in consumed_part_ids
+            is_h = pid in handled_part_ids
+            if is_c and is_h:
+                return "Consumed, Handled"
+            if is_c:
+                return "Consumed"
+            if is_h:
+                return "Handled"
+            return "Unassigned"
+
+        if not available_parts.empty:
+            available_parts["handling"] = available_parts["part_id"].apply(_calc_part_handling)
+            if "factory_nickname" not in available_parts.columns:
+                available_parts["factory_nickname"] = ""
+        else:
+            available_parts["handling"] = pd.Series(dtype="string")
+            available_parts["factory_nickname"] = pd.Series(dtype="string")
         section_has_available_fishbone_parts = not available_parts.empty
 
         if pairing_search and not yamazumi_rows.empty:
@@ -821,7 +858,10 @@ with tab_plan:
             yamazumi_rows = yamazumi_rows.loc[yam_mask].copy()
         if pairing_search and not section_placements.empty:
             placement_mask = pd.Series(False, index=section_placements.index)
-            for column in ["part_number", "description", "use_description", "model_applicability"]:
+            search_cols = ["part_number", "description", "use_description", "model_applicability"]
+            if "factory_nickname" in section_placements.columns:
+                search_cols.append("factory_nickname")
+            for column in search_cols:
                 placement_mask |= section_placements[column].fillna("").astype(str).str.casefold().str.contains(
                     pairing_search, regex=False
                 )
@@ -906,26 +946,153 @@ with tab_plan:
                     st.warning("Save or undo Process at a Glance table edits first.")
                 else:
                     st.session_state[missing_part_dialog_key] = True
+            filter_cols = st.columns([1, 1, 1, 1], vertical_alignment="bottom")
+
+            consumed_filter = filter_cols[0].selectbox(
+                "Consumed",
+                options=["All", "Consumed", "Not consumed"],
+                key=f"process_parts_consumed_{scenario_id}_{section_id}",
+                help="Filter parts that have or have not been consumed in this scenario.",
+            )
+
+            handled_filter = filter_cols[1].selectbox(
+                "Handled",
+                options=["All", "Handled", "Not handled"],
+                key=f"process_parts_handled_{scenario_id}_{section_id}",
+                help="Filter parts that have or have not been handled in this scenario.",
+            )
+
+            available_model_values: set[str] = set()
+            if not available_parts.empty and "model_applicability" in available_parts.columns:
+                for val in available_parts["model_applicability"].dropna():
+                    for m in split_filter_values(val):
+                        clean_m = m.strip()
+                        if clean_m and clean_m.casefold() not in {"all", "all models"}:
+                            available_model_values.add(model_labels.get(clean_m, clean_m))
+            all_project_models = [
+                label for label in model_labels.values() if label != "Common name not defined"
+            ]
+            model_options = [
+                "All models",
+                *sorted(set(all_project_models) | available_model_values, key=str.casefold),
+            ]
+            model_filter = filter_cols[2].selectbox(
+                "Model",
+                options=model_options,
+                key=f"process_parts_model_{scenario_id}_{section_id}",
+                help="Filter parts by vehicle model applicability.",
+            )
+
+            nickname_key = f"process_show_factory_nickname_{scenario_id}"
+            show_nickname = st.session_state.get(nickname_key, False)
+            eye_icon = ":material/visibility:" if show_nickname else ":material/visibility_off:"
+            eye_help = "Hide Factory Nickname on table" if show_nickname else "Show Factory Nickname on table"
+            if filter_cols[3].button(
+                "Nickname",
+                icon=eye_icon,
+                help=eye_help,
+                type="primary" if show_nickname else "secondary",
+                key=f"process_toggle_fn_{scenario_id}_{section_id}",
+            ):
+                st.session_state[nickname_key] = not show_nickname
+                st.rerun()
+
+            if not available_parts.empty:
+                if consumed_filter == "Consumed":
+                    available_parts = available_parts.loc[
+                        available_parts["part_id"].astype(str).isin(consumed_part_ids)
+                    ].copy()
+                elif consumed_filter == "Not consumed":
+                    available_parts = available_parts.loc[
+                        ~available_parts["part_id"].astype(str).isin(consumed_part_ids)
+                    ].copy()
+
+                if handled_filter == "Handled":
+                    available_parts = available_parts.loc[
+                        available_parts["part_id"].astype(str).isin(handled_part_ids)
+                    ].copy()
+                elif handled_filter == "Not handled":
+                    available_parts = available_parts.loc[
+                        ~available_parts["part_id"].astype(str).isin(handled_part_ids)
+                    ].copy()
+
+                if model_filter != "All models":
+                    def _part_matches_model(app_val: object) -> bool:
+                        app_str = str(app_val or "").strip()
+                        if not app_str or app_str.casefold() in ("all", "all models"):
+                            return True
+                        part_models = [
+                            model_labels.get(m.strip(), m.strip())
+                            for m in split_filter_values(app_str)
+                        ]
+                        target_num = model_numbers_by_label.get(model_filter, model_filter)
+                        return (
+                            model_filter in part_models
+                            or target_num in split_filter_values(app_str)
+                        )
+
+                    available_parts = available_parts.loc[
+                        available_parts["model_applicability"].apply(_part_matches_model)
+                    ].copy()
+
+            parts_signature_key = f"process_parts_visible_rows_{scenario_id}_{section_id}"
+            current_part_ids = (
+                tuple(available_parts["part_id"].astype(str)) if not available_parts.empty else ()
+            )
+            if parts_signature_key in st.session_state and st.session_state[parts_signature_key] != current_part_ids:
+                st.session_state.pop(part_source_key, None)
+            st.session_state[parts_signature_key] = current_part_ids
+
             if available_parts.empty:
-                if pairing_search and section_has_available_fishbone_parts:
-                    st.info("No available fishbone parts match this filter.")
+                if (
+                    pairing_search
+                    or consumed_filter != "All"
+                    or handled_filter != "All"
+                    or model_filter != "All models"
+                ) and section_has_available_fishbone_parts:
+                    st.info("No available fishbone parts match these filters.")
                 elif not section_has_fishbone_parts:
                     st.info("No catalog parts are placed in this fishbone section.")
                 selected_parts = available_parts
             else:
+                if show_nickname:
+                    column_order = [
+                        "part_number",
+                        "factory_nickname",
+                        "description",
+                        "handling",
+                        "fishbone_use_count",
+                        "model_applicability",
+                    ]
+                else:
+                    column_order = [
+                        "part_number",
+                        "description",
+                        "handling",
+                        "fishbone_use_count",
+                        "model_applicability",
+                    ]
+
                 part_event = selectable_dataframe(
                     available_parts,
                     key=part_source_key,
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="multi-row",
-                    column_order=[
-                        "part_number", "description", "fishbone_use_count",
-                        "model_applicability",
-                    ],
+                    column_order=column_order,
                     column_config={
                         "part_number": st.column_config.TextColumn("Part number", pinned=True),
+                        "factory_nickname": st.column_config.TextColumn(
+                            "Factory Nickname",
+                            help="Factory nickname / common shop floor name for the part",
+                            width="medium",
+                        ),
                         "description": st.column_config.TextColumn("Part Name", width="large"),
+                        "handling": st.column_config.TextColumn(
+                            "Handling",
+                            help="Shows whether this part has been consumed, handled, or is unassigned in this scenario.",
+                            width="small",
+                        ),
                         "fishbone_use_count": st.column_config.NumberColumn(
                             "Fishbone uses", format="%d"
                         ),
@@ -950,7 +1117,7 @@ with tab_plan:
             request_table_editor_reset(part_source_key)
             if part_selection_expired:
                 st.warning(
-                    "Your part selection changed and was cleared. Please reselect the parts for the Part requirement."
+                    "Your part selection changed and was cleared. Please reselect the parts for the PAAG Element."
                 )
             else:
                 st.warning(
@@ -1292,6 +1459,13 @@ with tab_plan:
         selected_yamazumi_id = (
             str(selected_yamazumi.iloc[0]["id"]) if len(selected_yamazumi) == 1 else None
         )
+        selected_pitch_id = (
+            str(selected_yamazumi.iloc[0]["pitch_id"])
+            if len(selected_yamazumi) == 1
+            and "pitch_id" in selected_yamazumi.columns
+            and pd.notna(selected_yamazumi.iloc[0]["pitch_id"])
+            else None
+        )
         selected_process_id = (
             process_element_id_for_yamazumi(project_id, scenario_id, selected_yamazumi_id)
             if selected_yamazumi_id else None
@@ -1421,6 +1595,123 @@ with tab_plan:
                                 ),
                             }
                         )
+            pair_controls.markdown("##### PAAG Element Configuration")
+            tool_res_container = pair_controls.container()
+            tool_c1, tool_c2 = tool_res_container.columns(2)
+
+            # Available equipment types for tool category dropdown
+            all_types_df = equipment_types(project_id)
+            type_labels = [
+                str(lbl).strip()
+                for lbl in all_types_df["label"].dropna().unique()
+                if str(lbl).strip()
+            ]
+            for std_tool in ["Handheld equipment", "Torque tool", "Scan/Compare equipment", "Poka-Yoke / Fixture equipment", "Test equipment"]:
+                if std_tool not in type_labels:
+                    type_labels.append(std_tool)
+            type_labels.sort()
+            tool_categories = ["(No tool required)", *type_labels, "Other tool"]
+
+            # Query existing work element values if already linked
+            existing_tool = ""
+            existing_res_type = "Human"
+            existing_res_detail = ""
+            if selected_process_id:
+                try:
+                    existing_we_df = project_table("work_elements", project_id, scenario_id=scenario_id)
+                    existing_match = existing_we_df[existing_we_df["id"].astype(str) == str(selected_process_id)]
+                    if not existing_match.empty:
+                        existing_tool = str(existing_match.iloc[0].get("tool") or "").strip()
+                        existing_res_type = str(existing_match.iloc[0].get("resource_type") or "Human").strip()
+                        existing_res_detail = str(existing_match.iloc[0].get("resource_detail") or "").strip()
+                except Exception:
+                    pass
+
+            default_cat_idx = 0
+            if existing_tool:
+                for idx, cat in enumerate(tool_categories):
+                    if cat.casefold() == existing_tool.casefold():
+                        default_cat_idx = idx
+                        break
+
+            selected_tool_category = tool_c1.selectbox(
+                "Tool category",
+                tool_categories,
+                index=default_cat_idx,
+                key=f"process_tool_cat_{scenario_id}_{section_id}_{selected_yamazumi_id}",
+                help="Select tool category from the handheld equipment catalog, or '(No tool required)'."
+            )
+
+            final_tool = ""
+            selected_equipment_id = None
+            if selected_tool_category != "(No tool required)":
+                all_assets_df = equipment_assets(project_id, scenario_id)
+                cat_assets = pd.DataFrame()
+                if not all_assets_df.empty and "equipment_type" in all_assets_df.columns:
+                    cat_assets = all_assets_df[
+                        all_assets_df["equipment_type"].astype(str).str.casefold() == selected_tool_category.casefold()
+                    ]
+                
+                asset_choices = ["(Standard / Unspecified)"]
+                asset_id_map = {}
+                for _, a_row in cat_assets.iterrows():
+                    a_name = str(a_row.get("name") or "").strip()
+                    if a_name:
+                        a_label = f"{a_name} ({str(a_row.get('model')).strip()})" if str(a_row.get("model") or "").strip() else a_name
+                        asset_choices.append(a_label)
+                        asset_id_map[a_label] = (str(a_row["id"]), a_name)
+                
+                default_asset_idx = 0
+                if existing_tool and existing_tool != selected_tool_category:
+                    for idx, ch in enumerate(asset_choices):
+                        if existing_tool.casefold() in ch.casefold():
+                            default_asset_idx = idx
+                            break
+
+                selected_asset_choice = tool_c2.selectbox(
+                    "Specific handheld tool / equipment",
+                    asset_choices,
+                    index=default_asset_idx,
+                    key=f"process_tool_specific_{scenario_id}_{section_id}_{selected_yamazumi_id}",
+                    help="Choose a specific cataloged equipment asset or standard."
+                )
+                if selected_asset_choice != "(Standard / Unspecified)":
+                    eq_info = asset_id_map.get(selected_asset_choice)
+                    if eq_info:
+                        selected_equipment_id = eq_info[0]
+                        final_tool = eq_info[1]
+                    else:
+                        final_tool = selected_asset_choice
+                else:
+                    final_tool = selected_tool_category
+            else:
+                tool_c2.caption("No tool will be assigned to this PAAG element.")
+
+            res_c1, res_c2 = tool_res_container.columns(2)
+            default_res_type_idx = 1 if existing_res_type.casefold() == "autonomous equipment" else 0
+            resource_type = res_c1.selectbox(
+                "Resource performing work",
+                ["Human", "Autonomous equipment"],
+                index=default_res_type_idx,
+                key=f"process_res_type_{scenario_id}_{section_id}_{selected_yamazumi_id}",
+                help="Select whether this operation is performed by a human operator or autonomous equipment."
+            )
+            resource_detail = ""
+            if resource_type == "Autonomous equipment":
+                auto_options = ["Robot", "AMR", "Quality checker"]
+                default_detail_idx = 0
+                if existing_res_detail in auto_options:
+                    default_detail_idx = auto_options.index(existing_res_detail)
+                resource_detail = res_c2.selectbox(
+                    "Autonomous resource type",
+                    auto_options,
+                    index=default_detail_idx,
+                    key=f"process_res_detail_{scenario_id}_{section_id}_{selected_yamazumi_id}",
+                    help="Select the specific autonomous equipment performing the work."
+                )
+            else:
+                res_c2.caption("Standard manual operator performing work.")
+
             with pair_controls.form(
                 f"pair_parts_{scenario_id}_{section_id}_{selected_yamazumi_id}", border=False
             ):
@@ -1474,7 +1765,9 @@ with tab_plan:
                     ),
                 )
                 pair_parts = st.form_submit_button(
-                    f"Create Part requirement ({len(selected_parts)} parts)",
+                    f"Create PAAG Elements ({len(selected_parts)} parts)"
+                    if not selected_parts.empty
+                    else "Create PAAG Elements",
                     type="primary",
                     icon=":material/link:",
                     disabled=selected_parts.empty,
@@ -1521,6 +1814,26 @@ with tab_plan:
                         raise ValueError(
                             "The work element could not be added to Process at a Glance."
                         )
+                    update_work_element_tool_and_resource(
+                        project_id,
+                        scenario_id,
+                        selected_process_id,
+                        tool=final_tool,
+                        resource_type=resource_type,
+                        resource_detail=resource_detail,
+                    )
+                    if selected_equipment_id and selected_pitch_id:
+                        try:
+                            save_equipment_placement(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                equipment_id=selected_equipment_id,
+                                pitch_id=str(selected_pitch_id),
+                                work_element_ids=[selected_process_id],
+                                editor_name=st.session_state.get("current_editor", ""),
+                            )
+                        except Exception:
+                            pass
                     save_process_part_group(
                         project_id,
                         scenario_id,
@@ -1551,24 +1864,57 @@ with tab_plan:
                             "requirement": group_name,
                             "section": section_labels.get(section_id, section_id),
                             "part_uses": selected_pairing_details,
+                            "tool": final_tool,
+                            "resource_type": resource_type,
+                            "resource_detail": resource_detail,
                         },
                     )
-                    st.toast("Part requirement added to the process work element", icon=":material/check_circle:")
+                    st.toast("PAAG element created and added to process work", icon=":material/check_circle:")
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
             if add_without_parts:
                 reconcile_yamazumi_to_process(project_id, scenario_id, [selected_yamazumi_id])
+                new_proc_id = process_element_id_for_yamazumi(
+                    project_id, scenario_id, selected_yamazumi_id
+                )
+                if new_proc_id:
+                    update_work_element_tool_and_resource(
+                        project_id,
+                        scenario_id,
+                        new_proc_id,
+                        tool=final_tool,
+                        resource_type=resource_type,
+                        resource_detail=resource_detail,
+                    )
+                    if selected_equipment_id and selected_pitch_id:
+                        try:
+                            save_equipment_placement(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                equipment_id=selected_equipment_id,
+                                pitch_id=str(selected_pitch_id),
+                                work_element_ids=[new_proc_id],
+                                editor_name=st.session_state.get("current_editor", ""),
+                            )
+                        except Exception:
+                            pass
                 record_audit_event(
                     project_id,
                     "Process plan",
                     "Add Yamazumi work",
                     1,
                     st.session_state.get("current_editor", ""),
-                    {"scenario_id": scenario_id, "work_element": selected_description},
+                    {
+                        "scenario_id": scenario_id,
+                        "work_element": selected_description,
+                        "tool": final_tool,
+                        "resource_type": resource_type,
+                        "resource_detail": resource_detail,
+                    },
                 )
                 st.toast(
-                    "Work element added to Process at a Glance",
+                    "PAAG element added to Process at a Glance",
                     icon=":material/check_circle:",
                 )
                 st.rerun()
@@ -1656,7 +2002,7 @@ with tab_plan:
     elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
     columns = [
         "id", "op_id", "sequence", "station", "pitch_name", "work_element", "operation", "description", "cycle_time_s",
-        "assigned_parts", "handling", "part_number", "output_assembly_number", "output_assembly_name",
+        "assigned_parts", "handling", "resource", "resource_type", "resource_detail", "part_number", "output_assembly_number", "output_assembly_name",
         "tool", "torque", "quality_requirement", "ergo_requirement", "location", "unit_orientation",
         "conveyor_height_in", "platform_height_in", "pit_depth_in",
         "model_applicability", "ergonomics_risk", "criticality", "status",
@@ -1666,6 +2012,8 @@ with tab_plan:
         "station",
         "pitch_name",
         "work_element",
+        "resource",
+        "tool",
         "assigned_parts",
         "handling",
         "ergonomics_risk",
@@ -1689,6 +2037,9 @@ with tab_plan:
                 "cycle_time_s": pd.Series(dtype="float64"),
                 "assigned_parts": pd.Series(dtype="string"),
                 "handling": pd.Series(dtype="object"),
+                "resource": pd.Series(dtype="string"),
+                "resource_type": pd.Series(dtype="string"),
+                "resource_detail": pd.Series(dtype="string"),
                 "part_number": pd.Series(dtype="string"),
                 "output_assembly_number": pd.Series(dtype="string"),
                 "output_assembly_name": pd.Series(dtype="string"),
@@ -1738,6 +2089,16 @@ with tab_plan:
                 key=lambda value: (handling_order.get(value, 99), value),
             )
         )
+
+        def _format_resource(row):
+            rtype = str(row.get("resource_type") or "Human").strip()
+            rdet = str(row.get("resource_detail") or "").strip()
+            if rtype.casefold() == "autonomous equipment":
+                return f"Autonomous: {rdet}" if rdet else "Autonomous equipment"
+            return rtype or "Human"
+
+        elements["resource"] = elements.apply(_format_resource, axis=1)
+
         yamazumi_context = yamazumi_context_for_process(project_id, scenario_id)
         if yamazumi_context.empty:
             elements["pitch_name"] = ""
@@ -1781,15 +2142,13 @@ with tab_plan:
     )
 
     editable_table_heading("Process at a Glance by pitch")
-    st.caption(
     st.caption("Complete and review ordered work elements by pitch, station, and model applicability.")
-    )
     visible_elements = filter_table(
         elements,
         key=f"process_filters_{scenario_id}",
-        dropdown_columns=["station", "handling", "model_applicability"],
+        dropdown_columns=["station", "resource", "handling", "model_applicability"],
         search_columns=[
-            "op_id", "work_element", "pitch_name", "description", "station", "assigned_parts", "output_assembly_number",
+            "op_id", "work_element", "pitch_name", "description", "station", "resource", "assigned_parts", "output_assembly_number",
             "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
         ],
         reset_widget_keys=[process_editor_key],
@@ -1811,6 +2170,7 @@ with tab_plan:
             "op_id",
             "pitch_name",
             "work_element",
+            "resource",
             "assigned_parts",
             "handling",
             "ergonomics_risk",
@@ -1834,6 +2194,17 @@ with tab_plan:
             "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),
             "work_element": st.column_config.TextColumn(
                 "Work Element", required=True, pinned=True, width="large"
+            ),
+            "resource": st.column_config.TextColumn(
+                "Resource",
+                help="Resource performing work (Human or Autonomous equipment)",
+                disabled=True,
+                width="medium",
+            ),
+            "tool": st.column_config.TextColumn(
+                "Tool",
+                help="Handheld equipment or tool used for this work element",
+                width="medium",
             ),
             "assigned_parts": st.column_config.TextColumn(
                 "Part requirements", width="large"

@@ -794,6 +794,42 @@ class ProcessPitchVisualTests(unittest.TestCase):
         app = close_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
 
+    def test_work_element_tool_and_resource_persistence(self) -> None:
+        work_id = self.work_ids[0]
+        store.update_work_element_tool_and_resource(
+            self.project_id,
+            self.scenario_id,
+            work_id,
+            tool="Cordless Screwdriver (Atlas Copco)",
+            resource_type="Autonomous equipment",
+            resource_detail="Robot",
+            editor_name="Test IE",
+        )
+
+        with store.connection() as conn:
+            row = conn.execute(
+                "SELECT tool, resource_type, resource_detail FROM work_elements WHERE id=?",
+                (work_id,),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["tool"], "Cordless Screwdriver (Atlas Copco)")
+            self.assertEqual(row["resource_type"], "Autonomous equipment")
+            self.assertEqual(row["resource_detail"], "Robot")
+
+        # Verify pitch summary includes the tool from work_elements
+        summary = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        self.assertIn(
+            "Cordless Screwdriver (Atlas Copco)",
+            [t["name"] for t in summary["tools"]],
+        )
+
+        # Verify Handheld equipment default type
+        from utils.equipment_store import equipment_types
+        eq_types = equipment_types(self.project_id)
+        self.assertIn("Handheld equipment", eq_types["label"].tolist())
+
 
 if __name__ == "__main__":
     unittest.main()

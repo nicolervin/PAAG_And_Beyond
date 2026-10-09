@@ -259,7 +259,7 @@ Collaborators may choose whether to append imported work elements to the target 
 
 ### `work_elements`
 
-- **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, location, unit orientation, and geometry or requirement fields. Conveyor height, platform height, and pit depth are stored directly in inches as `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
+- **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, resource performing work (`resource_type` and `resource_detail`), location, unit orientation, and geometry or requirement fields. Conveyor height, platform height, and pit depth are stored directly in inches as `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
 - **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. Detailed requirement fields remain retained by the schema, but the former Process step Details dialog has been replaced by the read-only Phase 3 inline pitch viewer. The legacy `status` value remains stored for compatibility but is no longer displayed, filtered, or edited by the Process at a Glance by pitch table.
 - **Scope:** Scenario-specific.
 
@@ -890,6 +890,23 @@ All writes validate project ownership, complete input sets, required fields, uni
 In-house fabrication tagging for Fishbone sections: a future idea to mark a Subassembly-type Fishbone section as representing an in-house fabrication process (e.g., stamped metal, injection molding), for Quality's PFMEA and Control Plan tracking. Confirmed approach: an orthogonal flag added to an existing Subassembly section (not a new `section_type` value). The section remains structurally an ordinary Subassembly in every respect — walk order, nesting, parent/child rules, and all existing behavior are unaffected. The flag only changes its display designator in the Op ID naming scheme (an `F` instead of `S`) and will drive future Quality-tracked fields once scoped. Requires Quality's input on what specific data should be tracked (for example, tooling, material lot, process parameters) before a real proposal can be written and before the New Module Proposal Gate can be completed. Not yet approved, not yet scoped, no implementation should begin from this note alone.
 
 ## Proposed modules — pending owner review
+
+### PAAG Elements: Resource Performing Work and Handheld Equipment Tool Selection
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 9, 2026
+- **Purpose:** On the Process Plan tab, update the action button to **Create PAAG Elements** and allow Industrial Engineers to assign:
+  1. A **Tool** from the handheld equipment catalog, featuring a primary category selection (e.g., Handheld equipment, Torque tool, etc.) and an optional sub-dropdown for cataloged handheld equipment assets.
+  2. The **Resource performing the work**, defaulting to **Human**, with the option to select **Autonomous equipment** and choose a specific autonomous resource (**Robot**, **AMR**, or **Quality checker**).
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects directly to `work_elements` (Process at a Glance step), linking to `planning_scenarios` and reconciled `yamazumi_elements`, and referencing tools in `equipment_assets` and `equipment_types`.
+  2. *Critical thread relationship:* Stored directly on scenario-owned `work_elements` (`resource_type` and `resource_detail`), tied directly to the reconciled Yamazumi operation on the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance*).
+  3. *Scope:* Scenario-specific. Automation and staffing allocations (Human vs Autonomous) can vary between planning scenarios.
+  4. *Table requirement:* Existing table `work_elements` serves it directly. Schema additions:
+     - `resource_type TEXT NOT NULL DEFAULT 'Human'`
+     - `resource_detail TEXT NOT NULL DEFAULT ''`
+     - Uses existing `tool TEXT DEFAULT ''` column on `work_elements` (and links to `equipment_process_links` where applicable).
+  5. *Applicable DESIGN_SYSTEM.md standards:* Saved atomically with PAAG element creation/update, recorded via `record_audit_event()`, cascaded on step deletion, and displayed in the Process at a Glance table.
 
 ### PAAG Visualizer Revision 2 — Landscape Slide Presentation and Scenario Visual Guides
 

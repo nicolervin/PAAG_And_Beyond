@@ -644,6 +644,8 @@ def init_db() -> None:
                 location TEXT DEFAULT '', unit_orientation TEXT DEFAULT '',
                 conveyor_height_in REAL, platform_height_in REAL,
                 pit_depth_in REAL, model_applicability TEXT DEFAULT 'All', status TEXT DEFAULT 'Draft',
+                resource_type TEXT NOT NULL DEFAULT 'Human',
+                resource_detail TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS safety_requirements (
@@ -1631,6 +1633,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE work_elements ADD COLUMN output_assembly_name TEXT DEFAULT ''")
         if "unit_orientation" not in work_columns:
             conn.execute("ALTER TABLE work_elements ADD COLUMN unit_orientation TEXT DEFAULT ''")
+        if "resource_type" not in work_columns:
+            conn.execute("ALTER TABLE work_elements ADD COLUMN resource_type TEXT NOT NULL DEFAULT 'Human'")
+        if "resource_detail" not in work_columns:
+            conn.execute("ALTER TABLE work_elements ADD COLUMN resource_detail TEXT NOT NULL DEFAULT ''")
         conn.execute(
             """UPDATE work_elements
                SET scenario_id=(SELECT id FROM planning_scenarios s

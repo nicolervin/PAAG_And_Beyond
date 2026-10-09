@@ -21,6 +21,7 @@ EQUIPMENT_FUNCTION_AREAS = (
 
 DEFAULT_EQUIPMENT_TYPES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Torque tool", ("Quality",)),
+    ("Handheld equipment", ("Assembly", "Quality")),
     ("ESD equipment", ("Quality",)),
     ("Vision equipment", ("Quality",)),
     ("Scan/Compare equipment", ("Quality",)),

@@ -1538,6 +1538,30 @@ def process_pitch_visual_summary(
                 "summary_line": summary_line,
             })
 
+        if work_ids:
+            we_tools = conn.execute(
+                f"""SELECT DISTINCT tool FROM work_elements
+                    WHERE id IN ({tool_placeholders}) AND tool IS NOT NULL AND TRIM(tool) != ''""",
+                work_ids,
+            ).fetchall()
+            existing_names = {t["name"].casefold() for t in tools_list}
+            for row in we_tools:
+                tool_val = str(row["tool"]).strip()
+                if tool_val and tool_val.casefold() not in existing_names:
+                    tools_list.append({
+                        "equipment_id": tool_val,
+                        "name": tool_val,
+                        "type_name": "Tool",
+                        "manufacturer": "",
+                        "model": "",
+                        "description": "",
+                        "notes": "",
+                        "image_path": "",
+                        "is_ppe": False,
+                        "summary_line": tool_val,
+                    })
+                    existing_names.add(tool_val.casefold())
+
         # Mini Yamazumi pitch stack
         yamazumi_pitch_elements = conn.execute(
             """SELECT yamazumi.id, yamazumi.description, yamazumi.time_s, yamazumi.sequence,
@@ -1730,11 +1754,34 @@ def process_pitch_visual_summary(
         "slide_count": slide_count,
     }
 
+
+def update_work_element_tool_and_resource(
+    project_id: str,
+    scenario_id: str,
+    work_element_id: str,
+    tool: str = "",
+    resource_type: str = "Human",
+    resource_detail: str = "",
+    editor_name: str = "",
+) -> None:
+    """Update tool, resource type, and resource detail on a work element."""
+    timestamp = now_iso()
+    with connection() as conn:
+        conn.execute(
+            """UPDATE work_elements
+               SET tool=?, resource_type=?, resource_detail=?, updated_at=?
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (tool, resource_type, resource_detail, timestamp, work_element_id, project_id, scenario_id),
+        )
+
+
 def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFrame) -> None:
-    fields = ["sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
-              "quality_requirement", "ergo_requirement", "location", "unit_orientation", "conveyor_height_in", "platform_height_in",
-              "pit_depth_in", "model_applicability", "status", "output_assembly_number",
-              "output_assembly_name"]
+    fields = [
+        "sequence", "station", "operation", "description", "cycle_time_s", "part_number", "tool", "torque",
+        "quality_requirement", "ergo_requirement", "location", "unit_orientation", "conveyor_height_in", "platform_height_in",
+        "pit_depth_in", "model_applicability", "status", "output_assembly_number",
+        "output_assembly_name", "resource_type", "resource_detail",
+    ]
     records: list[tuple[str, list]] = []
     assembly_numbers: set[str] = set()
     for _, row in edited.iterrows():
@@ -1810,7 +1857,7 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
                 (project_id, scenario_id, *removed),
             )
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'update_pitch_visual_media', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES']
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'update_pitch_visual_media', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])
