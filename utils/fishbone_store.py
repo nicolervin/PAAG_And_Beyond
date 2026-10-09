@@ -809,6 +809,7 @@ def fishbone_part_assignments(
         f"""SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
                   a.use_description, a.notes, a.pits_sync_status, a.pits_quantity_updated_at,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
+                  COALESCE(p.factory_nickname, '') AS factory_nickname,
                   s.name AS section_name
            FROM fishbone_part_assignments a
            JOIN parts p ON p.id = a.part_id
@@ -827,6 +828,7 @@ def search_parts_and_fishbone(
         "part_id",
         "part_number",
         "description",
+        "factory_nickname",
         "revision",
         "model_applicability",
         "assignment_id",
@@ -846,10 +848,11 @@ def search_parts_and_fishbone(
         pattern = f"%{token}%"
         token_clauses.append(
             """(LOWER(p.part_number) LIKE ? OR LOWER(p.description) LIKE ?
+                 OR LOWER(COALESCE(p.factory_nickname, '')) LIKE ?
                  OR LOWER(COALESCE(a.use_description, '')) LIKE ?
                  OR LOWER(COALESCE(s.name, '')) LIKE ?)"""
         )
-        params.extend([pattern, pattern, pattern, pattern])
+        params.extend([pattern, pattern, pattern, pattern, pattern])
     params.append(100)
     activity_join = """
             LEFT JOIN part_scenario_activity activity
@@ -858,10 +861,11 @@ def search_parts_and_fishbone(
     """ if scenario_id else ""
     activity_clause = " AND COALESCE(activity.active, 1)=1" if scenario_id else ""
     rows = query(
-        f"""SELECT p.id AS part_id, p.part_number, p.description, p.revision,
-                   p.model_applicability, a.id AS assignment_id, a.section_id,
-                   s.name AS section_name, a.quantity, a.use_description,
-                   a.notes AS assignment_notes
+        f"""SELECT p.id AS part_id, p.part_number, p.description,
+                   COALESCE(p.factory_nickname, '') AS factory_nickname,
+                   p.revision, p.model_applicability, a.id AS assignment_id,
+                   a.section_id, s.name AS section_name, a.quantity,
+                   a.use_description, a.notes AS assignment_notes
             FROM parts p
             LEFT JOIN fishbone_part_assignments a
               ON a.part_id=p.id AND a.project_id=p.project_id

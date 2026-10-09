@@ -440,6 +440,36 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertTrue(mini_bom_tables)
         self.assertFalse(mini_bom_tables[0].empty)
 
+    def test_parts_catalog_query_param_navigation(self) -> None:
+        linked_part = store.query(
+            "SELECT id, part_number FROM parts WHERE project_id=? LIMIT 1",
+            (self.project_id,),
+        )
+        self.assertTrue(linked_part)
+        target_id = linked_part[0]["id"]
+        target_pnum = linked_part[0]["part_number"]
+
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app = AppTest.from_file(
+                str(store.ROOT / "app_pages" / "parts.py"),
+                default_timeout=30,
+            )
+            app.session_state["project_id"] = self.project_id
+            app.session_state["scenario_id"] = self.scenario_id
+            app.query_params["part_number"] = target_pnum
+            app.run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(
+            app.session_state.get(f"parts_selected_id_{self.project_id}"),
+            target_id,
+        )
+        self.assertEqual(
+            app.session_state.get("part_catalog_filters_keyword"),
+            target_pnum,
+        )
+        self.assertTrue(any(f"Part Details · {target_pnum}" in h.value for h in app.subheader))
+
     def test_parts_catalog_saved_table_view_round_trip(self) -> None:
         with patch("utils.clipboard_image.clipboard_image", return_value=None):
             app = self.run_page("app_pages/parts.py")
@@ -1193,7 +1223,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             list(safety_editor.proto.column_order),
-            ["work_element_id", "requirement_description", "active"],
+            ["work_element_id", "ppe", "requirement_description", "active"],
         )
 
         process_app = self.run_page("app_pages/process.py")
@@ -1757,10 +1787,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             list(process_editor.proto.column_order),
             [
                 "op_id",
-                "details",
                 "station",
                 "pitch_name",
                 "work_element",
+                "resource",
+                "tool",
                 "assigned_parts",
                 "handling",
                 "ergonomics_risk",
@@ -1771,6 +1802,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("status", process_editor.proto.column_order)
+        self.assertNotIn("details", process_editor.proto.column_order)
         self.assertEqual(
             [
                 button.label
@@ -1779,7 +1811,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ],
             ["Export filtered table view", "Export filtered full data"],
         )
-        self.assertIn("details", process_table.columns)
+        self.assertNotIn("details", process_table.columns)
         self.assertNotIn(
             "Status for selected",
             {widget.label for widget in app.selectbox},
@@ -1826,10 +1858,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             compact.columns.tolist(),
             [
                 "op_id",
-                "details",
                 "station",
                 "pitch_name",
                 "work_element",
+                "resource",
+                "tool",
                 "assigned_parts",
                 "handling",
                 "ergonomics_risk",

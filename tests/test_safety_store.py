@@ -265,6 +265,48 @@ class SafetyStoreTests(unittest.TestCase):
         self.assertEqual(details["affected_element_count"], 1)
         self.assertNotIn("CTQ", events[0]["details"])
 
+    def test_ppe_parsing_and_persistence(self) -> None:
+        self.assertEqual(store.parse_ppe(""), [])
+        self.assertEqual(store.parse_ppe(None), [])
+        self.assertEqual(
+            store.parse_ppe(["Safety Glasses", "Cut-Resistant Gloves"]),
+            ["Safety Glasses", "Cut-Resistant Gloves"],
+        )
+        self.assertEqual(
+            store.parse_ppe('["Safety Glasses", "Hearing Protection"]'),
+            ["Safety Glasses", "Hearing Protection"],
+        )
+        self.assertEqual(
+            store.parse_ppe("Safety Glasses, Cut-Resistant Gloves"),
+            ["Safety Glasses", "Cut-Resistant Gloves"],
+        )
+
+        # Save with PPE list
+        df = pd.DataFrame([{
+            "work_element_id": "safety-work",
+            "ppe": ["Safety Glasses", "Cut-Resistant Gloves"],
+            "requirement_description": "Wear eye and hand protection",
+            "active": True,
+        }])
+        store.save_safety_requirements(self.project_id, self.scenario_id, df, "Safety tester")
+        loaded = store.safety_requirements(self.project_id, self.scenario_id)
+        saved_row = loaded.loc[loaded["work_element_id"] == "safety-work"].iloc[0]
+        self.assertEqual(saved_row["ppe"], ["Safety Glasses", "Cut-Resistant Gloves"])
+        self.assertEqual(saved_row["requirement_description"], "Wear eye and hand protection")
+
+        # Save with PPE but blank description -> auto fills description
+        df2 = pd.DataFrame([{
+            "work_element_id": "both-work",
+            "ppe": ["Hearing Protection"],
+            "requirement_description": "",
+            "active": True,
+        }])
+        store.save_safety_requirements(self.project_id, self.scenario_id, df2, "Safety tester")
+        loaded2 = store.safety_requirements(self.project_id, self.scenario_id)
+        both_row = loaded2.loc[loaded2["work_element_id"] == "both-work"].iloc[0]
+        self.assertEqual(both_row["ppe"], ["Hearing Protection"])
+        self.assertEqual(both_row["requirement_description"], "PPE: Hearing Protection")
+
 
 if __name__ == "__main__":
     unittest.main()

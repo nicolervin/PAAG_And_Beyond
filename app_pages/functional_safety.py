@@ -6,6 +6,7 @@ import streamlit as st
 from utils.equipment_ui import render_functional_equipment_tab
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
+    STANDARD_PPE_OPTIONS,
     delete_safety_requirements,
     ergonomics_work_elements,
     get_planning_scenario,
@@ -82,10 +83,22 @@ work_labels = {
     for _, row in work_elements.iterrows()
 }
 
+# Aggregate all standard PPE options plus any previously recorded custom PPE
+ppe_options = list(dict.fromkeys([
+    *STANDARD_PPE_OPTIONS,
+    *[
+        str(item).strip()
+        for ppe_list in saved.get("ppe", [])
+        if isinstance(ppe_list, (list, tuple, set))
+        for item in ppe_list
+        if str(item).strip()
+    ]
+]))
+
 editable_table_heading("Safety requirements")
 st.caption(
-    "Active requirements create the read-only Safety indicator on linked Process at a Glance "
-    "and Yamazumi work. Deactivating a requirement preserves its history while removing that indicator."
+    "Assign required PPE and document safety requirements per Process step. "
+    "Work elements without assigned PPE trigger a Safety Alert on the Process at a Glance slide."
 )
 visible = filter_table(
     saved,
@@ -101,6 +114,7 @@ editor_rows = direct_entry_editor_rows(
     sort_columns=["pitch", "work_element_label", "requirement_description", "active"],
     labels={
         "work_element_label": "Process Function",
+        "ppe": "Assigned PPE",
         "requirement_description": "Requirement description",
     },
 )
@@ -114,7 +128,7 @@ edited = st.data_editor(
         "id", "project_id", "scenario_id", "work_element_label", "pitch",
         "created_at", "updated_at",
     ],
-    column_order=["work_element_id", "requirement_description", "active"],
+    column_order=["work_element_id", "ppe", "requirement_description", "active"],
     column_config={
         "id": None,
         "project_id": None,
@@ -125,18 +139,24 @@ edited = st.data_editor(
             format_func=lambda value: work_labels.get(str(value), "Unavailable Process Function"),
             required=True,
             width="large",
-            help="Choose the Process step where this Safety requirement applies.",
+            help="Choose the Process step where this Safety requirement or PPE applies.",
+        ),
+        "ppe": st.column_config.MultiselectColumn(
+            "Assigned PPE",
+            options=ppe_options,
+            width="large",
+            help="Select Personal Protective Equipment required for this Process step.",
         ),
         "requirement_description": st.column_config.TextColumn(
             "Requirement description",
-            required=True,
+            required=False,
             width="large",
-            help="Describe the condition or requirement that makes this Process step safety-critical.",
+            help="Describe specific hazards or safety requirements (auto-filled if only PPE is selected).",
         ),
         "active": st.column_config.CheckboxColumn(
             "Active",
             default=True,
-            help="Only active requirements create the Safety indicator on linked Process work.",
+            help="Only active requirements and PPE satisfy safety compliance and appear on Process work.",
         ),
         "work_element_label": None,
         "pitch": None,
@@ -149,13 +169,16 @@ footer = editable_table_footer(
     key_prefix=f"safety_requirements_{project_id}_{scenario_id}",
     native_row_selection=True,
 )
+export_df = visible[["pitch", "work_element_label", "ppe", "requirement_description", "active"]].copy()
+export_df["ppe"] = export_df["ppe"].apply(lambda p: ", ".join(p) if isinstance(p, list) else str(p or ""))
 st.download_button(
     "Export filtered",
     data=dataframe_to_excel(
-        visible[["pitch", "work_element_label", "requirement_description", "active"]].rename(
+        export_df.rename(
             columns={
                 "pitch": "Pitch",
                 "work_element_label": "Process Function",
+                "ppe": "Assigned PPE",
                 "requirement_description": "Requirement description",
                 "active": "Active",
             }
@@ -234,7 +257,7 @@ if footer.save_and_refresh:
             raise ValueError("Clear selected rows before saving Safety requirement edits.")
         edited = drop_untouched_new_rows(
             edited,
-            identifying_columns=["work_element_id", "requirement_description"],
+            identifying_columns=["work_element_id", "requirement_description", "ppe"],
         )
         combined = merge_filtered_edits(saved, visible, edited)
         result = save_safety_requirements(

@@ -259,7 +259,7 @@ Collaborators may choose whether to append imported work elements to the target 
 
 ### `work_elements`
 
-- **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, location, unit orientation, and geometry or requirement fields. Conveyor height, platform height, and pit depth are stored directly in inches as `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
+- **Purpose:** Stores the ordered Process at a Glance steps for a planning scenario, including pitch, operation/work-element text, time, status, model applicability, output-assembly milestone, tool, resource performing work (`resource_type` and `resource_detail`), location, unit orientation, and geometry or requirement fields. Conveyor height, platform height, and pit depth are stored directly in inches as `conveyor_height_in`, `platform_height_in`, and `pit_depth_in`.
 - **Key relationships:** Belongs to `projects` and `planning_scenarios`. Soft-linked from `yamazumi_elements.process_element_id`. Parent of `process_part_groups`. Detailed requirement fields remain retained by the schema, but the former Process step Details dialog has been replaced by the read-only Phase 3 inline pitch viewer. The legacy `status` value remains stored for compatibility but is no longer displayed, filtered, or edited by the Process at a Glance by pitch table.
 - **Scope:** Scenario-specific.
 
@@ -890,6 +890,103 @@ All writes validate project ownership, complete input sets, required fields, uni
 In-house fabrication tagging for Fishbone sections: a future idea to mark a Subassembly-type Fishbone section as representing an in-house fabrication process (e.g., stamped metal, injection molding), for Quality's PFMEA and Control Plan tracking. Confirmed approach: an orthogonal flag added to an existing Subassembly section (not a new `section_type` value). The section remains structurally an ordinary Subassembly in every respect — walk order, nesting, parent/child rules, and all existing behavior are unaffected. The flag only changes its display designator in the Op ID naming scheme (an `F` instead of `S`) and will drive future Quality-tracked fields once scoped. Requires Quality's input on what specific data should be tracked (for example, tooling, material lot, process parameters) before a real proposal can be written and before the New Module Proposal Gate can be completed. Not yet approved, not yet scoped, no implementation should begin from this note alone.
 
 ## Proposed modules — pending owner review
+
+### PAAG Elements: Resource Performing Work and Handheld Equipment Tool Selection
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 9, 2026
+- **Purpose:** On the Process Plan tab, update the action button to **Create PAAG Elements** and allow Industrial Engineers to assign:
+  1. A **Tool** from the handheld equipment catalog, featuring a primary category selection (e.g., Handheld equipment, Torque tool, etc.) and an optional sub-dropdown for cataloged handheld equipment assets.
+  2. The **Resource performing the work**, defaulting to **Human**, with the option to select **Autonomous equipment** and choose a specific autonomous resource (**Robot**, **AMR**, or **Quality checker**).
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects directly to `work_elements` (Process at a Glance step), linking to `planning_scenarios` and reconciled `yamazumi_elements`, and referencing tools in `equipment_assets` and `equipment_types`.
+  2. *Critical thread relationship:* Stored directly on scenario-owned `work_elements` (`resource_type` and `resource_detail`), tied directly to the reconciled Yamazumi operation on the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance*).
+  3. *Scope:* Scenario-specific. Automation and staffing allocations (Human vs Autonomous) can vary between planning scenarios.
+  4. *Table requirement:* Existing table `work_elements` serves it directly. Schema additions:
+     - `resource_type TEXT NOT NULL DEFAULT 'Human'`
+     - `resource_detail TEXT NOT NULL DEFAULT ''`
+     - Uses existing `tool TEXT DEFAULT ''` column on `work_elements` (and links to `equipment_process_links` where applicable).
+  5. *Applicable DESIGN_SYSTEM.md standards:* Saved atomically with PAAG element creation/update, recorded via `record_audit_event()`, cascaded on step deletion, and displayed in the Process at a Glance table.
+
+### PAAG Visualizer Revision 2 — Landscape Slide Presentation and Scenario Visual Guides
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 7, 2026
+- **Purpose:** Transform the scenario-specific Process at a Glance (PAAG) visualizer from the former portrait-oriented 5-card stack into an automated, interactive 16:9 landscape PowerPoint-style slide presentation for shop-floor standard work, pitch reviews, and printing. Extends Process at a Glance with a Parts-catalog-style visual aids management workflow to upload supplemental photos and videos, assign callout captions, and tag media to one or more PAAG work elements within a pitch.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (owning project), `planning_scenarios` (active scenario), `yamazumi_pitches` (workstation pitch owning the slide), `work_elements` (Process at a Glance elements), `parts` (consumed and handled parts paired to work elements), `equipment_assets` & `equipment_placements` / `equipment_process_links` (tools and PPE assigned to the pitch or linked to work elements), and Functional Review alert sources (`quality_requirements` / torque / PFMEA, `ergonomics_reviews`, `safety_requirements`, materials, and equipment).
+  2. *Critical thread relationship:* Connects directly to the downstream visualization and standard work layer of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*). Each slide is generated from a scenario-owned pitch (`yamazumi_pitches`) and its ordered work elements (`work_elements`), with supplemental visual media linked to the pitch and tagged many-to-many to work elements.
+  3. *Scope:* Scenario-specific. Uploaded visual aids and element tag associations belong to the active planning scenario. Scenario cloning copies visual aids and re-maps tags to the cloned pitch and work elements.
+  4. *Table requirement:* Requires new dedicated scenario-owned tables because existing tables cannot store multi-format visual media (photos & videos), custom callout captions, or many-to-many tags linking one visual aid to multiple PAAG elements in a pitch:
+     - `process_visual_media`: stores uploaded media files and callout metadata for a pitch (`id`, `project_id`, `scenario_id`, `pitch_id`, `media_type`, `file_path`, `caption`, `created_at`, `created_by`, `updated_at`). `media_type` supports `'image'` or `'video'`.
+     - `process_visual_media_tags`: junction table linking visual media to specific work elements (`id`, `media_id`, `work_element_id`, `project_id`, `scenario_id`, `created_at`), allowing one photo or video to be tagged to multiple PAAG elements.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Deletion Standard: confirmed deletion dialog for visual aids with cleanup of owned media files in `data/uploads/`.
+     - Universal Save Action Standard: standard upload and tag submission in the visual aids manager below the Process table.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Process visual aids"`.
+     - Universal History Display Standard: bottom History expander using `audit_history()`.
+     - Scope Badges: scenario-specific scope badge on Process at a Glance and the visualizer.
+     - Presentation & Print: Full-screen presentation mode with pitch-by-pitch and slide-by-slide navigation; print-to-PDF / print CSS optimized for 8.5 × 11 and 11 × 17 landscape.
+- **Slide Layout & Visualizer Capabilities:**
+  1. *Top Header Banner:*
+     - Top-left: Automated facility branding stating `Process at a Glance for [Project Name]`.
+     - Center title: `[Pitch Number] — [Pitch Name]`.
+     - Right Document Control: Box displaying Op ID range, generated date, and scenario name/ID pulled from the active scenario.
+  2. *Left Information Column:*
+     - Slide and pitch page indicator (`Page X of Y`).
+     - *Tools required:* Aggregates tools and PPE placed on that pitch and/or linked to its work elements via the Equipment module, deduplicated to list each tool once, displaying 1-line summary and clickable hyperlink to open equipment details.
+     - *Parts table:* Displays all parts both handled and consumed across work elements on the slide, with columns `PART #`, `DESCRIPTION`, and `QTY`, plus factory nickname and part thumbnail from the Parts Catalog.
+     - *Mini Yamazumi pitch stack:* Scaled visual pitch stack faithfully mirroring the Yamazumi board appearance, including side-by-side variant columns (when model variants exist), stack element descriptions, times, and takt line.
+  3. *Right Visual Aids Area:*
+     - Dynamic 3×2 landscape grid (up to 6 visual items per slide) displaying photos and inline playable videos (`.mp4`, `.mov`, `.webm` with `<video controls>`).
+     - Automatically expands / stretches to fill available slide space when fewer than 6 visuals exist.
+     - Visuals ordered by the sequence of their tagged PAAG elements in the Yamazumi stack.
+     - Deduplication: Each visual aid appears only once on the slide, even when tagged to multiple PAAG elements.
+     - Pagination: If a pitch has more than 6 visual aids, a subsequent slide (`Page 2 of 2`) is automatically created for that pitch.
+     - Callout captions: Yellow-bordered callout box below each visual aid.
+  4. *Functional Alerts Banner:*
+     - Positioned along the top or bottom of the slide: `Functional Alerts: Quality, Ergo, Safety, Materials, Equipment`.
+     - Displays 1-line summaries below each function if an alert or requirement is triggered on that pitch or its PAAG elements (e.g. Quality CTQ / torque specifications, Ergonomics high-risk assessments, Safety PPE/hazards, Equipment unplaced/missing tools, Materials packaging/unassigned parts).
+     - Hyperlink / hover / click dialog window displaying detailed alert information.
+  5. *Process at a Glance Management UI:*
+     - Located below the Process at a Glance table (mirroring the Parts Catalog additional views pattern).
+     - Allows selecting a pitch, viewing existing attached visual aids, uploading supplemental photos or videos (or pasting screenshots from clipboard), entering callout caption, and multi-selecting the applicable PAAG elements in that pitch.
+
+### PAAG Visual Aids: In-App Image Annotation & Vector Markup Tool
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 9, 2026
+- **Purpose:** Empower Industrial Engineers to annotate photos and screenshots directly within Process at a Glance. When uploading or pasting an image, IEs can add shapes, arrows, callout text boxes, numbered step badges, and freehand pen markup. Annotations are stored as non-destructive vector layers so IEs can re-open and edit, move, recolor, or remove annotations later without degrading or re-uploading the original image.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects directly to `process_visual_media`, which belongs to `yamazumi_pitches`, `planning_scenarios`, and `projects`, and is linked many-to-many to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the PAAG slide visualization and standard work layer of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:* Scenario-specific. Belongs to the active planning scenario through `process_visual_media.scenario_id`.
+  4. *Table requirement:* Existing table `process_visual_media` serves it directly by adding:
+     - `annotations_json TEXT NOT NULL DEFAULT ''`: JSON array of editable vector annotation objects (type, geometry, coordinates, stroke color, fill color, line width, text, step number).
+     - `original_file_path TEXT NOT NULL DEFAULT ''`: Relative path to the original unannotated base image in `data/uploads/`, preserving source fidelity for re-editing.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: Saving from the annotation modal updates `annotations_json`, re-renders the flattened presentation composite to `file_path`, updates `updated_at`, and triggers an audited save.
+     - Universal Deletion Standard: Deleting an annotation layer or clearing markup restores the original base image. Deleting the visual aid removes both composite and original files from `data/uploads/`.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Process visual aids"` with action `"Annotate image"`.
+     - Universal History Display Standard: Captured in the visual aids audit history expander.
+
+### Safety Functional Review: PPE Assignment & PAAG Missing PPE Alerts
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 9, 2026
+- **Purpose:** Allow Safety reviewers to assign required Personal Protective Equipment (PPE) to individual Process at a Glance (PAAG) work elements within the Safety Functional Review page. Standardizes assembly PPE categories (e.g. Safety Glasses, Cut-Resistant Gloves, Hearing Protection, Steel-Toe Shoes, Face Shield, etc.) and automatically validates slide safety compliance on Process at a Glance slides by raising a dedicated Safety Alert for any individual PAAG work element that lacks an assigned PPE.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects directly to `safety_requirements` and `work_elements` (PAAG work elements), belonging to `planning_scenarios` and `projects`.
+  2. *Critical thread relationship:* Links Safety Functional Review to the Process at a Glance layer of the critical thread (*Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance -> Safety Review*).
+  3. *Scope:* Scenario-specific through `safety_requirements.scenario_id` and `work_elements.scenario_id`.
+  4. *Table requirement:* The existing `safety_requirements` table serves this requirement by adding:
+     - `ppe TEXT NOT NULL DEFAULT ''`: Stores the assigned PPE items (as a JSON list or comma-delimited string of selected standard PPE options). An existing table is sufficient; a new table is unnecessary because safety requirements already maintain the scenario-scoped relationship to `work_elements`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: Save & Refresh and direct entry data editor in `functional_safety.py`.
+     - Universal Deletion Standard: Checked delete confirmation modal for safety requirement rows.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Safety requirements"`.
+     - Universal History Display Standard: Exposes changes in the Safety review audit history expander.
+     - Scenario Badges: Uses scenario-specific scope badge on Safety page and PAAG visualizer.
 
 ### 2D Plant Floor Plan Layouts (Pin Map -> Layouts)
 
