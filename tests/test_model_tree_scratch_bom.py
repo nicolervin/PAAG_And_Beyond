@@ -48,12 +48,12 @@ class ModelTreeScratchBomTests(unittest.TestCase):
 
     def test_save_and_retrieve_manual_bom(self):
         items = [
-            {"level": 1, "group_number": "G1", "part_number": "ASM-TOP", "description": "Top Assembly", "quantity": 1.0},
-            {"level": 2, "group_number": "G1.1", "part_number": "SUB-DOOR", "description": "Door Assembly", "quantity": 1.0},
-            {"level": 3, "group_number": "G1.1.1", "part_number": "PRT-HNDL", "description": "Door Handle", "quantity": 2.0},
-            {"level": 3, "group_number": "G1.1.2", "part_number": "PRT-GSKT", "description": "Door Gasket", "quantity": 1.0},
-            {"level": 2, "group_number": "G1.2", "part_number": "SUB-CAB", "description": "Cabinet Assembly", "quantity": 1.0},
-            {"level": 3, "group_number": "G1.2.1", "part_number": "PRT-SHLF", "description": "Glass Shelf", "quantity": 3.0},
+            {"level": 1, "part_number": "ASM-TOP", "description": "Top Assembly", "quantity": 1.0},
+            {"level": 2, "part_number": "SUB-DOOR", "description": "Door Assembly", "quantity": 1.0},
+            {"level": 3, "part_number": "PRT-HNDL", "description": "Door Handle", "quantity": 2.0},
+            {"level": 3, "part_number": "PRT-GSKT", "description": "Door Gasket", "quantity": 1.0},
+            {"level": 2, "part_number": "SUB-CAB", "description": "Cabinet Assembly", "quantity": 1.0},
+            {"level": 3, "part_number": "PRT-SHLF", "description": "Glass Shelf", "quantity": 3.0},
         ]
 
         res = store.save_manual_model_bom(

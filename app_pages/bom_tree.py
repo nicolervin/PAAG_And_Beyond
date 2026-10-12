@@ -546,7 +546,7 @@ with tab_author:
                 st.session_state[draft_key] = saved_bom
             else:
                 st.session_state[draft_key] = [
-                    {"level": 1, "group_number": "", "part_number": "", "description": "", "quantity": 1.0}
+                    {"level": 1, "part_number": "", "description": "", "quantity": 1.0}
                 ]
 
         sub_grid, sub_builder = st.tabs([
@@ -567,7 +567,6 @@ with tab_author:
             df_editor_data = pd.DataFrame([
                 {
                     "Level": int(it.get("level", 1) or 1),
-                    "Group #": str(it.get("group_number", "") or ""),
                     "Part #": str(it.get("part_number", "") or ""),
                     "Description": str(it.get("description", "") or ""),
                     "Qty": float(it.get("quantity", 1.0) or 1.0),
@@ -576,7 +575,7 @@ with tab_author:
             ])
             if df_editor_data.empty:
                 df_editor_data = pd.DataFrame([{
-                    "Level": 1, "Group #": "", "Part #": "", "Description": "", "Qty": 1.0
+                    "Level": 1, "Part #": "", "Description": "", "Qty": 1.0
                 }])
 
             edited_df = st.data_editor(
@@ -589,13 +588,9 @@ with tab_author:
                         required=True,
                         help="Hierarchy Level (1–11)",
                     ),
-                    "Group #": st.column_config.TextColumn(
-                        "Group #",
-                        help="Optional subassembly group or tracker ID",
-                    ),
                     "Part #": st.column_config.TextColumn(
                         "Part #",
-                        help="Part number (required)",
+                        help="Part number or Assembly / Group number (required)",
                         required=True,
                     ),
                     "Description": st.column_config.TextColumn(
@@ -625,7 +620,6 @@ with tab_author:
                     if pn:
                         new_draft_list.append({
                             "level": int(r.get("Level") or 1),
-                            "group_number": str(r.get("Group #") or "").strip(),
                             "part_number": pn,
                             "description": str(r.get("Description") or "").strip(),
                             "quantity": float(r.get("Qty") or 1.0),
@@ -662,7 +656,7 @@ with tab_author:
             with c_clear_g:
                 if st.button("🗑️ Clear Draft", key=f"clear_bom_grid_{selected_model_id}"):
                     st.session_state[draft_key] = [
-                        {"level": 1, "group_number": "", "part_number": "", "description": "", "quantity": 1.0}
+                        {"level": 1, "part_number": "", "description": "", "quantity": 1.0}
                     ]
                     st.rerun()
 
@@ -679,10 +673,9 @@ with tab_author:
                         lvl = p_it["level"]
                         pad = max(0, (lvl - 1) * 20)
                         icon = "📁" if lvl == 1 else ("📂" if lvl == 2 else "📄")
-                        grp_str = f" [{p_it['group_number']}]" if p_it.get("group_number") else ""
                         st.markdown(
                             f"<div style='padding-left:{pad}px; font-family:monospace; line-height:26px;'>"
-                            f"{icon} <strong>L{lvl}</strong>{grp_str} <strong>{p_it['part_number']}</strong> &mdash; "
+                            f"{icon} <strong>L{lvl}</strong> <strong>{p_it['part_number']}</strong> &mdash; "
                             f"{p_it.get('description') or '—'} <span style='color:#666;'>&times;{p_it.get('quantity', 1.0)}</span>"
                             f"</div>",
                             unsafe_allow_html=True,
@@ -701,7 +694,7 @@ with tab_author:
             with col_tb_add:
                 if st.button("➕ Add Level 1 Assembly Group", key=f"add_l1_{selected_model_id}"):
                     st.session_state[draft_key].append({
-                        "level": 1, "group_number": "", "part_number": "", "description": "", "quantity": 1.0
+                        "level": 1, "part_number": "", "description": "", "quantity": 1.0
                     })
                     st.rerun()
             with col_tb_save:
@@ -747,12 +740,12 @@ with tab_author:
                         with btn_c1:
                             if st.button("➕Sub", key=f"sub_{i}_{selected_model_id}", help="Insert sub-item at Level + 1"):
                                 new_lvl = min(11, lvl + 1)
-                                items_list.insert(i + 1, {"level": new_lvl, "group_number": "", "part_number": "", "description": "", "quantity": 1.0})
+                                items_list.insert(i + 1, {"level": new_lvl, "part_number": "", "description": "", "quantity": 1.0})
                                 st.session_state[draft_key] = items_list
                                 st.rerun()
                         with btn_c2:
                             if st.button("➕Sib", key=f"sib_{i}_{selected_model_id}", help="Insert sibling item at same Level"):
-                                items_list.insert(i + 1, {"level": lvl, "group_number": "", "part_number": "", "description": "", "quantity": 1.0})
+                                items_list.insert(i + 1, {"level": lvl, "part_number": "", "description": "", "quantity": 1.0})
                                 st.session_state[draft_key] = items_list
                                 st.rerun()
                         with btn_c3:
@@ -774,12 +767,12 @@ with tab_author:
                             if st.button("🗑️", key=f"del_{i}_{selected_model_id}", help="Delete row"):
                                 items_list.pop(i)
                                 if not items_list:
-                                    items_list = [{"level": 1, "group_number": "", "part_number": "", "description": "", "quantity": 1.0}]
+                                    items_list = [{"level": 1, "part_number": "", "description": "", "quantity": 1.0}]
                                 st.session_state[draft_key] = items_list
                                 st.rerun()
 
                     # Inputs for this item
-                    f_c1, f_c2, f_c3, f_c4, f_c5 = st.columns([1, 1.2, 2, 2.5, 1])
+                    f_c1, f_c2, f_c3, f_c4 = st.columns([1, 2.5, 3, 1.2])
                     with f_c1:
                         new_lvl_val = st.selectbox(
                             "Level",
@@ -791,24 +784,20 @@ with tab_author:
                             it["level"] = new_lvl_val
                             st.session_state[draft_key] = items_list
                     with f_c2:
-                        it["group_number"] = st.text_input(
-                            "Group #",
-                            value=it.get("group_number", ""),
-                            key=f"bld_grp_{i}_{selected_model_id}",
-                        )
-                    with f_c3:
                         it["part_number"] = st.text_input(
                             "Part # *",
                             value=it.get("part_number", ""),
                             key=f"bld_pn_{i}_{selected_model_id}",
+                            help="Part or Assembly / Group number",
                         )
-                    with f_c4:
+                    with f_c3:
                         it["description"] = st.text_input(
                             "Description",
                             value=it.get("description", ""),
                             key=f"bld_desc_{i}_{selected_model_id}",
+                            help="Part or Assembly description",
                         )
-                    with f_c5:
+                    with f_c4:
                         it["quantity"] = st.number_input(
                             "Qty",
                             min_value=0.01,
