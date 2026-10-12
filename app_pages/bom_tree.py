@@ -16,9 +16,12 @@ from utils.scope_ui import page_title_with_scope
 from utils.store import (
     add_project_model,
     audit_history,
+    get_known_subassembly_structure,
     get_manual_model_bom,
+    get_model_level1_assemblies,
     pits_bom_model_tree,
     project_models,
+    query,
     save_manual_model_bom,
 )
 from utils.table_filters import (
@@ -26,6 +29,7 @@ from utils.table_filters import (
     has_unsaved_table_changes,
     request_table_editor_reset,
 )
+from utils.table_ui import format_clean_number
 
 page_title_with_scope("Model Tree", scope="project")
 st.caption(
@@ -52,12 +56,19 @@ if models_df.empty:
                 else:
                     try:
                         new_mid = add_project_model(project_id, m_num, m_name, "")
-                        st.session_state["model_tree_selected_model"] = new_mid
+                        st.session_state["_pending_model_tree_model"] = new_mid
                         st.success(f"Model '{m_num}' created!")
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
     st.stop()
+
+# Consume pending model selection before widgets are instantiated
+pending_mid = st.session_state.pop("_pending_model_tree_model", None)
+if pending_mid:
+    st.session_state["model_tree_selected_model"] = pending_mid
+    st.session_state["model_tree_model_search"] = ""
+    st.session_state["_last_model_tree_search"] = ""
 
 model_options: dict[str, str] = {"all": "All models (Master BOM)"}
 active_models = models_df.loc[models_df["active"].fillna(1).astype(bool)]
@@ -108,13 +119,14 @@ curr_selected = st.session_state.get("model_tree_selected_model")
 selected_idx = dropdown_keys.index(curr_selected) if curr_selected in dropdown_keys else 0
 
 with col_m_select:
-    selected_model_id = st.selectbox(
-        "Official model number",
-        options=dropdown_keys,
-        index=selected_idx,
-        format_func=lambda k: model_options.get(k, k),
-        key="model_tree_selected_model",
-    )
+    sb_kwargs: dict[str, Any] = {
+        "options": dropdown_keys,
+        "format_func": lambda k: model_options.get(k, k),
+        "key": "model_tree_selected_model",
+    }
+    if "model_tree_selected_model" not in st.session_state:
+        sb_kwargs["index"] = selected_idx
+    selected_model_id = st.selectbox("Official model number", **sb_kwargs)
 
 with col_m_add:
     st.write("")
@@ -127,7 +139,7 @@ with col_m_add:
                 if m_num:
                     try:
                         new_mid = add_project_model(project_id, m_num, m_name, "")
-                        st.session_state["model_tree_selected_model"] = new_mid
+                        st.session_state["_pending_model_tree_model"] = new_mid
                         st.success(f"Model '{m_num}' created!")
                         st.rerun()
                     except Exception as e:
@@ -332,11 +344,18 @@ with tab_view:
                     photo_badge = " 📷" if has_photo else ""
                     match_badge = " 🔍 MATCH" if self_matches else ""
 
+                    has_distinct_trk = bool(
+                        node.get("child_tracker")
+                        and str(node["child_tracker"]).strip() != str(node.get("part_number") or "").strip()
+                    )
+                    trk_bracket = f" [{node['child_tracker']}]" if has_distinct_trk else ""
+                    trk_caption = f" · Tracker #{node['child_tracker']}" if has_distinct_trk else ""
+
                     if has_children:
                         sub_count = len(node["children"])
                         expander_title = (
-                            f"📁 L{d} [{node['child_tracker'] or '—'}] {node['part_number']} — {node['description']} "
-                            f"(×{node['quantity']}) · {sub_count} sub-items{photo_badge}{match_badge}"
+                            f"📁 L{d}{trk_bracket} {node['part_number']} — {node['description']} "
+                            f"(×{format_clean_number(node['quantity'], decimal_places=5)}) · {sub_count} sub-items{photo_badge}{match_badge}"
                         )
                         with st.expander(expander_title, expanded=is_expanded):
                             c_btn, c_badge = st.columns([1.2, 4])
@@ -345,7 +364,7 @@ with tab_view:
                                     st.session_state["selected_model_tree_node_id"] = node["id"]
                                     st.rerun()
                             with c_badge:
-                                st.caption(f"Status: {status_txt} · Tracker #{node['child_tracker']}")
+                                st.caption(f"Status: {status_txt}{trk_caption}")
 
                             for child in node["children"]:
                                 render_expander_branch(child, expand_all)
@@ -356,9 +375,9 @@ with tab_view:
                             bg_style = "background:#fff8c5; border-left:3px solid #d4a72c; padding:2px 6px; border-radius:3px;" if self_matches else ""
                             st.markdown(
                                 f"<div style='padding-left:{indent_px}px; font-family:monospace; font-size:0.88rem; line-height:28px; {bg_style}'>"
-                                f"📄 <strong>L{d}</strong> [{node['child_tracker'] or '—'}] "
+                                f"📄 <strong>L{d}</strong>{trk_bracket} "
                                 f"<strong>{node['part_number']}</strong> &mdash; {node['description']} "
-                                f"<span style='color:#666;'>&times;{node['quantity']}</span> "
+                                f"<span style='color:#666;'>&times;{format_clean_number(node['quantity'], decimal_places=5)}</span> "
                                 f"<small style='margin-left:6px;'>[{status_txt}]</small>"
                                 f"{photo_badge}"
                                 f"{match_badge}"
@@ -406,8 +425,8 @@ with tab_view:
                             "Tree Structure": f"{prefix}{n['part_number']}",
                             "Description": n["description"],
                             "Level": f"L{d}",
-                            "PITS Qty": n["quantity"],
-                            "PITS Tracker": f"#{n['child_tracker']}" if n["child_tracker"] else "—",
+                            "PITS Qty": round(float(n["quantity"]), 5),
+                            "PITS Tracker": f"#{n['child_tracker']}" if n.get("child_tracker") and str(n["child_tracker"]).strip() != str(n.get("part_number") or "").strip() else "—",
                             "Fishbone Status": fb_badge,
                             "Parts Catalog": cat_badge,
                         })
@@ -421,6 +440,11 @@ with tab_view:
                             "Photo": st.column_config.ImageColumn(
                                 "Photo",
                                 help="Part CAD thumbnail",
+                            ),
+                            "PITS Qty": st.column_config.NumberColumn(
+                                "PITS Qty",
+                                format="%.5f",
+                                help="Quantity per unit (up to 5 decimal places)",
                             ),
                         },
                         selection_mode="single-row",
@@ -485,9 +509,10 @@ with tab_view:
                     st.markdown("##### :material/account_tree: BOM Hierarchy")
                     p_col1, p_col2 = st.columns(2)
                     with p_col1:
+                        distinct_trk = selected_node.get("child_tracker") if (selected_node.get("child_tracker") and str(selected_node["child_tracker"]).strip() != str(selected_node.get("part_number") or "").strip()) else ""
                         st.write("**Hierarchy Level:**", f"Level {selected_node['depth']}")
-                        st.write("**Tracker / ID:**", f"#{selected_node['child_tracker']}" if selected_node['child_tracker'] else "—")
-                        st.write("**Quantity:**", selected_node["quantity"])
+                        st.write("**Tracker / ID:**", f"#{distinct_trk}" if distinct_trk else "—")
+                        st.write("**Quantity:**", format_clean_number(selected_node["quantity"], decimal_places=5))
                     with p_col2:
                         st.write("**Parent Tracker:**", f"#{selected_node['parent_tracker']}" if selected_node['parent_tracker'] else "— (Root)")
                         st.write("**Source Row:**", f"Row #{selected_node['source_row']}")
@@ -526,6 +551,223 @@ with tab_view:
                             st.write("**Use / Installation:**", uses_str)
 
 
+@st.dialog("Copy BOM from another model")
+def copy_bom_dialog(
+    proj_id: str,
+    curr_model_id: str,
+    d_key: str,
+    ed_logical_key: str,
+    s_model_key: str,
+) -> None:
+    models_df = project_models(proj_id)
+    available = []
+    if not models_df.empty:
+        for _, m_row in models_df.iterrows():
+            mid = str(m_row["id"])
+            if mid == curr_model_id:
+                continue
+            b = get_manual_model_bom(proj_id, mid)
+            if b:
+                available.append((mid, str(m_row.get("model_number") or mid), b))
+
+    if not available:
+        st.info("No other models in this project currently have a saved BOM structure to copy from.")
+        if st.button("Close", key="close_empty_copy_dlg"):
+            st.rerun()
+        return
+
+    labels = {sid: f"{m_num} ({len(b)} items)" for sid, m_num, b in available}
+    sel_src = st.selectbox(
+        "Source Model *",
+        options=[sid for sid, _, _ in available],
+        format_func=lambda s: labels.get(s, s),
+        help="Select the model whose BOM hierarchy will be copied as a template.",
+    )
+
+    src_data = next((item for item in available if item[0] == sel_src), None)
+    if not src_data:
+        return
+    _, src_num, src_bom = src_data
+    src_lvl1 = next((r for r in src_bom if r.get("level") == 1), None)
+    src_lvl1_pn = str(src_lvl1.get("part_number") or "") if src_lvl1 else ""
+
+    st.markdown(
+        f"**Source Top-Level Assembly (Level 1):** `{src_lvl1_pn}`\n\n"
+        f"This model will inherit {len(src_bom) - 1} component rows from levels 2+.\n\n"
+        f":material/info: *Each model must have a unique Level 1 Assembly Number.*"
+    )
+
+    new_lvl1 = st.text_input(
+        "New Level 1 Assembly Number *",
+        value="",
+        placeholder=f"e.g. {src_lvl1_pn}_NEW",
+        help="Enter the distinct top-level assembly or group number for this model.",
+        key="copy_new_lvl1_input",
+    ).strip()
+
+    new_desc = st.text_input(
+        "New Level 1 Description (optional)",
+        value="",
+        placeholder="Assembly description (optional)",
+        key="copy_new_desc_input",
+    ).strip()
+
+    c1, c2 = st.columns([1, 1.5])
+    with c1:
+        if st.button("Cancel", key="cancel_copy_dlg"):
+            st.rerun()
+    with c2:
+        if st.button("Copy to BOM Editor", type="primary", key="confirm_copy_dlg"):
+            if not new_lvl1:
+                st.error("Please enter a new Level 1 Assembly Number.")
+                return
+            if new_lvl1.upper() == src_lvl1_pn.upper():
+                st.error(f"Level 1 Assembly Number must be different from source model's Level 1 ('{src_lvl1_pn}').")
+                return
+
+            # Check uniqueness against other models in the project
+            other_l1 = get_model_level1_assemblies(proj_id, exclude_model_id=curr_model_id)
+            if new_lvl1.upper() in other_l1:
+                st.error(f"Level 1 Assembly Number '{new_lvl1}' is already assigned to model '{other_l1[new_lvl1.upper()]}'.")
+                return
+
+            copied_draft = []
+            for it in src_bom:
+                lvl = int(it.get("level", 1) or 1)
+                if lvl == 1:
+                    copied_draft.append({
+                        "level": 1,
+                        "part_number": new_lvl1,
+                        "description": new_desc,
+                        "quantity": round(float(it.get("quantity", 1.0) or 1.0), 5),
+                    })
+                else:
+                    copied_draft.append({
+                        "level": lvl,
+                        "part_number": str(it.get("part_number") or ""),
+                        "description": str(it.get("description") or ""),
+                        "quantity": round(float(it.get("quantity", 1.0) or 1.0), 5),
+                    })
+
+            st.session_state[d_key] = copied_draft
+            st.session_state[s_model_key] = sel_src
+            request_table_editor_reset(ed_logical_key)
+            st.toast(f"BOM copied from {src_num} with Level 1 assembly {new_lvl1}!", icon=":material/content_copy:")
+            st.rerun()
+
+
+@st.dialog("Auto-detect & Autofill BOM")
+def autofill_bom_dialog(
+    proj_id: str,
+    curr_model_id: str,
+    d_key: str,
+    ed_logical_key: str,
+) -> None:
+    current_items = [dict(it) for it in st.session_state.get(d_key, [])]
+    valid_pns = [str(it.get("part_number") or "").strip() for it in current_items if str(it.get("part_number") or "").strip()]
+    if not valid_pns:
+        st.info("No parts entered in the BOM yet to analyze. Add part numbers in the editor first.")
+        if st.button("Close", key="close_empty_autofill_dlg"):
+            st.rerun()
+        return
+
+    # 1. Check description matches from Parts Catalog
+    cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,))
+    catalog_parts = {
+        str(r["part_number"]).strip().upper(): str(r["description"] or "").strip()
+        for r in cat_rows
+    }
+
+    desc_matches = []
+    for it in current_items:
+        pn = str(it.get("part_number") or "").strip()
+        desc = str(it.get("description") or "").strip()
+        pn_upper = pn.upper()
+        if pn and not desc and pn_upper in catalog_parts and catalog_parts[pn_upper]:
+            desc_matches.append((pn, catalog_parts[pn_upper]))
+
+    # 2. Check for known subassemblies
+    detected_subassemblies = []
+    existing_pns = {str(it.get("part_number") or "").strip().upper() for it in current_items if it.get("part_number")}
+    for idx, it in enumerate(current_items):
+        pn = str(it.get("part_number") or "").strip()
+        if not pn:
+            continue
+        sub_children = get_known_subassembly_structure(proj_id, pn)
+        missing_children = [c for c in sub_children if c["part_number"].upper() not in existing_pns]
+        if missing_children:
+            detected_subassemblies.append({
+                "index": idx,
+                "part_number": pn,
+                "level": int(it.get("level", 1) or 1),
+                "children": missing_children,
+            })
+
+    st.markdown("#### :material/manage_search: BOM Analysis")
+    if desc_matches:
+        st.success(f":material/check_circle: Found **{len(desc_matches)}** missing description(s) in the Parts Catalog:")
+        for pn, cat_desc in desc_matches[:5]:
+            st.caption(f"• `{pn}`: {cat_desc}")
+        if len(desc_matches) > 5:
+            st.caption(f"• ... and {len(desc_matches) - 5} more")
+    else:
+        st.caption(":material/check: All entered parts already have descriptions or are not yet in the Parts Catalog.")
+
+    selected_sub_expansions: dict[str, bool] = {}
+    if detected_subassemblies:
+        st.markdown(f"##### :material/account_tree: Known Subassemblies Detected ({len(detected_subassemblies)})")
+        st.caption("The following parts were previously defined as subassemblies with child components in this project:")
+        for sub in detected_subassemblies:
+            st.markdown(f"**{sub['part_number']}** (Level {sub['level']}): {len(sub['children'])} sub-tier part(s)")
+            preview_text = ", ".join(f"{c['part_number']} (L{min(11, sub['level'] + c['relative_level'])})" for c in sub['children'][:4])
+            if len(sub['children']) > 4:
+                preview_text += f", ... (+{len(sub['children']) - 4} more)"
+            st.caption(preview_text)
+            selected_sub_expansions[sub["part_number"]] = st.checkbox(
+                f"Insert child parts under `{sub['part_number']}`",
+                value=True,
+                key=f"chk_sub_expand_{sub['part_number']}",
+            )
+    else:
+        st.caption(":material/info: No unexpanded known subassemblies detected.")
+
+    c1, c2 = st.columns([1, 1.5])
+    with c1:
+        if st.button("Cancel", key="cancel_autofill_dlg"):
+            st.rerun()
+    with c2:
+        if st.button("Apply to Editor", type="primary", key="confirm_autofill_dlg"):
+            # Apply descriptions
+            for it in current_items:
+                pn = str(it.get("part_number") or "").strip().upper()
+                if pn and not str(it.get("description") or "").strip() and pn in catalog_parts and catalog_parts[pn]:
+                    it["description"] = catalog_parts[pn]
+
+            # Apply subassemblies
+            if detected_subassemblies:
+                new_items = []
+                for it in current_items:
+                    new_items.append(it)
+                    pn = str(it.get("part_number") or "").strip()
+                    parent_lvl = int(it.get("level", 1) or 1)
+                    if pn in selected_sub_expansions and selected_sub_expansions[pn]:
+                        sub_info = next((s for s in detected_subassemblies if s["part_number"] == pn), None)
+                        if sub_info:
+                            for child in sub_info["children"]:
+                                new_items.append({
+                                    "level": min(11, parent_lvl + child["relative_level"]),
+                                    "part_number": child["part_number"],
+                                    "description": child["description"],
+                                    "quantity": round(float(child["quantity"]), 5),
+                                })
+                current_items = new_items
+
+            st.session_state[d_key] = current_items
+            request_table_editor_reset(ed_logical_key)
+            st.toast("Autofill and subassembly expansion applied!", icon=":material/check_circle:")
+            st.rerun()
+
+
 # ==============================================================================
 # TAB 2: BUILD / AUTHOR BOM FROM SCRATCH
 # ==============================================================================
@@ -545,6 +787,9 @@ with tab_author:
         )
 
         draft_key = f"_bom_draft_{project_id}_{selected_model_id}"
+        source_model_key = f"_bom_source_model_{project_id}_{selected_model_id}"
+        bom_editor_logical_key = f"bom_grid_editor_{selected_model_id}"
+
         if draft_key not in st.session_state:
             saved_bom = get_manual_model_bom(project_id, selected_model_id)
             if saved_bom:
@@ -553,6 +798,38 @@ with tab_author:
                 st.session_state[draft_key] = [
                     {"level": 1, "part_number": "", "description": "", "quantity": 1.0}
                 ]
+
+        # ── Toolbar: Copy from Model & Auto-detect / Autofill ──
+        tb_col1, tb_col2, tb_col_space = st.columns([1.5, 1.4, 2.5], gap="small")
+        with tb_col1:
+            if st.button(
+                "Copy BOM from another model",
+                icon=":material/content_copy:",
+                key=f"btn_copy_bom_{selected_model_id}",
+                help="Copy the hierarchical BOM structure from another model and assign a new Level 1 Assembly Number.",
+            ):
+                copy_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key, source_model_key)
+        with tb_col2:
+            if st.button(
+                "Auto-detect & Autofill",
+                icon=":material/auto_fix_high:",
+                key=f"btn_autofill_bom_{selected_model_id}",
+                help="Auto-fill part descriptions from the Parts Catalog and detect known subassemblies to expand.",
+            ):
+                autofill_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
+
+        # ── Banner if draft was copied from a model ──
+        if st.session_state.get(source_model_key):
+            src_mid = st.session_state[source_model_key]
+            src_row = models_df[models_df["id"].astype(str) == str(src_mid)]
+            src_name = str(src_row.iloc[0]["model_number"]).strip() if not src_row.empty else src_mid
+            curr_draft = st.session_state.get(draft_key, [])
+            curr_lvl1 = curr_draft[0].get("part_number", "") if curr_draft else ""
+            st.info(
+                f":material/content_copy: **Draft copied from model `{src_name}`.** "
+                f"Level 1 assembly set to `{curr_lvl1}`. "
+                f"Per manufacturing planning rules, at least one Level 2+ component or quantity must be modified before saving."
+            )
 
         sub_grid, sub_builder = st.tabs([
             "📋 Spreadsheet Editor (Grid)",
@@ -607,7 +884,7 @@ with tab_author:
                     "Level": int(it.get("level", 1) or 1),
                     "Part #": str(it.get("part_number", "") or ""),
                     "Description": str(it.get("description", "") or ""),
-                    "Qty": float(it.get("quantity", 1.0) or 1.0),
+                    "Qty": round(float(it.get("quantity", 1.0) or 1.0), 5),
                 }
                 for it in current_draft
             ])
@@ -639,11 +916,11 @@ with tab_author:
                     ),
                     "Qty": st.column_config.NumberColumn(
                         "Qty",
-                        min_value=0.01,
-                        step=1.0,
+                        min_value=0.00001,
+                        step=0.00001,
                         default=1.0,
-                        format="%.2f",
-                        help="Quantity per unit",
+                        format="%.5f",
+                        help="Quantity per unit (up to 5 decimal places)",
                     ),
                 },
                 num_rows="dynamic",
@@ -674,7 +951,7 @@ with tab_author:
                         lvl = 1
                     try:
                         qty = float(qty_raw) if qty_raw is not None else 1.0
-                        qty = max(0.01, qty)
+                        qty = max(0.00001, round(qty, 5))
                     except (TypeError, ValueError):
                         qty = 1.0
                     rows_to_save.append({
@@ -692,15 +969,19 @@ with tab_author:
                 else:
                     try:
                         editor_name = st.session_state.get("current_editor", "")
+                        source_mid = st.session_state.get(source_model_key)
                         save_res = save_manual_model_bom(
                             project_id,
                             selected_model_id,
                             rows_to_save,
                             auto_add_parts=auto_add_grid,
                             editor=editor_name,
+                            source_model_id=source_mid,
                         )
                         # Refresh the draft key so the editor opens with saved data
-                        st.session_state[draft_key] = rows_to_save
+                        saved_reloaded = get_manual_model_bom(project_id, selected_model_id)
+                        st.session_state[draft_key] = saved_reloaded if saved_reloaded else rows_to_save
+                        st.session_state.pop(source_model_key, None)
                         request_table_editor_reset(bom_editor_logical_key)
                         st.toast(
                             f"Saved {save_res['saved_count']} BOM items for "
@@ -730,7 +1011,7 @@ with tab_author:
                             "level": lvl,
                             "part_number": pn,
                             "description": str(r.get("Description") or "").strip(),
-                            "quantity": float(r.get("Qty") or 1.0),
+                            "quantity": round(float(r.get("Qty") or 1.0), 5),
                         })
             if not preview_rows:
                 st.caption("No BOM items entered yet. Type rows above to see the live outline preview.")
@@ -743,7 +1024,7 @@ with tab_author:
                         st.markdown(
                             f"<div style='padding-left:{pad}px; font-family:monospace; line-height:26px;'>"
                             f"{icon} <strong>L{lvl}</strong> <strong>{p_it['part_number']}</strong> &mdash; "
-                            f"{p_it.get('description') or '—'} <span style='color:#666;'>&times;{p_it.get('quantity', 1.0)}</span>"
+                            f"{p_it.get('description') or '—'} <span style='color:#666;'>&times;{format_clean_number(p_it.get('quantity', 1.0), decimal_places=5)}</span>"
                             f"</div>",
                             unsafe_allow_html=True,
                         )
@@ -766,16 +1047,43 @@ with tab_author:
                     st.rerun()
             with col_tb_save:
                 if st.button("💾 Save BOM Structure", type="primary", key=f"save_bom_builder_{selected_model_id}"):
-                    draft_to_save = st.session_state.get(draft_key, [])
+                    current_items = list(st.session_state.get(draft_key, []))
+                    draft_to_save = []
+                    for idx_bld, it_bld in enumerate(current_items):
+                        pn_w = st.session_state.get(f"bld_pn_{idx_bld}_{selected_model_id}", it_bld.get("part_number", ""))
+                        desc_w = st.session_state.get(f"bld_desc_{idx_bld}_{selected_model_id}", it_bld.get("description", ""))
+                        qty_w = st.session_state.get(f"bld_qty_{idx_bld}_{selected_model_id}", it_bld.get("quantity", 1.0))
+                        lvl_w = st.session_state.get(f"bld_lvl_{idx_bld}_{selected_model_id}", it_bld.get("level", 1))
+                        try:
+                            qty_val = max(0.00001, round(float(qty_w), 5))
+                        except (TypeError, ValueError):
+                            qty_val = 1.0
+                        draft_to_save.append({
+                            "level": int(lvl_w),
+                            "part_number": str(pn_w).strip(),
+                            "description": str(desc_w).strip(),
+                            "quantity": qty_val,
+                        })
                     try:
                         editor_name = st.session_state.get("current_editor", "")
+                        source_mid = st.session_state.get(source_model_key)
                         save_res = save_manual_model_bom(
                             project_id,
                             selected_model_id,
                             draft_to_save,
                             auto_add_parts=auto_add_builder,
                             editor=editor_name,
+                            source_model_id=source_mid,
                         )
+                        st.session_state.pop(source_model_key, None)
+                        saved_reloaded = get_manual_model_bom(project_id, selected_model_id)
+                        st.session_state[draft_key] = saved_reloaded if saved_reloaded else draft_to_save
+                        request_table_editor_reset(bom_editor_logical_key)
+                        for idx_bld in range(len(draft_to_save) + 10):
+                            st.session_state.pop(f"bld_pn_{idx_bld}_{selected_model_id}", None)
+                            st.session_state.pop(f"bld_desc_{idx_bld}_{selected_model_id}", None)
+                            st.session_state.pop(f"bld_qty_{idx_bld}_{selected_model_id}", None)
+                            st.session_state.pop(f"bld_lvl_{idx_bld}_{selected_model_id}", None)
                         st.success(
                             f"Saved **{save_res['saved_count']}** BOM items for model **{save_res['model_number']}**! "
                             f"({save_res['parts_created']} new parts onboarded to Parts Catalog)"
@@ -798,10 +1106,28 @@ with tab_author:
                         title_pn = it.get("part_number") or f"Item #{i + 1} (Unspecified Part #)"
                         st.markdown(
                             f"<div style='padding-left:{pad_left}px; font-weight:600; font-family:monospace;'>"
-                            f"{icon} Level {lvl}: {title_pn} &times;{it.get('quantity', 1.0)}"
+                            f"{icon} Level {lvl}: {title_pn} &times;{format_clean_number(it.get('quantity', 1.0), decimal_places=5)}"
                             f"</div>",
                             unsafe_allow_html=True,
                         )
+                        pn_curr = str(it.get("part_number") or "").strip()
+                        if pn_curr:
+                            known_children = get_known_subassembly_structure(project_id, pn_curr)
+                            if known_children:
+                                if st.button(
+                                    f":material/account_tree: Insert {len(known_children)} Sub-tier Parts",
+                                    key=f"bld_insert_sub_{i}_{selected_model_id}",
+                                    help=f"Automatically insert known child components under {pn_curr}",
+                                ):
+                                    for idx_sub, child in enumerate(known_children):
+                                        items_list.insert(i + 1 + idx_sub, {
+                                            "level": min(11, lvl + child["relative_level"]),
+                                            "part_number": child["part_number"],
+                                            "description": child["description"],
+                                            "quantity": round(float(child["quantity"]), 5),
+                                        })
+                                    st.session_state[draft_key] = items_list
+                                    st.rerun()
                     with c_ctrls:
                         btn_c1, btn_c2, btn_c3, btn_c4, btn_c5, btn_c6 = st.columns(6)
                         with btn_c1:
@@ -867,11 +1193,13 @@ with tab_author:
                     with f_c4:
                         it["quantity"] = st.number_input(
                             "Qty",
-                            min_value=0.01,
-                            step=1.0,
-                            value=float(it.get("quantity", 1.0) or 1.0),
+                            min_value=0.00001,
+                            step=0.00001,
+                            format="%.5f",
+                            value=float(round(float(it.get("quantity", 1.0) or 1.0), 5)),
                             key=f"bld_qty_{i}_{selected_model_id}",
                         )
+            st.session_state[draft_key] = items_list
 
 
 # ==============================================================================

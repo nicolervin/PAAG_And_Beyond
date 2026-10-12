@@ -244,6 +244,7 @@ class ModelTreeTests(unittest.TestCase):
         img.save(img_file, format="PNG")
         self.addCleanup(lambda: img_file.unlink(missing_ok=True))
 
+        store.add_project_model(self.project_id, "MODEL-PHOTO", "Model Photo", "tester")
         part_id = str(uuid4())
         ts = store.now_iso()
         store.execute(
@@ -291,6 +292,23 @@ class ModelTreeTests(unittest.TestCase):
         at.run()
         self.assertEqual(at.exception, [])
         self.assertEqual(len(at.image), 1)
+
+    def test_quick_add_model_does_not_mutate_instantiated_widget(self) -> None:
+        file_path = str(Path(__file__).parent.parent / "app_pages" / "bom_tree.py")
+        at = AppTest.from_file(file_path)
+        at.session_state["project_id"] = self.project_id
+        at.session_state["scenario_id"] = self.scenario_id
+        at.run()
+        self.assertEqual(at.exception, [])
+
+        # Stage a new model creation as done by the quick add popover
+        new_mid = store.add_project_model(self.project_id, "MODEL-QUICK-99", "Quick Model", "tester")
+        at.session_state["_pending_model_tree_model"] = new_mid
+        at.run()
+        self.assertEqual(at.exception, [])
+        self.assertEqual(at.session_state.get("model_tree_selected_model"), new_mid)
+        sel = at.selectbox(key="model_tree_selected_model")
+        self.assertEqual(sel.value, new_mid)
 
 
 if __name__ == "__main__":
