@@ -26,9 +26,14 @@ def _rounded_decimal(value, *, decimal_places: int = DECIMAL_COMPARISON_PLACES) 
 
 
 def format_clean_number(value, *, decimal_places: int = DECIMAL_COMPARISON_PLACES) -> str:
-    """Display whole and decimal quantities without trailing zeroes."""
+    """Display whole and decimal quantities without trailing zeroes or scientific notation."""
     number = _rounded_decimal(value, decimal_places=decimal_places)
-    return "" if number is None else f"{number:g}"
+    if number is None:
+        return ""
+    if math.isfinite(number):
+        formatted = f"{number:.{decimal_places}f}".rstrip("0").rstrip(".")
+        return formatted if formatted and formatted != "-0" else "0"
+    return f"{number:g}"
 
 
 def part_number_cell_style(value) -> str:

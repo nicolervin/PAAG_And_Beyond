@@ -891,6 +891,24 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### Model Tree: BOM Authoring From Scratch
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 12, 2026
+- **Purpose:** Provide an intuitive model-by-model BOM authoring interface directly on the Model Tree tab, enabling engineers to create and maintain a hierarchical product structure from scratch (using Levels 1–11) for any official model. Features both an editable spreadsheet grid and an interactive visual tree builder, with automatic Parts Catalog matching and one-click part onboarding, enabling full CAD-browser inspection and Fishbone reconciliation without requiring an external PITS Excel import.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (owning project), `project_models` (official model selection), `parts` (Parts Catalog master data), `pits_bom_occurrences` (hierarchical BOM occurrence storage), and `fishbone_part_assignments` (Fishbone framework placement and gap reconciliation).
+  2. *Critical thread relationship:* Stored in `pits_bom_occurrences` with `source_state = 'manual'` and model usages, placing author-created BOMs directly at the Product Architecture root of the critical thread (*Product Architecture / BOM -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance*).
+  3. *Scope:* Project-wide with model-specific authoring and visibility.
+  4. *Table requirement:* Existing table `pits_bom_occurrences` serves it directly (`source_state = 'manual'`, `import_id = 'MANUAL'`, with `child_part_id` linked to `parts` and `raw_levels_json` recording model usages).
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit atomic Save button validating sequential hierarchy depths and positive quantities.
+     - Universal Deletion Standard: confirmed deletion modal warning if removing an assembly cascades to sub-items.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Model Tree BOM"`.
+     - Universal History Display Standard: bottom History expander using `audit_history()`.
+     - Scope Badges: `page_title_with_scope("Model Tree", scope="project")`.
+
+
 ### PAAG Elements: Resource Performing Work and Handheld Equipment Tool Selection
 
 - **Proposed by:** Nicole Ervin, project owner

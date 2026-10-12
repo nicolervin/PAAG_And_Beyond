@@ -2974,6 +2974,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
 
         for r in occ_rows:
             usages: dict[str, float] = {}
+            data: dict[str, Any] = {}
             if r["raw_levels_json"]:
                 try:
                     data = json.loads(r["raw_levels_json"])
@@ -2982,11 +2983,11 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                         if isinstance(u, dict):
                             usages = {str(k): float(v) for k, v in u.items() if v is not None}
                 except Exception:
-                    pass
+                    data = {}
             if usages:
                 has_any_model_usages = True
                 all_model_keys.update(usages.keys())
-            parsed_rows.append({"r": r, "usages": usages})
+            parsed_rows.append({"r": r, "usages": usages, "data": data})
 
         target_model = None
         if model_id and model_id != "all":
@@ -3003,11 +3004,18 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
         if target_model and has_any_model_usages:
             clean_target = re.sub(r"[^A-Za-z0-9]", "", target_model).upper()
             matched_model_key = None
+            # 1. Exact match has priority
             for mk in all_model_keys:
-                clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk).upper()
-                if clean_target == clean_mk or (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
+                if mk == target_model or re.sub(r"[^A-Za-z0-9]", "", mk).upper() == clean_target:
                     matched_model_key = mk
                     break
+            # 2. Fuzzy/prefix match only as fallback
+            if not matched_model_key:
+                for mk in all_model_keys:
+                    clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk).upper()
+                    if (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
+                        matched_model_key = mk
+                        break
 
             qualifying_nodes: list[dict[str, Any]] = []
             stack: dict[int, dict[str, Any]] = {}
@@ -3015,16 +3023,24 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
             for pr in parsed_rows:
                 r = pr["r"]
                 usages = pr["usages"]
+                pr_data = pr.get("data") or {}
 
                 model_qty = None
-                if matched_model_key and matched_model_key in usages:
+                if target_model in usages:
+                    model_qty = usages[target_model]
+                elif matched_model_key and matched_model_key in usages:
                     model_qty = usages[matched_model_key]
-                elif not matched_model_key:
+                else:
                     for mk, q in usages.items():
-                        clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk).upper()
-                        if clean_target in clean_mk or clean_mk in clean_target:
+                        if re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target:
                             model_qty = q
                             break
+                    if model_qty is None:
+                        for mk, q in usages.items():
+                            clean_mk = re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper()
+                            if (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
+                                model_qty = q
+                                break
 
                 # If this row is not used on this model, skip it
                 if model_qty is None or float(model_qty) <= 0:
@@ -3035,10 +3051,10 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 fb_info = fb_by_part.get(pid, []) if pid else []
                 in_fishbone = len(fb_info) > 0
 
-                p_num = r["part_number"] or (
+                p_num = r["part_number"] or pr_data.get("part_number") or (
                     f"Uncataloged (Tracker #{r['child_tracker_number']})" if r["child_tracker_number"] else "—"
                 )
-                p_desc = r["description"] or "—"
+                p_desc = r["description"] or pr_data.get("description") or "—"
                 depth = int(r["proposed_depth"] or 1)
 
                 node: dict[str, Any] = {
@@ -3048,8 +3064,8 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                     "child_tracker": str(r["child_tracker_number"] or "").strip(),
                     "part_number": p_num,
                     "description": p_desc,
-                    "quantity": float(model_qty),
-                    "raw_quantity_text": str(model_qty),
+                    "quantity": round(float(model_qty), 5),
+                    "raw_quantity_text": str(round(float(model_qty), 5)),
                     "in_catalog": in_catalog,
                     "in_fishbone": in_fishbone,
                     "fishbone_sections": [x["section"] for x in fb_info],
@@ -3131,10 +3147,11 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
             fb_info = fb_by_part.get(pid, []) if pid else []
             in_fishbone = len(fb_info) > 0
 
-            p_num = r["part_number"] or (
+            pr_data = pr.get("data") or {}
+            p_num = r["part_number"] or pr_data.get("part_number") or (
                 f"Uncataloged (Tracker #{r['child_tracker_number']})" if r["child_tracker_number"] else "—"
             )
-            p_desc = r["description"] or "—"
+            p_desc = r["description"] or pr_data.get("description") or "—"
             depth = int(r["proposed_depth"] or 1)
 
             node: dict[str, Any] = {
@@ -3359,10 +3376,991 @@ def pits_assembly_mini_bom(
         return pd.DataFrame(result_rows)
 
 
+def sort_bom_hierarchy(
+    raw_items: list[dict[str, Any]],
+    model_number: str = "",
+) -> list[dict[str, Any]]:
+    """Sort BOM items in strict hierarchical tree order (depth-first pre-order traversal).
+
+    Guarantees:
+    - Parent assemblies and group numbers always appear before their child components.
+    - Child components never appear above their group number.
+    - Levels naturally progress (1 -> 2 -> 3) and never jump (1 -> 3 -> 2).
+    - Preserves sibling order using model-specific sequence or source_row.
+    """
+    if not raw_items or len(raw_items) <= 1:
+        return [dict(it) for it in raw_items]
+
+    # Assign an initial index to guarantee stable sorting among siblings
+    for i, it in enumerate(raw_items):
+        it["_orig_idx"] = i
+
+    all_child_trackers = {
+        str(it.get("child_tracker") or it.get("part_number") or "").strip().upper()
+        for it in raw_items
+        if it.get("child_tracker") or it.get("part_number")
+    }
+
+    def _sort_key(node: dict[str, Any]) -> tuple:
+        seq = node.get("model_seq")
+        s_row = node.get("source_row")
+        return (
+            0 if seq is not None else 1,
+            seq if seq is not None else (s_row if s_row is not None else 0),
+            node.get("_orig_idx", 0),
+        )
+
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    roots: list[dict[str, Any]] = []
+
+    for it in raw_items:
+        pt = str(it.get("parent_tracker") or "").strip()
+        lvl = int(it.get("level", 1) or 1)
+        # Root if level 1, or empty parent tracker, or parent tracker not present in this set of items
+        if lvl == 1 or not pt or pt.upper() not in all_child_trackers:
+            roots.append(it)
+        else:
+            pt_clean = pt.upper()
+            if pt_clean not in children_by_parent:
+                children_by_parent[pt_clean] = []
+            children_by_parent[pt_clean].append(it)
+
+    roots.sort(key=_sort_key)
+    for pt_clean in children_by_parent:
+        children_by_parent[pt_clean].sort(key=_sort_key)
+
+    ordered: list[dict[str, Any]] = []
+    visited: set[Any] = set()
+
+    def _traverse(node: dict[str, Any], current_depth: int) -> None:
+        oid = node.get("occurrence_id") or node.get("_uid") or node["_orig_idx"]
+        if oid in visited:
+            return
+        visited.add(oid)
+
+        node_copy = dict(node)
+        node_copy["level"] = max(1, min(11, current_depth))
+        node_copy.pop("_orig_idx", None)
+        ordered.append(node_copy)
+
+        ct = str(node.get("child_tracker") or node.get("part_number") or "").strip().upper()
+        # Direct children by child_tracker
+        children = children_by_parent.get(ct, [])
+        for ch in children:
+            _traverse(ch, current_depth + 1)
+
+    for r in roots:
+        _traverse(r, 1)
+
+    # Any remaining unvisited items (e.g. disconnected nodes) are appended in original order
+    for it in raw_items:
+        oid = it.get("occurrence_id") or it.get("_uid") or it["_orig_idx"]
+        if oid not in visited:
+            node_copy = dict(it)
+            node_copy.pop("_orig_idx", None)
+            ordered.append(node_copy)
+
+    # Final pass: normalize levels to guarantee no row skips (e.g. curr_lvl <= prev_lvl + 1)
+    if ordered:
+        ordered[0]["level"] = 1
+        for i in range(1, len(ordered)):
+            prev_l = ordered[i - 1]["level"]
+            curr_l = ordered[i]["level"]
+            if curr_l > prev_l + 1:
+                ordered[i]["level"] = prev_l + 1
+
+    return ordered
 
 
+def get_manual_model_bom(
+    project_id: str,
+    model_id: str,
+    _conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Retrieve editable BOM items for the selected official model in source row order."""
+    def _execute(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        m_row = conn.execute(
+            "SELECT id, model_number FROM project_models WHERE id=? AND project_id=?",
+            (model_id, project_id),
+        ).fetchone()
+        if not m_row:
+            return []
+        model_number = str(m_row["model_number"]).strip()
+        target_model = model_number
+        clean_target = re.sub(r"[^A-Za-z0-9]", "", model_number).upper()
 
-__domain_exports__ = ['pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES', 'project_table', 'part_scenario_activity', 'active_part_ids', 'update_part_scenario_activity', 'normalize_model_applicability', '_clean_optional_text', '_validated_part_catalog_fields', 'upsert_part', 'update_part_rows', 'part_delete_impact', 'delete_project_part', 'set_part_image', 'add_part_image', 'part_images', 'complexity_features', 'complexity_feature_delete_impacts', 'complexity_tree', 'potential_duplicate_models', 'part_feature_rules', 'update_part_feature_rules', 'complexity_planning_snapshot', 'restore_complexity_planning_snapshot', 'update_complexity_features', 'update_complexity_tree', 'model_planning_snapshot', '_insert_snapshot_rows', 'restore_model_planning_snapshot', 'delete_project_models', 'delete_project_model', 'add_project_model', 'update_project_model_rows', 'pits_records', 'pits_revisions', 'pits_import_conflict_parts', 'import_pits_id_snapshot', 'apply_pits_updates', 'set_mbom_review_status', 'sync_confirmed_mbom_parts', 'pits_bom_occurrences', 'review_pits_bom_occurrences', 'escalate_pits_bom_occurrence', 'G_FORMAT_REGEX', 'is_g_format_number', 'model_bom_tree_nodes', 'pits_bom_model_tree', 'pits_assembly_mini_bom']
+        occ_rows = conn.execute(
+            """
+            SELECT o.id, o.proposed_depth, o.parent_tracker_number, o.child_tracker_number,
+                   o.parent_part_id, o.child_part_id, o.proposed_quantity, o.raw_quantity_text,
+                   o.source_row, o.raw_levels_json, o.source_state,
+                   p.part_number, p.description
+            FROM pits_bom_occurrences o
+            LEFT JOIN parts p ON p.id = o.child_part_id
+            WHERE o.project_id = ?
+            ORDER BY o.source_row ASC, o.id ASC
+            """,
+            (project_id,),
+        ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for r in occ_rows:
+            usages: dict[str, float] = {}
+            group_num = ""
+            data: dict[str, Any] = {}
+            raw_levels_str = r["raw_levels_json"]
+            if raw_levels_str:
+                try:
+                    data = json.loads(raw_levels_str)
+                    if isinstance(data, dict):
+                        u = data.get("model_usages")
+                        if isinstance(u, dict):
+                            usages = {str(k): float(v) for k, v in u.items() if v is not None}
+                        group_num = str(data.get("group_number") or "")
+                except Exception:
+                    data = {}
+
+            # Match model usage
+            model_qty = None
+            if usages:
+                # 1. Exact match
+                if target_model in usages:
+                    model_qty = usages[target_model]
+                else:
+                    for mk, q in usages.items():
+                        if re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target:
+                            model_qty = q
+                            break
+                    if model_qty is None:
+                        for mk, q in usages.items():
+                            clean_mk = re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper()
+                            if (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
+                                model_qty = q
+                                break
+            elif data and "model_usages" in data:
+                # model_usages was explicitly configured on this occurrence, but this model is not used on it!
+                model_qty = None
+            else:
+                # Occurrences with no explicit model_usages (legacy or master occurrences)
+                model_qty = r["proposed_quantity"] if r["proposed_quantity"] is not None else 1.0
+
+            if model_qty is None or float(model_qty) <= 0:
+                continue
+
+            p_num = str(r["part_number"] or data.get("part_number") or r["child_tracker_number"] or "").strip()
+            desc = str(r["description"] or data.get("description") or "").strip()
+            depth = int(r["proposed_depth"] or 1)
+
+            # Check if data has model_sequence
+            seq = None
+            if isinstance(data, dict):
+                ms = data.get("model_sequence")
+                if isinstance(ms, dict):
+                    if target_model in ms:
+                        seq = ms[target_model]
+                    else:
+                        for mk, val in ms.items():
+                            if re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target:
+                                seq = val
+                                break
+
+            results.append({
+                "level": depth,
+                "group_number": group_num,
+                "part_number": p_num,
+                "description": desc,
+                "quantity": round(float(model_qty), 5),
+                "child_tracker": str(r["child_tracker_number"] or "").strip(),
+                "parent_tracker": str(r["parent_tracker_number"] or "").strip(),
+                "occurrence_id": str(r["id"]),
+                "source_row": int(r["source_row"] or 0),
+                "model_seq": seq,
+            })
+
+        return sort_bom_hierarchy(results, model_number=target_model)
+
+    if _conn is not None:
+        return _execute(_conn)
+    with connection() as conn:
+        return _execute(conn)
+
+
+def get_known_subassembly_structure(
+    project_id: str,
+    part_number: str,
+    max_depth: int = 5,
+    _conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Find known child components for a part_number defined in pits_bom_occurrences across the project.
+
+    Uses recursive Pre-order Depth-First Search (DFS) so subassemblies are immediately followed
+    by their own child components and sub-tier parts in proper tree hierarchy.
+
+    Returns a list of dicts:
+    [{'part_number': str, 'description': str, 'quantity': float, 'relative_level': int, 'parent_tracker': str, 'child_tracker': str}]
+    """
+    clean_pn = str(part_number or "").strip()
+    if not clean_pn:
+        return []
+
+    def _execute(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        part_row = conn.execute(
+            "SELECT id FROM parts WHERE project_id=? AND UPPER(part_number)=UPPER(?)",
+            (project_id, clean_pn),
+        ).fetchone()
+        part_id = None
+        if part_row:
+            part_id = str(part_row["id"] if isinstance(part_row, (sqlite3.Row, dict)) else part_row[0])
+
+        results: list[dict[str, Any]] = []
+        visited = {clean_pn.upper()}
+
+        def _dfs(parent_trk: str, parent_pid: str | None, rel_lvl: int) -> None:
+            if rel_lvl > max_depth:
+                return
+
+            child_rows = conn.execute(
+                """SELECT o.id, o.child_tracker_number, o.proposed_quantity, o.child_part_id,
+                          p.part_number, p.description
+                   FROM pits_bom_occurrences o
+                   LEFT JOIN parts p ON o.child_part_id = p.id
+                   WHERE o.project_id = ?
+                     AND (
+                         (o.parent_tracker_number <> '' AND (UPPER(o.parent_tracker_number) = UPPER(?) OR UPPER(o.parent_tracker_number) LIKE UPPER(?) || '#%'))
+                         OR (? IS NOT NULL AND o.parent_part_id = ?)
+                     )
+                   ORDER BY o.proposed_depth ASC, o.source_row ASC, o.id ASC""",
+                (project_id, parent_trk, parent_trk, parent_pid, parent_pid),
+            ).fetchall()
+
+            for cr in child_rows:
+                c_pn = str(cr["part_number"] or cr["child_tracker_number"] or "").strip()
+                if not c_pn or c_pn.upper() in visited:
+                    continue
+                visited.add(c_pn.upper())
+
+                c_desc = str(cr["description"] or "").strip()
+                if not c_desc:
+                    p_lookup = conn.execute(
+                        "SELECT description FROM parts WHERE project_id=? AND UPPER(part_number)=UPPER(?)",
+                        (project_id, c_pn),
+                    ).fetchone()
+                    if p_lookup and (p_lookup["description"] if isinstance(p_lookup, (sqlite3.Row, dict)) else p_lookup[0]):
+                        c_desc = str(p_lookup["description"] if isinstance(p_lookup, (sqlite3.Row, dict)) else p_lookup[0]).strip()
+
+                c_qty = round(float(cr["proposed_quantity"] if cr["proposed_quantity"] is not None else 1.0), 5)
+                c_pid = str(cr["child_part_id"]) if cr["child_part_id"] else None
+
+                results.append({
+                    "part_number": c_pn,
+                    "description": c_desc,
+                    "quantity": c_qty,
+                    "relative_level": rel_lvl,
+                    "parent_tracker": parent_trk,
+                    "child_tracker": c_pn,
+                })
+
+                # Recursively visit children of this child immediately (DFS Pre-order)
+                _dfs(c_pn, c_pid, rel_lvl + 1)
+
+        _dfs(clean_pn, part_id, 1)
+        return results
+
+    if _conn is not None:
+        return _execute(_conn)
+    with connection() as conn:
+        return _execute(conn)
+
+
+def detect_unexpanded_subassemblies(
+    project_id: str,
+    items: list[dict[str, Any]],
+    _conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Scan items in a BOM draft for any part/group numbers that have known child components
+    in pits_bom_occurrences across the project which are not yet present in the draft.
+
+    Returns a list of dicts:
+    [
+        {
+            "part_number": str,
+            "level": int,
+            "description": str,
+            "children": list[dict[str, Any]],
+        }
+    ]
+    """
+    clean_items = [it for it in items if str(it.get("part_number") or "").strip()]
+    if not clean_items:
+        return []
+
+    existing_pns = {str(it["part_number"]).strip().upper() for it in clean_items}
+    detected: list[dict[str, Any]] = []
+    seen_detected_pns: set[str] = set()
+
+    def _execute(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        for it in clean_items:
+            pn = str(it["part_number"]).strip()
+            pn_upper = pn.upper()
+            if pn_upper in seen_detected_pns:
+                continue
+
+            sub_children = get_known_subassembly_structure(project_id, pn, _conn=conn)
+            if not sub_children:
+                continue
+
+            # Identify which children are not already in the BOM
+            missing_children = [
+                c for c in sub_children
+                if c["part_number"].upper() not in existing_pns
+            ]
+            if missing_children:
+                seen_detected_pns.add(pn_upper)
+                detected.append({
+                    "part_number": pn,
+                    "level": int(it.get("level", 1) or 1),
+                    "description": str(it.get("description") or ""),
+                    "children": missing_children,
+                })
+        return detected
+
+    if _conn is not None:
+        return _execute(_conn)
+    with connection() as conn:
+        return _execute(conn)
+
+
+def expand_subassembly_items(
+    items: list[dict[str, Any]],
+    detected_subassemblies: list[dict[str, Any]],
+    selected_pns: set[str] | None = None,
+    catalog_parts: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Insert child components directly beneath their parent subassembly, preserving all assemblies.
+
+    Rows are inserted between the parent assembly and whatever rows follow it.
+    Existing assemblies, including top-level assemblies and subsequent assemblies, are never overwritten.
+    Child components are inserted in strict Pre-order Depth-First tree order beneath the group number.
+    """
+    sub_map = {
+        d["part_number"].strip().upper(): d["children"]
+        for d in detected_subassemblies
+        if selected_pns is None or d["part_number"].strip().upper() in selected_pns
+    }
+
+    if not sub_map:
+        return [dict(it) for it in items]
+
+    expanded: list[dict[str, Any]] = []
+    seen_pns = {str(it.get("part_number") or "").strip().upper() for it in items if it.get("part_number")}
+
+    for it in items:
+        curr = dict(it)
+        pn = str(curr.get("part_number") or "").strip()
+        pn_upper = pn.upper()
+
+        # If description is missing, autofill from catalog if provided
+        if catalog_parts and not curr.get("description") and pn_upper in catalog_parts:
+            curr["description"] = catalog_parts[pn_upper]
+
+        # 1. ALWAYS preserve the parent / current item itself intact!
+        expanded.append(curr)
+
+        # 2. If this item was selected for subassembly expansion, insert its children
+        if pn_upper in sub_map:
+            parent_lvl = int(curr.get("level", 1) or 1)
+            for child in sub_map[pn_upper]:
+                c_pn = str(child.get("part_number") or "").strip()
+                if not c_pn or c_pn.upper() in seen_pns:
+                    continue
+                seen_pns.add(c_pn.upper())
+
+                c_desc = str(child.get("description") or "").strip()
+                if not c_desc and catalog_parts and c_pn.upper() in catalog_parts:
+                    c_desc = catalog_parts[c_pn.upper()]
+
+                try:
+                    c_qty = round(float(child.get("quantity", 1.0) or 1.0), 5)
+                except (TypeError, ValueError):
+                    c_qty = 1.0
+
+                rel_lvl = int(child.get("relative_level", 1) or 1)
+                expanded.append({
+                    "level": min(11, parent_lvl + rel_lvl),
+                    "part_number": c_pn,
+                    "description": c_desc,
+                    "quantity": c_qty,
+                    "_uid": str(uuid4())[:8],
+                })
+
+    return expanded
+
+
+def get_model_level1_assemblies(
+    project_id: str,
+    exclude_model_id: str | None = None,
+    _conn: sqlite3.Connection | None = None,
+) -> dict[str, str]:
+    """Returns mapping of UPPER(level1_part_number) -> model_number for models in the project."""
+    def _execute(conn: sqlite3.Connection) -> dict[str, str]:
+        q = "SELECT id, model_number FROM project_models WHERE project_id=?"
+        params = [project_id]
+        if exclude_model_id:
+            q += " AND id <> ?"
+            params.append(exclude_model_id)
+        models = conn.execute(q, params).fetchall()
+
+        mapping: dict[str, str] = {}
+        for m in models:
+            m_id = str(m["id"])
+            m_num = str(m["model_number"]).strip()
+            bom = get_manual_model_bom(project_id, m_id, _conn=conn)
+            lvl1 = next((it for it in bom if it.get("level") == 1), None)
+            if lvl1 and lvl1.get("part_number"):
+                pn_clean = str(lvl1["part_number"]).strip().upper()
+                if pn_clean:
+                    mapping[pn_clean] = m_num
+        return mapping
+
+    if _conn is not None:
+        return _execute(_conn)
+    with connection() as conn:
+        return _execute(conn)
+
+
+def save_manual_model_bom(
+    project_id: str,
+    model_id: str,
+    items: list[dict[str, Any]],
+    auto_add_parts: bool = True,
+    editor: str = "",
+    source_model_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate and atomically persist a model-specific BOM hierarchy in pits_bom_occurrences."""
+    with connection() as conn:
+        m_row = conn.execute(
+            "SELECT id, model_number FROM project_models WHERE id=? AND project_id=?",
+            (model_id, project_id),
+        ).fetchone()
+        if not m_row:
+            raise ValueError("The selected official model was not found in this project.")
+        model_number = str(m_row["model_number"]).strip()
+        clean_model_key = model_number
+
+        cleaned_items: list[dict[str, Any]] = []
+        for idx, it in enumerate(items):
+            p_num = str(it.get("part_number") or "").strip()
+            if not p_num:
+                continue
+            raw_lvl = it.get("level")
+            try:
+                lvl = int(raw_lvl)
+            except (TypeError, ValueError):
+                raise ValueError(f"Row {idx + 1}: Level must be an integer between 1 and 11.")
+            if not (1 <= lvl <= 11):
+                raise ValueError(f"Row {idx + 1}: Level must be between 1 and 11.")
+            raw_qty = it.get("quantity")
+            try:
+                qty = round(float(raw_qty), 5) if raw_qty is not None and str(raw_qty).strip() != "" else 1.0
+            except (TypeError, ValueError):
+                raise ValueError(f"Row {idx + 1} ('{p_num}'): Quantity must be a valid number.")
+            if qty <= 0:
+                raise ValueError(f"Row {idx + 1} ('{p_num}'): Quantity must be greater than 0.")
+            desc = str(it.get("description") or "").strip()
+            grp = str(it.get("group_number") or "").strip()
+            trk = str(it.get("child_tracker") or it.get("tracker") or p_num).strip()
+            cleaned_items.append({
+                "level": lvl,
+                "group_number": grp,
+                "part_number": p_num,
+                "description": desc,
+                "quantity": qty,
+                "child_tracker": trk,
+            })
+
+        if not cleaned_items:
+            raise ValueError("The BOM must contain at least one item with a valid Part Number.")
+
+        # Ensure first item starts at Level 1
+        if cleaned_items[0]["level"] > 1:
+            cleaned_items[0]["level"] = 1
+
+        # Validate no skipped levels (e.g. L1 directly to L3)
+        for i in range(1, len(cleaned_items)):
+            curr_lvl = cleaned_items[i]["level"]
+            prev_lvl = cleaned_items[i - 1]["level"]
+            if curr_lvl > prev_lvl + 1:
+                raise ValueError(
+                    f"Row {i + 1} ('{cleaned_items[i]['part_number']}'): Cannot skip levels (went from Level {prev_lvl} to Level {curr_lvl}). A subassembly level cannot exceed the preceding level + 1."
+                )
+
+        # Validate Level 1 Assembly uniqueness across models in the project
+        lvl1_items = [it for it in cleaned_items if it["level"] == 1]
+        if not lvl1_items:
+            raise ValueError("The BOM must contain at least one top-level item at Level 1.")
+        curr_lvl1_pn = lvl1_items[0]["part_number"].strip().upper()
+
+        other_lvl1_map = get_model_level1_assemblies(project_id, exclude_model_id=model_id, _conn=conn)
+        if curr_lvl1_pn in other_lvl1_map:
+            conflict_model = other_lvl1_map[curr_lvl1_pn]
+            raise ValueError(
+                f"Level 1 Assembly Number '{lvl1_items[0]['part_number']}' is already assigned to model '{conflict_model}'. "
+                f"Each model must have a distinct Level 1 Assembly Number."
+            )
+
+        # Validate Level 2+ difference when copied from a source model
+        if source_model_id and source_model_id != model_id:
+            src_bom = get_manual_model_bom(project_id, source_model_id, _conn=conn)
+            if src_bom:
+                curr_lvl2 = [
+                    (it["level"], it["part_number"].strip().upper(), round(float(it["quantity"]), 5))
+                    for it in cleaned_items if it["level"] >= 2
+                ]
+                src_lvl2 = [
+                    (it.get("level", 1), str(it.get("part_number", "")).strip().upper(), round(float(it.get("quantity", 1.0) or 1.0), 5))
+                    for it in src_bom if it.get("level", 1) >= 2
+                ]
+                if curr_lvl2 and src_lvl2 and curr_lvl2 == src_lvl2:
+                    src_m = conn.execute(
+                        "SELECT model_number FROM project_models WHERE id=?",
+                        (source_model_id,),
+                    ).fetchone()
+                    src_name = str(src_m["model_number"]).strip() if src_m else source_model_id
+                    raise ValueError(
+                        f"Cannot save BOM: The Level 2+ structure is 100% identical to source model '{src_name}'. "
+                        f"A model with a new Level 1 assembly must have at least one component, quantity, or variant difference in its Level 2+ structure."
+                    )
+
+        # 1. Onboard parts into Parts Catalog if requested, and autofill missing descriptions
+        parts_created = 0
+        existing_part_rows = conn.execute(
+            "SELECT id, part_number, description FROM parts WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+        part_lookup = {r["part_number"]: r["id"] for r in existing_part_rows}
+        part_desc_lookup = {
+            r["part_number"].upper(): str(r["description"] or "").strip()
+            for r in existing_part_rows
+        }
+
+        # Autofill missing descriptions from catalog
+        for it in cleaned_items:
+            pn_upper = it["part_number"].upper()
+            if not it["description"] and pn_upper in part_desc_lookup and part_desc_lookup[pn_upper]:
+                it["description"] = part_desc_lookup[pn_upper]
+
+        now_ts = now_iso()
+        if auto_add_parts:
+            for it in cleaned_items:
+                pn = it["part_number"]
+                raw_pits_id = str(it.get("pits_tracker_number") or it.get("pits_id") or "").strip()
+                pits_id = raw_pits_id if raw_pits_id and raw_pits_id != pn else ""
+                desc_val = str(it.get("description") or "").strip()
+                if pn not in part_lookup:
+                    new_pid = str(uuid4())
+                    conn.execute(
+                        """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (new_pid, project_id, pn, desc_val, pits_id, now_ts),
+                    )
+                    part_lookup[pn] = new_pid
+                    part_desc_lookup[pn.upper()] = desc_val
+                    parts_created += 1
+                else:
+                    # Clean up any stale part_number that was previously copied to pits_tracker_number
+                    # AND sync any non-empty description to the Parts Catalog table
+                    if desc_val:
+                        conn.execute(
+                            """UPDATE parts SET description = ?, pits_tracker_number = '', updated_at = ?
+                               WHERE project_id = ? AND part_number = ?""",
+                            (desc_val, now_ts, project_id, pn),
+                        )
+                        part_desc_lookup[pn.upper()] = desc_val
+                    else:
+                        conn.execute(
+                            """UPDATE parts SET pits_tracker_number = '', updated_at = ?
+                               WHERE project_id = ? AND part_number = ? AND pits_tracker_number = ?""",
+                            (now_ts, project_id, pn, pn),
+                        )
+        else:
+            for it in cleaned_items:
+                pn = it["part_number"]
+                desc_val = str(it.get("description") or "").strip()
+                if pn in part_lookup and desc_val:
+                    conn.execute(
+                        """UPDATE parts SET description = ?, updated_at = ?
+                           WHERE project_id = ? AND part_number = ? AND (description IS NULL OR description <> ?)""",
+                        (desc_val, now_ts, project_id, pn, desc_val),
+                    )
+                    part_desc_lookup[pn.upper()] = desc_val
+
+        # 2. Ensure an import record exists in pits_bom_imports
+        imp_row = conn.execute(
+            "SELECT id FROM pits_bom_imports WHERE project_id=? ORDER BY import_sequence ASC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if imp_row:
+            import_id = str(imp_row["id"])
+        else:
+            import_id = str(uuid4())
+            conn.execute(
+                """INSERT INTO pits_bom_imports (id, project_id, import_sequence, workbook_name, workbook_sha256, bom_sheet_name, imported_by, imported_at)
+                   VALUES (?, ?, 1, 'Manual Model Tree', 'manual', 'Model Tree', ?, ?)""",
+                (import_id, project_id, editor or "Collaborator", now_ts),
+            )
+
+        # 3. Resolve parentage via outline stack traversal
+        stack: dict[int, dict[str, Any]] = {}
+        processed_occurrences: list[dict[str, Any]] = []
+        seen_parent_child_trackers: set[tuple[str, str]] = set()
+        dup_counter: dict[tuple[str, str], int] = {}
+
+        for idx, it in enumerate(cleaned_items):
+            lvl = it["level"]
+            parent_node = stack.get(lvl - 1)
+            parent_trk = parent_node["child_tracker"] if parent_node else ""
+            parent_part_id = parent_node["part_id"] if parent_node else None
+
+            child_part_id = part_lookup.get(it["part_number"])
+
+            base_trk = str(it.get("child_tracker") or it.get("tracker") or it["part_number"]).strip()
+            pair_key = (parent_trk, base_trk)
+            if pair_key in seen_parent_child_trackers:
+                dup_idx = dup_counter.get(pair_key, 1) + 1
+                dup_counter[pair_key] = dup_idx
+                child_trk = f"{base_trk}#{dup_idx}"
+            else:
+                seen_parent_child_trackers.add(pair_key)
+                dup_counter[pair_key] = 1
+                child_trk = base_trk
+
+            stack[lvl] = {
+                "child_tracker": child_trk,
+                "part_id": child_part_id,
+                "part_number": it["part_number"],
+            }
+            stack = {d: n for d, n in stack.items() if d <= lvl}
+
+            processed_occurrences.append({
+                "source_row": idx + 1,
+                "depth": lvl,
+                "parent_tracker": parent_trk,
+                "child_tracker": child_trk,
+                "parent_part_id": parent_part_id,
+                "child_part_id": child_part_id,
+                "part_number": it["part_number"],
+                "description": it["description"],
+                "quantity": it["quantity"],
+                "group_number": it["group_number"],
+            })
+
+        # 4. Fetch all existing occurrences for this project
+        existing_occ_rows = conn.execute(
+            "SELECT * FROM pits_bom_occurrences WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+
+        # Build mapping: (parent_trk, child_trk) -> row
+        existing_by_key = {
+            (r["parent_tracker_number"], r["child_tracker_number"]): dict(r)
+            for r in existing_occ_rows
+        }
+
+        # Track which keys this new model uses
+        new_keys_used = set()
+        clean_target = re.sub(r"[^A-Za-z0-9]", "", clean_model_key).upper()
+
+        for occ_data in processed_occurrences:
+            k = (occ_data["parent_tracker"], occ_data["child_tracker"])
+            new_keys_used.add(k)
+
+            depth = occ_data["depth"]
+            qty = round(float(occ_data["quantity"]), 5)
+            raw_qty_text = f"{qty:.5f}".rstrip("0").rstrip(".") if "." in f"{qty:.5f}" else str(qty)
+            fingerprint = _pits_bom_fingerprint(depth, raw_qty_text, qty)
+
+            existing = existing_by_key.get(k)
+            if existing is not None:
+                # Update existing occurrence
+                occ_id = str(existing["id"])
+                usages: dict[str, float] = {}
+                try:
+                    data = json.loads(existing["raw_levels_json"] or "{}")
+                    if isinstance(data, dict):
+                        u = data.get("model_usages")
+                        if isinstance(u, dict):
+                            usages = {str(k_u): float(v_u) for k_u, v_u in u.items() if v_u is not None}
+                except Exception:
+                    data = {}
+
+                # Purge any stale or conflicting keys for this model
+                keys_to_purge = [
+                    k_u for k_u in usages
+                    if str(k_u) == clean_model_key
+                    or re.sub(r"[^A-Za-z0-9]", "", str(k_u)).upper() == clean_target
+                    or (len(clean_target) >= 6 and (clean_target[:6] in str(k_u).upper() or str(k_u).upper()[:6] in clean_target))
+                ]
+                for kp in keys_to_purge:
+                    del usages[kp]
+                usages[clean_model_key] = qty
+                data["model_usages"] = usages
+
+                # Store per-model row sequence in raw_levels_json to prevent cross-model source_row collisions
+                model_seq = data.get("model_sequence")
+                if not isinstance(model_seq, dict):
+                    model_seq = {}
+                for kp in keys_to_purge:
+                    model_seq.pop(kp, None)
+                model_seq[clean_model_key] = idx + 1
+                data["model_sequence"] = model_seq
+
+                if occ_data["group_number"]:
+                    data["group_number"] = occ_data["group_number"]
+                data["description"] = occ_data["description"]
+                data["part_number"] = occ_data["part_number"]
+                data["source"] = "manual"
+
+                conn.execute(
+                    """UPDATE pits_bom_occurrences
+                       SET child_part_id=?, parent_part_id=?, proposed_depth=?,
+                           proposed_quantity=?, raw_quantity_text=?, source_row=?,
+                           raw_levels_json=?, source_fingerprint=?, updated_at=?
+                       WHERE id=?""",
+                    (
+                        occ_data["child_part_id"], occ_data["parent_part_id"], depth,
+                        qty, raw_qty_text, occ_data["source_row"],
+                        json.dumps(data, ensure_ascii=False), fingerprint, now_ts,
+                        occ_id,
+                    ),
+                )
+                existing["raw_levels_json"] = json.dumps(data, ensure_ascii=False)
+            else:
+                # Insert new occurrence
+                occ_id = str(uuid4())
+                usages = {clean_model_key: qty}
+                model_seq = {clean_model_key: idx + 1}
+                data = {
+                    "model_usages": usages,
+                    "model_sequence": model_seq,
+                    "group_number": occ_data["group_number"],
+                    "description": occ_data["description"],
+                    "part_number": occ_data["part_number"],
+                    "source": "manual",
+                }
+                conn.execute(
+                    """INSERT INTO pits_bom_occurrences
+                       (id, project_id, parent_tracker_number, child_tracker_number,
+                        parent_part_id, child_part_id, proposed_depth, raw_quantity_text,
+                        proposed_quantity, source_row, raw_levels_json, source_fingerprint,
+                        review_status, source_state, validation_issues_json,
+                        first_seen_import_id, last_seen_import_id,
+                        first_seen_at, last_seen_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Needs review', 'Current', '[]',
+                               ?, ?, ?, ?, ?)""",
+                    (
+                        occ_id, project_id, occ_data["parent_tracker"], occ_data["child_tracker"],
+                        occ_data["parent_part_id"], occ_data["child_part_id"], depth,
+                        raw_qty_text, qty, occ_data["source_row"],
+                        json.dumps(data, ensure_ascii=False), fingerprint,
+                        import_id, import_id, now_ts, now_ts, now_ts,
+                    ),
+                )
+                existing_by_key[k] = {"id": occ_id, "raw_levels_json": json.dumps(data, ensure_ascii=False)}
+
+        # 5. Clean up any previous usages of this model that were removed
+        for k, existing in existing_by_key.items():
+            if k not in new_keys_used and "raw_levels_json" in existing:
+                try:
+                    data = json.loads(existing["raw_levels_json"] or "{}")
+                    if isinstance(data, dict):
+                        usages = data.get("model_usages", {})
+                        if isinstance(usages, dict):
+                            keys_to_purge = [
+                                mk for mk in usages
+                                if str(mk) == clean_model_key
+                                or re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target
+                                or (len(clean_target) >= 6 and (clean_target[:6] in str(mk).upper() or str(mk).upper()[:6] in clean_target))
+                            ]
+                            if keys_to_purge:
+                                for kp in keys_to_purge:
+                                    del usages[kp]
+                                data["model_usages"] = usages
+                                if "model_sequence" in data and isinstance(data["model_sequence"], dict):
+                                    for kp in keys_to_purge:
+                                        data["model_sequence"].pop(kp, None)
+                                if not usages and (data.get("source") == "manual" or str(existing.get("source_state", "")).lower() == "manual"):
+                                    conn.execute("DELETE FROM pits_bom_occurrences WHERE id=?", (existing["id"],))
+                                else:
+                                    conn.execute(
+                                        "UPDATE pits_bom_occurrences SET raw_levels_json=?, updated_at=? WHERE id=?",
+                                        (json.dumps(data, ensure_ascii=False), now_ts, existing["id"]),
+                                    )
+                except Exception:
+                    pass
+
+        # 6. Audit event
+        record_audit_event(
+            project_id,
+            "Model Tree BOM",
+            f"Saved BOM for model '{clean_model_key}'",
+            len(processed_occurrences),
+            editor_name=editor,
+            _conn=conn,
+        )
+
+        return {
+            "saved_count": len(processed_occurrences),
+            "parts_created": parts_created,
+            "model_number": clean_model_key,
+        }
+
+
+def sync_builder_inputs_to_items(items: list[dict[str, Any]], model_id: str) -> None:
+    """Synchronize Streamlit session state widget values into the in-memory items list."""
+    import streamlit as st
+    for it in items:
+        uid = it.get("_uid")
+        if not uid:
+            continue
+        pn_k = f"bld_pn_{uid}_{model_id}"
+        if pn_k in st.session_state:
+            it["part_number"] = str(st.session_state[pn_k]).strip()
+        desc_k = f"bld_desc_{uid}_{model_id}"
+        if desc_k in st.session_state:
+            it["description"] = str(st.session_state[desc_k]).strip()
+        qty_k = f"bld_qty_{uid}_{model_id}"
+        if qty_k in st.session_state:
+            try:
+                it["quantity"] = max(0.00001, round(float(st.session_state[qty_k]), 5))
+            except (TypeError, ValueError):
+                pass
+        lvl_k = f"bld_lvl_{uid}_{model_id}"
+        if lvl_k in st.session_state:
+            try:
+                it["level"] = max(1, min(11, int(st.session_state[lvl_k])))
+            except (TypeError, ValueError):
+                pass
+
+
+def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: str) -> list[dict[str, Any]]:
+    """Capture live un-saved cell edits, additions, and deletions from Streamlit Session State."""
+    import streamlit as st
+    from utils.table_filters import _EDITOR_INSTANCE_MARKER
+
+    base_items = [dict(it) for it in st.session_state.get(d_key, [])]
+    if not base_items:
+        base_items = [{"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}]
+
+    has_builder_keys = any(
+        k.startswith("bld_pn_") and k.endswith(f"_{curr_model_id}")
+        for k in st.session_state
+    )
+    if has_builder_keys:
+        sync_builder_inputs_to_items(base_items, curr_model_id)
+        return base_items
+
+    generation = int(st.session_state.get(f"_table_editor_generation_{ed_logical_key}", 0) or 0)
+    ed_key = f"{ed_logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
+    ed_state = st.session_state.get(ed_key)
+    if not isinstance(ed_state, dict):
+        return base_items
+
+    edited_rows = ed_state.get("edited_rows") or {}
+    for idx_str, edits in edited_rows.items():
+        try:
+            idx = int(idx_str)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(base_items):
+            if "Select" in edits:
+                base_items[idx]["_selected"] = bool(edits["Select"])
+            if "Level" in edits:
+                try:
+                    base_items[idx]["level"] = max(1, min(11, int(edits["Level"])))
+                except (TypeError, ValueError):
+                    pass
+            if "Part #" in edits:
+                base_items[idx]["part_number"] = str(edits["Part #"]).strip()
+            if "Description" in edits:
+                base_items[idx]["description"] = str(edits["Description"]).strip()
+            if "Qty" in edits:
+                try:
+                    base_items[idx]["quantity"] = max(0.00001, round(float(edits["Qty"]), 5))
+                except (TypeError, ValueError):
+                    pass
+
+    added_rows = ed_state.get("added_rows") or []
+    for add in added_rows:
+        try:
+            lvl = max(1, min(11, int(add.get("Level", 1) or 1)))
+        except (TypeError, ValueError):
+            lvl = 1
+        try:
+            qty = max(0.00001, round(float(add.get("Qty", 1.0) or 1.0), 5))
+        except (TypeError, ValueError):
+            qty = 1.0
+        base_items.append({
+            "level": lvl,
+            "part_number": str(add.get("Part #") or "").strip(),
+            "description": str(add.get("Description") or "").strip(),
+            "quantity": qty,
+            "_uid": str(uuid4())[:8],
+        })
+
+    deleted_rows = set(ed_state.get("deleted_rows") or [])
+    if deleted_rows:
+        base_items = [it for idx, it in enumerate(base_items) if idx not in deleted_rows]
+
+    return base_items
+
+
+def move_bom_rows_up(items: list[dict[str, Any]], selected_indices: set[int] | list[int]) -> tuple[list[dict[str, Any]], set[int]]:
+    """Move selected rows up by one position, preserving relative order."""
+    sel = {int(i) for i in selected_indices if isinstance(i, (int, str)) and str(i).isdigit()}
+    if not items or not sel:
+        return list(items), set()
+    new_items = [dict(it) for it in items]
+    new_selected = set()
+    for idx in sorted(sel):
+        if idx > 0 and (idx - 1) not in new_selected:
+            new_items[idx - 1], new_items[idx] = new_items[idx], new_items[idx - 1]
+            new_selected.add(idx - 1)
+        else:
+            new_selected.add(idx)
+    return new_items, new_selected
+
+
+def move_bom_rows_down(items: list[dict[str, Any]], selected_indices: set[int] | list[int]) -> tuple[list[dict[str, Any]], set[int]]:
+    """Move selected rows down by one position, preserving relative order."""
+    sel = {int(i) for i in selected_indices if isinstance(i, (int, str)) and str(i).isdigit()}
+    if not items or not sel:
+        return list(items), set()
+    new_items = [dict(it) for it in items]
+    new_selected = set()
+    for idx in sorted(sel, reverse=True):
+        if idx < len(new_items) - 1 and (idx + 1) not in new_selected:
+            new_items[idx + 1], new_items[idx] = new_items[idx], new_items[idx + 1]
+            new_selected.add(idx + 1)
+        else:
+            new_selected.add(idx)
+    return new_items, new_selected
+
+
+def delete_bom_rows(items: list[dict[str, Any]], selected_indices: set[int] | list[int]) -> tuple[list[dict[str, Any]], set[int]]:
+    """Delete all selected rows from items. Returns new items and new active selection."""
+    sel = {int(i) for i in selected_indices if isinstance(i, (int, str)) and str(i).isdigit()}
+    if not items or not sel:
+        return list(items), set()
+    new_items = [dict(it) for idx, it in enumerate(items) if idx not in sel]
+    if not new_items:
+        new_items = [{"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}]
+        return new_items, {0}
+    min_sel = min(sel)
+    next_sel = min(min_sel, len(new_items) - 1)
+    return new_items, {next_sel}
+
+
+__domain_exports__ = ['pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES', 'project_table', 'part_scenario_activity', 'active_part_ids', 'update_part_scenario_activity', 'normalize_model_applicability', '_clean_optional_text', '_validated_part_catalog_fields', 'upsert_part', 'update_part_rows', 'part_delete_impact', 'delete_project_part', 'set_part_image', 'add_part_image', 'part_images', 'complexity_features', 'complexity_feature_delete_impacts', 'complexity_tree', 'potential_duplicate_models', 'part_feature_rules', 'update_part_feature_rules', 'complexity_planning_snapshot', 'restore_complexity_planning_snapshot', 'update_complexity_features', 'update_complexity_tree', 'model_planning_snapshot', '_insert_snapshot_rows', 'restore_model_planning_snapshot', 'delete_project_models', 'delete_project_model', 'add_project_model', 'update_project_model_rows', 'pits_records', 'pits_revisions', 'pits_import_conflict_parts', 'import_pits_id_snapshot', 'apply_pits_updates', 'set_mbom_review_status', 'sync_confirmed_mbom_parts', 'pits_bom_occurrences', 'review_pits_bom_occurrences', 'escalate_pits_bom_occurrence', 'G_FORMAT_REGEX', 'is_g_format_number', 'model_bom_tree_nodes', 'pits_bom_model_tree', 'pits_assembly_mini_bom', 'get_manual_model_bom', 'save_manual_model_bom', 'get_known_subassembly_structure', 'get_model_level1_assemblies', 'detect_unexpanded_subassemblies', 'expand_subassembly_items', 'sort_bom_hierarchy', 'sync_builder_inputs_to_items', 'get_live_bom_editor_items', 'move_bom_rows_up', 'move_bom_rows_down', 'delete_bom_rows']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])
