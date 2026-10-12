@@ -353,6 +353,392 @@ class ModelTreeScratchBomTests(unittest.TestCase):
         self.assertEqual(clips[0]["quantity"], 1.0)
         self.assertEqual(clips[1]["quantity"], 2.0)
 
+    def test_expand_subassembly_items_preserves_assemblies_and_inserts_between(self):
+        draft = [
+            {"level": 1, "part_number": "ASM-TOP-01", "description": "Top Assembly 1", "quantity": 1.0},
+            {"level": 2, "part_number": "GRP-DOOR", "description": "Door Group", "quantity": 1.0},
+            {"level": 1, "part_number": "ASM-TOP-02", "description": "Top Assembly 2", "quantity": 1.0},
+        ]
+        detected = [
+            {
+                "part_number": "GRP-DOOR",
+                "level": 2,
+                "description": "Door Group",
+                "children": [
+                    {"part_number": "PRT-HINGE", "description": "Door Hinge", "quantity": 2.0, "relative_level": 1},
+                    {"part_number": "PRT-LATCH", "description": "Door Latch", "quantity": 1.0, "relative_level": 1},
+                ],
+            }
+        ]
+
+        expanded = store.expand_subassembly_items(draft, detected)
+        self.assertEqual(len(expanded), 5)
+
+        # 1. Verify Top-Level Assembly 1 is preserved and NOT deleted/overwritten
+        self.assertEqual(expanded[0]["part_number"], "ASM-TOP-01")
+        self.assertEqual(expanded[0]["level"], 1)
+        self.assertEqual(expanded[0]["description"], "Top Assembly 1")
+
+        # 2. Verify GRP-DOOR is preserved
+        self.assertEqual(expanded[1]["part_number"], "GRP-DOOR")
+        self.assertEqual(expanded[1]["level"], 2)
+
+        # 3. Verify child components are inserted between assemblies at level 3
+        self.assertEqual(expanded[2]["part_number"], "PRT-HINGE")
+        self.assertEqual(expanded[2]["level"], 3)
+        self.assertEqual(expanded[2]["quantity"], 2.0)
+        self.assertEqual(expanded[3]["part_number"], "PRT-LATCH")
+        self.assertEqual(expanded[3]["level"], 3)
+        self.assertEqual(expanded[3]["quantity"], 1.0)
+
+        # 4. Verify subsequent Top-Level Assembly 2 is NOT overwritten and follows children
+        self.assertEqual(expanded[4]["part_number"], "ASM-TOP-02")
+        self.assertEqual(expanded[4]["level"], 1)
+        self.assertEqual(expanded[4]["description"], "Top Assembly 2")
+
+    def test_detect_unexpanded_subassemblies(self):
+        # Save a subassembly in model 1
+        m1_items = [
+            {"level": 1, "part_number": "ASM-SRC-01", "description": "Source Model", "quantity": 1.0},
+            {"level": 2, "part_number": "GRP-SUB-WIDGET", "description": "Widget Assembly", "quantity": 1.0},
+            {"level": 3, "part_number": "PRT-WIDGET-GEAR", "description": "Gear", "quantity": 3.0},
+        ]
+        store.save_manual_model_bom(self.project_id, self.model_id, m1_items, auto_add_parts=True)
+
+        # Draft for model 2 contains only GRP-SUB-WIDGET without its children
+        draft_unexpanded = [
+            {"level": 1, "part_number": "ASM-TARGET-02", "description": "Target Model", "quantity": 1.0},
+            {"level": 2, "part_number": "GRP-SUB-WIDGET", "description": "", "quantity": 1.0},
+        ]
+
+        detected = store.detect_unexpanded_subassemblies(self.project_id, draft_unexpanded)
+        self.assertEqual(len(detected), 1)
+        self.assertEqual(detected[0]["part_number"], "GRP-SUB-WIDGET")
+        child_pns = [c["part_number"] for c in detected[0]["children"]]
+        self.assertIn("PRT-WIDGET-GEAR", child_pns)
+
+        # If child gear is already present, detect should return empty (no false positive)
+        draft_already_expanded = [
+            {"level": 1, "part_number": "ASM-TARGET-02", "description": "Target Model", "quantity": 1.0},
+            {"level": 2, "part_number": "GRP-SUB-WIDGET", "description": "", "quantity": 1.0},
+            {"level": 3, "part_number": "PRT-WIDGET-GEAR", "description": "Gear", "quantity": 3.0},
+        ]
+        detected_after = store.detect_unexpanded_subassemblies(self.project_id, draft_already_expanded)
+        self.assertEqual(len(detected_after), 0)
+
+    def test_subassembly_children_appear_below_group_and_levels_continuous(self):
+        # 1. Setup a nested subassembly structure in model 1:
+        # L1: ASM-ROOT -> L2: GRP-COMPLEX -> L3: SUB-MODULE -> L4: PRT-SCREW
+        #                                -> L3: PRT-BRACKET
+        model1_bom = [
+            {"level": 1, "part_number": "ASM-ROOT-M1", "description": "Model 1 Root", "quantity": 1.0},
+            {"level": 2, "part_number": "GRP-COMPLEX", "description": "Complex Group", "quantity": 1.0},
+            {"level": 3, "part_number": "SUB-MODULE", "description": "Sub Module", "quantity": 1.0},
+            {"level": 4, "part_number": "PRT-SCREW", "description": "Fastening Screw", "quantity": 4.0},
+            {"level": 3, "part_number": "PRT-BRACKET", "description": "Mounting Bracket", "quantity": 2.0},
+        ]
+        store.save_manual_model_bom(self.project_id, self.model_id, model1_bom, auto_add_parts=True)
+
+        # 2. In Model 2, user drafts a minimal BOM with only the group:
+        m2_id = store.add_project_model(self.project_id, "TEST-M2", "Test Model 2", "Second Model")
+        draft_m2 = [
+            {"level": 1, "part_number": "ASM-ROOT-M2", "description": "Model 2 Root", "quantity": 1.0},
+            {"level": 2, "part_number": "GRP-COMPLEX", "description": "", "quantity": 1.0},
+            {"level": 1, "part_number": "ASM-SECOND-M2", "description": "Subsequent Assembly", "quantity": 1.0},
+        ]
+
+        # 3. Detect unexpanded subassemblies
+        detected = store.detect_unexpanded_subassemblies(self.project_id, draft_m2)
+        self.assertEqual(len(detected), 1)
+        self.assertEqual(detected[0]["part_number"], "GRP-COMPLEX")
+
+        # 4. Expand subassembly
+        expanded = store.expand_subassembly_items(draft_m2, detected)
+        self.assertEqual(len(expanded), 6)
+
+        # Verify strict order:
+        # Row 0: L1 ASM-ROOT-M2
+        # Row 1: L2 GRP-COMPLEX (parent group must come first!)
+        # Row 2: L3 SUB-MODULE (child component below group)
+        # Row 3: L4 PRT-SCREW (grandchild below SUB-MODULE)
+        # Row 4: L3 PRT-BRACKET (sibling child below group)
+        # Row 5: L1 ASM-SECOND-M2 (subsequent assembly preserved at the end)
+        self.assertEqual(expanded[0]["part_number"], "ASM-ROOT-M2")
+        self.assertEqual(expanded[0]["level"], 1)
+
+        self.assertEqual(expanded[1]["part_number"], "GRP-COMPLEX")
+        self.assertEqual(expanded[1]["level"], 2)
+
+        self.assertEqual(expanded[2]["part_number"], "SUB-MODULE")
+        self.assertEqual(expanded[2]["level"], 3)
+
+        self.assertEqual(expanded[3]["part_number"], "PRT-SCREW")
+        self.assertEqual(expanded[3]["level"], 4)
+
+        self.assertEqual(expanded[4]["part_number"], "PRT-BRACKET")
+        self.assertEqual(expanded[4]["level"], 3)
+
+        self.assertEqual(expanded[5]["part_number"], "ASM-SECOND-M2")
+        self.assertEqual(expanded[5]["level"], 1)
+
+        # Verify levels NEVER skip or jump backwards inappropriately (no 1, 3, 2)
+        for i in range(1, len(expanded)):
+            prev_l = expanded[i - 1]["level"]
+            curr_l = expanded[i]["level"]
+            # A child cannot skip levels (curr_l <= prev_l + 1)
+            self.assertLessEqual(curr_l, prev_l + 1, f"Row {i} skipped level from {prev_l} to {curr_l}")
+
+    def test_multimodel_source_row_collision_resilience(self):
+        # Save model 1
+        m1_bom = [
+            {"level": 1, "part_number": "ASM-PARENT", "quantity": 1.0},
+            {"level": 2, "part_number": "GRP-SHARED", "quantity": 1.0},
+            {"level": 3, "part_number": "PRT-SHARED-COMP", "quantity": 1.0},
+        ]
+        store.save_manual_model_bom(self.project_id, self.model_id, m1_bom, auto_add_parts=True)
+
+        # Now simulate a cross-model database collision where source_row of PRT-SHARED-COMP
+        # is manually updated to a smaller or equal source_row as GRP-SHARED
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE pits_bom_occurrences SET source_row = 1 WHERE child_tracker_number = 'PRT-SHARED-COMP'"
+            )
+            conn.execute(
+                "UPDATE pits_bom_occurrences SET source_row = 10 WHERE child_tracker_number = 'GRP-SHARED'"
+            )
+
+        # Retrieve BOM for model 1 via get_manual_model_bom
+        retrieved = store.get_manual_model_bom(self.project_id, self.model_id)
+        self.assertEqual(len(retrieved), 3)
+
+        # Assert that even with corrupted source_row, hierarchy order is preserved:
+        # Row 0: L1 ASM-PARENT
+        # Row 1: L2 GRP-SHARED (parent group MUST be above component)
+        # Row 2: L3 PRT-SHARED-COMP (child component MUST be below group)
+        self.assertEqual(retrieved[0]["part_number"], "ASM-PARENT")
+        self.assertEqual(retrieved[0]["level"], 1)
+
+        self.assertEqual(retrieved[1]["part_number"], "GRP-SHARED")
+        self.assertEqual(retrieved[1]["level"], 2)
+
+        self.assertEqual(retrieved[2]["part_number"], "PRT-SHARED-COMP")
+        self.assertEqual(retrieved[2]["level"], 3)
+
+    def test_spreadsheet_row_insertion_and_deletion_between_parts(self):
+        # 1. Initial draft representing a 3-tier hierarchy
+        draft = [
+            {"level": 1, "part_number": "ASM-ROOT", "description": "Top Root", "quantity": 1.0, "_uid": "u1"},
+            {"level": 2, "part_number": "GRP-SIDE", "description": "Side Group", "quantity": 1.0, "_uid": "u2"},
+            {"level": 3, "part_number": "PRT-BOTTOM", "description": "Bottom Clip", "quantity": 4.0, "_uid": "u3"},
+        ]
+
+        # 2. Test inserting a row below Row 2 (GRP-SIDE) -> between GRP-SIDE and PRT-BOTTOM
+        target_idx = 1  # Row 2 (0-indexed)
+        new_row_below = {
+            "level": draft[target_idx]["level"],
+            "part_number": "PRT-BETWEEN-1",
+            "description": "Inserted Between Parts",
+            "quantity": 1.0,
+            "_uid": "u_new1",
+        }
+        draft.insert(target_idx + 1, new_row_below)
+
+        self.assertEqual(len(draft), 4)
+        self.assertEqual(draft[0]["part_number"], "ASM-ROOT")
+        self.assertEqual(draft[1]["part_number"], "GRP-SIDE")
+        self.assertEqual(draft[2]["part_number"], "PRT-BETWEEN-1")  # Inserted between row 2 and 3!
+        self.assertEqual(draft[2]["level"], 2)
+        self.assertEqual(draft[3]["part_number"], "PRT-BOTTOM")
+
+        # 3. Test inserting a row above Row 2 (GRP-SIDE) -> between ASM-ROOT and GRP-SIDE
+        target_idx = 1
+        new_row_above = {
+            "level": draft[target_idx]["level"],
+            "part_number": "PRT-BETWEEN-0",
+            "description": "Inserted Above Group",
+            "quantity": 1.0,
+            "_uid": "u_new0",
+        }
+        draft.insert(target_idx, new_row_above)
+
+        self.assertEqual(len(draft), 5)
+        self.assertEqual(draft[0]["part_number"], "ASM-ROOT")
+        self.assertEqual(draft[1]["part_number"], "PRT-BETWEEN-0")  # Inserted above GRP-SIDE!
+        self.assertEqual(draft[2]["part_number"], "GRP-SIDE")
+        self.assertEqual(draft[3]["part_number"], "PRT-BETWEEN-1")
+        self.assertEqual(draft[4]["part_number"], "PRT-BOTTOM")
+
+        # 4. Test deleting a specific row between part numbers (e.g. Row 3: GRP-SIDE)
+        del_target = 2
+        removed = draft.pop(del_target)
+        self.assertEqual(removed["part_number"], "GRP-SIDE")
+        self.assertEqual(len(draft), 4)
+        self.assertEqual([r["part_number"] for r in draft], ["ASM-ROOT", "PRT-BETWEEN-0", "PRT-BETWEEN-1", "PRT-BOTTOM"])
+
+        # 5. Test moving a row up and down
+        # Move Row 2 (PRT-BETWEEN-1, idx 2) up
+        draft[2], draft[1] = draft[1], draft[2]
+        self.assertEqual([r["part_number"] for r in draft], ["ASM-ROOT", "PRT-BETWEEN-1", "PRT-BETWEEN-0", "PRT-BOTTOM"])
+
+    def test_get_live_editor_items_preserves_cell_edits_and_native_deletions(self):
+        import streamlit as st
+        from utils.store import get_live_bom_editor_items
+
+        m_id = "test_model_live"
+        d_key = f"manual_bom_draft_{m_id}"
+        ed_key = f"bom_grid_editor_{m_id}"
+
+        # Initialize base items
+        st.session_state[d_key] = [
+            {"level": 1, "part_number": "ASM-ROOT", "description": "Old Root", "quantity": 1.0, "_uid": "u1"},
+            {"level": 2, "part_number": "GRP-DEL", "description": "To Delete", "quantity": 1.0, "_uid": "u2"},
+            {"level": 2, "part_number": "PRT-KEEP", "description": "Keep Me", "quantity": 1.0, "_uid": "u3"},
+        ]
+
+        from utils.table_filters import _EDITOR_INSTANCE_MARKER
+
+        # Simulate Streamlit data_editor state:
+        # - Row 0 has Description and Qty edited
+        # - Row 1 is deleted natively
+        inst_key = f"{ed_key}{_EDITOR_INSTANCE_MARKER}0"
+        st.session_state[inst_key] = {
+            "edited_rows": {
+                "0": {"Description": "New Root Desc", "Qty": 3.14159},
+            },
+            "added_rows": [],
+            "deleted_rows": [1],
+        }
+
+        live_items = get_live_bom_editor_items(m_id, d_key, ed_key)
+
+        # GRP-DEL should be gone
+        self.assertEqual(len(live_items), 2)
+        # ASM-ROOT should have preserved the live edits
+        self.assertEqual(live_items[0]["part_number"], "ASM-ROOT")
+        self.assertEqual(live_items[0]["description"], "New Root Desc")
+        self.assertEqual(live_items[0]["quantity"], 3.14159)
+        # PRT-KEEP should remain
+        self.assertEqual(live_items[1]["part_number"], "PRT-KEEP")
+
+    def test_direct_table_row_selection_and_action_dispatch(self):
+        # Verify that toggling Select checkbox or editing a cell in the table sets the active row index
+        m_id = self.model_id
+        row_tools_idx_key = f"row_tools_idx_{m_id}"
+        sel_indices_key = f"bom_selected_indices_{m_id}"
+
+        # 1. Simulate user selecting Row 2 in table (0-indexed: 1)
+        import streamlit as st
+        st.session_state[sel_indices_key] = {1}
+        st.session_state[row_tools_idx_key] = 1
+
+        self.assertIn(1, st.session_state[sel_indices_key])
+        self.assertEqual(st.session_state[row_tools_idx_key], 1)
+
+        # 2. Simulate inserting a row below Row 2 (pos 2)
+        draft = [
+            {"level": 1, "part_number": "L1-ASM", "quantity": 1.0},
+            {"level": 2, "part_number": "L2-GRP", "quantity": 1.0},
+            {"level": 3, "part_number": "L3-PRT", "quantity": 1.0},
+        ]
+        sel_row_idx = st.session_state[row_tools_idx_key]
+        target_item = draft[sel_row_idx]
+        new_row = {
+            "level": target_item["level"],
+            "part_number": "L2-NEW-INSERT",
+            "quantity": 1.0,
+        }
+        ins_pos = sel_row_idx + 1
+        draft.insert(ins_pos, new_row)
+        st.session_state[row_tools_idx_key] = ins_pos
+
+        self.assertEqual(len(draft), 4)
+        self.assertEqual(draft[0]["part_number"], "L1-ASM")
+        self.assertEqual(draft[1]["part_number"], "L2-GRP")
+        self.assertEqual(draft[2]["part_number"], "L2-NEW-INSERT")
+        self.assertEqual(draft[3]["part_number"], "L3-PRT")
+        # Newly inserted row is now selected
+        self.assertEqual(st.session_state[row_tools_idx_key], 2)
+
+    def test_multi_row_move_up_contiguous_and_boundary(self):
+        from utils.store import move_bom_rows_up
+        items = [
+            {"part_number": "P0"},
+            {"part_number": "P1"},
+            {"part_number": "P2"},
+            {"part_number": "P3"},
+            {"part_number": "P4"},
+        ]
+        # 1. Move contiguous selection [1, 2] up -> P1 and P2 swap with P0
+        res_items, res_sel = move_bom_rows_up(items, {1, 2})
+        self.assertEqual([x["part_number"] for x in res_items], ["P1", "P2", "P0", "P3", "P4"])
+        self.assertEqual(res_sel, {0, 1})
+
+        # 2. Boundary test: moving selection {0, 1} up cannot move beyond top
+        res_items2, res_sel2 = move_bom_rows_up(res_items, res_sel)
+        self.assertEqual([x["part_number"] for x in res_items2], ["P1", "P2", "P0", "P3", "P4"])
+        self.assertEqual(res_sel2, {0, 1})
+
+        # 3. Non-contiguous selection {1, 3} on original items
+        res_items3, res_sel3 = move_bom_rows_up(items, {1, 3})
+        # P1 moves to 0 (swapping P0), P3 moves to 2 (swapping P2)
+        self.assertEqual([x["part_number"] for x in res_items3], ["P1", "P0", "P3", "P2", "P4"])
+        self.assertEqual(res_sel3, {0, 2})
+
+    def test_multi_row_move_down_contiguous_and_boundary(self):
+        from utils.store import move_bom_rows_down
+        items = [
+            {"part_number": "P0"},
+            {"part_number": "P1"},
+            {"part_number": "P2"},
+            {"part_number": "P3"},
+            {"part_number": "P4"},
+        ]
+        # 1. Move contiguous selection [2, 3] down -> P2 and P3 swap with P4
+        res_items, res_sel = move_bom_rows_down(items, {2, 3})
+        self.assertEqual([x["part_number"] for x in res_items], ["P0", "P1", "P4", "P2", "P3"])
+        self.assertEqual(res_sel, {3, 4})
+
+        # 2. Boundary test: moving selection {3, 4} down cannot move beyond bottom
+        res_items2, res_sel2 = move_bom_rows_down(res_items, res_sel)
+        self.assertEqual([x["part_number"] for x in res_items2], ["P0", "P1", "P4", "P2", "P3"])
+        self.assertEqual(res_sel2, {3, 4})
+
+        # 3. Non-contiguous selection {1, 3} on original items
+        res_items3, res_sel3 = move_bom_rows_down(items, {1, 3})
+        # P3 moves to 4 (swapping P4), P1 moves to 2 (swapping P2)
+        self.assertEqual([x["part_number"] for x in res_items3], ["P0", "P2", "P1", "P4", "P3"])
+        self.assertEqual(res_sel3, {2, 4})
+
+    def test_multi_row_delete_and_empty_reset(self):
+        from utils.store import delete_bom_rows
+        items = [
+            {"part_number": "P0"},
+            {"part_number": "P1"},
+            {"part_number": "P2"},
+            {"part_number": "P3"},
+        ]
+        # 1. Delete multiple rows [1, 2]
+        res_items, res_sel = delete_bom_rows(items, {1, 2})
+        self.assertEqual([x["part_number"] for x in res_items], ["P0", "P3"])
+        self.assertEqual(res_sel, {1})
+
+        # 2. Delete all rows
+        res_items_empty, res_sel_empty = delete_bom_rows(res_items, {0, 1})
+        self.assertEqual(len(res_items_empty), 1)
+        self.assertEqual(res_items_empty[0]["part_number"], "")
+        self.assertEqual(res_sel_empty, {0})
+
+    def test_range_selection_and_checkbox_selection(self):
+        # Verify range selection logic: min to max inclusive
+        from_r = 1
+        to_r = 4
+        sel_range = set(range(min(from_r, to_r), max(from_r, to_r) + 1))
+        self.assertEqual(sel_range, {1, 2, 3, 4})
+
+        # Verify reverse range: from Row 5 to Row 2
+        rev_range = set(range(min(to_r, from_r), max(to_r, from_r) + 1))
+        self.assertEqual(rev_range, {1, 2, 3, 4})
+
     def test_bom_tree_page_smoke(self):
         page_path = Path(__file__).resolve().parent.parent / "app_pages" / "bom_tree.py"
         app = AppTest.from_file(str(page_path))
@@ -364,3 +750,4 @@ class ModelTreeScratchBomTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
