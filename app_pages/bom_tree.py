@@ -21,6 +21,11 @@ from utils.store import (
     project_models,
     save_manual_model_bom,
 )
+from utils.table_filters import (
+    apply_pending_table_editor_reset,
+    has_unsaved_table_changes,
+    request_table_editor_reset,
+)
 
 page_title_with_scope("Model Tree", scope="project")
 st.caption(
@@ -556,13 +561,46 @@ with tab_author:
 
         # --- Sub-tab A: Spreadsheet Editor ---
         with sub_grid:
-            auto_add_grid = st.checkbox(
-                "Automatically add new parts to Parts Catalog",
-                value=True,
-                key=f"auto_add_grid_{selected_model_id}",
-                help="If checked, any part numbers not currently in the Parts Catalog will be created automatically.",
-            )
+            # ── Logical editor key + instance rotation (standard pattern) ──
+            bom_editor_logical_key = f"bom_grid_editor_{selected_model_id}"
+            bom_editor_key = apply_pending_table_editor_reset(bom_editor_logical_key)
 
+            # Determine whether there are unsaved changes
+            is_unsaved = has_unsaved_table_changes(bom_editor_key)
+
+            # ── Action bar: left = checkbox, right = unsaved / undo / save ──
+            bar_left, bar_right = st.columns([2.5, 2], gap="small")
+            with bar_left:
+                auto_add_grid = st.checkbox(
+                    "Automatically add new parts to Parts Catalog",
+                    value=True,
+                    key=f"auto_add_grid_{selected_model_id}",
+                    help="If checked, any part numbers not currently in the Parts Catalog will be created automatically.",
+                )
+            with bar_right:
+                act_cols = st.columns([2, 1, 1.4], gap="small")
+                with act_cols[0]:
+                    if is_unsaved:
+                        st.markdown(":orange[:material/warning: **Unsaved changes**]")
+                with act_cols[1]:
+                    if st.button(
+                        "Undo",
+                        icon=":material/undo:",
+                        key=f"undo_bom_grid_{selected_model_id}",
+                        help="Discard unsaved edits and reload from the last saved BOM",
+                        disabled=not is_unsaved,
+                    ):
+                        request_table_editor_reset(bom_editor_logical_key)
+                        st.rerun()
+                with act_cols[2]:
+                    save_clicked = st.button(
+                        "Save BOM Structure",
+                        icon=":material/save:",
+                        type="primary",
+                        key=f"save_bom_grid_{selected_model_id}",
+                    )
+
+            # ── Build initial DataFrame from persisted BOM (do NOT sync on each edit) ──
             current_draft = st.session_state.get(draft_key, [])
             df_editor_data = pd.DataFrame([
                 {
@@ -578,20 +616,22 @@ with tab_author:
                     "Level": 1, "Part #": "", "Description": "", "Qty": 1.0
                 }])
 
+            # ── Data editor — Level as NumberColumn so Excel paste works ──
             edited_df = st.data_editor(
                 df_editor_data,
                 column_config={
-                    "Level": st.column_config.SelectboxColumn(
+                    "Level": st.column_config.NumberColumn(
                         "Level",
-                        options=list(range(1, 12)),
+                        min_value=1,
+                        max_value=11,
+                        step=1,
                         default=1,
-                        required=True,
+                        format="%d",
                         help="Hierarchy Level (1–11)",
                     ),
                     "Part #": st.column_config.TextColumn(
-                        "Part #",
-                        help="Part number or Assembly / Group number (required)",
-                        required=True,
+                        "Part # / Group #",
+                        help="Part number or Assembly / Group number (required to save)",
                     ),
                     "Description": st.column_config.TextColumn(
                         "Description",
@@ -602,74 +642,101 @@ with tab_author:
                         min_value=0.01,
                         step=1.0,
                         default=1.0,
-                        required=True,
+                        format="%.2f",
                         help="Quantity per unit",
                     ),
                 },
                 num_rows="dynamic",
                 hide_index=True,
-                key=f"bom_grid_editor_{selected_model_id}",
+                key=bom_editor_key,
                 width="stretch",
             )
 
-            # Sync draft from data_editor
-            if edited_df is not None and not edited_df.empty:
-                new_draft_list = []
-                for _, r in edited_df.iterrows():
+            # ── Save action ──
+            if save_clicked:
+                rows_to_save = []
+                validation_errors = []
+                for idx, r in edited_df.iterrows():
                     pn = str(r.get("Part #") or "").strip()
-                    if pn:
-                        new_draft_list.append({
-                            "level": int(r.get("Level") or 1),
-                            "part_number": pn,
-                            "description": str(r.get("Description") or "").strip(),
-                            "quantity": float(r.get("Qty") or 1.0),
-                        })
-                if new_draft_list:
-                    st.session_state[draft_key] = new_draft_list
+                    desc = str(r.get("Description") or "").strip()
+                    qty_raw = r.get("Qty")
+                    lvl_raw = r.get("Level")
+                    # Skip completely blank rows silently
+                    if not pn and not desc:
+                        continue
+                    if not pn:
+                        validation_errors.append(f"Row {idx + 1}: Part # is required.")
+                        continue
+                    try:
+                        lvl = int(float(lvl_raw)) if lvl_raw is not None else 1
+                        lvl = max(1, min(11, lvl))
+                    except (TypeError, ValueError):
+                        lvl = 1
+                    try:
+                        qty = float(qty_raw) if qty_raw is not None else 1.0
+                        qty = max(0.01, qty)
+                    except (TypeError, ValueError):
+                        qty = 1.0
+                    rows_to_save.append({
+                        "level": lvl,
+                        "part_number": pn,
+                        "description": desc,
+                        "quantity": qty,
+                    })
 
-            c_save_g, c_reload_g, c_clear_g = st.columns([1.5, 1, 1])
-            with c_save_g:
-                if st.button("💾 Save BOM Structure", type="primary", key=f"save_bom_grid_{selected_model_id}"):
-                    draft_to_save = st.session_state.get(draft_key, [])
+                if validation_errors:
+                    for err in validation_errors:
+                        st.error(f":material/error: {err}")
+                elif not rows_to_save:
+                    st.warning("No valid BOM rows to save. Fill in at least one Part # before saving.")
+                else:
                     try:
                         editor_name = st.session_state.get("current_editor", "")
                         save_res = save_manual_model_bom(
                             project_id,
                             selected_model_id,
-                            draft_to_save,
+                            rows_to_save,
                             auto_add_parts=auto_add_grid,
                             editor=editor_name,
                         )
-                        st.success(
-                            f"Saved **{save_res['saved_count']}** BOM items for model **{save_res['model_number']}**! "
-                            f"({save_res['parts_created']} new parts onboarded to Parts Catalog)"
+                        # Refresh the draft key so the editor opens with saved data
+                        st.session_state[draft_key] = rows_to_save
+                        request_table_editor_reset(bom_editor_logical_key)
+                        st.toast(
+                            f"Saved {save_res['saved_count']} BOM items for "
+                            f"{save_res['model_number']}  "
+                            f"({save_res['parts_created']} new parts onboarded)",
+                            icon=":material/check_circle:",
                         )
                         st.rerun()
                     except ValueError as val_err:
-                        st.error(f":material/error: {str(val_err)}")
+                        st.error(f":material/error: {val_err}")
 
-            with c_reload_g:
-                if st.button("🔄 Discard & Reload", key=f"reload_bom_grid_{selected_model_id}"):
-                    st.session_state.pop(draft_key, None)
-                    st.rerun()
-
-            with c_clear_g:
-                if st.button("🗑️ Clear Draft", key=f"clear_bom_grid_{selected_model_id}"):
-                    st.session_state[draft_key] = [
-                        {"level": 1, "part_number": "", "description": "", "quantity": 1.0}
-                    ]
-                    st.rerun()
-
-            # Live preview
+            # ── Live outline preview (read-only, never modifies draft) ──
             st.markdown("---")
             st.markdown("#### :material/account_tree: Live Tree Outline Preview")
-            preview_items = st.session_state.get(draft_key, [])
-            valid_preview = [it for it in preview_items if it.get("part_number")]
-            if not valid_preview:
+            # Build preview from editor's current state (what user sees in table)
+            preview_rows = []
+            if edited_df is not None and not edited_df.empty:
+                for _, r in edited_df.iterrows():
+                    pn = str(r.get("Part #") or "").strip()
+                    if pn:
+                        try:
+                            lvl = int(float(r.get("Level") or 1))
+                            lvl = max(1, min(11, lvl))
+                        except (TypeError, ValueError):
+                            lvl = 1
+                        preview_rows.append({
+                            "level": lvl,
+                            "part_number": pn,
+                            "description": str(r.get("Description") or "").strip(),
+                            "quantity": float(r.get("Qty") or 1.0),
+                        })
+            if not preview_rows:
                 st.caption("No BOM items entered yet. Type rows above to see the live outline preview.")
             else:
                 with st.container(height=280):
-                    for p_it in valid_preview:
+                    for p_it in preview_rows:
                         lvl = p_it["level"]
                         pad = max(0, (lvl - 1) * 20)
                         icon = "📁" if lvl == 1 else ("📂" if lvl == 2 else "📄")
