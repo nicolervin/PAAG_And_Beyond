@@ -1020,6 +1020,35 @@ def _clone_ergonomics_reviews(
                     timestamp,
                 ),
             )
+        for media in conn.execute(
+            """SELECT * FROM ergonomics_visual_media
+               WHERE project_id=? AND scenario_id=? AND review_id=?
+               ORDER BY sequence, id""",
+            (project_id, source_scenario_id, source_review_id),
+        ).fetchall():
+            conn.execute(
+                """INSERT INTO ergonomics_visual_media
+                   (id, project_id, scenario_id, review_id,
+                    media_type, file_path, original_file_path,
+                    annotations_json, caption, sequence,
+                    created_at, created_by, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()),
+                    project_id,
+                    new_scenario_id,
+                    cloned_review_id,
+                    media["media_type"],
+                    media["file_path"],
+                    media["original_file_path"],
+                    media["annotations_json"],
+                    media["caption"],
+                    media["sequence"],
+                    timestamp,
+                    media["created_by"],
+                    timestamp,
+                ),
+            )
     return len(source_reviews)
 
 
@@ -1064,6 +1093,31 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE process_visual_media ADD COLUMN annotations_json TEXT NOT NULL DEFAULT ''")
     if "original_file_path" not in cols:
         conn.execute("ALTER TABLE process_visual_media ADD COLUMN original_file_path TEXT NOT NULL DEFAULT ''")
+
+
+def init_ergonomics_visual_media_schema(conn: sqlite3.Connection) -> None:
+    """Initialize database tables for scenario-owned ergonomics visual aids."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ergonomics_visual_media (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+            review_id TEXT NOT NULL REFERENCES ergonomics_reviews(id) ON DELETE CASCADE,
+            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+            file_path TEXT NOT NULL,
+            original_file_path TEXT NOT NULL DEFAULT '',
+            annotations_json TEXT NOT NULL DEFAULT '',
+            caption TEXT NOT NULL DEFAULT '',
+            sequence INTEGER NOT NULL DEFAULT 10,
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ergonomics_visual_media_review
+            ON ergonomics_visual_media(project_id, scenario_id, review_id);
+        """
+    )
 
 
 def clone_process_visual_media_scenario(
@@ -1724,6 +1778,7 @@ def init_db() -> None:
         init_equipment_schema(conn)
         init_layout_schema(conn)
         init_process_visual_media_schema(conn)
+        init_ergonomics_visual_media_schema(conn)
         _upgrade_pfmea_entries_work_element_link(conn)
         _upgrade_quality_assignments_work_element_link(conn)
         _upgrade_equipment_process_links_work_element_link(conn)
@@ -2594,4 +2649,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']

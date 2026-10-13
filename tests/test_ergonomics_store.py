@@ -198,6 +198,7 @@ class ErgonomicsStoreTests(unittest.TestCase):
                 "ergonomic_hazard_options",
                 "ergonomics_reviews",
                 "ergonomics_review_hazard_selections",
+                "ergonomics_visual_media",
             },
         )
         self.assertIn("weight_lb", part_columns)

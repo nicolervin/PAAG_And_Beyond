@@ -367,6 +367,13 @@ This amendment does not change the approved status list, the controlled `risk_cl
 - **Key relationships:** Belongs to one `ergonomics_reviews` row and references one `ergonomic_hazard_options` row. `UNIQUE(ergonomics_review_id, hazard_option_id)` prevents the same hazard from being selected twice for one review. Store validation enforces matching project and scenario boundaries.
 - **Scope:** Scenario-specific through the parent Ergonomics review. New selections require an active project-wide hazard option; an inactive option may remain on an existing review until deliberately removed.
 
+### `ergonomics_visual_media`
+
+- **Purpose:** Stores scenario-specific visual aids (photos, screenshots, annotated markups, and demonstration videos) for an Ergonomics review, with custom callout captions, non-destructive vector annotations, sequence order, and contributor attribution.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`; references an owning `ergonomics_reviews` row through `review_id`. Deleting a review cascades and removes its attached visual media and associated media files from `data/uploads/`.
+- **Scope:** Scenario-specific. Cloned scenarios duplicate review visual media associations mapped to the cloned reviews.
+- **Storage:** Persisted in `ergonomics_visual_media` table (`id`, `project_id`, `scenario_id`, `review_id`, `media_type`, `file_path`, `original_file_path`, `annotations_json`, `caption`, `sequence`, `created_at`, `created_by`, `updated_at`).
+
 ## Module proposals and decision records
 
 ### Parts Catalog saved table view and explicit refresh
@@ -890,6 +897,24 @@ All writes validate project ownership, complete input sets, required fields, uni
 In-house fabrication tagging for Fishbone sections: a future idea to mark a Subassembly-type Fishbone section as representing an in-house fabrication process (e.g., stamped metal, injection molding), for Quality's PFMEA and Control Plan tracking. Confirmed approach: an orthogonal flag added to an existing Subassembly section (not a new `section_type` value). The section remains structurally an ordinary Subassembly in every respect — walk order, nesting, parent/child rules, and all existing behavior are unaffected. The flag only changes its display designator in the Op ID naming scheme (an `F` instead of `S`) and will drive future Quality-tracked fields once scoped. Requires Quality's input on what specific data should be tracked (for example, tooling, material lot, process parameters) before a real proposal can be written and before the New Module Proposal Gate can be completed. Not yet approved, not yet scoped, no implementation should begin from this note alone.
 
 ## Proposed modules — pending owner review
+
+### Ergonomics Slides: 16:9 Landscape Review Presentation, Visual Aids, Annotations, and Print
+
+- **Proposed by:** Collaborative Ergonomist / Industrial Engineer (JF)
+- **Date recorded:** October 13, 2026
+- **Purpose:** Provide an interactive 16:9 landscape slide interface for Ergonomics reviews directly below the Ergonomics Reviews table. Each slide represents a single Ergonomics Review / Process step, displaying its specific hazard analysis, risk classification badge, work element step & Op ID, parts & physical part weights, reviewer attribution, and notes, paired with a visual aids grid (supporting photo/video uploads, clipboard screenshot paste, and in-app vector annotations). Includes a full-screen PowerPoint-style Presentation mode with keyboard navigation and an Export & Print feature for 8.5×11 and 11×17 landscape standard work distribution.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (owning project), `planning_scenarios` (active scenario), `ergonomics_reviews` (Ergonomics review records), `work_elements` (linked Process at a Glance step, Op ID, description, cycle time, takt time), `yamazumi_pitches` (workstation pitch owning the work element), `parts` (parts handled/consumed with physical part `weight_lb`), and `ergonomic_hazard_options` (hazard tags).
+  2. *Critical thread relationship:* Connects directly to the scenario-specific Ergonomics review layer of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> scenario-specific Functional Ergonomics*). Each slide is generated from a scenario-owned review (`ergonomics_reviews`) and its linked work element (`work_elements`), displaying risk classification, hazard tags, workstation pitch context, part weight, and notes. Supplemental visual media is attached to the review.
+  3. *Scope:* Scenario-specific. Ergonomics slides, visual aids, annotations, and presentations belong to the active planning scenario. Scenario cloning copies visual aids and re-maps them to cloned reviews.
+  4. *Table requirement:* Requires a new dedicated table `ergonomics_visual_media` (`id`, `project_id`, `scenario_id`, `review_id`, `media_type`, `file_path`, `original_file_path`, `annotations_json`, `caption`, `sequence`, `created_at`, `created_by`, `updated_at`). Existing tables (`ergonomics_reviews`) cannot store multi-image visual aids, annotations, captions, or video media without violating 1NF and bloat.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Deletion Standard: confirmed deletion dialog for visual aids with safe cleanup of owned media files in `data/uploads/`.
+     - Universal Save Action Standard: standard upload, clipboard paste, annotation editor modal (`image_annotator`), and sequence/caption save below the Ergonomics review table.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Ergonomics visual aids"`.
+     - Universal History Display Standard: bottom History expander using `audit_history()`.
+     - Scope Badges: scenario-specific scope badge on Ergonomics.
+     - Presentation & Print: Full-screen presentation mode dialog with review-by-review navigation, keyboard shortcuts (Arrow keys, Spacebar, full-screen toggle); Print dialog with letter/tabloid landscape format, image fit options (fill/contain/stretch), and printable HTML deck.
 
 ### Model Tree: BOM Authoring From Scratch
 

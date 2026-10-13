@@ -1,27 +1,42 @@
 from __future__ import annotations
 
+import base64
 from datetime import date, datetime
+import hashlib
+from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
 
+from utils.clipboard_image import clipboard_image, decode_clipboard_image
+from utils.image_annotator import decode_data_url, image_annotator
 from utils.equipment_ui import render_functional_equipment_tab
+from utils.ergonomics_slide_visual import (
+    render_ergonomics_presentation_deck,
+    render_ergonomics_slide,
+    render_printable_ergonomics_deck,
+)
 from utils.time_units import format_seconds
-
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     ERGONOMICS_RISK_CLASSIFICATIONS,
     ERGONOMICS_REVIEW_STATUSES,
     delete_ergonomics_reviews,
+    delete_ergonomics_visual_media,
     ergonomic_hazard_options,
     ergonomics_review_audit_history,
     ergonomics_review_save_plan,
     ergonomics_reviews,
+    ergonomics_slide_summary,
     ergonomics_work_elements,
+    get_ergonomics_visual_media,
     get_planning_scenario,
     record_audit_event,
     save_ergonomics_review_rows,
+    save_ergonomics_visual_media,
+    update_ergonomics_visual_annotations,
+    update_ergonomics_visual_media,
 )
 from utils.table_filters import (
     apply_pending_table_editor_reset,
@@ -581,6 +596,248 @@ def _confirm_merge() -> None:
             st.error(str(exc))
 
 
+@st.dialog("Ergonomics Review Presentation Mode", width="large")
+def ergo_presentation_dialog(
+    project_id: str,
+    scenario_id: str,
+    review_options: list[tuple[str, str]],
+    initial_review_id: str = "",
+) -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] div[role="dialog"] {
+            width: 96vw !important;
+            max-width: 96vw !important;
+            max-height: 96vh !important;
+        }
+        div[data-testid="stDialog"] div[data-testid="stDialogHeader"] {
+            padding-bottom: 2px !important;
+        }
+        div[data-testid="stDialog"] button[aria-label="Close"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    review_ids = [rid for rid, _ in review_options]
+    if not review_ids:
+        st.info("No Ergonomics reviews available to present.")
+        if st.button("Close"):
+            st.session_state[f"ergo_present_active_{scenario_id}"] = False
+            st.rerun()
+        return
+
+    slides_data = []
+    for rid, rlabel in review_options:
+        try:
+            summary = ergonomics_slide_summary(project_id, scenario_id, rid)
+            s_html = render_ergonomics_slide(summary, presentation_mode=True)
+            slides_data.append({
+                "review_id": rid,
+                "review_label": rlabel,
+                "slide_html": s_html,
+            })
+        except Exception:
+            continue
+
+    deck_html = render_ergonomics_presentation_deck(
+        slides_data=slides_data,
+        initial_review_id=initial_review_id,
+    )
+    st.html(deck_html)
+
+    cols = st.columns([8, 2])
+    with cols[1]:
+        if st.button("✕ Close Presentation", key=f"close_ergo_pres_{scenario_id}", width="stretch"):
+            st.session_state[f"ergo_present_active_{scenario_id}"] = False
+            st.rerun()
+
+
+@st.dialog("Export & Print Ergonomics Slides", width="large")
+def ergo_print_dialog(
+    project_id: str,
+    scenario_id: str,
+    scenario_name: str,
+    review_options: list[tuple[str, str]],
+    selected_review_id: str,
+) -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] button[aria-label="Close"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Export & Print Ergonomics Assessment Slides")
+    st.caption("Generate high-resolution printable 16:9 slides for engineering reviews or physical shop-floor postings.")
+
+    ctrl_c1, ctrl_c2, ctrl_c3 = st.columns(3)
+    with ctrl_c1:
+        print_scope = st.radio(
+            "Print Scope",
+            options=["current", "all"],
+            format_func=lambda s: "Current review slide only" if s == "current" else f"All reviews ({len(review_options)} slides)",
+            key=f"ergo_print_scope_{scenario_id}",
+        )
+    with ctrl_c2:
+        paper_size = st.selectbox(
+            "Paper Size",
+            options=["tabloid", "letter"],
+            format_func=lambda s: "11 × 17 in (Tabloid Landscape)" if s == "tabloid" else "8.5 × 11 in (Letter Landscape)",
+            key=f"ergo_print_paper_{scenario_id}",
+        )
+    with ctrl_c3:
+        image_fit = st.selectbox(
+            "Visual Aids Fit",
+            options=["contain", "fill", "cover"],
+            key=f"ergo_print_fit_{scenario_id}",
+        )
+
+    target_ids = [selected_review_id] if print_scope == "current" else [rid for rid, _ in review_options]
+
+    slides_html = []
+    for rid in target_ids:
+        try:
+            summary = ergonomics_slide_summary(project_id, scenario_id, rid)
+            s_html = render_ergonomics_slide(
+                summary,
+                print_format=paper_size,
+                image_fit=image_fit,
+            )
+            slides_html.append(s_html)
+        except Exception:
+            continue
+
+    if not slides_html:
+        st.warning("No slides to generate.")
+        if st.button("Close"):
+            st.session_state[f"ergo_print_active_{scenario_id}"] = False
+            st.rerun()
+        return
+
+    full_html = render_printable_ergonomics_deck(
+        slides_html=slides_html,
+        paper_size=paper_size,
+        image_fit=image_fit,
+        title=f"Ergonomics Assessment - {scenario_name}",
+    )
+
+    st.download_button(
+        label="📥 Download Printable HTML Deck",
+        data=full_html,
+        file_name=f"Ergonomics_Slides_{scenario_id}_{paper_size}.html",
+        mime="text/html",
+        type="primary",
+        key=f"download_ergo_html_{scenario_id}",
+    )
+
+    b64_html = base64.b64encode(full_html.encode("utf-8")).decode("ascii")
+    st.markdown(
+        f'<div style="margin-top: 10px;"><a href="data:text/html;base64,{b64_html}" target="_blank" style="display:inline-block; padding:8px 16px; background:#1e40af; color:#ffffff; border-radius:6px; text-decoration:none; font-weight:600;">🖨️ Open Print View in New Tab</a></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.write("")
+    if st.button("Close", key=f"close_ergo_print_{scenario_id}"):
+        st.session_state[f"ergo_print_active_{scenario_id}"] = False
+        st.rerun()
+
+
+@st.dialog("Annotate Ergonomics Visual Aid", width="large")
+def annotate_existing_ergo_media_dialog(
+    project_id: str,
+    scenario_id: str,
+    media_id: str,
+    media_item: dict,
+) -> None:
+    file_path = Path(media_item.get("file_path", ""))
+    orig_path = Path(media_item.get("original_file_path") or str(file_path))
+    source_path = orig_path if orig_path.exists() and orig_path.is_file() else file_path
+
+    if not source_path.exists() or not source_path.is_file():
+        st.error("Underlying image file could not be found on disk.")
+        if st.button("Close"):
+            st.session_state.pop(f"ergo_annotate_active_{scenario_id}", None)
+            st.rerun()
+        return
+
+    st.markdown("#### Annotate Visual Aid")
+    st.caption("Draw arrows, boxes, callout circles, and risk flags non-destructively over this image.")
+
+    raw_bytes = source_path.read_bytes()
+    suffix = source_path.suffix.lower()
+    mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
+    b64 = base64.b64encode(raw_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64}"
+
+    annotator_res = image_annotator(
+        image_data_url=data_url,
+        annotations_json=media_item.get("annotations_json") or "",
+        key=f"annotator_existing_ergo_{media_id}",
+    )
+
+    save_payload = getattr(annotator_res, "save", None)
+    if save_payload:
+        try:
+            new_annotations = save_payload.get("annotations_json", "")
+            new_data_url = save_payload.get("data_url", "")
+            composite_bytes = decode_data_url(new_data_url) if new_data_url else None
+            update_ergonomics_visual_annotations(
+                project_id=project_id,
+                scenario_id=scenario_id,
+                media_id=media_id,
+                annotations_json=new_annotations,
+                composite_image_bytes=composite_bytes,
+                current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+            )
+            st.toast("Annotations saved!", icon=":material/check_circle:")
+            st.session_state.pop(f"ergo_annotate_active_{scenario_id}", None)
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    st.caption("Tip: Select shapes to move, recolor, or delete them. Click 'Apply & Save Markup' inside the canvas to apply changes.")
+    if st.button("Close without saving", key=f"btn_close_ergo_annotator_{media_id}"):
+        st.session_state.pop(f"ergo_annotate_active_{scenario_id}", None)
+        st.rerun()
+
+
+@st.dialog("Delete Visual Aid", width="medium")
+def confirm_delete_ergo_media_dialog(
+    project_id: str,
+    scenario_id: str,
+    media_id: str,
+    caption: str,
+) -> None:
+    st.warning(f"Are you sure you want to permanently delete this visual aid ({caption or 'Untitled'})?")
+    d_c1, d_c2 = st.columns(2)
+    with d_c1:
+        if st.button("Cancel", key=f"cancel_del_media_{media_id}", width="stretch"):
+            st.session_state.pop(f"ergo_del_media_target_{scenario_id}", None)
+            st.rerun()
+    with d_c2:
+        if st.button("Delete Permanently", type="primary", icon=":material/delete:", key=f"confirm_del_media_{media_id}", width="stretch"):
+            try:
+                delete_ergonomics_visual_media(
+                    project_id=project_id,
+                    scenario_id=scenario_id,
+                    media_id=media_id,
+                    current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+                )
+                st.toast("Visual aid deleted.", icon=":material/delete:")
+                st.session_state.pop(f"ergo_del_media_target_{scenario_id}", None)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+
 if st.session_state.get(pending_delete_key):
     _confirm_delete()
 elif st.session_state.get(pending_merge_key):
@@ -628,6 +885,223 @@ if footer.save_and_refresh:
             _save_rows(rows, candidate_ids)
         except ValueError as exc:
             st.error(str(exc))
+
+
+st.divider()
+st.subheader("Ergonomics Review Slides", anchor="ergonomics-slides")
+
+review_options: list[tuple[str, str]] = []
+for _, r_row in reviews.iterrows():
+    rid = _clean_text(r_row.get("id"))
+    if not rid:
+        continue
+    pitch_txt = _clean_text(r_row.get("pitch")) or "Unlinked"
+    op_txt = _clean_text(r_row.get("work_element_label")) or _clean_text(r_row.get("reviewer")) or rid[:8]
+    risk_txt = _clean_text(r_row.get("risk_classification")) or "Not assessed"
+    review_options.append((rid, f"{pitch_txt} · {op_txt} ({risk_txt})"))
+
+if not review_options:
+    st.info("No saved Ergonomics reviews exist for this planning scenario yet. Add or link a review in the table above to view and present Ergonomics slides.")
+else:
+    selected_rid_key = f"ergo_slide_selected_review_{scenario_id}"
+    if selected_rid_key not in st.session_state or st.session_state[selected_rid_key] not in dict(review_options):
+        st.session_state[selected_rid_key] = review_options[0][0]
+
+    curr_rid = st.session_state[selected_rid_key]
+    review_ids = [rid for rid, _ in review_options]
+    curr_idx = review_ids.index(curr_rid) if curr_rid in review_ids else 0
+
+    if st.session_state.get(f"ergo_present_active_{scenario_id}"):
+        ergo_presentation_dialog(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            review_options=review_options,
+            initial_review_id=curr_rid,
+        )
+    elif st.session_state.get(f"ergo_print_active_{scenario_id}"):
+        ergo_print_dialog(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            scenario_name=str((scenario or {}).get("name") or "Scenario"),
+            review_options=review_options,
+            selected_review_id=curr_rid,
+        )
+    elif st.session_state.get(f"ergo_annotate_active_{scenario_id}"):
+        target_item = st.session_state[f"ergo_annotate_active_{scenario_id}"]
+        annotate_existing_ergo_media_dialog(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            media_id=target_item["id"],
+            media_item=target_item,
+        )
+    elif st.session_state.get(f"ergo_del_media_target_{scenario_id}"):
+        del_target = st.session_state[f"ergo_del_media_target_{scenario_id}"]
+        confirm_delete_ergo_media_dialog(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            media_id=del_target["id"],
+            caption=del_target.get("caption", ""),
+        )
+
+    nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6 = st.columns(
+        [0.9, 3.2, 0.9, 1.4, 1.1, 1.1],
+        vertical_alignment="center",
+    )
+
+    with nav_c1:
+        if st.button("◀ Back", disabled=(curr_idx == 0), key=f"ergo_slide_prev_{scenario_id}", width="stretch"):
+            st.session_state[selected_rid_key] = review_ids[curr_idx - 1]
+            st.rerun()
+
+    with nav_c2:
+        new_sel = st.selectbox(
+            "Jump to Review",
+            options=review_ids,
+            index=curr_idx,
+            format_func=lambda rid: dict(review_options).get(rid, rid),
+            key=f"ergo_slide_select_{scenario_id}",
+            label_visibility="collapsed",
+        )
+        if new_sel != curr_rid:
+            st.session_state[selected_rid_key] = new_sel
+            st.rerun()
+
+    with nav_c3:
+        if st.button("Next ▶", disabled=(curr_idx >= len(review_ids) - 1), key=f"ergo_slide_next_{scenario_id}", width="stretch"):
+            st.session_state[selected_rid_key] = review_ids[curr_idx + 1]
+            st.rerun()
+
+    with nav_c4:
+        st.markdown(
+            f'<div style="text-align:center; font-weight:700; color:#0369a1; font-size:0.9rem; padding-top:4px;">Slide {curr_idx + 1} of {len(review_ids)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with nav_c5:
+        if st.button("Present", icon=":material/slideshow:", key=f"btn_ergo_present_{scenario_id}", width="stretch", help="Full-screen PowerPoint presentation mode"):
+            st.session_state[f"ergo_present_active_{scenario_id}"] = True
+            st.rerun()
+
+    with nav_c6:
+        if st.button("Print", icon=":material/print:", key=f"btn_ergo_print_{scenario_id}", width="stretch", help="Export or print 11x17 or 8.5x11 slides"):
+            st.session_state[f"ergo_print_active_{scenario_id}"] = True
+            st.rerun()
+
+    try:
+        slide_summary = ergonomics_slide_summary(project_id, scenario_id, curr_rid)
+        slide_html = render_ergonomics_slide(slide_summary)
+        st.html(slide_html)
+    except Exception as exc:
+        st.error(f"Error rendering slide: {exc}")
+        slide_summary = {}
+
+    attached_media = slide_summary.get("media", [])
+    with st.expander(
+        f"Visual Aids Manager ({len(attached_media)} attached)",
+        expanded=False,
+        icon=":material/photo_library:",
+    ):
+        st.markdown("##### Add Visual Aid")
+        st.caption("Upload photos, annotated work element screenshots, or short video clips to display on this Ergonomics review slide.")
+
+        up_c1, up_c2 = st.columns([1.5, 1])
+        with up_c1:
+            uploaded_file = st.file_uploader(
+                "Upload photo or video clip (PNG, JPG, WEBP max 10MB / MP4, MOV, WEBM max 25MB)",
+                type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
+                key=f"ergo_file_upload_{curr_rid}",
+            )
+            st.caption("Or paste screenshot from clipboard:")
+            pasted = clipboard_image(key=f"ergo_paste_{curr_rid}")
+
+        with up_c2:
+            new_caption = st.text_input(
+                "Caption / Yellow Callout Note",
+                key=f"ergo_new_caption_{curr_rid}",
+                placeholder="e.g. Ensure 2-hand palm button clear of pinch hazard",
+            )
+            new_seq = st.number_input(
+                "Sequence Order",
+                min_value=1,
+                value=(len(attached_media) + 1) * 10,
+                step=5,
+                key=f"ergo_new_seq_{curr_rid}",
+            )
+
+            file_to_save: bytes | None = None
+            file_name_to_save: str = ""
+
+            pasted_payload = getattr(pasted, "image", None)
+            if pasted_payload:
+                try:
+                    decoded = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
+                    file_to_save = decoded["bytes"]
+                    file_name_to_save = decoded["name"]
+                except Exception as pe:
+                    st.error(str(pe))
+            elif uploaded_file is not None:
+                file_to_save = uploaded_file.getvalue()
+                file_name_to_save = uploaded_file.name
+
+            if st.button("Attach Visual Aid", type="primary", icon=":material/add_photo_alternate:", disabled=(file_to_save is None), key=f"btn_attach_media_{curr_rid}"):
+                if file_to_save:
+                    try:
+                        save_ergonomics_visual_media(
+                            project_id=project_id,
+                            scenario_id=scenario_id,
+                            review_id=curr_rid,
+                            filename=file_name_to_save,
+                            file_bytes=file_to_save,
+                            caption=new_caption,
+                            sequence=int(new_seq),
+                            current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+                        )
+                        st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
+                        st.rerun()
+                    except Exception as save_err:
+                        st.error(str(save_err))
+
+        if attached_media:
+            st.markdown("##### Attached Visual Aids")
+            for media_item in attached_media:
+                m_id = media_item["id"]
+                m_type = media_item.get("media_type", "image")
+                with st.container(border=True):
+                    m_c1, m_c2 = st.columns([1.2, 2.5])
+                    with m_c1:
+                        d_url = media_item.get("data_url") or media_item.get("file_path", "")
+                        if m_type == "video":
+                            st.video(d_url)
+                        else:
+                            st.image(d_url, width="stretch")
+                    with m_c2:
+                        card_cap = st.text_input("Caption", value=media_item.get("caption", ""), key=f"cap_edit_{m_id}")
+                        card_seq = st.number_input("Sequence", value=int(media_item.get("sequence", 10)), step=5, key=f"seq_edit_{m_id}")
+                        btn_row = st.columns([1.2, 1.4, 1])
+                        with btn_row[0]:
+                            if st.button("Save", key=f"btn_save_media_{m_id}", width="stretch"):
+                                try:
+                                    update_ergonomics_visual_media(
+                                        project_id=project_id,
+                                        scenario_id=scenario_id,
+                                        media_id=m_id,
+                                        caption=card_cap,
+                                        sequence=int(card_seq),
+                                        current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+                                    )
+                                    st.toast("Visual aid updated.", icon=":material/check_circle:")
+                                    st.rerun()
+                                except Exception as ue:
+                                    st.error(str(ue))
+                        with btn_row[1]:
+                            if m_type == "image":
+                                if st.button("Annotate", icon=":material/draw:", key=f"btn_annot_media_{m_id}", width="stretch"):
+                                    st.session_state[f"ergo_annotate_active_{scenario_id}"] = media_item
+                                    st.rerun()
+                        with btn_row[2]:
+                            if st.button("Delete", icon=":material/delete:", key=f"btn_del_media_{m_id}", width="stretch"):
+                                st.session_state[f"ergo_del_media_target_{scenario_id}"] = media_item
+                                st.rerun()
 
 
 with st.expander("History", icon=":material/history:"):
