@@ -40,7 +40,12 @@ class EquipmentPageTests(unittest.TestCase):
 
     def test_top_level_equipment_page_loads(self) -> None:
         app = self._run("app_pages/functional_equipment.py")
-        self.assertIn("Project equipment", [item.value for item in app.subheader])
+        tab_labels = [tab.label for tab in app.tabs]
+        self.assertIn(":material/inventory_2: Equipment Catalog & Placements", tab_labels)
+        self.assertIn(":material/conveyor_belt: Conveyor Zones & Line Sizing", tab_labels)
+        self.assertIn(":material/fact_check: Needs vs. Placements Audit", tab_labels)
+        self.assertIn(":material/category: Equipment Types", tab_labels)
+        self.assertIn("Equipment Catalog & Placements", [item.value for item in app.subheader])
 
     def test_layouts_tab_renders_with_layout(self) -> None:
         from utils.layout_store import create_layout, create_layout_revision

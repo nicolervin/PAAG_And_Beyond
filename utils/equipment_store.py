@@ -19,27 +19,56 @@ EQUIPMENT_FUNCTION_AREAS = (
     "Assembly",
 )
 
-DEFAULT_EQUIPMENT_TYPES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Torque tool", ("Quality",)),
-    ("Handheld equipment", ("Assembly", "Quality")),
-    ("ESD equipment", ("Quality",)),
-    ("Vision equipment", ("Quality",)),
-    ("Scan/Compare equipment", ("Quality",)),
-    ("Test equipment", ("Quality",)),
-    ("Dimensional measurement equipment", ("Quality",)),
-    ("Poka-Yoke / Fixture equipment", ("Quality", "Assembly")),
-    ("Conveyor", ("Assembly",)),
+EQUIPMENT_TIERS: tuple[str, ...] = (
+    "Handheld Tools",
+    "Station/Pitch Equipment",
+    "Capital Equipment",
+)
+
+UNIT_ORIENTATION_OPTIONS: tuple[str, ...] = (
+    "Front Facing",
+    "Top Up / Standing",
+    "Lying on Back",
+    "Inverted / Bottom Up",
+    "Left Side Leading",
+    "Right Side Leading",
+    "Rear Facing",
+)
+
+DEFAULT_EQUIPMENT_TYPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("Torque tool", "Handheld Tools", ("Quality",)),
+    ("Handheld equipment", "Handheld Tools", ("Assembly", "Quality")),
+    ("ESD equipment", "Handheld Tools", ("Quality",)),
+    ("Vision equipment", "Station/Pitch Equipment", ("Quality",)),
+    ("Scan/Compare equipment", "Station/Pitch Equipment", ("Quality",)),
+    ("Test equipment", "Station/Pitch Equipment", ("Quality",)),
+    ("Dimensional measurement equipment", "Station/Pitch Equipment", ("Quality",)),
+    ("Poka-Yoke / Fixture equipment", "Station/Pitch Equipment", ("Quality", "Assembly")),
+    ("Conveyor", "Capital Equipment", ("Assembly",)),
+    ("Automation cell", "Capital Equipment", ("Assembly",)),
+    ("Robot", "Capital Equipment", ("Assembly",)),
 )
 
 EQUIPMENT_TYPE_COLUMNS = [
-    "id", "project_id", "label", "functional_areas", "created_at", "updated_at",
+    "id", "project_id", "label", "tier", "functional_areas", "created_at", "updated_at",
 ]
 EQUIPMENT_COLUMNS = [
-    "id", "project_id", "equipment_type_id", "equipment_type", "name",
+    "id", "project_id", "equipment_type_id", "equipment_type", "equipment_tier", "name",
     "description", "manufacturer", "model", "notes", "image_path",
     "functional_areas", "placement_id", "pitch_id", "pitch_number", "pitch_name",
     "process_link_count", "torque_requirement_count", "created_at", "updated_at",
 ]
+
+CONVEYOR_ZONE_COLUMNS = [
+    "id", "project_id", "scenario_id", "name", "sequence",
+    "start_pitch_id", "end_pitch_id", "start_pitch_number", "end_pitch_number",
+    "assigned_pitch_numbers",
+    "conveyor_height_in", "conveyor_width_in", "unit_orientation", "orientation_image_path",
+    "standard_pitch_length_in", "helper_pitch_count", "growth_pitch_count", "monument_length_in",
+    "active_pitch_count", "total_pitch_count", "calculated_total_length_in", "calculated_total_length_ft",
+    "notes", "created_at", "updated_at",
+]
+
 
 
 def _store_module():
@@ -82,6 +111,7 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             label TEXT NOT NULL COLLATE NOCASE,
+            tier TEXT NOT NULL DEFAULT 'Handheld Tools',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(project_id, label)
@@ -154,6 +184,26 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             UNIQUE(equipment_id, quality_requirement_id)
         );
+        CREATE TABLE IF NOT EXISTS conveyor_zones (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            sequence INTEGER NOT NULL DEFAULT 10,
+            start_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+            end_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+            conveyor_height_in REAL,
+            conveyor_width_in REAL,
+            unit_orientation TEXT NOT NULL DEFAULT '',
+            orientation_image_path TEXT NOT NULL DEFAULT '',
+            standard_pitch_length_in REAL DEFAULT 120.0,
+            helper_pitch_count INTEGER DEFAULT 0,
+            growth_pitch_count INTEGER DEFAULT 0,
+            monument_length_in REAL DEFAULT 0.0,
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_equipment_types_project
             ON equipment_types(project_id, label);
         CREATE INDEX IF NOT EXISTS idx_equipment_assets_project
@@ -166,8 +216,37 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
             ON equipment_process_links(project_id, scenario_id, work_element_id);
         CREATE INDEX IF NOT EXISTS idx_equipment_torque_links_requirement
             ON equipment_torque_requirement_links(project_id, quality_requirement_id);
+        CREATE INDEX IF NOT EXISTS idx_conveyor_zones_scenario
+            ON conveyor_zones(project_id, scenario_id, sequence);
         """
     )
+    # Check and upgrade equipment_types if tier column is missing
+    cursor = conn.execute("PRAGMA table_info(equipment_types)")
+    type_cols = [row[1] for row in cursor.fetchall()]
+    if "tier" not in type_cols:
+        conn.execute("ALTER TABLE equipment_types ADD COLUMN tier TEXT NOT NULL DEFAULT 'Handheld Tools'")
+        conn.execute(
+            """UPDATE equipment_types
+               SET tier = 'Capital Equipment'
+               WHERE label IN ('Conveyor', 'Automation cell', 'Robot')"""
+        )
+        conn.execute(
+            """UPDATE equipment_types
+               SET tier = 'Station/Pitch Equipment'
+               WHERE label IN ('Vision equipment', 'Test equipment', 'Poka-Yoke / Fixture equipment',
+                               'Dimensional measurement equipment', 'Scan/Compare equipment')"""
+        )
+
+    # Check and upgrade yamazumi_pitches for platform and pit ergonomics
+    cursor = conn.execute("PRAGMA table_info(yamazumi_pitches)")
+    pitch_cols = [row[1] for row in cursor.fetchall()]
+    if "platform_height_in" not in pitch_cols:
+        conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN platform_height_in REAL DEFAULT 0.0")
+    if "pit_depth_in" not in pitch_cols:
+        conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN pit_depth_in REAL DEFAULT 0.0")
+    if "conveyor_zone_id" not in pitch_cols:
+        conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN conveyor_zone_id TEXT REFERENCES conveyor_zones(id) ON DELETE SET NULL")
+
     for project in conn.execute("SELECT id FROM projects").fetchall():
         _ensure_default_equipment_types(conn, str(project["id"]))
 
@@ -180,15 +259,15 @@ def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -
             "SELECT label FROM equipment_types WHERE project_id=?", (project_id,)
         ).fetchall()
     }
-    for label, functional_areas in DEFAULT_EQUIPMENT_TYPES:
+    for label, tier, functional_areas in DEFAULT_EQUIPMENT_TYPES:
         if label.strip().casefold() in existing_types:
             continue
         type_id = str(uuid4())
         conn.execute(
             """INSERT INTO equipment_types
-               (id, project_id, label, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (type_id, project_id, label, timestamp, timestamp),
+               (id, project_id, label, tier, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (type_id, project_id, label, tier, timestamp, timestamp),
         )
         for functional_area in functional_areas:
             conn.execute(
@@ -213,7 +292,7 @@ def equipment_types(project_id: str, functional_area: str | None = None) -> pd.D
                 LEFT JOIN equipment_type_function_links f ON f.equipment_type_id=t.id
                 WHERE t.project_id=?{area_filter}
                 GROUP BY t.id
-                ORDER BY t.label COLLATE NOCASE, t.id""",
+                ORDER BY t.tier COLLATE NOCASE, t.label COLLATE NOCASE, t.id""",
             params,
         ).fetchall()
     frame = pd.DataFrame([dict(row) for row in rows], columns=EQUIPMENT_TYPE_COLUMNS)
@@ -238,13 +317,21 @@ def save_equipment_type_rows(
         if key in labels:
             raise ValueError("Equipment Type labels must be unique within the project.")
         labels.add(key)
+        tier = _text(record.get("tier")) or "Handheld Tools"
+        if tier not in EQUIPMENT_TIERS:
+            tier = "Handheld Tools"
         functional_areas = _list(record.get("functional_areas"))
         invalid = [value for value in functional_areas if value not in EQUIPMENT_FUNCTION_AREAS]
         if invalid:
             raise ValueError("Choose only approved Functional Reviews for each Equipment Type.")
         if not functional_areas:
             raise ValueError("Choose at least one Functional Review for each Equipment Type.")
-        cleaned.append({"id": _text(record.get("id")), "label": label, "functional_areas": functional_areas})
+        cleaned.append({
+            "id": _text(record.get("id")),
+            "label": label,
+            "tier": tier,
+            "functional_areas": functional_areas,
+        })
 
     changed_ids: list[str] = []
     created_ids: list[str] = []
@@ -282,19 +369,23 @@ def save_equipment_type_rows(
                             f"{record['label']} is still used by {count} {area} equipment record(s). "
                             "Move or detach those records before removing the Functional Review."
                         )
-                changed = _text(old["label"]) != record["label"] or old_areas != set(record["functional_areas"])
+                changed = (
+                    _text(old["label"]) != record["label"]
+                    or (_text(old["tier"]) if "tier" in old.keys() else "") != record["tier"]
+                    or old_areas != set(record["functional_areas"])
+                )
                 if changed:
                     conn.execute(
-                        "UPDATE equipment_types SET label=?, updated_at=? WHERE id=? AND project_id=?",
-                        (record["label"], timestamp, type_id, project_id),
+                        "UPDATE equipment_types SET label=?, tier=?, updated_at=? WHERE id=? AND project_id=?",
+                        (record["label"], record["tier"], timestamp, type_id, project_id),
                     )
                     changed_ids.append(type_id)
             else:
                 conn.execute(
                     """INSERT INTO equipment_types
-                       (id, project_id, label, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (type_id, project_id, record["label"], timestamp, timestamp),
+                       (id, project_id, label, tier, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (type_id, project_id, record["label"], record["tier"], timestamp, timestamp),
                 )
                 created_ids.append(type_id)
                 old_areas = set()
@@ -380,6 +471,7 @@ def equipment_assets(
         params.append(equipment_type_id)
     rows = store.query(
         f"""SELECT asset.*, type.label AS equipment_type,
+                   COALESCE(type.tier, 'Handheld Tools') AS equipment_tier,
                    COALESCE((SELECT GROUP_CONCAT(link.functional_area, ', ')
                              FROM equipment_function_links link
                              WHERE link.equipment_id=asset.id), '') AS functional_areas,
@@ -396,7 +488,7 @@ def equipment_assets(
               ON placement.equipment_id=asset.id AND placement.scenario_id=?
             LEFT JOIN yamazumi_pitches pitch ON pitch.id=placement.pitch_id
             WHERE {' AND '.join(where)}
-            ORDER BY type.label COLLATE NOCASE, asset.name COLLATE NOCASE, asset.id""",
+            ORDER BY type.tier COLLATE NOCASE, type.label COLLATE NOCASE, asset.name COLLATE NOCASE, asset.id""",
         tuple(params),
     )
     frame = pd.DataFrame(rows, columns=EQUIPMENT_COLUMNS)
@@ -809,6 +901,7 @@ def save_equipment_placement(
     pitch_id: str | None,
     work_element_ids: list[str],
     editor_name: str,
+    mark_pitch_blocked: bool = False,
 ) -> dict[str, object]:
     store = _store_module()
     editor = _require_editor(editor_name)
@@ -880,6 +973,11 @@ def save_equipment_placement(
                    (id, project_id, scenario_id, placement_id, work_element_id, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (str(uuid4()), project_id, scenario_id, placement_id, work_id, timestamp, timestamp),
+            )
+        if mark_pitch_blocked and normalized_pitch:
+            conn.execute(
+                "UPDATE yamazumi_pitches SET status='Blocked', updated_at=? WHERE id=? AND project_id=?",
+                (timestamp, normalized_pitch, project_id),
             )
         changed = before_pitch != (normalized_pitch or "") or before_work != set(normalized_work)
         if changed:
@@ -961,6 +1059,49 @@ def move_equipment_to_linked_pitch(
             _conn=conn,
         )
     return {"row_count": 1, "pitch_id": target_pitch_id, "timestamp": timestamp}
+
+
+def unlink_moved_equipment_links(
+    project_id: str,
+    scenario_id: str,
+    equipment_id: str | None,
+    editor_name: str,
+) -> dict[str, object]:
+    """Unlink moved process functions from station equipment, keeping equipment anchored to its pitch.
+    The moved operation will now show as an unfulfilled equipment need at its new pitch."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    timestamp = store.now_iso()
+    with store.connection() as conn:
+        mismatches = equipment_placement_mismatches(project_id, scenario_id)
+        if equipment_id:
+            mismatches = mismatches.loc[mismatches["equipment_id"].astype(str).eq(equipment_id)]
+        if mismatches.empty:
+            raise ValueError("No mismatched equipment links to unlink.")
+        count = 0
+        for _, row in mismatches.iterrows():
+            placement_id = str(row["placement_id"])
+            work_id = str(row["work_element_id"])
+            conn.execute(
+                "DELETE FROM equipment_process_links WHERE placement_id=? AND work_element_id=?",
+                (placement_id, work_id),
+            )
+            count += 1
+        store.record_audit_event(
+            project_id,
+            "Equipment placements",
+            "Unlink Moved Steps",
+            count,
+            editor,
+            {
+                "scenario_id": scenario_id,
+                "equipment_id": equipment_id or "all_mismatched",
+                "unlinked_count": count,
+                "store_timestamp": timestamp,
+            },
+            _conn=conn,
+        )
+    return {"row_count": count, "timestamp": timestamp}
 
 
 def torque_requirements(project_id: str) -> pd.DataFrame:
@@ -1261,6 +1402,53 @@ def clone_equipment_scenario(
                 (str(uuid4()), project_id, target_scenario_id, new_placement_id, new_work_id, timestamp, timestamp),
             )
 
+    # Clone conveyor zones
+    zone_id_map: dict[str, str] = {}
+    for zone in conn.execute(
+        """SELECT * FROM conveyor_zones WHERE project_id=? AND scenario_id=? ORDER BY sequence, id""",
+        (project_id, source_scenario_id),
+    ).fetchall():
+        old_zid = str(zone["id"])
+        new_zid = str(uuid4())
+        zone_id_map[old_zid] = new_zid
+        old_start = _text(zone["start_pitch_id"])
+        old_end = _text(zone["end_pitch_id"])
+        new_start = pitch_id_map.get(old_start) if old_start else None
+        new_end = pitch_id_map.get(old_end) if old_end else None
+
+        conn.execute(
+            """INSERT INTO conveyor_zones
+               (id, project_id, scenario_id, name, sequence, start_pitch_id, end_pitch_id,
+                conveyor_height_in, conveyor_width_in, unit_orientation, orientation_image_path,
+                standard_pitch_length_in, helper_pitch_count, growth_pitch_count, monument_length_in,
+                notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                new_zid, project_id, target_scenario_id, zone["name"], zone["sequence"],
+                new_start, new_end, zone["conveyor_height_in"], zone["conveyor_width_in"],
+                zone["unit_orientation"], zone["orientation_image_path"],
+                zone["standard_pitch_length_in"], zone["helper_pitch_count"],
+                zone["growth_pitch_count"], zone["monument_length_in"], zone["notes"],
+                timestamp, timestamp,
+            ),
+        )
+
+    # Remap conveyor_zone_id and copy platform/pit dimensions on cloned pitches
+    for old_pid, new_pid in pitch_id_map.items():
+        old_pitch = conn.execute(
+            "SELECT conveyor_zone_id, platform_height_in, pit_depth_in FROM yamazumi_pitches WHERE id=?",
+            (old_pid,),
+        ).fetchone()
+        if old_pitch:
+            old_zid = _text(old_pitch["conveyor_zone_id"])
+            new_zid = zone_id_map.get(old_zid) if old_zid else None
+            conn.execute(
+                """UPDATE yamazumi_pitches
+                   SET conveyor_zone_id=?, platform_height_in=?, pit_depth_in=?
+                   WHERE id=?""",
+                (new_zid, old_pitch["platform_height_in"] or 0.0, old_pitch["pit_depth_in"] or 0.0, new_pid),
+            )
+
 
 def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return a unified Equipment Needs vs Placements matrix DataFrame."""
@@ -1463,4 +1651,535 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
             "linked_asset_names", "coverage_status", "is_satisfied",
         ])
     return df.sort_values(by=["op_id", "source_stage"], kind="stable").reset_index(drop=True)
+
+
+def conveyor_zones(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Return scenario conveyor zones with dynamic pitch count and length calculations."""
+    store = _store_module()
+    rows = store.query(
+        """SELECT z.*,
+                  p_start.pitch_number AS start_pitch_number,
+                  p_end.pitch_number AS end_pitch_number
+           FROM conveyor_zones z
+           LEFT JOIN yamazumi_pitches p_start ON p_start.id=z.start_pitch_id
+           LEFT JOIN yamazumi_pitches p_end ON p_end.id=z.end_pitch_id
+           WHERE z.project_id=? AND z.scenario_id=?
+           ORDER BY z.sequence, z.name COLLATE NOCASE, z.id""",
+        (project_id, scenario_id),
+    )
+    all_pitches = store.query(
+        """SELECT p.id, p.pitch_number, p.sequence, p.conveyor_zone_id
+           FROM yamazumi_pitches p
+           JOIN yamazumi_areas area ON area.id=p.area_id
+           LEFT JOIN assembly_sections sec ON sec.id=area.section_id
+           WHERE p.project_id=? AND area.scenario_id=? AND p.status='Active'
+           ORDER BY COALESCE(sec.sequence, 0), area.name COLLATE NOCASE, p.sequence, p.pitch_number COLLATE NOCASE""",
+        (project_id, scenario_id),
+    )
+    pitch_ids = [str(r["id"]) for r in all_pitches]
+
+    records = []
+    for r in rows:
+        d = dict(r)
+        zone_id = str(d.get("id"))
+        start_id = _text(d.get("start_pitch_id"))
+        end_id = _text(d.get("end_pitch_id"))
+
+        # Explicitly assigned pitches via yamazumi_pitches.conveyor_zone_id
+        directly_assigned = [p for p in all_pitches if _text(p.get("conveyor_zone_id")) == zone_id]
+        if directly_assigned:
+            active_count = len(directly_assigned)
+            d["assigned_pitch_numbers"] = ", ".join(str(p["pitch_number"]) for p in directly_assigned)
+            d["assigned_pitch_ids"] = [str(p["id"]) for p in directly_assigned]
+            if not d.get("start_pitch_number"):
+                d["start_pitch_id"] = str(directly_assigned[0]["id"])
+                d["start_pitch_number"] = str(directly_assigned[0]["pitch_number"])
+            if not d.get("end_pitch_number"):
+                d["end_pitch_id"] = str(directly_assigned[-1]["id"])
+                d["end_pitch_number"] = str(directly_assigned[-1]["pitch_number"])
+        elif start_id in pitch_ids and end_id in pitch_ids:
+            idx1 = pitch_ids.index(start_id)
+            idx2 = pitch_ids.index(end_id)
+            if idx1 <= idx2:
+                sp_ids = pitch_ids[idx1 : idx2 + 1]
+            else:
+                sp_ids = pitch_ids[idx2 : idx1 + 1]
+            active_count = len(sp_ids)
+            matched = [p for p in all_pitches if str(p["id"]) in sp_ids]
+            d["assigned_pitch_numbers"] = ", ".join(str(p["pitch_number"]) for p in matched)
+            d["assigned_pitch_ids"] = sp_ids
+        elif start_id in pitch_ids:
+            idx1 = pitch_ids.index(start_id)
+            sp_ids = pitch_ids[idx1:]
+            active_count = len(sp_ids)
+            matched = [p for p in all_pitches if str(p["id"]) in sp_ids]
+            d["assigned_pitch_numbers"] = ", ".join(str(p["pitch_number"]) for p in matched)
+            d["assigned_pitch_ids"] = sp_ids
+        elif end_id in pitch_ids:
+            idx2 = pitch_ids.index(end_id)
+            sp_ids = pitch_ids[: idx2 + 1]
+            active_count = len(sp_ids)
+            matched = [p for p in all_pitches if str(p["id"]) in sp_ids]
+            d["assigned_pitch_numbers"] = ", ".join(str(p["pitch_number"]) for p in matched)
+            d["assigned_pitch_ids"] = sp_ids
+        else:
+            active_count = len(pitch_ids) if len(rows) == 1 else 0
+            if active_count > 0:
+                d["assigned_pitch_numbers"] = ", ".join(str(p["pitch_number"]) for p in all_pitches)
+                d["assigned_pitch_ids"] = pitch_ids
+            else:
+                d["assigned_pitch_numbers"] = ""
+                d["assigned_pitch_ids"] = []
+
+        helper_count = int(d.get("helper_pitch_count") or 0)
+        growth_count = int(d.get("growth_pitch_count") or 0)
+        pitch_len_in = float(d.get("standard_pitch_length_in") or 120.0)
+        monument_in = float(d.get("monument_length_in") or 0.0)
+
+        total_pitches = active_count + helper_count + growth_count
+        total_len_in = (total_pitches * pitch_len_in) + monument_in
+        total_len_ft = round(total_len_in / 12.0, 1)
+
+        d["active_pitch_count"] = active_count
+        d["total_pitch_count"] = total_pitches
+        d["calculated_total_length_in"] = round(total_len_in, 1)
+        d["calculated_total_length_ft"] = total_len_ft
+        records.append(d)
+
+    frame = pd.DataFrame(records, columns=CONVEYOR_ZONE_COLUMNS)
+    if frame.empty:
+        return pd.DataFrame(columns=CONVEYOR_ZONE_COLUMNS)
+    return frame
+
+
+def save_conveyor_zone(
+    project_id: str,
+    scenario_id: str,
+    record: dict,
+    editor_name: str,
+) -> dict[str, object]:
+    """Save or update a Conveyor Zone with ergonomic dimensions and pitch bounds."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    name = _text(record.get("name"))
+    if not name:
+        raise ValueError("Conveyor Zone name is required.")
+
+    zone_id = _text(record.get("id")) or str(uuid4())
+    sequence = int(record.get("sequence") or 10)
+
+    raw_pitch_ids = record.get("pitch_ids") if "pitch_ids" in record else record.get("assigned_pitch_ids")
+    if raw_pitch_ids is not None:
+        pitch_ids = [_text(pid) for pid in raw_pitch_ids if _text(pid)]
+        start_pitch_id = pitch_ids[0] if pitch_ids else None
+        end_pitch_id = pitch_ids[-1] if pitch_ids else None
+    else:
+        pitch_ids = None
+        start_pitch_id = _text(record.get("start_pitch_id")) or None
+        end_pitch_id = _text(record.get("end_pitch_id")) or None
+
+    height_in = record.get("conveyor_height_in")
+    conveyor_height_in = float(height_in) if height_in not in (None, "", "None") else None
+    if conveyor_height_in is not None and conveyor_height_in <= 0:
+        raise ValueError("Conveyor height must be a positive number in inches.")
+
+    width_in = record.get("conveyor_width_in")
+    conveyor_width_in = float(width_in) if width_in not in (None, "", "None") else None
+    if conveyor_width_in is not None and conveyor_width_in <= 0:
+        raise ValueError("Conveyor width must be a positive number in inches.")
+
+    unit_orientation = _text(record.get("unit_orientation"))
+    orientation_image_path = _text(record.get("orientation_image_path"))
+
+    standard_pitch_length_in = float(record.get("standard_pitch_length_in") or 120.0)
+    if standard_pitch_length_in <= 0:
+        raise ValueError("Standard pitch length must be greater than 0 inches.")
+
+    helper_pitch_count = max(0, int(record.get("helper_pitch_count") or 0))
+    growth_pitch_count = max(0, int(record.get("growth_pitch_count") or 0))
+    monument_length_in = max(0.0, float(record.get("monument_length_in") or 0.0))
+    notes = _text(record.get("notes"))
+    timestamp = store.now_iso()
+
+    with store.connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM conveyor_zones WHERE id=? AND project_id=? AND scenario_id=?",
+            (zone_id, project_id, scenario_id),
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                """UPDATE conveyor_zones
+                   SET name=?, sequence=?, start_pitch_id=?, end_pitch_id=?,
+                       conveyor_height_in=?, conveyor_width_in=?, unit_orientation=?,
+                       orientation_image_path=?, standard_pitch_length_in=?,
+                       helper_pitch_count=?, growth_pitch_count=?, monument_length_in=?,
+                       notes=?, updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (
+                    name, sequence, start_pitch_id, end_pitch_id,
+                    conveyor_height_in, conveyor_width_in, unit_orientation,
+                    orientation_image_path, standard_pitch_length_in,
+                    helper_pitch_count, growth_pitch_count, monument_length_in,
+                    notes, timestamp, zone_id, project_id, scenario_id,
+                ),
+            )
+            action = "Update conveyor zone"
+        else:
+            conn.execute(
+                """INSERT INTO conveyor_zones
+                   (id, project_id, scenario_id, name, sequence, start_pitch_id, end_pitch_id,
+                    conveyor_height_in, conveyor_width_in, unit_orientation, orientation_image_path,
+                    standard_pitch_length_in, helper_pitch_count, growth_pitch_count,
+                    monument_length_in, notes, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    zone_id, project_id, scenario_id, name, sequence, start_pitch_id, end_pitch_id,
+                    conveyor_height_in, conveyor_width_in, unit_orientation, orientation_image_path,
+                    standard_pitch_length_in, helper_pitch_count, growth_pitch_count,
+                    monument_length_in, notes, timestamp, timestamp,
+                ),
+            )
+            action = "Create conveyor zone"
+
+        if pitch_ids is not None:
+            if pitch_ids:
+                placeholders = ",".join("?" * len(pitch_ids))
+                conn.execute(
+                    f"""UPDATE yamazumi_pitches
+                       SET conveyor_zone_id=?, updated_at=?
+                       WHERE project_id=? AND id IN ({placeholders})""",
+                    (zone_id, timestamp, project_id, *pitch_ids),
+                )
+                conn.execute(
+                    f"""UPDATE yamazumi_pitches
+                       SET conveyor_zone_id=NULL, updated_at=?
+                       WHERE project_id=? AND conveyor_zone_id=? AND id NOT IN ({placeholders})""",
+                    (timestamp, project_id, zone_id, *pitch_ids),
+                )
+            else:
+                conn.execute(
+                    """UPDATE yamazumi_pitches
+                       SET conveyor_zone_id=NULL, updated_at=?
+                       WHERE project_id=? AND conveyor_zone_id=?""",
+                    (timestamp, project_id, zone_id),
+                )
+
+        store.record_audit_event(
+            project_id,
+            "Conveyor zones",
+            action,
+            1,
+            editor,
+            {
+                "zone_id": zone_id,
+                "name": name,
+                "scenario_id": scenario_id,
+                "conveyor_height_in": conveyor_height_in,
+                "conveyor_width_in": conveyor_width_in,
+                "unit_orientation": unit_orientation,
+                "store_timestamp": timestamp,
+            },
+            _conn=conn,
+        )
+
+    return {"zone_id": zone_id, "id": zone_id, "timestamp": timestamp}
+
+
+def batch_assign_pitches_to_conveyor_zone(
+    project_id: str,
+    scenario_id: str,
+    pitch_ids: list[str],
+    conveyor_zone_id: str | None,
+    editor_name: str,
+) -> dict[str, object]:
+    """Assign or unassign a batch of pitches to a conveyor zone."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    timestamp = store.now_iso()
+    clean_pids = [_text(p) for p in pitch_ids if _text(p)]
+    if not clean_pids:
+        return {"updated_count": 0, "timestamp": timestamp}
+    clean_zone_id = _text(conveyor_zone_id) or None
+    with store.connection() as conn:
+        placeholders = ",".join("?" * len(clean_pids))
+        conn.execute(
+            f"""UPDATE yamazumi_pitches
+               SET conveyor_zone_id=?, updated_at=?
+               WHERE project_id=? AND id IN ({placeholders})""",
+            (clean_zone_id, timestamp, project_id, *clean_pids),
+        )
+        store.record_audit_event(
+            project_id,
+            "Pitch ergonomics",
+            "Batch assign conveyor zone",
+            len(clean_pids),
+            editor,
+            {
+                "scenario_id": scenario_id,
+                "conveyor_zone_id": clean_zone_id,
+                "pitch_count": len(clean_pids),
+                "store_timestamp": timestamp,
+            },
+            _conn=conn,
+        )
+    return {"updated_count": len(clean_pids), "timestamp": timestamp}
+
+
+def delete_conveyor_zones(
+    project_id: str,
+    scenario_id: str,
+    zone_ids: list[str],
+    editor_name: str,
+) -> dict[str, object]:
+    """Delete conveyor zones and clean up associated image uploads."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    normalized = list(dict.fromkeys(_text(z) for z in zone_ids if _text(z)))
+    if not normalized:
+        return {"row_count": 0, "timestamp": store.now_iso()}
+    placeholders = ",".join("?" for _ in normalized)
+    timestamp = store.now_iso()
+    with store.connection() as conn:
+        rows = conn.execute(
+            f"SELECT id, name, orientation_image_path FROM conveyor_zones WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
+            (project_id, scenario_id, *normalized),
+        ).fetchall()
+        for r in rows:
+            img = _text(r["orientation_image_path"])
+            if img:
+                store._remove_owned_upload(img)
+        conn.execute(
+            f"UPDATE yamazumi_pitches SET conveyor_zone_id=NULL WHERE conveyor_zone_id IN ({placeholders})",
+            tuple(normalized),
+        )
+        conn.execute(
+            f"DELETE FROM conveyor_zones WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
+            (project_id, scenario_id, *normalized),
+        )
+        store.record_audit_event(
+            project_id,
+            "Conveyor zones",
+            "Delete conveyor zone(s)",
+            len(normalized),
+            editor,
+            {
+                "zone_ids": normalized,
+                "names": [str(r["name"]) for r in rows],
+                "store_timestamp": timestamp,
+            },
+            _conn=conn,
+        )
+    return {"row_count": len(normalized), "timestamp": timestamp}
+
+
+def set_conveyor_zone_image(
+    project_id: str,
+    scenario_id: str,
+    zone_id: str,
+    uploaded_file,
+    editor_name: str,
+) -> str:
+    """Save an illustrative unit orientation image for a conveyor zone."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    suffix = Path(str(getattr(uploaded_file, "name", "image.png"))).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise ValueError("Use PNG, JPG, JPEG, or WEBP images.")
+    content = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    if not content:
+        raise ValueError("Choose a non-empty image.")
+    try:
+        from io import BytesIO
+        with Image.open(BytesIO(content)) as image:
+            image.verify()
+    except Exception as exc:
+        raise ValueError("The selected file is not a readable image.") from exc
+
+    target = store.UPLOAD_DIR / f"zone_orientation_{zone_id}_{uuid4()}{suffix}"
+    target.write_bytes(content)
+    timestamp = store.now_iso()
+    previous = ""
+    try:
+        with store.connection() as conn:
+            row = conn.execute(
+                "SELECT orientation_image_path FROM conveyor_zones WHERE id=? AND project_id=? AND scenario_id=?",
+                (zone_id, project_id, scenario_id),
+            ).fetchone()
+            if not row:
+                raise ValueError("That conveyor zone no longer exists.")
+            previous = _text(row["orientation_image_path"])
+            conn.execute(
+                "UPDATE conveyor_zones SET orientation_image_path=?, updated_at=? WHERE id=? AND project_id=? AND scenario_id=?",
+                (str(target), timestamp, zone_id, project_id, scenario_id),
+            )
+            store.record_audit_event(
+                project_id,
+                "Conveyor zones",
+                "Save orientation visual",
+                1,
+                editor,
+                {"zone_id": zone_id, "store_timestamp": timestamp},
+                _conn=conn,
+            )
+    except Exception:
+        store._remove_owned_upload(target)
+        raise
+    if previous and previous != str(target):
+        store._remove_owned_upload(previous)
+    return str(target)
+
+
+def delete_conveyor_zone_image(
+    project_id: str,
+    scenario_id: str,
+    zone_id: str,
+    editor_name: str,
+) -> None:
+    """Delete an orientation image for a conveyor zone."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    timestamp = store.now_iso()
+    previous = ""
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT orientation_image_path FROM conveyor_zones WHERE id=? AND project_id=? AND scenario_id=?",
+            (zone_id, project_id, scenario_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("That conveyor zone no longer exists.")
+        previous = _text(row["orientation_image_path"])
+        conn.execute(
+            "UPDATE conveyor_zones SET orientation_image_path='', updated_at=? WHERE id=? AND project_id=? AND scenario_id=?",
+            (timestamp, zone_id, project_id, scenario_id),
+        )
+        store.record_audit_event(
+            project_id,
+            "Conveyor zones",
+            "Delete orientation visual",
+            1,
+            editor,
+            {"zone_id": zone_id, "store_timestamp": timestamp},
+            _conn=conn,
+        )
+    if previous:
+        store._remove_owned_upload(previous)
+
+
+def scenario_pitches_ergonomics_geometry(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Return workstation pitches with their platform elevation, pit depth, and assigned zone."""
+    store = _store_module()
+    rows = store.query(
+        """SELECT p.id, p.pitch_number, p.pitch_name, p.status, p.sequence,
+                  p.platform_height_in, p.pit_depth_in, p.conveyor_zone_id,
+                  z.name AS zone_name, z.conveyor_height_in, z.conveyor_width_in, z.unit_orientation,
+                  area.name AS area_name
+           FROM yamazumi_pitches p
+           JOIN yamazumi_areas area ON area.id=p.area_id
+           LEFT JOIN assembly_sections sec ON sec.id=area.section_id
+           LEFT JOIN conveyor_zones z ON z.id=p.conveyor_zone_id
+           WHERE p.project_id=? AND area.scenario_id=?
+           ORDER BY COALESCE(sec.sequence, 0), area.name COLLATE NOCASE, p.sequence, p.pitch_number COLLATE NOCASE""",
+        (project_id, scenario_id),
+    )
+    cols = [
+        "id", "pitch_number", "pitch_name", "status", "sequence", "area_name",
+        "platform_height_in", "pit_depth_in", "conveyor_zone_id", "zone_name",
+        "conveyor_height_in", "conveyor_width_in", "unit_orientation",
+    ]
+    frame = pd.DataFrame(rows, columns=cols)
+    if not frame.empty:
+        frame["platform_height_in"] = pd.to_numeric(frame["platform_height_in"], errors="coerce").fillna(0.0)
+        frame["pit_depth_in"] = pd.to_numeric(frame["pit_depth_in"], errors="coerce").fillna(0.0)
+    return frame
+
+
+def save_pitch_ergonomics_geometry(
+    project_id: str,
+    scenario_id: str,
+    records: list[dict],
+    editor_name: str,
+) -> dict[str, object]:
+    """Save platform height, pit depth, and conveyor zone assignments for pitches."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    timestamp = store.now_iso()
+    count = 0
+    with store.connection() as conn:
+        for r in records:
+            p_id = _text(r.get("id") or r.get("pitch_id"))
+            if not p_id:
+                continue
+            plat = float(r.get("platform_height_in") or 0.0)
+            pit = float(r.get("pit_depth_in") or 0.0)
+            zone_id = _text(r.get("conveyor_zone_id")) or None
+
+            conn.execute(
+                """UPDATE yamazumi_pitches
+                   SET platform_height_in=?, pit_depth_in=?, conveyor_zone_id=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (plat, pit, zone_id, timestamp, p_id, project_id),
+            )
+            count += 1
+
+        if count:
+            store.record_audit_event(
+                project_id,
+                "Pitch ergonomics",
+                "Save Platforms & Pits",
+                count,
+                editor,
+                {"scenario_id": scenario_id, "updated_count": count, "store_timestamp": timestamp},
+                _conn=conn,
+            )
+    return {"row_count": count, "timestamp": timestamp}
+
+
+def scenario_conveyor_line_sizing(project_id: str, scenario_id: str) -> dict[str, object]:
+    """Calculate aggregate conveyor line sizing across zones and active pitches."""
+    store = _store_module()
+    zones_df = conveyor_zones(project_id, scenario_id)
+    all_active_pitches_rows = store.query(
+        """SELECT COUNT(*) AS total FROM yamazumi_pitches p
+           JOIN yamazumi_areas area ON area.id=p.area_id
+           WHERE p.project_id=? AND area.scenario_id=? AND p.status='Active'""",
+        (project_id, scenario_id),
+    )
+    all_active_pitches = all_active_pitches_rows[0]["total"] if all_active_pitches_rows else 0
+
+    if zones_df.empty:
+        active_pitches = int(all_active_pitches)
+        std_len_in = 120.0
+        total_len_in = active_pitches * std_len_in
+        return {
+            "zone_count": 0,
+            "active_pitches": active_pitches,
+            "helper_pitches": 0,
+            "growth_pitches": 0,
+            "total_pitches": active_pitches,
+            "standard_pitch_length_in": std_len_in,
+            "monument_length_in": 0.0,
+            "total_length_in": round(total_len_in, 1),
+            "total_length_ft": round(total_len_in / 12.0, 1),
+        }
+
+    active_p = int(zones_df["active_pitch_count"].sum())
+    helper_p = int(zones_df["helper_pitch_count"].sum())
+    growth_p = int(zones_df["growth_pitch_count"].sum())
+    monument_in = float(zones_df["monument_length_in"].sum())
+    total_len_in = float(zones_df["calculated_total_length_in"].sum())
+    total_pitches = active_p + helper_p + growth_p
+
+    return {
+        "zone_count": len(zones_df),
+        "active_pitches": active_p,
+        "helper_pitches": helper_p,
+        "growth_pitches": growth_p,
+        "total_pitches": total_pitches,
+        "standard_pitch_length_in": float(zones_df["standard_pitch_length_in"].iloc[0]),
+        "monument_length_in": monument_in,
+        "total_length_in": round(total_len_in, 1),
+        "total_length_ft": round(total_len_in / 12.0, 1),
+    }
+
 

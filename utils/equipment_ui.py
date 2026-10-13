@@ -7,9 +7,17 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.equipment_store import (
+    CONVEYOR_ZONE_COLUMNS,
     EQUIPMENT_FUNCTION_AREAS,
+    EQUIPMENT_TIERS,
+    UNIT_ORIENTATION_OPTIONS,
     attach_equipment_to_function,
+    conveyor_zones,
+    delete_conveyor_zone_image,
+    delete_conveyor_zones,
+    batch_assign_pitches_to_conveyor_zone,
     delete_equipment_assets,
     delete_equipment_image,
     delete_equipment_types,
@@ -26,12 +34,18 @@ from utils.equipment_store import (
     equipment_torque_requirement_ids,
     equipment_types,
     move_equipment_to_linked_pitch,
+    save_conveyor_zone,
     save_equipment_placement,
     save_equipment_torque_requirements,
     save_equipment_type_rows,
     save_function_equipment_rows,
+    save_pitch_ergonomics_geometry,
+    scenario_conveyor_line_sizing,
+    scenario_pitches_ergonomics_geometry,
+    set_conveyor_zone_image,
     set_equipment_image,
     torque_requirements,
+    unlink_moved_equipment_links,
 )
 from utils.quality_store import (
     TORQUE_TOOL_ORIENTATIONS,
@@ -70,6 +84,8 @@ EQUIPMENT_HISTORY_CATEGORIES = (
     "Equipment placements",
     "Equipment images",
     "Equipment Torque links",
+    "Conveyor zones",
+    "Pitch ergonomics",
 )
 
 
@@ -96,6 +112,7 @@ def _pitch_label(row: pd.Series | dict) -> str:
 
 def _equipment_export(frame: pd.DataFrame) -> pd.DataFrame:
     export = frame.copy()
+    export["Tier"] = export.get("equipment_tier", "")
     export["Equipment Type"] = export.get("equipment_type", "")
     export["Equipment name"] = export.get("name", "")
     export["Description"] = export.get("description", "")
@@ -105,7 +122,7 @@ def _equipment_export(frame: pd.DataFrame) -> pd.DataFrame:
     export["Notes"] = export.get("notes", "")
     return export.reindex(
         columns=[
-            "Equipment name", "Equipment Type", "Description", "Manufacturer",
+            "Equipment name", "Tier", "Equipment Type", "Description", "Manufacturer",
             "Model", "Station / Pitch", "Notes",
         ]
     )
@@ -146,12 +163,13 @@ def render_equipment_history(project_id: str, *, key_prefix: str) -> None:
         )
 
 
-def render_equipment_type_manager(project_id: str) -> None:
+def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = True) -> None:
     """Render the project-wide controlled Equipment Type catalog."""
-    with st.expander("Manage Equipment Types", icon=":material/category:"):
+    def _render_type_content() -> None:
         st.caption(
-            "Equipment Types are shared across the project. Functional Review applicability "
-            "controls which type charts appear on each review page."
+            "Equipment Types are shared across the project. Operational Tier classifies equipment "
+            "into Handheld Tools, Station/Pitch Equipment, and Capital Equipment. "
+            "Functional Review applicability controls which charts appear on each review page."
         )
         logical_key = f"equipment_types_editor_{project_id}"
         editor_key = apply_pending_table_editor_reset(logical_key)
@@ -160,24 +178,24 @@ def render_equipment_type_manager(project_id: str) -> None:
         visible = filter_table(
             saved,
             key=f"equipment_types_filters_{project_id}",
-            dropdown_columns=["functional_areas"],
+            dropdown_columns=["tier", "functional_areas"],
             multi_value_columns=["functional_areas"],
-            search_columns=["label", "functional_areas"],
-            labels={"functional_areas": "Functional Reviews"},
+            search_columns=["label", "tier", "functional_areas"],
+            labels={"tier": "Tier", "functional_areas": "Functional Reviews"},
             reset_widget_keys=[editor_key],
         )
         rows = direct_entry_editor_rows(
             visible,
             editor_key=editor_key,
-            sort_columns=["label", "functional_areas"],
-            labels={"label": "Equipment Type", "functional_areas": "Functional Reviews"},
+            sort_columns=["tier", "label", "functional_areas"],
+            labels={"label": "Equipment Type", "tier": "Tier", "functional_areas": "Functional Reviews"},
         )
         edited = st.data_editor(
             rows,
             key=editor_key,
             num_rows="dynamic",
             hide_index=True,
-            column_order=["label", "functional_areas", "updated_at"],
+            column_order=["label", "tier", "functional_areas", "updated_at"],
             disabled=["id", "project_id", "created_at", "updated_at"],
             column_config={
                 "id": None,
@@ -185,6 +203,13 @@ def render_equipment_type_manager(project_id: str) -> None:
                 "label": st.column_config.TextColumn(
                     "Equipment Type", required=True,
                     help="Use one reusable project-wide name for this kind of equipment.",
+                ),
+                "tier": st.column_config.SelectboxColumn(
+                    "Tier",
+                    options=list(EQUIPMENT_TIERS),
+                    default="Handheld Tools",
+                    required=True,
+                    help="Classify this type into Handheld Tools, Station/Pitch Equipment, or Capital Equipment.",
                 ),
                 "functional_areas": st.column_config.MultiselectColumn(
                     "Functional Reviews",
@@ -201,7 +226,7 @@ def render_equipment_type_manager(project_id: str) -> None:
         st.download_button(
             "Export filtered rows",
             dataframe_to_excel(
-                visible[["label", "functional_areas", "updated_at"]],
+                visible[["label", "tier", "functional_areas", "updated_at"]],
                 sheet_name="Equipment Types",
             ),
             file_name="equipment_types_filtered.xlsx",
@@ -282,6 +307,12 @@ def render_equipment_type_manager(project_id: str) -> None:
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
+
+    if wrap_in_expander:
+        with st.expander("Manage Equipment Types", icon=":material/category:"):
+            _render_type_content()
+    else:
+        _render_type_content()
 
 
 def _render_add_existing(
@@ -364,17 +395,17 @@ def _render_equipment_table(
     visible = filter_table(
         editor_source,
         key=f"equipment_assets_filters_{project_id}_{functional_area}_{suffix}",
-        dropdown_columns=["equipment_type_id", "pitch_id"],
-        search_columns=["name", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
-        labels={"equipment_type_id": "Equipment Type", "pitch_id": "Station / Pitch"},
+        dropdown_columns=["equipment_tier", "equipment_type_id", "pitch_id"],
+        search_columns=["name", "equipment_tier", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
+        labels={"equipment_tier": "Tier", "equipment_type_id": "Equipment Type", "pitch_id": "Station / Pitch"},
         reset_widget_keys=[editor_key],
     )
     rows = direct_entry_editor_rows(
         visible,
         editor_key=editor_key,
-        sort_columns=["name", "equipment_type_id", "manufacturer", "model", "pitch_id"],
+        sort_columns=["name", "equipment_tier", "equipment_type_id", "manufacturer", "model", "pitch_id"],
         labels={
-            "name": "Equipment name", "equipment_type_id": "Equipment Type",
+            "name": "Equipment name", "equipment_tier": "Tier", "equipment_type_id": "Equipment Type",
             "manufacturer": "Manufacturer", "model": "Model", "pitch_id": "Station / Pitch",
         },
     )
@@ -384,11 +415,11 @@ def _render_equipment_table(
         num_rows="dynamic",
         hide_index=True,
         column_order=[
-            "name", "equipment_type_id", "description", "manufacturer", "model",
+            "name", "equipment_tier", "equipment_type_id", "description", "manufacturer", "model",
             "pitch_id", "notes", "image", "process_link_count", "torque_requirement_count",
         ],
         disabled=[
-            "id", "project_id", "equipment_type", "image_path", "functional_areas",
+            "id", "project_id", "equipment_tier", "equipment_type", "image_path", "functional_areas",
             "placement_id", "pitch_number", "pitch_name", "process_link_count",
             "torque_requirement_count", "created_at", "updated_at", "image",
             *(["equipment_type_id"] if equipment_type_id else []),
@@ -408,6 +439,10 @@ def _render_equipment_table(
             "name": st.column_config.TextColumn(
                 "Equipment name", required=True,
                 help="Use a unique project-wide name that collaborators can recognize.",
+            ),
+            "equipment_tier": st.column_config.TextColumn(
+                "Tier",
+                help="Handheld Tools, Station/Pitch Equipment, or Capital Equipment.",
             ),
             "equipment_type_id": st.column_config.SelectboxColumn(
                 "Equipment Type",
@@ -655,6 +690,15 @@ def _render_equipment_detail(
                 disabled=not selected_pitch,
                 help="Only Process Functions currently assigned to the selected Pitch can be linked.",
             )
+            is_station_tier = _text(asset.get("equipment_tier")) == "Station/Pitch Equipment"
+            mark_pitch_blocked = False
+            if is_station_tier and selected_pitch:
+                mark_pitch_blocked = st.checkbox(
+                    "Tag Station / Pitch as Blocked (dedicated station footprint)",
+                    value=False,
+                    key=f"equipment_block_pitch_{project_id}_{scenario_id}_{selected_id}_{selected_pitch}",
+                    help="Station equipment occupies pitch space and prevents arbitrary operator rebalancing.",
+                )
             if st.button(
                 "Save & Refresh",
                 type="primary",
@@ -669,6 +713,7 @@ def _render_equipment_detail(
                         str(selected_pitch or ""),
                         list(selected_work),
                         _editor_name(),
+                        mark_pitch_blocked=mark_pitch_blocked,
                     )
                     st.toast(
                         "Saved the equipment placement"
@@ -807,22 +852,59 @@ def _render_mismatch_review(
         if not movable:
             st.info(
                 "The linked Process Functions are split across Pitches or include an unassigned step. "
-                "Choose the intended Pitch and Process links in Equipment details."
+                "You can unlink the moved operations below to keep equipment anchored at its saved Station / Pitch."
             )
+            if st.button(
+                "Unlink all moved operations (keep equipment anchored)",
+                icon=":material/link_off:",
+                key=f"equipment_mismatch_unlink_all_{project_id}_{scenario_id}_{functional_area}",
+                help="Unlink operations that were rebalanced away, keeping equipment anchored at its saved pitch.",
+            ):
+                try:
+                    res = unlink_moved_equipment_links(
+                        project_id, scenario_id, None, _editor_name()
+                    )
+                    st.toast(
+                        f"Unlinked {res['row_count']} moved operation(s). Equipment remains anchored at Pitch.",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
             return
         selected_id = st.selectbox(
-            "Equipment eligible for confirmed move",
+            "Equipment eligible for reconciliation",
             options=list(movable),
             format_func=lambda value: movable.get(str(value), "Unavailable equipment"),
             key=f"equipment_mismatch_move_choice_{project_id}_{scenario_id}_{functional_area}",
         )
         pending_key = f"equipment_mismatch_pending_move_{project_id}_{scenario_id}_{functional_area}"
-        if st.button(
+        col_act1, col_act2 = st.columns(2)
+        if col_act1.button(
             "Move equipment to current Pitch",
             icon=":material/move_item:",
             key=f"equipment_mismatch_move_{project_id}_{scenario_id}_{functional_area}",
+            help="Move this equipment asset to follow its linked process steps.",
         ):
             st.session_state[pending_key] = str(selected_id)
+
+        if col_act2.button(
+            "Unlink moved steps (keep equipment anchored)",
+            icon=":material/link_off:",
+            key=f"equipment_mismatch_unlink_{project_id}_{scenario_id}_{functional_area}",
+            help="Keep equipment anchored at its current pitch and unlink the moved step(s). The moved steps will flag as missing equipment at their new pitch.",
+        ):
+            try:
+                res = unlink_moved_equipment_links(
+                    project_id, scenario_id, str(selected_id), _editor_name()
+                )
+                st.toast(
+                    f"Unlinked {res['row_count']} moved operation(s). Equipment remains anchored at Station / Pitch.",
+                    icon=":material/check_circle:",
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
         @st.dialog("Move equipment to current Pitch?", dismissible=False)
         def confirm_move() -> None:
@@ -1050,10 +1132,10 @@ def render_torque_requirement_specifications(project_id: str) -> None:
 
 
 def render_equipment_needs_vs_placements_matrix(
-    project_id: str, scenario_id: str | None
+    project_id: str, scenario_id: str | None, *, wrap_in_expander: bool = True
 ) -> None:
     """Render the unified Equipment Needs vs Placements Audit Matrix table."""
-    with st.expander("Equipment Needs vs. Placements Audit Matrix", icon=":material/fact_check:"):
+    def _render_matrix_content() -> None:
         st.caption(
             "Verify that every Drawing Requirement (e.g. Torque specs) and PFMEA Control method "
             "(e.g. Vision systems, Scanners, Poka-Yoke, ESD) has matching Equipment placed."
@@ -1119,8 +1201,14 @@ def render_equipment_needs_vs_placements_matrix(
                 "work_element_id": None,
                 "is_satisfied": None,
             },
-            use_container_width=True,
+            width="stretch",
         )
+
+    if wrap_in_expander:
+        with st.expander("Equipment Needs vs. Placements Audit Matrix", icon=":material/fact_check:"):
+            _render_matrix_content()
+    else:
+        _render_matrix_content()
 
 
 def render_functional_equipment_tab(
@@ -1188,149 +1276,642 @@ def render_functional_equipment_tab(
         )
 
 
-def render_equipment_overview(
-    project_id: str, scenario_id: str | None
-) -> None:
-    """Render the central read-only collation and permanent-delete workspace."""
-    render_equipment_type_manager(project_id)
-    st.divider()
-    editable_table_heading("Project equipment")
-    st.caption(
-        "This is the project-wide collation. Edit equipment from a Functional Review's "
-        "Equipment tab; use selection here only for permanent deletion."
-    )
-    saved = equipment_assets(project_id, scenario_id)
-    visible = filter_table(
-        saved,
-        key=f"equipment_overview_filters_{project_id}",
-        dropdown_columns=["equipment_type", "functional_areas", "pitch_number"],
-        multi_value_columns=["functional_areas"],
-        search_columns=["name", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
-        labels={
-            "equipment_type": "Equipment Type",
-            "functional_areas": "Functional Reviews",
-            "pitch_number": "Station / Pitch",
-        },
-    )
-    display = visible.copy()
-    if not display.empty:
-        display["station_pitch"] = display.apply(_pitch_label, axis=1)
-        display["functional_areas_display"] = display["functional_areas"].map(lambda values: ", ".join(values))
-        display["image"] = display["image_path"].map(lambda value: "Attached" if _text(value) else "None")
-    else:
-        display["station_pitch"] = pd.Series(dtype="string")
-        display["functional_areas_display"] = pd.Series(dtype="string")
-        display["image"] = pd.Series(dtype="string")
-    editor_key = apply_pending_table_editor_reset(f"equipment_overview_editor_{project_id}")
-    pending_key = f"equipment_overview_pending_delete_{project_id}"
-    st.data_editor(
-        display,
-        key=editor_key,
-        num_rows="delete",
-        hide_index=True,
-        disabled=list(display.columns),
-        column_order=[
-            "name", "equipment_type", "description", "manufacturer", "model",
-            "station_pitch", "functional_areas_display", "notes", "image",
-            "process_link_count", "torque_requirement_count",
-        ],
-        column_config={
-            column: None
-            for column in display.columns
-            if column not in {
-                "name", "equipment_type", "description", "manufacturer", "model",
-                "station_pitch", "functional_areas_display", "notes", "image",
-                "process_link_count", "torque_requirement_count",
-            }
-        } | {
-            "name": "Equipment name",
-            "equipment_type": "Equipment Type",
-            "description": "Description",
-            "manufacturer": "Manufacturer",
-            "model": "Model",
-            "station_pitch": "Station / Pitch",
-            "functional_areas_display": "Functional Reviews",
-            "notes": "Notes",
-            "image": "Primary image",
-            "process_link_count": "Process links",
-            "torque_requirement_count": "Torque requirements",
-        },
-        height=520,
-    )
-    st.download_button(
-        "Export filtered rows",
-        dataframe_to_excel(_equipment_export(visible), sheet_name="Project Equipment"),
-        file_name="project_equipment_filtered.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        icon=":material/download:",
-        key=f"equipment_overview_export_{project_id}",
-    )
-    selected = native_selected_rows(display, editor_key=editor_key)
-    if not selected.empty:
-        st.session_state[pending_key] = [
-            {"id": _text(row["id"]), "name": _text(row["name"])}
-            for _, row in selected.iterrows()
-        ]
-        stage_native_delete_confirmation(editor_key)
+def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> None:
+    """Render the scenario-specific Conveyor line sizing calculator, zones, and pitch ergonomics."""
+    if not scenario_id:
+        st.info("Select an active planning scenario in the header to configure Conveyor Zones and calculate line sizing.")
+        return
 
-    @st.dialog("Permanently delete selected equipment?", dismissible=False)
-    def confirm_delete() -> None:
-        pending = list(st.session_state.get(pending_key) or [])
-        try:
-            impact = equipment_deletion_impact(
-                project_id, [item["id"] for item in pending]
-            )
-        except ValueError as exc:
-            st.error(str(exc))
+    sizing = scenario_conveyor_line_sizing(project_id, scenario_id)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Total Conveyor Length",
+        f"{sizing['total_length_ft']} ft",
+        f"{sizing['total_length_in']} in",
+    )
+    c2.metric(
+        "Line Pitch Footprint",
+        f"{sizing['total_pitches']} pitches",
+        f"{sizing['active_pitches']} active · {sizing['helper_pitches']} helper · {sizing['growth_pitches']} growth",
+        delta_color="off",
+    )
+    c3.metric("Standard Pitch Length", f"{sizing['standard_pitch_length_in']} in")
+    c4.metric("Capital Monuments Gap", f"{sizing['monument_length_in']} in")
+
+    st.caption(
+        "Conveyor length calculation: `Total Length = (Active + Helper + Growth Pitches) × Standard Pitch Length + Monument Gaps`. "
+        "Ergonomists specify conveyor elevation/width and unit orientation per zone, plus platform/pit dimensions per pitch."
+    )
+
+    st.divider()
+    editable_table_heading("Conveyor Zones")
+    zones = conveyor_zones(project_id, scenario_id)
+
+    if zones.empty:
+        st.caption("No conveyor zones defined yet for this scenario. Configure a zone below.")
+    else:
+        st.dataframe(
+            zones,
+            key=f"conveyor_zones_table_{project_id}_{scenario_id}",
+            hide_index=True,
+            column_order=[
+                "sequence", "name", "assigned_pitch_numbers",
+                "active_pitch_count", "helper_pitch_count", "growth_pitch_count",
+                "total_pitch_count", "standard_pitch_length_in", "total_length_ft",
+                "conveyor_height_in", "conveyor_width_in", "unit_orientation", "has_visual",
+            ],
+            column_config={
+                "sequence": "Seq",
+                "name": "Zone Name",
+                "assigned_pitch_numbers": "Assigned Pitches",
+                "start_pitch_number": None,
+                "end_pitch_number": None,
+                "active_pitch_count": "Active",
+                "helper_pitch_count": "Helper",
+                "growth_pitch_count": "Growth",
+                "total_pitch_count": "Total Pitches",
+                "standard_pitch_length_in": "Pitch Length (in)",
+                "total_length_ft": "Total Length (ft)",
+                "conveyor_height_in": "Height (in)",
+                "conveyor_width_in": "Width (in)",
+                "unit_orientation": "Unit Orientation",
+                "has_visual": "Visual",
+                "id": None,
+                "project_id": None,
+                "scenario_id": None,
+                "start_pitch_id": None,
+                "end_pitch_id": None,
+                "monument_length_in": None,
+                "total_length_in": None,
+                "orientation_image_path": None,
+                "notes": None,
+                "created_at": None,
+                "updated_at": None,
+            },
+            width="stretch",
+        )
+
+    # Expander for Add / Edit Conveyor Zone
+    with st.expander("Configure Conveyor Zone", icon=":material/tune:", expanded=zones.empty):
+        pitches = equipment_pitch_options(project_id, scenario_id)
+        if pitches.empty:
+            st.warning("No pitches exist in the active scenario yet. Create pitches in Yamazumi before configuring Conveyor Zones.")
             return
-        st.warning(
-            "This permanently deletes the shared equipment records from every Functional "
-            "Review and removes their placements, Process links, Torque links, and owned image."
+
+        pitches_ergo = scenario_pitches_ergonomics_geometry(project_id, scenario_id)
+        pitch_options = {
+            _text(row["id"]): _pitch_label(row) for _, row in pitches.iterrows()
+        }
+        zone_choices = ["(Create new Conveyor Zone)"]
+        zone_map: dict[str, dict] = {}
+        if not zones.empty:
+            for _, z_row in zones.iterrows():
+                z_label = f"{z_row['sequence']}. {z_row['name']}"
+                zone_choices.append(z_label)
+                zone_map[z_label] = z_row.to_dict()
+
+        selected_zone_label = st.selectbox(
+            "Select Conveyor Zone to edit",
+            zone_choices,
+            key=f"conveyor_zone_picker_{project_id}_{scenario_id}",
         )
-        for item in pending:
-            st.write(f"- {item['name']}")
-        st.caption(
-            f"{impact['function_links']} Functional Review link(s), "
-            f"{impact['placements']} placement(s), {impact['process_links']} Process link(s), "
-            f"{impact['torque_links']} Torque link(s), and {impact['image_files']} image file(s) are affected."
+        is_editing = selected_zone_label != "(Create new Conveyor Zone)"
+        current_zone = zone_map.get(selected_zone_label, {})
+
+        f_col1, f_col2 = st.columns(2)
+        zone_name = f_col1.text_input(
+            "Conveyor Zone Name",
+            value=str(current_zone.get("name") or ""),
+            placeholder="e.g. Zone 1 — Chassis Loading & Tacking",
+            key=f"zone_name_input_{project_id}_{scenario_id}",
         )
-        actions = st.container(horizontal=True)
-        if actions.button("Cancel", key=f"cancel_equipment_delete_{project_id}"):
-            st.session_state.pop(pending_key, None)
-            request_table_editor_reset(editor_key)
-            st.rerun()
-        if actions.button(
-            "Delete equipment",
+        zone_seq = f_col2.number_input(
+            "Sequence / Zone Number",
+            min_value=1,
+            step=1,
+            value=int(current_zone.get("sequence") or (len(zones) + 1)),
+            key=f"zone_seq_input_{project_id}_{scenario_id}",
+        )
+
+        # Determine pitches currently assigned to this zone
+        curr_zid = str(current_zone.get("id") or "")
+        assigned_pids: list[str] = []
+        if curr_zid and not pitches_ergo.empty:
+            assigned_pids = [
+                _text(r["id"]) for _, r in pitches_ergo.iterrows()
+                if _text(r.get("conveyor_zone_id")) == curr_zid
+            ]
+            if not assigned_pids and current_zone.get("assigned_pitch_ids"):
+                assigned_pids = [str(pid) for pid in current_zone["assigned_pitch_ids"]]
+            elif not assigned_pids:
+                s_id = _text(current_zone.get("start_pitch_id"))
+                e_id = _text(current_zone.get("end_pitch_id"))
+                all_pids = list(pitch_options.keys())
+                if s_id in all_pids and e_id in all_pids:
+                    i1, i2 = all_pids.index(s_id), all_pids.index(e_id)
+                    assigned_pids = all_pids[min(i1, i2) : max(i1, i2) + 1]
+                elif s_id in all_pids:
+                    assigned_pids = [s_id]
+
+        selected_pitch_ids = st.multiselect(
+            "Assigned Stations / Pitches",
+            options=list(pitch_options.keys()),
+            default=[pid for pid in assigned_pids if pid in pitch_options],
+            format_func=lambda value: pitch_options.get(str(value), "Unavailable Pitch"),
+            placeholder="Select pitches/stations that belong to this conveyor zone...",
+            help="Select all pitches and workstations assigned to this conveyor section.",
+            key=f"zone_pitches_multiselect_{project_id}_{scenario_id}_{curr_zid or 'new'}",
+        )
+
+        if selected_pitch_ids and not pitches_ergo.empty:
+            assigned_preview = pitches_ergo[pitches_ergo["id"].isin(selected_pitch_ids)][
+                ["pitch_number", "pitch_name", "area_name", "status"]
+            ]
+            with st.container(border=True):
+                st.caption(f"**Pitches in this Conveyor Section ({len(selected_pitch_ids)}):**")
+                st.dataframe(
+                    assigned_preview,
+                    hide_index=True,
+                    column_config={
+                        "pitch_number": "Pitch Number",
+                        "pitch_name": "Pitch Name",
+                        "area_name": "Area",
+                        "status": "Status",
+                    },
+                    height=min(180, 36 * (len(assigned_preview) + 1)),
+                    width="stretch",
+                )
+
+        st.markdown("##### Ergonomic Specifications")
+        e_col1, e_col2, e_col3 = st.columns(3)
+        conveyor_h = e_col1.number_input(
+            "Conveyor Height (in)",
+            min_value=0.0,
+            step=0.5,
+            value=float(current_zone.get("conveyor_height_in") or 36.0),
+            help="Optimal working height specified by Ergonomist.",
+            key=f"zone_h_{project_id}_{scenario_id}",
+        )
+        conveyor_w = e_col2.number_input(
+            "Conveyor Width (in)",
+            min_value=0.0,
+            step=0.5,
+            value=float(current_zone.get("conveyor_width_in") or 24.0),
+            help="Conveyor bed width specified by Ergonomist.",
+            key=f"zone_w_{project_id}_{scenario_id}",
+        )
+        default_orient = str(current_zone.get("unit_orientation") or "Front Facing")
+        unit_orient = e_col3.selectbox(
+            "Unit Orientation to Operator",
+            options=list(UNIT_ORIENTATION_OPTIONS),
+            index=(
+                list(UNIT_ORIENTATION_OPTIONS).index(default_orient)
+                if default_orient in UNIT_ORIENTATION_OPTIONS
+                else 0
+            ),
+            help="Critical orientation of the unit relative to the operator.",
+            key=f"zone_orient_{project_id}_{scenario_id}",
+        )
+
+        # Orientation visual
+        st.markdown("##### Unit Orientation Diagram / Photo")
+        img_col1, img_col2 = st.columns([1, 2])
+        curr_img_path = str(current_zone.get("orientation_image_path") or "")
+        with img_col1:
+            if curr_img_path and Path(curr_img_path).exists():
+                st.image(curr_img_path, caption="Saved Orientation Visual", width="stretch")
+                if is_editing and st.button(
+                    "Delete visual",
+                    icon=":material/delete:",
+                    key=f"delete_zone_img_{current_zone.get('id')}",
+                ):
+                    delete_conveyor_zone_image(
+                        project_id, scenario_id, str(current_zone["id"]), _editor_name()
+                    )
+                    st.toast("Deleted orientation visual", icon=":material/check_circle:")
+                    st.rerun()
+            else:
+                st.caption("No orientation diagram attached.")
+
+        with img_col2:
+            uploaded_file = st.file_uploader(
+                "Upload orientation diagram / photo",
+                type=["png", "jpg", "jpeg", "webp"],
+                key=f"zone_img_upload_{project_id}_{scenario_id}_{selected_zone_label}",
+                help="Attach a CAD screenshot or line illustration showing orientation.",
+            )
+            pasted = clipboard_image(key=f"zone_clip_paste_{project_id}_{scenario_id}_{selected_zone_label}")
+            pasted_payload = getattr(pasted, "image", None)
+            if pasted_payload:
+                try:
+                    pasted_img = decode_clipboard_image(pasted_payload)
+                    uploaded_file = as_uploaded_file(pasted_img)
+                    st.success("Captured screenshot from clipboard!")
+                except Exception as exc:
+                    st.warning(str(exc))
+
+        st.markdown("##### Line Sizing Parameters")
+        s_col1, s_col2, s_col3, s_col4 = st.columns(4)
+        pitch_len = s_col1.number_input(
+            "Pitch Length (in)",
+            min_value=1.0,
+            step=1.0,
+            value=float(current_zone.get("standard_pitch_length_in") or 120.0),
+            help="Standard linear station pitch length in inches.",
+            key=f"zone_pitch_len_{project_id}_{scenario_id}",
+        )
+        helper_pitches = s_col2.number_input(
+            "Helper Pitches",
+            min_value=0,
+            step=1,
+            value=int(current_zone.get("helper_pitch_count") or 0),
+            help="Additional pitches allocated for line support / helpers.",
+            key=f"zone_helpers_{project_id}_{scenario_id}",
+        )
+        growth_pitches = s_col3.number_input(
+            "Growth Pitches",
+            min_value=0,
+            step=1,
+            value=int(current_zone.get("growth_pitch_count") or 0),
+            help="Spare pitches allocated for future growth or model variation.",
+            key=f"zone_growth_{project_id}_{scenario_id}",
+        )
+        monument_len = s_col4.number_input(
+            "Monuments / Gap (in)",
+            min_value=0.0,
+            step=1.0,
+            value=float(current_zone.get("monument_length_in") or 0.0),
+            help="Linear gap allocated for stationary robots, ovens, or physical monuments.",
+            key=f"zone_monuments_{project_id}_{scenario_id}",
+        )
+
+        zone_notes = st.text_area(
+            "Zone Notes",
+            value=str(current_zone.get("notes") or ""),
+            placeholder="Ergonomic rationale, fixture notes, or tooling considerations...",
+            key=f"zone_notes_{project_id}_{scenario_id}",
+        )
+
+        btn_c1, btn_c2 = st.columns(2)
+        if btn_c1.button(
+            "Save Conveyor Zone",
             type="primary",
-            icon=":material/delete:",
-            key=f"destructive_confirm_equipment_delete_{project_id}",
+            icon=":material/save:",
+            key=f"save_zone_btn_{project_id}_{scenario_id}",
         ):
             try:
-                result = delete_equipment_assets(
-                    project_id, [item["id"] for item in pending], _editor_name()
-                )
-                st.session_state.pop(pending_key, None)
-                request_table_editor_reset(editor_key)
-                st.toast(
-                    f"Deleted {result['row_count']} equipment record(s)",
-                    icon=":material/delete:",
-                )
+                zone_data = {
+                    "id": current_zone.get("id"),
+                    "name": zone_name,
+                    "sequence": int(zone_seq),
+                    "pitch_ids": [str(pid) for pid in selected_pitch_ids],
+                    "conveyor_height_in": float(conveyor_h),
+                    "conveyor_width_in": float(conveyor_w),
+                    "unit_orientation": str(unit_orient),
+                    "standard_pitch_length_in": float(pitch_len),
+                    "helper_pitch_count": int(helper_pitches),
+                    "growth_pitch_count": int(growth_pitches),
+                    "monument_length_in": float(monument_len),
+                    "notes": zone_notes,
+                }
+                res = save_conveyor_zone(project_id, scenario_id, zone_data, _editor_name())
+                saved_id = str(res.get("id") or current_zone.get("id"))
+                if uploaded_file and saved_id:
+                    set_conveyor_zone_image(
+                        project_id, scenario_id, saved_id, uploaded_file, _editor_name()
+                    )
+                st.toast("Saved Conveyor Zone", icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
 
-    if st.session_state.get(pending_key):
-        confirm_delete()
-    _render_equipment_detail(
-        project_id,
-        scenario_id,
-        "Project",
-        saved,
-    )
-    _render_mismatch_review(
-        project_id,
-        scenario_id,
-        "Project",
-        saved,
-    )
+        if is_editing and btn_c2.button(
+            "Delete Conveyor Zone",
+            icon=":material/delete:",
+            key=f"del_zone_btn_{project_id}_{scenario_id}",
+        ):
+            try:
+                res = delete_conveyor_zones(
+                    project_id, scenario_id, [str(current_zone["id"])], _editor_name()
+                )
+                st.toast(f"Deleted {res['row_count']} Conveyor Zone(s)", icon=":material/delete:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    # Expander for Workstation & Conveyor Pitch Assignments
+    with st.expander("Workstation & Conveyor Pitch Assignments (Ergonomics)", icon=":material/height:", expanded=False):
+        st.caption(
+            "All workstation pitches in this scenario are listed below. Assign pitches to conveyor zones, "
+            "and configure workstation platform elevations (+in) or pit recesses (-in)."
+        )
+        pitches_ergo = scenario_pitches_ergonomics_geometry(project_id, scenario_id)
+        if pitches_ergo.empty:
+            st.caption("No pitches available in the active scenario.")
+            return
+
+        ergo_editor_key = apply_pending_table_editor_reset(f"pitch_ergo_editor_{project_id}_{scenario_id}")
+        zone_options = {"": "None / Unassigned"}
+        if not zones.empty:
+            for _, z_row in zones.iterrows():
+                zone_options[str(z_row["id"])] = f"{z_row['sequence']}. {z_row['name']}"
+
+        # Quick Batch Assignment bar
+        with st.container(border=True):
+            st.markdown("###### Batch Assign Pitches to Conveyor Zone")
+            st.caption("Select one or more pitches below to assign them all to a Conveyor Zone simultaneously.")
+            ba_col1, ba_col2, ba_col3 = st.columns([2, 3, 1])
+            batch_zone = ba_col1.selectbox(
+                "Assign To Conveyor Zone",
+                options=list(zone_options.keys()),
+                format_func=lambda zid: zone_options.get(str(zid), "None / Unassigned"),
+                key=f"batch_assign_zone_{project_id}_{scenario_id}",
+            )
+            batch_pitches = ba_col2.multiselect(
+                "Select Pitches",
+                options=list(pitch_options.keys()),
+                format_func=lambda pid: pitch_options.get(str(pid), "Unavailable Pitch"),
+                placeholder="Choose pitches to assign together...",
+                key=f"batch_assign_pitches_{project_id}_{scenario_id}",
+            )
+            ba_col3.write("")
+            ba_col3.write("")
+            if ba_col3.button(
+                "Assign Pitches",
+                type="primary",
+                icon=":material/done_all:",
+                disabled=not batch_pitches,
+                key=f"batch_assign_btn_{project_id}_{scenario_id}",
+            ):
+                try:
+                    res = batch_assign_pitches_to_conveyor_zone(
+                        project_id, scenario_id, batch_pitches, batch_zone, _editor_name()
+                    )
+                    request_table_editor_reset(ergo_editor_key)
+                    st.toast(
+                        f"Assigned {res['updated_count']} pitch(es) to conveyor zone",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        ergo_rows = direct_entry_editor_rows(
+            pitches_ergo,
+            editor_key=ergo_editor_key,
+            sort_columns=["pitch_number", "pitch_name"],
+            labels={"pitch_number": "Pitch Number", "pitch_name": "Pitch Name"},
+        )
+        ergo_edited = st.data_editor(
+            ergo_rows,
+            key=ergo_editor_key,
+            hide_index=True,
+            column_order=[
+                "pitch_number", "pitch_name", "area_name", "status",
+                "conveyor_zone_id", "platform_height_in", "pit_depth_in",
+                "conveyor_height_in", "unit_orientation",
+            ],
+            disabled=[
+                "pitch_id", "pitch_number", "pitch_name", "area_name", "status",
+                "conveyor_height_in", "unit_orientation",
+            ],
+            column_config={
+                "pitch_id": None,
+                "pitch_number": st.column_config.TextColumn("Pitch Number"),
+                "pitch_name": st.column_config.TextColumn("Pitch Name"),
+                "area_name": st.column_config.TextColumn("Area"),
+                "status": st.column_config.TextColumn("Status"),
+                "conveyor_zone_id": st.column_config.SelectboxColumn(
+                    "Assigned Conveyor Zone",
+                    options=list(zone_options),
+                    format_func=lambda value: zone_options.get(str(value), "None / Unassigned"),
+                    help="Conveyor zone governing height, width, and unit orientation.",
+                ),
+                "platform_height_in": st.column_config.NumberColumn(
+                    "Platform Height (in)",
+                    min_value=0.0,
+                    step=0.5,
+                    format="%.1f in",
+                    help="Workstation platform elevation above shop floor.",
+                ),
+                "pit_depth_in": st.column_config.NumberColumn(
+                    "Pit Depth (in)",
+                    min_value=0.0,
+                    step=0.5,
+                    format="%.1f in",
+                    help="Recessed pit depth below shop floor.",
+                ),
+                "conveyor_height_in": st.column_config.NumberColumn(
+                    "Zone Conveyor Height (in)",
+                    format="%.1f in",
+                    help="Conveyor height inherited from Assigned Conveyor Zone.",
+                ),
+                "unit_orientation": st.column_config.TextColumn(
+                    "Zone Unit Orientation",
+                    help="Orientation to operator inherited from Assigned Conveyor Zone.",
+                ),
+            },
+            height=420,
+            width="stretch",
+        )
+        ergo_footer = editable_table_footer(
+            editor_key=ergo_editor_key,
+            key_prefix=f"pitch_ergo_footer_{project_id}_{scenario_id}",
+            native_row_selection=False,
+        )
+        if ergo_footer.undo:
+            request_table_editor_reset(ergo_editor_key)
+            st.rerun()
+        if ergo_footer.save_and_refresh:
+            try:
+                combined_ergo = merge_filtered_edits(pitches_ergo, pitches_ergo, ergo_edited)
+                res = save_pitch_ergonomics_geometry(
+                    project_id, scenario_id, combined_ergo.to_dict("records"), _editor_name()
+                )
+                request_table_editor_reset(ergo_editor_key)
+                st.toast(f"Saved ergonomics specs for {res['row_count']} pitch(es)", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+def render_equipment_overview(
+    project_id: str, scenario_id: str | None
+) -> None:
+    """Render the central Equipment workspace with 4 tabs and KPI cards."""
+    all_assets = equipment_assets(project_id, scenario_id)
+    handheld_count = int(all_assets["equipment_tier"].eq("Handheld Tools").sum()) if not all_assets.empty else 0
+    station_count = int(all_assets["equipment_tier"].eq("Station/Pitch Equipment").sum()) if not all_assets.empty else 0
+    capital_count = int(all_assets["equipment_tier"].eq("Capital Equipment").sum()) if not all_assets.empty else 0
+
+    # Top KPI Metrics row
+    kpi_cols = st.columns(4)
+    kpi_cols[0].metric("Total Equipment", len(all_assets))
+    kpi_cols[1].metric("Handheld Tools", handheld_count)
+    kpi_cols[2].metric("Station Equipment", station_count)
+    kpi_cols[3].metric("Capital Equipment", capital_count)
+
+    tab_labels = [
+        ":material/inventory_2: Equipment Catalog & Placements",
+        ":material/conveyor_belt: Conveyor Zones & Line Sizing",
+        ":material/fact_check: Needs vs. Placements Audit",
+        ":material/category: Equipment Types",
+    ]
+    tab1, tab2, tab3, tab4 = st.tabs(tab_labels)
+
+    with tab1:
+        editable_table_heading("Equipment Catalog & Placements")
+        st.caption(
+            "Unified collation of all project equipment across Handheld Tools, Station/Pitch Equipment, "
+            "and Capital Equipment. Assign Station / Pitch and link Process Functions in the details drawer below."
+        )
+        saved = all_assets.copy()
+        visible = filter_table(
+            saved,
+            key=f"equipment_overview_filters_{project_id}",
+            dropdown_columns=["equipment_tier", "equipment_type", "functional_areas", "pitch_number"],
+            multi_value_columns=["functional_areas"],
+            search_columns=["name", "equipment_tier", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
+            labels={
+                "equipment_tier": "Tier",
+                "equipment_type": "Equipment Type",
+                "functional_areas": "Functional Reviews",
+                "pitch_number": "Station / Pitch",
+            },
+        )
+        display = visible.copy()
+        if not display.empty:
+            display["station_pitch"] = display.apply(_pitch_label, axis=1)
+            display["functional_areas_display"] = display["functional_areas"].map(lambda values: ", ".join(values))
+            display["image"] = display["image_path"].map(lambda value: "Attached" if _text(value) else "None")
+        else:
+            display["station_pitch"] = pd.Series(dtype="string")
+            display["functional_areas_display"] = pd.Series(dtype="string")
+            display["image"] = pd.Series(dtype="string")
+
+        editor_key = apply_pending_table_editor_reset(f"equipment_overview_editor_{project_id}")
+        pending_key = f"equipment_overview_pending_delete_{project_id}"
+        st.data_editor(
+            display,
+            key=editor_key,
+            num_rows="delete",
+            hide_index=True,
+            disabled=list(display.columns),
+            column_order=[
+                "name", "equipment_tier", "equipment_type", "description", "manufacturer", "model",
+                "station_pitch", "functional_areas_display", "notes", "image",
+                "process_link_count", "torque_requirement_count",
+            ],
+            column_config={
+                column: None
+                for column in display.columns
+                if column not in {
+                    "name", "equipment_tier", "equipment_type", "description", "manufacturer", "model",
+                    "station_pitch", "functional_areas_display", "notes", "image",
+                    "process_link_count", "torque_requirement_count",
+                }
+            } | {
+                "name": "Equipment name",
+                "equipment_tier": "Tier",
+                "equipment_type": "Equipment Type",
+                "description": "Description",
+                "manufacturer": "Manufacturer",
+                "model": "Model",
+                "station_pitch": "Station / Pitch",
+                "functional_areas_display": "Functional Reviews",
+                "notes": "Notes",
+                "image": "Primary image",
+                "process_link_count": "Process links",
+                "torque_requirement_count": "Torque requirements",
+            },
+            height=430,
+            width="stretch",
+        )
+        st.download_button(
+            "Export filtered rows",
+            dataframe_to_excel(_equipment_export(visible), sheet_name="Project Equipment"),
+            file_name="project_equipment_filtered.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            icon=":material/download:",
+            key=f"equipment_overview_export_{project_id}",
+        )
+        selected = native_selected_rows(display, editor_key=editor_key)
+        if not selected.empty:
+            st.session_state[pending_key] = [
+                {"id": _text(row["id"]), "name": _text(row["name"])}
+                for _, row in selected.iterrows()
+            ]
+            stage_native_delete_confirmation(editor_key)
+
+        @st.dialog("Permanently delete selected equipment?", dismissible=False)
+        def confirm_delete() -> None:
+            pending = list(st.session_state.get(pending_key) or [])
+            try:
+                impact = equipment_deletion_impact(
+                    project_id, [item["id"] for item in pending]
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+                return
+            st.warning(
+                "This permanently deletes the shared equipment records from every Functional "
+                "Review and removes their placements, Process links, Torque links, and owned image."
+            )
+            for item in pending:
+                st.write(f"- {item['name']}")
+            st.caption(
+                f"{impact['function_links']} Functional Review link(s), "
+                f"{impact['placements']} placement(s), {impact['process_links']} Process link(s), "
+                f"{impact['torque_links']} Torque link(s), and {impact['image_files']} image file(s) are affected."
+            )
+            actions = st.container(horizontal=True)
+            if actions.button("Cancel", key=f"cancel_equipment_delete_{project_id}"):
+                st.session_state.pop(pending_key, None)
+                request_table_editor_reset(editor_key)
+                st.rerun()
+            if actions.button(
+                "Delete equipment",
+                type="primary",
+                icon=":material/delete:",
+                key=f"destructive_confirm_equipment_delete_{project_id}",
+            ):
+                try:
+                    result = delete_equipment_assets(
+                        project_id, [item["id"] for item in pending], _editor_name()
+                    )
+                    st.session_state.pop(pending_key, None)
+                    request_table_editor_reset(editor_key)
+                    st.toast(
+                        f"Deleted {result['row_count']} equipment record(s)",
+                        icon=":material/delete:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        if st.session_state.get(pending_key):
+            confirm_delete()
+        _render_equipment_detail(
+            project_id,
+            scenario_id,
+            "Project",
+            saved,
+        )
+        _render_mismatch_review(
+            project_id,
+            scenario_id,
+            "Project",
+            saved,
+        )
+
+    with tab2:
+        render_conveyor_line_sizing(project_id, scenario_id)
+
+    with tab3:
+        render_equipment_needs_vs_placements_matrix(project_id, scenario_id, wrap_in_expander=False)
+
+    with tab4:
+        render_equipment_type_manager(project_id, wrap_in_expander=False)
+
+    st.divider()
     render_equipment_history(project_id, key_prefix="equipment_overview")

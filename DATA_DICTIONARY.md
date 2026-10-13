@@ -891,6 +891,51 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### Unified 3-Tier Equipment, Station Placements, and Conveyor Zones Architecture
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 13, 2026
+- **Approval status:** Approved by project owner on October 13, 2026 for implementation on branch `NE_Equipment_and_Tools_Flow`.
+- **Purpose:** Unify equipment, tooling, and conveyor planning across three distinct operational tiers, establishing a single centralized workspace in the Equipment tab to view, audit, and configure all equipment big and small:
+  1. *Tier 1: Handheld Tools* (Element-level / Task-level): Portable tools (e.g., screwdrivers, torque nutrunners, scan guns, pneumatic tools) tied directly to PAAG work elements. The IE specifies generic intent/category during work element creation; AME/AQE/Tooling engineers specify exact cataloged assets. Tools automatically travel with the operation if rebalanced in Yamazumi.
+  2. *Tier 2: Station / Pitch Equipment* (Pitch-level / Physical Location): Dedicated workstation assets (e.g., vision inspection portals, leak testers, poka-yoke fixtures) anchored to a physical pitch. Placing Tier 2 equipment on a pitch marks the pitch as `Blocked`. Supports either autonomous machine cycle time (`resource_type = 'Autonomous equipment'`) or a pass-through physical footprint. If an IE rebalances Yamazumi and moves an operation away from the pitch, the equipment remains anchored to its station, and the moved operation unlinks and flags in the Equipment Audit Matrix as an unfulfilled equipment need at its new pitch.
+  3. *Tier 3: Capital Equipment & Conveyor Zones* (Scenario-level / Line Infrastructure): Scenario-specific line infrastructure organized into named Conveyor Zones encompassing ranges of pitches (e.g., Zone 1: Main Spine, Zone 2: Door Line, Zone 3: Test & Pack). Ergonomists define zone-level conveyor working height ($H_c$), conveyor width/reach ($W_c$), unit orientation to the operator (with an illustrative CAD/photo reference upload), and pitch-specific platform elevations or pit depths. The Industrial Engineer inputs helper pitches, future growth allowances, standard pitch length, and monument footprints to calculate total conveyor length dynamically from the scenario line balance.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `planning_scenarios` (scenario owning conveyor sizing, zones, pitch placements, and PAAG work elements), `yamazumi_pitches` (workstation pitches, `Blocked` pitch status, pitch platform/pit overrides), `work_elements` (PAAG process steps, tool category/asset links, resource type/detail, inherited conveyor height, platform height, pit depth, unit orientation), `equipment_types` (project-wide catalog with tier classification), `equipment_assets` (project-wide physical master assets: name, manufacturer, model, description, notes, image), `equipment_placements` (scenario-owned placement of an asset onto a pitch), and `equipment_process_links` (scenario-owned link between placement and work element).
+  2. *Critical thread relationship:* Connects directly to the Yamazumi, Process at a Glance, and Standard Work Presentation layers of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> Equipment & Conveyor Line Sizing -> PAAG Visualizer*).
+  3. *Scope:*
+     - Project-wide: `equipment_types` (catalog with `tier` classification: Handheld Tools, Station/Pitch Equipment, Capital Equipment) and `equipment_assets` (physical catalog of tools and machines).
+     - Scenario-specific: `equipment_placements`, `equipment_process_links`, pitch `Blocked` status, and `conveyor_zones` (scenario-specific line sizing, conveyor dimensions, zone unit orientation, and pitch platform/pit overrides).
+  4. *Table requirement:*
+     - Existing tables `equipment_types`, `equipment_assets`, `equipment_placements`, `equipment_process_links`, `work_elements`, and `yamazumi_pitches` serve Tiers 1 and 2.
+       - `equipment_types` adds `tier TEXT NOT NULL DEFAULT 'Handheld Tools'` (allowed values: `'Handheld Tools'`, `'Station/Pitch Equipment'`, `'Capital Equipment'`).
+       - `yamazumi_pitches` adds `platform_height_in REAL DEFAULT 0.0`, `pit_depth_in REAL DEFAULT 0.0`, `conveyor_zone_id TEXT REFERENCES conveyor_zones(id)`.
+     - A new scenario-owned table `conveyor_zones` serves Tier 3 to store conveyor segments encompassing sections of pitches:
+       - `id TEXT PRIMARY KEY`: UUID string
+       - `project_id TEXT NOT NULL REFERENCES projects(id)`
+       - `scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id)`
+       - `name TEXT NOT NULL`: e.g. "Zone 1 - Main Spine Assembly"
+       - `sequence INTEGER NOT NULL DEFAULT 10`: order along line
+       - `start_pitch_id TEXT REFERENCES yamazumi_pitches(id)`
+       - `end_pitch_id TEXT REFERENCES yamazumi_pitches(id)`
+       - `conveyor_height_in REAL`: Ergonomist-defined conveyor working height in inches (e.g. 36.0)
+       - `conveyor_width_in REAL`: Ergonomist-defined conveyor reach/width in inches (e.g. 28.0)
+       - `unit_orientation TEXT NOT NULL DEFAULT ''`: Unit orientation to operator (e.g. "Front Facing", "Inverted / Bottom Up", "Lying on Back", "Top Up / Standing")
+       - `orientation_image_path TEXT NOT NULL DEFAULT ''`: Relative path to illustrative unit orientation drawing/photo in `data/uploads/`
+       - `standard_pitch_length_in REAL DEFAULT 120.0`: Nominal pitch length in inches (e.g. 10 ft / 120 in)
+       - `helper_pitch_count INTEGER DEFAULT 0`: Offline rework/helper pitch count
+       - `growth_pitch_count INTEGER DEFAULT 0`: Future expansion/buffer pitch count
+       - `monument_length_in REAL DEFAULT 0.0`: Additional length for fixed monument equipment
+       - `notes TEXT NOT NULL DEFAULT ''`
+       - `created_at TEXT NOT NULL`
+       - `updated_at TEXT NOT NULL`
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: Save & Refresh with undo, audit logging under categories `"Equipment assets"`, `"Equipment placements"`, and `"Conveyor zones"`.
+     - Universal Deletion Standard: Non-dismissible relationship-aware confirmation dialog for zones and equipment assets.
+     - Scope Badges: Scenario-aware scope on Equipment page (`page_title_with_scope("Equipment", scope="scenario-aware")`).
+     - Imperial Units Standard: Stored and displayed in imperial inches (`conveyor_height_in`, `conveyor_width_in`, `platform_height_in`, `pit_depth_in`, `standard_pitch_length_in`).
+     - Image Uploads: Stored under `data/uploads/` with safe unique filenames, persisting relative paths.
+
 ### PAAG Elements: Resource Performing Work and Handheld Equipment Tool Selection
 
 - **Proposed by:** Nicole Ervin, project owner
