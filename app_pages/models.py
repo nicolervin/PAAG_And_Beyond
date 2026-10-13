@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import (
+    apply_inferred_part_feature_rules,
     assembly_grid_model_mappings,
     audit_history,
     complexity_feature_delete_impacts,
@@ -14,6 +15,7 @@ from utils.store import (
     delete_project_models,
     model_planning_snapshot,
     potential_duplicate_models,
+    preview_inferred_part_feature_rules,
     project_models,
     record_audit_event,
     restore_model_planning_snapshot,
@@ -22,6 +24,7 @@ from utils.store import (
     update_complexity_tree,
     update_project_model_rows,
 )
+from utils.part_feature_dialog import review_multi_feature_applicability_dialog
 from utils.scope_ui import page_title_with_scope
 from utils.table_ui import (
     drop_untouched_new_rows,
@@ -600,6 +603,100 @@ else:
     st.caption(
         "Assign one team-defined choice per feature to each official model. Models may share the same process-relevant choices."
     )
+    tree_bar = st.container(horizontal=True)
+    if tree_bar.button(
+        "Auto-assign to Parts Catalog",
+        icon=":material/auto_awesome:",
+        help="Infer and apply feature applicability rules to parts in the Parts Catalog based on this Complexity Tree.",
+    ):
+        if tree_has_unsaved:
+            st.warning(
+                "Save your Complexity Tree changes with 'Save & Refresh' below before auto-assigning to the Parts Catalog."
+            )
+        else:
+            st.session_state["models_pending_auto_assign"] = True
+
+    def dismiss_models_auto_assign() -> None:
+        st.session_state.pop("models_pending_auto_assign", None)
+
+    @st.dialog(
+        "Auto-assign to Parts Catalog?",
+        dismissible=True,
+        on_dismiss=dismiss_models_auto_assign,
+    )
+    def confirm_models_auto_assign() -> None:
+        if tree_has_unsaved:
+            st.warning(
+                "Save your Complexity Tree changes with 'Save & Refresh' below before auto-assigning to the Parts Catalog."
+            )
+            if st.button("Close", key=f"close_models_auto_assign_{project_id}"):
+                st.session_state.pop("models_pending_auto_assign", None)
+                st.rerun()
+            return
+        st.write(
+            "Detect and assign feature applicability (such as Fascia = LCD or All models) "
+            "to parts in the Parts Catalog based on their model occurrences and this Complexity Tree."
+        )
+        overwrite = st.checkbox(
+            "Overwrite existing manual feature rules",
+            value=False,
+            help="When unchecked (recommended for incremental additions), only parts without rules or marked 'Needs feature tagging' will be assigned. When checked, re-evaluates and updates all parts according to the latest Complexity Tree.",
+            key=f"models_auto_assign_overwrite_{project_id}",
+        )
+        dlg_cols = st.container(horizontal=True)
+        if dlg_cols.button("Cancel", key=f"cancel_models_auto_assign_{project_id}"):
+            st.session_state.pop("models_pending_auto_assign", None)
+            st.rerun()
+        if dlg_cols.button(
+            "Run auto-assign",
+            type="primary",
+            icon=":material/auto_awesome:",
+            key=f"confirm_models_auto_assign_{project_id}",
+        ):
+            try:
+                editor = st.session_state.get("current_editor", "")
+                preview = preview_inferred_part_feature_rules(
+                    project_id,
+                    overwrite_existing=overwrite,
+                )
+                if preview["review"]:
+                    st.session_state.pop("models_pending_auto_assign", None)
+                    st.session_state[f"pending_multi_feature_review_{project_id}"] = {
+                        "preview": preview,
+                        "source_page": "models",
+                    }
+                    st.rerun()
+                elif preview["direct"]:
+                    updated = apply_inferred_part_feature_rules(
+                        project_id,
+                        overwrite_existing=overwrite,
+                        editor_name=editor,
+                    )
+                    st.session_state.pop("models_pending_auto_assign", None)
+                    st.toast(
+                        f"Auto-assigned feature applicability for {updated} parts in the Parts Catalog",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                elif not overwrite and preview["skipped_existing_count"] > 0:
+                    st.warning(
+                        "No unassigned parts were updated because existing parts already have feature rules. "
+                        "Check 'Overwrite existing manual feature rules' above and click 'Run auto-assign' again to re-apply the latest Complexity Tree mappings."
+                    )
+                else:
+                    st.session_state.pop("models_pending_auto_assign", None)
+                    st.toast(
+                        "Parts Catalog is already up to date with the Complexity Tree.",
+                        icon=":material/info:",
+                    )
+                    st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    if st.session_state.get("models_pending_auto_assign"):
+        confirm_models_auto_assign()
+    if st.session_state.get(f"pending_multi_feature_review_{project_id}"):
+        review_multi_feature_applicability_dialog(project_id)
     tree = complexity_tree(project_id)
     tree = tree.loc[tree["model_id"].astype(str).isin(active_model_ids)].copy()
     active_feature_ids = active_features["id"].astype(str).tolist()
@@ -685,22 +782,35 @@ else:
         pending_tree = pd.DataFrame(pending.get("rows", []))
         changed_assignment_count = int(pending.get("changed_assignment_count", 0))
         count = update_complexity_tree(project_id, pending_tree)
+        editor_name = st.session_state.get("current_editor", "")
         record_audit_event(
             project_id,
             "Complexity tree",
             "Save & Refresh",
             changed_assignment_count,
-            st.session_state.get("current_editor", ""),
+            editor_name,
             {
                 "model_feature_assignments_changed": changed_assignment_count,
             },
+        )
+        auto_assigned_count = apply_inferred_part_feature_rules(
+            project_id,
+            overwrite_existing=False,
+            editor_name=editor_name,
+            skip_multi_feature=True,
         )
         st.session_state[tree_undo_key] = pending.get(
             "snapshot", current_complexity_snapshot
         )
         st.session_state.pop(tree_pending_save_key, None)
         request_table_editor_reset(tree_editor_key)
-        st.toast(f"Saved {count} model feature selections", icon=":material/check_circle:")
+        if auto_assigned_count > 0:
+            st.toast(
+                f"Saved {count} model feature selections. Auto-assigned {auto_assigned_count} parts in Parts Catalog.",
+                icon=":material/check_circle:",
+            )
+        else:
+            st.toast(f"Saved {count} model feature selections", icon=":material/check_circle:")
         st.rerun()
 
     def dismiss_duplicate_model_warning() -> None:

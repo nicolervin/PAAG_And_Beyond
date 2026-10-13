@@ -314,6 +314,9 @@ def _run_workspace_page(app_page, *, enable: bool = False) -> None:
         pass
 
 
+if active_page_key != "parts" and secondary_url_path != "parts":
+    st.session_state.pop("_parts_page_mounted_token", None)
+
 if secondary_page is None:
     navigation.run()
 else:

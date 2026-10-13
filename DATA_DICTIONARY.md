@@ -143,7 +143,7 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 
 ### `assembly_sections`
 
-- **Purpose:** Defines the station-independent assembly fishbone framework. Rows are either main-spine sections or subassemblies and include ordering, description, and active status.
+- **Purpose:** Defines the station-independent assembly fishbone framework. Rows are main-spine sections, subassemblies, or support operations, and include ordering, description, and active status.
 - **Key relationships:** Belongs to `projects`. May reference another `assembly_sections` row as its parent. Parent of `fishbone_part_assignments`; optionally linked from `yamazumi_areas`, `process_part_groups`, and the Built and Installed fields on `manufacturing_assemblies`. Deleting a referenced section requires the combined continuity re-pointing workflow documented below.
 - **Scope:** Project-wide.
 
@@ -890,6 +890,28 @@ All writes validate project ownership, complete input sets, required fields, uni
 In-house fabrication tagging for Fishbone sections: a future idea to mark a Subassembly-type Fishbone section as representing an in-house fabrication process (e.g., stamped metal, injection molding), for Quality's PFMEA and Control Plan tracking. Confirmed approach: an orthogonal flag added to an existing Subassembly section (not a new `section_type` value). The section remains structurally an ordinary Subassembly in every respect — walk order, nesting, parent/child rules, and all existing behavior are unaffected. The flag only changes its display designator in the Op ID naming scheme (an `F` instead of `S`) and will drive future Quality-tracked fields once scoped. Requires Quality's input on what specific data should be tracked (for example, tooling, material lot, process parameters) before a real proposal can be written and before the New Module Proposal Gate can be completed. Not yet approved, not yet scoped, no implementation should begin from this note alone.
 
 ## Proposed modules — pending owner review
+
+### PITS New Part Verification & Downstream Impact Wizard
+
+- **Proposed by:** Kayla Funk
+- **Date recorded:** October 6, 2026
+- **Purpose:** When importing or updating a PITS tracker list, provide an interactive, non-dismissible step-through wizard dialog that prompts the user to review each newly introduced part number and modified description individually. The user explicitly acknowledges awareness of each part before the import proceeds. For each part, the wizard summarizes downstream planning impacts across Fishbone framework placement, Model Tree hierarchy, Yamazumi balancing, and Process at a Glance part requirements with expandable dropdowns.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects upstream PITS Tracker / BOM evidence (`pits_records`, `pits_bom_occurrences`) to the Parts Catalog (`parts`), Fishbone (`fishbone_nodes`, `fishbone_part_assignments`, `assembly_sections`), Model Tree (`pits_bom_occurrences`, `project_models`), Yamazumi (`yamazumi_work_elements`, `yamazumi_areas`, `pitch_addresses`), and Process at a Glance (`process_plan_steps`, `process_part_requirements`).
+  2. *Critical thread relationship:* Connects Product Architecture / PITS evidence to the Parts Catalog and downstream planning stages (*Product Architecture -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance*). New parts are analyzed to show they currently have 0 Fishbone placements, 0 Yamazumi work element pairings, and 0 Process part requirements, while existing parts with modified descriptions are cross-referenced to highlight affected Fishbone sections and Process steps.
+  3. *Scope:* Project-wide for part identity, master catalog data, Fishbone framework, and Model Tree structure; scenario-aware for active-scenario Yamazumi balancing, pitch locations, and Process at a Glance requirements.
+  4. *Table requirement:* No new database table required. State is managed dynamically in memory / `st.session_state` during the pre-import review stage. The completed list of acknowledged new part numbers and updated descriptions is recorded in the universal `audit_log` under the `PITS snapshot` audit category with Current editor attribution.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Non-dismissible wizard dialog (`@st.dialog("Verify New Part Numbers & Descriptions", width="large")`, `dismissible=False`).
+     - Step-through card presentation ("Part X of N: [Part Number]") showing key attributes (Part Name / Description, Subsystem, Design Maturity, Design Engineer, PPM, Buyer/GCL).
+     - Expandable dropdown summaries (`st.expander` with Material Symbols) for each downstream action:
+       - `:material/account_tree:` **Fishbone Impact**: Details that the new part is not yet placed in any Fishbone section, or lists the section(s) currently containing the part if its description changed.
+       - `:material/park:` **Model Tree Impact**: Details where the part appears in the BOM hierarchy and its reconciliation status (e.g. *Missing from Fishbone*).
+       - `:material/tune:` **Yamazumi Impact**: Notes that no Yamazumi work elements or cycle time are currently linked, and that balancing will be required after Fishbone placement.
+       - `:material/description:` **Process at a Glance Impact**: Notes that no Consume or Handle part requirement pairings exist for this part yet.
+     - Single explicit "Acknowledge Part" button advances to the next unacknowledged part until all N parts are reviewed; upon the final acknowledgment, the full PITS snapshot import executes atomically.
+     - Universal Audit Trail: `record_audit_event()` with Current editor attribution, timestamp, and the full list of acknowledged part numbers and descriptions.
+- **Status:** Proposed by Kayla Funk on October 6, 2026; pending implementation and verification on branch `KF_PITS`.
 
 ### 2D Plant Floor Plan Layouts (Pin Map -> Layouts)
 
