@@ -73,7 +73,6 @@ class ScopeDetailsTests(unittest.TestCase):
         self.assertEqual(selected["id"], "latest")
         self.assertEqual(session_state["scenario_id"], "latest")
         self.assertEqual(session_state["page_scenario_view_test"], "latest")
-        self.assertEqual(parent.selectbox.call_args.kwargs["persist_state"], "session")
 
     def test_page_selector_change_updates_cross_page_scenario(self) -> None:
         session_state = {"page_scenario_view_test": "scenario-2"}

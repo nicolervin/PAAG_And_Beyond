@@ -2382,7 +2382,6 @@ selected_pitch_area_ids = st.multiselect(
     placeholder="All Yamazumi areas",
     key=pitch_table_area_key,
     on_change=mark_pitch_table_area_manual,
-    persist_state="session",
 )
 effective_pitch_area_ids = selected_pitch_area_ids or yamazumi_area_ids
 pitch_combined_view = set(effective_pitch_area_ids) != {str(area_id)}

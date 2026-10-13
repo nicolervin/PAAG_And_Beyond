@@ -1,4 +1,11 @@
+import importlib
 import streamlit as st
+
+import utils.model_part_store
+import utils.exchange_ui
+
+importlib.reload(utils.model_part_store)
+importlib.reload(utils.exchange_ui)
 
 from utils.exchange_ui import (
     render_part_data_exchange,

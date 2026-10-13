@@ -948,6 +948,12 @@ def work_element_op_contexts(
             walk.loc[walk["section_type"].eq("Main spine")].iterrows(), start=1
         )
     } if not walk.empty else {}
+    support_numbers = {
+        str(row["id"]): position
+        for position, (_, row) in enumerate(
+            walk.loc[walk["section_type"].eq("Support Operations")].iterrows(), start=1
+        )
+    } if not walk.empty else {}
     subassembly_children: dict[str, list[str]] = {}
     for section_id, section in section_by_id.items():
         if str(section.get("section_type") or "") != "Subassembly":
@@ -969,6 +975,9 @@ def work_element_op_contexts(
         if str(section.get("section_type") or "") == "Main spine":
             number = mainline_numbers.get(section_id)
             return f"M{number}" if number else None
+        if str(section.get("section_type") or "") == "Support Operations":
+            number = support_numbers.get(section_id)
+            return f"SO{number}" if number else None
 
         reverse_path: list[str] = []
         visited: set[str] = set()

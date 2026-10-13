@@ -114,11 +114,12 @@ export default function(component) {
     state.fitted = false
   }
   summary.textContent = `${sections.length} sections · ${parts.length} placed parts`
+  const containerLayer = svgElement("g", { class: "container-layer" })
   const edgeLayer = svgElement("g", { class: "edge-layer" })
   const partEdgeLayer = svgElement("g", { class: "part-edge-layer" })
   const sectionLayer = svgElement("g", { class: "section-layer" })
   const partLayer = svgElement("g", { class: "part-layer" })
-  world.append(edgeLayer, partEdgeLayer, sectionLayer, partLayer)
+  world.append(containerLayer, edgeLayer, partEdgeLayer, sectionLayer, partLayer)
   const sectionById = new Map(sections.map((section) => [section.id, section]))
   const parentBySection = new Map()
   const parentIdBySection = new Map()
@@ -149,27 +150,117 @@ export default function(component) {
     spineCursor += section.mainWidth + 34
   })
 
-  const rootMainSection = (section) => {
+  const rootSpineSection = (section) => {
     let current = section
     const visited = new Set()
-    while (current && current.type !== "Main spine" && !visited.has(current.id)) {
+    while (current && current.type !== "Main spine" && current.type !== "Support Operations" && !visited.has(current.id)) {
       visited.add(current.id)
       current = sectionById.get(parentIdBySection.get(current.id))
     }
-    return current && current.type === "Main spine" ? current : null
+    return current && (current.type === "Main spine" || current.type === "Support Operations") ? current : null
   }
-  sections.filter((section) => section.type !== "Main spine").forEach((section) => {
-    const root = rootMainSection(section)
-    const originalRootX = root ? Number(root.x) * xSpacing : 0
-    section.sx = Number(section.x) * xSpacing + (root ? root.sx - originalRootX : 0)
-    section.sy = Number(section.y || 0) * ySpacing
+  sections.filter((section) => section.type === "Subassembly").forEach((section) => {
+    const root = rootSpineSection(section)
+    if (root && root.type === "Main spine") {
+      const originalRootX = Number(root.x) * xSpacing
+      section.sx = Number(section.x) * xSpacing + (root.sx - originalRootX)
+      section.sy = Number(section.y || 0) * ySpacing
+    }
   })
+
+  let minMainBoundX = mainSections.length > 0 ? (mainSections[0].sx - mainSections[0].mainWidth / 2) : 0
+  mainSections.forEach((s) => {
+    minMainBoundX = Math.min(minMainBoundX, s.sx - s.mainWidth / 2)
+    const pCount = (partsBySection.get(s.id) || []).length
+    if (pCount > 0) {
+      const leftPartX = s.sx - ((pCount - 1) / 2) * 78 - 45
+      minMainBoundX = Math.min(minMainBoundX, leftPartX)
+    }
+  })
+  sections.filter((s) => {
+    const root = rootSpineSection(s)
+    return root && root.type === "Main spine" && s.type === "Subassembly"
+  }).forEach((s) => {
+    minMainBoundX = Math.min(minMainBoundX, s.sx - 120)
+    const pCount = (partsBySection.get(s.id) || []).length
+    if (pCount > 0) {
+      minMainBoundX = Math.min(minMainBoundX, s.sx - 160)
+    }
+  })
+
+  const supportSections = sections
+    .filter((section) => section.type === "Support Operations")
+    .sort((left, right) => Number(left.order) - Number(right.order))
+
+  if (supportSections.length > 0) {
+    supportSections.forEach((section) => {
+      const partCount = (partsBySection.get(section.id) || []).length
+      section.supportWidth = Math.max(220, 110 + partCount * 78)
+    })
+    const supportGap = 40
+    const totalSupportWidth = supportSections.reduce((sum, s) => sum + s.supportWidth, 0) + (supportSections.length - 1) * supportGap
+    const containerPadding = 36
+    const boxWidth = Math.max(totalSupportWidth + containerPadding * 2, 340)
+    const marginToMain = 140
+    const boxRight = minMainBoundX - marginToMain
+    const boxLeft = boxRight - boxWidth
+
+    let supportCursor = boxLeft + containerPadding + (boxWidth - containerPadding * 2 - totalSupportWidth) / 2
+    supportSections.forEach((section) => {
+      section.sx = supportCursor + section.supportWidth / 2
+      section.sy = 0
+      supportCursor += section.supportWidth + supportGap
+    })
+
+    sections.filter((section) => section.type === "Subassembly").forEach((section) => {
+      const root = rootSpineSection(section)
+      if (root && root.type === "Support Operations") {
+        const originalRootX = Number(root.x) * xSpacing
+        section.sx = Number(section.x) * xSpacing + (root ? root.sx - originalRootX : 0)
+        section.sy = Number(section.y || 0) * ySpacing
+      }
+    })
+
+    const allSupportNodes = sections.filter((s) => {
+      if (s.type === "Support Operations") return true
+      const root = rootSpineSection(s)
+      return root && root.type === "Support Operations"
+    })
+    const minSupportX = Math.min(...allSupportNodes.map((s) => s.sx - (s.type === "Support Operations" ? s.supportWidth / 2 : 110))) - containerPadding
+    const maxSupportX = Math.max(...allSupportNodes.map((s) => s.sx + (s.type === "Support Operations" ? s.supportWidth / 2 : 110))) + containerPadding
+    const minSupportY = Math.min(...allSupportNodes.map((s) => s.sy - (s.type === "Support Operations" ? 150 : 60)))
+    const maxSupportY = Math.max(...allSupportNodes.map((s) => s.sy + (s.type === "Support Operations" ? 65 : 60)))
+    const finalBoxWidth = Math.max(maxSupportX - minSupportX, 340)
+    const finalBoxHeight = Math.max(maxSupportY - minSupportY, 215)
+    const finalBoxX = minSupportX
+    const finalBoxY = minSupportY
+
+    containerLayer.appendChild(svgElement("rect", {
+      x: finalBoxX, y: finalBoxY, width: finalBoxWidth, height: finalBoxHeight, rx: 16,
+      fill: "none", stroke: "#818cf8", "stroke-width": 2, "stroke-dasharray": "6 4", opacity: 0.85
+    }))
+
+    const badgeGroup = svgElement("g", { transform: `translate(${finalBoxX + 16} ${finalBoxY - 12})` })
+    badgeGroup.appendChild(svgElement("rect", {
+      x: 0, y: 0, width: 175, height: 24, rx: 6,
+      fill: "#6366f1"
+    }))
+    const badgeText = svgElement("text", {
+      x: 87, y: 12, "text-anchor": "middle", "dominant-baseline": "middle",
+      fill: "white", "font-size": 11, "font-weight": 700, "letter-spacing": "0.5px"
+    })
+    badgeText.textContent = "SUPPORT OPERATIONS"
+    badgeGroup.appendChild(badgeText)
+    containerLayer.appendChild(badgeGroup)
+  }
 
   edges.forEach((edge) => {
     const start = sectionById.get(edge.from)
     const end = sectionById.get(edge.to)
     if (!start || !end) return
-    if (end.type !== "Main spine") parentBySection.set(end.id, start)
+    if ((start.type === "Support Operations" && end.type === "Main spine") ||
+        (start.type === "Main spine" && end.type === "Support Operations")) return
+    if (end.type !== "Main spine" && end.type !== "Support Operations") parentBySection.set(end.id, start)
     const bothMain = start.type === "Main spine" && end.type === "Main spine"
     edgeLayer.appendChild(svgElement("line", {
       x1: bothMain ? start.sx + start.mainWidth / 2 : start.sx,
@@ -183,20 +274,23 @@ export default function(component) {
   sections.forEach((section) => {
     const group = svgElement("g", { transform: `translate(${section.sx} ${section.sy})` })
     const isMain = section.type === "Main spine"
-    const sectionWidth = isMain ? section.mainWidth : 216
+    const isSupport = section.type === "Support Operations"
+    const sectionWidth = isMain ? section.mainWidth : (isSupport ? section.supportWidth : 216)
     group.appendChild(svgElement("rect", {
       x: -sectionWidth / 2, y: -29, width: sectionWidth, height: 58, rx: 14,
-      fill: isMain ? "var(--st-primary-color)" : "var(--st-secondary-background-color)",
-      stroke: "var(--st-primary-color)", "stroke-width": 3
+      fill: isMain ? "var(--st-primary-color)" : (isSupport ? "#6366f1" : "var(--st-secondary-background-color)"),
+      stroke: isMain ? "var(--st-primary-color)" : (isSupport ? "#4f46e5" : "var(--st-primary-color)"), "stroke-width": 3
     }))
     const label = svgElement("text", {
       x: 0, y: -2, "text-anchor": "middle", "dominant-baseline": "middle",
-      fill: isMain ? "white" : "var(--st-text-color)", "font-size": 15, "font-weight": 700
+      fill: (isMain || isSupport) ? "white" : "var(--st-text-color)", "font-size": 15, "font-weight": 700
     })
     label.textContent = section.name
     group.appendChild(label)
     const count = svgElement("text", {
-      x: 0, y: 17, "text-anchor": "middle", fill: isMain ? "white" : "var(--st-secondary-text-color)", "font-size": 11
+      x: 0, y: 17, "text-anchor": "middle",
+      fill: (isMain || isSupport) ? "rgba(255, 255, 255, 0.85)" : "var(--st-secondary-text-color)",
+      "font-size": 11
     })
     count.textContent = `${section.parts} part${section.parts === 1 ? "" : "s"}`
     group.appendChild(count)
@@ -241,7 +335,9 @@ export default function(component) {
       card.style.cursor = "pointer"
       card.appendChild(svgElement("rect", {
         x: -36, y: -36, width: 72, height: 82, rx: 9,
-        fill: "var(--st-background-color)", stroke: "var(--st-primary-color)", "stroke-width": 2
+        fill: "var(--st-background-color)",
+        stroke: isSupport ? "#6366f1" : "var(--st-primary-color)",
+        "stroke-width": 2
       }))
       if (part.image) {
         card.appendChild(svgElement("image", {

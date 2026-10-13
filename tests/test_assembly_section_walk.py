@@ -183,6 +183,39 @@ class AssemblySectionWalkOrderTests(unittest.TestCase):
         self.assertEqual(single["id"].astype(str).tolist(), ["only"])
         self.assertEqual(single["depth"].astype(int).tolist(), [0])
 
+    def test_support_operations_in_walk_order(self) -> None:
+        self.add_section("main", "Main", "Main spine", None, 10)
+        self.add_section("support-1", "Offline Subassembly", "Support Operations", None, 30)
+        self.add_section("support-0", "Kitting", "Support Operations", None, 20)
+        walk = store.assembly_section_walk_order(self.project_id)
+        self.assertEqual(
+            walk["id"].astype(str).tolist(),
+            ["main", "support-0", "support-1"],
+        )
+        self.assertEqual(walk["depth"].astype(int).tolist(), [0, 0, 0])
+
+    def test_add_and_update_support_operations(self) -> None:
+        section_id = store.add_assembly_section(
+            self.project_id, "Kitting Cell", "Support Operations", "ignored-parent", "Kitting parts",
+        )
+        sections = store.assembly_sections(self.project_id)
+        kitting = sections.loc[sections["id"] == section_id].iloc[0]
+        self.assertEqual(kitting["name"], "Kitting Cell")
+        self.assertEqual(kitting["section_type"], "Support Operations")
+        self.assertTrue(pd.isna(kitting["parent_id"]) or not kitting["parent_id"])
+
+        kitting_df = sections.loc[sections["id"] == section_id].copy()
+        kitting_df["name"] = "Kitting Cell Renamed"
+        kitting_df["parent_id"] = "some-parent"
+        store.update_assembly_section_rows(self.project_id, kitting_df)
+
+        sections_after = store.assembly_sections(self.project_id)
+        kitting_after = sections_after.loc[sections_after["id"] == section_id].iloc[0]
+        self.assertEqual(kitting_after["name"], "Kitting Cell Renamed")
+        self.assertTrue(pd.isna(kitting_after["parent_id"]) or not kitting_after["parent_id"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

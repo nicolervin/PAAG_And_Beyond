@@ -56,7 +56,7 @@ def assembly_section_walk_order(project_id: str) -> pd.DataFrame:
         section_id
         for section_id, row in records.items()
         if not normalized_parent_id(row.get("parent_id"))
-        or row["section_type"] == "Main spine"
+        or row["section_type"] in {"Main spine", "Support Operations"}
     ]
     root_ids.sort(
         key=lambda section_id: (
@@ -670,12 +670,12 @@ def add_assembly_section(
     name = name.strip()
     if not name:
         raise ValueError("Section or subassembly name is required.")
-    if section_type not in {"Main spine", "Subassembly"}:
-        raise ValueError("Choose Main spine or Subassembly.")
+    if section_type not in {"Main spine", "Subassembly", "Support Operations"}:
+        raise ValueError("Choose Main spine, Subassembly, or Support Operations.")
     parent_id = parent_id or None
     if section_type == "Subassembly" and not parent_id:
         raise ValueError("A subassembly must have a parent assembly.")
-    if section_type == "Main spine":
+    if section_type in {"Main spine", "Support Operations"}:
         parent_id = None
     timestamp = now_iso()
     section_id = str(uuid4())
@@ -758,9 +758,9 @@ def update_assembly_section_rows(
         section_type = str(row.get("section_type") or "")
         parent_id = row.get("parent_id")
         parent_id = None if parent_id is None or pd.isna(parent_id) or not str(parent_id).strip() else str(parent_id)
-        if section_type not in {"Main spine", "Subassembly"}:
-            raise ValueError("Each framework row must be Main spine or Subassembly.")
-        if section_type == "Main spine":
+        if section_type not in {"Main spine", "Subassembly", "Support Operations"}:
+            raise ValueError("Each framework row must be Main spine, Subassembly, or Support Operations.")
+        if section_type in {"Main spine", "Support Operations"}:
             parent_id = None
         elif not parent_id:
             raise ValueError(f"Subassembly {row['name']} needs a parent assembly.")

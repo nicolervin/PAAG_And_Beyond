@@ -66,7 +66,6 @@ def scenario_view_selector(
         on_change=_activate_scenario,
         args=(key,),
         label_visibility=label_visibility,
-        persist_state="session",
         width=width,
         help="Switch the active scenario used by every scenario-aware and scenario-specific page.",
     )

@@ -49,8 +49,41 @@ _EXPORTED = _facade_exports()
 globals().update(_EXPORTED)
 
 
+def __getattr__(name: str) -> object:
+    if name in _EXPORTED:
+        return _EXPORTED[name]
+    for module in _DOMAIN_MODULES:
+        if hasattr(module, name):
+            val = getattr(module, name)
+            globals()[name] = val
+            _EXPORTED[name] = val
+            return val
+    if hasattr(_db_core, name):
+        val = getattr(_db_core, name)
+        globals()[name] = val
+        _EXPORTED[name] = val
+        return val
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
 class _StoreFacade(_types.ModuleType):
     """Propagate facade monkeypatches to the modules that execute the code."""
+
+    def __getattr__(self, name: str) -> object:
+        if name in globals().get("_EXPORTED", {}):
+            return globals()["_EXPORTED"][name]
+        for module in _DOMAIN_MODULES:
+            if hasattr(module, name):
+                val = getattr(module, name)
+                self.__dict__[name] = val
+                globals().setdefault("_EXPORTED", {})[name] = val
+                return val
+        if hasattr(_db_core, name):
+            val = getattr(_db_core, name)
+            self.__dict__[name] = val
+            globals().setdefault("_EXPORTED", {})[name] = val
+            return val
+        raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
     def __setattr__(self, name: str, value: object) -> None:
         super().__setattr__(name, value)
@@ -64,3 +97,4 @@ class _StoreFacade(_types.ModuleType):
 
 _sys.modules[__name__].__class__ = _StoreFacade
 __all__ = sorted(_EXPORTED)
+

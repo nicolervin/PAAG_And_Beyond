@@ -520,6 +520,47 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             ["part_number", "description", "active"],
         )
 
+    def test_parts_catalog_saved_view_retained_across_page_navigation(self) -> None:
+        saved_columns = ["part_number", "description", "notes"]
+        store.save_table_view_preference(
+            self.project_id,
+            "AppTest smoke",
+            "parts_catalog",
+            saved_columns,
+            saved_columns,
+        )
+        with patch("utils.clipboard_image.clipboard_image", return_value=None):
+            app = AppTest.from_file(
+                str(store.ROOT / "streamlit_app.py"), default_timeout=30
+            )
+            app.session_state["project_id"] = self.project_id
+            app.session_state["scenario_id"] = self.scenario_id
+            app.session_state["current_editor"] = "AppTest smoke"
+            app.session_state[f"editor_defaulted_{self.project_id}"] = True
+            app.run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+
+            app.switch_page("app_pages/parts.py").run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            columns = next(
+                widget
+                for widget in app.multiselect
+                if widget.label == "Columns shown in saved view"
+            )
+            self.assertEqual(columns.value, saved_columns)
+
+            app.switch_page("app_pages/models.py").run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+
+            app.switch_page("app_pages/parts.py").run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            columns_after_return = next(
+                widget
+                for widget in app.multiselect
+                if widget.label == "Columns shown in saved view"
+            )
+            self.assertEqual(columns_after_return.value, saved_columns)
+
     def test_assemblies_smoke(self) -> None:
         app = self.run_page("app_pages/assemblies.py")
         self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
@@ -664,26 +705,18 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
             app = self.run_page("app_pages/fishbone.py")
         self.assertTrue(any(title.value == "Parts to fishbone" for title in app.title))
-        framework_expanders = [
-            status
-            for status in app.status
-            if status.label == "Fishbone framework"
-        ]
-        self.assertTrue(
-            framework_expanders,
-            [status.label for status in app.status],
-        )
-        framework_expander = framework_expanders[0]
+        tab_labels = [tab.label for tab in getattr(app, "tabs", [])]
+        self.assertEqual(tab_labels[:3], ["Assign Parts", "Fishbone", "Framework Set Up"])
         self.assertTrue(
             any(
                 widget.label == "View fishbone for features"
-                for widget in framework_expander.multiselect
+                for widget in app.multiselect
             )
         )
         self.assertTrue(
             any(
                 button.label == "Edit parts & photos"
-                for button in framework_expander.button
+                for button in app.button
             )
         )
 
@@ -1954,7 +1987,9 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             )
             for text_input in app.text_input
         ))
-        app = self.pairing_selectbox(app, "rule").select("Optional").run(timeout=30)
+        rule_sb = self.pairing_selectbox(app, "rule")
+        app.session_state[rule_sb.key] = "Optional"
+        app = app.run(timeout=30)
         self.assertTrue(any(
             str(text_input.key).startswith(
                 f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_"
