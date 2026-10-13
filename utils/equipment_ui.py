@@ -1283,7 +1283,24 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
         return
 
     sizing = scenario_conveyor_line_sizing(project_id, scenario_id)
-    c1, c2, c3, c4 = st.columns(4)
+
+    # Unit selector (Inches vs Feet)
+    top_heading_col, top_unit_col = st.columns([3, 1])
+    with top_unit_col:
+        dim_unit = st.radio(
+            "Dimension Unit",
+            options=["Inches (in)", "Feet (ft)"],
+            horizontal=True,
+            key=f"conveyor_dim_unit_{project_id}_{scenario_id}",
+            help="Choose whether to view and input conveyor dimensions in inches or feet.",
+        )
+    is_feet = dim_unit.startswith("Feet")
+    unit_str = "ft" if is_feet else "in"
+
+    std_in = float(sizing["standard_pitch_length_in"])
+    std_ft = round(std_in / 12.0, 2)
+
+    c1, c2, c3 = st.columns(3)
     c1.metric(
         "Total Conveyor Length",
         f"{sizing['total_length_ft']} ft",
@@ -1295,11 +1312,15 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
         f"{sizing['active_pitches']} active · {sizing['helper_pitches']} helper · {sizing['growth_pitches']} growth",
         delta_color="off",
     )
-    c3.metric("Standard Pitch Length", f"{sizing['standard_pitch_length_in']} in")
-    c4.metric("Capital Monuments Gap", f"{sizing['monument_length_in']} in")
+    c3.metric(
+        "Standard Pitch Length",
+        f"{std_ft} ft" if is_feet else f"{std_in:.1f} in",
+        f"{std_in:.1f} in" if is_feet else f"{std_ft} ft",
+        delta_color="off",
+    )
 
     st.caption(
-        "Conveyor length calculation: `Total Length = (Active + Helper + Growth Pitches) × Standard Pitch Length + Monument Gaps`. "
+        "Conveyor length calculation: `Total Length = (Active + Helper + Growth Pitches) × Standard Pitch Length`. "
         "Ergonomists specify conveyor elevation/width and unit orientation per zone, plus platform/pit dimensions per pitch."
     )
 
@@ -1310,15 +1331,25 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
     if zones.empty:
         st.caption("No conveyor zones defined yet for this scenario. Configure a zone below.")
     else:
+        display_zones = zones.copy()
+        if is_feet:
+            display_zones["display_pitch_len"] = (display_zones["standard_pitch_length_in"] / 12.0).round(2)
+            display_zones["display_height"] = (display_zones["conveyor_height_in"] / 12.0).round(2)
+            display_zones["display_width"] = (display_zones["conveyor_width_in"] / 12.0).round(2)
+        else:
+            display_zones["display_pitch_len"] = display_zones["standard_pitch_length_in"].round(1)
+            display_zones["display_height"] = display_zones["conveyor_height_in"].round(1)
+            display_zones["display_width"] = display_zones["conveyor_width_in"].round(1)
+
         st.dataframe(
-            zones,
-            key=f"conveyor_zones_table_{project_id}_{scenario_id}",
+            display_zones,
+            key=f"conveyor_zones_table_{project_id}_{scenario_id}_{unit_str}",
             hide_index=True,
             column_order=[
                 "sequence", "name", "assigned_pitch_numbers",
                 "active_pitch_count", "helper_pitch_count", "growth_pitch_count",
-                "total_pitch_count", "standard_pitch_length_in", "total_length_ft",
-                "conveyor_height_in", "conveyor_width_in", "unit_orientation", "has_visual",
+                "total_pitch_count", "display_pitch_len", "total_length_ft",
+                "display_height", "display_width", "unit_orientation", "has_visual",
             ],
             column_config={
                 "sequence": "Seq",
@@ -1330,10 +1361,19 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
                 "helper_pitch_count": "Helper",
                 "growth_pitch_count": "Growth",
                 "total_pitch_count": "Total Pitches",
-                "standard_pitch_length_in": "Pitch Length (in)",
-                "total_length_ft": "Total Length (ft)",
-                "conveyor_height_in": "Height (in)",
-                "conveyor_width_in": "Width (in)",
+                "display_pitch_len": st.column_config.NumberColumn(
+                    f"Pitch Length ({unit_str})",
+                    format="%.2f ft" if is_feet else "%.1f in",
+                ),
+                "total_length_ft": st.column_config.NumberColumn("Total Length (ft)", format="%.1f ft"),
+                "display_height": st.column_config.NumberColumn(
+                    f"Height ({unit_str})",
+                    format="%.2f ft" if is_feet else "%.1f in",
+                ),
+                "display_width": st.column_config.NumberColumn(
+                    f"Width ({unit_str})",
+                    format="%.2f ft" if is_feet else "%.1f in",
+                ),
                 "unit_orientation": "Unit Orientation",
                 "has_visual": "Visual",
                 "id": None,
@@ -1347,6 +1387,9 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
                 "notes": None,
                 "created_at": None,
                 "updated_at": None,
+                "standard_pitch_length_in": None,
+                "conveyor_height_in": None,
+                "conveyor_width_in": None,
             },
             width="stretch",
         )
@@ -1442,23 +1485,30 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
                     width="stretch",
                 )
 
-        st.markdown("##### Ergonomic Specifications")
+        st.markdown(f"##### Ergonomic Specifications ({unit_str})")
+        stored_h = float(current_zone.get("conveyor_height_in") or 36.0)
+        stored_w = float(current_zone.get("conveyor_width_in") or 24.0)
+        val_h = round(stored_h / 12.0, 2) if is_feet else round(stored_h, 1)
+        val_w = round(stored_w / 12.0, 2) if is_feet else round(stored_w, 1)
+        step_dim = 0.1 if is_feet else 0.5
+        zone_tag = str(current_zone.get("id") or "new")
+
         e_col1, e_col2, e_col3 = st.columns(3)
         conveyor_h = e_col1.number_input(
-            "Conveyor Height (in)",
+            f"Conveyor Height ({unit_str})",
             min_value=0.0,
-            step=0.5,
-            value=float(current_zone.get("conveyor_height_in") or 36.0),
-            help="Optimal working height specified by Ergonomist.",
-            key=f"zone_h_{project_id}_{scenario_id}",
+            step=step_dim,
+            value=float(val_h),
+            help=f"Optimal working height specified by Ergonomist in {unit_str}.",
+            key=f"zone_h_{project_id}_{scenario_id}_{zone_tag}_{unit_str}",
         )
         conveyor_w = e_col2.number_input(
-            "Conveyor Width (in)",
+            f"Conveyor Width ({unit_str})",
             min_value=0.0,
-            step=0.5,
-            value=float(current_zone.get("conveyor_width_in") or 24.0),
-            help="Conveyor bed width specified by Ergonomist.",
-            key=f"zone_w_{project_id}_{scenario_id}",
+            step=step_dim,
+            value=float(val_w),
+            help=f"Conveyor bed width specified by Ergonomist in {unit_str}.",
+            key=f"zone_w_{project_id}_{scenario_id}_{zone_tag}_{unit_str}",
         )
         default_orient = str(current_zone.get("unit_orientation") or "Front Facing")
         unit_orient = e_col3.selectbox(
@@ -1510,15 +1560,20 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
                 except Exception as exc:
                     st.warning(str(exc))
 
-        st.markdown("##### Line Sizing Parameters")
-        s_col1, s_col2, s_col3, s_col4 = st.columns(4)
+        st.markdown(f"##### Line Sizing Parameters ({unit_str})")
+        stored_p = float(current_zone.get("standard_pitch_length_in") or 120.0)
+        val_p = round(stored_p / 12.0, 2) if is_feet else round(stored_p, 1)
+        step_p = 0.5 if is_feet else 1.0
+        min_p = 0.1 if is_feet else 1.0
+
+        s_col1, s_col2, s_col3 = st.columns(3)
         pitch_len = s_col1.number_input(
-            "Pitch Length (in)",
-            min_value=1.0,
-            step=1.0,
-            value=float(current_zone.get("standard_pitch_length_in") or 120.0),
-            help="Standard linear station pitch length in inches.",
-            key=f"zone_pitch_len_{project_id}_{scenario_id}",
+            f"Pitch Length ({unit_str})",
+            min_value=min_p,
+            step=step_p,
+            value=float(val_p),
+            help=f"Standard linear station pitch length in {unit_str}.",
+            key=f"zone_pitch_len_{project_id}_{scenario_id}_{zone_tag}_{unit_str}",
         )
         helper_pitches = s_col2.number_input(
             "Helper Pitches",
@@ -1536,14 +1591,6 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
             help="Spare pitches allocated for future growth or model variation.",
             key=f"zone_growth_{project_id}_{scenario_id}",
         )
-        monument_len = s_col4.number_input(
-            "Monuments / Gap (in)",
-            min_value=0.0,
-            step=1.0,
-            value=float(current_zone.get("monument_length_in") or 0.0),
-            help="Linear gap allocated for stationary robots, ovens, or physical monuments.",
-            key=f"zone_monuments_{project_id}_{scenario_id}",
-        )
 
         zone_notes = st.text_area(
             "Zone Notes",
@@ -1560,18 +1607,22 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
             key=f"save_zone_btn_{project_id}_{scenario_id}",
         ):
             try:
+                save_h_in = round(float(conveyor_h) * 12.0, 2) if is_feet else round(float(conveyor_h), 2)
+                save_w_in = round(float(conveyor_w) * 12.0, 2) if is_feet else round(float(conveyor_w), 2)
+                save_p_in = round(float(pitch_len) * 12.0, 2) if is_feet else round(float(pitch_len), 2)
+
                 zone_data = {
                     "id": current_zone.get("id"),
                     "name": zone_name,
                     "sequence": int(zone_seq),
                     "pitch_ids": [str(pid) for pid in selected_pitch_ids],
-                    "conveyor_height_in": float(conveyor_h),
-                    "conveyor_width_in": float(conveyor_w),
+                    "conveyor_height_in": float(save_h_in),
+                    "conveyor_width_in": float(save_w_in),
                     "unit_orientation": str(unit_orient),
-                    "standard_pitch_length_in": float(pitch_len),
+                    "standard_pitch_length_in": float(save_p_in),
                     "helper_pitch_count": int(helper_pitches),
                     "growth_pitch_count": int(growth_pitches),
-                    "monument_length_in": float(monument_len),
+                    "monument_length_in": 0.0,
                     "notes": zone_notes,
                 }
                 res = save_conveyor_zone(project_id, scenario_id, zone_data, _editor_name())

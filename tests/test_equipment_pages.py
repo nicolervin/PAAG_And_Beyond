@@ -46,6 +46,11 @@ class EquipmentPageTests(unittest.TestCase):
         self.assertIn(":material/fact_check: Needs vs. Placements Audit", tab_labels)
         self.assertIn(":material/category: Equipment Types", tab_labels)
         self.assertIn("Equipment Catalog & Placements", [item.value for item in app.subheader])
+        metric_labels = [m.label for m in app.metric]
+        self.assertIn("Total Conveyor Length", metric_labels)
+        self.assertIn("Line Pitch Footprint", metric_labels)
+        self.assertIn("Standard Pitch Length", metric_labels)
+        self.assertNotIn("Capital Monuments Gap", metric_labels)
 
     def test_layouts_tab_renders_with_layout(self) -> None:
         from utils.layout_store import create_layout, create_layout_revision
@@ -141,6 +146,20 @@ class EquipmentPageTests(unittest.TestCase):
         self.assertIn("Test equipment", tab_labels)
         self.assertNotIn("Conveyor", tab_labels)
 
+    def test_ergonomics_equipment_tab_lists_seeded_type_charts(self) -> None:
+        app = self._run(
+            "app_pages/functional_ergonomics.py",
+            f"ergonomics_page_tabs_{self.project_id}",
+        )
+        tab_labels = [tab.label for tab in app.tabs]
+        self.assertIn("All equipment", tab_labels)
+        self.assertIn("Torque tool", tab_labels)
+        self.assertIn("Ergo Hand Tools", tab_labels)
+        self.assertIn("Platform", tab_labels)
+        self.assertIn("Pit", tab_labels)
+        self.assertIn("Operator Lift", tab_labels)
+        self.assertIn("Ergo Lift Assists", tab_labels)
+
     def test_other_functional_review_equipment_tabs_load(self) -> None:
         cases = [
             ("app_pages/functional_ergonomics.py", f"ergonomics_page_tabs_{self.project_id}"),
@@ -151,6 +170,28 @@ class EquipmentPageTests(unittest.TestCase):
             with self.subTest(path=path):
                 app = self._run(path, key)
                 self.assertIn("All equipment", [tab.label for tab in app.tabs])
+
+    def test_conveyor_line_sizing_allows_feet_unit(self) -> None:
+        unit_key = f"conveyor_dim_unit_{self.project_id}_{self.scenario_id}"
+        app = AppTest.from_file(REPO_ROOT / "app_pages/functional_equipment.py")
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Equipment page tester"
+        app.session_state[unit_key] = "Feet (ft)"
+        app.run(timeout=30)
+        self.assertEqual([], list(app.exception))
+
+        # Check Dimension Unit radio options
+        unit_radios = [r for r in app.radio if "Dimension Unit" in (r.label or "")]
+        self.assertTrue(len(unit_radios) > 0)
+        self.assertIn("Inches (in)", unit_radios[0].options)
+        self.assertIn("Feet (ft)", unit_radios[0].options)
+
+        # In feet mode, metric for standard pitch length shows ft as primary
+        pitch_metrics = [m for m in app.metric if m.label == "Standard Pitch Length"]
+        self.assertTrue(len(pitch_metrics) > 0)
+        self.assertTrue(str(pitch_metrics[0].value).endswith("ft"))
+        self.assertTrue(str(pitch_metrics[0].delta).endswith("in"))
 
 
 if __name__ == "__main__":

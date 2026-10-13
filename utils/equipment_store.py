@@ -36,14 +36,19 @@ UNIT_ORIENTATION_OPTIONS: tuple[str, ...] = (
 )
 
 DEFAULT_EQUIPMENT_TYPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("Torque tool", "Handheld Tools", ("Quality",)),
+    ("Torque tool", "Handheld Tools", ("Quality", "Ergonomics")),
     ("Handheld equipment", "Handheld Tools", ("Assembly", "Quality")),
     ("ESD equipment", "Handheld Tools", ("Quality",)),
+    ("Ergo Hand Tools", "Handheld Tools", ("Ergonomics",)),
     ("Vision equipment", "Station/Pitch Equipment", ("Quality",)),
     ("Scan/Compare equipment", "Station/Pitch Equipment", ("Quality",)),
     ("Test equipment", "Station/Pitch Equipment", ("Quality",)),
     ("Dimensional measurement equipment", "Station/Pitch Equipment", ("Quality",)),
     ("Poka-Yoke / Fixture equipment", "Station/Pitch Equipment", ("Quality", "Assembly")),
+    ("Platform", "Station/Pitch Equipment", ("Ergonomics",)),
+    ("Pit", "Station/Pitch Equipment", ("Ergonomics",)),
+    ("Operator Lift", "Station/Pitch Equipment", ("Ergonomics",)),
+    ("Ergo Lift Assists", "Station/Pitch Equipment", ("Ergonomics",)),
     ("Conveyor", "Capital Equipment", ("Assembly",)),
     ("Automation cell", "Capital Equipment", ("Assembly",)),
     ("Robot", "Capital Equipment", ("Assembly",)),
@@ -234,7 +239,8 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
             """UPDATE equipment_types
                SET tier = 'Station/Pitch Equipment'
                WHERE label IN ('Vision equipment', 'Test equipment', 'Poka-Yoke / Fixture equipment',
-                               'Dimensional measurement equipment', 'Scan/Compare equipment')"""
+                               'Dimensional measurement equipment', 'Scan/Compare equipment',
+                               'Platform', 'Pit', 'Operator Lift', 'Ergo Lift Assists')"""
         )
 
     # Check and upgrade yamazumi_pitches for platform and pit ergonomics
@@ -261,6 +267,19 @@ def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -
     }
     for label, tier, functional_areas in DEFAULT_EQUIPMENT_TYPES:
         if label.strip().casefold() in existing_types:
+            type_row = conn.execute(
+                "SELECT id FROM equipment_types WHERE project_id=? AND LOWER(TRIM(label))=?",
+                (project_id, label.strip().casefold()),
+            ).fetchone()
+            if type_row:
+                existing_type_id = str(type_row["id"])
+                for functional_area in functional_areas:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO equipment_type_function_links
+                           (id, project_id, equipment_type_id, functional_area, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (str(uuid4()), project_id, existing_type_id, functional_area, timestamp, timestamp),
+                    )
             continue
         type_id = str(uuid4())
         conn.execute(

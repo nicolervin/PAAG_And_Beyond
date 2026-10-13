@@ -59,9 +59,28 @@ class EquipmentStoreTests(unittest.TestCase):
             set(types["label"].astype(str)),
         )
         self.assertEqual(
-            ["Quality"],
-            types.loc[types["label"].eq("Torque tool"), "functional_areas"].iloc[0],
+            {"Quality", "Ergonomics"},
+            set(types.loc[types["label"].eq("Torque tool"), "functional_areas"].iloc[0]),
         )
+        ergo_expected = [
+            ("Torque tool", "Handheld Tools"),
+            ("Platform", "Station/Pitch Equipment"),
+            ("Pit", "Station/Pitch Equipment"),
+            ("Operator Lift", "Station/Pitch Equipment"),
+            ("Ergo Hand Tools", "Handheld Tools"),
+            ("Ergo Lift Assists", "Station/Pitch Equipment"),
+        ]
+        for label, tier in ergo_expected:
+            matching = types.loc[types["label"].eq(label)]
+            self.assertEqual(len(matching), 1, f"Missing default type {label}")
+            self.assertEqual(matching.iloc[0]["tier"], tier)
+            self.assertIn("Ergonomics", matching.iloc[0]["functional_areas"])
+
+        ergo_types = equipment_types(self.project_id, "Ergonomics")
+        ergo_labels = set(ergo_types["label"].astype(str))
+        for label, _ in ergo_expected:
+            self.assertIn(label, ergo_labels)
+
         type_columns = {
             str(row["name"])
             for row in store.query("PRAGMA table_info(equipment_types)")
@@ -78,7 +97,7 @@ class EquipmentStoreTests(unittest.TestCase):
     def test_shared_asset_is_not_duplicated_between_reviews(self) -> None:
         types = equipment_types(self.project_id)
         torque = types.loc[types["label"].eq("Torque tool")].iloc[0].to_dict()
-        torque["functional_areas"] = ["Quality", "Ergonomics"]
+        torque["functional_areas"] = ["Quality", "Ergonomics", "Safety"]
         result = save_equipment_type_rows(
             self.project_id, types.assign(
                 functional_areas=types.apply(

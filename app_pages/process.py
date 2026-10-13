@@ -1900,7 +1900,11 @@ with tab_plan:
                 for lbl in all_types_df["label"].dropna().unique()
                 if str(lbl).strip()
             ]
-            for std_tool in ["Handheld equipment", "Torque tool", "Scan/Compare equipment", "Poka-Yoke / Fixture equipment", "Test equipment"]:
+            for std_tool in [
+                "Handheld equipment", "Torque tool", "Scan/Compare equipment",
+                "Poka-Yoke / Fixture equipment", "Test equipment",
+                "Platform", "Pit", "Operator Lift", "Ergo Hand Tools", "Ergo Lift Assists",
+            ]:
                 if std_tool not in type_labels:
                     type_labels.append(std_tool)
             type_labels.sort()
