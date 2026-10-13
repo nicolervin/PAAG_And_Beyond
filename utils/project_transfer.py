@@ -73,6 +73,7 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("equipment_assets"), TransferTable("equipment_function_links"),
     TransferTable("equipment_placements"), TransferTable("equipment_process_links"),
     TransferTable("equipment_torque_requirement_links"),
+    TransferTable("conveyor_zones"),
     TransferTable("layout_plans"),
     TransferTable("layout_revisions", "layout_plans", "layout_id"),
     TransferTable("layout_section_pitch_standards", "layout_plans", "layout_id"),
