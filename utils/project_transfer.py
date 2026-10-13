@@ -27,8 +27,8 @@ class TransferTable:
     parent_key: str = "id"
 
 
-# Topological registry. Tables with project_id are scoped directly; the four
-# child-only tables use their declared ownership edge.
+# Topological registry. Tables with project_id are scoped directly; child-only
+# tables use their declared ownership edge.
 PROJECT_TRANSFER_TABLES = (
     TransferTable("projects"), TransferTable("planning_scenarios"),
     TransferTable("parts"), TransferTable("part_scenario_activity"),
@@ -62,6 +62,9 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("work_element_material_options", "work_element_material_groups", "group_id"),
     TransferTable("process_part_groups"),
     TransferTable("process_part_options", "process_part_groups", "group_id"),
+    TransferTable("process_visual_media"),
+    TransferTable("process_visual_media_tags"),
+    TransferTable("safety_requirements"),
     TransferTable("ergonomic_hazard_options"), TransferTable("ergonomics_reviews"),
     TransferTable("ergonomics_review_hazard_selections"),
     TransferTable("quality_requirements"), TransferTable("quality_requirement_assignments"),
@@ -70,11 +73,23 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("equipment_assets"), TransferTable("equipment_function_links"),
     TransferTable("equipment_placements"), TransferTable("equipment_process_links"),
     TransferTable("equipment_torque_requirement_links"),
+    TransferTable("layout_plans"),
+    TransferTable("layout_revisions", "layout_plans", "layout_id"),
+    TransferTable("layout_section_pitch_standards", "layout_plans", "layout_id"),
+    TransferTable("layout_shapes", "layout_revisions", "revision_id"),
+    TransferTable("pfmea_assignees"),
     TransferTable("pfmea_entries"), TransferTable("pfmea_effects"),
     TransferTable("pfmea_causes"), TransferTable("pfmea_risk_rows"),
     TransferTable("pfmea_actions"), TransferTable("pfmea_prevention_options"),
     TransferTable("pfmea_detection_options"), TransferTable("pfmea_prevention_selections"),
-    TransferTable("pfmea_detection_selections"), TransferTable("control_plan_items"),
+    TransferTable("pfmea_detection_selections"),
+    TransferTable("pfmea_patterns"),
+    TransferTable("pfmea_pattern_effects", "pfmea_patterns", "pattern_id"),
+    TransferTable("pfmea_pattern_causes", "pfmea_patterns", "pattern_id"),
+    TransferTable("pfmea_pattern_actions", "pfmea_patterns", "pattern_id"),
+    TransferTable("pfmea_pattern_prevention_sources", "pfmea_patterns", "pattern_id"),
+    TransferTable("pfmea_pattern_detection_sources", "pfmea_patterns", "pattern_id"),
+    TransferTable("control_plan_items"),
     TransferTable("control_method_catalog"),
     TransferTable("project_transfer_events"),
 )
@@ -255,15 +270,11 @@ def preview_project_package(package_data: bytes) -> dict:
             if not isinstance(tables, dict):
                 raise ValueError("The project package records must be grouped by table.")
             registered = {item.name for item in PROJECT_TRANSFER_TABLES}
-            if set(tables) != registered:
-                missing = registered - set(tables)
-                extra = set(tables) - registered
-                details = []
-                if missing:
-                    details.append("missing " + ", ".join(sorted(missing)))
-                if extra:
-                    details.append("unregistered " + ", ".join(sorted(extra)))
-                raise ValueError("The project package table registry is invalid: " + "; ".join(details))
+            extra = set(tables) - registered
+            if extra:
+                raise ValueError("The project package table registry is invalid: unregistered " + ", ".join(sorted(extra)))
+            for item in PROJECT_TRANSFER_TABLES:
+                tables.setdefault(item.name, [])
 
             with store.connection() as conn:
                 for item in PROJECT_TRANSFER_TABLES:
@@ -278,6 +289,9 @@ def preview_project_package(package_data: bytes) -> dict:
                             )
 
             record_counts = manifest.get("record_counts")
+            if isinstance(record_counts, dict):
+                for item in PROJECT_TRANSFER_TABLES:
+                    record_counts.setdefault(item.name, 0)
             actual_counts = {name: len(rows) for name, rows in tables.items()}
             if not isinstance(record_counts, dict) or record_counts != actual_counts:
                 raise ValueError("The project package record counts do not match its contents.")
@@ -379,6 +393,15 @@ def _remapped_tables(
                 row["process_element_id"] = id_maps["work_elements"].get(
                     str(source_row["process_element_id"])
                 )
+            if item.name == "layout_section_pitch_standards" and source_row.get("section_id"):
+                row["section_id"] = id_maps.get("assembly_sections", {}).get(
+                    str(source_row["section_id"]), str(source_row["section_id"])
+                )
+            if item.name == "layout_shapes":
+                if source_row.get("pitch_id") and str(source_row["pitch_id"]) not in id_maps.get("yamazumi_pitches", {}):
+                    row["pitch_id"] = None
+                if source_row.get("equipment_id") and str(source_row["equipment_id"]) not in id_maps.get("equipment_assets", {}):
+                    row["equipment_id"] = None
             if item.name == "project_transfer_events":
                 for column in ("source_project_id", "target_project_id"):
                     if str(source_row.get(column) or "") == source_project_id:
@@ -431,6 +454,8 @@ def import_project_package(
 
     with ZipFile(BytesIO(package_data)) as archive:
         tables = json.loads(archive.read("records.json"))
+        for item in PROJECT_TRANSFER_TABLES:
+            tables.setdefault(item.name, [])
         upload_contents = {
             upload["database_path"]: archive.read(upload["archive_path"])
             for upload in preview["uploads"]
