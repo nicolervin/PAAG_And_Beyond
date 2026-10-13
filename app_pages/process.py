@@ -1900,7 +1900,11 @@ with tab_plan:
                 for lbl in all_types_df["label"].dropna().unique()
                 if str(lbl).strip()
             ]
-            for std_tool in ["Handheld equipment", "Torque tool", "Scan/Compare equipment", "Poka-Yoke / Fixture equipment", "Test equipment"]:
+            for std_tool in [
+                "Handheld equipment", "Torque tool", "Scan/Compare equipment",
+                "Poka-Yoke / Fixture equipment", "Test equipment",
+                "Platform", "Pit", "Operator Lift", "Ergo Hand Tools", "Ergo Lift Assists",
+            ]:
                 if std_tool not in type_labels:
                     type_labels.append(std_tool)
             type_labels.sort()
@@ -2006,34 +2010,83 @@ with tab_plan:
             else:
                 res_c2.caption("Standard manual operator performing work.")
 
+            selection_rule = pair_controls.selectbox(
+                "Selection rule",
+                ["Use all", "Choose one", "Optional"],
+                key=(
+                    f"process_pairing_rule_{scenario_id}_{section_id}_"
+                    f"{selected_yamazumi_id}"
+                ),
+            )
+            is_handle_operation = any(
+                ht == "Handle" for ht in handling_types_by_part.values()
+            )
+
+            part_labels = []
+            if not selected_parts.empty:
+                for _, r in selected_parts.iterrows():
+                    p_desc = (
+                        ""
+                        if pd.isna(r.get("description"))
+                        else str(r.get("description") or "").strip()
+                    )
+                    p_num = (
+                        ""
+                        if pd.isna(r.get("part_number"))
+                        else str(r.get("part_number") or "").strip()
+                    )
+                    part_labels.append(p_desc or p_num)
+            part_labels = [p for p in part_labels if p]
+
+            if selection_rule == "Choose one":
+                auto_name = (
+                    " / ".join(part_labels)
+                    if part_labels
+                    else (selected_description or "Part option")
+                )
+            elif selection_rule == "Optional":
+                auto_name = (
+                    f"Optional: {', '.join(part_labels)}"
+                    if part_labels
+                    else (selected_description or "Optional part")
+                )
+            else:
+                auto_name = (
+                    ", ".join(part_labels)
+                    if part_labels
+                    else (selected_description or "Part requirement")
+                )
+
+            if len(auto_name) > 80 and part_labels:
+                auto_name = f"{part_labels[0]} (+{len(part_labels)-1} parts)"
+
             with pair_controls.form(
                 f"pair_parts_{scenario_id}_{section_id}_{selected_yamazumi_id}", border=False
             ):
                 form_row = st.container(horizontal=True, vertical_alignment="bottom")
-                selection_rule = form_row.selectbox(
-                    "Selection rule",
-                    ["Use all", "Choose one", "Optional"],
-                    key=(
-                        f"process_pairing_rule_{scenario_id}_{section_id}_"
-                        f"{selected_yamazumi_id}"
-                    ),
+                automatic_requirement_name = (
+                    len(selected_parts) == 1
+                    and selection_rule == "Use all"
+                    and not is_handle_operation
                 )
-                automatic_requirement_name = len(selected_parts) == 1 and selection_rule == "Use all"
                 if automatic_requirement_name:
-                    selected_part = selected_parts.iloc[0]
-                    raw_part_name = selected_part.get("description")
-                    part_name = (
-                        "" if pd.isna(raw_part_name) else str(raw_part_name or "").strip()
-                    )
-                    group_name = part_name or str(selected_part.get("part_number") or "").strip()
+                    group_name = auto_name
                     form_row.markdown(f"**Part requirement**  \n{group_name}")
                 else:
                     group_name = form_row.text_input(
-                        "Part requirement",
-                        placeholder="Example: Control panel color",
+                        "Part requirement"
+                        if not is_handle_operation
+                        else "Part requirement *",
+                        value=auto_name if not is_handle_operation else "",
+                        placeholder=(
+                            "Example: Control panel color"
+                            if not is_handle_operation
+                            else "Describe the handling requirement"
+                        ),
                         help=(
-                            "Name the shared requirement when parts are alternatives, optional, "
-                            "or grouped together. A single Use all part is named automatically."
+                            "Named automatically from selected parts. You can edit this requirement name if needed."
+                            if not is_handle_operation
+                            else "Name the requirement for this handle operation."
                         ),
                         key=(
                             f"process_pairing_requirement_{scenario_id}_{section_id}_"
@@ -2077,8 +2130,13 @@ with tab_plan:
             )
             if pair_parts:
                 try:
-                    if not str(group_name or "").strip():
-                        raise ValueError("Part requirement name is required.")
+                    final_group_name = str(group_name or "").strip()
+                    if not final_group_name:
+                        if is_handle_operation:
+                            raise ValueError(
+                                "Part requirement name is required for handle operations."
+                            )
+                        final_group_name = auto_name
                     if selected_parts.empty:
                         raise ValueError("Select at least one fishbone part.")
                     missing_locations = [
@@ -2128,13 +2186,28 @@ with tab_plan:
                             )
                         except Exception:
                             pass
+
+                    # Ensure unique requirement name on this work element
+                    existing_groups = process_part_groups(
+                        project_id, scenario_id, selected_process_id, active_only=True
+                    )
+                    existing_names = {
+                        str(g.get("name") or "").strip().casefold()
+                        for g in existing_groups
+                    }
+                    base_candidate = final_group_name
+                    counter = 2
+                    while final_group_name.casefold() in existing_names:
+                        final_group_name = f"{base_candidate} ({counter})"
+                        counter += 1
+
                     save_process_part_group(
                         project_id,
                         scenario_id,
                         selected_process_id,
                         section_id,
                         None,
-                        group_name,
+                        final_group_name,
                         selection_rule,
                         quantity,
                         selected_parts["part_id"].astype(str).tolist(),
@@ -2155,7 +2228,7 @@ with tab_plan:
                         {
                             "scenario_id": scenario_id,
                             "work_element": selected_description,
-                            "requirement": group_name,
+                            "requirement": final_group_name,
                             "section": section_labels.get(section_id, section_id),
                             "part_uses": selected_pairing_details,
                             "tool": final_tool,

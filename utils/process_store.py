@@ -1738,6 +1738,13 @@ def process_pitch_visual_summary(
 
         pitch = conn.execute(
             """SELECT pitch.id, pitch.pitch_number, pitch.pitch_name, pitch.sequence,
+                      COALESCE(pitch.platform_height_in, 0.0) AS platform_height_in,
+                      COALESCE(pitch.pit_depth_in, 0.0) AS pit_depth_in,
+                      pitch.conveyor_zone_id,
+                      COALESCE(zone.name, '') AS conveyor_zone_name,
+                      COALESCE(zone.conveyor_height_in, 0.0) AS conveyor_height_in,
+                      COALESCE(zone.conveyor_width_in, 0.0) AS conveyor_width_in,
+                      COALESCE(zone.unit_orientation, '') AS unit_orientation,
                       area.id AS area_id, area.section_id, area.name AS area_name,
                       sec.name AS section_name
                FROM yamazumi_pitches pitch
@@ -1745,6 +1752,8 @@ def process_pitch_visual_summary(
                  ON area.id=pitch.area_id AND area.project_id=pitch.project_id
                LEFT JOIN assembly_sections sec
                  ON sec.id=area.section_id AND sec.project_id=pitch.project_id
+               LEFT JOIN conveyor_zones zone
+                 ON zone.id=pitch.conveyor_zone_id AND zone.project_id=pitch.project_id AND zone.scenario_id=area.scenario_id
                WHERE pitch.id=? AND pitch.project_id=? AND area.scenario_id=?""",
             (normalized_pitch_id, project_id, scenario_id),
         ).fetchone()
@@ -1898,6 +1907,7 @@ def process_pitch_visual_summary(
                    asset.id AS equipment_id,
                    asset.name,
                    COALESCE(eq_type.label, '') AS type_name,
+                   COALESCE(eq_type.tier, 'Handheld Tools') AS tier,
                    asset.manufacturer,
                    asset.model,
                    asset.description,
@@ -1923,6 +1933,7 @@ def process_pitch_visual_summary(
                 "equipment_id": str(eq["equipment_id"]),
                 "name": eq["name"],
                 "type_name": eq["type_name"],
+                "tier": str(eq["tier"] or "Handheld Tools"),
                 "manufacturer": eq["manufacturer"] or "",
                 "model": eq["model"] or "",
                 "description": eq["description"] or "",

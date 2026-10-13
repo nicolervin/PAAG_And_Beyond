@@ -583,17 +583,35 @@ def render_pitch_canvas(
         seen_tool_ids.add(t_id)
         t_name = _text(tool.get("name") or "Tool")
         t_type = _text(tool.get("type_name") or "")
+        t_tier = _text(tool.get("tier") or tool.get("equipment_tier") or "")
         t_summary = _text(tool.get("summary_line") or f"{t_name} ({t_type})" if t_type else t_name)
         is_ppe = tool.get("is_ppe", False)
         ppe_badge = '<span class="badge-ppe">PPE</span> ' if is_ppe else ''
+        tier_badge = f'<span class="badge-tier" style="font-size:0.68rem;background:#e2e8f0;color:#334155;padding:1px 4px;border-radius:3px;margin-right:4px;">{t_tier}</span> ' if t_tier else ''
         tool_items_html.append(
-            f'<li class="tool-item" title="{t_summary}">{ppe_badge}<span class="tool-text">{t_summary}</span></li>'
+            f'<li class="tool-item" title="{t_summary}">{ppe_badge}{tier_badge}<span class="tool-text">{t_summary}</span></li>'
         )
     tools_section_html = (
         f'<ul class="tools-list">{"".join(tool_items_html)}</ul>'
         if tool_items_html
         else '<div class="subtle-empty">No equipment or PPE assigned</div>'
     )
+
+    # Ergonomic & Conveyor chips
+    ergo_badges: list[str] = []
+    platform_h = float(pitch.get("platform_height_in") or 0.0)
+    if platform_h > 0:
+        ergo_badges.append(f'<span class="badge-ergo platform" style="background:#e0f2fe;color:#0369a1;padding:1px 5px;border-radius:3px;font-size:0.72rem;margin-left:4px;">Platform: +{platform_h:g}"</span>')
+    pit_d = float(pitch.get("pit_depth_in") or 0.0)
+    if pit_d > 0:
+        ergo_badges.append(f'<span class="badge-ergo pit" style="background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;font-size:0.72rem;margin-left:4px;">Pit: -{pit_d:g}"</span>')
+    unit_orient = _text(pitch.get("unit_orientation") or "")
+    if unit_orient:
+        ergo_badges.append(f'<span class="badge-ergo orient" style="background:#f1f5f9;color:#475569;padding:1px 5px;border-radius:3px;font-size:0.72rem;margin-left:4px;">Orient: {unit_orient}</span>')
+    conveyor_h = float(pitch.get("conveyor_height_in") or 0.0)
+    if conveyor_h > 0:
+        ergo_badges.append(f'<span class="badge-ergo conveyor" style="background:#f3e8ff;color:#6b21a8;padding:1px 5px;border-radius:3px;font-size:0.72rem;margin-left:4px;">Conveyor: {conveyor_h:g}"</span>')
+    ergo_chips_html = f'<div class="ergo-chips-bar" style="margin-top:2px;font-weight:normal;">{"".join(ergo_badges)}</div>' if ergo_badges else ""
 
     # 2. BUILD LEFT COLUMN: PARTS TABLE
     part_rows_html: list[str] = []
@@ -2427,6 +2445,7 @@ def render_pitch_canvas(
         </div>
         <div class="pitch-center-title">
           {pitch_number} — {pitch_name}
+          {ergo_chips_html}
         </div>
         <div class="doc-control-box">
           <div><strong>Op ID:</strong> {op_id_summary}</div>
