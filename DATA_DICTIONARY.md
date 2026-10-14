@@ -891,6 +891,33 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### Web Link Attachments for Parts Catalog and PAAG Visual Aids
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow engineers and collaborators to attach web links (such as SharePoint documents, Windchill CAD / PLM drawings, intranet SOPs, or video streams) instead of or in addition to uploading local files, in two key areas:
+  1. *Parts Catalog:* Primary CAD image or additional views can be provided as a web URL.
+  2. *Process at a Glance (PAAG) Visual Aids:* Pitch-level visual aids tagged to work elements can be provided as web links, opening external SOPs or training materials directly in a new tab, or rendering web image URLs inline.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Parts Catalog: connects to `parts` (primary image/link) and `part_images` (additional views / supplemental links).
+     - PAAG Visual Aids: connects to `process_visual_media` (scenario-owned, linked to `yamazumi_pitches`, `planning_scenarios`, and `projects`) and tagged to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the Parts Catalog and Process at a Glance / PAAG Slide Visualizer layers of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:*
+     - Parts Catalog: Project-wide, matching `parts` and `part_images`.
+     - PAAG Visual Aids: Scenario-specific, matching `process_visual_media` and `process_visual_media_tags`.
+  4. *Table requirement:* No new tables required. Existing tables serve this feature directly:
+     - `process_visual_media`: `media_type` supports `'link'` (or `'url'`), where `file_path` stores the web link URL.
+     - `parts`: `image_path` can store either a local relative upload path or a web URL (`http://` or `https://`).
+     - `part_images`: `image_path` stores either a local relative upload path or a web URL, with `image_type` supporting `'Web Link'` alongside existing view types.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit Save button with URL validation (must be valid `http://` or `https://`).
+     - Universal Deletion Standard: confirmed deletion dialog removing the database record (skips filesystem deletion when the path is a web URL).
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Parts"` and `"Process"`.
+     - Universal History Display Standard: visible in the respective bottom History expanders using `audit_history()`.
+     - Scope Badges: Project-wide on Parts Catalog, Scenario-specific on Process at a Glance.
+
 ### Model Tree: BOM Authoring From Scratch
 
 - **Proposed by:** Nicole Ervin, project owner

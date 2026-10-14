@@ -1025,6 +1025,52 @@ def _clone_ergonomics_reviews(
 
 def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
     """Initialize database tables for scenario-owned pitch visual aids and element tags."""
+    cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='process_visual_media'")
+    row = cur.fetchone()
+    if row and row[0] and "'link'" not in row[0]:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            conn.executescript(
+                """
+                ALTER TABLE process_visual_media RENAME TO process_visual_media_legacy;
+
+                CREATE TABLE process_visual_media (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
+                    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link')),
+                    file_path TEXT NOT NULL,
+                    original_file_path TEXT NOT NULL DEFAULT '',
+                    annotations_json TEXT NOT NULL DEFAULT '',
+                    caption TEXT NOT NULL DEFAULT '',
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+
+                INSERT INTO process_visual_media (
+                    id, project_id, scenario_id, pitch_id, media_type,
+                    file_path, original_file_path, annotations_json,
+                    caption, sequence, created_at, created_by, updated_at
+                )
+                SELECT
+                    id, project_id, scenario_id, pitch_id, media_type,
+                    file_path,
+                    COALESCE(original_file_path, ''),
+                    COALESCE(annotations_json, ''),
+                    caption, sequence, created_at, created_by, updated_at
+                FROM process_visual_media_legacy;
+
+                DROP TABLE process_visual_media_legacy;
+                """
+            )
+        finally:
+            conn.execute("PRAGMA legacy_alter_table = OFF")
+            conn.execute("PRAGMA foreign_keys = ON")
+
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS process_visual_media (
@@ -1032,7 +1078,7 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
             pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
-            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link')),
             file_path TEXT NOT NULL,
             original_file_path TEXT NOT NULL DEFAULT '',
             annotations_json TEXT NOT NULL DEFAULT '',

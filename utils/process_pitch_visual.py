@@ -75,7 +75,10 @@ def _clean_number(value: object) -> str:
 
 
 def _media_data_url(raw_path: object) -> str:
-    path = Path(str(raw_path or ""))
+    val = str(raw_path or "").strip()
+    if val.startswith(("http://", "https://", "data:")):
+        return val
+    path = Path(val)
     try:
         if not path.is_file():
             return ""
@@ -971,6 +974,20 @@ def render_pitch_canvas(
                 media_element_html = f'<video class="visual-player" controls playsinline preload="metadata" src="{media_src}"></video>'
             else:
                 media_element_html = '<div class="media-missing">Video not available</div>'
+        elif m_type == "link":
+            safe_url = html.escape(f_path)
+            lower_p = f_path.lower()
+            if any(lower_p.endswith(ext) or (ext + "?") in lower_p for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
+                media_element_html = f'<img class="visual-image" src="{safe_url}" alt="{caption}" />'
+            else:
+                label = caption or "Open Document / SOP"
+                media_element_html = (
+                    f'<div class="media-link-card">'
+                    f'<div class="media-link-icon">🌐</div>'
+                    f'<div class="media-link-title" title="{label}">{label}</div>'
+                    f'<a class="media-link-btn" href="{safe_url}" target="_blank" rel="noopener noreferrer">🔗 Open Web Link</a>'
+                    f'</div>'
+                )
         else:
             if media_src:
                 media_element_html = f'<img class="visual-image" src="{media_src}" alt="{caption}" />'
@@ -2119,6 +2136,48 @@ def render_pitch_canvas(
       .media-missing {{
         color: #94a3b8;
         font-size: 0.78rem;
+      }}
+      .media-link-card {{
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #0f172a;
+        color: #f8fafc;
+        padding: 10px;
+        text-align: center;
+        gap: 6px;
+      }}
+      .media-link-icon {{
+        font-size: 1.8rem;
+        line-height: 1;
+      }}
+      .media-link-title {{
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: #cbd5e1;
+        max-width: 90%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .media-link-btn {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #0284c7;
+        color: #ffffff !important;
+        text-decoration: none;
+        font-size: 0.78rem;
+        font-weight: 600;
+        padding: 6px 12px;
+        border-radius: 4px;
+        transition: background 0.15s ease;
+      }}
+      .media-link-btn:hover {{
+        background: #0369a1;
       }}
       .caption-callout {{
         background: #fef08a;

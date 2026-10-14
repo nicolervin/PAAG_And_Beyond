@@ -496,7 +496,10 @@ def _thumbnail_data_url(image_path: str, modified_ns: int) -> str:
 
 
 def part_thumbnail(image_path: object) -> str:
-    path = Path(str(image_path or ""))
+    raw = str(image_path or "").strip()
+    if raw.startswith(("http://", "https://", "data:")):
+        return raw
+    path = Path(raw)
     try:
         return _thumbnail_data_url(str(path), path.stat().st_mtime_ns)
     except OSError:
