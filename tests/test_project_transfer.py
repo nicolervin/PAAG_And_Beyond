@@ -348,6 +348,97 @@ class ProjectTransferRegistryTests(unittest.TestCase):
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             self.assertEqual(violations, [])
 
+    def test_preview_and_import_with_extra_and_defaulted_columns(self) -> None:
+        # Create records with table_view_preferences having extra columns and equipment_types missing a defaulted column
+        pref_id = str(uuid4())
+        eq_type_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO table_view_preferences
+                   (id, project_id, editor_name, view_key, visible_columns_json, column_order_json, created_at, updated_at)
+                   VALUES (?, ?, 'Nicole Ervin', 'parts_catalog', '["part_number"]', '["part_number"]', ?, ?)""",
+                (pref_id, self.project_id, self.now, self.now),
+            )
+            conn.execute(
+                """INSERT INTO equipment_types
+                   (id, project_id, label, tier, created_at, updated_at)
+                   VALUES (?, ?, 'Drill', 'Handheld Tools', ?, ?)""",
+                (eq_type_id, self.project_id, self.now, self.now),
+            )
+
+        package = export_project_package(self.project_id, "Test User")
+        with ZipFile(BytesIO(package["data"])) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            records = json.loads(archive.read("records.json"))
+
+        # Add extra unrecognized columns to table_view_preferences
+        for row in records.get("table_view_preferences", []):
+            row["view_name"] = "Default"
+            row["is_default"] = 0
+
+        # Remove defaulted column 'tier' from equipment_types
+        for row in records.get("equipment_types", []):
+            row.pop("tier", None)
+
+        modified_buffer = BytesIO()
+        with ZipFile(modified_buffer, "w") as mod_zip:
+            mod_zip.writestr("manifest.json", json.dumps(manifest))
+            mod_zip.writestr("records.json", json.dumps(records))
+
+        modified_data = modified_buffer.getvalue()
+
+        # Preview should succeed despite extra and omitted-default columns
+        preview = preview_project_package(modified_data)
+        self.assertEqual(preview["record_counts"]["table_view_preferences"], 1)
+
+        # Import should succeed and prune extra columns
+        res = import_project_package(modified_data, "Create new", "Test User")
+        new_project_id = res["project_id"]
+        self.assertTrue(new_project_id)
+        with store.connection() as conn:
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            self.assertEqual(violations, [])
+
+            # Verify table_view_preferences record exists
+            imported_prefs = conn.execute(
+                "SELECT * FROM table_view_preferences WHERE project_id=?", (new_project_id,)
+            ).fetchall()
+            self.assertEqual(len(imported_prefs), 1)
+            self.assertEqual(imported_prefs[0]["view_key"], "parts_catalog")
+
+            # Verify equipment_types has default tier applied
+            imported_eq = conn.execute(
+                "SELECT tier FROM equipment_types WHERE project_id=?", (new_project_id,)
+            ).fetchone()
+            self.assertEqual(imported_eq["tier"], "Handheld Tools")
+
+    def test_preview_rejects_missing_required_columns(self) -> None:
+        part_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, updated_at)
+                   VALUES (?, ?, 'PN-100', 'Part 100', ?)""",
+                (part_id, self.project_id, self.now),
+            )
+
+        package = export_project_package(self.project_id, "Test User")
+        with ZipFile(BytesIO(package["data"])) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            records = json.loads(archive.read("records.json"))
+
+        # Remove required column 'part_number' from parts
+        for row in records.get("parts", []):
+            row.pop("part_number", None)
+
+        bad_buffer = BytesIO()
+        with ZipFile(bad_buffer, "w") as bad_zip:
+            bad_zip.writestr("manifest.json", json.dumps(manifest))
+            bad_zip.writestr("records.json", json.dumps(records))
+
+        with self.assertRaises(ValueError) as ctx:
+            preview_project_package(bad_buffer.getvalue())
+        self.assertIn("missing required column(s) part_number", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
