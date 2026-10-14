@@ -19,6 +19,7 @@ from utils.layout_store import (
     UNIT_TO_INCHES,
     annotate_preview_with_dimensions,
     apply_image_crop,
+    attach_layout_revision_cad,
     auto_detect_whitespace_crop,
     create_layout,
     create_layout_revision,
@@ -37,6 +38,7 @@ from utils.layout_store import (
     list_layouts,
     list_project_yamazumi_pitches,
     load_and_orient_layout_preview,
+    remove_layout_revision_cad,
     save_layout_shapes,
     set_section_pitch_standard,
     to_canonical_inches,
@@ -750,6 +752,24 @@ def _create_revision_dialog(
     else:
         st.info("Upload or paste a drawing above to preview it in its correct orientation and crop here before saving.")
 
+    with st.expander("Native AutoCAD Drawing (.dwg / .dxf) or CAD Web Link (Optional)", expanded=False):
+        st.caption(
+            "Attach the original native CAD file (.dwg or .dxf up to 100 MB) or provide a corporate CAD web link "
+            "(Autodesk Vault, BIM 360, SharePoint) for download by engineering collaborators."
+        )
+        rev_cad_file = st.file_uploader(
+            "Attach AutoCAD drawing file (.dwg, .dxf - max 100 MB)",
+            type=["dwg", "dxf"],
+            key="rev_cad_file_upload",
+            help="Original AutoCAD drawing file. Max 100 MB per file.",
+        )
+        rev_cad_url = st.text_input(
+            "Or CAD Web Link (Autodesk Vault / Cloud / SharePoint)",
+            key="rev_cad_url_input",
+            placeholder="https://autodesk360.com/... or https://company.sharepoint.com/...",
+            help="Direct web link to open the drawing in Autodesk Vault, Autodesk Construction Cloud, or corporate PLM.",
+        )
+
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("Cancel", width="stretch", key="cancel_new_rev"):
@@ -794,6 +814,8 @@ def _create_revision_dialog(
                     crop_top_pct=crop_t,
                     crop_right_pct=crop_r,
                     crop_bottom_pct=crop_b,
+                    cad_file=rev_cad_file,
+                    cad_web_url=rev_cad_url,
                 )
                 st.session_state.pop("rev_crop_left", None)
                 st.session_state.pop("rev_crop_top", None)
@@ -984,6 +1006,90 @@ def _delete_revision_dialog(
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
+
+
+@st.dialog("Manage Native AutoCAD Drawing & CAD Links", width="medium")
+def _attach_cad_dialog(
+    project_id: str,
+    layout_name: str,
+    revision: dict[str, Any],
+    editor_name: str,
+) -> None:
+    rev_num = revision.get("revision_number", 1)
+    cad_name = str(revision.get("cad_file_name") or "").strip()
+    cad_path = str(revision.get("cad_file_path") or "").strip()
+    cad_url = str(revision.get("cad_web_url") or "").strip()
+    cad_size = int(revision.get("cad_file_size_bytes") or 0)
+    has_file = bool(cad_path and Path(cad_path).exists())
+
+    st.write(f"Manage native AutoCAD engineering drawings for **{layout_name} — Rev {rev_num}**.")
+
+    if has_file:
+        size_mb = cad_size / (1024 * 1024)
+        st.success(f":material/architecture: **Attached AutoCAD File:** `{cad_name}` ({size_mb:.1f} MB)")
+    if cad_url:
+        st.info(f":material/link: **Attached CAD Web Link:** {cad_url}")
+
+    st.markdown("---")
+    st.markdown("##### Upload New or Replacement AutoCAD Drawing")
+    st.caption("Supported formats: `.dwg`, `.dxf`. Maximum file size: 100 MB.")
+    new_cad_file = st.file_uploader(
+        "AutoCAD Drawing (.dwg, .dxf)",
+        type=["dwg", "dxf"],
+        key=f"dialog_cad_upload_{revision['id']}",
+        help="Upload native AutoCAD drawing file up to 100 MB.",
+    )
+
+    st.markdown("##### Or CAD Web Link (Cloud / Vault / PLM)")
+    new_cad_url = st.text_input(
+        "Corporate CAD URL",
+        value=cad_url,
+        key=f"dialog_cad_url_{revision['id']}",
+        placeholder="https://autodesk360.com/... or https://company.sharepoint.com/...",
+        help="Direct web link to open the drawing in Autodesk Vault, Autodesk Construction Cloud, or corporate PLM.",
+    )
+
+    col_save, col_detach, col_cancel = st.columns([1, 1, 1])
+    with col_save:
+        if st.button("Save CAD source", type="primary", width="stretch", key=f"btn_save_cad_{revision['id']}"):
+            if not editor_name.strip():
+                st.error("Please enter Current editor attribution.")
+                return
+            if not new_cad_file and not new_cad_url.strip():
+                st.error("Please upload an AutoCAD drawing file or provide a CAD Web Link.")
+                return
+            try:
+                attach_layout_revision_cad(
+                    project_id=project_id,
+                    revision_id=str(revision["id"]),
+                    cad_file=new_cad_file,
+                    cad_web_url=new_cad_url,
+                    editor_name=editor_name,
+                )
+                st.toast("AutoCAD source updated successfully!", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    with col_detach:
+        if (has_file or cad_url) and st.button("Detach CAD", width="stretch", key=f"btn_detach_cad_{revision['id']}"):
+            if not editor_name.strip():
+                st.error("Please enter Current editor attribution.")
+                return
+            try:
+                remove_layout_revision_cad(
+                    project_id=project_id,
+                    revision_id=str(revision["id"]),
+                    editor_name=editor_name,
+                )
+                st.toast("CAD source detached.", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    with col_cancel:
+        if st.button("Close", width="stretch", key=f"btn_close_cad_{revision['id']}"):
+            st.rerun()
 
 
 @st.dialog("Section Workstation Pitch Standards", width="large")
@@ -1546,6 +1652,67 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
         scale_bar_html = _render_scale_bar_html(px_per_ft_x, unit)
         if scale_bar_html:
             st.markdown(scale_bar_html, unsafe_allow_html=True)
+
+        cad_path_str = str(active_rev.get("cad_file_path") or "").strip()
+        cad_name_str = str(active_rev.get("cad_file_name") or "").strip()
+        cad_size_int = int(active_rev.get("cad_file_size_bytes") or 0)
+        cad_url_str = str(active_rev.get("cad_web_url") or "").strip()
+        cad_p = Path(cad_path_str) if cad_path_str else None
+        has_cad_file = bool(cad_p and cad_p.exists() and cad_p.is_file())
+        has_cad_url = bool(cad_url_str)
+
+        st.markdown("---")
+        cad_col1, cad_col2, cad_col3 = st.columns([3, 2, 2])
+        with cad_col1:
+            if has_cad_file:
+                size_mb = cad_size_int / (1024 * 1024)
+                st.markdown(
+                    f":material/architecture: **Native AutoCAD Source:** `{cad_name_str}` ({size_mb:.1f} MB)"
+                )
+            elif has_cad_url:
+                st.markdown(
+                    f":material/link: **CAD Web Link:** [{cad_url_str}]({cad_url_str})"
+                )
+            else:
+                st.caption(":material/architecture: No native AutoCAD drawing attached to this revision.")
+
+        with cad_col2:
+            if has_cad_file:
+                try:
+                    cad_bytes = cad_p.read_bytes()
+                    st.download_button(
+                        f"Download CAD ({cad_name_str})",
+                        data=cad_bytes,
+                        file_name=cad_name_str,
+                        mime="application/octet-stream",
+                        icon=":material/download:",
+                        key=f"dl_cad_bar_{active_rev['id']}",
+                        width="stretch",
+                    )
+                except Exception:
+                    st.caption("CAD file could not be read.")
+            elif has_cad_url:
+                st.link_button(
+                    "Open CAD in Vault / Web",
+                    url=cad_url_str,
+                    icon=":material/open_in_new:",
+                    width="stretch",
+                )
+
+        with cad_col3:
+            if st.button(
+                "Manage CAD Source...",
+                icon=":material/edit_document:",
+                key=f"btn_manage_cad_{active_rev['id']}",
+                help="Attach, update, or remove native AutoCAD (.dwg/.dxf) or CAD Web Links for this revision.",
+                width="stretch",
+            ):
+                _attach_cad_dialog(
+                    project_id=project_id,
+                    layout_name=str(current_layout["name"]),
+                    revision=active_rev,
+                    editor_name=editor_name,
+                )
 
     # -------------------------------------------------------------------------
     # 2D Interactive Layout & Shape Annotations Workspace
@@ -2314,6 +2481,7 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                     "Scale": f"{r['width_value']:g} × {r['height_value']:g} {r['unit']}",
                     "Dimensions (in)": f"{r['scale_width_in']:,.0f} × {r['scale_height_in']:,.0f} in",
                     "Resolution": f"{r['image_width_px']} × {r['image_height_px']} px",
+                    "AutoCAD Source": r.get("cad_file_name") or ("CAD Link" if r.get("cad_web_url") else "—"),
                     "Shapes": r.get("shape_count", 0),
                     "Author": r["created_by"] or "Unknown",
                     "Date": str(r["created_at"])[:19].replace("T", " "),
