@@ -891,6 +891,86 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### Web Link Attachments for Parts Catalog and PAAG Visual Aids
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow engineers and collaborators to attach web links (such as SharePoint documents, Windchill CAD / PLM drawings, intranet SOPs, or video streams) instead of or in addition to uploading local files, in two key areas:
+  1. *Parts Catalog:* Primary CAD image or additional views can be provided as a web URL.
+  2. *Process at a Glance (PAAG) Visual Aids:* Pitch-level visual aids tagged to work elements can be provided as web links, opening external SOPs or training materials directly in a new tab, or rendering web image URLs inline.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Parts Catalog: connects to `parts` (primary image/link) and `part_images` (additional views / supplemental links).
+     - PAAG Visual Aids: connects to `process_visual_media` (scenario-owned, linked to `yamazumi_pitches`, `planning_scenarios`, and `projects`) and tagged to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the Parts Catalog and Process at a Glance / PAAG Slide Visualizer layers of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:*
+     - Parts Catalog: Project-wide, matching `parts` and `part_images`.
+     - PAAG Visual Aids: Scenario-specific, matching `process_visual_media` and `process_visual_media_tags`.
+  4. *Table requirement:* No new tables required. Existing tables serve this feature directly:
+     - `process_visual_media`: `media_type` supports `'link'` (or `'url'`), where `file_path` stores the web link URL.
+     - `parts`: `image_path` can store either a local relative upload path or a web URL (`http://` or `https://`).
+     - `part_images`: `image_path` stores either a local relative upload path or a web URL, with `image_type` supporting `'Web Link'` alongside existing view types.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit Save button with URL validation (must be valid `http://` or `https://`).
+     - Universal Deletion Standard: confirmed deletion dialog removing the database record (skips filesystem deletion when the path is a web URL).
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Parts"` and `"Process"`.
+     - Universal History Display Standard: visible in the respective bottom History expanders using `audit_history()`.
+     - Scope Badges: Project-wide on Parts Catalog, Scenario-specific on Process at a Glance.
+
+### Native AutoCAD Drawing File (.dwg / .dxf) Attachments and CAD Links for Pin Map Layouts
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow plant layout engineers, industrial engineers, and collaborators to attach native AutoCAD drawing files (`.dwg`, `.dxf`) and corporate CAD web links (Autodesk Vault, Autodesk Construction Cloud / BIM 360, SharePoint, Windchill) directly to Pin Map floor plan layout revisions:
+  1. *Pin Map 2D Plant Spatial Map:* Collaborators inspecting the spatial workstation placement see an authoritative AutoCAD drawing download button (with file name and size) and/or a link to the corporate CAD vault right above the floor plan map.
+  2. *Layouts Workspace:* When creating or managing layout revisions, engineers can attach the native `.dwg` or `.dxf` file, or set a CAD web link, alongside the high-resolution 2D canvas image used for scale calibration and footprint drafting.
+  3. *File Size Limit:* Enforces an application-level limit of **100 MB** per AutoCAD upload (`MAX_LAYOUT_CAD_FILE_SIZE_MB = 100`). Files exceeding 100 MB prompt the user to use the CAD Web Link option, protecting local system resources and maintaining fast `.paagproject` package transfer performance.
+  4. *Project Transfer:* Native `.dwg` and `.dxf` files are automatically bundled and restored across `.paagproject` export/import packages.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `layout_revisions` (and through it, `layout_plans` and `projects`). Downstream workstation footprints on `layout_shapes` link to `yamazumi_pitches`.
+  2. *Critical thread relationship:* Connects to the 2D Layouts and Pin Map layers of the critical thread (*Product Architecture -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance -> 2D Plant Layouts -> Pin Map*).
+  3. *Scope:* Project-wide (floor plan layouts and revisions are project-wide assets shared across planning scenarios).
+  4. *Table requirement:* No new tables required. Existing table `layout_revisions` serves this feature directly with 4 new columns:
+     - `cad_file_path TEXT NOT NULL DEFAULT ''`: relative path to uploaded `.dwg` or `.dxf` in `data/uploads/`.
+     - `cad_file_name TEXT NOT NULL DEFAULT ''`: original drawing filename for user download display.
+     - `cad_file_size_bytes INTEGER NOT NULL DEFAULT 0`: byte count for instant display without filesystem queries.
+     - `cad_web_url TEXT NOT NULL DEFAULT ''`: direct URL to Autodesk Vault, SharePoint, or PLM repository.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit validation checking extension (`.dwg`, `.dxf`) and enforcing max file size <= 100 MB.
+     - Universal Deletion Standard: confirmed deletion dialog for layouts or revisions purges owned uploads from `data/uploads/`; includes explicit detach CAD action.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Layouts"`.
+     - Universal History Display Standard: visible in the Layouts History expander via `audit_history()`.
+     - Scope Badges: Project-wide on Layouts workspace, Scenario-specific on Pin Map.
+
+### 3D CAD STEP File Attachments for Parts Catalog and PAAG Visual Aids
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow engineers and collaborators to attach 3D CAD exchange files (`.step`, `.stp`) to the Parts Catalog and PAAG pitch visual step guides, making authoritative 3D engineering models directly available as downloadable reference assets alongside 2D images, video clips, and web links:
+  1. *Parts Catalog:* In supplemental views (`part_images`), collaborators can upload 3D STEP models (`image_type = '3D CAD Model (STEP)'`), displaying file name, file size badge, and a 1-click download button.
+  2. *Process at a Glance (PAAG) Visual Aids:* Pitch-level visual aids tagged to work elements support 3D STEP CAD uploads (`media_type = 'cad'`), offering a download button in the pitch visual media gallery and rendering a designated 3D CAD indicator card on slide presentations.
+  3. *File Size Limit:* Enforces a strict application-level file size limit of **50 MB** per STEP file. Files exceeding 50 MB prompt the user to use the newly added Web Link / URL feature to link directly to corporate PLM (Windchill) or SharePoint repositories, preserving local memory, storage, and fast `.paagproject` package transfer performance.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Parts Catalog: connects to `parts` (master component) and `part_images` (additional views / supplemental 3D CAD models).
+     - PAAG Visual Aids: connects to `process_visual_media` (scenario-owned, linked to `yamazumi_pitches`, `planning_scenarios`, and `projects`) and tagged to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the Parts Catalog and Process at a Glance / PAAG Slide Visualizer layers of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:*
+     - Parts Catalog: Project-wide, matching `parts` and `part_images`.
+     - PAAG Visual Aids: Scenario-specific, matching `process_visual_media` and `process_visual_media_tags`.
+  4. *Table requirement:* No new tables required. Existing tables serve this feature directly:
+     - `process_visual_media`: `media_type` supports `'cad'` (in addition to `'image'`, `'video'`, and `'link'`), where `file_path` stores the local upload path.
+     - `part_images`: `image_path` stores the local relative upload path in `data/uploads/`, with `image_type` supporting `'3D CAD Model (STEP)'`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit validation checking extension (`.step`, `.stp`) and enforcing max file size <= 50 MB.
+     - Universal Deletion Standard: confirmed deletion dialog removing the record and safely unlinking local files from `data/uploads/`.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Parts"` and `"Process"`.
+     - Universal History Display Standard: visible in the respective bottom History expanders using `audit_history()`.
+     - Scope Badges: Project-wide on Parts Catalog, Scenario-specific on Process at a Glance.
+
 ### Model Tree: BOM Authoring From Scratch
 
 - **Proposed by:** Nicole Ervin, project owner
@@ -1083,7 +1163,7 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
   3. *Scope:* Project-wide. A project supports multiple named layouts (e.g., "Main Line", "Subassembly Area", "Building 2"). Each layout maintains versioned revisions (`layout_revisions`) so users can update the floor plan drawing with new revisions while retaining the ability to review historical revisions. When creating an updated revision with a new image, previously drawn shapes and footprints are retained (copied forward) so the user can reposition or resize them on the new layout drawing.
   4. *Table requirement:* Requires new dedicated tables because existing tables cannot store multi-revision floor plan images, real-world physical scale dimensions, 2D vector shapes, or section pitch dimensional standards:
      - `layout_plans`: project-wide container for a named layout (`id`, `project_id`, `name`, `description`, `created_at`, `updated_at`).
-     - `layout_revisions`: versioned floor plan snapshots (`id`, `layout_id`, `revision_number`, `image_path`, `width_value`, `height_value`, `unit`, `scale_width_in`, `scale_height_in`, `notes`, `created_at`, `created_by`).
+     - `layout_revisions`: versioned floor plan snapshots (`id`, `layout_id`, `revision_number`, `image_path`, `image_width_px`, `image_height_px`, `width_value`, `height_value`, `unit`, `scale_width_in`, `scale_height_in`, `notes`, `cad_file_path`, `cad_file_name`, `cad_file_size_bytes`, `cad_web_url`, `created_at`, `created_by`).
      - `layout_shapes`: drawn shapes, annotations, and workstation/equipment footprints (`id`, `revision_id`, `shape_type`, `label`, `x`, `y`, `width`, `height`, `rotation`, `color`, `style_json`, `pitch_id`, `equipment_id`, `created_at`, `updated_at`).
      - `layout_section_pitch_standards`: section-level standard workstation pitch dimensions (`id`, `layout_id`, `section_id`, `pitch_width`, `pitch_height`, `unit`, `created_at`, `updated_at`).
   5. *Applicable DESIGN_SYSTEM.md standards:*

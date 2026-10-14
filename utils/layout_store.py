@@ -22,6 +22,10 @@ SUPPORTED_LAYOUT_EXTENSIONS: tuple[str, ...] = (
     ".dxf",
 )
 
+SUPPORTED_LAYOUT_CAD_EXTENSIONS: tuple[str, ...] = (".dwg", ".dxf")
+MAX_LAYOUT_CAD_FILE_SIZE_BYTES: int = 100 * 1024 * 1024  # 100 MB
+MAX_LAYOUT_CAD_FILE_SIZE_MB: int = 100
+
 LAYOUT_UNITS: tuple[str, ...] = ("feet", "inches", "yards", "miles")
 
 UNIT_TO_INCHES: dict[str, float] = {
@@ -126,6 +130,10 @@ def init_layout_schema(conn: sqlite3.Connection) -> None:
             scale_width_in REAL NOT NULL DEFAULT 0.0,
             scale_height_in REAL NOT NULL DEFAULT 0.0,
             notes TEXT NOT NULL DEFAULT '',
+            cad_file_path TEXT NOT NULL DEFAULT '',
+            cad_file_name TEXT NOT NULL DEFAULT '',
+            cad_file_size_bytes INTEGER NOT NULL DEFAULT 0,
+            cad_web_url TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             created_by TEXT NOT NULL DEFAULT '',
             UNIQUE(layout_id, revision_number)
@@ -168,6 +176,16 @@ def init_layout_schema(conn: sqlite3.Connection) -> None:
             ON layout_section_pitch_standards(layout_id, section_id);
         """
     )
+    # Safe repeatable in-place schema upgrades for layout_revisions
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(layout_revisions)").fetchall()}
+    if "cad_file_path" not in existing_cols:
+        conn.execute("ALTER TABLE layout_revisions ADD COLUMN cad_file_path TEXT NOT NULL DEFAULT ''")
+    if "cad_file_name" not in existing_cols:
+        conn.execute("ALTER TABLE layout_revisions ADD COLUMN cad_file_name TEXT NOT NULL DEFAULT ''")
+    if "cad_file_size_bytes" not in existing_cols:
+        conn.execute("ALTER TABLE layout_revisions ADD COLUMN cad_file_size_bytes INTEGER NOT NULL DEFAULT 0")
+    if "cad_web_url" not in existing_cols:
+        conn.execute("ALTER TABLE layout_revisions ADD COLUMN cad_web_url TEXT NOT NULL DEFAULT ''")
 
 
 # --- Layout Plan Operations ---
@@ -302,10 +320,12 @@ def layout_deletion_impact(project_id: str, layout_id: str) -> dict[str, Any]:
         if not layout:
             raise ValueError("That layout no longer exists.")
         revisions = conn.execute(
-            "SELECT id, image_path FROM layout_revisions WHERE layout_id=?", (layout_id,)
+            "SELECT id, image_path, cad_file_path FROM layout_revisions WHERE layout_id=?", (layout_id,)
         ).fetchall()
         rev_ids = [str(r["id"]) for r in revisions]
         image_paths = [str(r["image_path"]) for r in revisions if _text(r["image_path"])]
+        cad_paths = [str(r["cad_file_path"]) for r in revisions if _text(r["cad_file_path"])]
+        all_file_paths = image_paths + cad_paths
         shape_count = 0
         if rev_ids:
             placeholders = ",".join("?" for _ in rev_ids)
@@ -318,7 +338,8 @@ def layout_deletion_impact(project_id: str, layout_id: str) -> dict[str, Any]:
             "revision_count": len(revisions),
             "shape_count": shape_count,
             "image_count": len(image_paths),
-            "image_paths": image_paths,
+            "image_paths": all_file_paths,
+            "cad_count": len(cad_paths),
             "revisions_count": len(revisions),
             "shapes_count": shape_count,
             "images_count": len(image_paths),
@@ -687,6 +708,8 @@ def create_layout_revision(
     crop_top_pct: float = 0.0,
     crop_right_pct: float = 0.0,
     crop_bottom_pct: float = 0.0,
+    cad_file: Any | None = None,
+    cad_web_url: str = "",
 ) -> dict[str, Any]:
     """Create a new versioned layout revision with an image/drawing and scale specifications."""
     store = _store_module()
@@ -782,6 +805,44 @@ def create_layout_revision(
     timestamp = store.now_iso()
     new_revision_id = str(uuid4())
 
+    cad_path_str = ""
+    cad_name_str = ""
+    cad_size_int = 0
+    clean_cad_url = _text(cad_web_url)
+
+    if cad_file:
+        cad_raw_name = str(getattr(cad_file, "name", "drawing.dwg")).strip()
+        cad_suffix = Path(cad_raw_name).suffix.lower()
+        if cad_suffix not in SUPPORTED_LAYOUT_CAD_EXTENSIONS:
+            allowed = ", ".join(ext.upper().lstrip(".") for ext in SUPPORTED_LAYOUT_CAD_EXTENSIONS)
+            raise ValueError(f"Unsupported AutoCAD drawing format '{cad_suffix}'. Allowed formats: {allowed}.")
+        cad_bytes = (
+            cad_file.getvalue() if hasattr(cad_file, "getvalue") else cad_file.read()
+        )
+        if hasattr(cad_file, "seek"):
+            cad_file.seek(0)
+        if not cad_bytes:
+            raise ValueError("The provided AutoCAD drawing file is empty.")
+        if len(cad_bytes) > MAX_LAYOUT_CAD_FILE_SIZE_BYTES:
+            size_mb = len(cad_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"AutoCAD drawing is {size_mb:.1f} MB. Maximum upload size is {MAX_LAYOUT_CAD_FILE_SIZE_MB} MB. "
+                f"For larger facility drawings, use the CAD Web Link option."
+            )
+        cad_target = store.UPLOAD_DIR / f"layout_cad_{layout_id}_{uuid4()}{cad_suffix}"
+        cad_target.write_bytes(cad_bytes)
+        cad_path_str = str(cad_target)
+        cad_name_str = cad_raw_name
+        cad_size_int = len(cad_bytes)
+    elif not isinstance(image_file, Image.Image):
+        raw_fname = str(getattr(image_file, "name", "")).strip()
+        if Path(raw_fname).suffix.lower() == ".dxf" and content:
+            cad_target = store.UPLOAD_DIR / f"layout_cad_{layout_id}_{uuid4()}.dxf"
+            cad_target.write_bytes(content)
+            cad_path_str = str(cad_target)
+            cad_name_str = raw_fname
+            cad_size_int = len(content)
+
     try:
         with store.connection() as conn:
             layout = conn.execute(
@@ -801,8 +862,9 @@ def create_layout_revision(
                 INSERT INTO layout_revisions
                 (id, layout_id, revision_number, image_path, image_width_px, image_height_px,
                  width_value, height_value, unit, scale_width_in, scale_height_in,
-                 notes, created_at, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 notes, cad_file_path, cad_file_name, cad_file_size_bytes, cad_web_url,
+                 created_at, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_revision_id,
@@ -817,6 +879,10 @@ def create_layout_revision(
                     scale_width_in,
                     scale_height_in,
                     _text(notes),
+                    cad_path_str,
+                    cad_name_str,
+                    cad_size_int,
+                    clean_cad_url,
                     timestamp,
                     editor,
                 ),
@@ -912,11 +978,16 @@ def create_layout_revision(
                     "copied_shapes_count": copied_shapes_count,
                     "orientation_deg": normalized_rot,
                     "source_format": suffix.lstrip("."),
+                    "has_cad_file": bool(cad_path_str),
+                    "cad_file_name": cad_name_str,
+                    "has_cad_url": bool(clean_cad_url),
                 },
                 _conn=conn,
             )
     except Exception:
         _remove_owned_upload(target_path)
+        if cad_path_str:
+            _remove_owned_upload(cad_path_str)
         raise
 
     return {
@@ -931,6 +1002,10 @@ def create_layout_revision(
         "scale_width_in": scale_width_in,
         "scale_height_in": scale_height_in,
         "copied_shapes_count": copied_shapes_count,
+        "cad_file_path": cad_path_str,
+        "cad_file_name": cad_name_str,
+        "cad_file_size_bytes": cad_size_int,
+        "cad_web_url": clean_cad_url,
     }
 
 
@@ -1028,6 +1103,7 @@ def delete_layout_revision(project_id: str, revision_id: str, editor_name: str) 
         if not rev:
             raise ValueError("Revision not found.")
         image_path = str(rev["image_path"] or "")
+        cad_file_path = str(rev["cad_file_path"] or "") if "cad_file_path" in rev.keys() else ""
         conn.execute("DELETE FROM layout_revisions WHERE id=?", (revision_id,))
         store.record_audit_event(
             project_id,
@@ -1042,6 +1118,145 @@ def delete_layout_revision(project_id: str, revision_id: str, editor_name: str) 
             _conn=conn,
         )
     _remove_owned_upload(image_path)
+    if cad_file_path:
+        _remove_owned_upload(cad_file_path)
+
+
+def attach_layout_revision_cad(
+    project_id: str,
+    revision_id: str,
+    cad_file: Any | None = None,
+    cad_web_url: str = "",
+    editor_name: str = "",
+) -> dict[str, Any]:
+    """Attach or update a native AutoCAD file or CAD web link on an existing revision."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    clean_url = _text(cad_web_url)
+
+    if not cad_file and not clean_url:
+        raise ValueError("Provide either an AutoCAD drawing file (.dwg, .dxf) or a CAD Web Link.")
+
+    with store.connection() as conn:
+        rev = conn.execute(
+            """
+            SELECT r.*, p.name AS layout_name
+            FROM layout_revisions r
+            JOIN layout_plans p ON p.id = r.layout_id
+            WHERE r.id = ? AND p.project_id = ?
+            """,
+            (revision_id, project_id),
+        ).fetchone()
+        if not rev:
+            raise ValueError("Revision not found in active project.")
+
+        old_cad_path = str(rev["cad_file_path"] or "") if "cad_file_path" in rev.keys() else ""
+        cad_path_str = old_cad_path
+        cad_name_str = str(rev["cad_file_name"] or "") if "cad_file_name" in rev.keys() else ""
+        cad_size_int = int(rev["cad_file_size_bytes"] or 0) if "cad_file_size_bytes" in rev.keys() else 0
+
+        if cad_file:
+            raw_name = str(getattr(cad_file, "name", "drawing.dwg")).strip()
+            suffix = Path(raw_name).suffix.lower()
+            if suffix not in SUPPORTED_LAYOUT_CAD_EXTENSIONS:
+                allowed = ", ".join(ext.upper().lstrip(".") for ext in SUPPORTED_LAYOUT_CAD_EXTENSIONS)
+                raise ValueError(f"Unsupported AutoCAD format '{suffix}'. Allowed: {allowed}.")
+            content = cad_file.getvalue() if hasattr(cad_file, "getvalue") else cad_file.read()
+            if hasattr(cad_file, "seek"):
+                cad_file.seek(0)
+            if not content:
+                raise ValueError("The provided AutoCAD file is empty.")
+            if len(content) > MAX_LAYOUT_CAD_FILE_SIZE_BYTES:
+                size_mb = len(content) / (1024 * 1024)
+                raise ValueError(
+                    f"AutoCAD drawing is {size_mb:.1f} MB. Maximum upload size is {MAX_LAYOUT_CAD_FILE_SIZE_MB} MB. "
+                    f"For larger facility drawings, use the CAD Web Link option."
+                )
+            store.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            target = store.UPLOAD_DIR / f"layout_cad_{rev['layout_id']}_{uuid4()}{suffix}"
+            target.write_bytes(content)
+            cad_path_str = str(target)
+            cad_name_str = raw_name
+            cad_size_int = len(content)
+
+        conn.execute(
+            """
+            UPDATE layout_revisions
+            SET cad_file_path = ?, cad_file_name = ?, cad_file_size_bytes = ?, cad_web_url = ?
+            WHERE id = ?
+            """,
+            (cad_path_str, cad_name_str, cad_size_int, clean_url, revision_id),
+        )
+        store.record_audit_event(
+            project_id,
+            "Layouts",
+            "Update AutoCAD source",
+            1,
+            editor,
+            {
+                "layout_id": str(rev["layout_id"]),
+                "revision_number": int(rev["revision_number"]),
+                "cad_file_name": cad_name_str,
+                "has_cad_file": bool(cad_path_str),
+                "has_cad_url": bool(clean_url),
+            },
+            _conn=conn,
+        )
+
+    if cad_file and old_cad_path and old_cad_path != cad_path_str:
+        _remove_owned_upload(old_cad_path)
+
+    return get_layout_revision(revision_id) or {}
+
+
+def remove_layout_revision_cad(
+    project_id: str,
+    revision_id: str,
+    editor_name: str = "",
+) -> dict[str, Any]:
+    """Remove attached native AutoCAD file and CAD web link from a revision."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+
+    with store.connection() as conn:
+        rev = conn.execute(
+            """
+            SELECT r.*, p.name AS layout_name
+            FROM layout_revisions r
+            JOIN layout_plans p ON p.id = r.layout_id
+            WHERE r.id = ? AND p.project_id = ?
+            """,
+            (revision_id, project_id),
+        ).fetchone()
+        if not rev:
+            raise ValueError("Revision not found in active project.")
+
+        old_cad_path = str(rev["cad_file_path"] or "") if "cad_file_path" in rev.keys() else ""
+        conn.execute(
+            """
+            UPDATE layout_revisions
+            SET cad_file_path = '', cad_file_name = '', cad_file_size_bytes = 0, cad_web_url = ''
+            WHERE id = ?
+            """,
+            (revision_id,),
+        )
+        store.record_audit_event(
+            project_id,
+            "Layouts",
+            "Remove AutoCAD source",
+            1,
+            editor,
+            {
+                "layout_id": str(rev["layout_id"]),
+                "revision_number": int(rev["revision_number"]),
+            },
+            _conn=conn,
+        )
+
+    if old_cad_path:
+        _remove_owned_upload(old_cad_path)
+
+    return get_layout_revision(revision_id) or {}
 
 
 # --- Shape Operations ---
@@ -1436,6 +1651,10 @@ def get_pitch_layout_footprints(project_id: str, scenario_id: str) -> list[dict[
                 r.id AS revision_id,
                 r.revision_number,
                 r.image_path,
+                r.cad_file_path,
+                r.cad_file_name,
+                r.cad_file_size_bytes,
+                r.cad_web_url,
                 r.unit,
                 r.unit AS layout_unit,
                 r.scale_width_in,
@@ -1477,6 +1696,9 @@ __domain_exports__ = [
     "get_layout_revision",
     "get_latest_layout_revision",
     "SUPPORTED_LAYOUT_EXTENSIONS",
+    "SUPPORTED_LAYOUT_CAD_EXTENSIONS",
+    "MAX_LAYOUT_CAD_FILE_SIZE_BYTES",
+    "MAX_LAYOUT_CAD_FILE_SIZE_MB",
     "get_pdf_page_count",
     "render_pdf_page_to_image",
     "render_dxf_to_image",
@@ -1488,6 +1710,8 @@ __domain_exports__ = [
     "create_layout_revision",
     "update_layout_revision_scale",
     "delete_layout_revision",
+    "attach_layout_revision_cad",
+    "remove_layout_revision_cad",
     "list_layout_shapes",
     "save_layout_shapes",
     "import_shapes_from_revision",

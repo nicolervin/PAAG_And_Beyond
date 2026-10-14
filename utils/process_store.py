@@ -1196,6 +1196,8 @@ def get_pitch_visual_media(
 
 MAX_VISUAL_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_VISUAL_VIDEO_BYTES = 25 * 1024 * 1024  # 25 MB
+MAX_CAD_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_CAD_FILE_SIZE_MB = 50
 
 
 def save_pitch_visual_media(
@@ -1212,7 +1214,7 @@ def save_pitch_visual_media(
     annotations_json: str = "",
     original_file_bytes: bytes | None = None,
 ) -> dict:
-    """Save an uploaded image or video visual aid, attach element tags, and record audit."""
+    """Save an uploaded image, video, or 3D CAD visual aid, attach element tags, and record audit."""
     normalized_pitch_id = str(pitch_id or "").strip()
     if not normalized_pitch_id:
         raise ValueError("Choose a Yamazumi pitch.")
@@ -1222,6 +1224,7 @@ def save_pitch_visual_media(
     suffix = Path(str(filename or "")).suffix.lower()
     image_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
     video_suffixes = {".mp4", ".mov", ".webm"}
+    cad_suffixes = {".step", ".stp"}
     if suffix in image_suffixes:
         detected_type = "image"
         if len(file_bytes) > MAX_VISUAL_IMAGE_BYTES:
@@ -1236,14 +1239,21 @@ def save_pitch_visual_media(
             raise ValueError(
                 f"Video is {size_mb:.1f} MB. For fast slide loading and smooth presentation playback, please trim or compress clips under 25 MB."
             )
+    elif suffix in cad_suffixes:
+        detected_type = "cad"
+        if len(file_bytes) > MAX_CAD_FILE_SIZE_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"3D CAD model is {size_mb:.1f} MB. STEP files must be under {MAX_CAD_FILE_SIZE_MB} MB. For large assemblies, please attach a PLM/CAD web link instead."
+            )
     else:
         raise ValueError(
-            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB)."
+            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB), STEP/STP (max {MAX_CAD_FILE_SIZE_MB} MB)."
         )
 
     resolved_media_type = media_type or detected_type
-    if resolved_media_type not in {"image", "video"}:
-        raise ValueError("Media type must be 'image' or 'video'.")
+    if resolved_media_type not in {"image", "video", "cad"}:
+        raise ValueError("Media type must be 'image', 'video', or 'cad'.")
 
     timestamp = now_iso()
     media_id = str(uuid4())
@@ -1341,6 +1351,123 @@ def save_pitch_visual_media(
     }
 
 
+def save_pitch_visual_media_url(
+    project_id: str,
+    scenario_id: str,
+    pitch_id: str,
+    url: str,
+    caption: str = "",
+    tagged_work_element_ids: list[str] | None = None,
+    sequence: int = 10,
+    current_editor: str = "Collaborator",
+) -> dict:
+    """Save an external web link or URL visual aid, attach element tags, and record audit."""
+    normalized_pitch_id = str(pitch_id or "").strip()
+    if not normalized_pitch_id:
+        raise ValueError("Choose a Yamazumi pitch.")
+    clean_url = str(url or "").strip()
+    if not clean_url.startswith(("http://", "https://")):
+        raise ValueError("Web link URL must start with http:// or https://")
+
+    lower_url = clean_url.lower()
+    if any(lower_url.endswith(ext) or (ext + "?") in lower_url for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+        resolved_media_type = "image"
+    elif any(lower_url.endswith(ext) or (ext + "?") in lower_url for ext in [".mp4", ".mov", ".webm"]):
+        resolved_media_type = "video"
+    elif any(lower_url.endswith(ext) or (ext + "?") in lower_url for ext in [".step", ".stp"]):
+        resolved_media_type = "cad"
+    else:
+        resolved_media_type = "link"
+
+    timestamp = now_iso()
+    media_id = str(uuid4())
+
+    with connection() as conn:
+        pitch = conn.execute(
+            """SELECT pitch.id, pitch.pitch_number
+               FROM yamazumi_pitches pitch
+               JOIN yamazumi_areas area ON area.id=pitch.area_id
+               WHERE pitch.id=? AND pitch.project_id=? AND area.scenario_id=?""",
+            (normalized_pitch_id, project_id, scenario_id),
+        ).fetchone()
+        if not pitch:
+            raise ValueError("The selected pitch does not exist in the active planning scenario.")
+
+        conn.execute(
+            """INSERT INTO process_visual_media
+               (id, project_id, scenario_id, pitch_id, media_type, file_path, original_file_path,
+                annotations_json, caption, sequence, created_at, created_by, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)""",
+            (
+                media_id,
+                project_id,
+                scenario_id,
+                normalized_pitch_id,
+                resolved_media_type,
+                clean_url,
+                clean_url,
+                str(caption or "").strip(),
+                int(sequence or 10),
+                timestamp,
+                str(current_editor or "").strip(),
+                timestamp,
+            ),
+        )
+
+        valid_tags: list[str] = []
+        if tagged_work_element_ids:
+            for we_id in tagged_work_element_ids:
+                cleaned_we_id = str(we_id or "").strip()
+                if not cleaned_we_id:
+                    continue
+                exists = conn.execute(
+                    "SELECT id FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+                    (cleaned_we_id, project_id, scenario_id),
+                ).fetchone()
+                if exists:
+                    tag_id = str(uuid4())
+                    conn.execute(
+                        """INSERT OR IGNORE INTO process_visual_media_tags
+                           (id, media_id, work_element_id, project_id, scenario_id, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (tag_id, media_id, cleaned_we_id, project_id, scenario_id, timestamp),
+                    )
+                    valid_tags.append(cleaned_we_id)
+
+    record_audit_event(
+        project_id,
+        "process_visual_media",
+        "Add visual aid link",
+        1,
+        str(current_editor or "").strip(),
+        {
+            "summary": f"Added visual aid link on pitch {pitch['pitch_number']}: '{clean_url}'",
+            "media_id": media_id,
+            "pitch_id": normalized_pitch_id,
+            "media_type": resolved_media_type,
+            "url": clean_url,
+            "caption": str(caption or "").strip(),
+            "tagged_work_element_ids": valid_tags,
+        },
+    )
+
+    return {
+        "id": media_id,
+        "project_id": project_id,
+        "scenario_id": scenario_id,
+        "pitch_id": normalized_pitch_id,
+        "media_type": resolved_media_type,
+        "file_path": clean_url,
+        "original_file_path": clean_url,
+        "annotations_json": "",
+        "caption": str(caption or "").strip(),
+        "sequence": int(sequence or 10),
+        "tagged_work_element_ids": valid_tags,
+        "created_at": timestamp,
+        "created_by": str(current_editor or "").strip(),
+    }
+
+
 def update_pitch_visual_media(
     project_id: str,
     scenario_id: str,
@@ -1349,8 +1476,9 @@ def update_pitch_visual_media(
     tagged_work_element_ids: list[str] | None = None,
     sequence: int | None = None,
     current_editor: str = "Collaborator",
+    url: str | None = None,
 ) -> None:
-    """Update caption, sequence, and tagged elements for a visual aid."""
+    """Update caption, sequence, url, and tagged elements for a visual aid."""
     normalized_media_id = str(media_id or "").strip()
     if not normalized_media_id:
         raise ValueError("Choose a visual aid to update.")
@@ -1358,7 +1486,7 @@ def update_pitch_visual_media(
     timestamp = now_iso()
     with connection() as conn:
         existing = conn.execute(
-            """SELECT m.id, m.pitch_id, pitch.pitch_number
+            """SELECT m.id, m.pitch_id, m.media_type, pitch.pitch_number
                FROM process_visual_media m
                JOIN yamazumi_pitches pitch ON pitch.id=m.pitch_id
                WHERE m.id=? AND m.project_id=? AND m.scenario_id=?""",
@@ -1366,6 +1494,26 @@ def update_pitch_visual_media(
         ).fetchone()
         if not existing:
             raise ValueError("Visual aid not found in this scenario.")
+
+        clean_url = str(url or "").strip() if url is not None else None
+        if clean_url:
+            if not clean_url.startswith(("http://", "https://")):
+                raise ValueError("Web link URL must start with http:// or https://")
+            lower_u = clean_url.lower()
+            if any(lower_u.endswith(ext) or (ext + "?") in lower_u for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+                new_m_type = "image"
+            elif any(lower_u.endswith(ext) or (ext + "?") in lower_u for ext in [".mp4", ".mov", ".webm"]):
+                new_m_type = "video"
+            elif any(lower_u.endswith(ext) or (ext + "?") in lower_u for ext in [".step", ".stp"]):
+                new_m_type = "cad"
+            else:
+                new_m_type = "link"
+            conn.execute(
+                """UPDATE process_visual_media
+                   SET file_path=?, original_file_path=?, media_type=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (clean_url, clean_url, new_m_type, normalized_media_id, project_id, scenario_id),
+            )
 
         if sequence is not None:
             conn.execute(
@@ -1510,7 +1658,7 @@ def delete_pitch_visual_media(
             (normalized_media_id, project_id, scenario_id),
         )
 
-    if file_path_str:
+    if file_path_str and not file_path_str.startswith(("http://", "https://")):
         p = Path(file_path_str)
         try:
             if p.exists() and p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
@@ -1518,7 +1666,7 @@ def delete_pitch_visual_media(
         except OSError:
             pass
 
-    if orig_path_str and orig_path_str != file_path_str:
+    if orig_path_str and orig_path_str != file_path_str and not orig_path_str.startswith(("http://", "https://")):
         op = Path(orig_path_str)
         try:
             if op.exists() and op.is_file() and UPLOAD_DIR.resolve() in op.resolve().parents:
@@ -2631,7 +2779,7 @@ def work_element_downstream_impact(
         }
 
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'work_element_downstream_impact']
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])
