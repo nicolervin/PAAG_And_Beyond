@@ -22,8 +22,12 @@ from utils.scope_ui import page_title_with_scope
 from utils.store import (
     ERGONOMICS_RISK_CLASSIFICATIONS,
     ERGONOMICS_REVIEW_STATUSES,
+    create_legacy_ergonomics_review,
+    create_or_get_ergonomic_hazard_option,
     delete_ergonomics_reviews,
     delete_ergonomics_visual_media,
+    delete_unlinked_ergonomics_reviews,
+    ensure_default_ergonomic_hazard_options,
     ergonomic_hazard_options,
     ergonomics_review_audit_history,
     ergonomics_review_save_plan,
@@ -32,7 +36,9 @@ from utils.store import (
     ergonomics_work_elements,
     get_ergonomics_visual_media,
     get_planning_scenario,
+    link_legacy_concern_to_work_element,
     record_audit_event,
+    save_ergonomic_hazard_option_rows,
     save_ergonomics_review_rows,
     save_ergonomics_visual_media,
     update_ergonomics_visual_annotations,
@@ -141,6 +147,7 @@ if reviews.empty:
             "scenario_id": pd.Series(dtype="string"),
             "work_element_id": pd.Series(dtype="string"),
             "process_part_option_id": pd.Series(dtype="string"),
+            "legacy_description": pd.Series(dtype="string"),
             "status": pd.Series(dtype="string"),
             "risk_classification": pd.Series(dtype="string"),
             "reviewer": pd.Series(dtype="string"),
@@ -155,6 +162,9 @@ if reviews.empty:
         }
     )
 
+if "legacy_description" not in reviews.columns:
+    reviews["legacy_description"] = ""
+reviews["legacy_description"] = reviews["legacy_description"].fillna("").astype(str)
 reviews["link_filter"] = reviews["work_element_id"].apply(
     lambda value: "Unlinked" if not _clean_text(value) else "Linked"
 )
@@ -162,6 +172,20 @@ reviews["link_status"] = reviews["link_filter"].apply(lambda value: [value])
 reviews["hazard_option_ids"] = reviews["hazard_option_ids"].apply(_id_list)
 reviews["requested_due_date"] = pd.to_datetime(
     reviews["requested_due_date"], errors="coerce"
+)
+reviews["view_slide"] = "View Slide"
+reviews["work_element_label"] = reviews.apply(
+    lambda r: (
+        _clean_text(r.get("work_element_label"))
+        or (
+            f"Unlinked · {_clean_text(r.get('legacy_description'))}"
+            if _clean_text(r.get("legacy_description"))
+            else "Unlinked — no Process step"
+        )
+    )
+    if not _clean_text(r.get("work_element_id"))
+    else _clean_text(r.get("work_element_label")),
+    axis=1,
 )
 
 work_elements = ergonomics_work_elements(project_id, scenario_id)
@@ -177,6 +201,9 @@ work_label_by_id = {
 work_options = ["", *work_label_by_id]
 
 hazards = ergonomic_hazard_options(project_id)
+if hazards.empty:
+    ensure_default_ergonomic_hazard_options(project_id)
+    hazards = ergonomic_hazard_options(project_id)
 hazard_label_by_id = {
     _clean_text(row["id"]): _clean_text(row["label"])
     for _, row in hazards.iterrows()
@@ -209,11 +236,42 @@ st.caption(
     "status and risk classification are set independently."
 )
 
+top_actions = st.container(horizontal=True)
+if top_actions.button(
+    "Add legacy concern",
+    icon=":material/add:",
+    key=f"add_legacy_concern_btn_{scenario_id}",
+):
+    st.session_state[f"show_add_legacy_dialog_{scenario_id}"] = True
+
+unlinked_count = int((reviews["link_filter"] == "Unlinked").sum())
+if unlinked_count > 0:
+    if top_actions.button(
+        "Link legacy concern",
+        icon=":material/link:",
+        key=f"link_legacy_concern_btn_{scenario_id}",
+    ):
+        st.session_state[f"show_link_legacy_dialog_{scenario_id}"] = True
+
+    if top_actions.button(
+        f"Delete unlinked reviews ({unlinked_count})",
+        icon=":material/delete_sweep:",
+        key=f"delete_unlinked_btn_{scenario_id}",
+    ):
+        st.session_state[f"show_delete_unlinked_dialog_{scenario_id}"] = True
+
+if top_actions.button(
+    "Manage hazard tags",
+    icon=":material/label:",
+    key=f"manage_hazards_btn_{project_id}",
+):
+    st.session_state[f"show_manage_hazards_dialog_{project_id}"] = True
+
 visible_reviews = filter_table(
     reviews,
     key=f"ergonomics_reviews_filters_{project_id}_{scenario_id}",
     dropdown_columns=["link_filter", "status", "risk_classification", "reviewer"],
-    search_columns=["work_element_label", "pitch", "reviewer", "notes", "hazard_labels"],
+    search_columns=["work_element_label", "legacy_description", "pitch", "reviewer", "notes", "hazard_labels"],
     labels={
         "link_filter": "Link status",
         "status": "Status",
@@ -222,12 +280,23 @@ visible_reviews = filter_table(
     },
     reset_widget_keys=[editor_key],
 )
+
+
+def open_ergo_slide() -> None:
+    click = st.session_state.get(f"ergo_reviews_view_slide_{scenario_id}")
+    if click and 0 <= click.get("row", -1) < len(reviews_for_editing):
+        row_id = str(reviews_for_editing.iloc[click["row"]]["id"]).strip()
+        st.session_state[f"ergo_slide_selected_review_{scenario_id}"] = row_id
+        st.session_state["ergo_scroll_to_slides"] = True
+
+
 reviews_for_editing = direct_entry_editor_rows(
     visible_reviews,
     editor_key=editor_key,
     sort_columns=[
         "link_filter",
         "work_element_label",
+        "legacy_description",
         "status",
         "risk_classification",
         "reviewer",
@@ -237,6 +306,7 @@ reviews_for_editing = direct_entry_editor_rows(
     labels={
         "link_filter": "Link status",
         "work_element_label": "Process step description",
+        "legacy_description": "Legacy concern / title",
         "requested_due_date": "Requested due date",
     },
 )
@@ -249,7 +319,9 @@ edited = st.data_editor(
     height=470,
     column_order=[
         "link_status",
+        "view_slide",
         "work_element_id",
+        "legacy_description",
         "status",
         "risk_classification",
         "reviewer",
@@ -289,6 +361,13 @@ edited = st.data_editor(
             width="small",
             help="Unlinked reviews have no Process at a Glance Work Element yet.",
         ),
+        "view_slide": st.column_config.ButtonColumn(
+            "Slide",
+            help="Navigate directly to this review's 16:9 Ergonomics slide below.",
+            key=f"ergo_reviews_view_slide_{scenario_id}",
+            on_click=open_ergo_slide,
+            type="secondary",
+        ),
         "work_element_id": st.column_config.SelectboxColumn(
             "Process step description",
             options=work_options,
@@ -299,6 +378,11 @@ edited = st.data_editor(
                 "Leave blank for a legacy item or pre-PAAG concern. Linking to a step "
                 "may merge this review with the step's automatic review."
             ),
+            width="large",
+        ),
+        "legacy_description": st.column_config.TextColumn(
+            "Legacy concern / title",
+            help="Title or description of legacy ergonomics concern before linking to a Process step.",
             width="large",
         ),
         "status": st.column_config.SelectboxColumn(
@@ -351,6 +435,7 @@ st.download_button(
             [
                 "link_filter",
                 "work_element_label",
+                "legacy_description",
                 "pitch",
                 "status",
                 "risk_classification",
@@ -363,6 +448,7 @@ st.download_button(
             columns={
                 "link_filter": "Link status",
                 "work_element_label": "Process step description",
+                "legacy_description": "Legacy concern / title",
                 "pitch": "Pitch",
                 "status": "Status",
                 "risk_classification": "Risk classification",
@@ -395,6 +481,7 @@ def _normalized_rows(dataframe: pd.DataFrame) -> list[dict]:
                 "process_part_option_id": (
                     _clean_text(values.get("process_part_option_id")) or None
                 ),
+                "legacy_description": _clean_text(values.get("legacy_description")),
                 "status": _clean_text(values.get("status")) or "Started",
                 "risk_classification": (
                     _clean_text(values.get("risk_classification"))
@@ -413,7 +500,12 @@ def _normalized_rows(dataframe: pd.DataFrame) -> list[dict]:
 
 def _review_summary(values: dict) -> str:
     work_id = _clean_text(values.get("work_element_id"))
-    return work_label_by_id.get(work_id, "Unlinked — no Process step")
+    legacy = _clean_text(values.get("legacy_description"))
+    if work_id:
+        return work_label_by_id.get(work_id, work_id)
+    if legacy:
+        return f"Unlinked · {legacy}"
+    return "Unlinked — no Process step"
 
 
 def _review_detail_frame(values: dict) -> pd.DataFrame:
@@ -493,6 +585,345 @@ if not selected_reviews.empty:
         for _, row in selected_reviews.iterrows()
     ]
     stage_native_delete_confirmation(editor_key)
+
+
+@st.dialog("Add legacy Ergonomics concern", dismissible=False)
+def _add_legacy_dialog() -> None:
+    st.markdown(
+        "Create an unlinked Ergonomics concern for legacy or pre-PAAG items that can later be paired to a Process step."
+    )
+    legacy_title = st.text_input(
+        "Concern title / description *",
+        key=f"legacy_input_title_{scenario_id}",
+    )
+    col_s1, col_s2 = st.columns(2)
+    init_status = col_s1.selectbox(
+        "Status",
+        list(ERGONOMICS_REVIEW_STATUSES),
+        index=0,
+        key=f"legacy_input_status_{scenario_id}",
+    )
+    init_risk = col_s2.selectbox(
+        "Risk classification",
+        list(ERGONOMICS_RISK_CLASSIFICATIONS),
+        index=0,
+        key=f"legacy_input_risk_{scenario_id}",
+    )
+    col_s3, col_s4 = st.columns(2)
+    init_reviewer = col_s3.text_input(
+        "Reviewer",
+        value=_clean_text(st.session_state.get("current_editor")),
+        key=f"legacy_input_reviewer_{scenario_id}",
+    )
+    init_due_date = col_s4.date_input(
+        "Requested due date (optional)",
+        value=None,
+        key=f"legacy_input_due_{scenario_id}",
+    )
+    init_hazards = st.multiselect(
+        "Hazard tags",
+        options=hazard_options,
+        format_func=lambda value: hazard_label_by_id.get(value, value),
+        key=f"legacy_input_hazards_{scenario_id}",
+    )
+    new_hazards_input = st.text_input(
+        "Add new hazard tag(s)",
+        placeholder="e.g. Awkward reaching, Sharp edge (comma-separated)",
+        help="Type new hazard tags separated by commas. They will be added to the project and tagged to this concern.",
+        key=f"legacy_new_hazards_input_{scenario_id}",
+    )
+    init_notes = st.text_area("Notes", key=f"legacy_input_notes_{scenario_id}")
+
+    act_row = st.container(horizontal=True)
+    if act_row.button("Cancel", key=f"cancel_add_legacy_{scenario_id}"):
+        st.session_state.pop(f"show_add_legacy_dialog_{scenario_id}", None)
+        st.rerun()
+    if act_row.button(
+        "Save concern",
+        type="primary",
+        icon=":material/check:",
+        key=f"save_add_legacy_{scenario_id}",
+    ):
+        clean_title = legacy_title.strip()
+        if not clean_title:
+            st.error("Please enter a concern title or description.")
+            return
+        try:
+            assigned_hazard_ids = list(init_hazards)
+            if new_hazards_input.strip():
+                for tag in new_hazards_input.split(","):
+                    tag_clean = tag.strip()
+                    if tag_clean:
+                        tag_id = create_or_get_ergonomic_hazard_option(project_id, tag_clean)
+                        if tag_id not in assigned_hazard_ids:
+                            assigned_hazard_ids.append(tag_id)
+            res = create_legacy_ergonomics_review(
+                project_id,
+                scenario_id,
+                clean_title,
+                status=init_status,
+                risk_classification=init_risk,
+                reviewer=init_reviewer,
+                hazard_option_ids=assigned_hazard_ids,
+                notes=init_notes,
+                requested_due_date=init_due_date.isoformat() if init_due_date else None,
+                editor_name=_clean_text(st.session_state.get("current_editor")),
+            )
+            st.session_state[f"ergo_slide_selected_review_{scenario_id}"] = res["id"]
+            st.session_state["ergo_scroll_to_slides"] = True
+            st.session_state.pop(f"show_add_legacy_dialog_{scenario_id}", None)
+            request_table_editor_reset(editor_key)
+            st.toast("Legacy Ergonomics concern created", icon=":material/check_circle:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+@st.dialog("Delete unlinked Ergonomics reviews?", dismissible=False)
+def _delete_unlinked_dialog() -> None:
+    unlinked_df = reviews[
+        reviews["work_element_id"].isna()
+        | reviews["work_element_id"].astype(str).str.strip().eq("")
+    ]
+    if unlinked_df.empty:
+        st.info("No unlinked Ergonomics reviews found.")
+        if st.button("Close", key=f"close_empty_del_unlinked_{scenario_id}"):
+            st.session_state.pop(f"show_delete_unlinked_dialog_{scenario_id}", None)
+            st.rerun()
+        return
+
+    st.warning(
+        f"Permanently remove {len(unlinked_df)} unlinked review(s)? "
+        "Hazard selections and visual aids will also be deleted."
+    )
+    unlinked_options = {
+        str(row["id"]): (
+            f"{_clean_text(row.get('legacy_description')) or _clean_text(row.get('reviewer')) or 'Untitled review'} "
+            f"({_clean_text(row.get('risk_classification')) or 'Not assessed'}, ID: {str(row['id'])[:8]})"
+        )
+        for _, row in unlinked_df.iterrows()
+    }
+    selected_to_delete = st.multiselect(
+        "Select reviews to delete (leave all selected to purge all unlinked)",
+        options=list(unlinked_options.keys()),
+        default=list(unlinked_options.keys()),
+        format_func=lambda rid: unlinked_options.get(rid, rid),
+        key=f"unlinked_delete_selection_{scenario_id}",
+    )
+    act_row = st.container(horizontal=True)
+    if act_row.button("Cancel", key=f"cancel_del_unlinked_{scenario_id}"):
+        st.session_state.pop(f"show_delete_unlinked_dialog_{scenario_id}", None)
+        st.rerun()
+    if act_row.button(
+        f"Delete selected ({len(selected_to_delete)})",
+        type="primary",
+        icon=":material/delete_sweep:",
+        key=f"confirm_del_unlinked_{scenario_id}",
+        disabled=len(selected_to_delete) == 0,
+    ):
+        try:
+            res = delete_unlinked_ergonomics_reviews(
+                project_id,
+                scenario_id,
+                review_ids=selected_to_delete,
+                editor_name=_clean_text(st.session_state.get("current_editor")),
+            )
+            st.session_state.pop(f"show_delete_unlinked_dialog_{scenario_id}", None)
+            request_table_editor_reset(editor_key)
+            st.toast(
+                f"Deleted {res.get('row_count', len(selected_to_delete))} unlinked review(s)",
+                icon=":material/delete:",
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+@st.dialog("Manage Ergonomics hazard tags", dismissible=False)
+def _manage_hazards_dialog() -> None:
+    st.caption("Manage reusable Ergonomics hazard tags available across this project.")
+    cur_hazards = ergonomic_hazard_options(project_id)
+
+    st.markdown("##### Add new hazard tag")
+    add_col1, add_col2 = st.columns([3, 1], vertical_alignment="bottom")
+    new_tag_label = add_col1.text_input(
+        "Hazard tag label",
+        placeholder="e.g. Excessive pinch force",
+        key=f"new_hazard_tag_input_{project_id}",
+    )
+    if add_col2.button("Add tag", icon=":material/add:", key=f"btn_add_hazard_{project_id}", width="stretch"):
+        if not new_tag_label.strip():
+            st.error("Please enter a label for the hazard tag.")
+        else:
+            try:
+                create_or_get_ergonomic_hazard_option(project_id, new_tag_label.strip())
+                st.toast(f"Added hazard tag '{new_tag_label.strip()}'", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    st.markdown("##### Active hazard tags")
+    if cur_hazards.empty:
+        st.info("No hazard tags created yet.")
+        if st.button("Seed standard hazard tags", icon=":material/auto_fix:", key=f"seed_hazards_{project_id}"):
+            ensure_default_ergonomic_hazard_options(project_id)
+            st.toast("Standard hazard tags created", icon=":material/check_circle:")
+            st.rerun()
+    else:
+        tags_editor_key = f"hazard_options_editor_{project_id}"
+        edited_tags = st.data_editor(
+            cur_hazards[["id", "label", "active", "selection_count"]],
+            key=tags_editor_key,
+            hide_index=True,
+            column_config={
+                "id": None,
+                "label": st.column_config.TextColumn("Tag label", required=True),
+                "active": st.column_config.CheckboxColumn("Active"),
+                "selection_count": st.column_config.NumberColumn("Used in reviews", disabled=True),
+            },
+            width="stretch",
+        )
+
+        btn_c1, btn_c2 = st.columns(2)
+        if btn_c1.button("Save changes", type="primary", icon=":material/save:", key=f"save_hazard_tags_{project_id}", width="stretch"):
+            try:
+                save_ergonomic_hazard_option_rows(project_id, edited_tags)
+                st.toast("Hazard tags updated", icon=":material/check_circle:")
+                st.session_state.pop(f"show_manage_hazards_dialog_{project_id}", None)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+        if btn_c2.button("Close", key=f"close_hazard_tags_{project_id}", width="stretch"):
+            st.session_state.pop(f"show_manage_hazards_dialog_{project_id}", None)
+            st.rerun()
+
+
+@st.dialog("Link Legacy concern to Process Step", dismissible=False)
+def _link_legacy_dialog() -> None:
+    st.caption(
+        "Pair an unlinked legacy Ergonomics concern with a Process step review. "
+        "Hazard tags, solutions, notes, and legacy titles from both will be preserved and merged."
+    )
+    unlinked_df = reviews[
+        reviews["work_element_id"].isna()
+        | reviews["work_element_id"].astype(str).str.strip().eq("")
+    ]
+    if unlinked_df.empty:
+        st.info("There are no unlinked legacy concerns to link.")
+        if st.button("Close", key=f"close_empty_link_{scenario_id}"):
+            st.session_state.pop(f"show_link_legacy_dialog_{scenario_id}", None)
+            st.rerun()
+        return
+
+    unlinked_map: dict[str, dict] = {}
+    for _, row in unlinked_df.iterrows():
+        r_id = _clean_text(row["id"])
+        desc = _clean_text(row.get("legacy_description")) or _clean_text(row.get("notes")) or "Legacy concern"
+        risk = _clean_text(row.get("risk_classification")) or "Not yet assessed"
+        unlinked_map[r_id] = {
+            "label": f"{desc} [{risk}]",
+            "row": dict(row),
+        }
+
+    selected_legacy_id = st.session_state.get(f"ergo_link_target_legacy_id_{scenario_id}")
+    if selected_legacy_id not in unlinked_map:
+        selected_legacy_id = list(unlinked_map.keys())[0]
+
+    chosen_legacy_id = st.selectbox(
+        "Select legacy concern",
+        options=list(unlinked_map.keys()),
+        index=list(unlinked_map.keys()).index(selected_legacy_id),
+        format_func=lambda vid: unlinked_map[vid]["label"],
+        key=f"select_legacy_concern_{scenario_id}",
+    )
+    legacy_info = unlinked_map[chosen_legacy_id]["row"]
+
+    step_options = [w_id for w_id in work_label_by_id.keys() if w_id]
+    if not step_options:
+        st.warning("No Process steps exist in this scenario yet. Create Process steps in PAAG first.")
+        if st.button("Close", key=f"close_no_steps_link_{scenario_id}"):
+            st.session_state.pop(f"show_link_legacy_dialog_{scenario_id}", None)
+            st.rerun()
+        return
+
+    chosen_step_id = st.selectbox(
+        "Select target Process step",
+        options=step_options,
+        format_func=lambda vid: work_label_by_id.get(vid, vid),
+        key=f"select_target_step_{scenario_id}",
+    )
+
+    target_reviews = reviews[reviews["work_element_id"] == chosen_step_id]
+    target_info = dict(target_reviews.iloc[0]) if not target_reviews.empty else {}
+
+    st.markdown("---")
+    st.markdown("##### Comparison preview")
+    col_leg, col_step = st.columns(2)
+
+    with col_leg:
+        st.markdown("**Legacy concern to link**")
+        l_desc = _clean_text(legacy_info.get("legacy_description")) or "—"
+        l_risk = _clean_text(legacy_info.get("risk_classification")) or "Not yet assessed"
+        l_status = _clean_text(legacy_info.get("status")) or "Started"
+        l_notes = _clean_text(legacy_info.get("notes")) or "—"
+        l_hazards = [
+            hazard_label_by_id.get(hid, hid)
+            for hid in _id_list(legacy_info.get("hazard_option_ids"))
+        ]
+        st.markdown(f"**Title:** {l_desc}")
+        st.markdown(f"**Risk:** {l_risk} | **Status:** {l_status}")
+        st.markdown(f"**Hazards:** {', '.join(l_hazards) if l_hazards else '—'}")
+        st.caption(f"Notes: {l_notes}")
+
+    with col_step:
+        st.markdown("**Target Process step**")
+        s_label = work_label_by_id.get(chosen_step_id, chosen_step_id)
+        s_risk = _clean_text(target_info.get("risk_classification")) or "Not yet assessed"
+        s_status = _clean_text(target_info.get("status")) or "Started"
+        s_notes = _clean_text(target_info.get("notes")) or "—"
+        s_hazards = [
+            hazard_label_by_id.get(hid, hid)
+            for hid in _id_list(target_info.get("hazard_option_ids"))
+        ]
+        st.markdown(f"**Step:** {s_label}")
+        st.markdown(f"**Current Risk:** {s_risk} | **Status:** {s_status}")
+        st.markdown(f"**Hazards:** {', '.join(s_hazards) if s_hazards else '—'}")
+        st.caption(f"Existing notes: {s_notes}")
+
+    st.info(
+        "Merging preserves and combines hazard tags, notes, and solutions from both records into a single unified review for the Process step."
+    )
+
+    btn_row = st.container(horizontal=True)
+    if btn_row.button("Cancel", key=f"cancel_link_legacy_{scenario_id}"):
+        st.session_state.pop(f"show_link_legacy_dialog_{scenario_id}", None)
+        st.session_state.pop(f"ergo_link_target_legacy_id_{scenario_id}", None)
+        st.rerun()
+
+    if btn_row.button(
+        "Confirm link & merge",
+        type="primary",
+        icon=":material/link:",
+        key=f"confirm_link_legacy_{scenario_id}",
+    ):
+        try:
+            res = link_legacy_concern_to_work_element(
+                project_id=project_id,
+                scenario_id=scenario_id,
+                legacy_review_id=chosen_legacy_id,
+                target_work_element_id=chosen_step_id,
+                editor_name=_clean_text(st.session_state.get("current_editor")),
+            )
+            surviving_id = res["surviving_id"]
+            st.session_state[f"ergo_slide_selected_review_{scenario_id}"] = surviving_id
+            st.session_state["ergo_scroll_to_slides"] = True
+            st.session_state.pop(f"show_link_legacy_dialog_{scenario_id}", None)
+            st.session_state.pop(f"ergo_link_target_legacy_id_{scenario_id}", None)
+            request_table_editor_reset(editor_key)
+            st.toast("Legacy concern linked to Process step!", icon=":material/check_circle:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 
 @st.dialog("Delete selected Ergonomics reviews?", dismissible=False)
@@ -838,7 +1269,15 @@ def confirm_delete_ergo_media_dialog(
                 st.error(str(exc))
 
 
-if st.session_state.get(pending_delete_key):
+if st.session_state.get(f"show_add_legacy_dialog_{scenario_id}"):
+    _add_legacy_dialog()
+elif st.session_state.get(f"show_link_legacy_dialog_{scenario_id}"):
+    _link_legacy_dialog()
+elif st.session_state.get(f"show_manage_hazards_dialog_{project_id}"):
+    _manage_hazards_dialog()
+elif st.session_state.get(f"show_delete_unlinked_dialog_{scenario_id}"):
+    _delete_unlinked_dialog()
+elif st.session_state.get(pending_delete_key):
     _confirm_delete()
 elif st.session_state.get(pending_merge_key):
     _confirm_merge()
@@ -851,6 +1290,7 @@ if footer.save_and_refresh:
             edited,
             identifying_columns=[
                 "work_element_id",
+                "legacy_description",
                 "status",
                 "risk_classification",
                 "reviewer",
@@ -887,8 +1327,34 @@ if footer.save_and_refresh:
             st.error(str(exc))
 
 
+st.html('<div id="ergo-slides-section"></div>')
 st.divider()
 st.subheader("Ergonomics Review Slides", anchor="ergonomics-slides")
+if st.session_state.pop("ergo_scroll_to_slides", False):
+    st.html(
+        """<script>
+        function scrollToErgoSlides() {
+            try {
+                const parentDoc = window.parent ? window.parent.document : document;
+                const elem = (parentDoc && parentDoc.getElementById('ergo-slides-section')) || document.getElementById('ergo-slides-section');
+                if (elem) {
+                    elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    return true;
+                }
+            } catch (e) {
+                const elem = document.getElementById('ergo-slides-section');
+                if (elem) {
+                    elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    return true;
+                }
+            }
+            return false;
+        }
+        setTimeout(scrollToErgoSlides, 150);
+        setTimeout(scrollToErgoSlides, 450);
+        </script>""",
+        unsafe_allow_javascript=True,
+    )
 
 review_options: list[tuple[str, str]] = []
 for _, r_row in reviews.iterrows():
@@ -896,7 +1362,12 @@ for _, r_row in reviews.iterrows():
     if not rid:
         continue
     pitch_txt = _clean_text(r_row.get("pitch")) or "Unlinked"
-    op_txt = _clean_text(r_row.get("work_element_label")) or _clean_text(r_row.get("reviewer")) or rid[:8]
+    legacy_txt = _clean_text(r_row.get("legacy_description"))
+    we_label = _clean_text(r_row.get("work_element_label"))
+    if we_label and legacy_txt:
+        op_txt = f"{we_label} [Legacy: {legacy_txt}]"
+    else:
+        op_txt = we_label or legacy_txt or _clean_text(r_row.get("reviewer")) or rid[:8]
     risk_txt = _clean_text(r_row.get("risk_classification")) or "Not assessed"
     review_options.append((rid, f"{pitch_txt} · {op_txt} ({risk_txt})"))
 
@@ -986,6 +1457,22 @@ else:
         if st.button("Print", icon=":material/print:", key=f"btn_ergo_print_{scenario_id}", width="stretch", help="Export or print 11x17 or 8.5x11 slides"):
             st.session_state[f"ergo_print_active_{scenario_id}"] = True
             st.rerun()
+
+    curr_rev_data = reviews[reviews["id"] == curr_rid]
+    if not curr_rev_data.empty:
+        curr_row = dict(curr_rev_data.iloc[0])
+        if not _clean_text(curr_row.get("work_element_id")):
+            slide_top_c1, slide_top_c2 = st.columns([3, 1], vertical_alignment="center")
+            slide_top_c1.info("💡 Unlinked legacy concern. Pair this item with a Process step to merge reviews.")
+            if slide_top_c2.button(
+                "Link to Process step",
+                icon=":material/link:",
+                key=f"btn_link_slide_{curr_rid}",
+                width="stretch",
+            ):
+                st.session_state[f"ergo_link_target_legacy_id_{scenario_id}"] = curr_rid
+                st.session_state[f"show_link_legacy_dialog_{scenario_id}"] = True
+                st.rerun()
 
     try:
         slide_summary = ergonomics_slide_summary(project_id, scenario_id, curr_rid)

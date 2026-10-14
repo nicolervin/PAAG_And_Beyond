@@ -309,6 +309,8 @@ The Phase 2A Process at a Glance picker defaults each newly selected catalog par
 
 `ergonomics_reviews.work_element_id` is nullable. A `NULL` value supports **legacy items**, meaning known ergonomic issues from current production entered at the start of a program, and **pre-PAAG concerns**, meaning issues identified before parts have been paired to time elements. Both use the existing `ergonomics_reviews` table; no separate holding or staging table is introduced.
 
+To support identifying and describing legacy items before a PAAG Work Element is created, `ergonomics_reviews` contains a `legacy_description TEXT NOT NULL DEFAULT ''` column. When a review is unlinked (`work_element_id IS NULL`), `legacy_description` provides its human-readable title (e.g. "Legacy Trunk Hinge Torque") across the table editor, delete dialogs, conflict merges, and slide viewers. When later paired to a PAAG Work Element, the Work Element relationship becomes authoritative while `legacy_description` is preserved as historical context. Unlinked reviews can also be bulk-purged or individually removed through confirmed deletion.
+
 Every review with `work_element_id = NULL` must display a clear **Unlinked** badge or tag in the Ergonomics UI rather than relying on a blank Work Element cell. The review table must support filtering between linked and unlinked records.
 
 Whenever a new `work_elements` Process at a Glance step is created, the system automatically creates one `ergonomics_reviews` row in the same project and planning scenario. The generated review has `status = 'Started'`, references the new step through `work_element_id`, has no hazard selections, and leaves every other contributor-editable field blank. The work-element creation path must guarantee that the starting review is present for every newly created Process step.
@@ -915,6 +917,23 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
      - Universal History Display Standard: bottom History expander using `audit_history()`.
      - Scope Badges: scenario-specific scope badge on Ergonomics.
      - Presentation & Print: Full-screen presentation mode dialog with review-by-review navigation, keyboard shortcuts (Arrow keys, Spacebar, full-screen toggle); Print dialog with letter/tabloid landscape format, image fit options (fill/contain/stretch), and printable HTML deck.
+
+### Ergonomics: Legacy Concern Title (`legacy_description`), Unlinked Purge, Table-to-Slide Sync, Concern-to-Step Linking, and Hazard Tag Management
+
+- **Proposed by:** Collaborative Ergonomist / Industrial Engineer (JF)
+- **Date recorded:** October 13, 2026 (Updated October 14, 2026)
+- **Purpose:** (1) Add the ability to remove/purge unlinked Ergonomics reviews from the scenario; (2) Enable direct entry of legacy ergonomics concerns with a descriptive title (`legacy_description`), risk classification, status, reviewer, hazard tags, on-the-fly tag creation, and notes before a PAAG Work Element exists; (3) Link the Ergonomics Reviews table to the 16:9 Slide viewer so selecting a row or clicking the slide action navigates directly to that review's slide; (4) Provide a dedicated "Link legacy concern to Process Step" workflow that merges unlinked legacy concerns into the target Process Step's review, aggregating hazard tags, preserving notes/solutions from both records (`[Legacy Concern]: ... \n\n [Process Step]: ...`), taking the higher risk classification, and re-pointing visual aids; and (5) Seed standard project-wide ergonomic hazard options and provide a dedicated "Manage hazard tags" dialog.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* `ergonomics_reviews` (scenario-owned review record), `work_elements` (Process at a Glance step), `ergonomic_hazard_options` (project-level hazard tags), `ergonomics_review_hazard_selections` (review hazard mappings), `ergonomics_visual_media` (review visual aids), `planning_scenarios` (active scenario), `projects` (owning project).
+  2. *Critical thread relationship:* Connects directly to the scenario-specific Ergonomics review layer of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> scenario-specific Functional Ergonomics*). Allows pre-PAAG and legacy ergonomic issues to be logged early with full hazard tags, and then seamlessly linked/merged into active Process steps as manufacturing plans develop, retaining all notes, solutions, and media.
+  3. *Scope:* Review records, linking, and visual media are scenario-specific (`planning_scenarios.id`); reusable hazard tags are project-wide (`projects.id`).
+  4. *Table requirement:* Uses existing tables `ergonomics_reviews` (with `legacy_description TEXT NOT NULL DEFAULT ''`), `ergonomic_hazard_options`, `ergonomics_review_hazard_selections`, and `ergonomics_visual_media`. No new table is required.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Deletion Standard: non-dismissible confirmation dialog for purging unlinked reviews with audit logging (`record_audit_event()`), cascading cleanup of hazard selections and visual media.
+     - Universal Save Action Standard: dialog-driven "Add legacy concern" modal with on-the-fly tag creation, "Link legacy concern" comparison modal with atomic merge, table editor saving with stable reset, and current editor attribution.
+     - Universal Audit Trail Standard: audit logging under `"Ergonomics reviews"`.
+     - Universal History Display Standard: history displayed at the bottom of Functional Ergonomics.
+     - Table Interaction Standard: synchronized slide selection and smooth scrolling to the 16:9 slide view.
 
 ### Model Tree: BOM Authoring From Scratch
 

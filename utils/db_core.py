@@ -220,6 +220,22 @@ def _upgrade_ergonomics_reviews_risk_classification(
     )
 
 
+def _upgrade_ergonomics_reviews_legacy_description(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add the legacy item description column to ergonomics_reviews if not present."""
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(ergonomics_reviews)").fetchall()
+    }
+    if "legacy_description" in columns:
+        return
+    conn.execute(
+        """ALTER TABLE ergonomics_reviews
+           ADD COLUMN legacy_description TEXT NOT NULL DEFAULT ''"""
+    )
+
+
 def _upgrade_pfmea_entries_work_element_link(conn: sqlite3.Connection) -> None:
     """Make the pfmea_entries work_element_id link nullable with ON DELETE SET NULL."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pfmea_entries'").fetchone():
@@ -980,8 +996,8 @@ def _clone_ergonomics_reviews(
             """INSERT INTO ergonomics_reviews
                (id, project_id, scenario_id, work_element_id,
                 process_part_option_id, status, risk_classification, reviewer,
-                notes, requested_due_date, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                notes, requested_due_date, legacy_description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 cloned_review_id,
                 project_id,
@@ -993,6 +1009,7 @@ def _clone_ergonomics_reviews(
                 source_review["reviewer"],
                 source_review["notes"],
                 source_review["requested_due_date"],
+                source_review["legacy_description"] if "legacy_description" in source_review.keys() else "",
                 timestamp,
                 timestamp,
             ),
@@ -1741,6 +1758,7 @@ def init_db() -> None:
                 reviewer TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 requested_due_date TEXT,
+                legacy_description TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -1770,6 +1788,7 @@ def init_db() -> None:
         _drop_yamazumi_flags_schema(conn)
         _upgrade_ergonomics_reviews_work_element_link(conn)
         _upgrade_ergonomics_reviews_risk_classification(conn)
+        _upgrade_ergonomics_reviews_legacy_description(conn)
         _repair_dangling_legacy_foreign_keys(conn)
         init_quality_schema(conn)
         init_pfmea_schema(conn)
@@ -2649,4 +2668,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']

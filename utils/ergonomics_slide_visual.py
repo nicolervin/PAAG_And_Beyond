@@ -154,7 +154,7 @@ def render_ergonomics_slide(
 
     # Operation & Pitch info
     is_linked = bool(review.get("work_element_id"))
-    op_desc = _text(work_info.get("operation") or "Unlinked Ergonomics Review")
+    legacy_desc = _text(review.get("legacy_description") or "")
     pitch_num = _text(work_info.get("pitch_number") or "")
     pitch_name = _text(work_info.get("pitch_name") or "")
     section_name = _text(work_info.get("section_name") or "")
@@ -163,14 +163,18 @@ def render_ergonomics_slide(
 
     # Pitch location line
     location_parts = [p for p in [pitch_num, pitch_name, section_name] if p]
-    location_line = " · ".join(location_parts) if location_parts else "Unassigned Pitch"
+    if is_linked and legacy_desc:
+        location_parts.append(f"Legacy Concern: {legacy_desc}")
+    location_line = " · ".join(location_parts) if location_parts else ("Unassigned Pitch" if is_linked else "Unlinked Item")
 
     # Title header text
     if is_linked:
+        op_desc = _text(work_info.get("operation") or "Process Step")
         title_prefix = f"Pitch {pitch_num}" if pitch_num else "Process Step"
         slide_title = f"{title_prefix}: {op_desc}"
     else:
-        slide_title = f"Unlinked Review: {op_desc}"
+        op_desc = legacy_desc or "Unlinked Ergonomics Concern"
+        slide_title = f"Unlinked Concern: {op_desc}" if legacy_desc else "Unlinked Ergonomics Concern"
 
     # Hazard tags HTML
     if hazards:

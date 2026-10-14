@@ -11,6 +11,62 @@ from utils import db_core as _db_core
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
+DEFAULT_ERGONOMIC_HAZARD_OPTIONS: tuple[str, ...] = (
+    "Heavy lift (≥ 33 lb)",
+    "Awkward posture (bending / twisting / reaching)",
+    "Repetitive motion",
+    "Pinch point",
+    "High grip / push / pull force",
+    "Contact stress",
+    "Vibration",
+    "Static load / sustained hold",
+)
+
+def ensure_default_ergonomic_hazard_options(project_id: str) -> int:
+    """Seed standard ergonomics hazard options if the project has none defined."""
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            return 0
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ergonomic_hazard_options WHERE project_id=?",
+            (project_id,),
+        ).fetchone()[0]
+        if count > 0:
+            return 0
+        for label in DEFAULT_ERGONOMIC_HAZARD_OPTIONS:
+            conn.execute(
+                """INSERT INTO ergonomic_hazard_options
+                   (id, project_id, label, active, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (str(uuid4()), project_id, label, 1, timestamp, timestamp),
+            )
+        return len(DEFAULT_ERGONOMIC_HAZARD_OPTIONS)
+
+def create_or_get_ergonomic_hazard_option(project_id: str, label: str) -> str:
+    """Create a new ergonomic hazard option if it does not already exist, and return its ID."""
+    clean_label = str(label or "").strip()
+    if not clean_label:
+        raise ValueError("Hazard label cannot be empty.")
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise ValueError("The selected project no longer exists.")
+        existing = conn.execute(
+            "SELECT id FROM ergonomic_hazard_options WHERE project_id=? AND LOWER(label)=LOWER(?)",
+            (project_id, clean_label),
+        ).fetchone()
+        if existing:
+            return str(existing["id"])
+        new_id = str(uuid4())
+        conn.execute(
+            """INSERT INTO ergonomic_hazard_options
+               (id, project_id, label, active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (new_id, project_id, clean_label, 1, timestamp, timestamp),
+        )
+        return new_id
+
 def ergonomic_hazard_options(project_id: str) -> pd.DataFrame:
     columns = [
         "id",
@@ -168,6 +224,7 @@ def ergonomics_reviews(
         "reviewer",
         "notes",
         "requested_due_date",
+        "legacy_description",
         "created_at",
         "updated_at",
         "hazard_option_ids",
@@ -231,6 +288,7 @@ def ergonomics_reviews(
         selections = selections_by_review[str(row["id"])]
         row["hazard_option_ids"] = [str(item["hazard_option_id"]) for item in selections]
         row["hazard_labels"] = [str(item["label"]) for item in selections]
+        row["legacy_description"] = str(row.get("legacy_description") or "")
     return pd.DataFrame(review_rows, columns=columns)
 
 def ergonomics_work_elements(project_id: str, scenario_id: str) -> pd.DataFrame:
@@ -309,6 +367,7 @@ def _ergonomics_review_has_real_content(values: dict) -> bool:
         or str(values.get("reviewer") or "").strip()
         or str(values.get("notes") or "").strip()
         or str(values.get("requested_due_date") or "").strip()
+        or str(values.get("legacy_description") or "").strip()
         or [value for value in values.get("hazard_option_ids", []) if str(value).strip()]
     )
 
@@ -418,6 +477,7 @@ def save_ergonomics_review_rows(
                 "requested_due_date": (
                     str(values.get("requested_due_date") or "").strip() or None
                 ),
+                "legacy_description": str(values.get("legacy_description") or "").strip(),
                 "hazard_option_ids": list(
                     dict.fromkeys(
                         str(value).strip()
@@ -584,7 +644,7 @@ def save_ergonomics_review_rows(
                     """UPDATE ergonomics_reviews
                        SET work_element_id=?, process_part_option_id=?, status=?,
                            risk_classification=?, reviewer=?, notes=?,
-                           requested_due_date=?, updated_at=?
+                           requested_due_date=?, legacy_description=?, updated_at=?
                        WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
                         row["work_element_id"],
@@ -594,6 +654,7 @@ def save_ergonomics_review_rows(
                         row["reviewer"],
                         row["notes"],
                         row["requested_due_date"],
+                        row["legacy_description"],
                         timestamp,
                         review_id,
                         project_id,
@@ -606,9 +667,9 @@ def save_ergonomics_review_rows(
                     """INSERT INTO ergonomics_reviews
                        (id, project_id, scenario_id, work_element_id,
                         process_part_option_id, status, reviewer, notes,
-                        requested_due_date, created_at, updated_at,
+                        requested_due_date, legacy_description, created_at, updated_at,
                         risk_classification)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         review_id,
                         project_id,
@@ -619,6 +680,7 @@ def save_ergonomics_review_rows(
                         row["reviewer"],
                         row["notes"],
                         row["requested_due_date"],
+                        row["legacy_description"],
                         timestamp,
                         timestamp,
                         row["risk_classification"],
@@ -689,6 +751,7 @@ def save_ergonomics_review(
     reviewer = str(values.get("reviewer") or "").strip()
     notes = str(values.get("notes") or "").strip()
     requested_due_date = str(values.get("requested_due_date") or "").strip() or None
+    legacy_description = str(values.get("legacy_description") or "").strip()
     hazard_option_ids = list(
         dict.fromkeys(
             str(value).strip()
@@ -762,7 +825,7 @@ def save_ergonomics_review(
                 """UPDATE ergonomics_reviews
                    SET work_element_id=?, process_part_option_id=?, status=?,
                        risk_classification=?, reviewer=?, notes=?,
-                       requested_due_date=?, updated_at=?
+                       requested_due_date=?, legacy_description=?, updated_at=?
                    WHERE id=? AND project_id=? AND scenario_id=?""",
                 (
                     work_element_id,
@@ -772,6 +835,7 @@ def save_ergonomics_review(
                     reviewer,
                     notes,
                     requested_due_date,
+                    legacy_description,
                     timestamp,
                     review_id,
                     project_id,
@@ -783,9 +847,9 @@ def save_ergonomics_review(
                 """INSERT INTO ergonomics_reviews
                    (id, project_id, scenario_id, work_element_id,
                     process_part_option_id, status, reviewer, notes,
-                    requested_due_date, created_at, updated_at,
+                    requested_due_date, legacy_description, created_at, updated_at,
                     risk_classification)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     review_id,
                     project_id,
@@ -796,6 +860,7 @@ def save_ergonomics_review(
                     reviewer,
                     notes,
                     requested_due_date,
+                    legacy_description,
                     timestamp,
                     timestamp,
                     risk_classification,
@@ -879,6 +944,284 @@ def delete_ergonomics_reviews(
     return {
         "row_count": len(ids),
         "hazard_selection_count": selection_count,
+        "timestamp": timestamp,
+    }
+
+
+def create_legacy_ergonomics_review(
+    project_id: str,
+    scenario_id: str,
+    legacy_description: str,
+    *,
+    risk_classification: str = "Not yet assessed",
+    status: str = "Started",
+    reviewer: str = "",
+    hazard_option_ids: list[str] | None = None,
+    notes: str = "",
+    requested_due_date: str | None = None,
+    editor_name: str = "",
+) -> dict:
+    """Create a new unlinked legacy ergonomics review."""
+    title = str(legacy_description or "").strip()
+    if not title:
+        raise ValueError("Please provide a legacy concern title or description.")
+    review_values = {
+        "id": str(uuid4()),
+        "work_element_id": None,
+        "process_part_option_id": None,
+        "legacy_description": title,
+        "status": status,
+        "risk_classification": risk_classification,
+        "reviewer": reviewer,
+        "hazard_option_ids": hazard_option_ids or [],
+        "notes": notes,
+        "requested_due_date": requested_due_date,
+    }
+    result = save_ergonomics_review(project_id, scenario_id, review_values)
+    record_audit_event(
+        project_id,
+        "Ergonomics reviews",
+        "Create legacy review",
+        1,
+        editor_name,
+        {
+            "scenario_id": scenario_id,
+            "review_id": result["id"],
+            "legacy_description": title,
+        },
+    )
+    return {**result, "legacy_description": title, "work_element_id": None}
+
+
+def delete_unlinked_ergonomics_reviews(
+    project_id: str,
+    scenario_id: str,
+    review_ids: list[str] | None = None,
+    editor_name: str = "",
+) -> dict:
+    """Purge unlinked reviews from the active scenario, with optional id filtering."""
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        if review_ids is not None:
+            clean_ids = list(dict.fromkeys(str(v).strip() for v in review_ids if str(v).strip()))
+            if not clean_ids:
+                return {"row_count": 0, "timestamp": now_iso()}
+            placeholders = ",".join("?" for _ in clean_ids)
+            unlinked = conn.execute(
+                f"""SELECT id FROM ergonomics_reviews
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IS NULL AND id IN ({placeholders})""",
+                (project_id, scenario_id, *clean_ids),
+            ).fetchall()
+        else:
+            unlinked = conn.execute(
+                """SELECT id FROM ergonomics_reviews
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IS NULL""",
+                (project_id, scenario_id),
+            ).fetchall()
+        target_ids = [str(r["id"]) for r in unlinked]
+        if not target_ids:
+            return {"row_count": 0, "timestamp": now_iso()}
+    result = delete_ergonomics_reviews(project_id, scenario_id, target_ids)
+    if result.get("row_count"):
+        record_audit_event(
+            project_id,
+            "Ergonomics reviews",
+            "Delete unlinked reviews",
+            result["row_count"],
+            editor_name,
+            {"scenario_id": scenario_id, "deleted_review_ids": target_ids},
+        )
+    return result
+
+
+def link_legacy_concern_to_work_element(
+    project_id: str,
+    scenario_id: str,
+    legacy_review_id: str,
+    target_work_element_id: str,
+    editor_name: str = "",
+) -> dict:
+    """Merge an unlinked legacy Ergonomics concern into a target Process step's review."""
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        work_elem = conn.execute(
+            "SELECT id, operation FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+            (target_work_element_id, project_id, scenario_id),
+        ).fetchone()
+        if not work_elem:
+            raise ValueError("The target Process step no longer exists.")
+
+        legacy_row = conn.execute(
+            """SELECT * FROM ergonomics_reviews
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (legacy_review_id, project_id, scenario_id),
+        ).fetchone()
+        if not legacy_row:
+            raise ValueError("The selected legacy concern no longer exists.")
+
+        legacy_review = dict(legacy_row)
+        legacy_hazards = [
+            str(r["hazard_option_id"])
+            for r in conn.execute(
+                """SELECT hazard_option_id FROM ergonomics_review_hazard_selections
+                   WHERE ergonomics_review_id=?""",
+                (legacy_review_id,),
+            ).fetchall()
+        ]
+
+        existing_rows = conn.execute(
+            """SELECT * FROM ergonomics_reviews
+               WHERE project_id=? AND scenario_id=? AND work_element_id=? AND id != ?""",
+            (project_id, scenario_id, target_work_element_id, legacy_review_id),
+        ).fetchall()
+
+        legacy_title = (
+            str(legacy_review.get("legacy_description") or "").strip()
+            or str(legacy_review.get("notes") or "").strip()
+            or "Legacy concern"
+        )
+
+        risk_ranks = {
+            "Red": 5,
+            "Favorable Red": 4,
+            "Favorable Green": 3,
+            "Green": 2,
+            "Not yet assessed": 1,
+        }
+
+        if existing_rows:
+            target_review = dict(existing_rows[0])
+            surviving_id = target_review["id"]
+            target_hazards = [
+                str(r["hazard_option_id"])
+                for r in conn.execute(
+                    """SELECT hazard_option_id FROM ergonomics_review_hazard_selections
+                       WHERE ergonomics_review_id=?""",
+                    (surviving_id,),
+                ).fetchall()
+            ]
+
+            # Merge notes
+            l_notes = str(legacy_review.get("notes") or "").strip()
+            t_notes = str(target_review.get("notes") or "").strip()
+            if l_notes and t_notes:
+                if l_notes == t_notes:
+                    merged_notes = l_notes
+                else:
+                    merged_notes = f"[Legacy Concern]: {l_notes}\n\n[Process Step Review]: {t_notes}"
+            else:
+                merged_notes = l_notes or t_notes
+
+            # Merge hazard tags
+            merged_hazards = list(dict.fromkeys([*target_hazards, *legacy_hazards]))
+
+            # Merge risk classification
+            l_risk = str(legacy_review.get("risk_classification") or "Not yet assessed")
+            t_risk = str(target_review.get("risk_classification") or "Not yet assessed")
+            merged_risk = l_risk if risk_ranks.get(l_risk, 0) >= risk_ranks.get(t_risk, 0) else t_risk
+
+            # Merge status
+            l_status = str(legacy_review.get("status") or "Started")
+            t_status = str(target_review.get("status") or "Started")
+            merged_status = l_status if t_status == "Started" else t_status
+
+            # Reviewer
+            merged_reviewer = (
+                str(legacy_review.get("reviewer") or "").strip()
+                or str(target_review.get("reviewer") or "").strip()
+            )
+
+            # Due date
+            merged_due_date = (
+                str(target_review.get("requested_due_date") or "").strip()
+                or str(legacy_review.get("requested_due_date") or "").strip()
+                or None
+            )
+
+            conn.execute(
+                """UPDATE ergonomics_reviews
+                   SET legacy_description=?, notes=?, risk_classification=?,
+                       status=?, reviewer=?, requested_due_date=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    legacy_title,
+                    merged_notes,
+                    merged_risk,
+                    merged_status,
+                    merged_reviewer,
+                    merged_due_date,
+                    timestamp,
+                    surviving_id,
+                ),
+            )
+
+            # Hazard selections on surviving review
+            conn.execute(
+                "DELETE FROM ergonomics_review_hazard_selections WHERE ergonomics_review_id=?",
+                (surviving_id,),
+            )
+            for idx, h_id in enumerate(merged_hazards):
+                conn.execute(
+                    """INSERT INTO ergonomics_review_hazard_selections
+                       (id, project_id, scenario_id, ergonomics_review_id, hazard_option_id, sequence, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(uuid4()), project_id, scenario_id, surviving_id, h_id, idx * 10, timestamp, timestamp),
+                )
+
+            # Re-point visual media from legacy review to surviving review
+            conn.execute(
+                "UPDATE ergonomics_visual_media SET review_id=?, updated_at=? WHERE review_id=?",
+                (surviving_id, timestamp, legacy_review_id),
+            )
+
+            # Delete legacy review and its hazard selections
+            conn.execute(
+                "DELETE FROM ergonomics_review_hazard_selections WHERE ergonomics_review_id=?",
+                (legacy_review_id,),
+            )
+            conn.execute(
+                "DELETE FROM ergonomics_reviews WHERE id=?",
+                (legacy_review_id,),
+            )
+            discarded_id = legacy_review_id
+        else:
+            surviving_id = legacy_review_id
+            conn.execute(
+                """UPDATE ergonomics_reviews
+                   SET work_element_id=?, legacy_description=?, updated_at=?
+                   WHERE id=?""",
+                (target_work_element_id, legacy_title, timestamp, surviving_id),
+            )
+            discarded_id = None
+
+    record_audit_event(
+        project_id,
+        "Ergonomics reviews",
+        "Link legacy concern",
+        1,
+        editor_name,
+        {
+            "scenario_id": scenario_id,
+            "legacy_review_id": legacy_review_id,
+            "target_work_element_id": target_work_element_id,
+            "surviving_review_id": surviving_id,
+            "discarded_review_id": discarded_id,
+            "legacy_title": legacy_title,
+        },
+    )
+    return {
+        "surviving_id": surviving_id,
+        "discarded_id": discarded_id,
+        "legacy_title": legacy_title,
         "timestamp": timestamp,
     }
 
@@ -1247,7 +1590,7 @@ def ergonomics_slide_summary(
         review_row = conn.execute(
             """SELECT r.id, r.work_element_id, r.process_part_option_id,
                       r.status, r.risk_classification, r.reviewer, r.notes,
-                      r.requested_due_date, r.created_at, r.updated_at
+                      r.requested_due_date, r.legacy_description, r.created_at, r.updated_at
                FROM ergonomics_reviews r
                WHERE r.id=? AND r.project_id=? AND r.scenario_id=?""",
             (normalized_review_id, project_id, scenario_id),
@@ -1363,6 +1706,11 @@ __domain_exports__ = [
     'save_ergonomics_review_rows',
     'save_ergonomics_review',
     'delete_ergonomics_reviews',
+    'create_legacy_ergonomics_review',
+    'delete_unlinked_ergonomics_reviews',
+    'link_legacy_concern_to_work_element',
+    'ensure_default_ergonomic_hazard_options',
+    'create_or_get_ergonomic_hazard_option',
     'get_ergonomics_visual_media',
     'save_ergonomics_visual_media',
     'update_ergonomics_visual_media',

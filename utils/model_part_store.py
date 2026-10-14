@@ -467,8 +467,16 @@ def update_part_rows(
                 revision = "0"
             design_maturity = catalog_fields["design_maturity"]
             subsystem = catalog_fields["subsystem"]
+            raw_weight = row.get("weight_lb")
+            weight_lb = (
+                None
+                if raw_weight is None
+                or pd.isna(raw_weight)
+                or str(raw_weight).strip() == ""
+                else float(raw_weight)
+            )
             values = (
-                part_number, clean_text(row.get("description")), quantity,
+                part_number, clean_text(row.get("description")), quantity, weight_lb,
                 revision, design_maturity, subsystem, applicability,
                 clean_text(row.get("notes")), catalog_fields["technology_engineer"],
                 catalog_fields["design_engineer"],
@@ -485,7 +493,7 @@ def update_part_rows(
             )
             if part_id in existing_ids:
                 conn.execute(
-                    """UPDATE parts SET part_number=?, description=?, quantity=?, revision=?,
+                    """UPDATE parts SET part_number=?, description=?, quantity=?, weight_lb=?, revision=?,
                        design_maturity=?, subsystem=?,
                        model_applicability=?, notes=?, technology_engineer=?, design_engineer=?,
                        pits_tracker_number=?, source_code=?, official_windchill_part_name=?,
@@ -496,16 +504,16 @@ def update_part_rows(
             else:
                 conn.execute(
                     """INSERT INTO parts
-                       (id, project_id, part_number, description, quantity, revision,
+                       (id, project_id, part_number, description, quantity, weight_lb, revision,
                         design_maturity, subsystem, source,
                         image_path, model_applicability, notes, technology_engineer, design_engineer,
                         pits_tracker_number, source_code, official_windchill_part_name,
                         factory_nickname, make_buy, ppm, buyer_gcl, pmqe_aqe, ame_tooling_engineer,
                         part_code, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (part_id, project_id, values[0], values[1], values[2], values[3],
-                     values[4], values[5],
-                     clean_text(row.get("source")) or "Manual", *values[6:]),
+                     values[4], values[5], values[6],
+                     clean_text(row.get("source")) or "Manual", *values[7:]),
                 )
         if scenario_id and activity_by_part is not None:
             normalized_activity = {
