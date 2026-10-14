@@ -918,6 +918,33 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
      - Universal History Display Standard: visible in the respective bottom History expanders using `audit_history()`.
      - Scope Badges: Project-wide on Parts Catalog, Scenario-specific on Process at a Glance.
 
+### 3D CAD STEP File Attachments for Parts Catalog and PAAG Visual Aids
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow engineers and collaborators to attach 3D CAD exchange files (`.step`, `.stp`) to the Parts Catalog and PAAG pitch visual step guides, making authoritative 3D engineering models directly available as downloadable reference assets alongside 2D images, video clips, and web links:
+  1. *Parts Catalog:* In supplemental views (`part_images`), collaborators can upload 3D STEP models (`image_type = '3D CAD Model (STEP)'`), displaying file name, file size badge, and a 1-click download button.
+  2. *Process at a Glance (PAAG) Visual Aids:* Pitch-level visual aids tagged to work elements support 3D STEP CAD uploads (`media_type = 'cad'`), offering a download button in the pitch visual media gallery and rendering a designated 3D CAD indicator card on slide presentations.
+  3. *File Size Limit:* Enforces a strict application-level file size limit of **50 MB** per STEP file. Files exceeding 50 MB prompt the user to use the newly added Web Link / URL feature to link directly to corporate PLM (Windchill) or SharePoint repositories, preserving local memory, storage, and fast `.paagproject` package transfer performance.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Parts Catalog: connects to `parts` (master component) and `part_images` (additional views / supplemental 3D CAD models).
+     - PAAG Visual Aids: connects to `process_visual_media` (scenario-owned, linked to `yamazumi_pitches`, `planning_scenarios`, and `projects`) and tagged to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the Parts Catalog and Process at a Glance / PAAG Slide Visualizer layers of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:*
+     - Parts Catalog: Project-wide, matching `parts` and `part_images`.
+     - PAAG Visual Aids: Scenario-specific, matching `process_visual_media` and `process_visual_media_tags`.
+  4. *Table requirement:* No new tables required. Existing tables serve this feature directly:
+     - `process_visual_media`: `media_type` supports `'cad'` (in addition to `'image'`, `'video'`, and `'link'`), where `file_path` stores the local upload path.
+     - `part_images`: `image_path` stores the local relative upload path in `data/uploads/`, with `image_type` supporting `'3D CAD Model (STEP)'`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit validation checking extension (`.step`, `.stp`) and enforcing max file size <= 50 MB.
+     - Universal Deletion Standard: confirmed deletion dialog removing the record and safely unlinking local files from `data/uploads/`.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Parts"` and `"Process"`.
+     - Universal History Display Standard: visible in the respective bottom History expanders using `audit_history()`.
+     - Scope Badges: Project-wide on Parts Catalog, Scenario-specific on Process at a Glance.
+
 ### Model Tree: BOM Authoring From Scratch
 
 - **Proposed by:** Nicole Ervin, project owner

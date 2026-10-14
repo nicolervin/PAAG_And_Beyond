@@ -617,16 +617,27 @@ def clear_part_image(part_id: str) -> None:
                 pass
     execute("UPDATE parts SET image_path = '', updated_at = ? WHERE id = ?", (now_iso(), part_id))
 
+MAX_CAD_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_CAD_FILE_SIZE_MB = 50
+
 def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -> str:
     suffix = Path(uploaded_file.name).suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-        raise ValueError("Use PNG, JPG, JPEG, or WEBP images.")
+    allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".step", ".stp"}
+    if suffix not in allowed_suffixes:
+        raise ValueError("Use PNG, JPG, JPEG, WEBP images or 3D CAD STEP files (.step, .stp).")
+    file_bytes = uploaded_file.getvalue()
+    if suffix in {".step", ".stp"} and len(file_bytes) > MAX_CAD_FILE_SIZE_BYTES:
+        size_mb = len(file_bytes) / (1024 * 1024)
+        raise ValueError(
+            f"STEP file is {size_mb:.1f} MB. STEP files must be under {MAX_CAD_FILE_SIZE_MB} MB. For large assemblies, please attach a PLM/CAD web link instead."
+        )
     image_id = str(uuid4())
     target = UPLOAD_DIR / f"{part_id}_{image_id}{suffix}"
-    target.write_bytes(uploaded_file.getvalue())
+    target.write_bytes(file_bytes)
+    resolved_type = image_type or ("3D CAD Model (STEP)" if suffix in {".step", ".stp"} else "Other")
     execute(
         "INSERT INTO part_images VALUES (?, ?, ?, ?, ?, ?)",
-        (image_id, part_id, str(target), image_type, caption.strip(), now_iso()),
+        (image_id, part_id, str(target), resolved_type, caption.strip(), now_iso()),
     )
     return str(target)
 
@@ -5271,7 +5282,8 @@ __domain_exports__ = [
     'update_part_scenario_activity', 'normalize_model_applicability',
     '_clean_optional_text', '_validated_part_catalog_fields', 'upsert_part',
     'update_part_rows', 'part_delete_impact', 'delete_project_part',
-    'set_part_image', 'set_part_image_url', 'clear_part_image', 'add_part_image', 'add_part_image_url', 'delete_part_image', 'part_images', 'complexity_features',
+    'set_part_image', 'set_part_image_url', 'clear_part_image', 'add_part_image', 'add_part_image_url', 'delete_part_image', 'part_images',
+    'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'complexity_features',
     'complexity_feature_delete_impacts', 'complexity_tree',
     'potential_duplicate_models', 'part_feature_rules',
     'update_part_feature_rules', 'infer_part_feature_rules',

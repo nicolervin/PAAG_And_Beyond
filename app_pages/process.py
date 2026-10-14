@@ -3395,12 +3395,12 @@ with tab_slides:
                         up_col1, up_col2 = st.columns([1.5, 1])
                         with up_col1:
                             uploaded_media = st.file_uploader(
-                                "Upload photo or video",
-                                type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
+                                "Upload photo, video, or 3D CAD STEP",
+                                type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm", "step", "stp"],
                                 key=f"file_upload_visual_{selected_pitch_id}",
-                                help="Photos: max 10 MB (PNG, JPG, WEBP) • Videos: max 25 MB (MP4, MOV, WEBM)",
+                                help="Photos: max 10 MB (PNG, JPG, WEBP) • Videos: max 25 MB (MP4, MOV, WEBM) • 3D CAD: max 50 MB (STEP, STP)",
                             )
-                            st.caption("Photos: max **10 MB** (PNG, JPG, WEBP) • Videos: max **25 MB** (MP4, MOV, WEBM)")
+                            st.caption("Photos: max **10 MB** • Videos: max **25 MB** • 3D CAD: max **50 MB** (STEP, STP)")
 
                             st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
                             pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}")
@@ -3469,6 +3469,9 @@ with tab_slides:
                                         "annotations_json": "",
                                     }
                                     current_staged = st.session_state[staged_key]
+                            elif up_suffix in {".step", ".stp"}:
+                                size_mb = len(uploaded_media.getvalue()) / (1024 * 1024)
+                                st.info(f":material/view_in_ar: **3D CAD Model Ready:** `{uploaded_media.name}` ({size_mb:.1f} MB)")
 
                         # Show preview card if an image is staged
                         if current_staged and current_staged.get("composite_bytes"):
@@ -3641,6 +3644,22 @@ with tab_slides:
                                     if any(lower_p.endswith(ext) or (ext + "?") in lower_p for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
                                         st.image(m_path, width=140)
                                     st.link_button("Open Web Link", m_path, icon=":material/open_in_new:")
+                                elif m_type == "cad":
+                                    p = Path(m_path)
+                                    size_str = ""
+                                    if p.exists():
+                                        size_mb = p.stat().st_size / (1024 * 1024)
+                                        size_str = f" ({size_mb:.1f} MB)"
+                                    st.markdown(f":material/view_in_ar: **3D CAD Model**{size_str}")
+                                    if p.exists():
+                                        st.download_button(
+                                            "Download STEP",
+                                            data=p.read_bytes(),
+                                            file_name=p.name,
+                                            mime="application/step",
+                                            icon=":material/download:",
+                                            key=f"dl_cad_gallery_{media_item['id']}",
+                                        )
                                 else:
                                     st.image(m_path, width=140)
                             with g_col2:

@@ -988,6 +988,17 @@ def render_pitch_canvas(
                     f'<a class="media-link-btn" href="{safe_url}" target="_blank" rel="noopener noreferrer">🔗 Open Web Link</a>'
                     f'</div>'
                 )
+        elif m_type == "cad":
+            file_name = Path(f_path).name
+            label = caption or file_name or "3D CAD Model (STEP)"
+            safe_lbl = html.escape(label)
+            media_element_html = (
+                f'<div class="media-link-card media-cad-card">'
+                f'<div class="media-link-icon">🧊</div>'
+                f'<div class="media-link-title" title="{safe_lbl}">{safe_lbl}</div>'
+                f'<div class="media-cad-badge">3D CAD Model (STEP)</div>'
+                f'</div>'
+            )
         else:
             if media_src:
                 media_element_html = f'<img class="visual-image" src="{media_src}" alt="{caption}" />'
@@ -2178,6 +2189,22 @@ def render_pitch_canvas(
       }}
       .media-link-btn:hover {{
         background: #0369a1;
+      }}
+      .media-cad-card {{
+        background: #1e293b;
+        border: 1px solid #334155;
+      }}
+      .media-cad-badge {{
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        background: #0f766e;
+        color: #ccfbf1;
+        padding: 3px 8px;
+        border-radius: 4px;
+        margin-top: 4px;
       }}
       .caption-callout {{
         background: #fef08a;

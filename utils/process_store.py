@@ -1196,6 +1196,8 @@ def get_pitch_visual_media(
 
 MAX_VISUAL_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_VISUAL_VIDEO_BYTES = 25 * 1024 * 1024  # 25 MB
+MAX_CAD_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_CAD_FILE_SIZE_MB = 50
 
 
 def save_pitch_visual_media(
@@ -1212,7 +1214,7 @@ def save_pitch_visual_media(
     annotations_json: str = "",
     original_file_bytes: bytes | None = None,
 ) -> dict:
-    """Save an uploaded image or video visual aid, attach element tags, and record audit."""
+    """Save an uploaded image, video, or 3D CAD visual aid, attach element tags, and record audit."""
     normalized_pitch_id = str(pitch_id or "").strip()
     if not normalized_pitch_id:
         raise ValueError("Choose a Yamazumi pitch.")
@@ -1222,6 +1224,7 @@ def save_pitch_visual_media(
     suffix = Path(str(filename or "")).suffix.lower()
     image_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
     video_suffixes = {".mp4", ".mov", ".webm"}
+    cad_suffixes = {".step", ".stp"}
     if suffix in image_suffixes:
         detected_type = "image"
         if len(file_bytes) > MAX_VISUAL_IMAGE_BYTES:
@@ -1236,14 +1239,21 @@ def save_pitch_visual_media(
             raise ValueError(
                 f"Video is {size_mb:.1f} MB. For fast slide loading and smooth presentation playback, please trim or compress clips under 25 MB."
             )
+    elif suffix in cad_suffixes:
+        detected_type = "cad"
+        if len(file_bytes) > MAX_CAD_FILE_SIZE_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"3D CAD model is {size_mb:.1f} MB. STEP files must be under {MAX_CAD_FILE_SIZE_MB} MB. For large assemblies, please attach a PLM/CAD web link instead."
+            )
     else:
         raise ValueError(
-            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB)."
+            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB), STEP/STP (max {MAX_CAD_FILE_SIZE_MB} MB)."
         )
 
     resolved_media_type = media_type or detected_type
-    if resolved_media_type not in {"image", "video"}:
-        raise ValueError("Media type must be 'image' or 'video'.")
+    if resolved_media_type not in {"image", "video", "cad"}:
+        raise ValueError("Media type must be 'image', 'video', or 'cad'.")
 
     timestamp = now_iso()
     media_id = str(uuid4())
@@ -1364,6 +1374,8 @@ def save_pitch_visual_media_url(
         resolved_media_type = "image"
     elif any(lower_url.endswith(ext) or (ext + "?") in lower_url for ext in [".mp4", ".mov", ".webm"]):
         resolved_media_type = "video"
+    elif any(lower_url.endswith(ext) or (ext + "?") in lower_url for ext in [".step", ".stp"]):
+        resolved_media_type = "cad"
     else:
         resolved_media_type = "link"
 
@@ -1492,6 +1504,8 @@ def update_pitch_visual_media(
                 new_m_type = "image"
             elif any(lower_u.endswith(ext) or (ext + "?") in lower_u for ext in [".mp4", ".mov", ".webm"]):
                 new_m_type = "video"
+            elif any(lower_u.endswith(ext) or (ext + "?") in lower_u for ext in [".step", ".stp"]):
+                new_m_type = "cad"
             else:
                 new_m_type = "link"
             conn.execute(
@@ -2765,7 +2779,7 @@ def work_element_downstream_impact(
         }
 
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'work_element_downstream_impact']
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

@@ -1384,7 +1384,22 @@ with image_col.container(border=True):
                 else:
                     supplemental_path = Path(supp_raw)
                     if supplemental_path.exists():
-                        st.image(str(supplemental_path), caption=supp_caption)
+                        supp_suffix = supplemental_path.suffix.lower()
+                        if supp_suffix in {".step", ".stp"}:
+                            size_mb = supplemental_path.stat().st_size / (1024 * 1024)
+                            st.markdown(f":material/view_in_ar: **3D CAD Model (STEP)** — `{supplemental_path.name}` ({size_mb:.1f} MB)")
+                            if supp_caption and supp_caption != "3D CAD Model (STEP)":
+                                st.caption(supp_caption)
+                            st.download_button(
+                                "Download STEP file",
+                                data=supplemental_path.read_bytes(),
+                                file_name=f"{part['part_number']}_{supplemental_path.name}",
+                                mime="application/step",
+                                icon=":material/download:",
+                                key=f"dl_supp_{supp_id}",
+                            )
+                        else:
+                            st.image(str(supplemental_path), caption=supp_caption)
                     st.caption(f"Type: `{supplemental.get('image_type')}`")
             with s_c2:
                 if st.button("Delete", icon=":material/delete:", key=f"del_supp_{supp_id}"):
@@ -1404,14 +1419,15 @@ with image_col.container(border=True):
                     st.toast("View removed", icon=":material/check_circle:")
                     st.rerun()
 
-    with st.expander("Add an exploded view, drawing, or web link", icon=":material/add_photo_alternate:"):
+    with st.expander("Add an exploded view, 3D CAD model, drawing, or web link", icon=":material/add_photo_alternate:"):
         source_mode = st.radio(
             "Source",
-            ["Upload image file", "Web link / URL"],
+            ["Upload file (Image or 3D STEP)", "Web link / URL"],
             horizontal=True,
             key=f"supp_source_mode_{part['id']}",
         )
         view_types = [
+            "3D CAD Model (STEP)",
             "Exploded assembly",
             "Alternate CAD view",
             "CAD / Drawing Link",
@@ -1423,31 +1439,40 @@ with image_col.container(border=True):
         image_type = st.selectbox("View type", view_types, key=f"supp_type_{part['id']}")
         caption = st.text_input("Caption / Notes", key=f"supp_caption_{part['id']}")
 
-        if source_mode == "Upload image file":
+        if source_mode == "Upload file (Image or 3D STEP)":
             extra = st.file_uploader(
-                "Upload image file",
-                type=["png", "jpg", "jpeg", "webp"],
+                "Upload image file or 3D CAD STEP file",
+                type=["png", "jpg", "jpeg", "webp", "step", "stp"],
                 key=f"supp_file_{part['id']}",
+                help="Images: max 10 MB (PNG, JPG, WEBP) • 3D CAD: max 50 MB (STEP, STP)",
             )
-            if st.button("Add image view", icon=":material/upload:", type="primary", key=f"btn_add_supp_file_{part['id']}"):
+            st.caption("Images: max **10 MB** (PNG, JPG, WEBP) • 3D CAD: max **50 MB** (STEP, STP)")
+            if st.button("Add file view", icon=":material/upload:", type="primary", key=f"btn_add_supp_file_{part['id']}"):
                 if not extra:
-                    st.error("Choose an image first.")
+                    st.error("Choose a file first.")
                 else:
-                    add_part_image(part["id"], extra, image_type, caption)
-                    record_audit_event(
-                        project_id,
-                        "Parts",
-                        "Add view",
-                        1,
-                        st.session_state.get("current_editor", ""),
-                        {
-                            "part_id": str(part["id"]),
-                            "part_number": str(part["part_number"]),
-                            "supplemental_view_type_added": image_type,
-                        },
-                    )
-                    st.toast("Additional view added", icon=":material/check_circle:")
-                    st.rerun()
+                    try:
+                        resolved_type = image_type
+                        if extra.name.lower().endswith((".step", ".stp")) and image_type == "Exploded assembly":
+                            resolved_type = "3D CAD Model (STEP)"
+                        add_part_image(part["id"], extra, resolved_type, caption)
+                        record_audit_event(
+                            project_id,
+                            "Parts",
+                            "Add view",
+                            1,
+                            st.session_state.get("current_editor", ""),
+                            {
+                                "part_id": str(part["id"]),
+                                "part_number": str(part["part_number"]),
+                                "supplemental_view_type_added": resolved_type,
+                                "filename": extra.name,
+                            },
+                        )
+                        st.toast("Additional view added", icon=":material/check_circle:")
+                        st.rerun()
+                    except ValueError as ve:
+                        st.error(str(ve))
         else:
             extra_url = st.text_input(
                 "Web link URL (SharePoint, Windchill drawing, CAD viewer link)",

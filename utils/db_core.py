@@ -1027,7 +1027,7 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
     """Initialize database tables for scenario-owned pitch visual aids and element tags."""
     cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='process_visual_media'")
     row = cur.fetchone()
-    if row and row[0] and "'link'" not in row[0]:
+    if row and row[0] and ("'link'" not in row[0] or "'cad'" not in row[0]):
         conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("PRAGMA legacy_alter_table = ON")
         try:
@@ -1040,7 +1040,7 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
                     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                     scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                     pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
-                    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link')),
+                    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link', 'cad')),
                     file_path TEXT NOT NULL,
                     original_file_path TEXT NOT NULL DEFAULT '',
                     annotations_json TEXT NOT NULL DEFAULT '',
@@ -1078,7 +1078,7 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
             pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
-            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link')),
+            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link', 'cad')),
             file_path TEXT NOT NULL,
             original_file_path TEXT NOT NULL DEFAULT '',
             annotations_json TEXT NOT NULL DEFAULT '',
