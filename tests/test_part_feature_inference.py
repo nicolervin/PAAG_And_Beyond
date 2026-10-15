@@ -214,26 +214,19 @@ class PartFeatureInferenceTests(unittest.TestCase):
         self.assertTrue(len(auto_assign_events) >= 1)
         self.assertEqual(auto_assign_events.iloc[0]["editor_name"], "Test Collaborator")
 
-    def test_apply_inferred_excludes_manufacturing_assemblies(self) -> None:
+    def test_apply_inferred_includes_all_catalog_parts(self) -> None:
         part_id = self._create_part_with_bom(
             part_number="ASM-TOP-001",
             description="Top Shell Subassembly",
             models=self.lcd_models,
             tracker="TRK-ASM-001",
         )
-        # Link to manufacturing assembly
-        store.execute(
-            """INSERT INTO manufacturing_assemblies (id, project_id, assembly_number, name, catalog_part_id, updated_at)
-               VALUES (?, ?, 'ASM-TOP-001', 'Top Shell Subassembly', ?, ?)""",
-            (str(uuid4()), self.project_id, part_id, store.now_iso()),
-        )
-
         updated = store.apply_inferred_part_feature_rules(
             self.project_id,
             overwrite_existing=True,
             part_ids=[part_id],
         )
-        self.assertEqual(updated, 0)
+        self.assertEqual(updated, 1)
 
     def test_app_test_smoke_parts_and_models(self) -> None:
         """Smoke test verifying pages compile and run without exceptions."""

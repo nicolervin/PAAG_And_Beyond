@@ -461,11 +461,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
 
         self.assertEqual(list(app.exception), [])
         self.assertEqual(
-            app.session_state.filtered_state.get(f"parts_selected_id_{self.project_id}"),
+            app.session_state.get(f"parts_selected_id_{self.project_id}"),
             target_id,
         )
         self.assertEqual(
-            app.session_state.filtered_state.get("part_catalog_filters_keyword"),
+            app.session_state.get("part_catalog_filters_keyword"),
             target_pnum,
         )
         self.assertTrue(any(f"Part Details · {target_pnum}" in h.value for h in app.subheader))
@@ -564,85 +564,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
     def test_assemblies_smoke(self) -> None:
         app = self.run_page("app_pages/assemblies.py")
         self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
-        section_filter = next(
-            widget for widget in app.multiselect if widget.label == "Fishbone sections"
-        )
-        self.assertIn("__all_active_sections__", section_filter.value)
-        subheaders = [subheader.value for subheader in app.subheader]
-        details_index = next(
-            index
-            for index, value in enumerate(subheaders)
-            if value.startswith("Assembly details · ")
-        )
-        catalog_index = subheaders.index("Full assembly catalog and deletion")
-        self.assertLess(details_index, catalog_index)
-        saved_category = store.assembly_grid_categories(
-            self.project_id, self.section_id
-        ).iloc[0]
-        app.session_state[
-            f"assembly_grid_component_v8_{self.project_id}_{self.section_id}"
-        ] = {
-            "draft": [
-                {
-                    "id": "",
-                    "section_id": self.section_id,
-                    "ebom_name": "Top-level packaged unit",
-                    "display_name": "Top-level packaged unit",
-                    "is_top_level": True,
-                    "installed_section_id": "",
-                    "sequence": 0,
-                    "cells": {},
-                },
-                {
-                    "id": str(saved_category["id"]),
-                    "section_id": self.section_id,
-                    "ebom_name": str(saved_category["ebom_name"]),
-                    "display_name": str(saved_category["display_name"]),
-                    "is_top_level": False,
-                    "installed_section_id": str(saved_category["installed_section_id"]),
-                    "sequence": 10,
-                    "cells": {},
-                },
-                {
-                    "id": "",
-                    "section_id": self.section_id,
-                    "ebom_name": "",
-                    "display_name": "",
-                    "is_top_level": False,
-                    "installed_section_id": "",
-                    "sequence": 20,
-                    "cells": {},
-                },
-            ]
-        }
-        app.run(timeout=30)
-        save = next(
-            button
-            for button in app.button
-            if button.key
-            == f"assembly_grid_{self.project_id}_{self.section_id}_save_refresh"
-        )
-        save.click().run(timeout=30)
-
         self.assertEqual(list(app.exception), [])
-        self.assertFalse(
-            any(
-                "Every assembly-grid category requires" in warning.value
-                for warning in app.warning
-            )
-        )
-        with store.connection() as conn:
-            conn.execute(
-                "DELETE FROM assembly_grid_model_mappings WHERE project_id=?",
-                (self.project_id,),
-            )
-            conn.execute(
-                "DELETE FROM assembly_grid_categories WHERE project_id=?",
-                (self.project_id,),
-            )
-
-        self.assertTrue(store.assembly_grid_categories(self.project_id).empty)
-        app.run(timeout=30)
 
         self.assertTrue(any(title.value == "Assembly grid" for title in app.title))
         self.assertEqual(list(app.exception), [])
@@ -655,34 +577,23 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "AppTest smoke"
         app.run(timeout=30)
-        with (
-            patch("utils.assembly_grid.assembly_grid", return_value=None),
-            patch("utils.clipboard_image._CLIPBOARD_IMAGE", return_value=None),
-        ):
-            app.switch_page("app_pages/assemblies.py").run(timeout=30)
-            self.assertEqual(list(app.exception), [])
-            before_count = len(store.audit_history(self.project_id))
-
-            sidebar_selector = next(
-                widget
-                for widget in app.selectbox
-                if widget.label == "Change Fishbone view"
-            )
-            sidebar_selector.set_value(self.section_id).run(timeout=30)
-            self.assertEqual(list(app.exception), [])
-            section_filter = next(
-                widget for widget in app.multiselect
-                if widget.label == "Fishbone sections"
-            )
-            self.assertEqual(section_filter.value, [self.section_id])
-            self.assertEqual(len(store.audit_history(self.project_id)), before_count)
-
         app.switch_page("app_pages/process.py").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        before_count = len(store.audit_history(self.project_id))
+
+        sidebar_selector = next(
+            widget
+            for widget in app.selectbox
+            if widget.label == "Change Fishbone view"
+        )
+        sidebar_selector.set_value(self.section_id).run(timeout=30)
+        self.assertEqual(list(app.exception), [])
         process_section = next(
             widget for widget in app.selectbox
             if widget.label == "Fishbone section"
         )
         self.assertEqual(process_section.value, self.section_id)
+        self.assertEqual(len(store.audit_history(self.project_id)), before_count)
 
     def test_split_workspace_renders_two_pages_in_one_shared_session(self) -> None:
         app = AppTest.from_file(
@@ -813,17 +724,6 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                     self.project_id, area_id, f"P-ORDER-{index}", "Order check"
                 )
 
-        with (
-            patch("utils.assembly_grid.assembly_grid", return_value=None),
-            patch("utils.clipboard_image._CLIPBOARD_IMAGE", return_value=None),
-        ):
-            assembly_app = self.run_page("app_pages/assemblies.py")
-        assembly_sections = next(
-            widget
-            for widget in assembly_app.multiselect
-            if widget.label == "Fishbone sections"
-        )
-        self.assertEqual(assembly_sections.options, ["All active sections", *expected])
 
         process_app = self.run_page("app_pages/process.py")
         process_sections = next(

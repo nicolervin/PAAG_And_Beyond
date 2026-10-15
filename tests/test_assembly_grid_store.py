@@ -527,22 +527,20 @@ class AssemblyGridStoreTests(unittest.TestCase):
             store.query("SELECT part_number FROM parts WHERE id=?", (part_id,))[0]["part_number"],
             "ASM-LINKED-AFTER",
         )
-        with self.assertRaisesRegex(ValueError, "Delete or merge that assembly first"):
-            store.delete_project_part(self.project_id, part_id)
         delete_impact = store.part_delete_impact(self.project_id, [part_id])
-        self.assertEqual(
-            delete_impact["linked_assemblies"][0]["assembly_number"],
-            "ASM-LINKED-AFTER",
+        self.assertEqual(delete_impact["linked_assemblies"], [])
+        store.update_part_feature_rules(
+            self.project_id, {part_id: ["All models"]}
         )
-        with self.assertRaisesRegex(ValueError, "gets its model applicability from the Assembly grid"):
-            store.update_part_feature_rules(
-                self.project_id, {part_id: ["All models"]}
-            )
-
-        store.delete_assembly_catalog_rows(self.project_id, [assembly_id], {})
+        deleted_part = store.delete_project_part(self.project_id, part_id)
+        self.assertEqual(deleted_part, "ASM-LINKED-AFTER")
         self.assertEqual(
             store.query("SELECT COUNT(*) AS count FROM parts WHERE id=?", (part_id,))[0]["count"],
-            1,
+            0,
+        )
+        self.assertEqual(
+            store.query("SELECT COUNT(*) AS count FROM manufacturing_assemblies WHERE id=?", (assembly_id,))[0]["count"],
+            0,
         )
 
     def test_rename_to_existing_part_requires_confirmation_and_relinks(self) -> None:

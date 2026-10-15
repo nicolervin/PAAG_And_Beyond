@@ -402,15 +402,6 @@ def update_part_rows(
                     f"{tracker}"
                 )
             tracker_owner[tracker] = part_id
-        linked_assemblies = {
-            str(row["catalog_part_id"]): str(row["assembly_number"])
-            for row in conn.execute(
-                """SELECT catalog_part_id, assembly_number
-                   FROM manufacturing_assemblies
-                   WHERE project_id=? AND catalog_part_id IS NOT NULL""",
-                (project_id,),
-            ).fetchall()
-        }
         for _, row in edited.iterrows():
             part_id = (
                 str(row["id"])
@@ -421,20 +412,7 @@ def update_part_rows(
             quantity = None if quantity is None or pd.isna(quantity) else float(quantity)
             previous = existing_parts.get(part_id)
             part_number = str(row["part_number"]).strip()
-            if (
-                part_id in linked_assemblies
-                and previous
-                and part_number != str(previous["part_number"])
-            ):
-                raise ValueError(
-                    f"Part number {previous['part_number']} represents assembly "
-                    f"{linked_assemblies[part_id]}. Rename it through the Assembly grid."
-                )
-            applicability = (
-                str(previous["model_applicability"] or "")
-                if part_id in linked_assemblies and previous
-                else normalize_model_applicability(row.get("model_applicability"))
-            )
+            applicability = normalize_model_applicability(row.get("model_applicability"))
             catalog_fields = _validated_part_catalog_fields(
                 {
                     field: (
@@ -542,17 +520,10 @@ def part_delete_impact(project_id: str, part_ids: list[str]) -> dict:
         ).fetchall()
         if len(parts) != len(normalized):
             raise ValueError("One or more selected parts no longer exist.")
-        linked = conn.execute(
-            f"""SELECT catalog_part_id AS part_id, assembly_number, name AS assembly_name
-                FROM manufacturing_assemblies
-                WHERE project_id=? AND catalog_part_id IN ({placeholders})
-                ORDER BY assembly_number""",
-            (project_id, *normalized),
-        ).fetchall()
         return {
             "part_ids": normalized,
             "part_numbers": [str(row["part_number"]) for row in parts],
-            "linked_assemblies": [dict(row) for row in linked],
+            "linked_assemblies": [],
         }
 
 def delete_project_part(project_id: str, part_id: str) -> str:
@@ -564,16 +535,10 @@ def delete_project_part(project_id: str, part_id: str) -> str:
         ).fetchone()
         if not part:
             raise ValueError("That part no longer exists.")
-        linked = conn.execute(
-            """SELECT assembly_number FROM manufacturing_assemblies
-               WHERE project_id=? AND catalog_part_id=?""",
+        conn.execute(
+            "DELETE FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id=?",
             (project_id, part_id),
-        ).fetchone()
-        if linked:
-            raise ValueError(
-                f"Part number {part['part_number']} represents assembly "
-                f"{linked['assembly_number']}. Delete or merge that assembly first."
-            )
+        )
         supplemental_paths = [row[0] for row in conn.execute(
             "SELECT image_path FROM part_images WHERE part_id=?", (part_id,)
         ).fetchall()]
@@ -765,32 +730,14 @@ def potential_duplicate_models(project_id: str, edited: pd.DataFrame) -> list[di
     return conflicts
 
 def part_feature_rules(project_id: str) -> pd.DataFrame:
-    """Return saved part rules plus mapping-derived rows for linked assembly parts."""
+    """Return saved part rules for catalog parts."""
     return pd.DataFrame(query(
         """SELECT r.part_id, r.feature_id, r.value, f.category, f.name AS feature_name
            FROM part_feature_rules r
            JOIN complexity_features f ON f.id=r.feature_id
            WHERE r.project_id=?
-             AND NOT EXISTS (
-                 SELECT 1 FROM manufacturing_assemblies assembly
-                 WHERE assembly.project_id=r.project_id
-                   AND assembly.catalog_part_id=r.part_id
-             )
-           UNION
-           SELECT assembly.catalog_part_id AS part_id, value.feature_id, value.value,
-                  f.category, f.name AS feature_name
-           FROM manufacturing_assemblies assembly
-           JOIN assembly_grid_model_mappings mapping
-             ON mapping.project_id=assembly.project_id AND mapping.assembly_id=assembly.id
-           JOIN project_models model
-             ON model.id=mapping.model_id AND model.active=1
-           JOIN model_feature_values value
-             ON value.project_id=assembly.project_id AND value.model_id=model.id
-           JOIN complexity_features f
-             ON f.id=value.feature_id AND f.active=1
-           WHERE assembly.project_id=? AND assembly.catalog_part_id IS NOT NULL
            ORDER BY category, feature_name, value""",
-        (project_id, project_id),
+        (project_id,),
     ))
 
 def update_part_feature_rules(
@@ -812,32 +759,6 @@ def update_part_feature_rules(
         str(row["id"])
         for row in read_rows("SELECT id FROM parts WHERE project_id=?", (project_id,))
     }
-    linked_parts = {
-        str(row["part_id"]): str(row["assembly_number"])
-        for row in read_rows(
-            """SELECT catalog_part_id AS part_id, assembly_number
-               FROM manufacturing_assemblies
-               WHERE project_id=? AND catalog_part_id IS NOT NULL""",
-            (project_id,),
-        )
-    }
-    derived_tokens: dict[str, set[str]] = {part_id: set() for part_id in linked_parts}
-    for row in read_rows(
-        """SELECT assembly.catalog_part_id AS part_id, value.feature_id, value.value
-           FROM manufacturing_assemblies assembly
-           JOIN assembly_grid_model_mappings mapping
-             ON mapping.project_id=assembly.project_id AND mapping.assembly_id=assembly.id
-           JOIN project_models model ON model.id=mapping.model_id AND model.active=1
-           JOIN model_feature_values value
-             ON value.project_id=assembly.project_id AND value.model_id=model.id
-           JOIN complexity_features feature
-             ON feature.id=value.feature_id AND feature.active=1
-           WHERE assembly.project_id=? AND assembly.catalog_part_id IS NOT NULL""",
-        (project_id,),
-    ):
-        derived_tokens.setdefault(str(row["part_id"]), set()).add(
-            f"{row['feature_id']}::{row['value']}"
-        )
     timestamp = now_iso()
     updated = 0
     context = nullcontext(_conn) if _conn is not None else connection()
@@ -846,13 +767,6 @@ def update_part_feature_rules(
             if part_id not in valid_parts:
                 continue
             tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
-            if part_id in linked_parts:
-                if set(tokens) != derived_tokens.get(part_id, set()):
-                    raise ValueError(
-                        f"Part number for assembly {linked_parts[part_id]} gets its model "
-                        "applicability from the Assembly grid and cannot use Parts feature rules."
-                    )
-                continue
             if not tokens:
                 continue  # Preserve legacy model-number applicability until the user tags it.
             if "All models" in tokens:
@@ -1202,14 +1116,6 @@ def preview_inferred_part_feature_rules(
             (project_id,),
         )
     }
-    linked_assemblies = {
-        str(row["catalog_part_id"])
-        for row in read_rows(
-            "SELECT catalog_part_id FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id IS NOT NULL",
-            (project_id,),
-        )
-    }
-
     part_rows = read_rows(
         "SELECT id, part_number, description, model_applicability FROM parts WHERE project_id=?",
         (project_id,),
@@ -1240,9 +1146,6 @@ def preview_inferred_part_feature_rules(
     skipped_assembly_count = 0
 
     for part_id, tokens in inferred.items():
-        if part_id in linked_assemblies:
-            skipped_assembly_count += 1
-            continue
         if not overwrite_existing and part_id in existing_rules:
             skipped_existing_count += 1
             continue

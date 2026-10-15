@@ -6,7 +6,6 @@ import streamlit as st
 
 from utils.store import (
     apply_inferred_part_feature_rules,
-    assembly_grid_model_mappings,
     audit_history,
     complexity_feature_delete_impacts,
     complexity_features,
@@ -188,18 +187,9 @@ if request_model_delete:
 def confirm_model_delete() -> None:
     pending_key = f"models_pending_delete_{project_id}"
     pending_ids = st.session_state.get(pending_key, [])
-    grid_mappings = assembly_grid_model_mappings(project_id)
-    mapping_count = (
-        int(grid_mappings["model_id"].astype(str).isin(pending_ids).sum())
-        if not grid_mappings.empty else 0
-    )
     st.warning(
         f"Delete {len(pending_ids)} selected model definition(s)? Models still assigned elsewhere "
         "will block the entire deletion."
-    )
-    st.markdown(
-        f"- **{mapping_count}** direct assembly-grid mapping(s) will also be removed. "
-        "The underlying assembly records remain unchanged."
     )
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_model_bulk_delete"):
@@ -221,7 +211,7 @@ def confirm_model_delete() -> None:
                 "Bulk delete",
                 len(labels),
                 st.session_state.get("current_editor", ""),
-                {"models": labels, "assembly_grid_mapping_count": mapping_count},
+                {"models": labels},
             )
             st.session_state.pop(pending_key, None)
             request_table_editor_reset(model_editor_key)

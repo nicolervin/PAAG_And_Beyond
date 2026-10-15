@@ -1365,7 +1365,7 @@ with framework_tab:
                         },
                     )
             if st.session_state.pop(f"fishbone_open_assembly_{project_id}", False):
-                st.switch_page("app_pages/assemblies.py")
+                st.switch_page("app_pages/bom_tree.py")
 
         st.caption("🟦 Main-spine section · 🟧 Subassembly · 🟪 Support Operations · indentation shows the parent-child relationship.")
         id_by_label = {

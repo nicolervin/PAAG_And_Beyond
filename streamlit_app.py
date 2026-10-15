@@ -141,7 +141,6 @@ registered_pages = {
     for section, section_pages in pages.items()
 }
 unlisted_pages = [
-    st.Page("app_pages/assemblies.py", title="Assembly grid", icon=":material/grid_on:"),
     st.Page("app_pages/functional_equipment.py", title="Equipment", url_path="Equipment"),
     st.Page("app_pages/functional_ergonomics.py", title="Ergonomics", url_path="Ergonomics"),
     st.Page("app_pages/functional_quality.py", title="Quality", url_path="Quality"),
