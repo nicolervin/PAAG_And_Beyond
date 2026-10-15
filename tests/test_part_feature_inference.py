@@ -378,6 +378,87 @@ class PartFeatureInferenceTests(unittest.TestCase):
             at_parts.run()
         self.assertFalse(at_parts.exception, f"Parts page with review dialog raised exception: {at_parts.exception}")
 
+    def test_single_model_bom_defaults_no_keyword_to_all_models(self) -> None:
+        """When only 1 model has a BOM, parts with no keyword overlap default to 'All models'."""
+        single_model = [self.lcd_models[0]]
+        bolt_pid = self._create_part_with_bom(
+            part_number="999D1001P001",
+            description="M6 Hex Flange Bolt",
+            models=single_model,
+        )
+        inferred = store.infer_part_feature_rules(self.project_id, [bolt_pid])
+        self.assertEqual(inferred[bolt_pid], ["All models"])
+
+    def test_single_model_bom_infers_keyword_matching_features(self) -> None:
+        """When only 1 model has a BOM, parts with keyword overlap still infer their matching feature."""
+        single_model = [self.lcd_models[0]]
+        fascia_pid = self._create_part_with_bom(
+            part_number="999D2001P001",
+            description="Fascia Display Housing",
+            models=single_model,
+        )
+        inferred = store.infer_part_feature_rules(self.project_id, [fascia_pid])
+        self.assertEqual(inferred[fascia_pid], [f"{self.fascia_fid}::LCD"])
+
+    def test_multiple_models_bom_tags_distinguishing_features_when_no_keyword(self) -> None:
+        """When multiple model BOMs exist and a part is unique to 1 model without keywords, tag distinguishing features."""
+        # Create occurrence in rotary model so len(models_with_bom) >= 2
+        self._create_part_with_bom(
+            part_number="ROTARY-BASE",
+            description="Rotary Base Plate",
+            models=[self.rotary_models[0]],
+        )
+        # Create a unique part in LCD model without keyword overlap
+        special_bracket = self._create_part_with_bom(
+            part_number="999D3001P001",
+            description="Special Internal Stiffener",
+            models=self.lcd_models,
+        )
+        inferred = store.infer_part_feature_rules(self.project_id, [special_bracket])
+        # Should tag distinguishing features of LCD models (Fascia = LCD)
+        self.assertIn(special_bracket, inferred)
+        self.assertEqual(inferred[special_bracket], [f"{self.fascia_fid}::LCD"])
+
+    def test_save_manual_model_bom_auto_infers_feature_rules(self) -> None:
+        """Saving a manual BOM from scratch automatically infers and updates part feature rules."""
+        target_model_num = self.lcd_models[0]
+        target_model_id = self.model_ids[target_model_num]
+
+        rows = [
+            {
+                "level": 1,
+                "part_number": "TOP-ASM-001",
+                "description": "Top Level Assembly",
+                "quantity": 1.0,
+            },
+            {
+                "level": 2,
+                "part_number": "FASCIA-LCD-001",
+                "description": "Fascia Assembly Front",
+                "quantity": 1.0,
+            },
+        ]
+        res = store.save_manual_model_bom(
+            self.project_id,
+            target_model_id,
+            rows,
+            auto_add_parts=True,
+            editor="Test Collaborator",
+        )
+        self.assertEqual(res["saved_count"], 2)
+        self.assertIn("features_inferred", res)
+
+        # Check part record created for FASCIA-LCD-001
+        p_row = store.query(
+            "SELECT id, model_applicability FROM parts WHERE project_id=? AND part_number=?",
+            (self.project_id, "FASCIA-LCD-001"),
+        )[0]
+        # Verified feature rule was auto-assigned
+        rules_df = store.part_feature_rules(self.project_id)
+        part_rules = rules_df.loc[rules_df["part_id"] == p_row["id"], "value"].tolist()
+        self.assertEqual(part_rules, ["LCD"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

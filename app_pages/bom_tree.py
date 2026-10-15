@@ -852,9 +852,11 @@ def _commit_bom_save(
         st.session_state.pop(f"bom_anchor_row_{curr_model_id}", None)
         _clear_bld_widget_keys(curr_model_id)
         request_table_editor_reset(ed_logical_key)
+        feat_inf = save_res.get("features_inferred", 0)
+        feat_msg = f", {feat_inf} feature rules updated" if feat_inf else ""
         st.toast(
             f"Saved {save_res['saved_count']} BOM items for {save_res['model_number']} "
-            f"({save_res['parts_created']} new parts onboarded)",
+            f"({save_res['parts_created']} new parts onboarded{feat_msg})",
             icon=":material/check_circle:",
         )
         st.rerun()

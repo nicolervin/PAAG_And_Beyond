@@ -973,20 +973,24 @@ def infer_part_feature_rules(
         (project_id,),
     )
     part_models: dict[str, set[str]] = {}
+    models_with_bom: set[str] = set()
     for b in bom_rows:
         cid = str(b.get("child_part_id") or "").strip()
         ctracker = str(b.get("child_tracker_number") or "").strip()
         p = part_by_id.get(cid) or part_by_tracker.get(ctracker)
-        if not p:
-            continue
-        pid = str(p["id"])
         try:
             levels = json.loads(b["raw_levels_json"] or "{}")
             usages = levels.get("model_usages") or {}
             if isinstance(usages, dict):
-                part_models.setdefault(pid, set()).update(
-                    str(m).strip() for m in usages if str(m).strip()
-                )
+                for m in usages:
+                    m_clean = str(m).strip()
+                    if m_clean and m_clean in active_models:
+                        models_with_bom.add(m_clean)
+                if p:
+                    pid = str(p["id"])
+                    part_models.setdefault(pid, set()).update(
+                        str(m).strip() for m in usages if str(m).strip() and str(m).strip() in active_models
+                    )
         except Exception:
             pass
 
@@ -995,9 +999,10 @@ def infer_part_feature_rules(
         if pid not in part_models:
             app_text = str(p.get("model_applicability") or "").strip()
             if app_text and app_text.lower() != "all":
-                mods = {m.strip() for m in app_text.split(",") if m.strip()}
+                mods = {m.strip() for m in app_text.split(",") if m.strip() and m.strip() in active_models}
                 if mods:
                     part_models[pid] = mods
+                    models_with_bom.update(mods)
 
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
@@ -1057,17 +1062,26 @@ def infer_part_feature_rules(
                 "exact_match": exact_match,
                 "category": f_cat,
                 "name": f_name,
+                "c_models": c_models,
             })
 
         if not candidates:
             continue
 
         candidates.sort(key=lambda c: c["score"], reverse=True)
+        top = candidates[0]
+
+        # If there is no keyword overlap:
+        # Check if variance across models has been established yet.
+        # If fewer than 2 models have BOMs built, default to "All models"
+        # until multiple model BOMs exist and differ (Answer 3).
+        if top["overlap"] == 0 and len(models_with_bom) < 2:
+            inferred[pid] = ["All models"]
+            continue
 
         features_seen: set[str] = set()
         chosen_tokens: list[str] = []
 
-        top = candidates[0]
         chosen_tokens.append(f"{top['feature_id']}::{top['value']}")
         features_seen.add(top["feature_id"])
 
@@ -1083,6 +1097,15 @@ def infer_part_feature_rules(
                     if p_models <= combined_models:
                         chosen_tokens.append(f"{other['feature_id']}::{other['value']}")
                         features_seen.add(other["feature_id"])
+        else:
+            # When multiple models have BOMs and no keyword matched,
+            # tag all distinguishing features of the model (Answer 2)
+            for other in candidates[1:]:
+                if other["feature_id"] in features_seen:
+                    continue
+                if other.get("exact_match", 0) > 0.99:
+                    chosen_tokens.append(f"{other['feature_id']}::{other['value']}")
+                    features_seen.add(other["feature_id"])
 
         inferred[pid] = chosen_tokens
 
@@ -5027,10 +5050,23 @@ def save_manual_model_bom(
             _conn=conn,
         )
 
+        # 7. Automatically infer & apply Feature Applicability based on Complexity Tree & Model Trees
+        features_inferred = 0
+        try:
+            features_inferred = apply_inferred_part_feature_rules(
+                project_id,
+                overwrite_existing=False,
+                editor_name=editor,
+                _conn=conn,
+            )
+        except Exception:
+            pass
+
         return {
             "saved_count": len(processed_occurrences),
             "parts_created": parts_created,
             "model_number": clean_model_key,
+            "features_inferred": features_inferred,
         }
 
 
