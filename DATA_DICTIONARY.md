@@ -6,7 +6,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `projects`
 
-- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
+- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, building location, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
 - **Key relationships:** Parent of `planning_scenarios`, `parts`, `project_models`, `complexity_features`, `assembly_sections`, `concerns`, source-import records, Yamazumi records, Process at a Glance records, and `audit_log` entries.
 - **Scope:** Project-wide; this is the root of all other business data.
 
@@ -1518,3 +1518,45 @@ Future issued-document generation and approval (not implemented)
   - BOM integration: Pulls from BOM model tree if available; prompts for quantity/use description if no BOM tree. Dropping an assembly prompts for Built section vs Installed section (components in Built, completed assembly part in Installed). Moving parts off an assembly warns when deviating from BOM structure.
   - Deletions: Click to select + Delete key/icon for connections and part removal; section deletion opens the existing safe reparenting/deletion disclosure dialog.
   - Persistence: Browser draft state with atomic **Save & Refresh** and **Undo** snapshot restoration. Audited with `record_audit_event()`.
+
+### Building Location Field on Projects
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 15, 2026
+- **Approval status:** Approved by project owner on October 15, 2026 for implementation on branch `NE_fishbone_flow_Updates`.
+- **Purpose:** Capture the physical manufacturing plant, facility, or building location (e.g. "Building 2", "AP1", "Plant 4") as a required field for project creation and project definition.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* `projects` table (root entity of an NPI planning project).
+  2. *Critical thread relationship:* Connects to the top-level project root (`projects -> planning_scenarios -> parts -> fishbone -> yamazumi -> process_at_a_glance`), defining the physical facility for the planning project.
+  3. *Scope:* Project-wide (shared across all planning scenarios within the project).
+  4. *Table requirement:* No new table required. Existing table `projects` is extended with:
+     - `building_location TEXT NOT NULL DEFAULT ''`
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Required field validation in the "Create an NPI project" dialog (`app_pages/overview.py`).
+     - Required field validation in the "Project definition" form (`app_pages/overview.py`).
+     - Universal Save Action Standard ("Save project" / "Create project").
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Projects"`.
+     - Universal History Display Standard: visible in the Overview History expander.
+     - Preserved in project transfer packages (`.paagproject` export/import).
+
+### Project Deletion Workflow
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 15, 2026
+- **Approval status:** Approved by project owner on October 15, 2026 for implementation on branch `NE_fishbone_flow_Updates`.
+- **Purpose:** Provide a safe, relationship-aware, confirmed deletion workflow allowing collaborators to permanently delete an NPI planning project and all of its associated data and uploads.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` and cascades across all project-owned child tables (`planning_scenarios`, `parts`, `fishbone_nodes`, `assembly_sections`, `yamazumi_areas`, `work_elements`, `pfmea_entries`, `layout_plans`, etc.) and removes associated local files from `data/uploads/`.
+  2. *Critical thread relationship:* Root-level deletion of the critical thread. Cascades cleanly through SQLite foreign keys (`ON DELETE CASCADE`).
+  3. *Scope:* Project-wide.
+  4. *Table requirement:* No new table required. Handled by dedicated store functions `get_project_deletion_impact(project_id)` and `delete_project(project_id, editor_name)` in `utils/project_store.py`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - UI Location: In the top action bar on the Overview page next to "New project".
+     - Universal Deletion Standard:
+       - Clicking "Delete project" opens a non-dismissible confirmation dialog (`@st.dialog("Delete project?", dismissible=False)`).
+       - Dialog summarizes what will be deleted: project name, number of planning scenarios, parts, fishbone sections, yamazumi pitches, work elements, and uploaded files.
+       - Explains clearly that this action is irreversible and permanently deletes all project records and files.
+       - Provides an explicit "Cancel" button that dismisses the dialog without deleting.
+       - Provides a red destructive confirmation button (`key="destructive_confirm_delete_project_{target_project_id}"`).
+       - On confirmation: calls `delete_project()`, clears session state references (`project_id`, `scenario_id`), redirects to the next available project (or empty state if no projects remain), displays a toast `"Project deleted"`, and triggers `st.rerun()`.
+

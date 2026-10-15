@@ -40,6 +40,7 @@ from utils.table_filters import (
     apply_pending_table_editor_reset,
     filter_table,
     has_unsaved_table_changes,
+    merge_filtered_edits,
     request_table_editor_reset,
 )
 
@@ -241,6 +242,9 @@ if save_requested:
         edited_models = drop_untouched_new_rows(
             edited_models, identifying_columns=["model_number"]
         )
+        merged_models = merge_filtered_edits(
+            models_for_editing, visible_models, edited_models
+        )
         existing_models_by_id = {
             str(row["id"]): row
             for _, row in models_for_editing.iterrows()
@@ -251,7 +255,7 @@ if save_requested:
         ]
         added_model_rows = 0
         edited_model_rows = 0
-        for _, row in edited_models.iterrows():
+        for _, row in merged_models.iterrows():
             model_id = "" if pd.isna(row.get("id")) else str(row.get("id")).strip()
             if not model_id or model_id not in existing_models_by_id:
                 added_model_rows += 1
@@ -263,7 +267,7 @@ if save_requested:
                 for field in model_audit_fields
             ):
                 edited_model_rows += 1
-        count = update_project_model_rows(project_id, edited_models)
+        count = update_project_model_rows(project_id, merged_models)
         record_audit_event(
             project_id,
             "Model definitions",
@@ -310,8 +314,17 @@ if features.empty:
 else:
     feature_rows = features.reindex(columns=feature_columns)
 
-feature_editor_rows = direct_entry_editor_rows(
+visible_features = filter_table(
     feature_rows,
+    key="feature_definition_filters",
+    dropdown_columns=["active", "category"],
+    search_columns=["category", "name", "allowed_choices", "description"],
+    labels={"active": "Planning status", "category": "Category"},
+    reset_widget_keys=[feature_editor_key],
+)
+
+feature_editor_rows = direct_entry_editor_rows(
+    visible_features,
     editor_key=feature_editor_key,
     sort_columns=["active", "category", "name", "allowed_choices", "description"],
     labels={"active": "Active", "name": "Feature"},
@@ -514,8 +527,11 @@ def confirm_feature_delete() -> None:
                 pending_state.get("draft_rows", []),
                 columns=feature_columns,
             )
+            merged_draft = merge_filtered_edits(
+                feature_rows, visible_features, draft_rows
+            )
             remaining_features = drop_untouched_new_rows(
-                draft_rows,
+                merged_draft,
                 identifying_columns=["category", "name", "allowed_choices"],
             )
             update_complexity_features(project_id, remaining_features)
@@ -560,8 +576,11 @@ if feature_actions.save_and_refresh:
             edited_features,
             identifying_columns=["category", "name", "allowed_choices"],
         )
+        merged_features = merge_filtered_edits(
+            feature_rows, visible_features, edited_features
+        )
         changed_features = pending_feature_edit_summaries()
-        count = update_complexity_features(project_id, edited_features)
+        count = update_complexity_features(project_id, merged_features)
         st.session_state[feature_undo_key] = current_complexity_snapshot
         record_audit_event(
             project_id,
@@ -700,7 +719,8 @@ else:
     tree = complexity_tree(project_id)
     tree = tree.loc[tree["model_id"].astype(str).isin(active_model_ids)].copy()
     active_feature_ids = active_features["id"].astype(str).tolist()
-    tree = tree[["model_id", "common_name", "official_model_number", *active_feature_ids]]
+    tree["id"] = tree["model_id"]
+    tree = tree[["id", "model_id", "common_name", "official_model_number", *active_feature_ids]]
     spacer_count = max(6, len(active_feature_ids))
     spacer_columns = [
         f"__complexity_tree_spacer_{index}" for index in range(1, spacer_count + 1)
@@ -708,6 +728,7 @@ else:
     for spacer_column in spacer_columns:
         tree[spacer_column] = ""
     tree_config = {
+        "id": None,
         "model_id": None,
         "common_name": st.column_config.TextColumn("Common name", width="medium"),
         "official_model_number": st.column_config.TextColumn(
@@ -727,15 +748,27 @@ else:
         tree_config[spacer_column] = st.column_config.TextColumn(
             "", width="medium"
         )
-    edited_tree = st.data_editor(
+    feature_filter_labels = {
+        str(f["id"]): f"{f['category']} · {f['name']}"
+        for _, f in active_features.iterrows()
+    }
+    visible_tree = filter_table(
         tree,
+        key="complexity_tree_filters",
+        dropdown_columns=active_feature_ids,
+        search_columns=["official_model_number", "common_name", *active_feature_ids],
+        labels=feature_filter_labels,
+        reset_widget_keys=[tree_editor_key],
+    )
+    edited_tree = st.data_editor(
+        visible_tree,
         key=tree_editor_key,
         hide_index=True,
         num_rows="delete",
         height=420,
         width="content",
         disabled=[
-            "model_id", "common_name", "official_model_number", *spacer_columns,
+            "id", "model_id", "common_name", "official_model_number", *spacer_columns,
         ],
         column_order=[
             "official_model_number", "common_name", *active_feature_ids, *spacer_columns,
@@ -776,7 +809,7 @@ else:
             request_table_editor_reset(tree_editor_key)
             st.toast("Undid the last complexity-tree change", icon=":material/undo:")
         st.rerun()
-    selected_tree_rows = native_selected_rows(tree, editor_key=tree_editor_key)
+    selected_tree_rows = native_selected_rows(visible_tree, editor_key=tree_editor_key)
 
     def persist_complexity_tree_save(pending: dict) -> None:
         pending_tree = pd.DataFrame(pending.get("rows", []))
@@ -875,9 +908,12 @@ else:
                     )
                     if edited_value != previous_value:
                         changed_assignment_count += 1
-            conflicts = potential_duplicate_models(project_id, edited_tree)
+            merged_tree = merge_filtered_edits(
+                tree, visible_tree, edited_tree, id_column="model_id"
+            )
+            conflicts = potential_duplicate_models(project_id, merged_tree)
             pending = {
-                "rows": edited_tree.to_dict("records"),
+                "rows": merged_tree.to_dict("records"),
                 "changed_assignment_count": changed_assignment_count,
                 "snapshot": current_complexity_snapshot,
                 "conflicts": conflicts,

@@ -1229,6 +1229,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, program TEXT DEFAULT '',
                 product_line TEXT DEFAULT '',
+                building_location TEXT NOT NULL DEFAULT '',
                 yamazumi_line_code TEXT NOT NULL DEFAULT ''
                     CHECK(
                         yamazumi_line_code = '' OR (
@@ -1811,6 +1812,8 @@ def init_db() -> None:
                 "TEXT NOT NULL DEFAULT 'seconds' "
                 "CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours'))"
             )
+        if "building_location" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN building_location TEXT NOT NULL DEFAULT ''")
         for project_row in conn.execute(
             "SELECT id FROM projects WHERE yamazumi_line_code=''"
         ).fetchall():
