@@ -5070,13 +5070,6 @@ def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: st
     if not base_items:
         base_items = [{"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}]
 
-    has_builder_keys = any(
-        k.startswith("bld_pn_") and k.endswith(f"_{curr_model_id}")
-        for k in st.session_state
-    )
-    if has_builder_keys:
-        sync_builder_inputs_to_items(base_items, curr_model_id)
-        return base_items
 
     generation = int(st.session_state.get(f"_table_editor_generation_{ed_logical_key}", 0) or 0)
     ed_key = f"{ed_logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
