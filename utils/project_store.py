@@ -710,16 +710,18 @@ def create_project(
     takt_time_s: float,
     product_line: str = "",
     takt_time_unit: str = "seconds",
+    building_location: str = "",
 ) -> str:
     project_id, timestamp = str(uuid4()), now_iso()
     takt_unit = normalize_time_unit(takt_time_unit)
     execute(
         """INSERT INTO projects
-           (id, name, program, product_line, owner, revision, status,
+           (id, name, program, product_line, building_location, owner, revision, status,
             takt_time_s, takt_time_unit, notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'A', 'Draft', ?, ?, '', ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, 'A', 'Draft', ?, ?, '', ?, ?)""",
         (
             project_id, name.strip(), program.strip(), product_line.strip(),
+            building_location.strip(),
             owner.strip(), takt_time_s, takt_unit, timestamp, timestamp,
         ),
     )
@@ -750,7 +752,7 @@ def update_project(project_id: str, values: dict) -> None:
     takt_unit = normalize_time_unit(values.get("takt_time_unit", "seconds"))
     values = {**values, "takt_time_unit": takt_unit}
     fields = [
-        "name", "program", "product_line", "owner", "revision", "status",
+        "name", "program", "product_line", "building_location", "owner", "revision", "status",
         "takt_time_s", "takt_time_unit", "notes",
     ]
     execute(
@@ -773,7 +775,65 @@ def replace_concerns(project_id: str, edited: pd.DataFrame) -> None:
                  str(row.get("created_at")) if row.get("created_at") and not pd.isna(row.get("created_at")) else timestamp, timestamp),
             )
 
-__domain_exports__ = ['projects', 'get_project', 'planning_scenarios', 'get_planning_scenario', 'table_view_preference', 'save_table_view_preference', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns']
+def get_project_deletion_impact(project_id: str) -> dict[str, int]:
+    """Return counts of major entities and files belonging to the project for deletion disclosure."""
+    from utils.project_transfer import _registered_rows, _upload_manifest
+    with connection() as conn:
+        counts = {}
+        for entity, tbl in [
+            ("scenarios", "planning_scenarios"),
+            ("parts", "parts"),
+            ("sections", "assembly_sections"),
+            ("pitches", "yamazumi_pitches"),
+            ("work_elements", "work_elements"),
+            ("concerns", "concerns"),
+        ]:
+            counts[entity] = conn.execute(
+                f"SELECT COUNT(*) FROM {tbl} WHERE project_id=?", (project_id,)
+            ).fetchone()[0]
+        try:
+            tables, _ = _registered_rows(conn, project_id)
+            uploads = _upload_manifest(tables)
+            counts["uploads"] = len(uploads)
+        except Exception:
+            counts["uploads"] = 0
+        return counts
+
+def delete_project(project_id: str, editor_name: str = "") -> dict[str, Any]:
+    """Permanently delete a project and all associated database records and uploads."""
+    from pathlib import Path
+    from utils.project_transfer import _registered_rows, _upload_manifest
+    with connection() as conn:
+        target = conn.execute(
+            "SELECT id, name FROM projects WHERE id=?", (project_id,)
+        ).fetchone()
+        if target is None:
+            raise ValueError("The project to delete no longer exists.")
+        project_name = str(target["name"] or "")
+
+        tables, record_counts = _registered_rows(conn, project_id)
+        uploads = _upload_manifest(tables)
+
+        conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+
+    deleted_files_count = 0
+    for upload in uploads:
+        file_path = upload.get("source_path")
+        if file_path and isinstance(file_path, Path) and file_path.is_file():
+            try:
+                file_path.unlink()
+                deleted_files_count += 1
+            except OSError:
+                pass
+
+    return {
+        "project_id": project_id,
+        "project_name": project_name,
+        "record_counts": record_counts,
+        "deleted_files_count": deleted_files_count,
+    }
+
+__domain_exports__ = ['projects', 'get_project', 'planning_scenarios', 'get_planning_scenario', 'table_view_preference', 'save_table_view_preference', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns', 'get_project_deletion_impact', 'delete_project']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

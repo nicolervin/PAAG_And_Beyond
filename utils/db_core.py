@@ -1025,6 +1025,52 @@ def _clone_ergonomics_reviews(
 
 def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
     """Initialize database tables for scenario-owned pitch visual aids and element tags."""
+    cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='process_visual_media'")
+    row = cur.fetchone()
+    if row and row[0] and ("'link'" not in row[0] or "'cad'" not in row[0]):
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            conn.executescript(
+                """
+                ALTER TABLE process_visual_media RENAME TO process_visual_media_legacy;
+
+                CREATE TABLE process_visual_media (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
+                    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link', 'cad')),
+                    file_path TEXT NOT NULL,
+                    original_file_path TEXT NOT NULL DEFAULT '',
+                    annotations_json TEXT NOT NULL DEFAULT '',
+                    caption TEXT NOT NULL DEFAULT '',
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+
+                INSERT INTO process_visual_media (
+                    id, project_id, scenario_id, pitch_id, media_type,
+                    file_path, original_file_path, annotations_json,
+                    caption, sequence, created_at, created_by, updated_at
+                )
+                SELECT
+                    id, project_id, scenario_id, pitch_id, media_type,
+                    file_path,
+                    COALESCE(original_file_path, ''),
+                    COALESCE(annotations_json, ''),
+                    caption, sequence, created_at, created_by, updated_at
+                FROM process_visual_media_legacy;
+
+                DROP TABLE process_visual_media_legacy;
+                """
+            )
+        finally:
+            conn.execute("PRAGMA legacy_alter_table = OFF")
+            conn.execute("PRAGMA foreign_keys = ON")
+
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS process_visual_media (
@@ -1032,7 +1078,7 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
             pitch_id TEXT NOT NULL REFERENCES yamazumi_pitches(id) ON DELETE CASCADE,
-            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'link', 'cad')),
             file_path TEXT NOT NULL,
             original_file_path TEXT NOT NULL DEFAULT '',
             annotations_json TEXT NOT NULL DEFAULT '',
@@ -1183,6 +1229,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, program TEXT DEFAULT '',
                 product_line TEXT DEFAULT '',
+                building_location TEXT NOT NULL DEFAULT '',
                 yamazumi_line_code TEXT NOT NULL DEFAULT ''
                     CHECK(
                         yamazumi_line_code = '' OR (
@@ -1363,13 +1410,30 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
                 sequence INTEGER NOT NULL DEFAULT 10, description TEXT DEFAULT '', active INTEGER DEFAULT 1,
+                grid_x INTEGER DEFAULT NULL, grid_y INTEGER DEFAULT NULL,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 UNIQUE(project_id, name), FOREIGN KEY(parent_id) REFERENCES assembly_sections(id)
             );
+            CREATE TABLE IF NOT EXISTS assembly_section_connections (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                from_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                to_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                connection_type TEXT NOT NULL CHECK(connection_type IN ('subassembly', 'series', 'parallel')),
+                sequence INTEGER NOT NULL DEFAULT 10,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, from_section_id, to_section_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_section_conn_from
+                ON assembly_section_connections(project_id, from_section_id);
+            CREATE INDEX IF NOT EXISTS idx_section_conn_to
+                ON assembly_section_connections(project_id, to_section_id);
             CREATE TABLE IF NOT EXISTS fishbone_part_assignments (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
-                section_id TEXT NOT NULL REFERENCES assembly_sections(id), sequence INTEGER NOT NULL DEFAULT 10,
+                section_id TEXT NOT NULL REFERENCES assembly_sections(id),
+                step_number INTEGER NOT NULL DEFAULT 1, sequence INTEGER NOT NULL DEFAULT 10,
                 quantity REAL NOT NULL DEFAULT 1 CHECK(quantity > 0), use_description TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 pits_sync_status TEXT NOT NULL DEFAULT 'Not linked'
@@ -1748,6 +1812,8 @@ def init_db() -> None:
                 "TEXT NOT NULL DEFAULT 'seconds' "
                 "CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours'))"
             )
+        if "building_location" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN building_location TEXT NOT NULL DEFAULT ''")
         for project_row in conn.execute(
             "SELECT id FROM projects WHERE yamazumi_line_code=''"
         ).fetchall():
@@ -2072,6 +2138,78 @@ def init_db() -> None:
             """CREATE INDEX IF NOT EXISTS idx_assembly_grid_visibility_section
                ON assembly_grid_feature_visibility(project_id, section_id, feature_id)"""
         )
+        assembly_section_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(assembly_sections)").fetchall()
+        }
+        if "grid_x" not in assembly_section_columns:
+            conn.execute("ALTER TABLE assembly_sections ADD COLUMN grid_x INTEGER DEFAULT NULL")
+        if "grid_y" not in assembly_section_columns:
+            conn.execute("ALTER TABLE assembly_sections ADD COLUMN grid_y INTEGER DEFAULT NULL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS assembly_section_connections (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                from_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                to_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                connection_type TEXT NOT NULL CHECK(connection_type IN ('subassembly', 'series', 'parallel')),
+                sequence INTEGER NOT NULL DEFAULT 10,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, from_section_id, to_section_id)
+            )"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_section_conn_from
+               ON assembly_section_connections(project_id, from_section_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_section_conn_to
+               ON assembly_section_connections(project_id, to_section_id)"""
+        )
+        conn_table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='assembly_section_connections'"
+        ).fetchone()
+        if conn_table_sql and "'parallel'" not in conn_table_sql[0]:
+            conn.executescript(
+                """
+                CREATE TABLE assembly_section_connections_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    from_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                    to_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE,
+                    connection_type TEXT NOT NULL CHECK(connection_type IN ('subassembly', 'series', 'parallel')),
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, from_section_id, to_section_id)
+                );
+                INSERT INTO assembly_section_connections_new
+                    (id, project_id, from_section_id, to_section_id, connection_type, sequence, created_at, updated_at)
+                SELECT id, project_id, from_section_id, to_section_id, connection_type, sequence, created_at, updated_at
+                FROM assembly_section_connections;
+                DROP TABLE assembly_section_connections;
+                ALTER TABLE assembly_section_connections_new RENAME TO assembly_section_connections;
+                CREATE INDEX IF NOT EXISTS idx_section_conn_from
+                    ON assembly_section_connections(project_id, from_section_id);
+                CREATE INDEX IF NOT EXISTS idx_section_conn_to
+                    ON assembly_section_connections(project_id, to_section_id);
+                """
+            )
+        conn.execute(
+            """INSERT OR IGNORE INTO assembly_section_connections (
+                   id, project_id, from_section_id, to_section_id, connection_type, sequence, created_at, updated_at
+               )
+               SELECT lower(hex(randomblob(16))), s.project_id, s.id, s.parent_id, 'subassembly', s.sequence, s.created_at, s.updated_at
+               FROM assembly_sections s
+               WHERE s.parent_id IS NOT NULL AND s.parent_id != ''
+                 AND s.section_type = 'Subassembly'
+            """
+        )
+        fishbone_part_assignment_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(fishbone_part_assignments)").fetchall()
+        }
+        if "step_number" not in fishbone_part_assignment_columns:
+            conn.execute("ALTER TABLE fishbone_part_assignments ADD COLUMN step_number INTEGER NOT NULL DEFAULT 1")
         fishbone_columns = {row[1] for row in conn.execute("PRAGMA table_info(fishbone_nodes)").fetchall()}
         if "review_status" not in fishbone_columns:
             conn.execute("ALTER TABLE fishbone_nodes ADD COLUMN review_status TEXT DEFAULT 'Confirmed'")

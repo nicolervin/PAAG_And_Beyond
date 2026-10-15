@@ -41,7 +41,8 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("pits_record_revisions", "pits_records", "record_id"),
     TransferTable("project_models"), TransferTable("complexity_features"),
     TransferTable("model_feature_values"), TransferTable("part_feature_rules"),
-    TransferTable("assembly_sections"), TransferTable("fishbone_part_assignments"),
+    TransferTable("assembly_sections"), TransferTable("assembly_section_connections"),
+    TransferTable("fishbone_part_assignments"),
     TransferTable("pits_bom_occurrences"),
     TransferTable(
         "pits_bom_occurrence_revisions", "pits_bom_occurrences", "occurrence_id"
@@ -98,6 +99,18 @@ PROJECT_TRANSFER_TABLES = (
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')]
+
+
+def _required_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    required: set[str] = set()
+    for row in conn.execute(f'PRAGMA table_info("{table}")'):
+        name = str(row[1])
+        notnull = bool(row[3])
+        dflt_value = row[4]
+        pk = int(row[5])
+        if (notnull or pk > 0) and dflt_value is None:
+            required.add(name)
+    return required
 
 
 def _registered_rows(
@@ -282,11 +295,13 @@ def preview_project_package(package_data: bytes) -> dict:
                     rows = tables[item.name]
                     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
                         raise ValueError(f"Table {item.name} does not contain a valid row list.")
-                    expected_columns = set(_table_columns(conn, item.name))
+                    required_columns = _required_table_columns(conn, item.name)
                     for row in rows:
-                        if set(row) != expected_columns:
+                        missing_required = required_columns - set(row)
+                        if missing_required:
                             raise ValueError(
-                                f"Table {item.name} does not match the registered local schema."
+                                f"Table {item.name} does not match the registered local schema: "
+                                f"missing required column(s) {', '.join(sorted(missing_required))}."
                             )
 
             record_counts = manifest.get("record_counts")
@@ -368,47 +383,54 @@ def _remapped_tables(
 
     remapped: dict[str, list[dict]] = {}
     for item in PROJECT_TRANSFER_TABLES:
+        valid_columns = set(_table_columns(conn, item.name))
         foreign_keys = {
             str(row[3]): (str(row[2]), str(row[4]))
             for row in conn.execute(f'PRAGMA foreign_key_list("{item.name}")')
         }
         output_rows = []
         for source_row in tables[item.name]:
-            row = dict(source_row)
+            row = {
+                column: value
+                for column, value in source_row.items()
+                if column in valid_columns
+            }
             if "id" in row:
                 row["id"] = id_maps[item.name][str(source_row["id"])]
             if "project_id" in row:
                 row["project_id"] = new_project_id
             for column, (parent_table, parent_column) in foreign_keys.items():
+                if column not in valid_columns:
+                    continue
                 value = source_row.get(column)
                 if value is None or parent_column != "id" or parent_table == "projects":
                     continue
                 mapping = id_maps.get(parent_table, {})
                 if str(value) in mapping:
                     row[column] = mapping[str(value)]
-            if item.name == "fishbone_nodes" and source_row.get("parent_id"):
+            if item.name == "fishbone_nodes" and source_row.get("parent_id") and "parent_id" in valid_columns:
                 row["parent_id"] = id_maps["fishbone_nodes"].get(
                     str(source_row["parent_id"])
                 )
-            if item.name == "yamazumi_elements" and source_row.get("process_element_id"):
+            if item.name == "yamazumi_elements" and source_row.get("process_element_id") and "process_element_id" in valid_columns:
                 row["process_element_id"] = id_maps["work_elements"].get(
                     str(source_row["process_element_id"])
                 )
-            if item.name == "layout_section_pitch_standards" and source_row.get("section_id"):
+            if item.name == "layout_section_pitch_standards" and source_row.get("section_id") and "section_id" in valid_columns:
                 row["section_id"] = id_maps.get("assembly_sections", {}).get(
                     str(source_row["section_id"]), str(source_row["section_id"])
                 )
             if item.name == "layout_shapes":
-                if source_row.get("pitch_id") and str(source_row["pitch_id"]) not in id_maps.get("yamazumi_pitches", {}):
+                if "pitch_id" in valid_columns and source_row.get("pitch_id") and str(source_row["pitch_id"]) not in id_maps.get("yamazumi_pitches", {}):
                     row["pitch_id"] = None
-                if source_row.get("equipment_id") and str(source_row["equipment_id"]) not in id_maps.get("equipment_assets", {}):
+                if "equipment_id" in valid_columns and source_row.get("equipment_id") and str(source_row["equipment_id"]) not in id_maps.get("equipment_assets", {}):
                     row["equipment_id"] = None
             if item.name == "project_transfer_events":
                 for column in ("source_project_id", "target_project_id"):
-                    if str(source_row.get(column) or "") == source_project_id:
+                    if column in valid_columns and str(source_row.get(column) or "") == source_project_id:
                         row[column] = new_project_id
             for column, value in source_row.items():
-                if column.endswith("_path") and str(value) in upload_paths:
+                if column.endswith("_path") and str(value) in upload_paths and column in valid_columns:
                     row[column] = upload_paths[str(value)]
             output_rows.append(row)
         remapped[item.name] = output_rows
@@ -421,6 +443,8 @@ def _insert_remapped_tables(
     for item in PROJECT_TRANSFER_TABLES:
         for row in tables[item.name]:
             columns = list(row)
+            if not columns:
+                continue
             column_sql = ", ".join(f'"{column}"' for column in columns)
             placeholders = ", ".join("?" for _ in columns)
             conn.execute(

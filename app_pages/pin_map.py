@@ -190,10 +190,45 @@ def render_pin_map_tab(project_id: str, scenario_id: str) -> None:
             visible_pitch_id_set = set(visible_pitches["pitch_id"].astype(str))
             active_fps = [fp for fp in layout_fps if str(fp["pitch_id"]) in visible_pitch_id_set]
 
-            st.caption(
-                f":material/architecture: Layout: **{layout_name}** · Rev {rev_num} · "
-                f"{len(active_fps)} workstation(s) positioned to scale on plant floor plan"
-            )
+            cad_path_str = str(sample_fp.get("cad_file_path") or "").strip()
+            cad_name_str = str(sample_fp.get("cad_file_name") or "").strip()
+            cad_size_int = int(sample_fp.get("cad_file_size_bytes") or 0)
+            cad_url_str = str(sample_fp.get("cad_web_url") or "").strip()
+            cad_p = Path(cad_path_str) if cad_path_str else None
+            has_cad_file = bool(cad_p and cad_p.is_file())
+            has_cad_url = bool(cad_url_str)
+
+            col_caption, col_dl, col_link = st.columns([5, 2, 2], vertical_alignment="center")
+            with col_caption:
+                st.caption(
+                    f":material/architecture: Layout: **{layout_name}** · Rev {rev_num} · "
+                    f"{len(active_fps)} workstation(s) positioned to scale on plant floor plan"
+                )
+            with col_dl:
+                if has_cad_file:
+                    try:
+                        cad_bytes = cad_p.read_bytes()
+                        size_mb = cad_size_int / (1024 * 1024)
+                        btn_txt = f"Download AutoCAD ({cad_name_str})" if size_mb < 0.1 else f"Download AutoCAD ({cad_name_str} · {size_mb:.1f} MB)"
+                        st.download_button(
+                            btn_txt,
+                            data=cad_bytes,
+                            file_name=cad_name_str,
+                            mime="application/octet-stream",
+                            icon=":material/download:",
+                            key=f"pin_map_dl_cad_{selected_fp_layout_id}_{scenario_id}",
+                            width="stretch",
+                        )
+                    except Exception:
+                        pass
+            with col_link:
+                if has_cad_url:
+                    st.link_button(
+                        "Open CAD in Vault / Web",
+                        url=cad_url_str,
+                        icon=":material/open_in_new:",
+                        width="stretch",
+                    )
 
             img_url = (
                 layout_image_data_url(str(img_path), img_path.stat().st_mtime_ns)

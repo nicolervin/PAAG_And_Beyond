@@ -6,7 +6,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `projects`
 
-- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
+- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, building location, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
 - **Key relationships:** Parent of `planning_scenarios`, `parts`, `project_models`, `complexity_features`, `assembly_sections`, `concerns`, source-import records, Yamazumi records, Process at a Glance records, and `audit_log` entries.
 - **Scope:** Project-wide; this is the root of all other business data.
 
@@ -224,7 +224,7 @@ Each assigned-pitch lane displays one continuous red takt line at the effective 
 - **Scope:** Scenario-specific through the parent area.
 - **Deletion:** The interactive-board editor may delete one element, and the Work elements table may delete one or more selected elements, only after a non-dismissible, relationship-aware confirmation. The editable one-area table uses Streamlit's native row selection and toolbar **Delete row(s)** action. The read-only combined-area table uses native far-left selection and a visible **Delete selected (N)** action beneath the table. A multi-row deletion validates every selected element against the active project and scenario and commits with one audit event or not at all. Any linked Process at a Glance step and its downstream records remain, but lose the deleted Yamazumi source used for pitch context, derived Op ID, and the inline pitch summary. Existing locked `work_element_material_groups` and their options retain their schema-defined cascade behavior and are disclosed if present; pitches, areas, Fishbone structure, work-region definitions, and audit history remain.
 
-Process at a Glance's **Create Part requirements** source list reads only Cycle `yamazumi_elements`; explicit Periodic and Fluctuation rows remain Yamazumi planning content and are not offered for Process part pairing. Compatibility rows whose `work_type` is null or blank are treated as Cycle. The filter is read-only and does not remove already-created Process steps or rewrite either table.
+Process at a Glance's **Create PAAG Elements** (Process plan tab) Yamazumi work elements source table includes Cycle, Periodic, and Fluctuation work elements (`yamazumi_elements.work_type`). The table provides dedicated filters for **Pitch** and **Model** (vehicle model variant) in addition to keyword search. Compatibility rows whose `work_type` is null or blank are treated as Cycle.
 - **Flag retirement:** Yamazumi does not own or display element flags. The former `flags` column and `yamazumi_flag_definitions` table are removed by an idempotent schema upgrade, and their legacy values are intentionally discarded. Reconciliation does not infer PAAG quality text from Yamazumi. Any future PAAG indicators generated from Functional Reviews require a separately approved design and must not be persisted on Yamazumi elements.
 
 #### Copy to another Yamazumi area — approved September 11, 2026
@@ -898,6 +898,86 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 
 ## Proposed modules — pending owner review
 
+### Web Link Attachments for Parts Catalog and PAAG Visual Aids
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow engineers and collaborators to attach web links (such as SharePoint documents, Windchill CAD / PLM drawings, intranet SOPs, or video streams) instead of or in addition to uploading local files, in two key areas:
+  1. *Parts Catalog:* Primary CAD image or additional views can be provided as a web URL.
+  2. *Process at a Glance (PAAG) Visual Aids:* Pitch-level visual aids tagged to work elements can be provided as web links, opening external SOPs or training materials directly in a new tab, or rendering web image URLs inline.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Parts Catalog: connects to `parts` (primary image/link) and `part_images` (additional views / supplemental links).
+     - PAAG Visual Aids: connects to `process_visual_media` (scenario-owned, linked to `yamazumi_pitches`, `planning_scenarios`, and `projects`) and tagged to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the Parts Catalog and Process at a Glance / PAAG Slide Visualizer layers of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:*
+     - Parts Catalog: Project-wide, matching `parts` and `part_images`.
+     - PAAG Visual Aids: Scenario-specific, matching `process_visual_media` and `process_visual_media_tags`.
+  4. *Table requirement:* No new tables required. Existing tables serve this feature directly:
+     - `process_visual_media`: `media_type` supports `'link'` (or `'url'`), where `file_path` stores the web link URL.
+     - `parts`: `image_path` can store either a local relative upload path or a web URL (`http://` or `https://`).
+     - `part_images`: `image_path` stores either a local relative upload path or a web URL, with `image_type` supporting `'Web Link'` alongside existing view types.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit Save button with URL validation (must be valid `http://` or `https://`).
+     - Universal Deletion Standard: confirmed deletion dialog removing the database record (skips filesystem deletion when the path is a web URL).
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Parts"` and `"Process"`.
+     - Universal History Display Standard: visible in the respective bottom History expanders using `audit_history()`.
+     - Scope Badges: Project-wide on Parts Catalog, Scenario-specific on Process at a Glance.
+
+### Native AutoCAD Drawing File (.dwg / .dxf) Attachments and CAD Links for Pin Map Layouts
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow plant layout engineers, industrial engineers, and collaborators to attach native AutoCAD drawing files (`.dwg`, `.dxf`) and corporate CAD web links (Autodesk Vault, Autodesk Construction Cloud / BIM 360, SharePoint, Windchill) directly to Pin Map floor plan layout revisions:
+  1. *Pin Map 2D Plant Spatial Map:* Collaborators inspecting the spatial workstation placement see an authoritative AutoCAD drawing download button (with file name and size) and/or a link to the corporate CAD vault right above the floor plan map.
+  2. *Layouts Workspace:* When creating or managing layout revisions, engineers can attach the native `.dwg` or `.dxf` file, or set a CAD web link, alongside the high-resolution 2D canvas image used for scale calibration and footprint drafting.
+  3. *File Size Limit:* Enforces an application-level limit of **100 MB** per AutoCAD upload (`MAX_LAYOUT_CAD_FILE_SIZE_MB = 100`). Files exceeding 100 MB prompt the user to use the CAD Web Link option, protecting local system resources and maintaining fast `.paagproject` package transfer performance.
+  4. *Project Transfer:* Native `.dwg` and `.dxf` files are automatically bundled and restored across `.paagproject` export/import packages.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `layout_revisions` (and through it, `layout_plans` and `projects`). Downstream workstation footprints on `layout_shapes` link to `yamazumi_pitches`.
+  2. *Critical thread relationship:* Connects to the 2D Layouts and Pin Map layers of the critical thread (*Product Architecture -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance -> 2D Plant Layouts -> Pin Map*).
+  3. *Scope:* Project-wide (floor plan layouts and revisions are project-wide assets shared across planning scenarios).
+  4. *Table requirement:* No new tables required. Existing table `layout_revisions` serves this feature directly with 4 new columns:
+     - `cad_file_path TEXT NOT NULL DEFAULT ''`: relative path to uploaded `.dwg` or `.dxf` in `data/uploads/`.
+     - `cad_file_name TEXT NOT NULL DEFAULT ''`: original drawing filename for user download display.
+     - `cad_file_size_bytes INTEGER NOT NULL DEFAULT 0`: byte count for instant display without filesystem queries.
+     - `cad_web_url TEXT NOT NULL DEFAULT ''`: direct URL to Autodesk Vault, SharePoint, or PLM repository.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit validation checking extension (`.dwg`, `.dxf`) and enforcing max file size <= 100 MB.
+     - Universal Deletion Standard: confirmed deletion dialog for layouts or revisions purges owned uploads from `data/uploads/`; includes explicit detach CAD action.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Layouts"`.
+     - Universal History Display Standard: visible in the Layouts History expander via `audit_history()`.
+     - Scope Badges: Project-wide on Layouts workspace, Scenario-specific on Pin Map.
+
+### 3D CAD STEP File Attachments for Parts Catalog and PAAG Visual Aids
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 14, 2026
+- **Approval status:** Approved by project owner on October 14, 2026 for implementation on branch `NE_app_wide_fixes`.
+- **Purpose:** Allow engineers and collaborators to attach 3D CAD exchange files (`.step`, `.stp`) to the Parts Catalog and PAAG pitch visual step guides, making authoritative 3D engineering models directly available as downloadable reference assets alongside 2D images, video clips, and web links:
+  1. *Parts Catalog:* In supplemental views (`part_images`), collaborators can upload 3D STEP models (`image_type = '3D CAD Model (STEP)'`), displaying file name, file size badge, and a 1-click download button.
+  2. *Process at a Glance (PAAG) Visual Aids:* Pitch-level visual aids tagged to work elements support 3D STEP CAD uploads (`media_type = 'cad'`), offering a download button in the pitch visual media gallery and rendering a designated 3D CAD indicator card on slide presentations.
+  3. *File Size Limit:* Enforces a strict application-level file size limit of **50 MB** per STEP file. Files exceeding 50 MB prompt the user to use the newly added Web Link / URL feature to link directly to corporate PLM (Windchill) or SharePoint repositories, preserving local memory, storage, and fast `.paagproject` package transfer performance.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Parts Catalog: connects to `parts` (master component) and `part_images` (additional views / supplemental 3D CAD models).
+     - PAAG Visual Aids: connects to `process_visual_media` (scenario-owned, linked to `yamazumi_pitches`, `planning_scenarios`, and `projects`) and tagged to `work_elements` via `process_visual_media_tags`.
+  2. *Critical thread relationship:* Connects to the Parts Catalog and Process at a Glance / PAAG Slide Visualizer layers of the critical thread (*Product Architecture / PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> PAAG Visualizer*).
+  3. *Scope:*
+     - Parts Catalog: Project-wide, matching `parts` and `part_images`.
+     - PAAG Visual Aids: Scenario-specific, matching `process_visual_media` and `process_visual_media_tags`.
+  4. *Table requirement:* No new tables required. Existing tables serve this feature directly:
+     - `process_visual_media`: `media_type` supports `'cad'` (in addition to `'image'`, `'video'`, and `'link'`), where `file_path` stores the local upload path.
+     - `part_images`: `image_path` stores the local relative upload path in `data/uploads/`, with `image_type` supporting `'3D CAD Model (STEP)'`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Universal Save Action Standard: explicit validation checking extension (`.step`, `.stp`) and enforcing max file size <= 50 MB.
+     - Universal Deletion Standard: confirmed deletion dialog removing the record and safely unlinking local files from `data/uploads/`.
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Parts"` and `"Process"`.
+     - Universal History Display Standard: visible in the respective bottom History expanders using `audit_history()`.
+     - Scope Badges: Project-wide on Parts Catalog, Scenario-specific on Process at a Glance.
+
 ### Model Tree: BOM Authoring From Scratch
 
 - **Proposed by:** Nicole Ervin, project owner
@@ -1090,7 +1170,7 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
   3. *Scope:* Project-wide. A project supports multiple named layouts (e.g., "Main Line", "Subassembly Area", "Building 2"). Each layout maintains versioned revisions (`layout_revisions`) so users can update the floor plan drawing with new revisions while retaining the ability to review historical revisions. When creating an updated revision with a new image, previously drawn shapes and footprints are retained (copied forward) so the user can reposition or resize them on the new layout drawing.
   4. *Table requirement:* Requires new dedicated tables because existing tables cannot store multi-revision floor plan images, real-world physical scale dimensions, 2D vector shapes, or section pitch dimensional standards:
      - `layout_plans`: project-wide container for a named layout (`id`, `project_id`, `name`, `description`, `created_at`, `updated_at`).
-     - `layout_revisions`: versioned floor plan snapshots (`id`, `layout_id`, `revision_number`, `image_path`, `width_value`, `height_value`, `unit`, `scale_width_in`, `scale_height_in`, `notes`, `created_at`, `created_by`).
+     - `layout_revisions`: versioned floor plan snapshots (`id`, `layout_id`, `revision_number`, `image_path`, `image_width_px`, `image_height_px`, `width_value`, `height_value`, `unit`, `scale_width_in`, `scale_height_in`, `notes`, `cad_file_path`, `cad_file_name`, `cad_file_size_bytes`, `cad_web_url`, `created_at`, `created_by`).
      - `layout_shapes`: drawn shapes, annotations, and workstation/equipment footprints (`id`, `revision_id`, `shape_type`, `label`, `x`, `y`, `width`, `height`, `rotation`, `color`, `style_json`, `pitch_id`, `equipment_id`, `created_at`, `updated_at`).
      - `layout_section_pitch_standards`: section-level standard workstation pitch dimensions (`id`, `layout_id`, `section_id`, `pitch_width`, `pitch_height`, `unit`, `created_at`, `updated_at`).
   5. *Applicable DESIGN_SYSTEM.md standards:*
@@ -1412,3 +1492,78 @@ Scenario-specific Manufacturing Control Plan working draft
       ↓
 Future issued-document generation and approval (not implemented)
 ```
+
+## Proposed modules — pending owner review
+
+### Interactive Visual Fishbone Builder & Subassembly Series Flow (Phase 1 & Phase 2)
+
+- **Proposed by:** Nicole Ervin (Project Owner) & Antigravity
+- **Date proposed:** October 14, 2026
+- **Review status:** **Approved for implementation on branch `NE_fishbone_flow_Updates`**
+- **1. Connections:** Connects to `assembly_sections` (Fishbone framework spines/sections), `fishbone_part_assignments` (placed part occurrences in sections), `parts` / `pits_bom_occurrences` (Parts Catalog and BOM model tree), `manufacturing_assemblies` (Built and Installed sections), and downstream `yamazumi_areas` (linked to `assembly_sections`), `yamazumi_pitches`, and `work_elements` (Process at a Glance via live-derived Op IDs).
+- **2. Relationship to the critical thread:** Parts Catalog & BOM model tree -> placed into `fishbone_part_assignments` -> organized on the interactive canvas into `assembly_sections` with many-to-many flow lines in `assembly_section_connections` -> drives scenario-aware Yamazumi areas -> drives Op IDs (`M1+M2.S1a...`) in Process at a Glance.
+- **3. Scope:** Project-wide. `assembly_sections` (with `grid_x`, `grid_y`), `assembly_section_connections`, and `fishbone_part_assignments` belong to `projects`. When subassembly parts have `step_number` (Phase 2), it is project-wide. Fishbone structure creation does NOT automatically force or sync Yamazumi pitches ahead of time.
+- **4. Tables and fields:**
+  - Extended `assembly_sections`:
+    - `grid_x INTEGER DEFAULT NULL`: Saved canvas grid X coordinate for manual positioning.
+    - `grid_y INTEGER DEFAULT NULL`: Saved canvas grid Y coordinate for manual positioning.
+  - New `assembly_section_connections`:
+    - `id TEXT PRIMARY KEY`
+    - `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`
+    - `from_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE`
+    - `to_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE`
+    - `connection_type TEXT NOT NULL CHECK(connection_type IN ('subassembly', 'series', 'parallel'))`
+    - `sequence INTEGER NOT NULL DEFAULT 10`
+    - `created_at TEXT NOT NULL`
+    - `updated_at TEXT NOT NULL`
+    - `UNIQUE(project_id, from_section_id, to_section_id)`
+  - Phase 2 extension on `fishbone_part_assignments`:
+    - `step_number INTEGER NOT NULL DEFAULT 1`: Represents the subassembly step divider/station order along the spine.
+- **5. DESIGN_SYSTEM.md standards:**
+  - Layout: Stacked layout on `app_pages/fishbone.py` (interactive diagram canvas with collapsible parts palette on top, collapsible table editors directly below on the same page).
+  - Canvas interactions: Grid snap with manual positioning + Auto-arrange button. Visual connection handles between sections prompt for 'Connect in Series' or 'Feed as Subassembly'.
+  - BOM integration: Pulls from BOM model tree if available; prompts for quantity/use description if no BOM tree. Dropping an assembly prompts for Built section vs Installed section (components in Built, completed assembly part in Installed). Moving parts off an assembly warns when deviating from BOM structure.
+  - Deletions: Click to select + Delete key/icon for connections and part removal; section deletion opens the existing safe reparenting/deletion disclosure dialog.
+  - Persistence: Browser draft state with atomic **Save & Refresh** and **Undo** snapshot restoration. Audited with `record_audit_event()`.
+
+### Building Location Field on Projects
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 15, 2026
+- **Approval status:** Approved by project owner on October 15, 2026 for implementation on branch `NE_fishbone_flow_Updates`.
+- **Purpose:** Capture the physical manufacturing plant, facility, or building location (e.g. "Building 2", "AP1", "Plant 4") as a required field for project creation and project definition.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* `projects` table (root entity of an NPI planning project).
+  2. *Critical thread relationship:* Connects to the top-level project root (`projects -> planning_scenarios -> parts -> fishbone -> yamazumi -> process_at_a_glance`), defining the physical facility for the planning project.
+  3. *Scope:* Project-wide (shared across all planning scenarios within the project).
+  4. *Table requirement:* No new table required. Existing table `projects` is extended with:
+     - `building_location TEXT NOT NULL DEFAULT ''`
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Required field validation in the "Create an NPI project" dialog (`app_pages/overview.py`).
+     - Required field validation in the "Project definition" form (`app_pages/overview.py`).
+     - Universal Save Action Standard ("Save project" / "Create project").
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Projects"`.
+     - Universal History Display Standard: visible in the Overview History expander.
+     - Preserved in project transfer packages (`.paagproject` export/import).
+
+### Project Deletion Workflow
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 15, 2026
+- **Approval status:** Approved by project owner on October 15, 2026 for implementation on branch `NE_fishbone_flow_Updates`.
+- **Purpose:** Provide a safe, relationship-aware, confirmed deletion workflow allowing collaborators to permanently delete an NPI planning project and all of its associated data and uploads.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` and cascades across all project-owned child tables (`planning_scenarios`, `parts`, `fishbone_nodes`, `assembly_sections`, `yamazumi_areas`, `work_elements`, `pfmea_entries`, `layout_plans`, etc.) and removes associated local files from `data/uploads/`.
+  2. *Critical thread relationship:* Root-level deletion of the critical thread. Cascades cleanly through SQLite foreign keys (`ON DELETE CASCADE`).
+  3. *Scope:* Project-wide.
+  4. *Table requirement:* No new table required. Handled by dedicated store functions `get_project_deletion_impact(project_id)` and `delete_project(project_id, editor_name)` in `utils/project_store.py`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - UI Location: In the top action bar on the Overview page next to "New project".
+     - Universal Deletion Standard:
+       - Clicking "Delete project" opens a non-dismissible confirmation dialog (`@st.dialog("Delete project?", dismissible=False)`).
+       - Dialog summarizes what will be deleted: project name, number of planning scenarios, parts, fishbone sections, yamazumi pitches, work elements, and uploaded files.
+       - Explains clearly that this action is irreversible and permanently deletes all project records and files.
+       - Provides an explicit "Cancel" button that dismisses the dialog without deleting.
+       - Provides a red destructive confirmation button (`key="destructive_confirm_delete_project_{target_project_id}"`).
+       - On confirmation: calls `delete_project()`, clears session state references (`project_id`, `scenario_id`), redirects to the next available project (or empty state if no projects remain), displays a toast `"Project deleted"`, and triggers `st.rerun()`.
+

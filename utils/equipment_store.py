@@ -45,6 +45,7 @@ DEFAULT_EQUIPMENT_TYPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("Test equipment", "Station/Pitch Equipment", ("Quality",)),
     ("Dimensional measurement equipment", "Station/Pitch Equipment", ("Quality",)),
     ("Poka-Yoke / Fixture equipment", "Station/Pitch Equipment", ("Quality", "Assembly")),
+    ("Tape machine", "Station/Pitch Equipment", ("Assembly",)),
     ("Platform", "Station/Pitch Equipment", ("Ergonomics",)),
     ("Pit", "Station/Pitch Equipment", ("Ergonomics",)),
     ("Operator Lift", "Station/Pitch Equipment", ("Ergonomics",)),

@@ -1,11 +1,10 @@
-from __future__ import annotations
-
 import base64
 from io import BytesIO
 from pathlib import Path
+from typing import Any, Callable
 
-import streamlit as st
 from PIL import Image, ImageOps
+import streamlit as st
 
 
 _HTML = """
@@ -16,47 +15,177 @@ _HTML = """
       <span id="fishbone-summary"></span>
     </div>
     <div class="fishbone-actions">
+      <button id="add-section-btn" type="button" title="Add new section block" class="btn-tool" style="background:#2563eb; color:white; border-color:#2563eb; font-weight:700;">➕ Add Section</button>
+      <button id="toggle-palette" type="button" title="Toggle parts palette" class="btn-tool">📦 Parts palette</button>
+      <button id="auto-arrange" type="button" title="Auto-arrange sections" class="btn-tool">⚡ Auto-arrange</button>
       <button id="zoom-out" type="button" title="Zoom out">−</button>
       <button id="zoom-in" type="button" title="Zoom in">+</button>
       <button id="fit-view" type="button" title="Fit the entire fishbone">Fit</button>
       <button id="full-screen" type="button" title="Open the fishbone full screen">Full screen</button>
     </div>
   </div>
-  <div class="fishbone-viewport">
-    <svg id="fishbone-svg" role="img" aria-label="Interactive assembly fishbone">
-      <g id="fishbone-world"></g>
-    </svg>
-    <div id="fishbone-tooltip" class="fishbone-tooltip" hidden>
-      <img id="tooltip-image" alt="" />
-      <div id="tooltip-no-image">No photo</div>
-      <div class="tooltip-copy">
-        <strong id="tooltip-number"></strong>
-        <span id="tooltip-name"></span>
-        <small id="tooltip-meta"></small>
+  <div class="fishbone-body">
+    <aside id="fishbone-palette" class="fishbone-palette">
+      <div class="palette-header">
+        <strong>Parts & Assemblies</strong>
+        <span id="palette-count"></span>
       </div>
+      <div class="palette-search-box">
+        <input type="text" id="palette-search" placeholder="Search parts / assemblies..." />
+      </div>
+      <div class="palette-filter-row">
+        <label><input type="checkbox" id="palette-unplaced-only" checked /> Unplaced only</label>
+      </div>
+      <div id="palette-list" class="palette-list">
+        <!-- Rendered draggable part cards -->
+      </div>
+    </aside>
+    <div class="fishbone-viewport">
+      <svg id="fishbone-svg" role="img" aria-label="Interactive assembly fishbone">
+        <defs>
+          <marker id="arrow-flow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563eb" />
+          </marker>
+          <marker id="arrow-buffer" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b" />
+          </marker>
+          <marker id="arrow-selected" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ef4444" />
+          </marker>
+        </defs>
+        <g id="fishbone-world"></g>
+      </svg>
+      <div id="fishbone-tooltip" class="fishbone-tooltip" hidden>
+        <img id="tooltip-image" alt="" />
+        <div id="tooltip-no-image">No photo</div>
+        <div class="tooltip-copy">
+          <strong id="tooltip-number"></strong>
+          <span id="tooltip-name"></span>
+          <small id="tooltip-meta"></small>
+        </div>
+      </div>
+      <!-- Assembly Drop Modal -->
+      <div id="assembly-drop-modal" class="canvas-modal" hidden>
+        <div class="modal-card">
+          <h4>Place assembly</h4>
+          <p id="assembly-drop-desc"></p>
+          <div class="modal-form">
+            <label class="modal-label">
+              Where is this assembly built?
+              <select id="assembly-built-select" class="modal-select"></select>
+            </label>
+            <label class="modal-label">
+              Where is this assembly installed?
+              <select id="assembly-installed-select" class="modal-select"></select>
+            </label>
+          </div>
+          <div class="modal-buttons">
+            <button id="btn-assembly-confirm" type="button" class="btn-modal btn-primary">Confirm Placement</button>
+            <button id="btn-assembly-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <!-- Add Section Modal -->
+      <div id="add-section-modal" class="canvas-modal" hidden>
+        <div class="modal-card">
+          <h4>Add Assembly Section</h4>
+          <p>Create a new section block directly on the interactive canvas.</p>
+          <div class="modal-form">
+            <label class="modal-label">
+              Section name
+              <input type="text" id="add-section-name" placeholder="e.g. Door Subassembly, Freezer Op 1" style="box-sizing:border-box; width:100%; padding:8px 10px; border:1px solid var(--st-border-color); border-radius:6px; background:var(--st-background-color); color:var(--st-text-color); font-size:.88rem; font-family:inherit;" />
+            </label>
+            <label class="modal-label">
+              Section category
+              <select id="add-section-type" class="modal-select">
+                <option value="Subassembly" selected>Assembly Section</option>
+                <option value="Support Operations">Support Operations / Fabrication</option>
+              </select>
+            </label>
+            <label class="modal-label" id="add-section-parent-label">
+              Feeds into (Parent assembly)
+              <select id="add-section-parent" class="modal-select"></select>
+            </label>
+          </div>
+          <div class="modal-buttons">
+            <button id="btn-add-section-confirm" type="button" class="btn-modal btn-primary">Create Section</button>
+            <button id="btn-add-section-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle (•) to connect sections · Drag parts onto blocks · Scroll to zoom</div>
     </div>
-    <div class="fishbone-hint">Scroll to zoom · Drag to pan · Hover over a part</div>
   </div>
 </div>
 """
 
-
 _CSS = """
 :host { color: var(--st-text-color); font-family: var(--st-font); }
-.fishbone-shell { box-sizing: border-box; width: 100%; height: 700px; min-height: 700px; display: flex; flex-direction: column; border: 1px solid var(--st-border-color); border-radius: var(--st-base-radius); overflow: hidden; background: var(--st-background-color); }
-.fishbone-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--st-border-color); background: var(--st-secondary-background-color); }
+.fishbone-shell { box-sizing: border-box; width: 100%; height: 750px; min-height: 750px; display: flex; flex-direction: column; border: 1px solid var(--st-border-color); border-radius: var(--st-base-radius); overflow: hidden; background: var(--st-background-color); }
+.fishbone-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--st-border-color); background: var(--st-secondary-background-color); flex-shrink: 0; }
 .fishbone-title { min-width: 0; display: flex; align-items: baseline; gap: 10px; }
-.fishbone-title span { color: var(--st-secondary-text-color); font-size: .82rem; white-space: nowrap; }
-.fishbone-actions { display: flex; gap: 6px; }
-.fishbone-actions button { min-width: 34px; height: 32px; padding: 0 10px; border: 1px solid var(--st-border-color); border-radius: var(--st-button-radius); color: var(--st-text-color); background: var(--st-background-color); cursor: pointer; font: inherit; font-weight: 600; }
+.fishbone-title span { color: var(--st-secondary-text-color); font-size: .84rem; white-space: nowrap; }
+.fishbone-actions { display: flex; gap: 6px; align-items: center; }
+.fishbone-actions button { min-width: 32px; height: 32px; padding: 0 10px; border: 1px solid var(--st-border-color); border-radius: var(--st-button-radius); color: var(--st-text-color); background: var(--st-background-color); cursor: pointer; font: inherit; font-size: .84rem; font-weight: 600; }
 .fishbone-actions button:hover { border-color: var(--st-primary-color); color: var(--st-primary-color); }
-.fishbone-viewport { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background-color: var(--st-background-color); background-image: radial-gradient(circle, color-mix(in srgb, var(--st-text-color) 13%, transparent) 1px, transparent 1px); background-size: 22px 22px; touch-action: none; }
+.fishbone-actions button.btn-tool { background: var(--st-secondary-background-color); }
+
+.fishbone-body { display: flex; flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; }
+
+/* Palette styling */
+.fishbone-palette { width: 280px; min-width: 280px; max-width: 340px; display: flex; flex-direction: column; border-right: 1px solid var(--st-border-color); background: var(--st-secondary-background-color); flex-shrink: 0; transition: width .2s ease, margin .2s ease; overflow: hidden; }
+.fishbone-palette.collapsed { width: 0; min-width: 0; border-right: none; display: none; }
+.palette-header { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 12px 6px; font-size: .88rem; }
+.palette-header span { font-size: .78rem; color: var(--st-secondary-text-color); }
+.palette-search-box { padding: 0 12px 6px; }
+.palette-search-box input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--st-border-color); border-radius: 6px; background: var(--st-background-color); color: var(--st-text-color); font-size: .82rem; }
+.palette-filter-row { padding: 0 12px 8px; font-size: .78rem; color: var(--st-secondary-text-color); display: flex; align-items: center; gap: 6px; }
+.palette-list { flex: 1 1 auto; overflow-y: auto; padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
+.palette-card { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--st-border-color); border-radius: 8px; background: var(--st-background-color); cursor: grab; user-select: none; transition: border-color .15s ease, box-shadow .15s ease; }
+.palette-card:hover { border-color: var(--st-primary-color); box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+.palette-card.placed { opacity: 0.65; border-style: dashed; }
+.palette-thumb { width: 38px; height: 38px; border-radius: 4px; object-fit: contain; background: var(--st-secondary-background-color); flex-shrink: 0; }
+.palette-no-thumb { width: 38px; height: 38px; border-radius: 4px; background: var(--st-secondary-background-color); display: grid; place-items: center; font-size: .65rem; color: var(--st-secondary-text-color); flex-shrink: 0; }
+.palette-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.palette-pn { font-weight: 700; font-size: .82rem; color: var(--st-primary-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-desc { font-size: .74rem; color: var(--st-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.1; }
+.palette-meta { font-size: .7rem; color: var(--st-secondary-text-color); display: flex; gap: 6px; align-items: center; }
+.palette-badge { padding: 1px 5px; border-radius: 4px; font-size: .65rem; font-weight: 700; background: #6366f1; color: white; }
+
+/* Viewport styling */
+.fishbone-viewport { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background-color: var(--st-background-color); background-image: radial-gradient(circle, color-mix(in srgb, var(--st-text-color) 13%, transparent) 1px, transparent 1px); background-size: 20px 20px; touch-action: none; }
 #fishbone-svg { display: block; width: 100%; height: 100%; cursor: grab; user-select: none; }
 #fishbone-svg.dragging { cursor: grabbing; }
+
+/* Section node styling */
+.section-node { cursor: grab; }
+.section-node.dragging { cursor: grabbing; opacity: 0.85; }
+.section-node-rect { transition: stroke-width .15s ease, filter .15s ease; }
+.section-node:hover .section-node-rect { filter: drop-shadow(0 4px 12px rgba(0, 0, 0, .18)); }
+.section-drop-hover .section-node-rect { stroke: #10b981 !important; stroke-width: 4px !important; stroke-dasharray: 6 4; }
+
+/* Connection port handle */
+.port-handle { cursor: crosshair; fill: #3b82f6; stroke: white; stroke-width: 2; opacity: 0.88; transition: r .12s ease, opacity .12s ease; }
+.port-handle:hover { r: 10; opacity: 1; fill: #1d4ed8; }
+
+/* Connection line */
+.conn-line { cursor: pointer; transition: stroke .15s ease, stroke-width .15s ease; }
+.conn-line:hover { stroke-width: 5 !important; filter: drop-shadow(0 0 5px rgba(37,99,235,0.4)); }
+.conn-line.selected { stroke: #ef4444 !important; stroke-width: 5 !important; }
+.conn-hit-area { cursor: pointer; stroke: transparent; fill: none; stroke-width: 18; }
+.conn-delete-btn { cursor: pointer; opacity: 0.92; }
+.conn-delete-btn:hover { opacity: 1; transform: scale(1.1); }
+
+/* Part card styling */
+.part-card { cursor: pointer; }
 .part-card > rect { transition: stroke-width .12s ease, filter .12s ease; }
-.part-card:hover > rect, .part-card:focus > rect { stroke-width: 4; filter: drop-shadow(0 5px 8px rgba(0, 0, 0, .24)); }
+.part-card:hover > rect { stroke-width: 2.5; stroke: var(--st-primary-color); filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .2)); }
+.part-remove-btn { cursor: pointer; opacity: 0; transition: opacity .12s ease; }
+.part-card:hover .part-remove-btn { opacity: 0.95; }
+.part-remove-btn:hover { opacity: 1; }
+
 .fishbone-hint { position: absolute; right: 12px; bottom: 10px; padding: 5px 8px; border-radius: 6px; color: var(--st-secondary-text-color); background: color-mix(in srgb, var(--st-background-color) 88%, transparent); font-size: .75rem; pointer-events: none; }
-.fishbone-tooltip { position: absolute; z-index: 5; width: 300px; display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 10px; border: 1px solid var(--st-primary-color); border-radius: 10px; background: var(--st-background-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .24); pointer-events: none; }
+.fishbone-tooltip { position: absolute; z-index: 20; width: 300px; display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 10px; border: 1px solid var(--st-primary-color); border-radius: 10px; background: var(--st-background-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .24); pointer-events: none; }
 .fishbone-tooltip[hidden] { display: none; }
 .fishbone-tooltip img, #tooltip-no-image { width: 112px; height: 88px; border-radius: 7px; object-fit: contain; background: var(--st-secondary-background-color); }
 #tooltip-no-image { display: grid; place-items: center; color: var(--st-secondary-text-color); font-size: .8rem; }
@@ -64,10 +193,26 @@ _CSS = """
 .tooltip-copy strong { color: var(--st-primary-color); overflow-wrap: anywhere; }
 .tooltip-copy span { line-height: 1.25; }
 .tooltip-copy small { color: var(--st-secondary-text-color); line-height: 1.35; }
+
+/* Modals */
+.canvas-modal { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.canvas-modal[hidden] { display: none; }
+.modal-card { background: var(--st-background-color); border: 1px solid var(--st-border-color); border-radius: 12px; padding: 22px; max-width: 440px; width: 90%; box-shadow: 0 16px 36px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 12px; }
+.modal-card h4 { margin: 0; font-size: 1.15rem; color: var(--st-text-color); }
+.modal-card p { margin: 0; font-size: .88rem; color: var(--st-secondary-text-color); line-height: 1.4; }
+.modal-form { display: flex; flex-direction: column; gap: 10px; }
+.modal-label { font-size: .84rem; font-weight: 600; display: flex; flex-direction: column; gap: 4px; }
+.modal-select { padding: 8px 10px; border: 1px solid var(--st-border-color); border-radius: 6px; background: var(--st-background-color); color: var(--st-text-color); font-size: .88rem; }
+.modal-buttons { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.btn-modal { padding: 9px 14px; border: 1px solid var(--st-border-color); border-radius: 6px; font-weight: 600; font-size: .86rem; cursor: pointer; text-align: center; }
+.btn-primary { background: var(--st-primary-color); color: white; border-color: var(--st-primary-color); }
+.btn-cancel { background: transparent; color: var(--st-secondary-text-color); }
+.buffer-badge rect { fill: #1e293b; stroke: #94a3b8; stroke-width: 1.5; rx: 6px; }
+.buffer-badge text { fill: #f8fafc; font-size: 10px; font-weight: 700; user-select: none; }
+
 .fishbone-shell:fullscreen { width: 100vw; height: 100vh; min-height: 0; border: 0; border-radius: 0; }
 .fishbone-shell:fullscreen .fishbone-viewport { min-height: 0; }
 """
-
 
 _JS = """
 const SVG_NS = "http://www.w3.org/2000/svg"
@@ -83,6 +228,10 @@ function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value))
 }
 
+function snap(val, step = 20) {
+  return Math.round(val / step) * step
+}
+
 export default function(component) {
   const { data, parentElement } = component
   const shell = parentElement.querySelector(".fishbone-shell")
@@ -96,376 +245,983 @@ export default function(component) {
   const tooltipName = parentElement.querySelector("#tooltip-name")
   const tooltipMeta = parentElement.querySelector("#tooltip-meta")
   const summary = parentElement.querySelector("#fishbone-summary")
+
+  const palette = parentElement.querySelector("#fishbone-palette")
+  const paletteList = parentElement.querySelector("#palette-list")
+  const paletteCount = parentElement.querySelector("#palette-count")
+  const paletteSearch = parentElement.querySelector("#palette-search")
+  const paletteUnplacedOnly = parentElement.querySelector("#palette-unplaced-only")
+  const togglePaletteBtn = parentElement.querySelector("#toggle-palette")
+  const autoArrangeBtn = parentElement.querySelector("#auto-arrange")
+
+  const assemblyModal = parentElement.querySelector("#assembly-drop-modal")
+  const assemblyDropDesc = parentElement.querySelector("#assembly-drop-desc")
+  const assemblyBuiltSelect = parentElement.querySelector("#assembly-built-select")
+  const assemblyInstalledSelect = parentElement.querySelector("#assembly-installed-select")
+  const btnAssemblyConfirm = parentElement.querySelector("#btn-assembly-confirm")
+  const btnAssemblyCancel = parentElement.querySelector("#btn-assembly-cancel")
+
+  const addSectionBtn = parentElement.querySelector("#add-section-btn")
+  const addSectionModal = parentElement.querySelector("#add-section-modal")
+  const addSectionName = parentElement.querySelector("#add-section-name")
+  const addSectionType = parentElement.querySelector("#add-section-type")
+  const addSectionParentLabel = parentElement.querySelector("#add-section-parent-label")
+  const addSectionParent = parentElement.querySelector("#add-section-parent")
+  const btnAddSectionConfirm = parentElement.querySelector("#btn-add-section-confirm")
+  const btnAddSectionCancel = parentElement.querySelector("#btn-add-section-cancel")
+
   if (!shell || !viewport || !svg || !world || !data) return
 
   let state = instanceState.get(parentElement)
   if (!state) {
-    state = { scale: 1, x: 0, y: 0, dragging: false, pointerX: 0, pointerY: 0, fitted: false, signature: "" }
+    state = {
+      scale: 1, x: 0, y: 0, dragging: false, pointerX: 0, pointerY: 0, fitted: false, signature: "",
+      selectedConnId: null, selectedSectionId: null, pendingConnection: null,
+      hasUserInteracted: false, observerAttached: false
+    }
     instanceState.set(parentElement, state)
   }
   world.replaceChildren()
 
-  const sections = data.sections || []
-  const edges = data.edges || []
+  const sections = (data.sections || []).map(s => ({ ...s }))
+  const connections = (data.connections || []).map(c => ({ ...c }))
   const parts = data.parts || []
-  const dataSignature = `${sections.map((section) => section.id).join("|")}::${parts.map((part) => part.id).join("|")}`
+  const paletteItems = data.palette_items || []
+  const allSections = data.all_sections || sections
+
+  const dataSignature = `${sections.map(s => `${s.id}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}`).join("|")}::${paletteItems.length}`
   if (state.signature !== dataSignature) {
     state.signature = dataSignature
     state.fitted = false
   }
-  summary.textContent = `${sections.length} sections · ${parts.length} placed parts`
-  const containerLayer = svgElement("g", { class: "container-layer" })
-  const edgeLayer = svgElement("g", { class: "edge-layer" })
-  const partEdgeLayer = svgElement("g", { class: "part-edge-layer" })
-  const sectionLayer = svgElement("g", { class: "section-layer" })
-  const partLayer = svgElement("g", { class: "part-layer" })
-  world.append(containerLayer, edgeLayer, partEdgeLayer, sectionLayer, partLayer)
-  const sectionById = new Map(sections.map((section) => [section.id, section]))
-  const parentBySection = new Map()
-  const parentIdBySection = new Map()
-  const partsBySection = new Map()
-  const placedPartPositions = []
-  parts.forEach((part) => {
-    const group = partsBySection.get(part.section_id) || []
-    group.push(part)
-    partsBySection.set(part.section_id, group)
-  })
+  summary.textContent = `${sections.length} sections · ${connections.length} connections · ${parts.length} placed parts`
 
-  edges.forEach((edge) => {
-    const child = sectionById.get(edge.to)
-    if (child && child.type !== "Main spine") parentIdBySection.set(edge.to, edge.from)
-  })
-
-  const xSpacing = 390
-  const ySpacing = 245
-  const mainSections = sections
-    .filter((section) => section.type === "Main spine")
-    .sort((left, right) => Number(left.order) - Number(right.order))
-  let spineCursor = 0
-  mainSections.forEach((section) => {
-    const partCount = (partsBySection.get(section.id) || []).length
-    section.mainWidth = Math.max(220, 110 + partCount * 78)
-    section.sx = spineCursor + section.mainWidth / 2
-    section.sy = 0
-    spineCursor += section.mainWidth + 34
-  })
-
-  const rootSpineSection = (section) => {
-    let current = section
-    const visited = new Set()
-    while (current && current.type !== "Main spine" && current.type !== "Support Operations" && !visited.has(current.id)) {
-      visited.add(current.id)
-      current = sectionById.get(parentIdBySection.get(current.id))
-    }
-    return current && (current.type === "Main spine" || current.type === "Support Operations") ? current : null
+  // Palette toggle
+  togglePaletteBtn.onclick = () => {
+    palette.classList.toggle("collapsed")
   }
-  sections.filter((section) => section.type === "Subassembly").forEach((section) => {
-    const root = rootSpineSection(section)
-    if (root && root.type === "Main spine") {
-      const originalRootX = Number(root.x) * xSpacing
-      section.sx = Number(section.x) * xSpacing + (root.sx - originalRootX)
-      section.sy = Number(section.y || 0) * ySpacing
-    }
-  })
 
-  let minMainBoundX = mainSections.length > 0 ? (mainSections[0].sx - mainSections[0].mainWidth / 2) : 0
-  mainSections.forEach((s) => {
-    minMainBoundX = Math.min(minMainBoundX, s.sx - s.mainWidth / 2)
-    const pCount = (partsBySection.get(s.id) || []).length
-    if (pCount > 0) {
-      const leftPartX = s.sx - ((pCount - 1) / 2) * 78 - 45
-      minMainBoundX = Math.min(minMainBoundX, leftPartX)
+  // Add Section Modal Handling
+  if (addSectionBtn && addSectionModal) {
+    function updateAddSectionParentVisibility() {
+      const isAssembly = addSectionType ? addSectionType.value === "Subassembly" : true
+      if (addSectionParentLabel) {
+        addSectionParentLabel.style.display = isAssembly ? "flex" : "none"
+      }
+      if (addSectionParent) {
+        addSectionParent.replaceChildren()
+        const noneOpt = document.createElement("option")
+        noneOpt.value = ""
+        noneOpt.textContent = "(None - Root assembly)"
+        addSectionParent.appendChild(noneOpt)
+        allSections.forEach(s => {
+          const opt = document.createElement("option")
+          opt.value = s.id
+          opt.textContent = `${s.name}`
+          addSectionParent.appendChild(opt)
+        })
+      }
     }
-  })
-  sections.filter((s) => {
-    const root = rootSpineSection(s)
-    return root && root.type === "Main spine" && s.type === "Subassembly"
-  }).forEach((s) => {
-    minMainBoundX = Math.min(minMainBoundX, s.sx - 120)
-    const pCount = (partsBySection.get(s.id) || []).length
-    if (pCount > 0) {
-      minMainBoundX = Math.min(minMainBoundX, s.sx - 160)
+
+    addSectionBtn.onclick = () => {
+      if (addSectionName) addSectionName.value = ""
+      if (addSectionType) addSectionType.value = "Subassembly"
+      updateAddSectionParentVisibility()
+      addSectionModal.hidden = false
+      setTimeout(() => { if (addSectionName) addSectionName.focus() }, 50)
     }
-  })
 
-  const supportSections = sections
-    .filter((section) => section.type === "Support Operations")
-    .sort((left, right) => Number(left.order) - Number(right.order))
+    if (addSectionType) {
+      addSectionType.onchange = updateAddSectionParentVisibility
+    }
 
-  if (supportSections.length > 0) {
-    supportSections.forEach((section) => {
-      const partCount = (partsBySection.get(section.id) || []).length
-      section.supportWidth = Math.max(220, 110 + partCount * 78)
+    if (btnAddSectionCancel) {
+      btnAddSectionCancel.onclick = () => {
+        addSectionModal.hidden = true
+      }
+    }
+
+    if (btnAddSectionConfirm) {
+      btnAddSectionConfirm.onclick = () => {
+        const name = (addSectionName ? addSectionName.value : "").trim()
+        if (!name) {
+          alert("Please enter a section name.")
+          return
+        }
+        const categoryVal = addSectionType ? addSectionType.value : "Subassembly"
+        let chosenType = categoryVal
+        let parentId = null
+        if (categoryVal === "Support Operations") {
+          chosenType = "Support Operations"
+        } else {
+          parentId = addSectionParent && addSectionParent.value ? addSectionParent.value : null
+          chosenType = parentId ? "Subassembly" : "Main spine"
+        }
+        addSectionModal.hidden = true
+
+        let nextX = 160
+        let nextY = 200
+        if (sections.length > 0) {
+          const maxX = Math.max(...sections.map(s => s.grid_x || s.sx || 0))
+          const maxY = Math.max(...sections.map(s => s.grid_y || s.sy || 0))
+          if (chosenType === "Support Operations") {
+            nextX = snap(maxX + 260, 20)
+            nextY = -220
+          } else if (!parentId) {
+            nextX = snap(maxX + 320, 20)
+            nextY = 220
+          } else {
+            nextX = snap(maxX > 200 ? maxX - 100 : 200, 20)
+            nextY = snap(maxY + 200, 20)
+          }
+        }
+
+        component.setTriggerValue("create_section", {
+          name: name,
+          section_type: chosenType,
+          parent_id: parentId,
+          grid_x: nextX,
+          grid_y: nextY,
+        })
+      }
+    }
+  }
+
+  // Populate Palette
+  function renderPalette() {
+    paletteList.replaceChildren()
+    const query = (paletteSearch.value || "").toLowerCase().trim()
+    const unplacedOnly = paletteUnplacedOnly.checked
+    const placedPartIds = new Set(parts.map(p => p.part_id))
+
+    const filtered = paletteItems.filter(item => {
+      const isPlaced = placedPartIds.has(item.part_id)
+      if (unplacedOnly && isPlaced) return false
+      if (!query) return true
+      return (
+        (item.part_number || "").toLowerCase().includes(query) ||
+        (item.description || "").toLowerCase().includes(query)
+      )
     })
-    const supportGap = 40
-    const totalSupportWidth = supportSections.reduce((sum, s) => sum + s.supportWidth, 0) + (supportSections.length - 1) * supportGap
-    const containerPadding = 36
-    const boxWidth = Math.max(totalSupportWidth + containerPadding * 2, 340)
-    const marginToMain = 140
-    const boxRight = minMainBoundX - marginToMain
-    const boxLeft = boxRight - boxWidth
 
-    let supportCursor = boxLeft + containerPadding + (boxWidth - containerPadding * 2 - totalSupportWidth) / 2
-    supportSections.forEach((section) => {
-      section.sx = supportCursor + section.supportWidth / 2
-      section.sy = 0
-      supportCursor += section.supportWidth + supportGap
+    paletteCount.textContent = `${filtered.length} of ${paletteItems.length}`
+
+    filtered.forEach(item => {
+      const isPlaced = placedPartIds.has(item.part_id)
+      const card = document.createElement("div")
+      card.className = `palette-card${isPlaced ? " placed" : ""}`
+      card.draggable = true
+      card.dataset.partId = item.part_id
+      card.dataset.partNumber = item.part_number
+      card.dataset.isAssembly = String(Boolean(item.is_assembly))
+
+      if (item.image) {
+        const thumb = document.createElement("img")
+        thumb.className = "palette-thumb"
+        thumb.src = item.image
+        thumb.alt = item.part_number
+        card.appendChild(thumb)
+      } else {
+        const thumb = document.createElement("div")
+        thumb.className = "palette-no-thumb"
+        thumb.textContent = item.is_assembly ? "ASM" : "PART"
+        card.appendChild(thumb)
+      }
+
+      const info = document.createElement("div")
+      info.className = "palette-info"
+
+      const pn = document.createElement("div")
+      pn.className = "palette-pn"
+      pn.textContent = item.part_number
+      info.appendChild(pn)
+
+      const desc = document.createElement("div")
+      desc.className = "palette-desc"
+      desc.textContent = item.description || "—"
+      info.appendChild(desc)
+
+      const meta = document.createElement("div")
+      meta.className = "palette-meta"
+      meta.textContent = `Qty ${item.quantity || 1}`
+      if (item.is_assembly) {
+        const badge = document.createElement("span")
+        badge.className = "palette-badge"
+        badge.textContent = `Asm (${item.child_count})`
+        meta.appendChild(badge)
+      }
+      info.appendChild(meta)
+
+      card.appendChild(info)
+
+      card.ondragstart = (e) => {
+        e.dataTransfer.setData("application/json", JSON.stringify(item))
+        e.dataTransfer.effectAllowed = "copy"
+      }
+
+      paletteList.appendChild(card)
+    })
+  }
+
+  paletteSearch.oninput = renderPalette
+  paletteUnplacedOnly.onchange = renderPalette
+  renderPalette()
+
+  // Map parts by section
+  const partsBySection = new Map()
+  parts.forEach((part) => {
+    const sid = part.section_id
+    if (!partsBySection.has(sid)) partsBySection.set(sid, [])
+    partsBySection.get(sid).push(part)
+  })
+
+  // Group sections by connection hierarchy
+  const sectionById = new Map()
+  sections.forEach((sec, idx) => {
+    sec.sx = (sec.grid_x !== null && sec.grid_x !== undefined) ? Number(sec.grid_x) : (160 + (idx % 4) * 280)
+    sec.sy = (sec.grid_y !== null && sec.grid_y !== undefined) ? Number(sec.grid_y) : (160 + Math.floor(idx / 4) * 220)
+
+    const secParts = partsBySection.get(sec.id) || []
+    const cardW = 68
+    const gap = 8
+    const partsRowW = secParts.length * (cardW + gap) + 24
+    sec.secWidth = Math.max(220, partsRowW)
+    sec.secHeight = secParts.length > 0 ? 146 : 64
+
+    sectionById.set(sec.id, sec)
+  })
+
+  // Layers
+  const edgeLayer = svgElement("g", { id: "edge-layer" })
+  const sectionLayer = svgElement("g", { id: "section-layer" })
+  const ghostLayer = svgElement("g", { id: "ghost-layer" })
+  world.appendChild(edgeLayer)
+  world.appendChild(sectionLayer)
+  world.appendChild(ghostLayer)
+
+  // Auto-arrange sections logically
+  autoArrangeBtn.onclick = () => {
+    state.hasUserInteracted = false
+    const supportSections = sections.filter(s => s.type === "Support Operations")
+    const assemblySections = sections.filter(s => s.type !== "Support Operations")
+
+    let suppX = 140
+    supportSections.forEach((s) => {
+      s.autoX = snap(suppX, 20)
+      s.autoY = -220
+      suppX += s.secWidth + 50
     })
 
-    sections.filter((section) => section.type === "Subassembly").forEach((section) => {
-      const root = rootSpineSection(section)
-      if (root && root.type === "Support Operations") {
-        const originalRootX = Number(root.x) * xSpacing
-        section.sx = Number(section.x) * xSpacing + (root ? root.sx - originalRootX : 0)
-        section.sy = Number(section.y || 0) * ySpacing
+    // Assembly sections layout: identify outgoing connections
+    const outgoingMap = new Map()
+    connections.forEach(c => {
+      if (c.from_section_id && c.to_section_id) {
+        outgoingMap.set(c.from_section_id, c.to_section_id)
+      }
+    })
+    const incomingMap = new Map()
+    connections.forEach(c => {
+      if (c.from_section_id && c.to_section_id) {
+        if (!incomingMap.has(c.to_section_id)) incomingMap.set(c.to_section_id, [])
+        incomingMap.get(c.to_section_id).push(c.from_section_id)
       }
     })
 
-    const allSupportNodes = sections.filter((s) => {
-      if (s.type === "Support Operations") return true
-      const root = rootSpineSection(s)
-      return root && root.type === "Support Operations"
-    })
-    const minSupportX = Math.min(...allSupportNodes.map((s) => s.sx - (s.type === "Support Operations" ? s.supportWidth / 2 : 110))) - containerPadding
-    const maxSupportX = Math.max(...allSupportNodes.map((s) => s.sx + (s.type === "Support Operations" ? s.supportWidth / 2 : 110))) + containerPadding
-    const minSupportY = Math.min(...allSupportNodes.map((s) => s.sy - (s.type === "Support Operations" ? 150 : 60)))
-    const maxSupportY = Math.max(...allSupportNodes.map((s) => s.sy + (s.type === "Support Operations" ? 65 : 60)))
-    const finalBoxWidth = Math.max(maxSupportX - minSupportX, 340)
-    const finalBoxHeight = Math.max(maxSupportY - minSupportY, 215)
-    const finalBoxX = minSupportX
-    const finalBoxY = minSupportY
+    // Root sections (no outgoing connection to another section)
+    const roots = assemblySections.filter(s => !outgoingMap.has(s.id))
+    if (roots.length === 0 && assemblySections.length > 0) roots.push(assemblySections[0])
 
-    containerLayer.appendChild(svgElement("rect", {
-      x: finalBoxX, y: finalBoxY, width: finalBoxWidth, height: finalBoxHeight, rx: 16,
-      fill: "none", stroke: "#818cf8", "stroke-width": 2, "stroke-dasharray": "6 4", opacity: 0.85
-    }))
+    const visited = new Set()
+    let currentColumnX = 750
 
-    const badgeGroup = svgElement("g", { transform: `translate(${finalBoxX + 16} ${finalBoxY - 12})` })
-    badgeGroup.appendChild(svgElement("rect", {
-      x: 0, y: 0, width: 175, height: 24, rx: 6,
-      fill: "#6366f1"
-    }))
-    const badgeText = svgElement("text", {
-      x: 87, y: 12, "text-anchor": "middle", "dominant-baseline": "middle",
-      fill: "white", "font-size": 11, "font-weight": 700, "letter-spacing": "0.5px"
+    function layoutSubtree(nodeId, colX, startY) {
+      if (visited.has(nodeId)) return startY
+      visited.add(nodeId)
+      const sec = sectionById.get(nodeId)
+      if (!sec) return startY
+
+      const feeders = (incomingMap.get(nodeId) || []).filter(fid => !visited.has(fid))
+      let childY = startY
+      feeders.forEach(fid => {
+        childY = layoutSubtree(fid, colX - (sec.secWidth + 80), childY)
+      })
+
+      sec.autoX = snap(colX, 20)
+      sec.autoY = snap(feeders.length > 0 ? (startY + childY - 200) / 2 : startY, 20)
+      return Math.max(childY, startY + sec.secHeight + 60)
+    }
+
+    let rootY = 160
+    roots.forEach(r => {
+      rootY = layoutSubtree(r.id, currentColumnX, rootY) + 60
     })
-    badgeText.textContent = "SUPPORT OPERATIONS"
-    badgeGroup.appendChild(badgeText)
-    containerLayer.appendChild(badgeGroup)
+
+    // Any remaining assembly sections
+    assemblySections.forEach(s => {
+      if (!visited.has(s.id)) {
+        s.autoX = snap(currentColumnX - 350, 20)
+        s.autoY = snap(rootY, 20)
+        rootY += s.secHeight + 60
+      }
+    })
+
+    const positions = {}
+    sections.forEach(s => {
+      positions[s.id] = [s.autoX !== undefined ? s.autoX : s.sx, s.autoY !== undefined ? s.autoY : s.sy]
+    })
+    component.setTriggerValue("auto_arrange", { positions })
   }
 
-  edges.forEach((edge) => {
-    const start = sectionById.get(edge.from)
-    const end = sectionById.get(edge.to)
+  // Draw Connections (Smooth Parent / Child Flow Arrows)
+  connections.forEach((conn) => {
+    const start = sectionById.get(conn.from_section_id)
+    const end = sectionById.get(conn.to_section_id)
     if (!start || !end) return
-    if ((start.type === "Support Operations" && end.type === "Main spine") ||
-        (start.type === "Main spine" && end.type === "Support Operations")) return
-    if (end.type !== "Main spine" && end.type !== "Support Operations") parentBySection.set(end.id, start)
-    const bothMain = start.type === "Main spine" && end.type === "Main spine"
-    edgeLayer.appendChild(svgElement("line", {
-      x1: bothMain ? start.sx + start.mainWidth / 2 : start.sx,
-      y1: start.sy,
-      x2: bothMain ? end.sx - end.mainWidth / 2 : end.sx,
-      y2: end.sy,
-      stroke: "var(--st-border-color)", "stroke-width": 5, "stroke-linecap": "round"
-    }))
+
+    const isFromSupport = start.type === "Support Operations"
+    const isSelected = state.selectedConnId === conn.id
+
+    // Start from right handle of start section
+    const p1x = start.sx + start.secWidth / 2
+    const p1y = start.sy - start.secHeight / 2 + 21
+    // End at left border of target section
+    const p2x = end.sx - end.secWidth / 2
+    const p2y = end.sy - end.secHeight / 2 + 21
+
+    const cdx = Math.max(40, Math.abs(p2x - p1x) * 0.45)
+    const pathData = `M ${p1x} ${p1y} C ${p1x + cdx} ${p1y}, ${p2x - cdx} ${p2y}, ${p2x} ${p2y}`
+
+    let marker = "url(#arrow-flow)"
+    let color = "#2563eb"
+    if (isSelected) {
+      marker = "url(#arrow-selected)"
+      color = "#ef4444"
+    } else if (isFromSupport) {
+      marker = "url(#arrow-buffer)"
+      color = "#64748b"
+    }
+
+    const path = svgElement("path", {
+      d: pathData,
+      fill: "none",
+      stroke: color,
+      "stroke-width": isSelected ? 4.5 : 3,
+      "marker-end": marker,
+      class: `conn-line${isSelected ? " selected" : ""}`
+    })
+    if (isFromSupport) {
+      path.setAttribute("stroke-dasharray", "6 4")
+    }
+
+    const hitArea = svgElement("path", {
+      d: pathData,
+      class: "conn-hit-area"
+    })
+
+    const midX = (p1x + p2x) / 2
+    const midY = (p1y + p2y) / 2
+
+    hitArea.onclick = (e) => {
+      e.stopPropagation()
+      state.selectedConnId = isSelected ? null : conn.id
+      renderWorld()
+    }
+
+    edgeLayer.appendChild(path)
+    edgeLayer.appendChild(hitArea)
+
+    // Storage Buffer badge for Support Operations
+    if (isFromSupport && !isSelected) {
+      const bufGroup = svgElement("g", {
+        transform: `translate(${midX} ${midY})`,
+        class: "buffer-badge",
+        title: "Fabrication buffer / storage supermarket"
+      })
+      bufGroup.appendChild(svgElement("rect", {
+        x: -56, y: -12, width: 112, height: 24, rx: 6
+      }))
+      const bufTxt = svgElement("text", {
+        x: 0, y: 4, "text-anchor": "middle"
+      })
+      bufTxt.textContent = "📦 Buffer / Storage"
+      bufGroup.appendChild(bufTxt)
+      edgeLayer.appendChild(bufGroup)
+    }
+
+    // Selected Connection Delete Button
+    if (isSelected) {
+      const delGroup = svgElement("g", {
+        transform: `translate(${midX} ${midY})`,
+        class: "conn-delete-btn",
+        title: "Delete this connection"
+      })
+      delGroup.appendChild(svgElement("circle", { cx: 0, cy: 0, r: 12, fill: "#ef4444", stroke: "white", "stroke-width": 2 }))
+      const delText = svgElement("text", {
+        x: 0, y: 4, "text-anchor": "middle", fill: "white", "font-size": 13, "font-weight": 700
+      })
+      delText.textContent = "×"
+      delGroup.appendChild(delText)
+      delGroup.onclick = (e) => {
+        e.stopPropagation()
+        state.selectedConnId = null
+        component.setTriggerValue("delete_connection", { connection_id: conn.id })
+      }
+      edgeLayer.appendChild(delGroup)
+    }
   })
 
+  // Draw Simple Section Blocks
+  if (sections.length === 0) {
+    const emptyGroup = svgElement("g", { transform: "translate(340 180)" })
+    const emptyCard = svgElement("rect", {
+      x: -180, y: -50, width: 360, height: 100, rx: 12,
+      fill: "var(--st-secondary-background-color)", stroke: "var(--st-border-color)", "stroke-width": 1.5
+    })
+    emptyGroup.appendChild(emptyCard)
+    const emptyTitle = svgElement("text", {
+      x: 0, y: -15, "text-anchor": "middle", fill: "var(--st-text-color)", "font-size": 15, "font-weight": 700
+    })
+    emptyTitle.textContent = "Start Your Fishbone Diagram"
+    emptyGroup.appendChild(emptyTitle)
+    const emptySub = svgElement("text", {
+      x: 0, y: 15, "text-anchor": "middle", fill: "var(--st-secondary-text-color)", "font-size": 12
+    })
+    emptySub.textContent = "Click '➕ Add Section' in toolbar to create your first section"
+    emptyGroup.appendChild(emptySub)
+    world.appendChild(emptyGroup)
+  }
+
   sections.forEach((section) => {
-    const group = svgElement("g", { transform: `translate(${section.sx} ${section.sy})` })
-    const isMain = section.type === "Main spine"
     const isSupport = section.type === "Support Operations"
-    const sectionWidth = isMain ? section.mainWidth : (isSupport ? section.supportWidth : 216)
-    group.appendChild(svgElement("rect", {
-      x: -sectionWidth / 2, y: -29, width: sectionWidth, height: 58, rx: 14,
-      fill: isMain ? "var(--st-primary-color)" : (isSupport ? "#6366f1" : "var(--st-secondary-background-color)"),
-      stroke: isMain ? "var(--st-primary-color)" : (isSupport ? "#4f46e5" : "var(--st-primary-color)"), "stroke-width": 3
-    }))
+    const secParts = partsBySection.get(section.id) || []
+    const secWidth = section.secWidth
+    const secHeight = section.secHeight
+    const isSelected = state.selectedSectionId === section.id
+
+    const group = svgElement("g", {
+      class: `section-node${isSelected ? " selected" : ""}`,
+      transform: `translate(${section.sx} ${section.sy})`,
+      "data-section-id": section.id
+    })
+
+    // Card background
+    const bgRect = svgElement("rect", {
+      x: -secWidth / 2, y: -secHeight / 2, width: secWidth, height: secHeight, rx: 10,
+      fill: isSupport ? "#1e293b" : "var(--st-secondary-background-color)",
+      stroke: isSelected ? "#3b82f6" : (isSupport ? "#475569" : "var(--st-border-color)"),
+      "stroke-width": isSelected ? 3.5 : 2,
+      class: "section-node-rect"
+    })
+    if (isSelected) {
+      bgRect.setAttribute("filter", "drop-shadow(0 0 8px rgba(59,130,246,0.6))")
+    }
+    group.appendChild(bgRect)
+
+    // Header strip
+    const headerBg = svgElement("rect", {
+      x: -secWidth / 2, y: -secHeight / 2, width: secWidth, height: 42, rx: 10,
+      fill: isSupport ? "#334155" : "#1e40af"
+    })
+    group.appendChild(headerBg)
+
+    // Section title
     const label = svgElement("text", {
-      x: 0, y: -2, "text-anchor": "middle", "dominant-baseline": "middle",
-      fill: (isMain || isSupport) ? "white" : "var(--st-text-color)", "font-size": 15, "font-weight": 700
+      x: -secWidth / 2 + 12, y: -secHeight / 2 + 18,
+      fill: "white", "font-size": 13, "font-weight": 700
     })
     label.textContent = section.name
     group.appendChild(label)
+
+    // Subtitle / parts count
     const count = svgElement("text", {
-      x: 0, y: 17, "text-anchor": "middle",
-      fill: (isMain || isSupport) ? "rgba(255, 255, 255, 0.85)" : "var(--st-secondary-text-color)",
-      "font-size": 11
+      x: -secWidth / 2 + 12, y: -secHeight / 2 + 33,
+      fill: "rgba(255, 255, 255, 0.85)", "font-size": 10
     })
-    count.textContent = `${section.parts} part${section.parts === 1 ? "" : "s"}`
+    if (isSupport) {
+      count.textContent = `🏭 Fabrication / Support Ops · ${secParts.length} parts`
+    } else {
+      count.textContent = `${secParts.length} part${secParts.length === 1 ? "" : "s"} assigned`
+    }
     group.appendChild(count)
-    sectionLayer.appendChild(group)
 
-    const sectionParts = partsBySection.get(section.id) || []
-    const parentSection = parentBySection.get(section.id)
-    sectionParts.forEach((part, index) => {
-      let px
-      let py
-      if (parentSection) {
-        const dx = section.sx - parentSection.sx
-        const dy = section.sy - parentSection.sy
-        const length = Math.max(Math.hypot(dx, dy), 1)
-        // Keep fin photos away from the main spine and cluster them into a
-        // shorter portion of the fin. Staggering uses the perpendicular axis.
-        const fraction = sectionParts.length === 1
-          ? .62
-          : .42 + (index / (sectionParts.length - 1)) * .36
-        const compactOffsets = [0, 76, -76, 38, -38]
-        const offset = compactOffsets[index % compactOffsets.length]
-        px = parentSection.sx + dx * fraction + (-dy / length) * offset
-        py = parentSection.sy + dy * fraction + (dx / length) * offset
-        // Resolve collisions with photos already placed on this or nearby fins.
-        // Move outward along the fin until the cards have a small visual gap.
-        let attempts = 0
-        while (
-          placedPartPositions.some((position) => Math.abs(position.x - px) < 78 && Math.abs(position.y - py) < 88)
-          && attempts < 30
-        ) {
-          px += (dx / length) * 18
-          py += (dy / length) * 18
-          attempts += 1
-        }
-      } else {
-        const photoSpacing = 78
-        px = section.sx + (index - (sectionParts.length - 1) / 2) * photoSpacing
-        py = section.sy - 76
-      }
-      placedPartPositions.push({ x: px, y: py })
-      const card = svgElement("g", { class: "part-card", transform: `translate(${px} ${py})`, tabindex: 0 })
-      card.style.cursor = "pointer"
-      card.appendChild(svgElement("rect", {
-        x: -36, y: -36, width: 72, height: 82, rx: 9,
-        fill: "var(--st-background-color)",
-        stroke: isSupport ? "#6366f1" : "var(--st-primary-color)",
-        "stroke-width": 2
-      }))
-      if (part.image) {
-        card.appendChild(svgElement("image", {
-          href: part.image, x: -32, y: -32, width: 64, height: 60, preserveAspectRatio: "xMidYMid meet"
-        }))
-      } else {
-        const placeholder = svgElement("text", {
-          x: 0, y: -1, "text-anchor": "middle", fill: "var(--st-secondary-text-color)", "font-size": 11
-        })
-        placeholder.textContent = "No photo"
-        card.appendChild(placeholder)
-      }
-      const partNumber = svgElement("text", {
-        x: 0, y: 39, "text-anchor": "middle", fill: "var(--st-text-color)", "font-size": 10, "font-weight": 700
-      })
-      partNumber.textContent = part.part_number.length > 12 ? `${part.part_number.slice(0, 11)}…` : part.part_number
-      card.appendChild(partNumber)
-
-      const showTooltip = (event) => {
-        tooltipNumber.textContent = part.part_number
-        tooltipName.textContent = part.description || "No part name"
-        const use = part.use_description ? `Use: ${part.use_description} · ` : ""
-        tooltipMeta.textContent = `${use}${part.section_name} · Qty ${part.quantity} · ${part.models || "All models"}`
-        tooltipImage.hidden = !part.image
-        tooltipNoImage.hidden = Boolean(part.image)
-        if (part.image) tooltipImage.src = part.image
-        tooltip.hidden = false
-        const bounds = viewport.getBoundingClientRect()
-        const width = 300
-        const x = clamp(event.clientX - bounds.left + 16, 8, Math.max(8, bounds.width - width - 8))
-        const y = clamp(event.clientY - bounds.top + 16, 8, Math.max(8, bounds.height - 122))
-        tooltip.style.left = `${x}px`
-        tooltip.style.top = `${y}px`
-      }
-      card.onpointerenter = showTooltip
-      card.onpointermove = showTooltip
-      card.onpointerleave = () => { tooltip.hidden = true }
-      card.onfocus = (event) => showTooltip({ clientX: viewport.getBoundingClientRect().left + viewport.clientWidth / 2, clientY: viewport.getBoundingClientRect().top + 80 })
-      card.onblur = () => { tooltip.hidden = true }
-      partLayer.appendChild(card)
+    // Connection Port Handle (on right border of header)
+    const port = svgElement("circle", {
+      cx: secWidth / 2, cy: -secHeight / 2 + 21, r: 8, class: "port-handle",
+      title: "Drag to connect this section to another section"
     })
+    port.onmousedown = (e) => {
+      e.stopPropagation()
+      state.pendingConnection = {
+        fromId: section.id,
+        fromName: section.name,
+        startX: section.sx + secWidth / 2,
+        startY: section.sy - secHeight / 2 + 21
+      }
+    }
+    group.appendChild(port)
+
+    // Parts Tray inside the block
+    if (secParts.length === 0) {
+      const placeholder = svgElement("text", {
+        x: 0, y: -secHeight / 2 + 54, "text-anchor": "middle",
+        fill: "var(--st-secondary-text-color)", "font-size": 10.5, "font-style": "italic"
+      })
+      placeholder.textContent = "Drop parts here from palette"
+      group.appendChild(placeholder)
+    } else {
+      const cardW = 68
+      const cardH = 78
+      const gap = 8
+
+      secParts.forEach((part, pIdx) => {
+        const cardX = -secWidth / 2 + 12 + pIdx * (cardW + gap)
+        const cardY = -secHeight / 2 + 48
+
+        const card = svgElement("g", {
+          class: "part-card",
+          "data-part-id": part.part_id,
+          "data-assignment-id": part.id
+        })
+
+        const cardRect = svgElement("rect", {
+          x: cardX, y: cardY, width: cardW, height: cardH, rx: 6,
+          fill: "var(--st-background-color)", stroke: "var(--st-border-color)", "stroke-width": 1.5
+        })
+        card.appendChild(cardRect)
+
+        if (part.image) {
+          const img = svgElement("image", {
+            href: part.image,
+            x: cardX + 4, y: cardY + 4,
+            width: cardW - 8, height: 48,
+            preserveAspectRatio: "xMidYMid meet"
+          })
+          card.appendChild(img)
+        } else {
+          const noImg = svgElement("text", {
+            x: cardX + cardW / 2, y: cardY + 28, "text-anchor": "middle",
+            fill: "var(--st-secondary-text-color)", "font-size": 9
+          })
+          noImg.textContent = "No photo"
+          card.appendChild(noImg)
+        }
+
+        const pnText = svgElement("text", {
+          x: cardX + cardW / 2, y: cardY + 68, "text-anchor": "middle",
+          fill: "var(--st-text-color)", "font-size": 9, "font-weight": 700
+        })
+        const pnStr = part.part_number || ""
+        pnText.textContent = pnStr.length > 10 ? `${pnStr.slice(0, 9)}…` : pnStr
+        card.appendChild(pnText)
+
+        // Remove (x) Button
+        const removeBtn = svgElement("g", {
+          class: "part-remove-btn",
+          title: "Remove part from section"
+        })
+        removeBtn.appendChild(svgElement("circle", {
+          cx: cardX + cardW - 6, cy: cardY + 6, r: 7.5,
+          fill: "#ef4444", stroke: "white", "stroke-width": 1.5
+        }))
+        const rmTxt = svgElement("text", {
+          x: cardX + cardW - 6, y: cardY + 9, "text-anchor": "middle",
+          fill: "white", "font-size": 10, "font-weight": 700
+        })
+        rmTxt.textContent = "×"
+        removeBtn.appendChild(rmTxt)
+        removeBtn.onclick = (e) => {
+          e.stopPropagation()
+          component.setTriggerValue("remove_part", {
+            assignment_id: part.id,
+            part_id: part.part_id,
+            section_id: section.id
+          })
+        }
+        card.appendChild(removeBtn)
+
+        // Hover tooltip
+        card.onmouseenter = (e) => {
+          if (part.image) {
+            tooltipImage.src = part.image
+            tooltipImage.hidden = false
+            tooltipNoImage.hidden = true
+          } else {
+            tooltipImage.hidden = true
+            tooltipNoImage.hidden = false
+          }
+          tooltipNumber.textContent = part.part_number
+          tooltipName.textContent = part.description || "—"
+          tooltipMeta.textContent = `Qty: ${part.quantity} · ${part.models || "All models"}${part.use_description ? ` · ${part.use_description}` : ""}`
+          tooltip.hidden = false
+          const rect = viewport.getBoundingClientRect()
+          tooltip.style.left = `${clamp(e.clientX - rect.left + 16, 12, rect.width - 320)}px`
+          tooltip.style.top = `${clamp(e.clientY - rect.top + 16, 12, rect.height - 130)}px`
+        }
+        card.onmouseleave = () => { tooltip.hidden = true }
+
+        group.appendChild(card)
+      })
+    }
+
+    // Section Dragging to move node & Click selection
+    group.onclick = (e) => {
+      e.stopPropagation()
+      state.selectedSectionId = (state.selectedSectionId === section.id) ? null : section.id
+      renderWorld()
+    }
+
+    group.onmousedown = (e) => {
+      if (e.target === port || e.target.closest(".part-card")) return
+      e.stopPropagation()
+      const startMouseX = e.clientX
+      const startMouseY = e.clientY
+      const origSx = section.sx
+      const origSy = section.sy
+      let didMove = false
+
+      const onMouseMove = (moveEvt) => {
+        const dx = (moveEvt.clientX - startMouseX) / state.scale
+        const dy = (moveEvt.clientY - startMouseY) / state.scale
+        if (Math.hypot(dx, dy) > 3) {
+          didMove = true
+          group.classList.add("dragging")
+          section.sx = origSx + dx
+          section.sy = origSy + dy
+          group.setAttribute("transform", `translate(${section.sx} ${section.sy})`)
+        }
+      }
+
+      const onMouseUp = () => {
+        window.removeEventListener("mousemove", onMouseMove)
+        window.removeEventListener("mouseup", onMouseUp)
+        group.classList.remove("dragging")
+        if (didMove) {
+          section.sx = snap(section.sx, 20)
+          section.sy = snap(section.sy, 20)
+          component.setTriggerValue("move_node", {
+            section_id: section.id,
+            grid_x: section.sx,
+            grid_y: section.sy
+          })
+        }
+      }
+
+      window.addEventListener("mousemove", onMouseMove)
+      window.addEventListener("mouseup", onMouseUp)
+    }
+
+    sectionLayer.appendChild(group)
   })
 
-  const applyTransform = () => {
+  // Connection Dragging Ghost Line
+  window.onmousemove = (e) => {
+    if (!state.pendingConnection) return
+    ghostLayer.replaceChildren()
+    const rect = svg.getBoundingClientRect()
+    const currX = (e.clientX - rect.left - state.x) / state.scale
+    const currY = (e.clientY - rect.top - state.y) / state.scale
+    const ghost = svgElement("line", {
+      x1: state.pendingConnection.startX,
+      y1: state.pendingConnection.startY,
+      x2: currX,
+      y2: currY,
+      stroke: "#3b82f6",
+      "stroke-width": 3,
+      "stroke-dasharray": "6 4"
+    })
+    ghostLayer.appendChild(ghost)
+  }
+
+  window.onmouseup = (e) => {
+    if (!state.pendingConnection) return
+    ghostLayer.replaceChildren()
+    const fromId = state.pendingConnection.fromId
+    state.pendingConnection = null
+
+    const rect = svg.getBoundingClientRect()
+    const currX = (e.clientX - rect.left - state.x) / state.scale
+    const currY = (e.clientY - rect.top - state.y) / state.scale
+
+    const targetSec = sections.find(s => {
+      const w = s.secWidth || 220
+      const h = s.secHeight || 64
+      return Math.abs(currX - s.sx) < w / 2 + 10 && Math.abs(currY - s.sy) < h / 2 + 10 && s.id !== fromId
+    })
+
+    if (targetSec) {
+      component.setTriggerValue("create_connection", {
+        from_section_id: fromId,
+        to_section_id: targetSec.id,
+        connection_type: "subassembly"
+      })
+    }
+  }
+
+  // HTML5 Drag and Drop into SVG
+  svg.ondragover = (e) => {
+    e.preventDefault()
+    const rect = svg.getBoundingClientRect()
+    const currX = (e.clientX - rect.left - state.x) / state.scale
+    const currY = (e.clientY - rect.top - state.y) / state.scale
+
+    document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+
+    const targetSec = sections.find(s => {
+      const w = s.secWidth || 220
+      const h = s.secHeight || 64
+      return Math.abs(currX - s.sx) < w / 2 && Math.abs(currY - s.sy) < h / 2
+    })
+    if (targetSec) {
+      const nodeElem = parentElement.querySelector(`[data-section-id="${targetSec.id}"]`)
+      if (nodeElem) nodeElem.classList.add("section-drop-hover")
+    }
+  }
+
+  svg.ondragleave = () => {
+    document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+  }
+
+  svg.ondrop = (e) => {
+    e.preventDefault()
+    document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+    const rawData = e.dataTransfer.getData("application/json")
+    if (!rawData) return
+    const item = JSON.parse(rawData)
+
+    const rect = svg.getBoundingClientRect()
+    const currX = (e.clientX - rect.left - state.x) / state.scale
+    const currY = (e.clientY - rect.top - state.y) / state.scale
+
+    const targetSec = sections.find(s => {
+      const w = s.secWidth || 220
+      const h = s.secHeight || 64
+      return Math.abs(currX - s.sx) < w / 2 && Math.abs(currY - s.sy) < h / 2
+    })
+    if (!targetSec) return
+
+    if (item.is_assembly) {
+      assemblyDropDesc.textContent = `Placing assembly ${item.part_number} (${item.child_count} subcomponents). Select built and installed sections:`
+      assemblyBuiltSelect.replaceChildren()
+      assemblyInstalledSelect.replaceChildren()
+      allSections.forEach(s => {
+        const opt1 = document.createElement("option")
+        opt1.value = s.id
+        opt1.textContent = s.name
+        if (s.id === targetSec.id) opt1.selected = true
+        assemblyBuiltSelect.appendChild(opt1)
+
+        const opt2 = document.createElement("option")
+        opt2.value = s.id
+        opt2.textContent = s.name
+        if (s.id === targetSec.parent_id) opt2.selected = true
+        assemblyInstalledSelect.appendChild(opt2)
+      })
+      assemblyModal.hidden = false
+
+      btnAssemblyConfirm.onclick = () => {
+        assemblyModal.hidden = true
+        component.setTriggerValue("drop_assembly", {
+          assembly_part_id: item.part_id,
+          built_section_id: assemblyBuiltSelect.value,
+          installed_section_id: assemblyInstalledSelect.value,
+        })
+      }
+      btnAssemblyCancel.onclick = () => {
+        assemblyModal.hidden = true
+      }
+    } else {
+      component.setTriggerValue("drop_part", {
+        part_id: item.part_id,
+        section_id: targetSec.id,
+        quantity: item.quantity || 1,
+        use_description: ""
+      })
+    }
+  }
+
+  // Viewport Pan and Zoom
+  function updateTransform() {
     world.setAttribute("transform", `translate(${state.x} ${state.y}) scale(${state.scale})`)
   }
-  const fit = () => {
-    const bounds = world.getBBox()
-    const width = Math.max(viewport.clientWidth, 300)
-    const height = Math.max(viewport.clientHeight, 300)
-    if (!bounds.width || !bounds.height) return
-    state.scale = clamp(Math.min((width - 70) / bounds.width, (height - 70) / bounds.height), .08, 1.35)
-    state.x = (width - bounds.width * state.scale) / 2 - bounds.x * state.scale
-    state.y = (height - bounds.height * state.scale) / 2 - bounds.y * state.scale
-    applyTransform()
-  }
-  const zoomAtCenter = (factor) => {
-    const cx = viewport.clientWidth / 2
-    const cy = viewport.clientHeight / 2
-    const next = clamp(state.scale * factor, .08, 4)
-    state.x = cx - (cx - state.x) * next / state.scale
-    state.y = cy - (cy - state.y) * next / state.scale
-    state.scale = next
-    applyTransform()
+
+  function renderWorld() {
+    exportDefaultFunction({ data, parentElement })
   }
 
-  svg.onwheel = (event) => {
-    event.preventDefault()
-    const bounds = svg.getBoundingClientRect()
-    const px = event.clientX - bounds.left
-    const py = event.clientY - bounds.top
-    const next = clamp(state.scale * (event.deltaY < 0 ? 1.12 : .89), .08, 4)
-    state.x = px - (px - state.x) * next / state.scale
-    state.y = py - (py - state.y) * next / state.scale
-    state.scale = next
-    applyTransform()
+  function fitView() {
+    const rect = viewport.getBoundingClientRect()
+    if (!rect || rect.width <= 50 || rect.height <= 50) {
+      return false
+    }
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+
+    if (sections.length === 0) {
+      minX = 140
+      maxX = 540
+      minY = 110
+      maxY = 250
+    } else {
+      sections.forEach(s => {
+        const hw = (s.secWidth || 220) / 2
+        const hh = (s.secHeight || 64) / 2
+        minX = Math.min(minX, s.sx - hw)
+        maxX = Math.max(maxX, s.sx + hw)
+        minY = Math.min(minY, s.sy - hh)
+        maxY = Math.max(maxY, s.sy + hh)
+      })
+      connections.forEach(c => {
+        const start = sectionById.get(c.from_section_id)
+        const end = sectionById.get(c.to_section_id)
+        if (start && end) {
+          minX = Math.min(minX, start.sx, end.sx)
+          maxX = Math.max(maxX, start.sx, end.sx)
+          minY = Math.min(minY, start.sy, end.sy)
+          maxY = Math.max(maxY, start.sy, end.sy)
+        }
+      })
+    }
+
+    const padX = 50
+    const padY = 50
+    const contentW = Math.max(maxX - minX + padX * 2, 200)
+    const contentH = Math.max(maxY - minY + padY * 2, 160)
+    const midX = (minX + maxX) / 2
+    const midY = (minY + maxY) / 2
+
+    const availW = Math.max(rect.width - 40, 100)
+    const availH = Math.max(rect.height - 40, 100)
+    const fitScale = clamp(Math.min(availW / contentW, availH / contentH), 0.25, 1.35)
+
+    state.scale = fitScale
+    state.x = rect.width / 2 - midX * fitScale
+    state.y = rect.height / 2 - midY * fitScale
+    updateTransform()
+    state.fitted = true
+    return true
   }
-  svg.onpointerdown = (event) => {
+
+  if (!state.fitted) {
+    const ok = fitView()
+    if (!ok) {
+      requestAnimationFrame(() => {
+        if (!state.fitted) fitView()
+      })
+    }
+  } else {
+    updateTransform()
+  }
+
+  // Setup ResizeObserver and IntersectionObserver so canvas defaults to Fit screen when clicked or revealed
+  if (!state.observerAttached && typeof ResizeObserver !== "undefined") {
+    state.observerAttached = true
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect
+        if (width > 80 && height > 80) {
+          if (!state.fitted || !state.hasUserInteracted) {
+            requestAnimationFrame(() => {
+              fitView()
+            })
+          }
+        }
+      }
+    })
+    ro.observe(viewport)
+
+    if (typeof IntersectionObserver !== "undefined") {
+      const io = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            if (!state.fitted || !state.hasUserInteracted) {
+              requestAnimationFrame(() => {
+                fitView()
+              })
+            }
+          }
+        }
+      })
+      io.observe(shell)
+    }
+  }
+
+  // Pan interaction
+  svg.onmousedown = (e) => {
+    if (e.target !== svg && e.target.tagName !== "svg") return
     state.dragging = true
-    state.pointerX = event.clientX
-    state.pointerY = event.clientY
-    svg.setPointerCapture(event.pointerId)
+    state.pointerX = e.clientX
+    state.pointerY = e.clientY
     svg.classList.add("dragging")
   }
-  svg.onpointermove = (event) => {
+  window.addEventListener("mousemove", (e) => {
     if (!state.dragging) return
-    state.x += event.clientX - state.pointerX
-    state.y += event.clientY - state.pointerY
-    state.pointerX = event.clientX
-    state.pointerY = event.clientY
-    applyTransform()
-  }
-  svg.onpointerup = svg.onpointercancel = (event) => {
-    state.dragging = false
-    svg.classList.remove("dragging")
-    if (svg.hasPointerCapture(event.pointerId)) svg.releasePointerCapture(event.pointerId)
-  }
-  parentElement.querySelector("#zoom-in").onclick = () => zoomAtCenter(1.2)
-  parentElement.querySelector("#zoom-out").onclick = () => zoomAtCenter(.83)
-  parentElement.querySelector("#fit-view").onclick = fit
-  parentElement.querySelector("#full-screen").onclick = async () => {
-    if (document.fullscreenElement === shell) await document.exitFullscreen()
-    else await shell.requestFullscreen()
-    setTimeout(fit, 80)
-  }
-  if (!state.fitted) {
-    state.fitted = true
-    requestAnimationFrame(() => requestAnimationFrame(fit))
-  } else {
-    applyTransform()
-  }
-  const resizeObserver = new ResizeObserver((entries) => {
-    const bounds = entries[0]?.contentRect
-    if (!bounds || !bounds.width || !bounds.height) return
-    if (Math.abs((state.lastWidth || 0) - bounds.width) > 2 || Math.abs((state.lastHeight || 0) - bounds.height) > 2) {
-      state.lastWidth = bounds.width
-      state.lastHeight = bounds.height
-      requestAnimationFrame(fit)
+    state.hasUserInteracted = true
+    state.x += (e.clientX - state.pointerX)
+    state.y += (e.clientY - state.pointerY)
+    state.pointerX = e.clientX
+    state.pointerY = e.clientY
+    updateTransform()
+  })
+  window.addEventListener("mouseup", () => {
+    if (state.dragging) {
+      state.dragging = false
+      svg.classList.remove("dragging")
     }
   })
-  resizeObserver.observe(viewport)
-  return () => resizeObserver.disconnect()
+
+  // Zoom interaction
+  viewport.onwheel = (e) => {
+    e.preventDefault()
+    state.hasUserInteracted = true
+    const rect = viewport.getBoundingClientRect()
+    const mouseX = e.clientX - rect.left
+    const mouseY = e.clientY - rect.top
+    const delta = e.deltaY < 0 ? 1.12 : 0.89
+    const newScale = clamp(state.scale * delta, 0.2, 3.0)
+    state.x = mouseX - (mouseX - state.x) * (newScale / state.scale)
+    state.y = mouseY - (mouseY - state.y) * (newScale / state.scale)
+    state.scale = newScale
+    updateTransform()
+  }
+
+  parentElement.querySelector("#zoom-in").onclick = () => {
+    state.hasUserInteracted = true
+    const rect = viewport.getBoundingClientRect()
+    const cx = rect.width / 2
+    const cy = rect.height / 2
+    const newScale = clamp(state.scale * 1.2, 0.2, 3.0)
+    state.x = cx - (cx - state.x) * (newScale / state.scale)
+    state.y = cy - (cy - state.y) * (newScale / state.scale)
+    state.scale = newScale
+    updateTransform()
+  }
+  parentElement.querySelector("#zoom-out").onclick = () => {
+    state.hasUserInteracted = true
+    const rect = viewport.getBoundingClientRect()
+    const cx = rect.width / 2
+    const cy = rect.height / 2
+    const newScale = clamp(state.scale / 1.2, 0.2, 3.0)
+    state.x = cx - (cx - state.x) * (newScale / state.scale)
+    state.y = cy - (cy - state.y) * (newScale / state.scale)
+    state.scale = newScale
+    updateTransform()
+  }
+  parentElement.querySelector("#fit-view").onclick = () => {
+    state.hasUserInteracted = false
+    fitView()
+  }
+  parentElement.querySelector("#full-screen").onclick = () => {
+    if (!document.fullscreenElement) {
+      shell.requestFullscreen().catch(() => {})
+    } else {
+      document.exitFullscreen().catch(() => {})
+    }
+  }
 }
 """
 
-
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "interactive_fishbone_compact_fins",
+    "paag_interactive_fishbone_builder_v7",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -496,7 +1252,10 @@ def _thumbnail_data_url(image_path: str, modified_ns: int) -> str:
 
 
 def part_thumbnail(image_path: object) -> str:
-    path = Path(str(image_path or ""))
+    raw = str(image_path or "").strip()
+    if raw.startswith(("http://", "https://", "data:")):
+        return raw
+    path = Path(raw)
     try:
         return _thumbnail_data_url(str(path), path.stat().st_mtime_ns)
     except OSError:
@@ -505,14 +1264,49 @@ def part_thumbnail(image_path: object) -> str:
 
 def interactive_fishbone(
     sections: list[dict],
-    edges: list[dict],
+    connections: list[dict],
     parts: list[dict],
+    palette_items: list[dict] | None = None,
+    all_sections: list[dict] | None = None,
     *,
     key: str,
-) -> None:
-    _FISHBONE_COMPONENT(
-        key=key,
-        data={"sections": sections, "edges": edges, "parts": parts},
-        width="stretch",
-        height="content",
-    )
+    on_create_section: Callable[[], None] | None = None,
+    on_move_node: Callable[[], None] | None = None,
+    on_auto_arrange: Callable[[], None] | None = None,
+    on_create_connection: Callable[[], None] | None = None,
+    on_delete_connection: Callable[[], None] | None = None,
+    on_drop_part: Callable[[], None] | None = None,
+    on_drop_assembly: Callable[[], None] | None = None,
+    on_remove_part: Callable[[], None] | None = None,
+) -> Any:
+    """Render the simplified interactive Fishbone builder canvas with simple blocks and direct parent/child flow."""
+    kwargs = {
+        "key": key,
+        "data": {
+            "sections": sections,
+            "connections": connections,
+            "parts": parts,
+            "palette_items": palette_items or [],
+            "all_sections": all_sections or sections,
+        },
+        "width": "stretch",
+        "height": "content",
+    }
+    if on_create_section:
+        kwargs["on_create_section_change"] = on_create_section
+    if on_move_node:
+        kwargs["on_move_node_change"] = on_move_node
+    if on_auto_arrange:
+        kwargs["on_auto_arrange_change"] = on_auto_arrange
+    if on_create_connection:
+        kwargs["on_create_connection_change"] = on_create_connection
+    if on_delete_connection:
+        kwargs["on_delete_connection_change"] = on_delete_connection
+    if on_drop_part:
+        kwargs["on_drop_part_change"] = on_drop_part
+    if on_drop_assembly:
+        kwargs["on_drop_assembly_change"] = on_drop_assembly
+    if on_remove_part:
+        kwargs["on_remove_part_change"] = on_remove_part
+
+    return _FISHBONE_COMPONENT(**kwargs)

@@ -20,13 +20,21 @@ st.html(
         color: #ffffff !important;
     }
     div[class*="st-key-destructive_"] button p,
-    div[class*="st-key-destructive_"] button span {
+    div[class*="st-key-destructive_"] button span,
+    div[class*="st-key-destructive_"] button [data-testid="stIconMaterial"] {
         color: #ffffff !important;
     }
     div[class*="st-key-destructive_"] button:hover {
         background-color: #a71919 !important;
         border-color: #a71919 !important;
         color: #ffffff !important;
+    }
+    div[class*="st-key-destructive_"] button:focus,
+    div[class*="st-key-destructive_"] button:active {
+        background-color: #8e0000 !important;
+        border-color: #8e0000 !important;
+        color: #ffffff !important;
+        box-shadow: none !important;
     }
     div[class*="st-key-destructive_"] button:disabled {
         opacity: 0.45;
@@ -77,6 +85,13 @@ if pending_project_id and any(
     str(project["id"]) == str(pending_project_id) for project in all_projects
 ):
     st.session_state.project_id = str(pending_project_id)
+    st.session_state.scenario_id = None
+    st.session_state.pop("global_project", None)
+    st.session_state.pop("global_scenario", None)
+
+valid_project_ids = {str(project["id"]) for project in all_projects}
+if st.session_state.get("project_id") not in valid_project_ids:
+    st.session_state.project_id = all_projects[0]["id"] if all_projects else None
     st.session_state.scenario_id = None
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
