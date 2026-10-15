@@ -186,7 +186,12 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
         self.assertEqual(len(handled_sb), 1)
         self.assertEqual(handled_sb[0].options, ["All", "Handled", "Not handled"])
 
-        model_sb = [sb for sb in app.selectbox if sb.label == "Model"]
+        model_sb = [
+            sb
+            for sb in app.selectbox
+            if sb.label == "Model"
+            and sb.key == f"process_parts_model_{self.scenario_id}_{self.section_id}"
+        ]
         self.assertEqual(len(model_sb), 1)
         self.assertIn("All models", model_sb[0].options)
         self.assertIn("Model-A", model_sb[0].options)

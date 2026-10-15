@@ -1092,6 +1092,14 @@ with tab_plan:
         yamazumi_rows = yamazumi_elements_for_section(project_id, scenario_id, section_id)
         section_has_yamazumi_work = not yamazumi_rows.empty
         if not yamazumi_rows.empty:
+            yamazumi_rows["work_type"] = (
+                yamazumi_rows["work_type"]
+                .fillna("Cycle")
+                .astype(str)
+                .str.strip()
+                .str.capitalize()
+                .replace({"": "Cycle"})
+            )
             yamazumi_rows["model_variants"] = yamazumi_rows.apply(
                 lambda row: parse_yamazumi_model_variants(
                     row.get("model_variants"), str(row.get("model_variant") or "Base")
@@ -1099,8 +1107,55 @@ with tab_plan:
                 axis=1,
             )
             reflected_in_process = yamazumi_rows["process_reflected"].fillna(0).astype(bool)
+            all_section_yamazumi_rows = yamazumi_rows.copy()
             yamazumi_rows = yamazumi_rows.loc[~reflected_in_process].copy()
+        else:
+            all_section_yamazumi_rows = yamazumi_rows.copy()
         section_has_available_yamazumi_work = not yamazumi_rows.empty
+
+        pitch_options: list[str] = ["All pitches"]
+        pitch_label_map: dict[str, str] = {
+            "All pitches": "All pitches",
+            "Unassigned": "Unassigned",
+        }
+        if not all_section_yamazumi_rows.empty:
+            for _, r in all_section_yamazumi_rows.iterrows():
+                p_num = str(r.get("pitch_number") or "").strip()
+                p_name = str(r.get("pitch_name") or "").strip()
+                if p_num and p_num not in pitch_label_map:
+                    pitch_options.append(p_num)
+                    pitch_label_map[p_num] = f"{p_num} — {p_name}" if p_name else p_num
+            if (
+                all_section_yamazumi_rows["pitch_number"].isna()
+                | all_section_yamazumi_rows["pitch_number"].astype(str).str.strip().eq("")
+            ).any():
+                if "Unassigned" not in pitch_options:
+                    pitch_options.append("Unassigned")
+
+        available_work_model_values: set[str] = set()
+        if (
+            not all_section_yamazumi_rows.empty
+            and "model_variants" in all_section_yamazumi_rows.columns
+        ):
+            for val in all_section_yamazumi_rows["model_variants"].dropna():
+                for m in split_filter_values(val):
+                    clean_m = m.strip()
+                    if clean_m and clean_m.casefold() not in {"all", "all models"}:
+                        available_work_model_values.add(
+                            model_labels.get(clean_m, clean_m)
+                        )
+        all_project_models = [
+            label
+            for label in model_labels.values()
+            if label != "Common name not defined"
+        ]
+        work_model_options = [
+            "All models",
+            *sorted(
+                set(all_project_models) | available_work_model_values,
+                key=str.casefold,
+            ),
+        ]
 
         section_placements = fishbone_part_assignments(project_id, scenario_id)
         if not section_placements.empty:
@@ -1155,10 +1210,11 @@ with tab_plan:
 
         if pairing_search and not yamazumi_rows.empty:
             yam_mask = pd.Series(False, index=yamazumi_rows.index)
-            for column in ["description", "area_name", "pitch_number", "pitch_name", "model_variants"]:
-                yam_mask |= yamazumi_rows[column].fillna("").astype(str).str.casefold().str.contains(
-                    pairing_search, regex=False
-                )
+            for column in ["description", "area_name", "pitch_number", "pitch_name", "model_variants", "work_type"]:
+                if column in yamazumi_rows.columns:
+                    yam_mask |= yamazumi_rows[column].fillna("").astype(str).str.casefold().str.contains(
+                        pairing_search, regex=False
+                    )
             yamazumi_rows = yamazumi_rows.loc[yam_mask].copy()
         if pairing_search and not section_placements.empty:
             placement_mask = pd.Series(False, index=section_placements.index)
@@ -1190,27 +1246,99 @@ with tab_plan:
         part_selection_expired = False
         with work_column.container(border=True, height="stretch"):
             st.markdown("#### Yamazumi work elements")
-            st.caption(
-                "Select the Cycle work element that uses the parts. Periodic and "
-                "Fluctuation work is managed in Yamazumi and is not shown here."
+            st.caption("Select the work element that uses the parts.")
+
+            work_filter_cols = st.columns([1, 1], vertical_alignment="bottom")
+            pitch_filter = work_filter_cols[0].selectbox(
+                "Pitch",
+                options=pitch_options,
+                format_func=lambda val: pitch_label_map.get(val, val),
+                key=f"process_yamazumi_pitch_{scenario_id}_{section_id}",
+                help="Filter Yamazumi work elements by pitch.",
             )
-            if yamazumi_rows.empty:
-                if pairing_search and section_has_available_yamazumi_work:
-                    st.info("No available Yamazumi work matches this filter.")
+            work_model_filter = work_filter_cols[1].selectbox(
+                "Model",
+                options=work_model_options,
+                key=f"process_yamazumi_model_{scenario_id}_{section_id}",
+                help="Filter work elements by vehicle model variant.",
+            )
+
+            has_active_work_filters = (
+                pitch_filter != "All pitches"
+                or work_model_filter != "All models"
+            )
+            filtered_yamazumi = yamazumi_rows.copy()
+            if not filtered_yamazumi.empty:
+                if pitch_filter != "All pitches":
+                    if pitch_filter == "Unassigned":
+                        pitch_mask = (
+                            filtered_yamazumi["pitch_number"].isna()
+                            | filtered_yamazumi["pitch_number"].astype(str).str.strip().eq("")
+                            | filtered_yamazumi["pitch_number"].astype(str).str.strip().casefold().eq("unassigned")
+                        )
+                    else:
+                        pitch_mask = (
+                            filtered_yamazumi["pitch_number"].fillna("").astype(str).str.strip()
+                            == pitch_filter
+                        )
+                    filtered_yamazumi = filtered_yamazumi.loc[pitch_mask].copy()
+
+                if work_model_filter != "All models":
+                    def _element_matches_model(variants_val: object) -> bool:
+                        items = split_filter_values(variants_val)
+                        if not items:
+                            return True
+                        target_num = model_numbers_by_label.get(work_model_filter, work_model_filter)
+                        for item in items:
+                            item_str = str(item).strip()
+                            if item_str.casefold() in {"all", "all models"}:
+                                return True
+                            mapped_label = model_labels.get(item_str, item_str)
+                            if (
+                                work_model_filter.casefold() == mapped_label.casefold()
+                                or work_model_filter.casefold() == item_str.casefold()
+                                or target_num.casefold() == item_str.casefold()
+                            ):
+                                return True
+                        return False
+
+                    filtered_yamazumi = filtered_yamazumi.loc[
+                        filtered_yamazumi["model_variants"].apply(_element_matches_model)
+                    ].copy()
+
+            work_sig_key = f"process_yamazumi_visible_rows_{scenario_id}_{section_id}"
+            current_work_ids = (
+                tuple(filtered_yamazumi["id"].astype(str))
+                if not filtered_yamazumi.empty
+                else ()
+            )
+            if (
+                work_sig_key in st.session_state
+                and st.session_state[work_sig_key] != current_work_ids
+            ):
+                st.session_state.pop(work_source_key, None)
+            st.session_state[work_sig_key] = current_work_ids
+
+            if filtered_yamazumi.empty:
+                if (pairing_search or has_active_work_filters) and section_has_available_yamazumi_work:
+                    st.info("No available Yamazumi work matches the selected filters.")
                 elif section_has_yamazumi_work:
-                    st.info("All Cycle work in this section is already reflected below.")
+                    st.info("All work in this section is already reflected below.")
                 else:
-                    st.info("No Cycle work is linked to this fishbone section.")
-                selected_yamazumi = yamazumi_rows
+                    st.info("No work is linked to this fishbone section.")
+                selected_yamazumi = filtered_yamazumi
             else:
                 work_event = selectable_dataframe(
-                    yamazumi_rows,
+                    filtered_yamazumi,
                     key=work_source_key,
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="multi-row",
                     column_order=[
-                        "pitch_number", "description", "time_s", "model_variants",
+                        "pitch_number",
+                        "description",
+                        "time_s",
+                        "model_variants",
                         "material_group_count",
                     ],
                     column_config={
@@ -1226,12 +1354,12 @@ with tab_plan:
                 valid_work_selection_rows = [
                     row
                     for row in work_selection_rows
-                    if isinstance(row, int) and 0 <= row < len(yamazumi_rows)
+                    if isinstance(row, int) and 0 <= row < len(filtered_yamazumi)
                 ]
                 work_selection_expired = len(valid_work_selection_rows) != len(
                     work_selection_rows
                 )
-                selected_yamazumi = yamazumi_rows.iloc[
+                selected_yamazumi = filtered_yamazumi.iloc[
                     [] if work_selection_expired else valid_work_selection_rows
                 ]
 

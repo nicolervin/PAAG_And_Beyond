@@ -230,11 +230,12 @@ def validate_process_part_option_pairings(
 def yamazumi_elements_for_section(
     project_id: str, scenario_id: str, section_id: str
 ) -> pd.DataFrame:
-    return pd.DataFrame(query(
+    rows = query(
         """SELECT element.id, element.process_element_id, element.description,
-                   element.time_s, element.model_variant, element.model_variants, element.work_type,
+                   element.time_s, element.model_variant, element.model_variants,
+                   COALESCE(NULLIF(TRIM(element.work_type), ''), 'Cycle') AS work_type,
                    element.process_sync_status, area.id AS area_id, area.name AS area_name,
-                   pitch.pitch_number, pitch.pitch_name,
+                   element.pitch_id AS pitch_id, pitch.pitch_number, pitch.pitch_name,
                    CASE WHEN process.id IS NULL THEN 0 ELSE 1 END AS process_reflected,
                    COUNT(DISTINCT group_row.id) AS material_group_count
            FROM yamazumi_elements element
@@ -248,13 +249,20 @@ def yamazumi_elements_for_section(
              ON group_row.work_element_id=element.process_element_id
             AND group_row.scenario_id=area.scenario_id
            WHERE element.project_id=? AND area.scenario_id=? AND area.section_id=?
-             AND LOWER(
-                   COALESCE(NULLIF(TRIM(element.work_type), ''), 'Cycle')
-                 )='cycle'
            GROUP BY element.id
            ORDER BY area.name, pitch.sequence, element.sequence""",
         (project_id, scenario_id, section_id),
-    ))
+    )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "id", "process_element_id", "description", "time_s", "model_variant",
+                "model_variants", "work_type", "process_sync_status", "area_id",
+                "area_name", "pitch_id", "pitch_number", "pitch_name", "process_reflected",
+                "material_group_count",
+            ]
+        )
+    return pd.DataFrame(rows)
 
 def yamazumi_context_for_process(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return Yamazumi source labels linked to Process at a Glance rows."""

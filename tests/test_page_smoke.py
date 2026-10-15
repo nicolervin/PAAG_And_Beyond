@@ -461,11 +461,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
 
         self.assertEqual(list(app.exception), [])
         self.assertEqual(
-            app.session_state.filtered_state.get(f"parts_selected_id_{self.project_id}"),
+            app.session_state.get(f"parts_selected_id_{self.project_id}"),
             target_id,
         )
         self.assertEqual(
-            app.session_state.filtered_state.get("part_catalog_filters_keyword"),
+            app.session_state.get("part_catalog_filters_keyword"),
             target_pnum,
         )
         self.assertTrue(any(f"Part Details · {target_pnum}" in h.value for h in app.subheader))
@@ -2016,7 +2016,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             for text_input in app.text_input
         ))
 
-    def test_process_pairing_source_shows_cycle_work_only(self) -> None:
+    def test_process_pairing_source_includes_all_work_types(self) -> None:
         cycle_id = self.add_process_pairing_source()
         source = store.query(
             """SELECT area_id, pitch_id FROM yamazumi_elements
@@ -2048,13 +2048,47 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         visible_descriptions = set(source_table["description"].astype(str))
 
         self.assertIn("Pair smoke component", visible_descriptions)
-        self.assertNotIn("Periodic pairing source", visible_descriptions)
-        self.assertNotIn("Fluctuation pairing source", visible_descriptions)
-        self.assertTrue(any(
-            "Periodic and Fluctuation work is managed in Yamazumi"
-            in caption.value
-            for caption in app.caption
-        ))
+        self.assertIn("Periodic pairing source", visible_descriptions)
+        self.assertIn("Fluctuation pairing source", visible_descriptions)
+        self.assertIn("work_type", source_table.columns)
+        self.assertIn("Periodic", set(source_table["work_type"]))
+        self.assertIn("Fluctuation", set(source_table["work_type"]))
+
+        pitch_sb = next(
+            sb for sb in app.selectbox
+            if sb.key == f"process_yamazumi_pitch_{self.scenario_id}_{self.section_id}"
+        )
+        self.assertIn("All pitches", pitch_sb.options)
+
+        self.assertFalse(
+            any(
+                sb.key == f"process_yamazumi_work_type_{self.scenario_id}_{self.section_id}"
+                for sb in app.selectbox
+            )
+        )
+
+        model_sb = next(
+            sb for sb in app.selectbox
+            if sb.key == f"process_yamazumi_model_{self.scenario_id}_{self.section_id}"
+        )
+        self.assertIn("All models", model_sb.options)
+        self.assertIn("Base", model_sb.options)
+
+        self.assertFalse(
+            any(
+                b.key == f"process_toggle_work_type_{self.scenario_id}_{self.section_id}"
+                for b in app.button
+            )
+        )
+
+        app = model_sb.select("Base").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        source_table_filtered = next(
+            table.value
+            for table in app.dataframe
+            if "material_group_count" in table.value.columns
+        )
+        self.assertEqual(len(source_table_filtered), 3)
 
     def test_process_pairing_without_parts_remains_unclassified(self) -> None:
         self.add_process_pairing_source()
