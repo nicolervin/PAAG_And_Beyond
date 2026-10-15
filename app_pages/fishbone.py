@@ -967,11 +967,13 @@ with fishbone_tab:
         bom_tree = pits_bom_model_tree(project_id)
         bom_nodes = bom_tree.get("nodes", []) if bom_tree else []
         asm_children_by_pid = {}
+        asm_children_by_pn = {}
         for node in bom_nodes:
-            np_id = str(node.get("part_id") or node.get("child_part_id") or "")
+            np_id = str(node.get("part_id") or node.get("child_part_id") or "").strip()
+            np_pn = str(node.get("part_number") or "").strip().upper()
             children = node.get("children", [])
-            if np_id and children:
-                asm_children_by_pid[np_id] = [
+            if children:
+                ch_records = [
                     {
                         "part_id": str(c.get("part_id") or c.get("child_part_id") or ""),
                         "part_number": str(c.get("part_number") or ""),
@@ -979,6 +981,10 @@ with fishbone_tab:
                     }
                     for c in children
                 ]
+                if np_id:
+                    asm_children_by_pid[np_id] = ch_records
+                if np_pn:
+                    asm_children_by_pn[np_pn] = ch_records
 
         palette_items = []
         seen_pids = set()
@@ -993,7 +999,7 @@ with fishbone_tab:
             if pn:
                 seen_pns.add(pn)
 
-            ch_list = asm_children_by_pid.get(pid, [])
+            ch_list = asm_children_by_pid.get(pid) or asm_children_by_pn.get(pn.upper(), [])
             is_asm = len(ch_list) > 0
             raw_qty = p.get("quantity")
             try:
