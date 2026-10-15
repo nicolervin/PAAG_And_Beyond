@@ -185,6 +185,7 @@ split_secondary_key = "split_workspace_secondary_url_path"
 split_ratio_key = "split_workspace_ratio"
 split_navigation_key = "split_workspace_navigation"
 split_divider_key = "split_workspace_divider"
+split_orientation_key = "split_workspace_orientation"
 
 secondary_url_path = str(st.session_state.get(split_secondary_key) or "")
 if secondary_url_path not in page_by_url_path or secondary_url_path == active_page_key:
@@ -343,35 +344,131 @@ if active_page_key != "parts" and secondary_url_path != "parts":
 if secondary_page is None:
     navigation.run()
 else:
-    split_ratio = max(
-        0.25,
-        min(0.75, float(st.session_state.get(split_ratio_key, 0.5))),
+    # Relax container horizontal margins so split panes autofill the available monitor space
+    st.html(
+        """
+        <style>
+        .main .block-container {
+            max-width: 100% !important;
+            padding-left: 1.5rem !important;
+            padding-right: 1.5rem !important;
+        }
+        div[data-testid="stHorizontalBlock"] {
+            width: 100% !important;
+        }
+        </style>
+        """
     )
-    primary_pane, divider_pane, secondary_pane = st.columns(
-        [split_ratio, 0.018, 1.0 - split_ratio],
-        gap="small",
-    )
-    with primary_pane:
-        _run_workspace_page(navigation)
-    with divider_pane:
-        split_divider(
-            split_ratio,
-            key=split_divider_key,
-            on_ratio_change=_on_split_ratio,
+    split_orientation = str(st.session_state.get(split_orientation_key) or "top_bottom")
+
+    if split_orientation == "side_by_side":
+        # Side-by-side mode (if user toggles to columns)
+        st.html(
+            """
+            <style>
+            .st-key-split_side_by_side > div[data-testid="stHorizontalBlock"] {
+                flex-wrap: nowrap !important;
+                width: 100% !important;
+            }
+            .st-key-split_side_by_side div[data-testid="stColumn"] {
+                min-width: 0 !important;
+            }
+            </style>
+            """
         )
-    with secondary_pane:
-        split_header = st.container(
-            horizontal=True,
-            horizontal_alignment="right",
-            vertical_alignment="center",
+        split_ratio = max(
+            0.25,
+            min(0.75, float(st.session_state.get(split_ratio_key, 0.5))),
         )
-        split_header.caption(f"Split pane · {secondary_page.title}")
-        if split_header.button(
-            "Close",
-            icon=":material/close:",
-            key="split_workspace_close_button",
-            help="Close the second pane",
-        ):
-            st.session_state.pop(split_secondary_key, None)
-            st.rerun()
-        _run_workspace_page(secondary_page, enable=True)
+        with st.container(key="split_side_by_side"):
+            primary_pane, divider_pane, secondary_pane = st.columns(
+                [split_ratio, 0.018, 1.0 - split_ratio],
+                gap="small",
+            )
+            with primary_pane:
+                _run_workspace_page(navigation)
+            with divider_pane:
+                split_divider(
+                    split_ratio,
+                    key=split_divider_key,
+                    on_ratio_change=_on_split_ratio,
+                )
+            with secondary_pane:
+                split_header = st.container(
+                    horizontal=True,
+                    horizontal_alignment="right",
+                    vertical_alignment="center",
+                )
+                split_header.caption(f"Split pane · {secondary_page.title}")
+                if split_header.button(
+                    "Top & Bottom",
+                    icon=":material/splitscreen:",
+                    key="split_to_top_bottom_btn",
+                    help="Switch to full-width Top & Bottom layout",
+                ):
+                    st.session_state[split_orientation_key] = "top_bottom"
+                    st.rerun()
+                if split_header.button(
+                    "Close",
+                    icon=":material/close:",
+                    key="split_workspace_close_button",
+                    help="Close the second pane",
+                ):
+                    st.session_state.pop(split_secondary_key, None)
+                    st.rerun()
+                _run_workspace_page(secondary_page, enable=True)
+    else:
+        # Default: Top & Bottom (stacked) mode — both screens span 100% full width of monitor!
+        with st.container(key="split_top_pane"):
+            _run_workspace_page(navigation)
+
+        st.markdown("---")
+        split_bar = st.container(border=True, key="split_divider_toolbar")
+        with split_bar:
+            b_info, b_swap, b_orient, b_close = st.columns(
+                [2.8, 1.1, 1.1, 0.9],
+                vertical_alignment="center",
+                gap="small",
+            )
+            with b_info:
+                top_icon = _material_icon_name(navigation.icon)
+                bottom_icon = _material_icon_name(secondary_page.icon)
+                st.markdown(
+                    f"**:material/splitscreen: Split Screen (Top & Bottom)** &nbsp;&bull;&nbsp; "
+                    f":material/{top_icon}: **Top:** {navigation.title} &nbsp;&bull;&nbsp; "
+                    f":material/{bottom_icon}: **Bottom:** {secondary_page.title}"
+                )
+            with b_swap:
+                if st.button(
+                    "Swap Panes",
+                    icon=":material/swap_vert:",
+                    key="split_swap_panes_btn",
+                    help="Swap top and bottom pages",
+                    width="stretch",
+                ):
+                    st.session_state["split_workspace_pending_navigation"] = secondary_url_path
+                    st.session_state[split_secondary_key] = active_page_key
+                    st.rerun()
+            with b_orient:
+                if st.button(
+                    "Side-by-side",
+                    icon=":material/view_column_2:",
+                    key="split_to_side_by_side_btn",
+                    help="Switch to side-by-side columns view",
+                    width="stretch",
+                ):
+                    st.session_state[split_orientation_key] = "side_by_side"
+                    st.rerun()
+            with b_close:
+                if st.button(
+                    "Close",
+                    icon=":material/close:",
+                    key="split_workspace_close_button",
+                    help="Close split view and return to full single screen",
+                    width="stretch",
+                ):
+                    st.session_state.pop(split_secondary_key, None)
+                    st.rerun()
+
+        with st.container(key="split_bottom_pane"):
+            _run_workspace_page(secondary_page, enable=True)
