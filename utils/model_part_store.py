@@ -5108,6 +5108,10 @@ def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: st
                 except (TypeError, ValueError):
                     pass
 
+    deleted_rows = set(ed_state.get("deleted_rows") or [])
+    if deleted_rows:
+        base_items = [it for idx, it in enumerate(base_items) if idx not in deleted_rows]
+
     added_rows = ed_state.get("added_rows") or []
     for add in added_rows:
         try:
@@ -5125,10 +5129,6 @@ def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: st
             "quantity": qty,
             "_uid": str(uuid4())[:8],
         })
-
-    deleted_rows = set(ed_state.get("deleted_rows") or [])
-    if deleted_rows:
-        base_items = [it for idx, it in enumerate(base_items) if idx not in deleted_rows]
 
     return base_items
 
