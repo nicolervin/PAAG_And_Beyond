@@ -922,6 +922,16 @@ def work_element_op_contexts(
                         element.id""",
             (scenario_id, project_id),
         ).fetchall()
+        conn_rows = conn.execute(
+            """SELECT from_section_id, to_section_id, connection_type
+               FROM assembly_section_connections WHERE project_id=?""",
+            (project_id,),
+        ).fetchall()
+
+    subassembly_destinations: dict[str, list[str]] = {}
+    for r in conn_rows:
+        if r["connection_type"] == "subassembly":
+            subassembly_destinations.setdefault(str(r["from_section_id"]), []).append(str(r["to_section_id"]))
 
     links_by_work: dict[str, list[sqlite3.Row]] = {}
     stack_rows: dict[str, list[sqlite3.Row]] = {}
@@ -1014,7 +1024,31 @@ def work_element_op_contexts(
                 if len(siblings) > 1:
                     branch_path.append(str(siblings.index(path_section_id) + 1))
             depth_designator = _op_id_depth_letter(depth) + "".join(branch_path)
-        return f"M{mainline_numbers[mainline_id]}S{lineage_number}{depth_designator}"
+
+        def find_mainlines(sid: str, visited_set: set[str]) -> list[str]:
+            if sid in visited_set:
+                return []
+            visited_set.add(sid)
+            sec = section_by_id.get(sid)
+            if not sec:
+                return []
+            if str(sec.get("section_type") or "") == "Main spine":
+                return [sid]
+            parents = subassembly_destinations.get(sid) or ([str(sec.get("parent_id"))] if sec.get("parent_id") else [])
+            roots: list[str] = []
+            for p in parents:
+                if p:
+                    roots.extend(find_mainlines(p, visited_set.copy()))
+            return list(dict.fromkeys(roots))
+
+        all_mainlines = find_mainlines(section_id, set())
+        mainline_nums = sorted([mainline_numbers[m] for m in all_mainlines if m in mainline_numbers])
+        if len(mainline_nums) > 1:
+            mainline_tag = "+".join(f"M{num}" for num in mainline_nums) + "."
+        else:
+            mainline_tag = f"M{mainline_numbers[mainline_id]}"
+
+        return f"{mainline_tag}S{lineage_number}{depth_designator}"
 
     section_order = {
         str(row["id"]): position

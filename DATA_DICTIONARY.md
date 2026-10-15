@@ -1485,3 +1485,36 @@ Scenario-specific Manufacturing Control Plan working draft
       ↓
 Future issued-document generation and approval (not implemented)
 ```
+
+## Proposed modules — pending owner review
+
+### Interactive Visual Fishbone Builder & Subassembly Series Flow (Phase 1 & Phase 2)
+
+- **Proposed by:** Nicole Ervin (Project Owner) & Antigravity
+- **Date proposed:** October 14, 2026
+- **Review status:** **Approved for implementation on branch `NE_fishbone_flow_Updates`**
+- **1. Connections:** Connects to `assembly_sections` (Fishbone framework spines/sections), `fishbone_part_assignments` (placed part occurrences in sections), `parts` / `pits_bom_occurrences` (Parts Catalog and BOM model tree), `manufacturing_assemblies` (Built and Installed sections), and downstream `yamazumi_areas` (linked to `assembly_sections`), `yamazumi_pitches`, and `work_elements` (Process at a Glance via live-derived Op IDs).
+- **2. Relationship to the critical thread:** Parts Catalog & BOM model tree -> placed into `fishbone_part_assignments` -> organized on the interactive canvas into `assembly_sections` with many-to-many flow lines in `assembly_section_connections` -> drives scenario-aware Yamazumi areas -> drives Op IDs (`M1+M2.S1a...`) in Process at a Glance.
+- **3. Scope:** Project-wide. `assembly_sections` (with `grid_x`, `grid_y`), `assembly_section_connections`, and `fishbone_part_assignments` belong to `projects`. When subassembly parts have `step_number` (Phase 2), it is project-wide. Fishbone structure creation does NOT automatically force or sync Yamazumi pitches ahead of time.
+- **4. Tables and fields:**
+  - Extended `assembly_sections`:
+    - `grid_x INTEGER DEFAULT NULL`: Saved canvas grid X coordinate for manual positioning.
+    - `grid_y INTEGER DEFAULT NULL`: Saved canvas grid Y coordinate for manual positioning.
+  - New `assembly_section_connections`:
+    - `id TEXT PRIMARY KEY`
+    - `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`
+    - `from_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE`
+    - `to_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE`
+    - `connection_type TEXT NOT NULL CHECK(connection_type IN ('subassembly', 'series', 'parallel'))`
+    - `sequence INTEGER NOT NULL DEFAULT 10`
+    - `created_at TEXT NOT NULL`
+    - `updated_at TEXT NOT NULL`
+    - `UNIQUE(project_id, from_section_id, to_section_id)`
+  - Phase 2 extension on `fishbone_part_assignments`:
+    - `step_number INTEGER NOT NULL DEFAULT 1`: Represents the subassembly step divider/station order along the spine.
+- **5. DESIGN_SYSTEM.md standards:**
+  - Layout: Stacked layout on `app_pages/fishbone.py` (interactive diagram canvas with collapsible parts palette on top, collapsible table editors directly below on the same page).
+  - Canvas interactions: Grid snap with manual positioning + Auto-arrange button. Visual connection handles between sections prompt for 'Connect in Series' or 'Feed as Subassembly'.
+  - BOM integration: Pulls from BOM model tree if available; prompts for quantity/use description if no BOM tree. Dropping an assembly prompts for Built section vs Installed section (components in Built, completed assembly part in Installed). Moving parts off an assembly warns when deviating from BOM structure.
+  - Deletions: Click to select + Delete key/icon for connections and part removal; section deletion opens the existing safe reparenting/deletion disclosure dialog.
+  - Persistence: Browser draft state with atomic **Save & Refresh** and **Undo** snapshot restoration. Audited with `record_audit_event()`.

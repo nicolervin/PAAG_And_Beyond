@@ -8,10 +8,26 @@ from utils import db_core as _db_core
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
 def assembly_sections(project_id: str) -> pd.DataFrame:
-    return pd.DataFrame(query(
+    rows = query(
         "SELECT * FROM assembly_sections WHERE project_id = ? ORDER BY sequence, name",
         (project_id,),
-    ))
+    )
+    if not rows:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "name": pd.Series(dtype="string"),
+            "section_type": pd.Series(dtype="string"),
+            "parent_id": pd.Series(dtype="string"),
+            "sequence": pd.Series(dtype="int64"),
+            "description": pd.Series(dtype="string"),
+            "active": pd.Series(dtype="int64"),
+            "grid_x": pd.Series(dtype="Int64"),
+            "grid_y": pd.Series(dtype="Int64"),
+            "created_at": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+        })
+    return pd.DataFrame(rows)
 
 def assembly_section_walk_order(project_id: str) -> pd.DataFrame:
     """Return Fishbone sections in deterministic depth-first framework order."""
@@ -666,6 +682,8 @@ def add_assembly_section(
     section_type: str,
     parent_id: str | None,
     description: str,
+    grid_x: int | None = None,
+    grid_y: int | None = None,
 ) -> str:
     name = name.strip()
     if not name:
@@ -688,9 +706,9 @@ def add_assembly_section(
             ).fetchone()[0]
             conn.execute(
                 """INSERT INTO assembly_sections
-                   (id, project_id, name, section_type, parent_id, sequence, description, active, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-                (section_id, project_id, name, section_type, parent_id, next_sequence, description.strip(), timestamp, timestamp),
+                   (id, project_id, name, section_type, parent_id, sequence, description, active, grid_x, grid_y, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                (section_id, project_id, name, section_type, parent_id, next_sequence, description.strip(), grid_x, grid_y, timestamp, timestamp),
             )
             _create_yamazumi_areas_for_section(
                 conn, project_id, section_id, name, timestamp
@@ -806,7 +824,8 @@ def fishbone_part_assignments(
     activity_clause = " AND COALESCE(activity.active, 1)=1" if scenario_id else ""
     params = (scenario_id, project_id) if scenario_id else (project_id,)
     return pd.DataFrame(query(
-        f"""SELECT a.id, a.project_id, a.part_id, a.section_id, a.sequence, a.quantity,
+        f"""SELECT a.id, a.project_id, a.part_id, a.section_id,
+                  COALESCE(a.step_number, 1) AS step_number, a.sequence, a.quantity,
                   a.use_description, a.notes, a.pits_sync_status, a.pits_quantity_updated_at,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
                   COALESCE(p.factory_nickname, '') AS factory_nickname,
@@ -816,7 +835,7 @@ def fishbone_part_assignments(
            JOIN assembly_sections s ON s.id = a.section_id
            {activity_join}
            WHERE a.project_id = ?{activity_clause}
-           ORDER BY s.sequence, a.sequence, p.part_number""",
+           ORDER BY s.sequence, a.step_number, a.sequence, p.part_number""",
         params,
     ))
 
@@ -885,6 +904,7 @@ def create_part_and_assign_to_section(
     placement_quantity: float,
     use_description: str = "",
     placement_notes: str = "",
+    step_number: int = 1,
 ) -> tuple[str, str, str]:
     """Create one catalog part and its first fishbone use in one transaction."""
     part_number = str(values.get("part_number") or "").strip()
@@ -947,14 +967,15 @@ def create_part_and_assign_to_section(
             ).fetchone()[0]
             conn.execute(
                 """INSERT INTO fishbone_part_assignments
-                   (id, project_id, part_id, section_id, sequence, quantity,
+                   (id, project_id, part_id, section_id, step_number, sequence, quantity,
                     use_description, notes, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     assignment_id,
                     project_id,
                     part_id,
                     section_id,
+                    int(step_number or 1),
                     next_sequence,
                     quantity,
                     str(use_description or "").strip(),
@@ -1028,6 +1049,7 @@ def assign_parts_to_section(
     section_id: str,
     use_description: str = "",
     *,
+    step_number: int = 1,
     allow_additional_use: bool = False,
     quantities_by_part: dict[str, float] | None = None,
 ) -> int:
@@ -1076,10 +1098,10 @@ def assign_parts_to_section(
             assignment_id = str(uuid4())
             conn.execute(
                 """INSERT INTO fishbone_part_assignments
-                   (id, project_id, part_id, section_id, sequence, quantity, use_description, notes, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)""",
+                   (id, project_id, part_id, section_id, step_number, sequence, quantity, use_description, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)""",
                 (
-                    assignment_id, project_id, part_id, section_id, next_sequence,
+                    assignment_id, project_id, part_id, section_id, int(step_number or 1), next_sequence,
                     quantity, use_description.strip(), timestamp,
                 ),
             )
@@ -1151,6 +1173,7 @@ def replace_fishbone_part_assignments(
                 raise ValueError("Fishbone quantities must be numbers greater than zero.")
             records.append((
                 str(row.get("id") or uuid4()), project_id, part_id, section_id,
+                int(row.get("step_number") or 1),
                 int(row.get("sequence") or 0), quantity,
                 str(row.get("use_description") or "").strip(),
                 str(row.get("notes") or "").strip(), timestamp,
@@ -1178,7 +1201,7 @@ def replace_fishbone_part_assignments(
                     "The part or Fishbone section of an approved PITS BOM use cannot be changed "
                     "here. Detach its occurrence first."
                 )
-            if round(float(desired[5]), 9) != round(float(linked["quantity"]), 9):
+            if round(float(desired[6]), 9) != round(float(linked["quantity"]), 9):
                 raise ValueError(
                     "The quantity of an approved PITS BOM use is determined by PITS and cannot be changed here. "
                     "Correct the quantity in PITS."
@@ -1199,13 +1222,13 @@ def replace_fishbone_part_assignments(
             )
         conn.executemany(
             """INSERT INTO fishbone_part_assignments
-               (id, project_id, part_id, section_id, sequence, quantity,
+               (id, project_id, part_id, section_id, step_number, sequence, quantity,
                 use_description, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
-                 sequence=excluded.sequence, quantity=excluded.quantity,
-                 use_description=excluded.use_description, notes=excluded.notes,
-                 updated_at=excluded.updated_at""",
+                 step_number=excluded.step_number, sequence=excluded.sequence,
+                 quantity=excluded.quantity, use_description=excluded.use_description,
+                 notes=excluded.notes, updated_at=excluded.updated_at""",
             records,
         )
     return len(records)
@@ -1321,6 +1344,10 @@ def fishbone_plan_snapshot(project_id: str) -> dict:
                 "SELECT * FROM assembly_grid_feature_visibility WHERE project_id=?",
                 (project_id,),
             ).fetchall()],
+            "connections": [dict(row) for row in conn.execute(
+                "SELECT * FROM assembly_section_connections WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
         }
 
 def fishbone_assignment_snapshot(project_id: str) -> list[dict]:
@@ -1368,6 +1395,7 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
             "DELETE FROM assembly_grid_feature_visibility WHERE project_id=?",
             (project_id,),
         )
+        conn.execute("DELETE FROM assembly_section_connections WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
         # Insert parents and children with empty parent IDs first, then reconnect them.
@@ -1379,6 +1407,7 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
                     "UPDATE assembly_sections SET parent_id=? WHERE id=? AND project_id=?",
                     (row["parent_id"], row["id"], project_id),
                 )
+        _insert_snapshot_rows(conn, "assembly_section_connections", snapshot.get("connections", []))
         _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
         _insert_snapshot_rows(conn, "manufacturing_assembly_components", assembly_components)
         _insert_snapshot_rows(conn, "assembly_grid_categories", grid_categories)
@@ -1452,7 +1481,304 @@ def update_fishbone_assignment_use(
             _conn=conn,
         )
 
-__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use']
+def assembly_section_connections(project_id: str) -> pd.DataFrame:
+    """Return all directed flow connections between sections for a project."""
+    return pd.DataFrame(query(
+        """SELECT * FROM assembly_section_connections
+           WHERE project_id = ?
+           ORDER BY sequence, created_at""",
+        (project_id,),
+    ))
+
+def save_assembly_section_connection(
+    project_id: str,
+    from_section_id: str,
+    to_section_id: str,
+    connection_type: str,
+    sequence: int = 10,
+    editor_name: str = "",
+) -> str:
+    """Create or update a flow connection between two sections."""
+    from_id = str(from_section_id).strip()
+    to_id = str(to_section_id).strip()
+    conn_type = str(connection_type).strip().lower()
+    if not from_id or not to_id:
+        raise ValueError("Both source and destination sections must be provided.")
+    if from_id == to_id:
+        raise ValueError("A section cannot connect to itself.")
+    if conn_type not in {"subassembly", "series", "parallel"}:
+        raise ValueError("Connection type must be 'subassembly', 'series', or 'parallel'.")
+    timestamp = now_iso()
+    with connection() as conn:
+        sections = conn.execute(
+            "SELECT id, name, section_type, parent_id FROM assembly_sections WHERE id IN (?, ?) AND project_id = ?",
+            (from_id, to_id, project_id),
+        ).fetchall()
+        if len(sections) < 2:
+            raise ValueError("One or both sections could not be found in this project.")
+        sec_by_id = {row["id"]: row for row in sections}
+        from_sec = sec_by_id[from_id]
+        to_sec = sec_by_id[to_id]
+
+        existing = conn.execute(
+            """SELECT id, connection_type FROM assembly_section_connections
+               WHERE project_id = ? AND from_section_id = ? AND to_section_id = ?""",
+            (project_id, from_id, to_id),
+        ).fetchone()
+        if existing:
+            conn_id = str(existing["id"])
+            conn.execute(
+                """UPDATE assembly_section_connections
+                   SET connection_type = ?, sequence = ?, updated_at = ?
+                   WHERE id = ?""",
+                (conn_type, sequence, timestamp, conn_id),
+            )
+        else:
+            conn_id = str(uuid4())
+            conn.execute(
+                """INSERT INTO assembly_section_connections (
+                       id, project_id, from_section_id, to_section_id, connection_type, sequence, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (conn_id, project_id, from_id, to_id, conn_type, sequence, timestamp, timestamp),
+            )
+        if conn_type in {"subassembly", "parallel"} and from_sec["section_type"] == "Subassembly":
+            conn.execute(
+                "UPDATE assembly_sections SET parent_id = ?, updated_at = ? WHERE id = ? AND project_id = ?",
+                (to_id, timestamp, from_id, project_id),
+            )
+        record_audit_event(
+            project_id,
+            "Fishbone framework",
+            "Save connection",
+            1,
+            str(editor_name or "").strip(),
+            {
+                "connection_id": conn_id,
+                "from_section_id": from_id,
+                "from_section_name": from_sec["name"],
+                "to_section_id": to_id,
+                "to_section_name": to_sec["name"],
+                "connection_type": conn_type,
+            },
+            _conn=conn,
+        )
+        return conn_id
+
+def delete_assembly_section_connection(
+    project_id: str,
+    connection_id: str,
+    editor_name: str = "",
+) -> None:
+    """Delete a flow connection and repair subassembly parent_id if needed."""
+    timestamp = now_iso()
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT id, from_section_id, to_section_id, connection_type
+               FROM assembly_section_connections WHERE id = ? AND project_id = ?""",
+            (connection_id, project_id),
+        ).fetchone()
+        if not row:
+            return
+        conn.execute(
+            "DELETE FROM assembly_section_connections WHERE id = ? AND project_id = ?",
+            (connection_id, project_id),
+        )
+        if row["connection_type"] == "subassembly":
+            other = conn.execute(
+                """SELECT to_section_id FROM assembly_section_connections
+                   WHERE project_id = ? AND from_section_id = ? AND connection_type = 'subassembly'
+                   LIMIT 1""",
+                (project_id, row["from_section_id"]),
+            ).fetchone()
+            new_parent = other["to_section_id"] if other else None
+            conn.execute(
+                "UPDATE assembly_sections SET parent_id = ?, updated_at = ? WHERE id = ? AND project_id = ?",
+                (new_parent, timestamp, row["from_section_id"], project_id),
+            )
+        record_audit_event(
+            project_id,
+            "Fishbone framework",
+            "Delete connection",
+            1,
+            str(editor_name or "").strip(),
+            {
+                "connection_id": connection_id,
+                "from_section_id": row["from_section_id"],
+                "to_section_id": row["to_section_id"],
+                "connection_type": row["connection_type"],
+            },
+            _conn=conn,
+        )
+
+def save_fishbone_canvas_positions(
+    project_id: str,
+    positions: dict[str, tuple[int | None, int | None]],
+    editor_name: str = "",
+) -> None:
+    """Persist grid_x, grid_y coordinates for Fishbone sections."""
+    if not positions:
+        return
+    timestamp = now_iso()
+    with connection() as conn:
+        for section_id, coords in positions.items():
+            gx = coords[0] if coords else None
+            gy = coords[1] if coords else None
+            conn.execute(
+                """UPDATE assembly_sections
+                   SET grid_x = ?, grid_y = ?, updated_at = ?
+                   WHERE id = ? AND project_id = ?""",
+                (gx, gy, timestamp, section_id, project_id),
+            )
+        record_audit_event(
+            project_id,
+            "Fishbone framework",
+            "Update canvas layout",
+            len(positions),
+            str(editor_name or "").strip(),
+            {"positions_count": len(positions)},
+            _conn=conn,
+        )
+
+def save_fishbone_canvas_draft(
+    project_id: str,
+    *,
+    positions: dict[str, tuple[int | None, int | None]] | None = None,
+    connections: list[dict] | None = None,
+    deleted_connection_ids: list[str] | None = None,
+    new_assignments: list[dict] | None = None,
+    updated_assignments: list[dict] | None = None,
+    deleted_assignment_ids: list[str] | None = None,
+    editor_name: str = "",
+) -> dict[str, int]:
+    """Atomically commit canvas positions, connections, and part assignments from a visual edit draft."""
+    timestamp = now_iso()
+    positions_saved = 0
+    conns_saved = 0
+    conns_deleted = 0
+    assignments_saved = 0
+    assignments_updated = 0
+    assignments_deleted = 0
+    with connection() as conn:
+        if positions:
+            for section_id, coords in positions.items():
+                gx = coords[0] if coords else None
+                gy = coords[1] if coords else None
+                conn.execute(
+                    """UPDATE assembly_sections
+                       SET grid_x = ?, grid_y = ?, updated_at = ?
+                       WHERE id = ? AND project_id = ?""",
+                    (gx, gy, timestamp, section_id, project_id),
+                )
+                positions_saved += 1
+        if deleted_connection_ids:
+            for cid in deleted_connection_ids:
+                row = conn.execute(
+                    "SELECT from_section_id, connection_type FROM assembly_section_connections WHERE id = ? AND project_id = ?",
+                    (cid, project_id),
+                ).fetchone()
+                if row:
+                    conn.execute("DELETE FROM assembly_section_connections WHERE id = ? AND project_id = ?", (cid, project_id))
+                    conns_deleted += 1
+                    if row["connection_type"] in {"subassembly", "parallel"}:
+                        other = conn.execute(
+                            "SELECT to_section_id FROM assembly_section_connections WHERE project_id=? AND from_section_id=? AND connection_type IN ('subassembly', 'parallel') LIMIT 1",
+                            (project_id, row["from_section_id"]),
+                        ).fetchone()
+                        new_parent = other["to_section_id"] if other else None
+                        conn.execute("UPDATE assembly_sections SET parent_id=?, updated_at=? WHERE id=? AND project_id=?", (new_parent, timestamp, row["from_section_id"], project_id))
+        if connections:
+            for c in connections:
+                from_id = str(c.get("from_section_id") or "").strip()
+                to_id = str(c.get("to_section_id") or "").strip()
+                c_type = str(c.get("connection_type") or "subassembly").strip().lower()
+                seq = int(c.get("sequence") or 10)
+                if not from_id or not to_id or from_id == to_id:
+                    continue
+                cid = str(c.get("id") or uuid4())
+                conn.execute(
+                    """INSERT INTO assembly_section_connections (
+                           id, project_id, from_section_id, to_section_id, connection_type, sequence, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(project_id, from_section_id, to_section_id)
+                       DO UPDATE SET connection_type = excluded.connection_type, sequence = excluded.sequence, updated_at = excluded.updated_at""",
+                    (cid, project_id, from_id, to_id, c_type, seq, timestamp, timestamp),
+                )
+                conns_saved += 1
+                if c_type in {"subassembly", "parallel"}:
+                    conn.execute(
+                        "UPDATE assembly_sections SET parent_id=?, updated_at=? WHERE id=? AND project_id=? AND section_type='Subassembly'",
+                        (to_id, timestamp, from_id, project_id),
+                    )
+        if deleted_assignment_ids:
+            for aid in deleted_assignment_ids:
+                conn.execute(
+                    "DELETE FROM fishbone_part_assignments WHERE id = ? AND project_id = ?",
+                    (aid, project_id),
+                )
+                assignments_deleted += 1
+        if updated_assignments:
+            for ua in updated_assignments:
+                ua_id = str(ua.get("id") or ua.get("assignment_id") or "").strip()
+                if ua_id:
+                    step_num = int(ua.get("step_number") or 1)
+                    target_sid = str(ua.get("section_id") or "").strip()
+                    if target_sid:
+                        conn.execute(
+                            """UPDATE fishbone_part_assignments
+                               SET step_number = ?, section_id = ?, updated_at = ?
+                               WHERE id = ? AND project_id = ?""",
+                            (step_num, target_sid, timestamp, ua_id, project_id),
+                        )
+                    else:
+                        conn.execute(
+                            """UPDATE fishbone_part_assignments
+                               SET step_number = ?, updated_at = ?
+                               WHERE id = ? AND project_id = ?""",
+                            (step_num, timestamp, ua_id, project_id),
+                        )
+                    assignments_updated += 1
+        if new_assignments:
+            for a in new_assignments:
+                pid = str(a.get("part_id") or "").strip()
+                sid = str(a.get("section_id") or "").strip()
+                qty = float(a.get("quantity") or 1.0)
+                use_desc = str(a.get("use_description") or "").strip()
+                if pid and sid:
+                    aid = str(a.get("id") or uuid4())
+                    conn.execute(
+                        """INSERT INTO fishbone_part_assignments (
+                               id, project_id, part_id, section_id, step_number, sequence, quantity, use_description, updated_at
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (aid, project_id, pid, sid, int(a.get("step_number") or 1), int(a.get("sequence") or 10), qty, use_desc, timestamp),
+                    )
+                    assignments_saved += 1
+        total_changes = positions_saved + conns_saved + conns_deleted + assignments_saved + assignments_updated + assignments_deleted
+        record_audit_event(
+            project_id,
+            "Fishbone framework",
+            "Save canvas draft",
+            total_changes,
+            str(editor_name or "").strip(),
+            {
+                "positions_saved": positions_saved,
+                "connections_saved": conns_saved,
+                "connections_deleted": conns_deleted,
+                "assignments_saved": assignments_saved,
+                "assignments_updated": assignments_updated,
+                "assignments_deleted": assignments_deleted,
+            },
+            _conn=conn,
+        )
+    return {
+        "positions_saved": positions_saved,
+        "connections_saved": conns_saved,
+        "connections_deleted": conns_deleted,
+        "assignments_saved": assignments_saved,
+        "assignments_updated": assignments_updated,
+        "assignments_deleted": assignments_deleted,
+    }
+
+__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])
