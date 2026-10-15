@@ -567,16 +567,59 @@ with tab_view:
                             st.write("**Use / Installation:**", uses_str)
 
 
-def generate_bom_excel_template() -> bytes:
-    """Generate an Excel template for Model BOM authoring."""
+def generate_bom_excel_template(items: list[dict[str, Any]] | None = None) -> bytes:
+    """Generate an Excel template/spreadsheet for Model BOM authoring.
+
+    If items contains existing tree rows, exports those rows.
+    If items is empty or blank, exports generic sample rows.
+    """
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "BOM"
     ws.append(["Level", "Part #", "Description", "Qty"])
-    ws.append([1, "SAMPLE_MAIN_ASY", "Main Top-Level Assembly", 1.0])
-    ws.append([2, "SAMPLE_SUB_ASY", "Subassembly Module", 1.0])
-    ws.append([3, "SAMPLE_COMP_01", "Component Part A", 2.0])
-    ws.append([3, "SAMPLE_COMP_02", "Component Part B", 4.0])
+
+    # Header styling
+    header_fill = openpyxl.styles.PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    header_font = openpyxl.styles.Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    for col_idx in range(1, 5):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = openpyxl.styles.Alignment(horizontal="center" if col_idx in (1, 4) else "left", vertical="center")
+
+    valid_items = [
+        it for it in (items or [])
+        if str(it.get("part_number") or "").strip() or str(it.get("description") or "").strip()
+    ]
+
+    if valid_items:
+        for it in valid_items:
+            try:
+                lvl = int(it.get("level", 1) or 1)
+                lvl = max(1, min(11, lvl))
+            except (TypeError, ValueError):
+                lvl = 1
+            pn = str(it.get("part_number") or "").strip()
+            desc = str(it.get("description") or "").strip()
+            try:
+                qty = float(it.get("quantity", 1.0) or 1.0)
+                qty = max(0.00001, round(qty, 5))
+            except (TypeError, ValueError):
+                qty = 1.0
+            ws.append([lvl, pn, desc, qty])
+    else:
+        # Default generic sample rows if tree is blank
+        ws.append([1, "SAMPLE_MAIN_ASY", "Main Top-Level Assembly", 1.0])
+        ws.append([2, "SAMPLE_SUB_ASY", "Subassembly Module", 1.0])
+        ws.append([3, "SAMPLE_COMP_01", "Component Part A", 2.0])
+        ws.append([3, "SAMPLE_COMP_02", "Component Part B", 4.0])
+
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 25
+    ws.column_dimensions["C"].width = 45
+    ws.column_dimensions["D"].width = 12
+    ws.freeze_panes = "A2"
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1395,13 +1438,25 @@ with tab_author:
                 # Row 4: Excel Tools row
                 ex_c1, ex_c2 = st.columns([1, 1], gap="small")
                 with ex_c1:
+                    live_for_dl = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
+                    has_tree_items = any(
+                        bool(str(it.get("part_number") or "").strip() or str(it.get("description") or "").strip())
+                        for it in live_for_dl
+                    )
+                    clean_model_tag = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(target_model_label).strip())
+                    dl_file_name = f"BOM_{clean_model_tag}.xlsx" if has_tree_items else f"BOM_Template_{clean_model_tag}.xlsx"
+                    dl_help = (
+                        f"Download the existing BOM hierarchy for {target_model_label} (Level, Part #, Description, Qty) to edit in Excel"
+                        if has_tree_items
+                        else "Download an Excel template pre-formatted with Level, Part #, Description, Qty"
+                    )
                     st.download_button(
                         label="📥 Download Excel Template",
-                        data=generate_bom_excel_template(),
-                        file_name=f"BOM_Template_{selected_model_id}.xlsx",
+                        data=generate_bom_excel_template(live_for_dl),
+                        file_name=dl_file_name,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"dl_template_{selected_model_id}",
-                        help="Download an Excel spreadsheet pre-formatted with Level, Part #, Description, Qty",
+                        help=dl_help,
                         width="stretch",
                     )
                 with ex_c2:
