@@ -1837,6 +1837,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertEqual(
             list(process_editor.proto.column_order),
             [
+                "selected",
                 "op_id",
                 "station",
                 "pitch_name",

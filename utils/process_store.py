@@ -33,11 +33,16 @@ def _process_part_assignment_consume_count(
     fishbone_assignment_id: str,
     *,
     exclude_process_part_option_id: str | None = None,
+    exclude_group_id: str | None = None,
 ) -> int:
-    exclude_clause = " AND option.id<>?" if exclude_process_part_option_id else ""
+    exclude_clause = ""
     params: tuple = (project_id, scenario_id, fishbone_assignment_id)
     if exclude_process_part_option_id:
+        exclude_clause += " AND option.id<>?"
         params += (exclude_process_part_option_id,)
+    if exclude_group_id:
+        exclude_clause += " AND option.group_id<>?"
+        params += (exclude_group_id,)
     return int(
         conn.execute(
             f"""SELECT COUNT(*)
@@ -60,6 +65,7 @@ def _validate_process_part_option_handling(
     part_id: str,
     handling_type: str | None,
     fishbone_assignment_id: str | None,
+    exclude_group_id: str | None = None,
 ) -> None:
     if handling_type is None and fishbone_assignment_id is None:
         return
@@ -94,6 +100,7 @@ def _validate_process_part_option_handling(
         scenario_id,
         fishbone_assignment_id,
         exclude_process_part_option_id=process_part_option_id,
+        exclude_group_id=exclude_group_id,
     )
     placement_label = str(assignment["part_number"])
     use_description = str(assignment["use_description"] or "").strip()
@@ -122,6 +129,8 @@ def process_part_placement_options(
     scenario_id: str,
     section_id: str,
     part_id: str,
+    *,
+    exclude_group_id: str | None = None,
 ) -> pd.DataFrame:
     """Return exact Fishbone uses with scenario-specific Consume availability."""
     columns = [
@@ -165,7 +174,11 @@ def process_part_placement_options(
         for assignment in assignments:
             assignment_id = str(assignment["fishbone_assignment_id"])
             consumed_count = _process_part_assignment_consume_count(
-                conn, project_id, scenario_id, assignment_id
+                conn,
+                project_id,
+                scenario_id,
+                assignment_id,
+                exclude_group_id=exclude_group_id,
             )
             fishbone_quantity = float(assignment["fishbone_quantity"])
             remaining = max(fishbone_quantity - consumed_count, 0.0)
@@ -186,6 +199,8 @@ def validate_process_part_option_pairings(
     scenario_id: str,
     section_id: str,
     pairings: list[dict],
+    *,
+    exclude_group_id: str | None = None,
 ) -> None:
     """Validate new Process part pairings before any surrounding workflow writes."""
     with connection() as conn:
@@ -209,6 +224,7 @@ def validate_process_part_option_pairings(
                 fishbone_assignment_id=_normalize_fishbone_assignment_id(
                     pairing.get("fishbone_assignment_id")
                 ),
+                exclude_group_id=exclude_group_id,
             )
 
 def yamazumi_elements_for_section(
@@ -246,6 +262,7 @@ def yamazumi_context_for_process(project_id: str, scenario_id: str) -> pd.DataFr
         """SELECT element.process_element_id, element.id AS yamazumi_element_id,
                    element.description AS yamazumi_description,
                    element.time_s AS yamazumi_time_s,
+                   area.section_id AS section_id,
                    pitch.id AS pitch_id, pitch.pitch_number, pitch.pitch_name
            FROM yamazumi_elements element
            JOIN yamazumi_areas area ON area.id=element.area_id
