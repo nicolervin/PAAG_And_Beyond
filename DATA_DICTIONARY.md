@@ -6,7 +6,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `projects`
 
-- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
+- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, building location, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
 - **Key relationships:** Parent of `planning_scenarios`, `parts`, `project_models`, `complexity_features`, `assembly_sections`, `concerns`, source-import records, Yamazumi records, Process at a Glance records, and `audit_log` entries.
 - **Scope:** Project-wide; this is the root of all other business data.
 
@@ -1485,3 +1485,78 @@ Scenario-specific Manufacturing Control Plan working draft
       ↓
 Future issued-document generation and approval (not implemented)
 ```
+
+## Proposed modules — pending owner review
+
+### Interactive Visual Fishbone Builder & Subassembly Series Flow (Phase 1 & Phase 2)
+
+- **Proposed by:** Nicole Ervin (Project Owner) & Antigravity
+- **Date proposed:** October 14, 2026
+- **Review status:** **Approved for implementation on branch `NE_fishbone_flow_Updates`**
+- **1. Connections:** Connects to `assembly_sections` (Fishbone framework spines/sections), `fishbone_part_assignments` (placed part occurrences in sections), `parts` / `pits_bom_occurrences` (Parts Catalog and BOM model tree), `manufacturing_assemblies` (Built and Installed sections), and downstream `yamazumi_areas` (linked to `assembly_sections`), `yamazumi_pitches`, and `work_elements` (Process at a Glance via live-derived Op IDs).
+- **2. Relationship to the critical thread:** Parts Catalog & BOM model tree -> placed into `fishbone_part_assignments` -> organized on the interactive canvas into `assembly_sections` with many-to-many flow lines in `assembly_section_connections` -> drives scenario-aware Yamazumi areas -> drives Op IDs (`M1+M2.S1a...`) in Process at a Glance.
+- **3. Scope:** Project-wide. `assembly_sections` (with `grid_x`, `grid_y`), `assembly_section_connections`, and `fishbone_part_assignments` belong to `projects`. When subassembly parts have `step_number` (Phase 2), it is project-wide. Fishbone structure creation does NOT automatically force or sync Yamazumi pitches ahead of time.
+- **4. Tables and fields:**
+  - Extended `assembly_sections`:
+    - `grid_x INTEGER DEFAULT NULL`: Saved canvas grid X coordinate for manual positioning.
+    - `grid_y INTEGER DEFAULT NULL`: Saved canvas grid Y coordinate for manual positioning.
+  - New `assembly_section_connections`:
+    - `id TEXT PRIMARY KEY`
+    - `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`
+    - `from_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE`
+    - `to_section_id TEXT NOT NULL REFERENCES assembly_sections(id) ON DELETE CASCADE`
+    - `connection_type TEXT NOT NULL CHECK(connection_type IN ('subassembly', 'series', 'parallel'))`
+    - `sequence INTEGER NOT NULL DEFAULT 10`
+    - `created_at TEXT NOT NULL`
+    - `updated_at TEXT NOT NULL`
+    - `UNIQUE(project_id, from_section_id, to_section_id)`
+  - Phase 2 extension on `fishbone_part_assignments`:
+    - `step_number INTEGER NOT NULL DEFAULT 1`: Represents the subassembly step divider/station order along the spine.
+- **5. DESIGN_SYSTEM.md standards:**
+  - Layout: Stacked layout on `app_pages/fishbone.py` (interactive diagram canvas with collapsible parts palette on top, collapsible table editors directly below on the same page).
+  - Canvas interactions: Grid snap with manual positioning + Auto-arrange button. Visual connection handles between sections prompt for 'Connect in Series' or 'Feed as Subassembly'.
+  - BOM integration: Pulls from BOM model tree if available; prompts for quantity/use description if no BOM tree. Dropping an assembly prompts for Built section vs Installed section (components in Built, completed assembly part in Installed). Moving parts off an assembly warns when deviating from BOM structure.
+  - Deletions: Click to select + Delete key/icon for connections and part removal; section deletion opens the existing safe reparenting/deletion disclosure dialog.
+  - Persistence: Browser draft state with atomic **Save & Refresh** and **Undo** snapshot restoration. Audited with `record_audit_event()`.
+
+### Building Location Field on Projects
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 15, 2026
+- **Approval status:** Approved by project owner on October 15, 2026 for implementation on branch `NE_fishbone_flow_Updates`.
+- **Purpose:** Capture the physical manufacturing plant, facility, or building location (e.g. "Building 2", "AP1", "Plant 4") as a required field for project creation and project definition.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* `projects` table (root entity of an NPI planning project).
+  2. *Critical thread relationship:* Connects to the top-level project root (`projects -> planning_scenarios -> parts -> fishbone -> yamazumi -> process_at_a_glance`), defining the physical facility for the planning project.
+  3. *Scope:* Project-wide (shared across all planning scenarios within the project).
+  4. *Table requirement:* No new table required. Existing table `projects` is extended with:
+     - `building_location TEXT NOT NULL DEFAULT ''`
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Required field validation in the "Create an NPI project" dialog (`app_pages/overview.py`).
+     - Required field validation in the "Project definition" form (`app_pages/overview.py`).
+     - Universal Save Action Standard ("Save project" / "Create project").
+     - Universal Audit Trail Standard: `record_audit_event()` with Current editor attribution under category `"Projects"`.
+     - Universal History Display Standard: visible in the Overview History expander.
+     - Preserved in project transfer packages (`.paagproject` export/import).
+
+### Project Deletion Workflow
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** October 15, 2026
+- **Approval status:** Approved by project owner on October 15, 2026 for implementation on branch `NE_fishbone_flow_Updates`.
+- **Purpose:** Provide a safe, relationship-aware, confirmed deletion workflow allowing collaborators to permanently delete an NPI planning project and all of its associated data and uploads.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` and cascades across all project-owned child tables (`planning_scenarios`, `parts`, `fishbone_nodes`, `assembly_sections`, `yamazumi_areas`, `work_elements`, `pfmea_entries`, `layout_plans`, etc.) and removes associated local files from `data/uploads/`.
+  2. *Critical thread relationship:* Root-level deletion of the critical thread. Cascades cleanly through SQLite foreign keys (`ON DELETE CASCADE`).
+  3. *Scope:* Project-wide.
+  4. *Table requirement:* No new table required. Handled by dedicated store functions `get_project_deletion_impact(project_id)` and `delete_project(project_id, editor_name)` in `utils/project_store.py`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - UI Location: In the top action bar on the Overview page next to "New project".
+     - Universal Deletion Standard:
+       - Clicking "Delete project" opens a non-dismissible confirmation dialog (`@st.dialog("Delete project?", dismissible=False)`).
+       - Dialog summarizes what will be deleted: project name, number of planning scenarios, parts, fishbone sections, yamazumi pitches, work elements, and uploaded files.
+       - Explains clearly that this action is irreversible and permanently deletes all project records and files.
+       - Provides an explicit "Cancel" button that dismisses the dialog without deleting.
+       - Provides a red destructive confirmation button (`key="destructive_confirm_delete_project_{target_project_id}"`).
+       - On confirmation: calls `delete_project()`, clears session state references (`project_id`, `scenario_id`), redirects to the next available project (or empty state if no projects remain), displays a toast `"Project deleted"`, and triggers `st.rerun()`.
+

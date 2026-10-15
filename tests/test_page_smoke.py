@@ -905,8 +905,9 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             list(framework.columns),
             [
                 "id", "project_id", "name", "section_type", "parent_id",
-                "sequence", "description", "active", "created_at", "updated_at",
-                "hierarchy", "parent_assembly", "order_actions", "assemblies_action",
+                "sequence", "description", "active", "grid_x", "grid_y",
+                "created_at", "updated_at", "hierarchy", "parent_assembly",
+                "order_actions", "assemblies_action",
             ],
         )
         visible_bytes = framework[["name", "hierarchy"]].to_csv(
@@ -922,6 +923,23 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 "Smoke second main,🟦  Smoke second main\n"
             ).encode("utf-8"),
         )
+
+    def test_fishbone_page_empty_sections_loads_cleanly(self) -> None:
+        empty_project_id = f"proj-empty-{uuid4().hex[:8]}"
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (empty_project_id, "Empty Test Project", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+            )
+        old_proj = self.project_id
+        self.project_id = empty_project_id
+        try:
+            with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
+                app = self.run_page("app_pages/fishbone.py")
+            self.assertEqual(len(app.exception), 0)
+            self.assertTrue(any("No Fishbone sections created yet" in str(getattr(info, "value", "")) for info in app.info))
+        finally:
+            self.project_id = old_proj
 
     def test_yamazumi_smoke(self) -> None:
         app = self.run_page("app_pages/yamazumi.py")

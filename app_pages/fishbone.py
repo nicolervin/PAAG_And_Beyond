@@ -6,12 +6,15 @@ from utils.store import (
     active_part_ids,
     add_assembly_section,
     assemblies_for_section,
+    assembly_section_connections,
     assembly_section_delete_impact,
     assembly_section_delete_target_validation,
     assembly_section_walk_order,
     assign_parts_to_section,
     audit_history,
+    delete_assembly_section_connection,
     delete_assembly_sections,
+    delete_fishbone_part_assignment,
     delete_fishbone_part_assignments,
     fishbone_assignment_snapshot,
     fishbone_assignment_assembly_impact,
@@ -26,6 +29,9 @@ from utils.store import (
     replace_fishbone_part_assignments,
     restore_fishbone_assignment_snapshot,
     restore_fishbone_plan_snapshot,
+    save_assembly_section_connection,
+    save_fishbone_canvas_draft,
+    save_fishbone_canvas_positions,
     update_assembly_section_rows,
     yamazumi_area_creation_summary,
 )
@@ -769,146 +775,502 @@ with assign_parts_tab:
 
 with fishbone_tab:
     if sections.empty:
-        st.info("The visual Fishbone framework will appear after the first section is added in Framework Set Up.")
-    else:
-        visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
+        st.info("No Fishbone sections created yet. Use **➕ Add Section** above or in the canvas toolbar to create your first Main spine.")
+    if True:
+        visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections.copy()
         records = {str(row["id"]): row.to_dict() for _, row in visible_sections.iterrows()}
-        children: dict[str, list[str]] = {}
-        for section_id, row in records.items():
-            parent_id = normalized_parent_id(row.get("parent_id"))
-            children.setdefault(parent_id, []).append(section_id)
-        for child_ids in children.values():
-            child_ids.sort(key=lambda section_id: (int(records[section_id]["sequence"]), records[section_id]["name"]))
 
-        main_ids = [section_id for section_id, row in records.items() if row["section_type"] == "Main spine"]
-        main_ids.sort(key=lambda section_id: (int(records[section_id]["sequence"]), records[section_id]["name"]))
-        support_ids = [section_id for section_id, row in records.items() if row["section_type"] == "Support Operations"]
-        support_ids.sort(key=lambda section_id: (int(records[section_id]["sequence"]), records[section_id]["name"]))
-        coordinates: dict[str, tuple[float, float, int]] = {}
+        # Connections from database
+        connections_df = assembly_section_connections(project_id)
 
-        def place_fin(section_id: str, x: float, y: float, depth: int, side: int) -> None:
-            """Continue nested subassemblies outward on a diagonal fin."""
-            coordinates[section_id] = (x, y, depth)
-            for index, child_id in enumerate(children.get(section_id, [])):
-                place_fin(
-                    child_id,
-                    x - 0.48 - index * 0.10,
-                    y + side * (0.88 + index * 0.16),
-                    depth + 1,
-                    side,
-                )
+        # Canvas draft management
+        canvas_draft_key = f"fishbone_canvas_draft_{project_id}"
+        draft = st.session_state.setdefault(
+            canvas_draft_key,
+            {
+                "positions": {},
+                "connections": [],
+                "deleted_connections": set(),
+                "new_assignments": [],
+                "updated_assignments": [],
+                "deleted_assignments": set(),
+            },
+        )
+        if "updated_assignments" not in draft:
+            draft["updated_assignments"] = []
 
-        for main_index, section_id in enumerate(main_ids):
-            coordinates[section_id] = (float(main_index), 0.0, 0)
-            direct_subassemblies = children.get(section_id, [])
-            for branch_index, child_id in enumerate(direct_subassemblies):
-                side = -1 if (main_index + branch_index) % 2 == 0 else 1
-                lane = branch_index // 2
-                place_fin(
-                    child_id,
-                    float(main_index) - 0.48 - lane * 0.10,
-                    side * (1.0 + lane * 0.18),
-                    1,
-                    side,
-                )
+        canvas_key = f"interactive_fishbone_{project_id}"
+        canvas_state = st.session_state.get(canvas_key)
+        if canvas_state is not None:
+            if p := getattr(canvas_state, "create_section", None):
+                sec_name = str(p.get("name") or "").strip()
+                sec_type = str(p.get("section_type") or "Subassembly")
+                parent_id = p.get("parent_id") or None
+                gx = p.get("grid_x")
+                gy = p.get("grid_y")
+                if sec_name:
+                    try:
+                        st.session_state[framework_undo_key] = current_plan_snapshot
+                        new_sec_id = add_assembly_section(
+                            project_id,
+                            sec_name,
+                            sec_type,
+                            parent_id if sec_type == "Subassembly" else None,
+                            "",
+                            grid_x=int(gx) if gx is not None else None,
+                            grid_y=int(gy) if gy is not None else None,
+                        )
+                        if parent_id and sec_type == "Subassembly":
+                            save_assembly_section_connection(
+                                project_id,
+                                new_sec_id,
+                                parent_id,
+                                connection_type="subassembly",
+                                sequence=10,
+                                editor_name=st.session_state.get("current_editor", ""),
+                            )
+                        area_summary = yamazumi_area_creation_summary(project_id, new_sec_id)
+                        created_areas = list(area_summary.get("created", []))
+                        area_conflicts = list(area_summary.get("conflicts", []))
+                        record_audit_event(
+                            project_id,
+                            "Fishbone framework",
+                            "Add section from canvas",
+                            1,
+                            st.session_state.get("current_editor", ""),
+                            {
+                                "framework_section_added": {
+                                    "section_id": new_sec_id,
+                                    "section_name": sec_name,
+                                    "section_type": sec_type,
+                                    "grid_x": gx,
+                                    "grid_y": gy,
+                                },
+                                "automatic_yamazumi_areas": created_areas,
+                                "yamazumi_area_conflicts": area_conflicts,
+                            },
+                        )
+                        request_table_editor_reset(framework_editor_key)
+                        st.toast(f"Created {sec_type} '{sec_name}'", icon=":material/check_circle:")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+            if p := getattr(canvas_state, "move_node", None):
+                if sec_id := p.get("section_id"):
+                    draft["positions"][sec_id] = (p.get("grid_x"), p.get("grid_y"))
+            if p := getattr(canvas_state, "auto_arrange", None):
+                if pos_map := p.get("positions"):
+                    draft["positions"].update(pos_map)
+            if p := getattr(canvas_state, "create_connection", None):
+                f_id = p.get("from_section_id")
+                t_id = p.get("to_section_id")
+                c_type = p.get("connection_type", "subassembly")
+                if f_id and t_id and f_id != t_id:
+                    if not any(
+                        dc["from_section_id"] == f_id and dc["to_section_id"] == t_id
+                        for dc in draft["connections"]
+                    ):
+                        draft["connections"].append({
+                            "from_section_id": f_id,
+                            "to_section_id": t_id,
+                            "connection_type": c_type,
+                            "sequence": 10,
+                        })
+            if p := getattr(canvas_state, "delete_connection", None):
+                if cid := p.get("connection_id"):
+                    draft["deleted_connections"].add(cid)
+            if p := getattr(canvas_state, "drop_part", None):
+                pid = p.get("part_id")
+                sid = p.get("section_id")
+                if pid and sid:
+                    draft["new_assignments"].append({
+                        "part_id": pid,
+                        "section_id": sid,
+                        "quantity": float(p.get("quantity") or 1.0),
+                        "use_description": str(p.get("use_description") or ""),
+                    })
+            if p := getattr(canvas_state, "drop_assembly", None):
+                asm_pid = p.get("assembly_part_id")
+                built_sid = p.get("built_section_id")
+                inst_sid = p.get("installed_section_id")
+                if asm_pid and built_sid and inst_sid:
+                    tree = pits_bom_model_tree(project_id)
+                    matched_node = next(
+                        (
+                            n
+                            for n in tree.get("nodes", [])
+                            if str(n.get("part_id")) == str(asm_pid)
+                            or str(n.get("child_part_id")) == str(asm_pid)
+                            or str(n.get("part_number")) == str(asm_pid)
+                        ),
+                        None,
+                    )
+                    child_nodes = matched_node.get("children", []) if matched_node else []
+                    for c in child_nodes:
+                        c_pid = str(c.get("part_id") or c.get("child_part_id") or "")
+                        if c_pid:
+                            draft["new_assignments"].append({
+                                "part_id": c_pid,
+                                "section_id": built_sid,
+                                "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
+                                "use_description": "Built subcomponent",
+                            })
+                    draft["new_assignments"].append({
+                        "part_id": asm_pid,
+                        "section_id": inst_sid,
+                        "quantity": 1.0,
+                        "use_description": "Installed assembly",
+                    })
+            if p := getattr(canvas_state, "remove_part", None):
+                if aid := p.get("assignment_id"):
+                    draft["deleted_assignments"].add(aid)
+                pid = p.get("part_id")
+                if pid:
+                    draft["new_assignments"] = [
+                        na for na in draft["new_assignments"] if na.get("part_id") != pid
+                    ]
 
-        num_support = len(support_ids)
-        for support_index, section_id in enumerate(support_ids):
-            supp_x = float(support_index - num_support)
-            coordinates[section_id] = (supp_x, 0.0, 0)
-            direct_support_subassemblies = children.get(section_id, [])
-            for branch_index, child_id in enumerate(direct_support_subassemblies):
-                side = -1 if (support_index + branch_index) % 2 == 0 else 1
-                lane = branch_index // 2
-                place_fin(
-                    child_id,
-                    supp_x - 0.48 - lane * 0.10,
-                    side * (1.0 + lane * 0.18),
-                    1,
-                    side,
-                )
+        image_path_by_part = (
+            parts.set_index(parts["id"].astype(str))["image_path"].to_dict()
+            if not parts.empty and "image_path" in parts.columns
+            else {}
+        )
+        visual_feature_options = sorted(
+            {label for labels in feature_labels_by_part.values() for label in labels},
+            key=str.casefold,
+        )
+        visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
+        selected_visual_features = visual_controls.multiselect(
+            "View fishbone for features",
+            options=visual_feature_options,
+            placeholder="All feature configurations · complete fishbone",
+            key=f"fishbone_visual_features_{project_id}",
+            help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
+        )
+        if visual_controls.button(
+            "Edit parts & photos",
+            icon=":material/edit:",
+            key="fishbone_edit_parts_visual",
+            help="Open the Parts Catalog to edit part details or add more photos.",
+        ):
+            st.switch_page("app_pages/parts.py")
 
-        node_rows = []
-        edge_rows = []
-        assignment_counts = assignments["section_id"].astype(str).value_counts().to_dict() if not assignments.empty else {}
-        for section_id, (x, y, depth) in coordinates.items():
-            row = records[section_id]
-            node_rows.append({
-                "id": section_id, "x": x, "y": y, "name": row["name"], "type": row["section_type"],
-                "order": row["sequence"], "parts": assignment_counts.get(section_id, 0), "depth": depth,
+        # Effective assignments (DB minus deleted plus draft new)
+        effective_assigned_part_ids = set()
+        for _, a in assignments.iterrows():
+            if str(a["id"]) not in draft["deleted_assignments"]:
+                effective_assigned_part_ids.add(str(a["part_id"]))
+        for na in draft["new_assignments"]:
+            effective_assigned_part_ids.add(str(na["part_id"]))
+
+        # Build Parts Palette items (Parts Catalog + BOM tree assembly hierarchy)
+        bom_tree = pits_bom_model_tree(project_id)
+        bom_nodes = bom_tree.get("nodes", []) if bom_tree else []
+        asm_children_by_pid = {}
+        for node in bom_nodes:
+            np_id = str(node.get("part_id") or node.get("child_part_id") or "")
+            children = node.get("children", [])
+            if np_id and children:
+                asm_children_by_pid[np_id] = [
+                    {
+                        "part_id": str(c.get("part_id") or c.get("child_part_id") or ""),
+                        "part_number": str(c.get("part_number") or ""),
+                        "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
+                    }
+                    for c in children
+                ]
+
+        palette_items = []
+        seen_pids = set()
+        seen_pns = set()
+
+        for _, p in parts.iterrows():
+            pid = str(p["id"])
+            pn = str(p.get("part_number") or "").strip()
+            if not pid or pid in seen_pids:
+                continue
+            seen_pids.add(pid)
+            if pn:
+                seen_pns.add(pn)
+
+            ch_list = asm_children_by_pid.get(pid, [])
+            is_asm = len(ch_list) > 0
+            raw_qty = p.get("quantity")
+            try:
+                qty = float(raw_qty) if raw_qty is not None and float(raw_qty) > 0 else 1.0
+            except (ValueError, TypeError):
+                qty = 1.0
+
+            palette_items.append({
+                "part_id": pid,
+                "part_number": pn or "—",
+                "description": str(p.get("description", "") or ""),
+                "quantity": qty,
+                "is_assembly": is_asm,
+                "child_count": len(ch_list),
+                "child_parts": ch_list,
+                "image": part_thumbnail(image_path_by_part.get(pid, "")),
+                "placed": pid in effective_assigned_part_ids,
             })
-            parent_id = normalized_parent_id(row.get("parent_id"))
-            if parent_id in coordinates:
-                edge_rows.append({"from": parent_id, "to": section_id})
-        for left_id, right_id in zip(main_ids, main_ids[1:]):
-            edge_rows.append({"from": left_id, "to": right_id})
 
-        if not node_rows:
-            st.info("Activate at least one Fishbone section to draw the Fishbone framework.")
-        else:
-            image_path_by_part = (
-                parts.set_index(parts["id"].astype(str))["image_path"].to_dict()
-                if not parts.empty and "image_path" in parts.columns
-                else {}
-            )
-            visual_feature_options = sorted(
-                {label for labels in feature_labels_by_part.values() for label in labels},
-                key=str.casefold,
-            )
-            visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
-            selected_visual_features = visual_controls.multiselect(
-                    "View fishbone for features",
-                    options=visual_feature_options,
-                    placeholder="All feature configurations · complete fishbone",
-                    key=f"fishbone_visual_features_{project_id}",
-                    help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
-                )
-            if visual_controls.button(
-                "Edit parts & photos",
-                icon=":material/edit:",
-                key="fishbone_edit_parts_visual",
-                help="Open the Parts Catalog to edit part details or add more photos.",
+        for node in bom_nodes:
+            np_id = str(node.get("part_id") or node.get("child_part_id") or "")
+            np_pn = str(node.get("part_number") or "").strip()
+            if not np_id or np_id in seen_pids or (np_pn and np_pn in seen_pns):
+                continue
+            seen_pids.add(np_id)
+            if np_pn:
+                seen_pns.add(np_pn)
+            ch_list = node.get("children", [])
+            is_asm = len(ch_list) > 0
+            palette_items.append({
+                "part_id": np_id,
+                "part_number": np_pn or "—",
+                "description": str(node.get("description") or node.get("part_name") or ""),
+                "quantity": float(node.get("quantity") or node.get("proposed_quantity") or 1.0),
+                "is_assembly": is_asm,
+                "child_count": len(ch_list),
+                "child_parts": [
+                    {
+                        "part_id": str(c.get("part_id") or c.get("child_part_id") or ""),
+                        "part_number": str(c.get("part_number") or ""),
+                        "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
+                    }
+                    for c in ch_list
+                ],
+                "image": part_thumbnail(image_path_by_part.get(np_id, "")),
+                "placed": np_id in effective_assigned_part_ids,
+            })
+
+        def get_palette_sort_key(item):
+            pid = item["part_id"]
+            pnum = item["part_number"]
+            info = master_info_by_part_id.get(pid) or master_info_by_pnum.get(pnum)
+            order = info["order"] if info else 1_000_000
+            return (order, pnum.casefold())
+
+        palette_items.sort(key=get_palette_sort_key)
+
+        # Visual Placed Parts
+        staged_updates_by_aid = {
+            ua["assignment_id"]: ua
+            for ua in draft.get("updated_assignments", [])
+            if ua.get("assignment_id")
+        }
+        visual_parts = []
+        for _, assignment in assignments.iterrows():
+            aid = str(assignment["id"])
+            if aid in draft["deleted_assignments"]:
+                continue
+            part_id = str(assignment["part_id"])
+            section_id = str(assignment["section_id"])
+            staged = staged_updates_by_aid.get(aid)
+            current_sec_id = staged.get("section_id") if staged and staged.get("section_id") else section_id
+            if current_sec_id not in records:
+                continue
+            applicability_label = feature_applicability(part_id, assignment["model_applicability"])
+            if (
+                selected_visual_features
+                and applicability_label != "All models"
+                and not set(selected_visual_features) & set(feature_labels_by_part.get(part_id, []))
             ):
-                st.switch_page("app_pages/parts.py")
-            fishbone_refresh_key = f"fishbone_refresh_version_{project_id}"
-            st.session_state.setdefault(fishbone_refresh_key, 0)
-            visual_parts = []
-            for _, assignment in assignments.iterrows():
-                part_id = str(assignment["part_id"])
-                section_id = str(assignment["section_id"])
-                if section_id not in coordinates:
+                continue
+            visual_parts.append({
+                "id": aid,
+                "part_id": part_id,
+                "section_id": current_sec_id,
+                "section_name": str(records.get(current_sec_id, {}).get("name") or assignment["section_name"]),
+                "part_number": str(assignment["part_number"] or ""),
+                "description": str(assignment["description"] or ""),
+                "use_description": str(assignment["use_description"] or ""),
+                "quantity": float(assignment["quantity"] or 0),
+                "models": applicability_label,
+                "image": part_thumbnail(image_path_by_part.get(part_id, "")),
+            })
+        for idx, na in enumerate(draft["new_assignments"]):
+            part_row = parts.loc[parts["id"].astype(str) == na["part_id"]]
+            pn = str(part_row["part_number"].iloc[0]) if not part_row.empty else "—"
+            p_desc = str(part_row["description"].iloc[0]) if not part_row.empty and "description" in part_row.columns else "—"
+            sec_name = records.get(na["section_id"], {}).get("name", "Section")
+            visual_parts.append({
+                "id": f"draft_a_{idx}",
+                "part_id": na["part_id"],
+                "section_id": na["section_id"],
+                "section_name": sec_name,
+                "part_number": pn,
+                "description": p_desc,
+                "use_description": na.get("use_description", ""),
+                "quantity": float(na.get("quantity") or 1.0),
+                "models": "All models",
+                "image": part_thumbnail(image_path_by_part.get(na["part_id"], "")),
+            })
+
+        # Node rows with grid coordinates and op prefix
+        node_rows = []
+        all_sections_list = [
+            {
+                "id": str(r["id"]),
+                "name": str(r["name"]),
+                "type": str(r["section_type"]),
+                "parent_id": str(r["parent_id"]) if pd.notna(r.get("parent_id")) else None,
+            }
+            for _, r in visible_sections.iterrows()
+        ]
+        for _, row in visible_sections.iterrows():
+            sec_id = str(row["id"])
+            gx = draft["positions"].get(sec_id, (row.get("grid_x"), None))[0] if sec_id in draft["positions"] else row.get("grid_x")
+            gy = draft["positions"].get(sec_id, (None, row.get("grid_y")))[1] if sec_id in draft["positions"] else row.get("grid_y")
+            gx = int(gx) if gx is not None and pd.notna(gx) else None
+            gy = int(gy) if gy is not None and pd.notna(gy) else None
+            node_rows.append({
+                "id": sec_id,
+                "name": str(row["name"]),
+                "type": str(row["section_type"]),
+                "order": int(row["sequence"]),
+                "parent_id": str(row["parent_id"]) if pd.notna(row.get("parent_id")) else None,
+                "grid_x": gx,
+                "grid_y": gy,
+                "op_prefix": "",
+                "parts": len([p for p in visual_parts if p["section_id"] == sec_id]),
+            })
+
+        # Connection rows
+        conn_rows = []
+        if not connections_df.empty:
+            for _, conn_r in connections_df.iterrows():
+                cid = str(conn_r["id"])
+                if cid in draft["deleted_connections"]:
                     continue
-                applicability_label = feature_applicability(part_id, assignment["model_applicability"])
-                if (
-                    selected_visual_features
-                    and applicability_label != "All models"
-                    and not set(selected_visual_features)
-                    & set(feature_labels_by_part.get(part_id, []))
-                ):
-                    continue
-                visual_parts.append({
-                    "id": str(assignment["id"]),
-                    "part_id": part_id,
-                    "section_id": section_id,
-                    "section_name": str(assignment["section_name"]),
-                    "part_number": str(assignment["part_number"] or ""),
-                    "description": str(assignment["description"] or ""),
-                    "use_description": str(assignment["use_description"] or ""),
-                    "quantity": float(assignment["quantity"] or 0),
-                    "models": applicability_label,
-                    "image": part_thumbnail(image_path_by_part.get(part_id, "")),
+                conn_rows.append({
+                    "id": cid,
+                    "from_section_id": str(conn_r["from_section_id"]),
+                    "to_section_id": str(conn_r["to_section_id"]),
+                    "connection_type": str(conn_r["connection_type"]),
+                    "sequence": int(conn_r["sequence"]),
                 })
-            visible_counts: dict[str, int] = {}
-            for part in visual_parts:
-                visible_counts[part["section_id"]] = visible_counts.get(part["section_id"], 0) + 1
-            for node in node_rows:
-                node["parts"] = visible_counts.get(node["id"], 0)
-            interactive_fishbone(
-                node_rows,
-                edge_rows,
-                visual_parts,
-                key=f"interactive_fishbone_{project_id}_{st.session_state[fishbone_refresh_key]}",
+        else:
+            for sec_id, row in records.items():
+                pid = normalized_parent_id(row.get("parent_id"))
+                if pid and pid in records:
+                    conn_rows.append({
+                        "id": f"init_{sec_id}_{pid}",
+                        "from_section_id": sec_id,
+                        "to_section_id": pid,
+                        "connection_type": "subassembly",
+                        "sequence": 10,
+                    })
+            main_sec_ids = [
+                str(r["id"]) for _, r in visible_sections.iterrows() if r["section_type"] == "Main spine"
+            ]
+            for left_id, right_id in zip(main_sec_ids, main_sec_ids[1:]):
+                conn_rows.append({
+                    "id": f"init_{left_id}_{right_id}",
+                    "from_section_id": left_id,
+                    "to_section_id": right_id,
+                    "connection_type": "series",
+                    "sequence": 10,
+                })
+        for idx, dc in enumerate(draft["connections"]):
+            conn_rows.append({
+                "id": f"draft_{idx}",
+                "from_section_id": dc["from_section_id"],
+                "to_section_id": dc["to_section_id"],
+                "connection_type": dc["connection_type"],
+                "sequence": dc.get("sequence", 10),
+            })
+
+        # Render Interactive Fishbone Canvas Builder
+        interactive_fishbone(
+            sections=node_rows,
+            connections=conn_rows,
+            parts=visual_parts,
+            palette_items=palette_items,
+            all_sections=all_sections_list,
+            key=canvas_key,
+        )
+
+        has_canvas_draft = bool(
+            draft["positions"]
+            or draft["connections"]
+            or draft["deleted_connections"]
+            or draft["new_assignments"]
+            or draft.get("updated_assignments")
+            or draft["deleted_assignments"]
+        )
+        if has_canvas_draft:
+            total_actions = (
+                len(draft["positions"])
+                + len(draft["connections"])
+                + len(draft["deleted_connections"])
+                + len(draft["new_assignments"])
+                + len(draft.get("updated_assignments", []))
+                + len(draft["deleted_assignments"])
             )
+            st.info(
+                f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh below to commit."
+            )
+
+        canvas_actions = editable_table_footer(
+            editor_key=f"fishbone_canvas_footer_{project_id}",
+            key_prefix=f"fishbone_canvas_{project_id}",
+            additional_unsaved_changes=has_canvas_draft,
+        )
+        if canvas_actions.undo:
+            if has_canvas_draft:
+                st.session_state.pop(canvas_draft_key, None)
+                st.toast("Discarded canvas draft changes", icon=":material/undo:")
+                st.rerun()
+            elif framework_undo_key in st.session_state:
+                restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
+                st.toast("Restored Fishbone framework to previous saved state", icon=":material/undo:")
+                st.rerun()
+
+        if canvas_actions.save_and_refresh:
+            try:
+                st.session_state[framework_undo_key] = current_plan_snapshot
+                save_fishbone_canvas_draft(
+                    project_id=project_id,
+                    positions=draft["positions"] if draft["positions"] else None,
+                    connections=draft["connections"] if draft["connections"] else None,
+                    deleted_connection_ids=list(draft["deleted_connections"]) if draft["deleted_connections"] else None,
+                    new_assignments=draft["new_assignments"] if draft["new_assignments"] else None,
+                    updated_assignments=draft.get("updated_assignments") if draft.get("updated_assignments") else None,
+                    deleted_assignment_ids=list(draft["deleted_assignments"]) if draft["deleted_assignments"] else None,
+                    editor_name=st.session_state.get("current_editor", ""),
+                )
+                st.session_state.pop(canvas_draft_key, None)
+                request_table_editor_reset(pool_editor_key)
+                request_table_editor_reset(assignment_editor_key)
+                request_table_editor_reset(framework_editor_key)
+                st.toast("Saved all Fishbone canvas changes", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+        # Stacked Layout: Collapsible Table Editors
+        st.divider()
+        with st.expander("Framework Sections Table", expanded=False):
+            st.caption(
+                "Framework sections establish product assembly order and subassembly feeding relationships."
+            )
+            sec_cols = [c for c in ["name", "section_type", "sequence", "active"] if c in visible_sections.columns]
+            display_sections = visible_sections[sec_cols].copy() if not visible_sections.empty else pd.DataFrame(columns=["name", "section_type", "sequence", "active"])
+            st.dataframe(display_sections, width="stretch", hide_index=True)
+
+        with st.expander("Parts Placement Table", expanded=False):
+            st.caption("Parts placed into Fishbone assembly sections and subassemblies.")
+            if not assignments.empty:
+                display_cols = ["section_name", "part_number", "description", "quantity", "use_description"]
+                display_assignments = assignments[
+                    [c for c in display_cols if c in assignments.columns]
+                ].copy()
+                st.dataframe(
+                    display_assignments,
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info("No parts placed yet.")
 
 
 

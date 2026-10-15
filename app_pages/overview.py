@@ -13,9 +13,10 @@ from utils.table_ui import (
     direct_entry_editor_rows, standard_details_column_config,
 )
 from utils.store import (
-    audit_history, create_project, get_planning_scenario, get_project,
-    next_scenario_revision_label, planning_scenarios, project_table,
-    record_audit_event, save_planning_scenario_rows, update_project,
+    audit_history, create_project, delete_project, get_planning_scenario, get_project,
+    get_project_deletion_impact, next_scenario_revision_label, planning_scenarios,
+    project_table, projects, record_audit_event, save_planning_scenario_rows,
+    update_project,
 )
 
 
@@ -31,13 +32,46 @@ page_title_with_scope(
 )
 st.caption("The current snapshot of an evolving NPI process plan.")
 
+DESTRUCTIVE_BUTTON_CSS = """
+<style>
+div[class*="st-key-destructive_"] button {
+    background-color: #c62828 !important;
+    border-color: #c62828 !important;
+    color: #ffffff !important;
+}
+div[class*="st-key-destructive_"] button p,
+div[class*="st-key-destructive_"] button span,
+div[class*="st-key-destructive_"] button [data-testid="stIconMaterial"] {
+    color: #ffffff !important;
+}
+div[class*="st-key-destructive_"] button:hover {
+    background-color: #a71919 !important;
+    border-color: #a71919 !important;
+    color: #ffffff !important;
+}
+div[class*="st-key-destructive_"] button:focus,
+div[class*="st-key-destructive_"] button:active {
+    background-color: #8e0000 !important;
+    border-color: #8e0000 !important;
+    color: #ffffff !important;
+    box-shadow: none !important;
+}
+div[class*="st-key-destructive_"] button:disabled {
+    opacity: 0.45;
+}
+</style>
+"""
+st.html(DESTRUCTIVE_BUTTON_CSS)
+
 
 @st.dialog("Create an NPI project")
 def new_project_dialog():
     with st.form("new_project"):
         name = st.text_input("Program Name")
         program = st.text_input("Product")
-        product_line = st.text_input("Assembly Line")
+        loc_cols = st.columns(2)
+        product_line = loc_cols[0].text_input("Assembly Line")
+        building_location = loc_cols[1].text_input("Building Location", placeholder="e.g. Building 2, AP1, Plant 4")
         takt_unit = st.selectbox(
             "Target takt unit", list(TIME_UNITS), format_func=lambda value: TIME_UNITS[value].label
         )
@@ -52,10 +86,13 @@ def new_project_dialog():
         if st.form_submit_button("Create project", type="primary", icon=":material/add:"):
             if not name.strip():
                 st.error("Program Name is required.")
+            elif not building_location.strip():
+                st.error("Building Location is required.")
             else:
                 created_project_id = create_project(
                     name, program, "", display_to_seconds(takt, takt_unit),
                     product_line=product_line, takt_time_unit=takt_unit,
+                    building_location=building_location.strip(),
                 )
                 record_audit_event(
                     created_project_id,
@@ -66,6 +103,7 @@ def new_project_dialog():
                     {
                         "created_project_id": created_project_id,
                         "created_project_name": name.strip(),
+                        "building_location": building_location.strip(),
                     },
                 )
                 st.session_state.project_id = created_project_id
@@ -73,15 +111,80 @@ def new_project_dialog():
                 st.rerun()
 
 
+@st.dialog("Delete project?", dismissible=False)
+def confirm_delete_project_dialog(target_project_id: str):
+    st.html(DESTRUCTIVE_BUTTON_CSS)
+    target = get_project(target_project_id)
+    if not target:
+        st.warning("The project no longer exists.")
+        if st.button("Close"):
+            st.rerun()
+        return
+    impact = get_project_deletion_impact(target_project_id)
+    st.error(
+        f"**Permanently delete project:** {target['name']}?\n\n"
+        "This action cannot be undone. All planning scenarios, parts, fishbone structures, "
+        "Yamazumi lines, Process plans, PFMEAs, and uploaded files for this project will be permanently erased."
+    )
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Planning scenarios", impact.get("scenarios", 0))
+    col2.metric("Parts", impact.get("parts", 0))
+    col3.metric("Work elements", impact.get("work_elements", 0))
+
+    col4, col5, col6 = st.columns(3)
+    col4.metric("Fishbone sections", impact.get("sections", 0))
+    col5.metric("Yamazumi pitches", impact.get("pitches", 0))
+    col6.metric("Uploaded files", impact.get("uploads", 0))
+
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key=f"cancel_delete_project_{target_project_id}"):
+        st.rerun()
+    if actions.button(
+        "Delete project",
+        type="primary",
+        icon=":material/delete_forever:",
+        key=f"destructive_confirm_delete_project_{target_project_id}",
+    ):
+        try:
+            delete_project(target_project_id, st.session_state.get("current_editor", ""))
+            all_projs = [p for p in projects() if p["id"] != target_project_id]
+            if all_projs:
+                st.session_state.project_id = all_projs[0]["id"]
+                st.session_state.pending_active_project_id = all_projs[0]["id"]
+                st.session_state.scenario_id = None
+                st.session_state.pop("global_project", None)
+                st.session_state.pop("global_scenario", None)
+            else:
+                st.session_state.project_id = None
+                st.session_state.pending_active_project_id = None
+                st.session_state.scenario_id = None
+                st.session_state.pop("global_project", None)
+                st.session_state.pop("global_scenario", None)
+            st.toast(f"Project '{target['name']}' deleted", icon=":material/check_circle:")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+
 with st.container(horizontal=True, horizontal_alignment="right"):
     if st.button("New project", icon=":material/add:"):
         new_project_dialog()
+    if project_id and st.button(
+        "Delete project",
+        icon=":material/delete:",
+        help="Permanently delete the active project",
+        key=f"destructive_delete_project_{project_id}",
+    ):
+        confirm_delete_project_dialog(project_id)
 
 if not project_id:
     st.info("Create a project to begin.")
     st.stop()
 
 project = get_project(project_id)
+if not project:
+    st.info("The selected project was not found. Please select or create a project.")
+    st.stop()
 scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
 parts = project_table("parts", project_id)
 elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
@@ -111,8 +214,12 @@ with st.container(border=True):
         identity_row = st.columns(2)
         name = identity_row[0].text_input("Project name", value=project["name"])
         program = identity_row[1].text_input("Program or product", value=project["program"])
-        product_line = st.text_input(
+        loc_row = st.columns(2)
+        product_line = loc_row[0].text_input(
             "Product line", value=project.get("product_line", "")
+        )
+        building_location = loc_row[1].text_input(
+            "Building location", value=project.get("building_location", "")
         )
         row = st.columns(3)
         revision = row[0].text_input("Product baseline revision", value=project["revision"])
@@ -138,39 +245,46 @@ with st.container(border=True):
             placeholder="Assumptions, scope, milestones, or known changes…",
         )
         if st.form_submit_button("Save project", type="primary", icon=":material/save:"):
-            project_takt_seconds = (
-                float(project["takt_time_s"])
-                if project_takt_unit != str(project.get("takt_time_unit") or "seconds")
-                and float(takt) == float(project_original_display)
-                else display_to_seconds(takt, project_takt_unit)
-            )
-            project_values = {
-                "name": name, "program": program, "product_line": product_line,
-                "owner": project.get("owner", ""), "revision": revision,
-                "status": project.get("status", "Draft"),
-                "takt_time_s": project_takt_seconds,
-                "takt_time_unit": project_takt_unit,
-                "notes": notes,
-            }
-            project_changed_fields = [
-                field for field, value in project_values.items()
-                if value != project.get(field)
-            ]
-            update_project(project_id, project_values)
-            record_audit_event(
-                project_id,
-                "Projects",
-                "Save project",
-                1,
-                st.session_state.get("current_editor", ""),
-                {
-                    "project_id": project_id,
-                    "project_name": name,
-                    "project_changed_fields": project_changed_fields,
-                },
-            )
-            st.toast("Project saved", icon=":material/check_circle:")
-            st.rerun()
+            if not name.strip():
+                st.error("Project name is required.")
+            elif not building_location.strip():
+                st.error("Building location is required.")
+            else:
+                project_takt_seconds = (
+                    float(project["takt_time_s"])
+                    if project_takt_unit != str(project.get("takt_time_unit") or "seconds")
+                    and float(takt) == float(project_original_display)
+                    else display_to_seconds(takt, project_takt_unit)
+                )
+                project_values = {
+                    "name": name.strip(), "program": program.strip(),
+                    "product_line": product_line.strip(),
+                    "building_location": building_location.strip(),
+                    "owner": project.get("owner", ""), "revision": revision.strip(),
+                    "status": project.get("status", "Draft"),
+                    "takt_time_s": project_takt_seconds,
+                    "takt_time_unit": project_takt_unit,
+                    "notes": notes,
+                }
+                project_changed_fields = [
+                    field for field, value in project_values.items()
+                    if value != project.get(field)
+                ]
+                update_project(project_id, project_values)
+                record_audit_event(
+                    project_id,
+                    "Projects",
+                    "Save project",
+                    1,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "project_id": project_id,
+                        "project_name": name.strip(),
+                        "project_changed_fields": project_changed_fields,
+                    },
+                )
+                st.toast("Project saved", icon=":material/check_circle:")
+                st.rerun()
 
 if scenario:
     scenario_editor_key = f"overview_scenario_editor_{project_id}"
