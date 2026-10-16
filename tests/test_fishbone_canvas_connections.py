@@ -12,12 +12,16 @@ from utils import store
 from utils.store import (
     add_assembly_section,
     assembly_section_connections,
+    assembly_section_delete_impact,
     assembly_sections,
     assign_parts_to_section,
     delete_assembly_section_connection,
+    delete_assembly_sections,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
+    move_assembly_section_connection,
     move_fishbone_part_assignment,
+    reorder_fishbone_part_assignments,
     replace_fishbone_part_assignments,
     restore_fishbone_plan_snapshot,
     save_assembly_section_connection,
@@ -458,6 +462,310 @@ class FishboneCanvasConnectionsTests(unittest.TestCase):
         updated_assignments = fishbone_part_assignments(self.project_id)
         self.assertEqual(len(updated_assignments), 1)
         self.assertEqual(str(updated_assignments.iloc[0]["section_id"]), sec2)
+
+    def test_interactive_section_deletion_impact_includes_connections(self) -> None:
+        sec2 = add_assembly_section(self.project_id, "Target Section", "Main spine", None, "")
+        sec1 = add_assembly_section(self.project_id, "Source Section", "Subassembly", sec2, "")
+        sec3 = add_assembly_section(self.project_id, "Upstream Section", "Subassembly", sec1, "")
+
+        # Connect upstream -> sec1, and sec1 -> sec2
+        save_assembly_section_connection(self.project_id, sec3, sec1, "subassembly", 10)
+        save_assembly_section_connection(self.project_id, sec1, sec2, "series", 20)
+
+        # Assign part to sec1
+        part_id = f"part-{uuid4().hex[:8]}"
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (part_id, self.project_id, "999D8503P001", "Door Trim", 1.0, "2026-01-01T00:00:00"),
+            )
+        assign_parts_to_section(self.project_id, [part_id], sec1)
+
+        impact = assembly_section_delete_impact(self.project_id, [sec1])
+        # sec1 has child sec3, so 2 affected sections total
+        self.assertEqual(impact["affected_section_count"], 2)
+        self.assertEqual(impact["fishbone_use_count"], 1)
+        self.assertEqual(impact["connection_count"], 2)
+
+    def test_interactive_section_deletion_with_rehome(self) -> None:
+        sec2 = add_assembly_section(self.project_id, "Destination Section", "Main spine", None, "")
+        sec1 = add_assembly_section(self.project_id, "Feed Section", "Subassembly", sec2, "")
+        sec3 = add_assembly_section(self.project_id, "Upstream Section", "Subassembly", sec2, "")
+
+        # Connect upstream -> sec1, and sec1 -> sec2
+        save_assembly_section_connection(self.project_id, sec3, sec1, "series", 10)
+        save_assembly_section_connection(self.project_id, sec1, sec2, "series", 20)
+
+        # Assign part to sec1
+        part_id = f"part-{uuid4().hex[:8]}"
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (part_id, self.project_id, "999D8503P002", "Door Panel", 1.0, "2026-01-01T00:00:00"),
+            )
+        assign_parts_to_section(self.project_id, [part_id], sec1)
+
+        # Delete sec1 with rehome_parts=True pointing to sec2
+        res = delete_assembly_sections(
+            project_id=self.project_id,
+            section_ids=[sec1],
+            target_section_id=sec2,
+            rehome_parts=True,
+            cascade_delete_content=False,
+        )
+        self.assertEqual(res["affected_section_count"], 1)
+
+        # Part assignment should now belong to sec2
+        assignments = fishbone_part_assignments(self.project_id)
+        self.assertEqual(len(assignments), 1)
+        self.assertEqual(str(assignments.iloc[0]["section_id"]), sec2)
+
+        # Connection sec3 -> sec1 should now be re-routed to sec3 -> sec2
+        # Connection sec1 -> sec2 would have become sec2 -> sec2 (self-loop) and thus removed
+        conns = assembly_section_connections(self.project_id)
+        self.assertEqual(len(conns), 1)
+        self.assertEqual(str(conns.iloc[0]["from_section_id"]), sec3)
+        self.assertEqual(str(conns.iloc[0]["to_section_id"]), sec2)
+
+    def test_interactive_section_deletion_cascade_delete_all(self) -> None:
+        sec2 = add_assembly_section(self.project_id, "Main Section", "Main spine", None, "")
+        sec1 = add_assembly_section(self.project_id, "Standalone Section", "Subassembly", sec2, "")
+
+        save_assembly_section_connection(self.project_id, sec1, sec2, "subassembly", 10)
+
+        # Assign part to sec1
+        part_id = f"part-{uuid4().hex[:8]}"
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (part_id, self.project_id, "999D8503P003", "Bracket", 1.0, "2026-01-01T00:00:00"),
+            )
+        assign_parts_to_section(self.project_id, [part_id], sec1)
+
+        # Delete sec1 with cascade_delete_content=True
+        res = delete_assembly_sections(
+            project_id=self.project_id,
+            section_ids=[sec1],
+            target_section_id=None,
+            rehome_parts=False,
+            cascade_delete_content=True,
+        )
+        self.assertEqual(res["affected_section_count"], 1)
+
+        # Part assignment should be unassigned (removed from fishbone_part_assignments)
+        assignments = fishbone_part_assignments(self.project_id)
+        self.assertEqual(len(assignments), 0)
+
+        # Flow connection should be gone
+        conns = assembly_section_connections(self.project_id)
+        self.assertEqual(len(conns), 0)
+
+        # Section should no longer exist
+        secs = assembly_sections(self.project_id)
+        self.assertNotIn(sec1, secs["id"].tolist())
+
+    def test_assembly_drop_and_child_parts_enrichment(self) -> None:
+        main_sec = add_assembly_section(self.project_id, "Main Spine", "Main spine", None, "")
+        sec = add_assembly_section(self.project_id, "Assembly Line", "Subassembly", main_sec, "")
+        asm_id = f"part-{uuid4().hex[:8]}"
+        ch1_id = f"part-{uuid4().hex[:8]}"
+        ch2_id = f"part-{uuid4().hex[:8]}"
+
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (asm_id, self.project_id, "999D8402G002", "Body Assembly", 1.0, "2026-01-01T00:00:00"),
+            )
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (ch1_id, self.project_id, "999D8501P001", "Front bumper", 1.0, "2026-01-01T00:00:00"),
+            )
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (ch2_id, self.project_id, "999D8502P001", "Rear bumper", 1.0, "2026-01-01T00:00:00"),
+            )
+
+        # Test group part only placement
+        res_group = save_fishbone_canvas_draft(
+            self.project_id,
+            new_assignments=[{
+                "part_id": asm_id,
+                "section_id": sec,
+                "quantity": 1.0,
+            }],
+            editor_name="AsmTester",
+        )
+        self.assertEqual(res_group["assignments_saved"], 1)
+        assignments = fishbone_part_assignments(self.project_id)
+        self.assertEqual(len(assignments), 1)
+        self.assertEqual(assignments.iloc[0]["part_id"], asm_id)
+
+        # Test placing children
+        res_children = save_fishbone_canvas_draft(
+            self.project_id,
+            new_assignments=[
+                {"part_id": ch1_id, "section_id": sec, "quantity": 1.0},
+                {"part_id": ch2_id, "section_id": sec, "quantity": 1.0},
+            ],
+            editor_name="AsmTester",
+        )
+        self.assertEqual(res_children["assignments_saved"], 2)
+        assignments_all = fishbone_part_assignments(self.project_id)
+        self.assertEqual(len(assignments_all), 3)
+
+    def test_move_assembly_section_connection(self) -> None:
+        target_a = add_assembly_section(self.project_id, "Main Spine A", "Main spine", None, "")
+        target_b = add_assembly_section(self.project_id, "Main Spine B", "Main spine", None, "")
+        sec1 = add_assembly_section(self.project_id, "Sub Line 1", "Subassembly", target_a, "")
+        sec2 = add_assembly_section(self.project_id, "Sub Line 2", "Subassembly", target_a, "")
+
+        # Connect Sub Line 1 -> Main Spine A
+        conn_id = save_assembly_section_connection(
+            self.project_id, sec1, target_a, connection_type="subassembly", editor_name="Tester"
+        )
+        conns = assembly_section_connections(self.project_id)
+        self.assertEqual(len(conns), 1)
+        self.assertEqual(conns.iloc[0]["to_section_id"], target_a)
+
+        # Move Sub Line 1 connection from Main Spine A -> Main Spine B
+        move_assembly_section_connection(
+            self.project_id, conn_id, target_b, editor_name="Tester"
+        )
+        conns_after = assembly_section_connections(self.project_id)
+        self.assertEqual(len(conns_after), 1)
+        self.assertEqual(conns_after.iloc[0]["to_section_id"], target_b)
+
+        # Verify parent_id was updated on Sub Line 1
+        sec_df = assembly_sections(self.project_id)
+        sub1 = sec_df[sec_df["id"] == sec1].iloc[0]
+        self.assertEqual(sub1["parent_id"], target_b)
+
+        # Connecting to self must fail
+        with self.assertRaises(ValueError):
+            move_assembly_section_connection(self.project_id, conn_id, sec1)
+
+    def test_save_fishbone_canvas_draft_move_connection(self) -> None:
+        target_a = add_assembly_section(self.project_id, "Assembly Line 1", "Main spine", None, "")
+        target_b = add_assembly_section(self.project_id, "Assembly Line 2", "Main spine", None, "")
+        sec1 = add_assembly_section(self.project_id, "Feeder", "Support Operations", target_a, "")
+
+        # Initial connection Feeder -> Assembly Line 1
+        init_cid = save_assembly_section_connection(
+            self.project_id, sec1, target_a, connection_type="parallel", editor_name="Tester"
+        )
+        self.assertEqual(len(assembly_section_connections(self.project_id)), 1)
+
+        # Re-route connection Feeder -> Assembly Line 2 via canvas draft
+        res = save_fishbone_canvas_draft(
+            self.project_id,
+            deleted_connection_ids=[init_cid],
+            connections=[{
+                "from_section_id": sec1,
+                "to_section_id": target_b,
+                "connection_type": "parallel",
+                "sequence": 10,
+            }],
+            editor_name="Tester",
+        )
+        self.assertEqual(res["connections_deleted"], 1)
+        self.assertEqual(res["connections_saved"], 1)
+
+        conns = assembly_section_connections(self.project_id)
+        self.assertEqual(len(conns), 1)
+        self.assertEqual(conns.iloc[0]["from_section_id"], sec1)
+        self.assertEqual(conns.iloc[0]["to_section_id"], target_b)
+
+    def _create_part(self, description: str, part_number: str) -> str:
+        part_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (part_id, self.project_id, part_number, description, 1.0, "2026-01-01T00:00:00"),
+            )
+        return part_id
+
+    def test_reorder_fishbone_part_assignments_within_section(self) -> None:
+        sec_id = add_assembly_section(self.project_id, "Assembly Line", "Main spine", None, "")
+        part_a = self._create_part("Part Alpha", "PN-ALPHA")
+        part_b = self._create_part("Part Beta", "PN-BETA")
+        part_c = self._create_part("Part Gamma", "PN-GAMMA")
+
+        # Assign all 3 to sec_id
+        assign_parts_to_section(self.project_id, [part_a, part_b, part_c], sec_id)
+        df_initial = fishbone_part_assignments(self.project_id)
+        self.assertEqual(len(df_initial), 3)
+
+        # Get their IDs
+        aid_a = df_initial.loc[df_initial["part_id"] == part_a, "id"].iloc[0]
+        aid_b = df_initial.loc[df_initial["part_id"] == part_b, "id"].iloc[0]
+        aid_c = df_initial.loc[df_initial["part_id"] == part_c, "id"].iloc[0]
+
+        # Reorder to C, A, B
+        reordered_count = reorder_fishbone_part_assignments(
+            self.project_id, sec_id, [aid_c, aid_a, aid_b], editor_name="Tester"
+        )
+        self.assertEqual(reordered_count, 3)
+
+        df_after = fishbone_part_assignments(self.project_id)
+        self.assertEqual(list(df_after["id"]), [aid_c, aid_a, aid_b])
+        self.assertEqual(list(df_after["sequence"]), [10, 20, 30])
+
+    def test_move_and_reorder_part_assignments_cross_section(self) -> None:
+        sec1 = add_assembly_section(self.project_id, "Source Line", "Main spine", None, "")
+        sec2 = add_assembly_section(self.project_id, "Target Line", "Main spine", None, "")
+
+        part1 = self._create_part("Part 1", "PN-1")
+        part2 = self._create_part("Part 2", "PN-2")
+        part3 = self._create_part("Part 3", "PN-3")
+
+        assign_parts_to_section(self.project_id, [part1], sec1)
+        assign_parts_to_section(self.project_id, [part2, part3], sec2)
+
+        df_sec1 = fishbone_part_assignments(self.project_id)
+        aid1 = df_sec1.loc[df_sec1["part_id"] == part1, "id"].iloc[0]
+        aid2 = df_sec1.loc[df_sec1["part_id"] == part2, "id"].iloc[0]
+        aid3 = df_sec1.loc[df_sec1["part_id"] == part3, "id"].iloc[0]
+
+        # Move part1 to sec2
+        move_fishbone_part_assignment(self.project_id, aid1, sec2)
+
+        # Reorder sec2 to [part2, part1, part3] (inserting part1 between part2 and part3)
+        reorder_fishbone_part_assignments(
+            self.project_id, sec2, [aid2, aid1, aid3], editor_name="Tester"
+        )
+
+        df_after = fishbone_part_assignments(self.project_id)
+        sec2_assignments = df_after[df_after["section_id"] == sec2]
+        self.assertEqual(list(sec2_assignments["id"]), [aid2, aid1, aid3])
+        self.assertEqual(list(sec2_assignments["sequence"]), [10, 20, 30])
+
+    def test_save_fishbone_canvas_draft_with_updated_assignment_sequence(self) -> None:
+        sec = add_assembly_section(self.project_id, "Main Line", "Main spine", None, "")
+        p1 = self._create_part("P1", "PN-01")
+        p2 = self._create_part("P2", "PN-02")
+        assign_parts_to_section(self.project_id, [p1, p2], sec)
+
+        df = fishbone_part_assignments(self.project_id)
+        aid1 = df.loc[df["part_id"] == p1, "id"].iloc[0]
+        aid2 = df.loc[df["part_id"] == p2, "id"].iloc[0]
+
+        # Use save_fishbone_canvas_draft to update sequence
+        res = save_fishbone_canvas_draft(
+            self.project_id,
+            updated_assignments=[
+                {"id": aid1, "sequence": 50},
+                {"id": aid2, "sequence": 25},
+            ],
+            editor_name="Tester",
+        )
+        self.assertEqual(res["assignments_updated"], 2)
+
+        df_after = fishbone_part_assignments(self.project_id)
+        # Sequence 25 (aid2) comes before Sequence 50 (aid1)
+        self.assertEqual(list(df_after["id"]), [aid2, aid1])
+        self.assertEqual(list(df_after["sequence"]), [25, 50])
+
+
 
 
 

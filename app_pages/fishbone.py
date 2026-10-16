@@ -21,6 +21,7 @@ from utils.store import (
     fishbone_part_assignments,
     fishbone_plan_snapshot,
     move_fishbone_part_assignment,
+    reorder_fishbone_part_assignments,
     part_feature_rules,
     pits_bom_model_tree,
     project_models,
@@ -877,91 +878,187 @@ with fishbone_tab:
                             "connection_type": c_type,
                             "sequence": 10,
                         })
+            if p := getattr(canvas_state, "move_connection", None):
+                cid = str(p.get("connection_id") or "").strip()
+                f_id = str(p.get("from_section_id") or "").strip()
+                new_t_id = str(p.get("to_section_id") or "").strip()
+                old_t_id = str(p.get("old_to_section_id") or "").strip()
+                c_type = str(p.get("connection_type") or "subassembly").strip()
+                if cid and not cid.startswith("draft_") and not cid.startswith("init_"):
+                    draft["deleted_connections"].add(cid)
+                draft["connections"] = [
+                    dc for dc in draft["connections"]
+                    if not (dc.get("from_section_id") == f_id and dc.get("to_section_id") == old_t_id)
+                ]
+                if f_id and new_t_id and f_id != new_t_id:
+                    if not any(
+                        dc["from_section_id"] == f_id and dc["to_section_id"] == new_t_id
+                        for dc in draft["connections"]
+                    ):
+                        draft["connections"].append({
+                            "from_section_id": f_id,
+                            "to_section_id": new_t_id,
+                            "connection_type": c_type,
+                            "sequence": 10,
+                        })
             if p := getattr(canvas_state, "delete_connection", None):
                 if cid := p.get("connection_id"):
-                    draft["deleted_connections"].add(cid)
+                    cid_str = str(cid).strip()
+                    if not cid_str.startswith("draft_") and not cid_str.startswith("init_"):
+                        draft["deleted_connections"].add(cid_str)
+                    else:
+                        draft["connections"] = [
+                            dc for idx, dc in enumerate(draft["connections"])
+                            if f"draft_{idx}" != cid_str
+                        ]
+            if p := getattr(canvas_state, "delete_section_request", None):
+                if sid := p.get("section_id"):
+                    st.session_state[f"pending_interactive_delete_section_{project_id}"] = str(sid)
+                try:
+                    delattr(canvas_state, "delete_section_request")
+                except (AttributeError, TypeError):
+                    pass
             if p := getattr(canvas_state, "drop_part", None):
                 pid = p.get("part_id")
                 sid = p.get("section_id")
                 if pid and sid:
-                    draft["new_assignments"].append({
-                        "part_id": pid,
-                        "section_id": sid,
-                        "quantity": float(p.get("quantity") or 1.0),
-                        "use_description": str(p.get("use_description") or ""),
-                    })
+                    already_in_sec = any(
+                        str(a["part_id"]) == str(pid) and str(a["section_id"]) == str(sid)
+                        and str(a["id"]) not in draft["deleted_assignments"]
+                        for _, a in assignments.iterrows()
+                    ) or any(
+                        str(na.get("part_id")) == str(pid) and str(na.get("section_id")) == str(sid)
+                        for na in draft.get("new_assignments", [])
+                    )
+                    if not already_in_sec:
+                        draft["new_assignments"].append({
+                            "part_id": str(pid),
+                            "section_id": str(sid),
+                            "quantity": float(p.get("quantity") or 1.0),
+                            "use_description": str(p.get("use_description") or ""),
+                        })
             if p := getattr(canvas_state, "drop_assembly", None):
                 asm_pid = p.get("assembly_part_id")
                 built_sid = p.get("built_section_id")
                 inst_sid = p.get("installed_section_id")
-                if asm_pid and built_sid and inst_sid:
-                    tree = pits_bom_model_tree(project_id)
-                    matched_node = next(
-                        (
-                            n
-                            for n in tree.get("nodes", [])
-                            if str(n.get("part_id")) == str(asm_pid)
-                            or str(n.get("child_part_id")) == str(asm_pid)
-                            or str(n.get("part_number")) == str(asm_pid)
-                        ),
-                        None,
-                    )
-                    child_nodes = matched_node.get("children", []) if matched_node else []
-                    for c in child_nodes:
-                        c_pid = str(c.get("part_id") or c.get("child_part_id") or "")
-                        if c_pid:
+                include_children = bool(p.get("include_children", True))
+                dest_sid = inst_sid or built_sid
+                if asm_pid:
+                    if include_children and built_sid and inst_sid:
+                        tree = pits_bom_model_tree(project_id)
+                        matched_node = next(
+                            (
+                                n
+                                for n in tree.get("nodes", [])
+                                if str(n.get("part_id")) == str(asm_pid)
+                                or str(n.get("child_part_id")) == str(asm_pid)
+                                or str(n.get("part_number")) == str(asm_pid)
+                            ),
+                            None,
+                        )
+                        child_nodes = matched_node.get("children", []) if matched_node else []
+                        seen_child_pids = set()
+                        for c in child_nodes:
+                            c_pid = str(c.get("part_id") or c.get("child_part_id") or "").strip()
+                            if not c_pid or c_pid in seen_child_pids:
+                                continue
+                            seen_child_pids.add(c_pid)
+                            already_in_built = any(
+                                str(a["part_id"]) == c_pid and str(a["section_id"]) == str(built_sid)
+                                and str(a["id"]) not in draft["deleted_assignments"]
+                                for _, a in assignments.iterrows()
+                            ) or any(
+                                str(na.get("part_id")) == c_pid and str(na.get("section_id")) == str(built_sid)
+                                for na in draft.get("new_assignments", [])
+                            )
+                            if not already_in_built:
+                                draft["new_assignments"].append({
+                                    "part_id": c_pid,
+                                    "section_id": str(built_sid),
+                                    "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
+                                    "use_description": "Built subcomponent",
+                                })
+                    if dest_sid:
+                        already_in_dest = any(
+                            str(a["part_id"]) == str(asm_pid) and str(a["section_id"]) == str(dest_sid)
+                            and str(a["id"]) not in draft["deleted_assignments"]
+                            for _, a in assignments.iterrows()
+                        ) or any(
+                            str(na.get("part_id")) == str(asm_pid) and str(na.get("section_id")) == str(dest_sid)
+                            for na in draft.get("new_assignments", [])
+                        )
+                        if not already_in_dest:
                             draft["new_assignments"].append({
-                                "part_id": c_pid,
-                                "section_id": built_sid,
-                                "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
-                                "use_description": "Built subcomponent",
+                                "part_id": str(asm_pid),
+                                "section_id": str(dest_sid),
+                                "quantity": 1.0,
+                                "use_description": "Installed assembly" if include_children else "Assembly group part",
                             })
-                    draft["new_assignments"].append({
-                        "part_id": asm_pid,
-                        "section_id": inst_sid,
-                        "quantity": 1.0,
-                        "use_description": "Installed assembly",
-                    })
             if p := getattr(canvas_state, "remove_part", None):
                 if aid := p.get("assignment_id"):
                     draft["deleted_assignments"].add(aid)
+                for a_item in p.get("assignment_ids", []):
+                    if a_item:
+                        draft["deleted_assignments"].add(a_item)
                 pid = p.get("part_id")
+                sec_id = p.get("section_id")
                 if pid:
                     draft["new_assignments"] = [
-                        na for na in draft["new_assignments"] if na.get("part_id") != pid
+                        na for na in draft["new_assignments"]
+                        if not (str(na.get("part_id")) == str(pid) and (sec_id is None or str(na.get("section_id")) == str(sec_id)))
                     ]
             if p := getattr(canvas_state, "move_part_assignment", None):
                 aid = p.get("assignment_id")
+                aids = p.get("assignment_ids") or ([aid] if aid else [])
                 from_sid = p.get("from_section_id")
                 to_sid = p.get("to_section_id")
                 pid = p.get("part_id")
-                if aid and to_sid and to_sid != from_sid:
+                ordered_aids = p.get("ordered_assignment_ids") or []
+                editor = st.session_state.get("current_editor", "")
+
+                if to_sid and to_sid == from_sid:
+                    if ordered_aids:
+                        reorder_fishbone_part_assignments(
+                            project_id, from_sid, ordered_aids, editor_name=editor
+                        )
+                        sec_name = section_name_by_id.get(from_sid, "section")
+                        st.toast(f"Reordered parts in {sec_name}", icon=":material/reorder:")
+                        st.rerun()
+                elif to_sid and to_sid != from_sid:
                     moved_draft = False
                     for na in draft.get("new_assignments", []):
-                        if na.get("part_id") == pid and na.get("section_id") == from_sid:
+                        if str(na.get("part_id")) == str(pid) and (from_sid is None or str(na.get("section_id")) == str(from_sid)):
                             na["section_id"] = to_sid
                             moved_draft = True
-                            break
-                    if not moved_draft:
-                        try:
-                            move_fishbone_part_assignment(project_id, aid, to_sid)
-                            target_name = section_name_by_id.get(to_sid, "section")
-                            st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
-                            record_audit_event(
-                                project_id,
-                                "Fishbone uses",
-                                "Move fishbone use",
-                                1,
-                                st.session_state.get("current_editor", ""),
-                                {
-                                    "assignment_id": aid,
-                                    "from_section_id": from_sid,
-                                    "to_section_id": to_sid,
-                                },
+                    moved_db_count = 0
+                    for item_aid in aids:
+                        if item_aid and not str(item_aid).startswith("draft_"):
+                            try:
+                                move_fishbone_part_assignment(project_id, item_aid, to_sid)
+                                moved_db_count += 1
+                            except ValueError as err:
+                                st.error(str(err))
+                    if moved_db_count > 0:
+                        if ordered_aids:
+                            reorder_fishbone_part_assignments(
+                                project_id, to_sid, ordered_aids, editor_name=editor
                             )
-                            st.rerun()
-                        except ValueError as err:
-                            st.error(str(err))
+                        target_name = section_name_by_id.get(to_sid, "section")
+                        st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
+                        record_audit_event(
+                            project_id,
+                            "Fishbone uses",
+                            "Move fishbone use",
+                            moved_db_count,
+                            editor,
+                            {
+                                "assignment_ids": aids,
+                                "from_section_id": from_sid,
+                                "to_section_id": to_sid,
+                                "ordered_assignment_ids": ordered_aids,
+                            },
+                        )
+                        st.rerun()
 
         image_path_by_part = (
             parts.set_index(parts["id"].astype(str))["image_path"].to_dict()
@@ -999,6 +1096,34 @@ with fishbone_tab:
         # Build Parts Palette items (Parts Catalog + BOM tree assembly hierarchy)
         bom_tree = pits_bom_model_tree(project_id)
         bom_nodes = bom_tree.get("nodes", []) if bom_tree else []
+
+        part_desc_lookup: dict[str, str] = {}
+        for _, pr in parts.iterrows():
+            p_id = str(pr.get("id") or "").strip()
+            p_num = str(pr.get("part_number") or "").strip().upper()
+            p_desc = str(pr.get("description") or pr.get("part_name") or "").strip()
+            if p_id and p_desc:
+                part_desc_lookup[p_id] = p_desc
+            if p_num and p_desc:
+                part_desc_lookup[p_num] = p_desc
+
+        for bn in bom_nodes:
+            b_id = str(bn.get("part_id") or bn.get("child_part_id") or "").strip()
+            b_num = str(bn.get("part_number") or "").strip().upper()
+            b_desc = str(bn.get("description") or bn.get("part_name") or "").strip()
+            if b_id and b_desc and b_id not in part_desc_lookup:
+                part_desc_lookup[b_id] = b_desc
+            if b_num and b_desc and b_num not in part_desc_lookup:
+                part_desc_lookup[b_num] = b_desc
+            for bc in bn.get("children", []):
+                bc_id = str(bc.get("part_id") or bc.get("child_part_id") or "").strip()
+                bc_num = str(bc.get("part_number") or "").strip().upper()
+                bc_desc = str(bc.get("description") or bc.get("part_name") or "").strip()
+                if bc_id and bc_desc and bc_id not in part_desc_lookup:
+                    part_desc_lookup[bc_id] = bc_desc
+                if bc_num and bc_desc and bc_num not in part_desc_lookup:
+                    part_desc_lookup[bc_num] = bc_desc
+
         asm_children_by_pid = {}
         asm_children_by_pn = {}
         for node in bom_nodes:
@@ -1006,14 +1131,27 @@ with fishbone_tab:
             np_pn = str(node.get("part_number") or "").strip().upper()
             children = node.get("children", [])
             if children:
-                ch_records = [
-                    {
-                        "part_id": str(c.get("part_id") or c.get("child_part_id") or ""),
-                        "part_number": str(c.get("part_number") or ""),
-                        "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
-                    }
-                    for c in children
-                ]
+                ch_map = {}
+                for c in children:
+                    c_pid = str(c.get("part_id") or c.get("child_part_id") or "").strip()
+                    c_pn = str(c.get("part_number") or "").strip()
+                    key = c_pid or c_pn
+                    if not key:
+                        continue
+                    c_qty = float(c.get("quantity") or c.get("proposed_quantity") or 1.0)
+                    c_desc = str(c.get("description") or c.get("part_name") or "").strip() or part_desc_lookup.get(c_pid) or part_desc_lookup.get(c_pn.upper()) or ""
+                    if key in ch_map:
+                        ch_map[key]["quantity"] += c_qty
+                        if not ch_map[key]["description"] and c_desc:
+                            ch_map[key]["description"] = c_desc
+                    else:
+                        ch_map[key] = {
+                            "part_id": c_pid,
+                            "part_number": c_pn,
+                            "description": c_desc,
+                            "quantity": c_qty,
+                        }
+                ch_records = list(ch_map.values())
                 if np_id:
                     asm_children_by_pid[np_id] = ch_records
                 if np_pn:
@@ -1040,10 +1178,11 @@ with fishbone_tab:
             except (ValueError, TypeError):
                 qty = 1.0
 
+            p_desc = str(p.get("description", "") or "").strip() or part_desc_lookup.get(pid) or part_desc_lookup.get(pn.upper()) or ""
             palette_items.append({
                 "part_id": pid,
                 "part_number": pn or "—",
-                "description": str(p.get("description", "") or ""),
+                "description": p_desc,
                 "quantity": qty,
                 "is_assembly": is_asm,
                 "child_count": len(ch_list),
@@ -1062,10 +1201,11 @@ with fishbone_tab:
                 seen_pns.add(np_pn)
             ch_list = node.get("children", [])
             is_asm = len(ch_list) > 0
+            n_desc = str(node.get("description") or node.get("part_name") or "").strip() or part_desc_lookup.get(np_id) or part_desc_lookup.get(np_pn.upper()) or ""
             palette_items.append({
                 "part_id": np_id,
                 "part_number": np_pn or "—",
-                "description": str(node.get("description") or node.get("part_name") or ""),
+                "description": n_desc,
                 "quantity": float(node.get("quantity") or node.get("proposed_quantity") or 1.0),
                 "is_assembly": is_asm,
                 "child_count": len(ch_list),
@@ -1073,6 +1213,7 @@ with fishbone_tab:
                     {
                         "part_id": str(c.get("part_id") or c.get("child_part_id") or ""),
                         "part_number": str(c.get("part_number") or ""),
+                        "description": str(c.get("description") or c.get("part_name") or "").strip() or part_desc_lookup.get(str(c.get("part_id") or c.get("child_part_id") or "").strip()) or part_desc_lookup.get(str(c.get("part_number") or "").strip().upper()) or "",
                         "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
                     }
                     for c in ch_list
@@ -1125,6 +1266,7 @@ with fishbone_tab:
                 "quantity": float(assignment["quantity"] or 0),
                 "models": applicability_label,
                 "image": part_thumbnail(image_path_by_part.get(part_id, "")),
+                "sequence": int(staged.get("sequence") if staged and staged.get("sequence") is not None else (assignment.get("sequence") or 10)),
             })
         for idx, na in enumerate(draft["new_assignments"]):
             part_row = parts.loc[parts["id"].astype(str) == na["part_id"]]
@@ -1142,6 +1284,7 @@ with fishbone_tab:
                 "quantity": float(na.get("quantity") or 1.0),
                 "models": "All models",
                 "image": part_thumbnail(image_path_by_part.get(na["part_id"], "")),
+                "sequence": int(na.get("sequence") or (1000 + idx * 10)),
             })
 
         # Node rows with grid coordinates and op prefix
@@ -1219,7 +1362,196 @@ with fishbone_tab:
             })
 
         # Render Interactive Fishbone Canvas Builder
-        interactive_fishbone(
+        @st.dialog("Delete Fishbone section?", dismissible=False)
+        def confirm_interactive_section_delete() -> None:
+            interactive_delete_key = f"pending_interactive_delete_section_{project_id}"
+            pending_sec_id = str(st.session_state.get(interactive_delete_key, ""))
+            if not pending_sec_id:
+                return
+
+            sec_info = visible_sections.loc[visible_sections["id"].astype(str) == pending_sec_id]
+            sec_name = str(sec_info.iloc[0]["name"]) if not sec_info.empty else "Section"
+            sec_type = str(sec_info.iloc[0]["section_type"]) if not sec_info.empty else ""
+
+            try:
+                impact = assembly_section_delete_impact(project_id, [pending_sec_id])
+            except ValueError as exc:
+                st.error(str(exc))
+                if st.button("Close", key=f"close_err_delete_{pending_sec_id}"):
+                    st.session_state.pop(interactive_delete_key, None)
+                    st.rerun()
+                return
+
+            st.markdown(f"#### Are you sure you want to delete **{sec_name}**?")
+            child_count = impact.get("descendant_section_count", 0)
+            if sec_type or child_count:
+                child_note = (
+                    f" · Will also delete **{child_count}** child section(s): {', '.join(impact['section_names'][1:])}"
+                    if child_count else ""
+                )
+                st.caption(f"Type: **{sec_type}**{child_note}")
+
+            st.markdown("##### Downstream Processes & Content Affected")
+            m1, m2 = st.columns(2)
+            with m1:
+                st.markdown(f"- 📦 **{impact['fishbone_use_count']}** placed part assignment(s)")
+                st.markdown(f"- 🔗 **{impact.get('connection_count', 0)}** flow connection line(s)")
+                st.markdown(f"- ⏱️ **{impact['yamazumi_area_count']}** Yamazumi area(s)")
+            with m2:
+                st.markdown(f"- 📋 **{impact['process_link_count']}** Process at a Glance requirement(s)")
+                st.markdown(f"- ⚙️ **{impact['assembly_reference_count']}** Assembly reference(s)")
+                st.markdown(f"- 🗂️ **{impact['category_reference_count']}** Assembly category reference(s)")
+
+            if impact["pits_bom_approved_occurrence_count"]:
+                st.error(
+                    f"⚠️ **{impact['pits_bom_approved_occurrence_count']}** approved PITS BOM occurrence(s) must be detached in Import/Export Projects before this section can be deleted."
+                )
+
+            replacement_sections = visible_sections.loc[
+                ~visible_sections["id"].astype(str).isin(impact["section_ids"])
+            ].copy()
+            has_replacements = not replacement_sections.empty
+            replacement_options = replacement_sections["id"].astype(str).tolist()
+            replacement_labels = {
+                str(r["id"]): f"{r['name']} ({r['section_type']})"
+                for _, r in replacement_sections.iterrows()
+            }
+
+            st.divider()
+            st.markdown("##### Content Resolution")
+
+            options = []
+            if has_replacements:
+                options.append("rehome")
+            options.append("delete_all")
+
+            format_labels = {
+                "rehome": "Re-home content to another section (preserves parts & merges Yamazumi work)",
+                "delete_all": "Delete it all and its downstream content (unassigns parts, deletes areas & connections)",
+            }
+
+            mode = st.radio(
+                "Select action:",
+                options=options,
+                format_func=lambda x: format_labels.get(x, x),
+                index=0,
+                key=f"radio_interactive_delete_mode_{pending_sec_id}",
+                label_visibility="collapsed",
+            )
+
+            target_section_id = None
+            target_is_valid = True
+
+            if mode == "rehome":
+                st.info(
+                    "Parts assigned to this section will be moved to the chosen destination section. "
+                    "Flow connection lines will be re-routed, and Yamazumi work elements/pitches will be merged into the destination area."
+                )
+                target_section_id = st.selectbox(
+                    "Choose destination Fishbone section:",
+                    options=replacement_options,
+                    index=0 if replacement_options else None,
+                    format_func=lambda v: replacement_labels.get(v, v),
+                    key=f"select_interactive_target_sec_{pending_sec_id}",
+                )
+                if target_section_id:
+                    try:
+                        validation = assembly_section_delete_target_validation(
+                            project_id, [pending_sec_id], str(target_section_id), scenario_id
+                        )
+                        target_is_valid = bool(validation.get("valid", True))
+                        if not target_is_valid:
+                            st.error(str(validation.get("message", "Invalid destination section.")))
+                    except ValueError as val_err:
+                        target_is_valid = False
+                        st.error(str(val_err))
+                else:
+                    target_is_valid = False
+            else:
+                st.warning(
+                    "⚠️ **Delete all & downstream content:** Placed parts in this section will be unassigned and returned to the parts palette. "
+                    "All flow connections, Yamazumi areas, pitches, work elements, and process links for this section will be permanently deleted."
+                )
+
+            actions = st.container(horizontal=True)
+            if actions.button("Cancel", key=f"cancel_interactive_sec_del_{pending_sec_id}"):
+                st.session_state.pop(interactive_delete_key, None)
+                st.rerun()
+
+            can_confirm = (
+                not impact["pits_bom_approved_occurrence_count"]
+                and (target_is_valid if mode == "rehome" else True)
+            )
+            confirm_btn_text = "Delete & Re-home" if mode == "rehome" else "Delete All Content"
+            if actions.button(
+                confirm_btn_text,
+                type="primary",
+                icon=":material/delete:",
+                disabled=not can_confirm,
+                key=f"destructive_confirm_interactive_sec_delete_{pending_sec_id}",
+            ):
+                try:
+                    # Clean up staged canvas draft for deleted sections
+                    affected_set = set(impact["section_ids"])
+                    draft_obj = st.session_state.get(canvas_draft_key, {})
+                    if draft_obj:
+                        draft_obj["positions"] = {
+                            k: v for k, v in draft_obj.get("positions", {}).items()
+                            if k not in affected_set
+                        }
+                        draft_obj["connections"] = [
+                            c for c in draft_obj.get("connections", [])
+                            if c.get("from_section_id") not in affected_set
+                            and c.get("to_section_id") not in affected_set
+                        ]
+                        draft_obj["new_assignments"] = [
+                            a for a in draft_obj.get("new_assignments", [])
+                            if a.get("section_id") not in affected_set
+                        ]
+
+                    current_plan_snapshot = fishbone_plan_snapshot(project_id)
+                    deleted = delete_assembly_sections(
+                        project_id=project_id,
+                        section_ids=[pending_sec_id],
+                        target_section_id=str(target_section_id) if mode == "rehome" else None,
+                        active_scenario_id=scenario_id,
+                        rehome_parts=(mode == "rehome"),
+                        cascade_delete_content=(mode == "delete_all"),
+                    )
+
+                    st.session_state[framework_undo_key] = current_plan_snapshot
+                    record_audit_event(
+                        project_id,
+                        "Fishbone framework",
+                        "Delete section",
+                        deleted["affected_section_count"],
+                        st.session_state.get("current_editor", ""),
+                        {
+                            "deleted_section": sec_name,
+                            "affected_sections": deleted["section_names"],
+                            "resolution_mode": mode,
+                            "target_section": replacement_labels.get(str(target_section_id), "") if target_section_id else None,
+                            "impact": impact,
+                        },
+                    )
+
+                    st.session_state.pop(interactive_delete_key, None)
+                    request_table_editor_reset(pool_editor_key)
+                    request_table_editor_reset(assignment_editor_key)
+                    request_table_editor_reset(framework_editor_key)
+
+                    dest_label = replacement_labels.get(str(target_section_id), "")
+                    toast_msg = (
+                        f"Deleted '{sec_name}' and re-homed content to {dest_label}"
+                        if mode == "rehome"
+                        else f"Deleted '{sec_name}' and unassigned all content"
+                    )
+                    st.toast(toast_msg, icon=":material/delete:")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        canvas_output = interactive_fishbone(
             sections=node_rows,
             connections=conn_rows,
             parts=visual_parts,
@@ -1227,6 +1559,19 @@ with fishbone_tab:
             all_sections=all_sections_list,
             key=canvas_key,
         )
+        if canvas_output:
+            if p := getattr(canvas_output, "delete_section_request", None):
+                if sid := p.get("section_id"):
+                    st.session_state[f"pending_interactive_delete_section_{project_id}"] = str(sid)
+                    try:
+                        delattr(canvas_output, "delete_section_request")
+                    except (AttributeError, TypeError):
+                        pass
+                    st.rerun()
+
+        interactive_delete_key = f"pending_interactive_delete_section_{project_id}"
+        if st.session_state.get(interactive_delete_key):
+            confirm_interactive_section_delete()
 
         has_canvas_draft = bool(
             draft["positions"]
@@ -1603,7 +1948,7 @@ def _render_framework_maintenance():
                     selected_framework_rows["id"].astype(str).tolist()
                 )
 
-        @st.dialog("Delete selected Fishbone sections?")
+        @st.dialog("Delete selected Fishbone sections?", dismissible=False)
         def confirm_framework_delete() -> None:
             pending_ids = st.session_state.get(framework_delete_key, [])
             try:

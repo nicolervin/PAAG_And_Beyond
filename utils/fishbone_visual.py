@@ -56,11 +56,17 @@ _HTML = """
         <g id="fishbone-world"></g>
       </svg>
       <div id="fishbone-tooltip" class="fishbone-tooltip" hidden>
-        <img id="tooltip-image" alt="" />
-        <div id="tooltip-no-image">No photo</div>
-        <div class="tooltip-copy">
-          <strong id="tooltip-number"></strong>
-          <span id="tooltip-name"></span>
+        <div class="tooltip-header">
+          <div class="tooltip-media">
+            <img id="tooltip-image" alt="Part CAD" />
+            <div id="tooltip-no-image">No photo</div>
+          </div>
+          <div class="tooltip-title-block">
+            <strong id="tooltip-number"></strong>
+            <span id="tooltip-name"></span>
+          </div>
+        </div>
+        <div class="tooltip-details">
           <small id="tooltip-meta"></small>
         </div>
       </div>
@@ -69,13 +75,30 @@ _HTML = """
         <div class="modal-card">
           <h4>Place assembly</h4>
           <p id="assembly-drop-desc"></p>
+          <div id="assembly-children-container" style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;">
+            <span style="display:block; font-size:.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; color:var(--st-secondary-text-color);">Sub-components:</span>
+            <div id="assembly-children-list" class="assembly-children-box"></div>
+          </div>
           <div class="modal-form">
+            <div style="margin-bottom:8px; padding:10px 12px; background:var(--st-secondary-background-color, #f8fafc); border:1px solid var(--st-border-color, #e2e8f0); border-radius:8px;">
+              <span style="display:block; font-size:.82rem; font-weight:600; color:var(--st-text-color); margin-bottom:6px;">Placement mode:</span>
+              <label style="display:flex; align-items:center; gap:8px; font-size:.84rem; cursor:pointer; margin-bottom:6px;">
+                <input type="radio" name="assembly-mode" id="assembly-mode-both" value="both" checked />
+                <span><strong>Place assembly & bring in child parts</strong></span>
+              </label>
+              <label style="display:flex; align-items:center; gap:8px; font-size:.84rem; cursor:pointer;">
+                <input type="radio" name="assembly-mode" id="assembly-mode-group-only" value="group_only" />
+                <span><strong>Bring in group part only</strong> (keep children in parts palette)</span>
+              </label>
+            </div>
+            <div id="assembly-built-group">
+              <label class="modal-label">
+                Where is this assembly built?
+                <select id="assembly-built-select" class="modal-select"></select>
+              </label>
+            </div>
             <label class="modal-label">
-              Where is this assembly built?
-              <select id="assembly-built-select" class="modal-select"></select>
-            </label>
-            <label class="modal-label">
-              Where is this assembly installed?
+              <span id="assembly-installed-label">Where is this assembly installed?</span>
               <select id="assembly-installed-select" class="modal-select"></select>
             </label>
           </div>
@@ -113,7 +136,25 @@ _HTML = """
           </div>
         </div>
       </div>
-      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle (•) to connect · Drag parts to sections or between sections · Click stacked cards to cycle variants</div>
+      <!-- Connection Edit / Move Modal -->
+      <div id="conn-edit-modal" class="canvas-modal" hidden>
+        <div class="modal-card">
+          <h4>Re-route Connection</h4>
+          <p id="conn-edit-desc">Move this connection to a different section, or delete it:</p>
+          <div class="modal-form">
+            <label class="modal-label">
+              <span>Feeds into (Target Section):</span>
+              <select id="conn-target-select" class="modal-select"></select>
+            </label>
+          </div>
+          <div class="modal-buttons">
+            <button id="btn-conn-move" type="button" class="btn-modal btn-primary">Move Connection</button>
+            <button id="btn-conn-delete" type="button" class="btn-modal" style="background:#fee2e2; color:#b91c1c; border-color:#fca5a5;">Delete Connection</button>
+            <button id="btn-conn-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle (•) to connect · Drag end of arrow or click × to move connector · Drag parts to re-order within section or move between sections · Click stacked cards to cycle variants</div>
     </div>
   </div>
 </div>
@@ -169,12 +210,20 @@ _CSS = """
 .port-handle:hover { r: 10; opacity: 1; fill: #1d4ed8; }
 
 /* Connection line */
-.conn-line { cursor: pointer; transition: stroke .15s ease, stroke-width .15s ease; }
+.conn-line { cursor: pointer; fill: none !important; stroke-linecap: round; transition: stroke .15s ease, stroke-width .15s ease; pointer-events: stroke; }
 .conn-line:hover { stroke-width: 5 !important; filter: drop-shadow(0 0 5px rgba(37,99,235,0.4)); }
 .conn-line.selected { stroke: #ef4444 !important; stroke-width: 5 !important; }
-.conn-hit-area { cursor: pointer; stroke: transparent; fill: none; stroke-width: 18; }
-.conn-delete-btn { cursor: pointer; opacity: 0.92; }
-.conn-delete-btn:hover { opacity: 1; transform: scale(1.1); }
+.conn-hit-area { cursor: pointer; stroke: transparent !important; fill: none !important; stroke-width: 22px; pointer-events: stroke; }
+.conn-delete-btn { cursor: pointer; opacity: 0.92; transition: opacity .12s ease; }
+.conn-delete-btn:hover { opacity: 1; }
+
+/* Section delete button styling - keep stationary without scale transform to prevent jitter */
+.section-remove-btn { cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.section-node:hover .section-remove-btn,
+.section-node.selected .section-remove-btn { opacity: 0.88; pointer-events: auto; }
+.section-remove-btn:hover { opacity: 1 !important; }
+.section-remove-btn circle.sec-del-circle { transition: fill .12s ease; }
+.section-remove-btn:hover circle.sec-del-circle { fill: #dc2626; }
 
 /* Part card styling */
 .part-card { cursor: grab; user-select: none; }
@@ -190,21 +239,31 @@ _CSS = """
 .part-drag-ghost { pointer-events: none; }
 
 .fishbone-hint { position: absolute; right: 12px; bottom: 10px; padding: 5px 8px; border-radius: 6px; color: var(--st-secondary-text-color); background: color-mix(in srgb, var(--st-background-color) 88%, transparent); font-size: .75rem; pointer-events: none; }
-.fishbone-tooltip { position: absolute; z-index: 20; width: 300px; display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 10px; border: 1px solid var(--st-primary-color); border-radius: 10px; background: var(--st-background-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .24); pointer-events: none; }
-.fishbone-tooltip[hidden] { display: none; }
-.fishbone-tooltip img, #tooltip-no-image { width: 112px; height: 88px; border-radius: 7px; object-fit: contain; background: var(--st-secondary-background-color); }
-#tooltip-no-image { display: grid; place-items: center; color: var(--st-secondary-text-color); font-size: .8rem; }
-.tooltip-copy { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.tooltip-copy strong { color: var(--st-primary-color); overflow-wrap: anywhere; }
-.tooltip-copy span { line-height: 1.25; }
-.tooltip-copy small { color: var(--st-secondary-text-color); line-height: 1.35; }
+.fishbone-tooltip { position: absolute; z-index: 20; width: 360px; max-width: 90vw; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--st-primary-color); border-radius: 10px; background: var(--st-background-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .24); pointer-events: none; }
+.fishbone-tooltip[hidden] { display: none !important; }
+.tooltip-header { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.tooltip-media { width: 92px; min-width: 92px; height: 80px; border-radius: 8px; background: var(--st-secondary-background-color); overflow: hidden; display: flex; align-items: center; justify-content: center; border: 1px solid var(--st-border-color); flex-shrink: 0; }
+.tooltip-media img { width: 100%; height: 100%; object-fit: contain; }
+.tooltip-media img[hidden] { display: none !important; }
+#tooltip-no-image { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--st-secondary-text-color); font-size: .78rem; text-align: center; padding: 4px; }
+#tooltip-no-image[hidden] { display: none !important; }
+.tooltip-title-block { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
+.tooltip-title-block strong { font-size: .92rem; color: var(--st-primary-color); overflow-wrap: anywhere; line-height: 1.25; }
+.tooltip-title-block span { font-size: .84rem; color: var(--st-text-color); line-height: 1.3; overflow-wrap: anywhere; }
+.tooltip-details { border-top: 1px solid var(--st-border-color); padding-top: 6px; display: flex; flex-direction: column; }
+.tooltip-details small { color: var(--st-text-color); font-size: .8rem; line-height: 1.45; white-space: pre-line; word-break: break-word; }
 
 /* Modals */
 .canvas-modal { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .canvas-modal[hidden] { display: none; }
-.modal-card { background: var(--st-background-color); border: 1px solid var(--st-border-color); border-radius: 12px; padding: 22px; max-width: 440px; width: 90%; box-shadow: 0 16px 36px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 12px; }
+.modal-card { background: var(--st-background-color); border: 1px solid var(--st-border-color); border-radius: 12px; padding: 22px; max-width: 480px; width: 90%; max-height: 90vh; overflow-y: auto; box-shadow: 0 16px 36px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 12px; }
 .modal-card h4 { margin: 0; font-size: 1.15rem; color: var(--st-text-color); }
 .modal-card p { margin: 0; font-size: .88rem; color: var(--st-secondary-text-color); line-height: 1.4; }
+.assembly-children-box { max-height: 140px; overflow-y: auto; background: var(--st-secondary-background-color, #f8fafc); border: 1px solid var(--st-border-color, #e2e8f0); border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; gap: 5px; }
+.assembly-child-item { display: flex; align-items: center; gap: 8px; font-size: .83rem; line-height: 1.3; }
+.assembly-child-num { font-weight: 600; color: var(--st-primary-color); font-family: monospace; white-space: nowrap; }
+.assembly-child-name { color: var(--st-text-color); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assembly-child-qty { color: var(--st-secondary-text-color); font-size: .78rem; font-weight: 500; white-space: nowrap; }
 .modal-form { display: flex; flex-direction: column; gap: 10px; }
 .modal-label { font-size: .84rem; font-weight: 600; display: flex; flex-direction: column; gap: 4px; }
 .modal-select { padding: 8px 10px; border: 1px solid var(--st-border-color); border-radius: 6px; background: var(--st-background-color); color: var(--st-text-color); font-size: .88rem; }
@@ -212,6 +271,9 @@ _CSS = """
 .btn-modal { padding: 9px 14px; border: 1px solid var(--st-border-color); border-radius: 6px; font-weight: 600; font-size: .86rem; cursor: pointer; text-align: center; }
 .btn-primary { background: var(--st-primary-color); color: white; border-color: var(--st-primary-color); }
 .btn-cancel { background: transparent; color: var(--st-secondary-text-color); }
+.conn-arrow-handle { cursor: grab; opacity: 0.88; transition: r .12s ease, fill .12s ease, opacity .12s ease; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.3)); }
+.conn-arrow-handle:hover { r: 10px !important; opacity: 1 !important; fill: #1d4ed8 !important; }
+.conn-arrow-handle:active { cursor: grabbing; }
 .buffer-badge rect { fill: #1e293b; stroke: #94a3b8; stroke-width: 1.5; rx: 6px; }
 .buffer-badge text { fill: #f8fafc; font-size: 10px; font-weight: 700; user-select: none; }
 
@@ -237,7 +299,7 @@ function snap(val, step = 20) {
   return Math.round(val / step) * step
 }
 
-export default function(component) {
+export default function renderFishbone(component) {
   const { data, parentElement } = component
   const shell = parentElement.querySelector(".fishbone-shell")
   const viewport = parentElement.querySelector(".fishbone-viewport")
@@ -261,10 +323,24 @@ export default function(component) {
 
   const assemblyModal = parentElement.querySelector("#assembly-drop-modal")
   const assemblyDropDesc = parentElement.querySelector("#assembly-drop-desc")
+  const assemblyModeBoth = parentElement.querySelector("#assembly-mode-both")
+  const assemblyModeGroupOnly = parentElement.querySelector("#assembly-mode-group-only")
+  const assemblyBuiltGroup = parentElement.querySelector("#assembly-built-group")
   const assemblyBuiltSelect = parentElement.querySelector("#assembly-built-select")
+  const assemblyInstalledLabel = parentElement.querySelector("#assembly-installed-label")
   const assemblyInstalledSelect = parentElement.querySelector("#assembly-installed-select")
   const btnAssemblyConfirm = parentElement.querySelector("#btn-assembly-confirm")
   const btnAssemblyCancel = parentElement.querySelector("#btn-assembly-cancel")
+
+  function updateAssemblyModalMode() {
+    const isGroupOnly = assemblyModeGroupOnly && assemblyModeGroupOnly.checked
+    if (assemblyBuiltGroup) assemblyBuiltGroup.hidden = isGroupOnly
+    if (assemblyInstalledLabel) {
+      assemblyInstalledLabel.textContent = isGroupOnly ? "Place assembly in section:" : "Where is this assembly installed?"
+    }
+  }
+  if (assemblyModeBoth) assemblyModeBoth.onchange = updateAssemblyModalMode
+  if (assemblyModeGroupOnly) assemblyModeGroupOnly.onchange = updateAssemblyModalMode
 
   const addSectionBtn = parentElement.querySelector("#add-section-btn")
   const addSectionModal = parentElement.querySelector("#add-section-modal")
@@ -275,13 +351,20 @@ export default function(component) {
   const btnAddSectionConfirm = parentElement.querySelector("#btn-add-section-confirm")
   const btnAddSectionCancel = parentElement.querySelector("#btn-add-section-cancel")
 
+  const connModal = parentElement.querySelector("#conn-edit-modal")
+  const connDesc = parentElement.querySelector("#conn-edit-desc")
+  const connTargetSelect = parentElement.querySelector("#conn-target-select")
+  const btnConnMove = parentElement.querySelector("#btn-conn-move")
+  const btnConnDelete = parentElement.querySelector("#btn-conn-delete")
+  const btnConnCancel = parentElement.querySelector("#btn-conn-cancel")
+
   if (!shell || !viewport || !svg || !world || !data) return
 
   let state = instanceState.get(parentElement)
   if (!state) {
     state = {
       scale: 1, x: 0, y: 0, dragging: false, pointerX: 0, pointerY: 0, fitted: false, signature: "",
-      selectedConnId: null, selectedSectionId: null, pendingConnection: null,
+      selectedConnId: null, selectedSectionId: null, pendingConnection: null, reconnectingConnection: null,
       hasUserInteracted: false, observerAttached: false, clusterActiveIndices: new Map()
     }
     instanceState.set(parentElement, state)
@@ -404,6 +487,72 @@ export default function(component) {
     }
   }
 
+  // Connection Re-route / Edit Modal Handling
+  function openConnEditModal(rConn) {
+    if (!connModal) return
+    const fromSec = sectionById.get(rConn.fromId)
+    const oldToSec = sectionById.get(rConn.oldToId)
+    const fromName = fromSec ? fromSec.name : (rConn.fromName || "section")
+    const oldToName = oldToSec ? oldToSec.name : "target"
+
+    if (connDesc) {
+      connDesc.textContent = `Flow connection from "${fromName}" to "${oldToName}". Choose a new target section to move it, or delete it:`
+    }
+    if (connTargetSelect) {
+      connTargetSelect.replaceChildren()
+      allSections.forEach(s => {
+        if (s.id !== rConn.fromId) {
+          const opt = document.createElement("option")
+          opt.value = s.id
+          opt.textContent = s.name
+          if (s.id === rConn.oldToId) opt.selected = true
+          connTargetSelect.appendChild(opt)
+        }
+      })
+    }
+
+    if (btnConnMove) {
+      btnConnMove.onclick = () => {
+        const newToId = connTargetSelect ? connTargetSelect.value : ""
+        connModal.hidden = true
+        if (newToId && newToId !== rConn.oldToId) {
+          state.selectedConnId = null
+          component.setTriggerValue("move_connection", {
+            connection_id: rConn.connId,
+            from_section_id: rConn.fromId,
+            to_section_id: newToId,
+            old_to_section_id: rConn.oldToId,
+            connection_type: rConn.connType
+          })
+        }
+      }
+    }
+
+    if (btnConnDelete) {
+      btnConnDelete.onclick = () => {
+        connModal.hidden = true
+        state.selectedConnId = null
+        component.setTriggerValue("delete_connection", {
+          connection_id: rConn.connId
+        })
+      }
+    }
+
+    if (btnConnCancel) {
+      btnConnCancel.onclick = () => {
+        connModal.hidden = true
+      }
+    }
+
+    connModal.hidden = false
+  }
+
+  if (connModal) {
+    connModal.onclick = (e) => {
+      if (e.target === connModal) connModal.hidden = true
+    }
+  }
+
   // Populate Palette
   function renderPalette() {
     paletteList.replaceChildren()
@@ -484,9 +633,13 @@ export default function(component) {
   paletteUnplacedOnly.onchange = renderPalette
   renderPalette()
 
-  // Helper for clustering similar parts (same 8 chars, differing suffix)
+  // Helper for clustering similar parts (same base drawing number, differing suffix)
   function getPartBaseCode(pn) {
     const clean = String(pn || "").trim().toUpperCase()
+    const match = clean.match(/^([A-Z0-9]+?)([PG]\\d{2,4}[A-Z]?)$/)
+    if (match && match[1].length >= 5) {
+      return match[1]
+    }
     if (clean.length >= 10) {
       return clean.slice(0, 8)
     }
@@ -497,7 +650,8 @@ export default function(component) {
     const clusters = []
     const map = new Map()
     secPartsList.forEach(p => {
-      const base = getPartBaseCode(p.part_number)
+      const pNum = String(p.part_number || "").trim().toUpperCase()
+      const base = getPartBaseCode(pNum)
       const clusterKey = `${secId}:${base}`
       if (!map.has(base)) {
         const activeIdx = (state.clusterActiveIndices && state.clusterActiveIndices.get(clusterKey)) || 0
@@ -510,7 +664,26 @@ export default function(component) {
         map.set(base, cl)
         clusters.push(cl)
       }
-      map.get(base).parts.push(p)
+      const cl = map.get(base)
+      // Check if this EXACT part (same part_number or same part_id) is already in the cluster
+      const existing = cl.parts.find(item => 
+        (p.part_id && item.part_id === p.part_id) || 
+        (pNum && String(item.part_number || "").trim().toUpperCase() === pNum)
+      )
+      if (existing) {
+        // Same exact part number/name/photo: DO NOT duplicate! Combine quantity and IDs.
+        existing.quantity = (Number(existing.quantity) || 1) + (Number(p.quantity) || 1)
+        if (!existing.assignment_ids) existing.assignment_ids = [existing.id]
+        if (p.id && !existing.assignment_ids.includes(p.id)) existing.assignment_ids.push(p.id)
+        if (p.models && p.models !== "All models" && existing.models && !existing.models.includes(p.models)) {
+          existing.models = `${existing.models}, ${p.models}`
+        }
+      } else {
+        const copy = Object.assign({}, p, {
+          assignment_ids: [p.id]
+        })
+        cl.parts.push(copy)
+      }
     })
     return clusters
   }
@@ -658,6 +831,7 @@ export default function(component) {
       fill: "none",
       stroke: color,
       "stroke-width": isSelected ? 4.5 : 3,
+      "stroke-linecap": "round",
       "marker-end": marker,
       class: `conn-line${isSelected ? " selected" : ""}`
     })
@@ -667,6 +841,9 @@ export default function(component) {
 
     const hitArea = svgElement("path", {
       d: pathData,
+      fill: "none",
+      stroke: "transparent",
+      "stroke-width": 22,
       class: "conn-hit-area"
     })
 
@@ -700,12 +877,41 @@ export default function(component) {
       edgeLayer.appendChild(bufGroup)
     }
 
-    // Selected Connection Delete Button
+    // Arrow-end handle for dragging to a different section or clicking to re-route
+    const endHandle = svgElement("circle", {
+      cx: p2x,
+      cy: p2y,
+      r: isSelected ? 8.5 : 6.5,
+      fill: isSelected ? "#ef4444" : (isFromSupport ? "#64748b" : "#2563eb"),
+      stroke: "white",
+      "stroke-width": 2,
+      class: "conn-arrow-handle",
+      title: "Drag end of arrow to connect to a different section, or click to re-route"
+    })
+    endHandle.onmousedown = (e) => {
+      e.stopPropagation()
+      state.reconnectingConnection = {
+        connId: conn.id,
+        fromId: start.id,
+        fromName: start.name,
+        oldToId: end.id,
+        connType: conn.connection_type || "subassembly",
+        startX: p1x,
+        startY: p1y,
+        isDrag: false,
+        originX: e.clientX,
+        originY: e.clientY,
+        isFromDelGroup: false
+      }
+    }
+    edgeLayer.appendChild(endHandle)
+
+    // Selected Connection Action Button (Red X)
     if (isSelected) {
       const delGroup = svgElement("g", {
         transform: `translate(${midX} ${midY})`,
         class: "conn-delete-btn",
-        title: "Delete this connection"
+        title: "Click to move or delete connection, or drag to reconnect"
       })
       delGroup.appendChild(svgElement("circle", { cx: 0, cy: 0, r: 12, fill: "#ef4444", stroke: "white", "stroke-width": 2 }))
       const delText = svgElement("text", {
@@ -713,10 +919,22 @@ export default function(component) {
       })
       delText.textContent = "×"
       delGroup.appendChild(delText)
-      delGroup.onclick = (e) => {
+
+      delGroup.onmousedown = (e) => {
         e.stopPropagation()
-        state.selectedConnId = null
-        component.setTriggerValue("delete_connection", { connection_id: conn.id })
+        state.reconnectingConnection = {
+          connId: conn.id,
+          fromId: start.id,
+          fromName: start.name,
+          oldToId: end.id,
+          connType: conn.connection_type || "subassembly",
+          startX: p1x,
+          startY: p1y,
+          isDrag: false,
+          originX: e.clientX,
+          originY: e.clientY,
+          isFromDelGroup: true
+        }
       }
       edgeLayer.appendChild(delGroup)
     }
@@ -828,6 +1046,34 @@ export default function(component) {
     }
     group.appendChild(port)
 
+    // Section Delete Button (red × on hover or click)
+    const secDelBtn = svgElement("g", {
+      class: "section-remove-btn",
+      transform: `translate(${secWidth / 2 - 16} ${-secHeight / 2 + 16})`,
+      title: `Delete section "${section.name}"`
+    })
+    // Transparent expanded hit area for smooth steady interaction
+    secDelBtn.appendChild(svgElement("circle", { cx: 0, cy: 0, r: 14, fill: "transparent" }))
+    // Visible red circle badge
+    secDelBtn.appendChild(svgElement("circle", { cx: 0, cy: 0, r: 9, fill: "#ef4444", class: "sec-del-circle" }))
+    const secDelTxt = svgElement("text", {
+      x: 0, y: 3.5, "text-anchor": "middle", fill: "white", "font-size": 12, "font-weight": 700,
+      "pointer-events": "none"
+    })
+    secDelTxt.textContent = "×"
+    secDelBtn.appendChild(secDelTxt)
+    secDelBtn.onmousedown = (e) => {
+      e.stopPropagation()
+    }
+    secDelBtn.onclick = (e) => {
+      e.stopPropagation()
+      component.setTriggerValue("delete_section_request", {
+        section_id: section.id,
+        section_name: section.name
+      })
+    }
+    group.appendChild(secDelBtn)
+
     // Parts Tray inside the block
     if (secParts.length === 0) {
       const placeholder = svgElement("text", {
@@ -848,6 +1094,12 @@ export default function(component) {
         const activePart = cluster.parts[activeIdx]
         const cardX = curX
         const cardY = -secHeight / 2 + 48
+        const clusterW = hasMultiple ? cardW + 10 : cardW
+        cluster.cardX = cardX
+        cluster.cardY = cardY
+        cluster.cardW = clusterW
+        cluster.cardH = cardH
+        cluster.midX = cardX + clusterW / 2
 
         const clusterGroup = svgElement("g", {
           class: `part-cluster${hasMultiple ? " cascaded" : ""}`,
@@ -961,13 +1213,14 @@ export default function(component) {
           e.stopPropagation()
           component.setTriggerValue("remove_part", {
             assignment_id: activePart.id,
+            assignment_ids: activePart.assignment_ids || [activePart.id],
             part_id: activePart.part_id,
             section_id: section.id
           })
         }
         card.appendChild(removeBtn)
 
-        // Mouse Drag to move part to another section & Click to cycle variants
+        // Mouse Drag to re-order within section or move to another section & Click to cycle variants
         card.onmousedown = (e) => {
           if (e.target.closest(".part-remove-btn")) return
           e.stopPropagation()
@@ -1006,14 +1259,80 @@ export default function(component) {
               const currY = (moveEvt.clientY - rect.top - state.y) / state.scale
 
               document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+              const oldIndicator = ghostLayer.querySelector(".part-insert-indicator")
+              if (oldIndicator) oldIndicator.remove()
+
               const hoveredSec = sections.find(s => {
                 const w = s.secWidth || 220
                 const h = s.secHeight || 64
                 return Math.abs(currX - s.sx) < w / 2 && Math.abs(currY - s.sy) < h / 2
               })
               if (hoveredSec) {
-                const nodeElem = parentElement.querySelector(`[data-section-id="${hoveredSec.id}"]`)
-                if (nodeElem) nodeElem.classList.add("section-drop-hover")
+                if (hoveredSec.id !== section.id) {
+                  const nodeElem = parentElement.querySelector(`[data-section-id="${hoveredSec.id}"]`)
+                  if (nodeElem) nodeElem.classList.add("section-drop-hover")
+                }
+
+                // Show insertion line between parts if section has clusters
+                const clusters = hoveredSec.partClusters || []
+                if (clusters.length > 0) {
+                  const localX = currX - hoveredSec.sx
+                  let insertLocalX = 0
+                  const gap = 12
+
+                  if (localX < clusters[0].midX) {
+                    insertLocalX = clusters[0].cardX - gap / 2
+                  } else if (localX >= clusters[clusters.length - 1].midX) {
+                    const lastCl = clusters[clusters.length - 1]
+                    insertLocalX = lastCl.cardX + lastCl.cardW + gap / 2
+                  } else {
+                    for (let i = 0; i < clusters.length - 1; i++) {
+                      const clA = clusters[i]
+                      const clB = clusters[i + 1]
+                      const splitX = (clA.cardX + clA.cardW + clB.cardX) / 2
+                      if (localX < splitX) {
+                        insertLocalX = splitX
+                        break
+                      }
+                    }
+                  }
+
+                  const worldInsertX = hoveredSec.sx + insertLocalX
+                  const cardY = -hoveredSec.secHeight / 2 + 48
+                  const topY = hoveredSec.sy + cardY - 4
+                  const indicatorH = 86
+
+                  const indicatorG = svgElement("g", { class: "part-insert-indicator", "pointer-events": "none" })
+                  const bar = svgElement("rect", {
+                    x: worldInsertX - 2,
+                    y: topY,
+                    width: 4,
+                    height: indicatorH,
+                    rx: 2,
+                    fill: "#3b82f6",
+                    filter: "drop-shadow(0 0 5px rgba(59, 130, 246, 0.7))"
+                  })
+                  indicatorG.appendChild(bar)
+                  const topDot = svgElement("circle", {
+                    cx: worldInsertX,
+                    cy: topY,
+                    r: 4.5,
+                    fill: "#2563eb",
+                    stroke: "white",
+                    "stroke-width": 1.5
+                  })
+                  indicatorG.appendChild(topDot)
+                  const botDot = svgElement("circle", {
+                    cx: worldInsertX,
+                    cy: topY + indicatorH,
+                    r: 4.5,
+                    fill: "#2563eb",
+                    stroke: "white",
+                    "stroke-width": 1.5
+                  })
+                  indicatorG.appendChild(botDot)
+                  ghostLayer.appendChild(indicatorG)
+                }
               }
             }
           }
@@ -1021,7 +1340,10 @@ export default function(component) {
           const onMouseUp = (upEvt) => {
             window.removeEventListener("mousemove", onMouseMove)
             window.removeEventListener("mouseup", onMouseUp)
+            window.removeEventListener("keydown", onKeyDown)
             document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+            const oldIndicator = ghostLayer.querySelector(".part-insert-indicator")
+            if (oldIndicator) oldIndicator.remove()
             if (ghostEl) {
               ghostEl.remove()
               ghostEl = null
@@ -1036,13 +1358,91 @@ export default function(component) {
                 const h = s.secHeight || 64
                 return Math.abs(currX - s.sx) < w / 2 && Math.abs(currY - s.sy) < h / 2
               })
-              if (targetSec && targetSec.id !== section.id) {
-                component.setTriggerValue("move_part_assignment", {
-                  assignment_id: activePart.id,
-                  part_id: activePart.part_id,
-                  from_section_id: section.id,
-                  to_section_id: targetSec.id
-                })
+              if (targetSec) {
+                const clusters = targetSec.partClusters || []
+                let targetIdx = clusters.length
+                const localX = currX - targetSec.sx
+                if (clusters.length > 0) {
+                  if (localX < clusters[0].midX) {
+                    targetIdx = 0
+                  } else if (localX >= clusters[clusters.length - 1].midX) {
+                    targetIdx = clusters.length
+                  } else {
+                    for (let i = 0; i < clusters.length - 1; i++) {
+                      const clA = clusters[i]
+                      const clB = clusters[i + 1]
+                      const splitX = (clA.cardX + clA.cardW + clB.cardX) / 2
+                      if (localX < splitX) {
+                        targetIdx = i + 1
+                        break
+                      }
+                    }
+                  }
+                }
+
+                if (targetSec.id === section.id) {
+                  // Reorder within the same section
+                  if (clusters.length > 1) {
+                    const sourceIdx = clusters.indexOf(cluster)
+                    if (sourceIdx !== -1 && targetIdx !== sourceIdx && targetIdx !== sourceIdx + 1) {
+                      const newClusters = [...clusters]
+                      const [movedCluster] = newClusters.splice(sourceIdx, 1)
+                      const insertAt = targetIdx > sourceIdx ? targetIdx - 1 : targetIdx
+                      newClusters.splice(insertAt, 0, movedCluster)
+
+                      const orderedAssignmentIds = []
+                      newClusters.forEach(cl => {
+                        cl.parts.forEach(p => {
+                          if (p.assignment_ids && p.assignment_ids.length > 0) {
+                            p.assignment_ids.forEach(aid => {
+                              if (!orderedAssignmentIds.includes(aid)) orderedAssignmentIds.push(aid)
+                            })
+                          } else if (p.id && !orderedAssignmentIds.includes(p.id)) {
+                            orderedAssignmentIds.push(p.id)
+                          }
+                        })
+                      })
+
+                      component.setTriggerValue("move_part_assignment", {
+                        assignment_id: activePart.id,
+                        assignment_ids: activePart.assignment_ids || [activePart.id],
+                        part_id: activePart.part_id,
+                        from_section_id: section.id,
+                        to_section_id: section.id,
+                        target_index: insertAt,
+                        ordered_assignment_ids: orderedAssignmentIds
+                      })
+                    }
+                  }
+                } else {
+                  // Move to another section
+                  const targetClusters = [...clusters]
+                  const insertAt = Math.min(Math.max(0, targetIdx), targetClusters.length)
+                  targetClusters.splice(insertAt, 0, cluster)
+
+                  const orderedTargetAssignmentIds = []
+                  targetClusters.forEach(cl => {
+                    cl.parts.forEach(p => {
+                      if (p.assignment_ids && p.assignment_ids.length > 0) {
+                        p.assignment_ids.forEach(aid => {
+                          if (!orderedTargetAssignmentIds.includes(aid)) orderedTargetAssignmentIds.push(aid)
+                        })
+                      } else if (p.id && !orderedTargetAssignmentIds.includes(p.id)) {
+                        orderedTargetAssignmentIds.push(p.id)
+                      }
+                    })
+                  })
+
+                  component.setTriggerValue("move_part_assignment", {
+                    assignment_id: activePart.id,
+                    assignment_ids: activePart.assignment_ids || [activePart.id],
+                    part_id: activePart.part_id,
+                    from_section_id: section.id,
+                    to_section_id: targetSec.id,
+                    target_index: insertAt,
+                    ordered_assignment_ids: orderedTargetAssignmentIds
+                  })
+                }
               }
             } else {
               // Clicked without dragging: cycle variant if cascaded
@@ -1054,8 +1454,25 @@ export default function(component) {
             }
           }
 
+          const onKeyDown = (keyEvt) => {
+            if (keyEvt.key === "Escape") {
+              window.removeEventListener("mousemove", onMouseMove)
+              window.removeEventListener("mouseup", onMouseUp)
+              window.removeEventListener("keydown", onKeyDown)
+              document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+              const oldIndicator = ghostLayer.querySelector(".part-insert-indicator")
+              if (oldIndicator) oldIndicator.remove()
+              if (ghostEl) {
+                ghostEl.remove()
+                ghostEl = null
+              }
+              isDragging = false
+            }
+          }
+
           window.addEventListener("mousemove", onMouseMove)
           window.addEventListener("mouseup", onMouseUp)
+          window.addEventListener("keydown", onKeyDown)
         }
 
         // Hover tooltip
@@ -1063,29 +1480,37 @@ export default function(component) {
           if (activePart.image) {
             tooltipImage.src = activePart.image
             tooltipImage.hidden = false
+            tooltipImage.style.display = "block"
             tooltipNoImage.hidden = true
+            tooltipNoImage.style.display = "none"
           } else {
+            tooltipImage.src = ""
             tooltipImage.hidden = true
+            tooltipImage.style.display = "none"
             tooltipNoImage.hidden = false
+            tooltipNoImage.style.display = "flex"
           }
           if (hasMultiple) {
             tooltipNumber.textContent = `${cluster.baseCode} (${cluster.parts.length} variants)`
             tooltipName.textContent = activePart.description || "Similar Part Family"
-            const lines = cluster.parts.map((p, i) => `${i === activeIdx ? "▶ " : "• "}${p.part_number}: ${p.description || ""} (Qty: ${p.quantity})`).join("\n")
-            tooltipMeta.style.whiteSpace = "pre-line"
-            tooltipMeta.textContent = `${lines}\n\n💡 Click card to cycle active variant · Drag to move to section`
+            const lines = cluster.parts.map((p, i) => `${i === activeIdx ? "▶ " : "• "}${p.part_number}: ${p.description || ""} (Qty: ${p.quantity})`).join("\\n")
+            tooltipMeta.textContent = `${lines}\n\n💡 Click card to cycle active variant · Drag to re-order or move between sections`
           } else {
             tooltipNumber.textContent = activePart.part_number
             tooltipName.textContent = activePart.description || "—"
-            tooltipMeta.style.whiteSpace = "normal"
-            tooltipMeta.textContent = `Qty: ${activePart.quantity} · ${activePart.models || "All models"}${activePart.use_description ? ` · ${activePart.use_description}` : ""}\n\n💡 Drag to move to another section`
+            tooltipMeta.textContent = `Qty: ${activePart.quantity} · ${activePart.models || "All models"}${activePart.use_description ? ` · ${activePart.use_description}` : ""}\n\n💡 Drag to re-order or move between sections`
           }
           tooltip.hidden = false
           const rect = viewport.getBoundingClientRect()
-          tooltip.style.left = `${clamp(e.clientX - rect.left + 16, 12, rect.width - 320)}px`
-          tooltip.style.top = `${clamp(e.clientY - rect.top + 16, 12, rect.height - 130)}px`
+          const tipWidth = tooltip.offsetWidth || 360
+          const tipHeight = tooltip.offsetHeight || 150
+          tooltip.style.left = `${clamp(e.clientX - rect.left + 16, 12, Math.max(12, rect.width - tipWidth - 16))}px`
+          tooltip.style.top = `${clamp(e.clientY - rect.top + 16, 12, Math.max(12, rect.height - tipHeight - 16))}px`
         }
-        card.onmouseleave = () => { tooltip.hidden = true }
+        card.onmouseleave = () => {
+          tooltip.hidden = true
+          tooltipImage.src = ""
+        }
 
         clusterGroup.appendChild(card)
         group.appendChild(clusterGroup)
@@ -1096,13 +1521,14 @@ export default function(component) {
 
     // Section Dragging to move node & Click selection
     group.onclick = (e) => {
+      if (e.target.closest(".section-remove-btn")) return
       e.stopPropagation()
       state.selectedSectionId = (state.selectedSectionId === section.id) ? null : section.id
       renderWorld()
     }
 
     group.onmousedown = (e) => {
-      if (e.target === port || e.target.closest(".part-card")) return
+      if (e.target === port || e.target.closest(".part-card") || e.target.closest(".section-remove-btn")) return
       e.stopPropagation()
       const startMouseX = e.clientX
       const startMouseY = e.clientY
@@ -1144,47 +1570,137 @@ export default function(component) {
     sectionLayer.appendChild(group)
   })
 
-  // Connection Dragging Ghost Line
+  // Connection Dragging & Reconnecting Ghost Lines
   window.onmousemove = (e) => {
-    if (!state.pendingConnection) return
-    ghostLayer.replaceChildren()
-    const rect = svg.getBoundingClientRect()
-    const currX = (e.clientX - rect.left - state.x) / state.scale
-    const currY = (e.clientY - rect.top - state.y) / state.scale
-    const ghost = svgElement("line", {
-      x1: state.pendingConnection.startX,
-      y1: state.pendingConnection.startY,
-      x2: currX,
-      y2: currY,
-      stroke: "#3b82f6",
-      "stroke-width": 3,
-      "stroke-dasharray": "6 4"
-    })
-    ghostLayer.appendChild(ghost)
+    if (state.pendingConnection) {
+      ghostLayer.replaceChildren()
+      const rect = svg.getBoundingClientRect()
+      const currX = (e.clientX - rect.left - state.x) / state.scale
+      const currY = (e.clientY - rect.top - state.y) / state.scale
+      const ghost = svgElement("line", {
+        x1: state.pendingConnection.startX,
+        y1: state.pendingConnection.startY,
+        x2: currX,
+        y2: currY,
+        stroke: "#3b82f6",
+        "stroke-width": 3,
+        "stroke-dasharray": "6 4"
+      })
+      ghostLayer.appendChild(ghost)
+      return
+    }
+
+    if (state.reconnectingConnection) {
+      const dist = Math.hypot(e.clientX - state.reconnectingConnection.originX, e.clientY - state.reconnectingConnection.originY)
+      if (dist > 4) {
+        state.reconnectingConnection.isDrag = true
+      }
+      if (state.reconnectingConnection.isDrag) {
+        ghostLayer.replaceChildren()
+        const rect = svg.getBoundingClientRect()
+        const currX = (e.clientX - rect.left - state.x) / state.scale
+        const currY = (e.clientY - rect.top - state.y) / state.scale
+
+        const cdx = Math.max(40, Math.abs(currX - state.reconnectingConnection.startX) * 0.45)
+        const ghost = svgElement("path", {
+          d: `M ${state.reconnectingConnection.startX} ${state.reconnectingConnection.startY} C ${state.reconnectingConnection.startX + cdx} ${state.reconnectingConnection.startY}, ${currX - cdx} ${currY}, ${currX} ${currY}`,
+          fill: "none",
+          stroke: "#ef4444",
+          "stroke-width": 3.5,
+          "stroke-dasharray": "6 4",
+          "marker-end": "url(#arrow-selected)"
+        })
+        ghostLayer.appendChild(ghost)
+
+        const hoverSec = sections.find(s => {
+          const w = s.secWidth || 220
+          const h = s.secHeight || 64
+          return Math.abs(currX - s.sx) < w / 2 + 15 && Math.abs(currY - s.sy) < h / 2 + 15 && s.id !== state.reconnectingConnection.fromId
+        })
+        if (hoverSec) {
+          const w = hoverSec.secWidth || 220
+          const h = hoverSec.secHeight || 64
+          const ring = svgElement("rect", {
+            x: hoverSec.sx - w / 2 - 4,
+            y: hoverSec.sy - h / 2 - 4,
+            width: w + 8,
+            height: h + 8,
+            rx: 14,
+            fill: "none",
+            stroke: hoverSec.id === state.reconnectingConnection.oldToId ? "#94a3b8" : "#22c55e",
+            "stroke-width": 3,
+            "stroke-dasharray": "6 3"
+          })
+          ghostLayer.appendChild(ring)
+        }
+      }
+      return
+    }
   }
 
   window.onmouseup = (e) => {
-    if (!state.pendingConnection) return
-    ghostLayer.replaceChildren()
-    const fromId = state.pendingConnection.fromId
-    state.pendingConnection = null
+    if (state.pendingConnection) {
+      ghostLayer.replaceChildren()
+      const fromId = state.pendingConnection.fromId
+      state.pendingConnection = null
 
-    const rect = svg.getBoundingClientRect()
-    const currX = (e.clientX - rect.left - state.x) / state.scale
-    const currY = (e.clientY - rect.top - state.y) / state.scale
+      const rect = svg.getBoundingClientRect()
+      const currX = (e.clientX - rect.left - state.x) / state.scale
+      const currY = (e.clientY - rect.top - state.y) / state.scale
 
-    const targetSec = sections.find(s => {
-      const w = s.secWidth || 220
-      const h = s.secHeight || 64
-      return Math.abs(currX - s.sx) < w / 2 + 10 && Math.abs(currY - s.sy) < h / 2 + 10 && s.id !== fromId
-    })
-
-    if (targetSec) {
-      component.setTriggerValue("create_connection", {
-        from_section_id: fromId,
-        to_section_id: targetSec.id,
-        connection_type: "subassembly"
+      const targetSec = sections.find(s => {
+        const w = s.secWidth || 220
+        const h = s.secHeight || 64
+        return Math.abs(currX - s.sx) < w / 2 + 10 && Math.abs(currY - s.sy) < h / 2 + 10 && s.id !== fromId
       })
+
+      if (targetSec) {
+        component.setTriggerValue("create_connection", {
+          from_section_id: fromId,
+          to_section_id: targetSec.id,
+          connection_type: "subassembly"
+        })
+      }
+      return
+    }
+
+    if (state.reconnectingConnection) {
+      ghostLayer.replaceChildren()
+      const rConn = state.reconnectingConnection
+      state.reconnectingConnection = null
+
+      if (rConn.isDrag) {
+        const rect = svg.getBoundingClientRect()
+        const currX = (e.clientX - rect.left - state.x) / state.scale
+        const currY = (e.clientY - rect.top - state.y) / state.scale
+
+        const targetSec = sections.find(s => {
+          const w = s.secWidth || 220
+          const h = s.secHeight || 64
+          return Math.abs(currX - s.sx) < w / 2 + 15 && Math.abs(currY - s.sy) < h / 2 + 15 && s.id !== rConn.fromId
+        })
+
+        if (targetSec && targetSec.id !== rConn.oldToId) {
+          state.selectedConnId = null
+          component.setTriggerValue("move_connection", {
+            connection_id: rConn.connId,
+            from_section_id: rConn.fromId,
+            to_section_id: targetSec.id,
+            old_to_section_id: rConn.oldToId,
+            connection_type: rConn.connType
+          })
+        }
+      } else {
+        openConnEditModal(rConn)
+      }
+    }
+  }
+
+  window.onkeydown = (e) => {
+    if (e.key === "Escape") {
+      if (connModal && !connModal.hidden) connModal.hidden = true
+      if (assemblyModal && !assemblyModal.hidden) assemblyModal.hidden = true
+      if (addSectionModal && !addSectionModal.hidden) addSectionModal.hidden = true
     }
   }
 
@@ -1232,9 +1748,48 @@ export default function(component) {
 
     if (item.is_assembly) {
       const isSupport = targetSec.type === "Support Operations"
+      const asmName = item.description ? ` — ${item.description}` : ""
+      const count = item.child_count || (item.child_parts ? item.child_parts.length : 0)
       assemblyDropDesc.textContent = isSupport
-        ? `Placing assembly ${item.part_number} (${item.child_count} subcomponents). Formed/built in ${targetSec.name}. Select installation section:`
-        : `Placing assembly ${item.part_number} (${item.child_count} subcomponents). Select built and installed sections:`
+        ? `Assembly ${item.part_number}${asmName} (${count} subcomponents). Formed/built in ${targetSec.name}. Choose placement mode:`
+        : `Assembly ${item.part_number}${asmName} (${count} subcomponents). Choose placement mode:`
+
+      const childrenContainer = parentElement.querySelector("#assembly-children-container")
+      const childrenList = parentElement.querySelector("#assembly-children-list")
+      if (childrenList) {
+        childrenList.replaceChildren()
+        const childParts = item.child_parts || []
+        if (childParts.length > 0) {
+          childParts.forEach(ch => {
+            const row = document.createElement("div")
+            row.className = "assembly-child-item"
+
+            const num = document.createElement("span")
+            num.className = "assembly-child-num"
+            num.textContent = ch.part_number || "—"
+
+            const name = document.createElement("span")
+            name.className = "assembly-child-name"
+            name.textContent = ch.description || "—"
+
+            const qty = document.createElement("span")
+            qty.className = "assembly-child-qty"
+            qty.textContent = `(Qty: ${ch.quantity || 1})`
+
+            row.appendChild(num)
+            row.appendChild(name)
+            row.appendChild(qty)
+            childrenList.appendChild(row)
+          })
+          if (childrenContainer) childrenContainer.hidden = false
+        } else {
+          if (childrenContainer) childrenContainer.hidden = true
+        }
+      }
+
+      if (assemblyModeBoth) assemblyModeBoth.checked = true
+      updateAssemblyModalMode()
+
       assemblyBuiltSelect.replaceChildren()
       assemblyInstalledSelect.replaceChildren()
       allSections.forEach(s => {
@@ -1250,14 +1805,25 @@ export default function(component) {
         if (targetSec.parent_id ? s.id === targetSec.parent_id : s.id !== targetSec.id) opt2.selected = true
         assemblyInstalledSelect.appendChild(opt2)
       })
+
+      if (assemblyModeGroupOnly) {
+        assemblyModeGroupOnly.onclick = () => {
+          if (assemblyModeGroupOnly.checked && assemblyInstalledSelect) {
+            assemblyInstalledSelect.value = targetSec.id
+          }
+        }
+      }
+
       assemblyModal.hidden = false
 
       btnAssemblyConfirm.onclick = () => {
         assemblyModal.hidden = true
+        const isGroupOnly = assemblyModeGroupOnly && assemblyModeGroupOnly.checked
         component.setTriggerValue("drop_assembly", {
           assembly_part_id: item.part_id,
-          built_section_id: assemblyBuiltSelect.value,
-          installed_section_id: assemblyInstalledSelect.value,
+          built_section_id: isGroupOnly ? null : assemblyBuiltSelect.value,
+          installed_section_id: isGroupOnly ? (assemblyInstalledSelect.value || targetSec.id) : assemblyInstalledSelect.value,
+          include_children: !isGroupOnly,
         })
       }
       btnAssemblyCancel.onclick = () => {
@@ -1288,7 +1854,7 @@ export default function(component) {
   }
 
   function renderWorld() {
-    exportDefaultFunction({ data, parentElement })
+    renderFishbone(component)
   }
 
   function fitView() {
@@ -1464,7 +2030,7 @@ export default function(component) {
 """
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v7",
+    "paag_interactive_fishbone_builder_v16",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -1517,10 +2083,13 @@ def interactive_fishbone(
     on_move_node: Callable[[], None] | None = None,
     on_auto_arrange: Callable[[], None] | None = None,
     on_create_connection: Callable[[], None] | None = None,
+    on_move_connection: Callable[[], None] | None = None,
     on_delete_connection: Callable[[], None] | None = None,
+    on_delete_section_request: Callable[[], None] | None = None,
     on_drop_part: Callable[[], None] | None = None,
     on_drop_assembly: Callable[[], None] | None = None,
     on_remove_part: Callable[[], None] | None = None,
+    on_move_part_assignment: Callable[[], None] | None = None,
 ) -> Any:
     """Render the simplified interactive Fishbone builder canvas with simple blocks and direct parent/child flow."""
     kwargs = {
@@ -1543,13 +2112,19 @@ def interactive_fishbone(
         kwargs["on_auto_arrange_change"] = on_auto_arrange
     if on_create_connection:
         kwargs["on_create_connection_change"] = on_create_connection
+    if on_move_connection:
+        kwargs["on_move_connection_change"] = on_move_connection
     if on_delete_connection:
         kwargs["on_delete_connection_change"] = on_delete_connection
+    if on_delete_section_request:
+        kwargs["on_delete_section_request_change"] = on_delete_section_request
     if on_drop_part:
         kwargs["on_drop_part_change"] = on_drop_part
     if on_drop_assembly:
         kwargs["on_drop_assembly_change"] = on_drop_assembly
     if on_remove_part:
         kwargs["on_remove_part_change"] = on_remove_part
+    if on_move_part_assignment:
+        kwargs["on_move_part_assignment_change"] = on_move_part_assignment
 
     return _FISHBONE_COMPONENT(**kwargs)
