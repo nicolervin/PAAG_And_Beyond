@@ -20,6 +20,7 @@ from utils.store import (
     fishbone_assignment_assembly_impact,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
+    move_fishbone_part_assignment,
     part_feature_rules,
     pits_bom_model_tree,
     project_models,
@@ -166,8 +167,8 @@ metrics[2].metric("Fishbone uses placed", len(assignments), border=True)
 metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_parts), border=True)
 
 
-assign_parts_tab, fishbone_tab, framework_tab = st.tabs(
-    ["Assign Parts", "Fishbone", "Framework Set Up"],
+fishbone_tab, assign_parts_tab = st.tabs(
+    ["Interactive Fishbone", "Parts Placement Table"],
     key=f"fishbone_main_tabs_{project_id}",
 )
 
@@ -815,12 +816,12 @@ with fishbone_tab:
                             project_id,
                             sec_name,
                             sec_type,
-                            parent_id if sec_type == "Subassembly" else None,
+                            parent_id if sec_type in {"Subassembly", "Support Operations"} else None,
                             "",
                             grid_x=int(gx) if gx is not None else None,
                             grid_y=int(gy) if gy is not None else None,
                         )
-                        if parent_id and sec_type == "Subassembly":
+                        if parent_id and sec_type in {"Subassembly", "Support Operations"}:
                             save_assembly_section_connection(
                                 project_id,
                                 new_sec_id,
@@ -929,6 +930,38 @@ with fishbone_tab:
                     draft["new_assignments"] = [
                         na for na in draft["new_assignments"] if na.get("part_id") != pid
                     ]
+            if p := getattr(canvas_state, "move_part_assignment", None):
+                aid = p.get("assignment_id")
+                from_sid = p.get("from_section_id")
+                to_sid = p.get("to_section_id")
+                pid = p.get("part_id")
+                if aid and to_sid and to_sid != from_sid:
+                    moved_draft = False
+                    for na in draft.get("new_assignments", []):
+                        if na.get("part_id") == pid and na.get("section_id") == from_sid:
+                            na["section_id"] = to_sid
+                            moved_draft = True
+                            break
+                    if not moved_draft:
+                        try:
+                            move_fishbone_part_assignment(project_id, aid, to_sid)
+                            target_name = section_name_by_id.get(to_sid, "section")
+                            st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
+                            record_audit_event(
+                                project_id,
+                                "Fishbone uses",
+                                "Move fishbone use",
+                                1,
+                                st.session_state.get("current_editor", ""),
+                                {
+                                    "assignment_id": aid,
+                                    "from_section_id": from_sid,
+                                    "to_section_id": to_sid,
+                                },
+                            )
+                            st.rerun()
+                        except ValueError as err:
+                            st.error(str(err))
 
         image_path_by_part = (
             parts.set_index(parts["id"].astype(str))["image_path"].to_dict()
@@ -1280,13 +1313,13 @@ with fishbone_tab:
 
 
 
-with framework_tab:
+def _render_framework_maintenance():
     st.subheader("Build the Fishbone framework")
     framework_has_unsaved = table_has_unsaved_changes(
         framework_editor_key, native_row_selection=True
     )
     refresh_framework = False
-    st.caption("Main-spine Fishbone sections establish product assembly order. Subassemblies—such as Wheel Subassembly—must attach to a parent Fishbone section or subassembly.")
+    st.caption("Main-spine Fishbone sections establish product assembly order. Subassemblies attach to a parent section or subassembly. Support Operations represent fabrication or feeder cells.")
 
 
     with st.container(border=True):
@@ -1298,13 +1331,13 @@ with framework_tab:
             section_name = section_row[0].text_input("Name", placeholder="Wheel Subassembly")
             section_type = section_row[1].selectbox("Type", ["Main spine", "Subassembly", "Support Operations"])
             parent_id = section_row[2].selectbox(
-                "Parent assembly",
+                "Parent assembly / Feeds into",
                 options=[None, *parent_options],
                 format_func=lambda value: (
                     "Product / main assembly"
                     if value is None else section_option_labels.get(value, value)
                 ),
-                help="Required for a subassembly. Main-spine sections attach directly to the product. Support Operations are independent of the main spine.",
+                help="Required for a subassembly. For Support Operations, optional downstream assembly/line it feeds into.",
             )
             section_description = st.text_area("Fishbone section description", placeholder="What is assembled in this section?")
             if st.form_submit_button("Add to Fishbone framework", type="primary", icon=":material/account_tree:"):
@@ -1313,6 +1346,15 @@ with framework_tab:
                         project_id, section_name, section_type, parent_id,
                         section_description,
                     )
+                    if parent_id and section_type in {"Subassembly", "Support Operations"}:
+                        save_assembly_section_connection(
+                            project_id,
+                            section_id,
+                            parent_id,
+                            connection_type="subassembly",
+                            sequence=10,
+                            editor_name=st.session_state.get("current_editor", ""),
+                        )
                     area_summary = yamazumi_area_creation_summary(
                         project_id, section_id
                     )
@@ -1810,6 +1852,9 @@ with framework_tab:
                 st.error(str(exc))
 
 
+with assign_parts_tab:
+    with st.expander("🛠️ Advanced Section Configuration & Maintenance", expanded=False):
+        _render_framework_maintenance()
 
 
 with st.expander("History", icon=":material/history:"):

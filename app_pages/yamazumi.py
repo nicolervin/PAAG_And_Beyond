@@ -88,11 +88,14 @@ from utils.time_units import (
     time_unit,
 )
 from utils.yamazumi_stack import (
+    UNASSIGNED_STACK_ID,
     apply_stack_draft_to_elements,
     apply_stack_drop,
     build_stack_draft,
     draft_differs,
+    reconcile_stack_draft,
     remove_element_from_stack_draft,
+    stack_id,
 )
 from utils.yamazumi_pdf import parse_yamazumi_pdf
 
@@ -1260,10 +1263,15 @@ def handle_yamazumi_move() -> None:
         move = state.get("move")
     if not move:
         return
-    persisted_elements = elements.to_dict("records")
+    persisted_elements = yamazumi_elements(project_id, area_id).to_dict("records")
     current_draft = st.session_state.get(board_draft_key)
+    valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
     if not isinstance(current_draft, dict):
         current_draft = build_stack_draft(persisted_elements)
+    else:
+        current_draft = reconcile_stack_draft(
+            current_draft, persisted_elements, valid_pitch_ids=valid_p_ids
+        )
     try:
         updated_draft = apply_stack_drop(
             current_draft,
@@ -1417,7 +1425,7 @@ def add_element_dialog() -> None:
         st.rerun()
     if actions.button("Add element", type="primary", icon=":material/add:", key="save_interactive_element"):
         try:
-            add_yamazumi_element(
+            new_element_id = add_yamazumi_element(
                 project_id,
                 area_id,
                 target_pitch_id,
@@ -1429,6 +1437,11 @@ def add_element_dialog() -> None:
                     "work_region": work_region,
                 },
             )
+            active_board_draft = st.session_state.get(board_draft_key)
+            if isinstance(active_board_draft, dict):
+                dest_stack = stack_id(target_pitch_id)
+                active_board_draft.setdefault(dest_stack, []).append(new_element_id)
+                st.session_state[board_draft_key] = active_board_draft
             record_audit_event(
                 project_id, "Yamazumi elements", "Add from interactive board", 1,
                 st.session_state.get("current_editor", ""),
@@ -1883,6 +1896,14 @@ def edit_element_dialog(
                     "work_region": work_region,
                 },
             )
+            active_board_draft = st.session_state.get(board_draft_key)
+            if isinstance(active_board_draft, dict):
+                eid_str = str(element_id)
+                for stack in active_board_draft.values():
+                    if eid_str in stack:
+                        stack.remove(eid_str)
+                active_board_draft.setdefault(stack_id(selected_pitch_id), []).append(eid_str)
+                st.session_state[board_draft_key] = {k: v for k, v in active_board_draft.items() if v}
             record_audit_event(
                 project_id, "Yamazumi elements", "Edit from interactive board", 1,
                 st.session_state.get("current_editor", ""), {"element_id": element_id, "description": description},
@@ -2211,7 +2232,16 @@ st.caption(
     ),
 )
 persisted_board_elements = elements.to_dict("records")
-board_draft = st.session_state.get(board_draft_key)
+raw_board_draft = st.session_state.get(board_draft_key)
+if isinstance(raw_board_draft, dict):
+    valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
+    board_draft = reconcile_stack_draft(
+        raw_board_draft, persisted_board_elements, valid_pitch_ids=valid_p_ids
+    )
+    if board_draft != raw_board_draft:
+        st.session_state[board_draft_key] = board_draft
+else:
+    board_draft = None
 has_board_draft = (
     isinstance(board_draft, dict)
     and draft_differs(persisted_board_elements, board_draft)
@@ -2255,8 +2285,13 @@ if board_actions.save_and_refresh:
     try:
         if not has_board_draft:
             raise ValueError("There are no unsaved Yamazumi stack changes to save.")
+        fresh_elements = yamazumi_elements(project_id, area_id).to_dict("records")
+        valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
+        reconciled_draft = reconcile_stack_draft(
+            board_draft, fresh_elements, valid_pitch_ids=valid_p_ids
+        )
         result = save_yamazumi_stack_draft(
-            project_id, scenario_id, area_id, board_draft
+            project_id, scenario_id, area_id, reconciled_draft
         )
         record_audit_event(
             project_id,
@@ -3035,6 +3070,12 @@ if not element_combined_view and element_actions.save_and_refresh:
         to_save = element_times_to_seconds(to_save)
         count = replace_yamazumi_elements(project_id, area_id, to_save)
         record_audit_event(project_id, "Yamazumi elements", "Save & Refresh", count, st.session_state.get("current_editor", ""))
+        active_board_draft = st.session_state.get(board_draft_key)
+        if isinstance(active_board_draft, dict):
+            valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
+            st.session_state[board_draft_key] = reconcile_stack_draft(
+                active_board_draft, to_save.to_dict("records"), valid_pitch_ids=valid_p_ids
+            )
         request_table_editor_reset(element_editor_key)
         st.rerun()
     except ValueError as exc:
@@ -3302,6 +3343,11 @@ def confirm_element_bulk_delete() -> None:
                     audit_editor_name=editor_name,
                 )
                 st.session_state.pop(element_delete_key, None)
+                active_board_draft = st.session_state.get(board_draft_key)
+                if isinstance(active_board_draft, dict):
+                    st.session_state[board_draft_key] = reconcile_stack_draft(
+                        active_board_draft, yamazumi_elements(project_id, area_id).to_dict("records")
+                    )
                 request_table_editor_reset(combined_element_editor_key)
                 request_table_editor_reset(element_editor_key)
                 st.toast(
@@ -3344,6 +3390,14 @@ def confirm_element_bulk_delete() -> None:
                 {"area_id": area_id, "elements": selected_rows},
             )
             st.session_state.pop(element_delete_key, None)
+            active_board_draft = st.session_state.get(board_draft_key)
+            if isinstance(active_board_draft, dict):
+                st.session_state[board_draft_key] = reconcile_stack_draft(
+                    active_board_draft,
+                    element_save_rows.to_dict("records")
+                    if hasattr(element_save_rows, "to_dict")
+                    else yamazumi_elements(project_id, area_id).to_dict("records"),
+                )
             request_table_editor_reset(element_editor_key)
             request_table_editor_reset(pitch_editor_key)
             st.toast(

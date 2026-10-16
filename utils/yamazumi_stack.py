@@ -9,8 +9,12 @@ UNASSIGNED_STACK_ID = "__unassigned__"
 
 def stack_id(pitch_id: object) -> str:
     """Return the stable draft key for a pitch or the Unassigned stack."""
-    value = str(pitch_id or "").strip()
-    return value or UNASSIGNED_STACK_ID
+    if pitch_id is None:
+        return UNASSIGNED_STACK_ID
+    value = str(pitch_id).strip()
+    if not value or value.casefold() in {"nan", "none", "<na>"}:
+        return UNASSIGNED_STACK_ID
+    return value
 
 
 def build_stack_draft(elements: Iterable[Mapping[str, object]]) -> dict[str, list[str]]:
@@ -91,6 +95,91 @@ def remove_element_from_stack_draft(
     }
 
 
+def reconcile_stack_draft(
+    stacks: Mapping[str, list[str]] | None,
+    elements: Iterable[Mapping[str, object]],
+    *,
+    valid_pitch_ids: Iterable[object] | None = None,
+) -> dict[str, list[str]]:
+    """Reconcile an in-flight stack draft with current persisted elements.
+
+    Preserves drafted user ordering for existing elements while:
+    1. Removing stale/deleted element IDs that no longer exist in storage.
+    2. Inserting newly created or missing elements into their persisted pitch
+       (or __unassigned__) stack at their designated sequence position.
+    3. Re-pointing elements from non-existent pitches to __unassigned__.
+    4. Removing empty stacks.
+    """
+    elements_list = [dict(e) for e in elements]
+    element_by_id = {
+        str(e.get("id") or "").strip(): e
+        for e in elements_list
+        if str(e.get("id") or "").strip()
+    }
+    if not stacks:
+        return build_stack_draft(elements_list)
+
+    valid_pitches = (
+        None
+        if valid_pitch_ids is None
+        else {str(p or "").strip() for p in valid_pitch_ids if str(p or "").strip()}
+    )
+
+    # 1. Clean existing stacks: drop stale/deleted element IDs and deduplicate
+    seen_ids: set[str] = set()
+    cleaned_stacks: dict[str, list[str]] = {}
+
+    for raw_stack_key, element_ids in stacks.items():
+        stack_key = stack_id(raw_stack_key)
+        dest_key = (
+            UNASSIGNED_STACK_ID
+            if (
+                valid_pitches is not None
+                and stack_key != UNASSIGNED_STACK_ID
+                and stack_key not in valid_pitches
+            )
+            else stack_key
+        )
+        dest_list = cleaned_stacks.setdefault(dest_key, [])
+        for raw_id in element_ids:
+            eid = str(raw_id or "").strip()
+            if eid and eid in element_by_id and eid not in seen_ids:
+                seen_ids.add(eid)
+                dest_list.append(eid)
+
+    # 2. Find any elements currently in storage that are missing from draft
+    missing_elements = [
+        e
+        for e in elements_list
+        if str(e.get("id") or "").strip() not in seen_ids
+    ]
+    missing_elements.sort(
+        key=lambda e: (
+            int(e.get("sequence") or 0)
+            if str(e.get("sequence") or "").isdigit()
+            else 0,
+            str(e.get("description") or "").casefold(),
+            str(e.get("id") or ""),
+        )
+    )
+
+    for element in missing_elements:
+        eid = str(element.get("id") or "").strip()
+        if not eid:
+            continue
+        dest_key = stack_id(element.get("pitch_id"))
+        if (
+            valid_pitches is not None
+            and dest_key != UNASSIGNED_STACK_ID
+            and dest_key not in valid_pitches
+        ):
+            dest_key = UNASSIGNED_STACK_ID
+        cleaned_stacks.setdefault(dest_key, []).append(eid)
+        seen_ids.add(eid)
+
+    return {k: v for k, v in cleaned_stacks.items() if v}
+
+
 def apply_stack_draft_to_elements(
     elements: Iterable[Mapping[str, object]], stacks: Mapping[str, list[str]]
 ) -> list[dict]:
@@ -99,6 +188,7 @@ def apply_stack_draft_to_elements(
         str(element.get("id") or ""): dict(element) for element in elements
     }
     rendered: list[dict] = []
+    rendered_ids: set[str] = set()
     for key, element_ids in stacks.items():
         pitch_id = None if key == UNASSIGNED_STACK_ID else key
         for position, element_id in enumerate(element_ids, start=1):
@@ -108,4 +198,11 @@ def apply_stack_draft_to_elements(
             row["pitch_id"] = pitch_id
             row["sequence"] = position * 10
             rendered.append(row)
+            rendered_ids.add(element_id)
+    # Ensure any elements not explicitly sequenced in stacks remain visible on board
+    for element in elements:
+        eid = str(element.get("id") or "")
+        if eid and eid not in rendered_ids:
+            rendered.append(dict(element))
     return rendered
+

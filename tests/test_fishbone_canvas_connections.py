@@ -17,6 +17,7 @@ from utils.store import (
     delete_assembly_section_connection,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
+    move_fishbone_part_assignment,
     replace_fishbone_part_assignments,
     restore_fishbone_plan_snapshot,
     save_assembly_section_connection,
@@ -414,6 +415,50 @@ class FishboneCanvasConnectionsTests(unittest.TestCase):
         self.assertEqual(len(unplaced_items), 2)
         unplaced_pns = {it["part_number"] for it in unplaced_items}
         self.assertEqual(unplaced_pns, {"PN-102", "PN-103"})
+
+    def test_support_operations_feeds_into_connection(self) -> None:
+        main_sec = add_assembly_section(self.project_id, "Main Spine Line", "Main spine", None, "")
+        supp_sec = add_assembly_section(
+            self.project_id, "Stamping Cell", "Support Operations", main_sec, "Fabrication area"
+        )
+        sections = assembly_sections(self.project_id)
+        supp_row = sections[sections["id"] == supp_sec].iloc[0]
+        self.assertEqual(supp_row["parent_id"], main_sec)
+        self.assertEqual(supp_row["section_type"], "Support Operations")
+
+        # Save connection from Support Operations to Main Spine
+        save_assembly_section_connection(
+            self.project_id, supp_sec, main_sec, connection_type="subassembly", sequence=10, editor_name="Tester"
+        )
+        conns = assembly_section_connections(self.project_id)
+        self.assertEqual(len(conns), 1)
+        self.assertEqual(conns.iloc[0]["from_section_id"], supp_sec)
+        self.assertEqual(conns.iloc[0]["to_section_id"], main_sec)
+
+    def test_move_fishbone_part_assignment_between_sections(self) -> None:
+        sec1 = add_assembly_section(self.project_id, "Section 1", "Main spine", None, "")
+        sec2 = add_assembly_section(self.project_id, "Section 2", "Main spine", None, "")
+
+        part_id = f"part-{uuid4().hex[:8]}"
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO parts (id, project_id, part_number, description, quantity, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (part_id, self.project_id, "999D8503P001", "Door Foam Outer", 1.0, "2026-01-01T00:00:00"),
+            )
+        assign_parts_to_section(self.project_id, [part_id], sec1)
+
+        assignments = fishbone_part_assignments(self.project_id)
+        self.assertEqual(len(assignments), 1)
+        assignment_id = str(assignments.iloc[0]["id"])
+        self.assertEqual(str(assignments.iloc[0]["section_id"]), sec1)
+
+        # Move assignment from sec1 to sec2
+        move_fishbone_part_assignment(self.project_id, assignment_id, sec2)
+
+        updated_assignments = fishbone_part_assignments(self.project_id)
+        self.assertEqual(len(updated_assignments), 1)
+        self.assertEqual(str(updated_assignments.iloc[0]["section_id"]), sec2)
+
 
 
 

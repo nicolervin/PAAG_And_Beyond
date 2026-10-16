@@ -103,7 +103,7 @@ _HTML = """
               </select>
             </label>
             <label class="modal-label" id="add-section-parent-label">
-              Feeds into (Parent assembly)
+              <span id="add-section-parent-title">Feeds into (Downstream assembly / line)</span>
               <select id="add-section-parent" class="modal-select"></select>
             </label>
           </div>
@@ -113,7 +113,7 @@ _HTML = """
           </div>
         </div>
       </div>
-      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle (•) to connect sections · Drag parts onto blocks · Scroll to zoom</div>
+      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle (•) to connect · Drag parts to sections or between sections · Click stacked cards to cycle variants</div>
     </div>
   </div>
 </div>
@@ -177,12 +177,17 @@ _CSS = """
 .conn-delete-btn:hover { opacity: 1; transform: scale(1.1); }
 
 /* Part card styling */
-.part-card { cursor: pointer; }
+.part-card { cursor: grab; user-select: none; }
 .part-card > rect { transition: stroke-width .12s ease, filter .12s ease; }
 .part-card:hover > rect { stroke-width: 2.5; stroke: var(--st-primary-color); filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .2)); }
+.part-cluster { user-select: none; }
+.cascade-badge { cursor: pointer; }
+.cascade-badge rect { transition: fill .12s ease; }
+.cascade-badge:hover rect { fill: #3730a3; }
 .part-remove-btn { cursor: pointer; opacity: 0; transition: opacity .12s ease; }
 .part-card:hover .part-remove-btn { opacity: 0.95; }
 .part-remove-btn:hover { opacity: 1; }
+.part-drag-ghost { pointer-events: none; }
 
 .fishbone-hint { position: absolute; right: 12px; bottom: 10px; padding: 5px 8px; border-radius: 6px; color: var(--st-secondary-text-color); background: color-mix(in srgb, var(--st-background-color) 88%, transparent); font-size: .75rem; pointer-events: none; }
 .fishbone-tooltip { position: absolute; z-index: 20; width: 300px; display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 10px; border: 1px solid var(--st-primary-color); border-radius: 10px; background: var(--st-background-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .24); pointer-events: none; }
@@ -277,9 +282,12 @@ export default function(component) {
     state = {
       scale: 1, x: 0, y: 0, dragging: false, pointerX: 0, pointerY: 0, fitted: false, signature: "",
       selectedConnId: null, selectedSectionId: null, pendingConnection: null,
-      hasUserInteracted: false, observerAttached: false
+      hasUserInteracted: false, observerAttached: false, clusterActiveIndices: new Map()
     }
     instanceState.set(parentElement, state)
+  }
+  if (!state.clusterActiveIndices) {
+    state.clusterActiveIndices = new Map()
   }
   world.replaceChildren()
 
@@ -304,15 +312,19 @@ export default function(component) {
   // Add Section Modal Handling
   if (addSectionBtn && addSectionModal) {
     function updateAddSectionParentVisibility() {
-      const isAssembly = addSectionType ? addSectionType.value === "Subassembly" : true
+      const isSupport = addSectionType ? addSectionType.value === "Support Operations" : false
+      const parentTitle = parentElement.querySelector("#add-section-parent-title")
+      if (parentTitle) {
+        parentTitle.textContent = isSupport ? "Feeds into (Downstream assembly / line)" : "Feeds into (Parent assembly)"
+      }
       if (addSectionParentLabel) {
-        addSectionParentLabel.style.display = isAssembly ? "flex" : "none"
+        addSectionParentLabel.style.display = "flex"
       }
       if (addSectionParent) {
         addSectionParent.replaceChildren()
         const noneOpt = document.createElement("option")
         noneOpt.value = ""
-        noneOpt.textContent = "(None - Root assembly)"
+        noneOpt.textContent = isSupport ? "(None - Standalone fabrication)" : "(None - Root assembly / Main spine)"
         addSectionParent.appendChild(noneOpt)
         allSections.forEach(s => {
           const opt = document.createElement("option")
@@ -350,11 +362,10 @@ export default function(component) {
         }
         const categoryVal = addSectionType ? addSectionType.value : "Subassembly"
         let chosenType = categoryVal
-        let parentId = null
+        let parentId = addSectionParent && addSectionParent.value ? addSectionParent.value : null
         if (categoryVal === "Support Operations") {
           chosenType = "Support Operations"
         } else {
-          parentId = addSectionParent && addSectionParent.value ? addSectionParent.value : null
           chosenType = parentId ? "Subassembly" : "Main spine"
         }
         addSectionModal.hidden = true
@@ -365,8 +376,14 @@ export default function(component) {
           const maxX = Math.max(...sections.map(s => s.grid_x || s.sx || 0))
           const maxY = Math.max(...sections.map(s => s.grid_y || s.sy || 0))
           if (chosenType === "Support Operations") {
-            nextX = snap(maxX + 260, 20)
-            nextY = -220
+            if (parentId) {
+              const parentSec = sectionById.get(parentId)
+              nextX = snap(parentSec ? parentSec.sx - 80 : maxX + 260, 20)
+              nextY = snap(parentSec ? parentSec.sy - 220 : -220, 20)
+            } else {
+              nextX = snap(maxX + 260, 20)
+              nextY = -220
+            }
           } else if (!parentId) {
             nextX = snap(maxX + 320, 20)
             nextY = 220
@@ -467,6 +484,37 @@ export default function(component) {
   paletteUnplacedOnly.onchange = renderPalette
   renderPalette()
 
+  // Helper for clustering similar parts (same 8 chars, differing suffix)
+  function getPartBaseCode(pn) {
+    const clean = String(pn || "").trim().toUpperCase()
+    if (clean.length >= 10) {
+      return clean.slice(0, 8)
+    }
+    return clean
+  }
+
+  function clusterSectionParts(secPartsList, secId) {
+    const clusters = []
+    const map = new Map()
+    secPartsList.forEach(p => {
+      const base = getPartBaseCode(p.part_number)
+      const clusterKey = `${secId}:${base}`
+      if (!map.has(base)) {
+        const activeIdx = (state.clusterActiveIndices && state.clusterActiveIndices.get(clusterKey)) || 0
+        const cl = {
+          baseCode: base,
+          clusterKey: clusterKey,
+          parts: [],
+          activeIdx: activeIdx
+        }
+        map.set(base, cl)
+        clusters.push(cl)
+      }
+      map.get(base).parts.push(p)
+    })
+    return clusters
+  }
+
   // Map parts by section
   const partsBySection = new Map()
   parts.forEach((part) => {
@@ -482,10 +530,14 @@ export default function(component) {
     sec.sy = (sec.grid_y !== null && sec.grid_y !== undefined) ? Number(sec.grid_y) : (160 + Math.floor(idx / 4) * 220)
 
     const secParts = partsBySection.get(sec.id) || []
+    sec.partClusters = clusterSectionParts(secParts, sec.id)
     const cardW = 68
-    const gap = 8
-    const partsRowW = secParts.length * (cardW + gap) + 24
-    sec.secWidth = Math.max(220, partsRowW)
+    const gap = 12
+    let rowW = 28
+    sec.partClusters.forEach(cl => {
+      rowW += (cl.parts.length > 1 ? cardW + 10 : cardW) + gap
+    })
+    sec.secWidth = Math.max(220, rowW)
     sec.secHeight = secParts.length > 0 ? 146 : 64
 
     sectionById.set(sec.id, sec)
@@ -738,7 +790,23 @@ export default function(component) {
       fill: "rgba(255, 255, 255, 0.85)", "font-size": 10
     })
     if (isSupport) {
-      count.textContent = `🏭 Fabrication / Support Ops · ${secParts.length} parts`
+      let targetName = ""
+      if (section.parent_id) {
+        const pSec = sectionById.get(section.parent_id)
+        if (pSec) targetName = pSec.name
+      }
+      if (!targetName) {
+        const outConn = connections.find(c => c.from_section_id === section.id)
+        if (outConn) {
+          const tSec = sectionById.get(outConn.to_section_id)
+          if (tSec) targetName = tSec.name
+        }
+      }
+      if (targetName) {
+        count.textContent = `🏭 Built here ➔ Feeds ${targetName} · ${secParts.length} parts`
+      } else {
+        count.textContent = `🏭 Fabrication / Support Ops · ${secParts.length} parts`
+      }
     } else {
       count.textContent = `${secParts.length} part${secParts.length === 1 ? "" : "s"} assigned`
     }
@@ -771,27 +839,58 @@ export default function(component) {
     } else {
       const cardW = 68
       const cardH = 78
-      const gap = 8
+      const gap = 12
+      let curX = -secWidth / 2 + 14
 
-      secParts.forEach((part, pIdx) => {
-        const cardX = -secWidth / 2 + 12 + pIdx * (cardW + gap)
+      section.partClusters.forEach((cluster) => {
+        const hasMultiple = cluster.parts.length > 1
+        const activeIdx = cluster.activeIdx % cluster.parts.length
+        const activePart = cluster.parts[activeIdx]
+        const cardX = curX
         const cardY = -secHeight / 2 + 48
 
+        const clusterGroup = svgElement("g", {
+          class: `part-cluster${hasMultiple ? " cascaded" : ""}`,
+          "data-base-code": cluster.baseCode
+        })
+
+        // Cascading background cards if multiple variants share base code
+        if (hasMultiple) {
+          if (cluster.parts.length >= 3) {
+            clusterGroup.appendChild(svgElement("rect", {
+              x: cardX + 8, y: cardY - 6, width: cardW, height: cardH, rx: 6,
+              fill: "var(--st-secondary-background-color)",
+              stroke: "#818cf8", "stroke-width": 1.5, opacity: 0.55
+            }))
+          }
+          if (cluster.parts.length >= 2) {
+            clusterGroup.appendChild(svgElement("rect", {
+              x: cardX + 4, y: cardY - 3, width: cardW, height: cardH, rx: 6,
+              fill: "var(--st-secondary-background-color)",
+              stroke: "#6366f1", "stroke-width": 1.5, opacity: 0.8
+            }))
+          }
+        }
+
+        // Active front card
         const card = svgElement("g", {
           class: "part-card",
-          "data-part-id": part.part_id,
-          "data-assignment-id": part.id
+          "data-part-id": activePart.part_id,
+          "data-assignment-id": activePart.id,
+          style: "cursor: grab;"
         })
 
         const cardRect = svgElement("rect", {
           x: cardX, y: cardY, width: cardW, height: cardH, rx: 6,
-          fill: "var(--st-background-color)", stroke: "var(--st-border-color)", "stroke-width": 1.5
+          fill: "var(--st-background-color)",
+          stroke: hasMultiple ? "#4f46e5" : "var(--st-border-color)",
+          "stroke-width": hasMultiple ? 2 : 1.5
         })
         card.appendChild(cardRect)
 
-        if (part.image) {
+        if (activePart.image) {
           const img = svgElement("image", {
-            href: part.image,
+            href: activePart.image,
             x: cardX + 4, y: cardY + 4,
             width: cardW - 8, height: 48,
             preserveAspectRatio: "xMidYMid meet"
@@ -807,17 +906,46 @@ export default function(component) {
         }
 
         const pnText = svgElement("text", {
-          x: cardX + cardW / 2, y: cardY + 68, "text-anchor": "middle",
-          fill: "var(--st-text-color)", "font-size": 9, "font-weight": 700
+          x: cardX + cardW / 2, y: cardY + 66, "text-anchor": "middle",
+          fill: "var(--st-text-color)", "font-size": 8.8, "font-weight": 700
         })
-        const pnStr = part.part_number || ""
+        const pnStr = activePart.part_number || ""
         pnText.textContent = pnStr.length > 10 ? `${pnStr.slice(0, 9)}…` : pnStr
         card.appendChild(pnText)
+
+        // Variant badge and suffix counter for cascaded clusters
+        if (hasMultiple) {
+          const badgeG = svgElement("g", {
+            class: "cascade-badge",
+            title: `Click card to cycle ${cluster.parts.length} variants`
+          })
+          badgeG.appendChild(svgElement("rect", {
+            x: cardX + 2, y: cardY - 7, width: 32, height: 14, rx: 4,
+            fill: "#4f46e5", stroke: "white", "stroke-width": 1
+          }))
+          const badgeTxt = svgElement("text", {
+            x: cardX + 18, y: cardY + 3.5, "text-anchor": "middle",
+            fill: "white", "font-size": 8.5, "font-weight": 700
+          })
+          badgeTxt.textContent = `${cluster.parts.length}×`
+          badgeG.appendChild(badgeTxt)
+          card.appendChild(badgeG)
+
+          // Suffix indicator at bottom
+          const sufTxt = svgElement("text", {
+            x: cardX + cardW / 2, y: cardY + 76, "text-anchor": "middle",
+            fill: "#6366f1", "font-size": 7.5, "font-weight": 600
+          })
+          const suf = pnStr.length >= 8 ? pnStr.slice(8) : pnStr
+          sufTxt.textContent = `[${activeIdx + 1}/${cluster.parts.length}] ${suf}`
+          card.appendChild(sufTxt)
+        }
 
         // Remove (x) Button
         const removeBtn = svgElement("g", {
           class: "part-remove-btn",
-          title: "Remove part from section"
+          title: `Remove ${activePart.part_number} from section`,
+          style: "cursor: pointer;"
         })
         removeBtn.appendChild(svgElement("circle", {
           cx: cardX + cardW - 6, cy: cardY + 6, r: 7.5,
@@ -832,26 +960,126 @@ export default function(component) {
         removeBtn.onclick = (e) => {
           e.stopPropagation()
           component.setTriggerValue("remove_part", {
-            assignment_id: part.id,
-            part_id: part.part_id,
+            assignment_id: activePart.id,
+            part_id: activePart.part_id,
             section_id: section.id
           })
         }
         card.appendChild(removeBtn)
 
+        // Mouse Drag to move part to another section & Click to cycle variants
+        card.onmousedown = (e) => {
+          if (e.target.closest(".part-remove-btn")) return
+          e.stopPropagation()
+          const startMouseX = e.clientX
+          const startMouseY = e.clientY
+          let isDragging = false
+          let ghostEl = null
+
+          const onMouseMove = (moveEvt) => {
+            const dist = Math.hypot(moveEvt.clientX - startMouseX, moveEvt.clientY - startMouseY)
+            if (dist > 4 && !isDragging) {
+              isDragging = true
+              tooltip.hidden = true
+              ghostEl = document.createElement("div")
+              ghostEl.className = "part-drag-ghost"
+              ghostEl.style.position = "fixed"
+              ghostEl.style.zIndex = "9999"
+              ghostEl.style.pointerEvents = "none"
+              ghostEl.style.padding = "6px 10px"
+              ghostEl.style.background = "#1e293b"
+              ghostEl.style.color = "white"
+              ghostEl.style.border = "2px solid #3b82f6"
+              ghostEl.style.borderRadius = "8px"
+              ghostEl.style.fontSize = "12px"
+              ghostEl.style.fontWeight = "700"
+              ghostEl.style.boxShadow = "0 8px 24px rgba(0,0,0,0.3)"
+              ghostEl.textContent = `📦 ${activePart.part_number} (${activePart.quantity || 1})`
+              document.body.appendChild(ghostEl)
+            }
+            if (isDragging && ghostEl) {
+              ghostEl.style.left = `${moveEvt.clientX + 12}px`
+              ghostEl.style.top = `${moveEvt.clientY + 12}px`
+
+              const rect = svg.getBoundingClientRect()
+              const currX = (moveEvt.clientX - rect.left - state.x) / state.scale
+              const currY = (moveEvt.clientY - rect.top - state.y) / state.scale
+
+              document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+              const hoveredSec = sections.find(s => {
+                const w = s.secWidth || 220
+                const h = s.secHeight || 64
+                return Math.abs(currX - s.sx) < w / 2 && Math.abs(currY - s.sy) < h / 2
+              })
+              if (hoveredSec) {
+                const nodeElem = parentElement.querySelector(`[data-section-id="${hoveredSec.id}"]`)
+                if (nodeElem) nodeElem.classList.add("section-drop-hover")
+              }
+            }
+          }
+
+          const onMouseUp = (upEvt) => {
+            window.removeEventListener("mousemove", onMouseMove)
+            window.removeEventListener("mouseup", onMouseUp)
+            document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+            if (ghostEl) {
+              ghostEl.remove()
+              ghostEl = null
+            }
+            if (isDragging) {
+              const rect = svg.getBoundingClientRect()
+              const currX = (upEvt.clientX - rect.left - state.x) / state.scale
+              const currY = (upEvt.clientY - rect.top - state.y) / state.scale
+
+              const targetSec = sections.find(s => {
+                const w = s.secWidth || 220
+                const h = s.secHeight || 64
+                return Math.abs(currX - s.sx) < w / 2 && Math.abs(currY - s.sy) < h / 2
+              })
+              if (targetSec && targetSec.id !== section.id) {
+                component.setTriggerValue("move_part_assignment", {
+                  assignment_id: activePart.id,
+                  part_id: activePart.part_id,
+                  from_section_id: section.id,
+                  to_section_id: targetSec.id
+                })
+              }
+            } else {
+              // Clicked without dragging: cycle variant if cascaded
+              if (hasMultiple) {
+                cluster.activeIdx = (activeIdx + 1) % cluster.parts.length
+                state.clusterActiveIndices.set(cluster.clusterKey, cluster.activeIdx)
+                renderWorld()
+              }
+            }
+          }
+
+          window.addEventListener("mousemove", onMouseMove)
+          window.addEventListener("mouseup", onMouseUp)
+        }
+
         // Hover tooltip
         card.onmouseenter = (e) => {
-          if (part.image) {
-            tooltipImage.src = part.image
+          if (activePart.image) {
+            tooltipImage.src = activePart.image
             tooltipImage.hidden = false
             tooltipNoImage.hidden = true
           } else {
             tooltipImage.hidden = true
             tooltipNoImage.hidden = false
           }
-          tooltipNumber.textContent = part.part_number
-          tooltipName.textContent = part.description || "—"
-          tooltipMeta.textContent = `Qty: ${part.quantity} · ${part.models || "All models"}${part.use_description ? ` · ${part.use_description}` : ""}`
+          if (hasMultiple) {
+            tooltipNumber.textContent = `${cluster.baseCode} (${cluster.parts.length} variants)`
+            tooltipName.textContent = activePart.description || "Similar Part Family"
+            const lines = cluster.parts.map((p, i) => `${i === activeIdx ? "▶ " : "• "}${p.part_number}: ${p.description || ""} (Qty: ${p.quantity})`).join("\n")
+            tooltipMeta.style.whiteSpace = "pre-line"
+            tooltipMeta.textContent = `${lines}\n\n💡 Click card to cycle active variant · Drag to move to section`
+          } else {
+            tooltipNumber.textContent = activePart.part_number
+            tooltipName.textContent = activePart.description || "—"
+            tooltipMeta.style.whiteSpace = "normal"
+            tooltipMeta.textContent = `Qty: ${activePart.quantity} · ${activePart.models || "All models"}${activePart.use_description ? ` · ${activePart.use_description}` : ""}\n\n💡 Drag to move to another section`
+          }
           tooltip.hidden = false
           const rect = viewport.getBoundingClientRect()
           tooltip.style.left = `${clamp(e.clientX - rect.left + 16, 12, rect.width - 320)}px`
@@ -859,7 +1087,10 @@ export default function(component) {
         }
         card.onmouseleave = () => { tooltip.hidden = true }
 
-        group.appendChild(card)
+        clusterGroup.appendChild(card)
+        group.appendChild(clusterGroup)
+
+        curX += (hasMultiple ? cardW + 10 : cardW) + gap
       })
     }
 
@@ -1000,7 +1231,10 @@ export default function(component) {
     if (!targetSec) return
 
     if (item.is_assembly) {
-      assemblyDropDesc.textContent = `Placing assembly ${item.part_number} (${item.child_count} subcomponents). Select built and installed sections:`
+      const isSupport = targetSec.type === "Support Operations"
+      assemblyDropDesc.textContent = isSupport
+        ? `Placing assembly ${item.part_number} (${item.child_count} subcomponents). Formed/built in ${targetSec.name}. Select installation section:`
+        : `Placing assembly ${item.part_number} (${item.child_count} subcomponents). Select built and installed sections:`
       assemblyBuiltSelect.replaceChildren()
       assemblyInstalledSelect.replaceChildren()
       allSections.forEach(s => {
@@ -1013,7 +1247,7 @@ export default function(component) {
         const opt2 = document.createElement("option")
         opt2.value = s.id
         opt2.textContent = s.name
-        if (s.id === targetSec.parent_id) opt2.selected = true
+        if (targetSec.parent_id ? s.id === targetSec.parent_id : s.id !== targetSec.id) opt2.selected = true
         assemblyInstalledSelect.appendChild(opt2)
       })
       assemblyModal.hidden = false
@@ -1030,11 +1264,20 @@ export default function(component) {
         assemblyModal.hidden = true
       }
     } else {
+      let useDesc = ""
+      if (targetSec.type === "Support Operations") {
+        if (targetSec.parent_id) {
+          const fedSec = allSections.find(s => s.id === targetSec.parent_id)
+          useDesc = fedSec ? `Formed in ${targetSec.name} · Installed in ${fedSec.name}` : `Formed in ${targetSec.name}`
+        } else {
+          useDesc = `Formed in ${targetSec.name}`
+        }
+      }
       component.setTriggerValue("drop_part", {
         part_id: item.part_id,
         section_id: targetSec.id,
         quantity: item.quantity || 1,
-        use_description: ""
+        use_description: useDesc
       })
     }
   }

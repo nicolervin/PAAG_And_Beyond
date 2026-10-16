@@ -12,7 +12,9 @@ from utils.yamazumi_stack import (
     apply_stack_draft_to_elements,
     apply_stack_drop,
     build_stack_draft,
+    reconcile_stack_draft,
     remove_element_from_stack_draft,
+    stack_id,
 )
 
 
@@ -291,6 +293,92 @@ class YamazumiStackOrderTests(unittest.TestCase):
                 self.project_id, self.scenario_id, self.other_area_id,
                 {self.other_pitch_id: ["other"]},
             )
+
+    def test_stack_id_handles_missing_and_nan(self) -> None:
+        self.assertEqual(stack_id(None), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id(""), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id("   "), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id("nan"), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id("NaN"), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id("None"), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id("<NA>"), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id(float("nan")), UNASSIGNED_STACK_ID)
+        self.assertEqual(stack_id("pitch-123"), "pitch-123")
+
+    def test_reconcile_stack_draft_auto_recovers_missing_elements(self) -> None:
+        self.add_element("elem1", self.area_id, self.north_id, 10)
+        self.add_element("elem2", self.area_id, self.north_id, 20)
+        draft = {self.north_id: ["elem2", "elem1"]}  # User swapped elem1 and elem2
+
+        # A 3rd element was added to the DB, so draft is missing elem3
+        self.add_element("elem3", self.area_id, self.north_id, 30)
+        persisted = self.rows()
+
+        reconciled = reconcile_stack_draft(draft, persisted)
+        # Should keep user's swapped order and append new element
+        self.assertEqual(reconciled[self.north_id], ["elem2", "elem1", "elem3"])
+
+    def test_reconcile_stack_draft_removes_stale_elements(self) -> None:
+        self.add_element("elem1", self.area_id, self.north_id, 10)
+        persisted = self.rows()
+        draft = {self.north_id: ["elem1", "stale_deleted_id"]}
+
+        reconciled = reconcile_stack_draft(draft, persisted)
+        self.assertEqual(reconciled[self.north_id], ["elem1"])
+
+    def test_reconcile_stack_draft_remaps_invalid_pitches_to_unassigned(self) -> None:
+        persisted = [{"id": "elem1", "pitch_id": "deleted_pitch_id", "sequence": 10}]
+        draft = {"deleted_pitch_id": ["elem1"]}
+
+        # When valid_pitch_ids is provided and doesn't contain deleted_pitch_id
+        reconciled = reconcile_stack_draft(
+            draft, persisted, valid_pitch_ids=[self.north_id, self.south_id]
+        )
+        self.assertEqual(reconciled[UNASSIGNED_STACK_ID], ["elem1"])
+
+    def test_apply_stack_draft_to_elements_preserves_unstacked_elements(self) -> None:
+        persisted = [
+            {"id": "elem1", "pitch_id": self.north_id, "sequence": 10},
+            {"id": "elem2", "pitch_id": self.north_id, "sequence": 20},
+            {"id": "elem_unstacked", "pitch_id": self.south_id, "sequence": 10},
+        ]
+        # Draft only explicitly stacks elem1 and elem2
+        draft = {self.north_id: ["elem2", "elem1"]}
+        rendered = apply_stack_draft_to_elements(persisted, draft)
+
+        rendered_ids = [r["id"] for r in rendered]
+        self.assertIn("elem2", rendered_ids)
+        self.assertIn("elem1", rendered_ids)
+        self.assertIn("elem_unstacked", rendered_ids)
+        self.assertEqual(len(rendered), 3)
+
+    def test_reconciliation_prevents_save_failure_when_elements_added_concurrently(self) -> None:
+        self.add_element("alpha", self.area_id, self.north_id, 10)
+        self.add_element("beta", self.area_id, self.north_id, 20)
+
+        # In-flight draft with swapped elements
+        draft = {self.north_id: ["beta", "alpha"]}
+
+        # Concurrent element added to the area (e.g. from Add Element dialog)
+        self.add_element("gamma", self.area_id, self.south_id, 10)
+
+        # Directly saving un-reconciled draft would fail with "incomplete or out of date"
+        with self.assertRaisesRegex(ValueError, "incomplete or out of date"):
+            store.save_yamazumi_stack_draft(
+                self.project_id, self.scenario_id, self.area_id, draft
+            )
+
+        # Reconciling first synchronizes with the database and allows safe save
+        fresh_elements = self.rows()
+        reconciled = reconcile_stack_draft(draft, fresh_elements)
+        result = store.save_yamazumi_stack_draft(
+            self.project_id, self.scenario_id, self.area_id, reconciled
+        )
+        self.assertIn("alpha", result["changed_element_ids"])
+        saved_rows = {row["id"]: row for row in self.rows()}
+        self.assertEqual(saved_rows["beta"]["sequence"], 10)
+        self.assertEqual(saved_rows["alpha"]["sequence"], 20)
+        self.assertEqual(saved_rows["gamma"]["pitch_id"], self.south_id)
 
 
 if __name__ == "__main__":

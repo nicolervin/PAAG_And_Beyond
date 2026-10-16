@@ -693,7 +693,7 @@ def add_assembly_section(
     parent_id = parent_id or None
     if section_type == "Subassembly" and not parent_id:
         raise ValueError("A subassembly must have a parent assembly.")
-    if section_type in {"Main spine", "Support Operations"}:
+    if section_type == "Main spine":
         parent_id = None
     timestamp = now_iso()
     section_id = str(uuid4())
@@ -778,9 +778,9 @@ def update_assembly_section_rows(
         parent_id = None if parent_id is None or pd.isna(parent_id) or not str(parent_id).strip() else str(parent_id)
         if section_type not in {"Main spine", "Subassembly", "Support Operations"}:
             raise ValueError("Each framework row must be Main spine, Subassembly, or Support Operations.")
-        if section_type in {"Main spine", "Support Operations"}:
+        if section_type == "Main spine":
             parent_id = None
-        elif not parent_id:
+        elif section_type == "Subassembly" and not parent_id:
             raise ValueError(f"Subassembly {row['name']} needs a parent assembly.")
         if parent_id == section_id or (parent_id and parent_id not in ids):
             raise ValueError(f"Choose a valid parent for {row['name']}.")
