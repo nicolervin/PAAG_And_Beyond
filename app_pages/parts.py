@@ -465,13 +465,7 @@ linked_assembly_by_part = {
 
 
 def assembly_grid_applicability_status(part_id: str, value) -> str:
-    if part_id not in linked_assembly_by_part:
-        return readable_feature_applicability(part_id, value)
-    model_numbers = split_model_applicability(value) if str(value or "").strip() else []
-    return (
-        f"Assembly grid · {', '.join(model_numbers)}"
-        if model_numbers else "Assembly grid · No active mapped models"
-    )
+    return readable_feature_applicability(part_id, value)
 parts_for_editing["active"] = parts_for_editing["id"].apply(
     lambda part_id: activity_by_part.get(str(part_id), True)
 ).astype(bool)
@@ -980,17 +974,6 @@ def confirm_bulk_part_delete() -> None:
     st.warning(
         f"This will permanently delete {len(pending_ids)} part(s), their photos, and their fishbone uses."
     )
-    if impact["linked_assemblies"]:
-        st.error(
-            "These Parts Catalog rows represent current manufacturing assemblies and cannot "
-            "be deleted here:"
-        )
-        for linked in impact["linked_assemblies"]:
-            st.write(
-                f"- Part number **{linked['assembly_number']}** is linked to assembly "
-                f"**{linked['assembly_number']}** ({linked['assembly_name']})."
-            )
-        st.caption("Delete or merge the linked assembly first, then retry the Parts deletion.")
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_bulk_part_delete"):
         st.session_state.pop("parts_pending_bulk_delete", None)
@@ -1001,7 +984,6 @@ def confirm_bulk_part_delete() -> None:
         type="primary",
         icon=":material/delete:",
         key="destructive_confirm_bulk_part_delete",
-        disabled=bool(impact["linked_assemblies"]),
     ):
         deleted_labels = [
             delete_project_part(project_id, str(part_id))
@@ -1585,8 +1567,7 @@ with details_col.container(border=True):
         )
     elif assembly_id:
         st.caption(
-            "Read-only completed-subassembly structure. Edit it from Assembly grid "
-            "Details → Mini-BOM."
+            "Read-only completed-subassembly structure."
         )
         legacy_bom = assembly_bom_components(project_id, assembly_id)
         if legacy_bom.empty:

@@ -615,9 +615,8 @@ class PartsCatalogFieldTests(unittest.TestCase):
         # Ensure Assembly grid is not inside the Product structure visible navigation
         product_struct_section = streamlit_app_code.split('"Product structure": [')[1].split(']')[0]
         self.assertNotIn("app_pages/assemblies.py", product_struct_section)
-        # Ensure it is still registered in unlisted_pages for internal navigation and smoke checks
-        self.assertIn("unlisted_pages", streamlit_app_code)
-        self.assertIn('st.Page("app_pages/assemblies.py"', streamlit_app_code)
+        # Ensure it is also completely retired from unlisted_pages
+        self.assertNotIn('st.Page("app_pages/assemblies.py"', streamlit_app_code)
 
 
 if __name__ == "__main__":

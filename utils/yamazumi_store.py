@@ -3023,7 +3023,13 @@ def save_yamazumi_stack_draft(
         if missing or stale:
             parts = []
             if missing:
-                parts.append(f"missing {len(missing)} current element(s)")
+                missing_labels = [
+                    f"'{elements[eid]['description']}'"
+                    for eid in missing
+                    if eid in elements and str(elements[eid]["description"] or "").strip()
+                ]
+                summary = f": {', '.join(missing_labels[:3])}" if missing_labels else ""
+                parts.append(f"missing {len(missing)} current element(s){summary}")
             if stale:
                 parts.append(f"containing {len(stale)} stale or foreign element(s)")
             raise ValueError(

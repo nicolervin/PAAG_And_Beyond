@@ -79,7 +79,8 @@ See `PROJECT_STATUS.md` for the precise distinction between working, incomplete,
 - `app_pages/pits_exchange.py` — **Import/Export PITS** Product structure page providing focused access to ordinary BOM/PITS import and Excel snapshot export.
 - `app_pages/models.py` — Model catalog, common names, usage, manufacturing features, and the model-feature complexity tree.
 - `app_pages/parts.py` — Parts Catalog, applicability, images, filters, bulk actions, export, and history.
-- `app_pages/assemblies.py` — Project-wide multi-section assembly-to-model grid plus the shared full assembly catalog, operational mini-BOM nesting, image, deletion, and history workflows.
+- `app_pages/bom_tree.py` — CAD-style Model Tree / BOM Tree for exploring and managing model structures, assemblies, and parts.
+- `app_pages/assemblies.py` — Retired legacy Assembly grid page (directs users to Model Tree).
 - `utils/assembly_grid.py` — Components v2 category/model grid renderer and its narrow interaction event contract.
 - `app_pages/fishbone.py` — Assembly framework, nested subassemblies, part placement, occurrence ordering, and the interactive Fishbone.
 - `app_pages/yamazumi.py` — Scenario branching, balancing areas, pitches, regions, model variants, visual board, work tables, and derived CTQ/Safety context.

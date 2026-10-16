@@ -15,7 +15,6 @@ from utils.store import (
 
 ALL_ACTIVE_SECTIONS = "__all_active_sections__"
 FISHBONE_LINKED_PAGES = {
-    "Assembly grid",
     "Parts to fishbone",
     "Yamazumi",
     "Process at a Glance",
@@ -208,9 +207,7 @@ def _set_sidebar_page_scope(
         remember_preferred_section(
             st.session_state, project_id, str(value), all_section_ids
         )
-    if page_title == "Assembly grid":
-        st.session_state[f"assembly_grid_sections_{project_id}"] = [value]
-    elif page_title == "Process at a Glance" and scenario_id:
+    if page_title == "Process at a Glance" and scenario_id:
         st.session_state[f"process_pairing_section_{scenario_id}"] = str(value)
     elif page_title == "Yamazumi" and scenario_id:
         area_id = section_to_area.get(str(value))
@@ -258,40 +255,7 @@ def render_fishbone_sidebar_context(
     selected_count_override: int | None = None
     valid_ids = list(active_section_ids)
 
-    if page_title == "Assembly grid":
-        target_key = f"assembly_grid_sections_{project_id}"
-        stored = st.session_state.get(target_key)
-        preferred_key, _ = preferred_section_keys(project_id)
-        if stored is None and st.session_state.get(preferred_key):
-            preferred = nearest_valid_section(
-                st.session_state, project_id, all_section_ids, valid_ids
-            )
-            if preferred:
-                stored = [preferred]
-                st.session_state[target_key] = stored
-        values = list(stored) if isinstance(stored, (list, tuple)) else []
-        if values and ALL_ACTIVE_SECTIONS not in values:
-            retained_values = [
-                section_id for section_id in active_section_ids
-                if section_id in values
-            ]
-            if not retained_values:
-                fallback = nearest_valid_section(
-                    st.session_state, project_id, all_section_ids, valid_ids
-                )
-                retained_values = [fallback] if fallback else []
-            if retained_values != values:
-                values = retained_values
-                st.session_state[target_key] = (
-                    values if values else [ALL_ACTIVE_SECTIONS]
-                )
-        all_selected = not values or ALL_ACTIVE_SECTIONS in values
-        selected_ids = (
-            active_section_ids
-            if all_selected
-            else [value for value in active_section_ids if value in values]
-        )
-    elif page_title == "Process at a Glance" and scenario_id:
+    if page_title == "Process at a Glance" and scenario_id:
         target_key = f"process_pairing_section_{scenario_id}"
         current = str(st.session_state.get(target_key) or "")
         if current not in valid_ids:
@@ -382,7 +346,7 @@ def render_fishbone_sidebar_context(
         return
 
     options = list(valid_ids)
-    if page_title in {"Assembly grid", "Pin Map"}:
+    if page_title == "Pin Map":
         options.insert(0, ALL_ACTIVE_SECTIONS)
     selector_key = (
         f"fishbone_sidebar_select_{project_id}_{scenario_id or 'project'}_"

@@ -503,6 +503,13 @@ Store validation rejects direct self-containment and every indirect containment 
 
 The Assembly grid Fishbone-section control is a multiselect with an **All active sections** choice. Selected sections render together as clearly labeled grid groups in Fishbone order. One shared visible-model filter and one shared active-feature-header filter apply to every displayed group. Categories remain owned by exactly one section, and ordinary part options remain limited to exact Fishbone uses in that category's Built section. Completed-subassembly options may originate in any displayed section. One **Save & Refresh** validates and writes category, mapping, visibility, automatically created Fishbone-use, and mini-BOM changes for every displayed section in one transaction; an error rolls back the complete multi-section operation. Categories, mappings, and preferences belonging to unselected sections or hidden models remain unchanged.
 
+#### Retirement of Assembly Grid and unblocked Parts Catalog deletion — approved October 2026 (Branch `NE_More_intuitive_BOM_tree_asm_grid`)
+
+The Assembly Grid subsystem (`assemblies.py`, `assembly_grid_*` tables, and blocking constraints) is deprecated and retired in favor of the CAD-style Model Tree (`bom_tree.py`):
+- **Unblocked Parts Catalog deletion and renaming**: The `ON DELETE RESTRICT` and application checks preventing deletion or renaming of catalog parts that had links to `manufacturing_assemblies` have been removed. In `delete_project_part()`, any linked `manufacturing_assemblies` row is automatically cleaned up with the part. The delete confirmation dialog in `app_pages/parts.py` no longer disables the Delete button or displays a blocking error banner for assembly-linked parts.
+- **Unblocked feature rules**: Feature rule updates and rule inference on catalog parts are no longer blocked by assembly links.
+- **Navigation retirement**: `app_pages/assemblies.py` is removed from active navigation and displays a retirement notification directing contributors to the Model Tree.
+
 #### Required Task 03 section-deletion extension
 
 Task 09 adds two section references to the four already handled by the combined Fishbone continuity workflow. `assembly_section_delete_impact()` and `delete_assembly_sections()` must treat all six reference types as requiring one valid same-project target outside the deletion set:

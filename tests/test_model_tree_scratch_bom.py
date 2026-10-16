@@ -747,6 +747,55 @@ class ModelTreeScratchBomTests(unittest.TestCase):
         app.run()
         self.assertEqual(len(app.exception), 0)
 
+    def test_generate_bom_excel_template_with_existing_tree_and_blank_fallback(self):
+        import io
+        import openpyxl
+        from app_pages.bom_tree import generate_bom_excel_template, parse_uploaded_bom_file
+
+        # 1. Blank items fallback to generic template
+        blank_items = [
+            {"level": 1, "part_number": "", "description": "", "quantity": 1.0},
+        ]
+        blank_bytes = generate_bom_excel_template(blank_items)
+        wb_blank = openpyxl.load_workbook(io.BytesIO(blank_bytes))
+        rows_blank = list(wb_blank["BOM"].iter_rows(values_only=True))
+        self.assertEqual(rows_blank[0], ("Level", "Part #", "Description", "Qty"))
+        self.assertEqual(rows_blank[1], (1, "SAMPLE_MAIN_ASY", "Main Top-Level Assembly", 1.0))
+        self.assertEqual(rows_blank[2], (2, "SAMPLE_SUB_ASY", "Subassembly Module", 1.0))
+
+        # None items fallback to generic template
+        none_bytes = generate_bom_excel_template(None)
+        wb_none = openpyxl.load_workbook(io.BytesIO(none_bytes))
+        rows_none = list(wb_none["BOM"].iter_rows(values_only=True))
+        self.assertEqual(rows_none[1], (1, "SAMPLE_MAIN_ASY", "Main Top-Level Assembly", 1.0))
+
+        # 2. Existing tree items are populated into the Excel download
+        tree_items = [
+            {"level": 1, "part_number": "ASY-TOP-01", "description": "Top Main Assembly", "quantity": 1.0},
+            {"level": 2, "part_number": "SUB-MODULE-02", "description": "Door Assembly", "quantity": 1.0},
+            {"level": 3, "part_number": "999D8503P002", "description": "Black ABS Roof", "quantity": 3.5},
+        ]
+        tree_bytes = generate_bom_excel_template(tree_items)
+        wb_tree = openpyxl.load_workbook(io.BytesIO(tree_bytes))
+        rows_tree = list(wb_tree["BOM"].iter_rows(values_only=True))
+        self.assertEqual(rows_tree[0], ("Level", "Part #", "Description", "Qty"))
+        self.assertEqual(rows_tree[1], (1, "ASY-TOP-01", "Top Main Assembly", 1.0))
+        self.assertEqual(rows_tree[2], (2, "SUB-MODULE-02", "Door Assembly", 1.0))
+        self.assertEqual(rows_tree[3], (3, "999D8503P002", "Black ABS Roof", 3.5))
+
+        # 3. Round-trip verify that parse_uploaded_bom_file can parse it back accurately
+        f_like = io.BytesIO(tree_bytes)
+        f_like.name = "BOM_Model.xlsx"
+        parsed = parse_uploaded_bom_file(f_like)
+        self.assertEqual(len(parsed), 3)
+        self.assertEqual(parsed[0]["level"], 1)
+        self.assertEqual(parsed[0]["part_number"], "ASY-TOP-01")
+        self.assertEqual(parsed[1]["level"], 2)
+        self.assertEqual(parsed[1]["part_number"], "SUB-MODULE-02")
+        self.assertEqual(parsed[2]["level"], 3)
+        self.assertEqual(parsed[2]["part_number"], "999D8503P002")
+        self.assertEqual(parsed[2]["quantity"], 3.5)
+
 
 if __name__ == "__main__":
     unittest.main()

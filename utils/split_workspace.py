@@ -176,7 +176,7 @@ export default function(component) {
 
   const drop = document.createElement('div')
   drop.className = 'split-nav-drop'
-  drop.innerHTML = '<span class="split-nav-icon">vertical_split</span><span>Drop a page here to open split view</span>'
+  drop.innerHTML = '<span class="split-nav-icon">splitscreen</span><span>Drop a page here to open split view</span>'
   drop.ondragover = (event) => {
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'
@@ -194,7 +194,7 @@ export default function(component) {
   if (data.secondary_title) {
     const open = document.createElement('div')
     open.className = 'split-nav-open'
-    open.innerHTML = '<span class="split-nav-icon">view_column_2</span>'
+    open.innerHTML = '<span class="split-nav-icon">splitscreen</span>'
     const label = document.createElement('span')
     label.textContent = `Split: ${data.secondary_title}`
     open.appendChild(label)

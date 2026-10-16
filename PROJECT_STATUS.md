@@ -47,6 +47,14 @@ These checks confirm that the screens can load and that export can be generated.
 
 ## Recently implemented
 
+### Task 10 — Legacy Assembly Grid retirement and unblocked Parts Catalog deletion
+
+On branch `NE_More_intuitive_BOM_tree_asm_grid` (October 2026), the legacy Assembly Grid subsystem (`app_pages/assemblies.py` and `assembly_grid_*` tables) has been formally retired in favor of the CAD-style Model Tree / BOM Tree (`app_pages/bom_tree.py`):
+- **Unblocked Parts Catalog Deletion**: Removed the constraints in `delete_project_part()`, `part_delete_impact()`, `update_part_rows()`, and `confirm_bulk_part_delete()` that previously blocked deletion or renaming of catalog parts that had legacy links to manufacturing assemblies. Parts can now be freely deleted or renamed in Parts Catalog.
+- **Unblocked Feature Rules**: Removed constraints blocking feature rule updates and rule inference on parts previously tied to manufacturing assembly mappings.
+- **Navigation & Page Retirement**: `app_pages/assemblies.py` has been removed from navigation and replaced with a clean retirement notice directing users to the Model Tree. Fishbone Details and sidebar links targeting assemblies now target the Model Tree.
+- **Database Hygiene**: Legacy assembly grid rows and lingering assembly links were safely cleaned from `data/paag.db` with SQLite foreign key validation (`PRAGMA foreign_key_check`) passing cleanly.
+
 ### Task 09 — Grid-based assembly-to-model mapping
 
 The project owner confirmed the schema and interaction design on September 2, 2026. Implementation completed on `Nicole_assembly_grid_editor` on September 3, 2026, with completed-subassembly Parts Catalog integration added on September 4, 2026. The existing Task 04 assembly infrastructure remains intact, while `app_pages/assemblies.py` is now the project-wide, section-selected grid and primary entry point. Each persisted EBOM category has official and plain-English names, row order, and one authoritative Installed section. Each active-model cell maps that category directly to one real `manufacturing_assemblies` record, and those mappings are the authoritative model-applicability source. Components remain that mapped assembly's existing `manufacturing_assembly_components` rows. Legacy `manufacturing_assembly_feature_rules` rows remain stored for compatibility but are hidden and no longer evaluated.
