@@ -81,20 +81,20 @@ def _hash_filtered_export(dataframe: pd.DataFrame) -> str:
 PARTS_VIEW_KEY = "parts_catalog"
 DEFAULT_PARTS_COLUMN_ORDER = [
     "view_details", "active", "photo_status", "part_number", "description",
-    "subsystem", "design_maturity", "factory_nickname", "design_engineer",
+    "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
     "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
     "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
     "applicability_status", "notes", "source", "updated_display",
 ]
 PARTS_COLUMN_LABELS = {
     "view_details": "Details", "active": "Active", "photo_status": "Photo status",
-    "part_number": "Part number", "description": "Part name", "subsystem": "Subsystem",
-    "design_maturity": "Design Maturity", "factory_nickname": "Factory Nickname",
-    "design_engineer": "Design Engineer", "ppm": "PPM", "buyer_gcl": "Buyer / GCL",
-    "pmqe_aqe": "PMQE / AQE", "ame_tooling_engineer": "AME / Tooling Engineer",
-    "part_code": "Part Code", "pits_tracker_number": "PITS ID",
-    "source_code": "Source Code", "make_buy": "Make vs Buy",
-    "feature_applicability": "Feature applicability",
+    "part_number": "Part number", "description": "Part name", "weight_lb": "Weight (lb)",
+    "subsystem": "Subsystem", "design_maturity": "Design Maturity",
+    "factory_nickname": "Factory Nickname", "design_engineer": "Design Engineer",
+    "ppm": "PPM", "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
+    "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
+    "pits_tracker_number": "PITS ID", "source_code": "Source Code",
+    "make_buy": "Make vs Buy", "feature_applicability": "Feature applicability",
     "applicability_status": "Applicability status", "notes": "Notes",
     "source": "Source", "updated_display": "Updated",
 }
@@ -638,7 +638,7 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
 
 
 candidate_sort_columns = [
-    "active", "photo_status", "part_number", "description",
+    "active", "photo_status", "part_number", "description", "weight_lb",
     "subsystem", "design_maturity",
     "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
     "pmqe_aqe", "ame_tooling_engineer", "part_code", "pits_tracker_number",
@@ -653,7 +653,8 @@ parts_editor_rows = direct_entry_editor_rows(
     ],
     labels={
         "photo_status": "Photo status", "part_number": "Part number",
-        "description": "Part name", "subsystem": "Subsystem", "design_maturity": "Design Maturity",
+        "description": "Part name", "weight_lb": "Weight (lb)",
+        "subsystem": "Subsystem", "design_maturity": "Design Maturity",
         "factory_nickname": "Factory Nickname",
         "design_engineer": "Design Engineer", "ppm": "PPM",
         "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
@@ -732,6 +733,13 @@ edited_parts = st.data_editor(
         ),
         "part_number": st.column_config.TextColumn("Part number", required=True),
         "description": st.column_config.TextColumn("Part Name", width="large"),
+        "weight_lb": st.column_config.NumberColumn(
+            "Weight (lb)",
+            min_value=0.0,
+            step=0.1,
+            format="%.2f lb",
+            help="Catalog part weight in pounds. Single parts >= 33 lb trigger Ergonomics heavy part warnings.",
+        ),
         "subsystem": st.column_config.TextColumn(
             "Subsystem",
             width="medium",
@@ -1518,6 +1526,9 @@ with details_col.container(border=True):
         st.write("**Part Code:**", part.get("part_code") or "—")
         st.write("**PPM:**", part.get("ppm") or "—")
     with col_meta2:
+        raw_w = part.get("weight_lb")
+        w_str = f"{float(raw_w):.2f} lb" if raw_w is not None and not pd.isna(raw_w) and str(raw_w).strip() != "" else "—"
+        st.write("**Weight (lb):**", w_str)
         st.write("**Buyer / GCL:**", part.get("buyer_gcl") or "—")
         st.write("**PMQE / AQE:**", part.get("pmqe_aqe") or "—")
         st.write("**AME / Tooling:**", part.get("ame_tooling_engineer") or "—")

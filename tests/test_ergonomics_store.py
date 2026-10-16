@@ -198,6 +198,7 @@ class ErgonomicsStoreTests(unittest.TestCase):
                 "ergonomic_hazard_options",
                 "ergonomics_reviews",
                 "ergonomics_review_hazard_selections",
+                "ergonomics_visual_media",
             },
         )
         self.assertIn("weight_lb", part_columns)
@@ -1418,5 +1419,164 @@ class ErgonomicsStoreTests(unittest.TestCase):
             self.assertEqual(review["notes"], "")
 
 
+    def test_create_and_delete_legacy_ergonomics_review(self) -> None:
+        hazard_ids = self._create_hazards()
+        created = store.create_legacy_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            "Legacy Oil Pan Gasket Alignment",
+            status="Started",
+            risk_classification="Red",
+            reviewer="Ergo Specialist",
+            hazard_option_ids=[hazard_ids[0]],
+            notes="Need lift assist or redesign.",
+            editor_name="Test Author",
+        )
+        self.assertTrue(created["id"])
+        self.assertEqual(created["legacy_description"], "Legacy Oil Pan Gasket Alignment")
+        self.assertIsNone(created["work_element_id"])
+
+        reviews_df = store.ergonomics_reviews(self.project_id, self.scenario_id)
+        matching = reviews_df[reviews_df["id"] == created["id"]]
+        self.assertFalse(matching.empty)
+        row = matching.iloc[0]
+        self.assertEqual(row["legacy_description"], "Legacy Oil Pan Gasket Alignment")
+        self.assertEqual(row["risk_classification"], "Red")
+        self.assertIn(hazard_ids[0], row["hazard_option_ids"])
+
+        # Test purge
+        del_res = store.delete_unlinked_ergonomics_reviews(
+            self.project_id,
+            self.scenario_id,
+            review_ids=[created["id"]],
+            editor_name="Test Purger",
+        )
+        self.assertEqual(del_res["row_count"], 1)
+        after_df = store.ergonomics_reviews(self.project_id, self.scenario_id)
+        self.assertTrue(after_df[after_df["id"] == created["id"]].empty)
+
+    def test_parts_weight_lb_round_trip(self) -> None:
+        part_row = {
+            "id": self.part_id,
+            "part_number": "TEST-WT-100",
+            "description": "Heavy Component",
+            "quantity": 1,
+            "weight_lb": 38.5,
+            "revision": "A",
+            "source": "Manual",
+            "model_applicability": "",
+            "notes": "",
+        }
+        store.update_part_rows(self.project_id, pd.DataFrame([part_row]))
+        with store.connection() as conn:
+            saved = conn.execute(
+                "SELECT weight_lb FROM parts WHERE id=?", (self.part_id,)
+            ).fetchone()
+            self.assertIsNotNone(saved)
+            self.assertAlmostEqual(saved["weight_lb"], 38.5)
+
+    def test_ensure_default_ergonomic_hazard_options(self) -> None:
+        new_pid = "ergo-hazard-project"
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO projects
+                   (id, name, revision, status, takt_time_s, created_at, updated_at)
+                   VALUES (?, 'Hazard Test Project', 'A', 'Draft', 60, ?, ?)""",
+                (new_pid, timestamp, timestamp),
+            )
+        # Initially empty
+        hazards = store.ergonomic_hazard_options(new_pid)
+        self.assertTrue(hazards.empty)
+
+        # Seed defaults
+        seeded_count = store.ensure_default_ergonomic_hazard_options(new_pid)
+        self.assertGreater(seeded_count, 0)
+        hazards_after = store.ergonomic_hazard_options(new_pid)
+        self.assertEqual(len(hazards_after), seeded_count)
+
+        # Second call does not duplicate
+        second_call = store.ensure_default_ergonomic_hazard_options(new_pid)
+        self.assertEqual(second_call, 0)
+        self.assertEqual(len(store.ergonomic_hazard_options(new_pid)), seeded_count)
+
+    def test_create_or_get_ergonomic_hazard_option(self) -> None:
+        tag_id1 = store.create_or_get_ergonomic_hazard_option(self.project_id, "Sharp Edge Pinch")
+        self.assertTrue(tag_id1)
+
+        # Case-insensitive retrieval
+        tag_id2 = store.create_or_get_ergonomic_hazard_option(self.project_id, "sharp edge pinch")
+        self.assertEqual(tag_id1, tag_id2)
+
+        # Empty validation
+        with self.assertRaises(ValueError):
+            store.create_or_get_ergonomic_hazard_option(self.project_id, "   ")
+
+    def test_link_legacy_concern_to_work_element_merges_reviews(self) -> None:
+        # Create hazard tags
+        tag1 = store.create_or_get_ergonomic_hazard_option(self.project_id, "Lift Hazard")
+        tag2 = store.create_or_get_ergonomic_hazard_option(self.project_id, "Twist Hazard")
+
+        # Create legacy concern
+        legacy = store.create_legacy_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            "Legacy Back Strain Concern",
+            risk_classification="Red",
+            hazard_option_ids=[tag1],
+            notes="Prior line ergo report documented back injury here.",
+            reviewer="Ergo Specialist A",
+            editor_name="Test Author",
+        )
+        legacy_id = legacy["id"]
+
+        # Target step already has an initial Green review
+        target_step_id = self.work_element_id
+        store.save_ergonomics_review(
+            self.project_id,
+            self.scenario_id,
+            {
+                "work_element_id": target_step_id,
+                "risk_classification": "Green",
+                "hazard_option_ids": [tag2],
+                "notes": "Current tooling revised.",
+                "reviewer": "Engineer B",
+            },
+        )
+
+        # Link and merge legacy concern into the target step review
+        merge_res = store.link_legacy_concern_to_work_element(
+            self.project_id,
+            self.scenario_id,
+            legacy_review_id=legacy_id,
+            target_work_element_id=target_step_id,
+            editor_name="Test Linker",
+        )
+        surviving_id = merge_res["surviving_id"]
+        self.assertTrue(surviving_id)
+
+        # Check surviving review properties
+        reviews_df = store.ergonomics_reviews(self.project_id, self.scenario_id)
+        surviving_row = reviews_df[reviews_df["id"] == surviving_id].iloc[0]
+
+        # Higher risk Red should survive over Green
+        self.assertEqual(surviving_row["risk_classification"], "Red")
+        # Legacy title preserved
+        self.assertEqual(surviving_row["legacy_description"], "Legacy Back Strain Concern")
+        # Notes combined
+        self.assertIn("Legacy Back Strain Concern", surviving_row["legacy_description"])
+        self.assertIn("[Legacy Concern]: Prior line ergo report", surviving_row["notes"])
+        self.assertIn("[Process Step Review]: Current tooling revised", surviving_row["notes"])
+
+        # Hazard tags merged (both tag1 and tag2)
+        surviving_hazards = surviving_row["hazard_option_ids"]
+        self.assertIn(tag1, surviving_hazards)
+        self.assertIn(tag2, surviving_hazards)
+
+        # Legacy unlinked row must be deleted
+        self.assertTrue(reviews_df[reviews_df["id"] == legacy_id].empty)
+
+
 if __name__ == "__main__":
     unittest.main()
+

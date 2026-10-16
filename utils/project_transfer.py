@@ -68,6 +68,7 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("safety_requirements"),
     TransferTable("ergonomic_hazard_options"), TransferTable("ergonomics_reviews"),
     TransferTable("ergonomics_review_hazard_selections"),
+    TransferTable("ergonomics_visual_media"),
     TransferTable("quality_requirements"), TransferTable("quality_requirement_assignments"),
     TransferTable("quality_requirement_torque_details"), TransferTable("quality_requirement_types"),
     TransferTable("equipment_types"), TransferTable("equipment_type_function_links"),

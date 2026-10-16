@@ -2,10 +2,70 @@
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
 import sys as _sys
+from typing import Any
+from uuid import uuid4
 from utils import db_core as _db_core
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
+
+DEFAULT_ERGONOMIC_HAZARD_OPTIONS: tuple[str, ...] = (
+    "Heavy lift (≥ 33 lb)",
+    "Awkward posture (bending / twisting / reaching)",
+    "Repetitive motion",
+    "Pinch point",
+    "High grip / push / pull force",
+    "Contact stress",
+    "Vibration",
+    "Static load / sustained hold",
+)
+
+def ensure_default_ergonomic_hazard_options(project_id: str) -> int:
+    """Seed standard ergonomics hazard options if the project has none defined."""
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            return 0
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ergonomic_hazard_options WHERE project_id=?",
+            (project_id,),
+        ).fetchone()[0]
+        if count > 0:
+            return 0
+        for label in DEFAULT_ERGONOMIC_HAZARD_OPTIONS:
+            conn.execute(
+                """INSERT INTO ergonomic_hazard_options
+                   (id, project_id, label, active, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (str(uuid4()), project_id, label, 1, timestamp, timestamp),
+            )
+        return len(DEFAULT_ERGONOMIC_HAZARD_OPTIONS)
+
+def create_or_get_ergonomic_hazard_option(project_id: str, label: str) -> str:
+    """Create a new ergonomic hazard option if it does not already exist, and return its ID."""
+    clean_label = str(label or "").strip()
+    if not clean_label:
+        raise ValueError("Hazard label cannot be empty.")
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise ValueError("The selected project no longer exists.")
+        existing = conn.execute(
+            "SELECT id FROM ergonomic_hazard_options WHERE project_id=? AND LOWER(label)=LOWER(?)",
+            (project_id, clean_label),
+        ).fetchone()
+        if existing:
+            return str(existing["id"])
+        new_id = str(uuid4())
+        conn.execute(
+            """INSERT INTO ergonomic_hazard_options
+               (id, project_id, label, active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (new_id, project_id, clean_label, 1, timestamp, timestamp),
+        )
+        return new_id
 
 def ergonomic_hazard_options(project_id: str) -> pd.DataFrame:
     columns = [
@@ -164,6 +224,7 @@ def ergonomics_reviews(
         "reviewer",
         "notes",
         "requested_due_date",
+        "legacy_description",
         "created_at",
         "updated_at",
         "hazard_option_ids",
@@ -227,6 +288,7 @@ def ergonomics_reviews(
         selections = selections_by_review[str(row["id"])]
         row["hazard_option_ids"] = [str(item["hazard_option_id"]) for item in selections]
         row["hazard_labels"] = [str(item["label"]) for item in selections]
+        row["legacy_description"] = str(row.get("legacy_description") or "")
     return pd.DataFrame(review_rows, columns=columns)
 
 def ergonomics_work_elements(project_id: str, scenario_id: str) -> pd.DataFrame:
@@ -305,6 +367,7 @@ def _ergonomics_review_has_real_content(values: dict) -> bool:
         or str(values.get("reviewer") or "").strip()
         or str(values.get("notes") or "").strip()
         or str(values.get("requested_due_date") or "").strip()
+        or str(values.get("legacy_description") or "").strip()
         or [value for value in values.get("hazard_option_ids", []) if str(value).strip()]
     )
 
@@ -414,6 +477,7 @@ def save_ergonomics_review_rows(
                 "requested_due_date": (
                     str(values.get("requested_due_date") or "").strip() or None
                 ),
+                "legacy_description": str(values.get("legacy_description") or "").strip(),
                 "hazard_option_ids": list(
                     dict.fromkeys(
                         str(value).strip()
@@ -580,7 +644,7 @@ def save_ergonomics_review_rows(
                     """UPDATE ergonomics_reviews
                        SET work_element_id=?, process_part_option_id=?, status=?,
                            risk_classification=?, reviewer=?, notes=?,
-                           requested_due_date=?, updated_at=?
+                           requested_due_date=?, legacy_description=?, updated_at=?
                        WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
                         row["work_element_id"],
@@ -590,6 +654,7 @@ def save_ergonomics_review_rows(
                         row["reviewer"],
                         row["notes"],
                         row["requested_due_date"],
+                        row["legacy_description"],
                         timestamp,
                         review_id,
                         project_id,
@@ -602,9 +667,9 @@ def save_ergonomics_review_rows(
                     """INSERT INTO ergonomics_reviews
                        (id, project_id, scenario_id, work_element_id,
                         process_part_option_id, status, reviewer, notes,
-                        requested_due_date, created_at, updated_at,
+                        requested_due_date, legacy_description, created_at, updated_at,
                         risk_classification)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         review_id,
                         project_id,
@@ -615,6 +680,7 @@ def save_ergonomics_review_rows(
                         row["reviewer"],
                         row["notes"],
                         row["requested_due_date"],
+                        row["legacy_description"],
                         timestamp,
                         timestamp,
                         row["risk_classification"],
@@ -685,6 +751,7 @@ def save_ergonomics_review(
     reviewer = str(values.get("reviewer") or "").strip()
     notes = str(values.get("notes") or "").strip()
     requested_due_date = str(values.get("requested_due_date") or "").strip() or None
+    legacy_description = str(values.get("legacy_description") or "").strip()
     hazard_option_ids = list(
         dict.fromkeys(
             str(value).strip()
@@ -758,7 +825,7 @@ def save_ergonomics_review(
                 """UPDATE ergonomics_reviews
                    SET work_element_id=?, process_part_option_id=?, status=?,
                        risk_classification=?, reviewer=?, notes=?,
-                       requested_due_date=?, updated_at=?
+                       requested_due_date=?, legacy_description=?, updated_at=?
                    WHERE id=? AND project_id=? AND scenario_id=?""",
                 (
                     work_element_id,
@@ -768,6 +835,7 @@ def save_ergonomics_review(
                     reviewer,
                     notes,
                     requested_due_date,
+                    legacy_description,
                     timestamp,
                     review_id,
                     project_id,
@@ -779,9 +847,9 @@ def save_ergonomics_review(
                 """INSERT INTO ergonomics_reviews
                    (id, project_id, scenario_id, work_element_id,
                     process_part_option_id, status, reviewer, notes,
-                    requested_due_date, created_at, updated_at,
+                    requested_due_date, legacy_description, created_at, updated_at,
                     risk_classification)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     review_id,
                     project_id,
@@ -792,6 +860,7 @@ def save_ergonomics_review(
                     reviewer,
                     notes,
                     requested_due_date,
+                    legacy_description,
                     timestamp,
                     timestamp,
                     risk_classification,
@@ -878,7 +947,777 @@ def delete_ergonomics_reviews(
         "timestamp": timestamp,
     }
 
-__domain_exports__ = ['ergonomic_hazard_options', 'save_ergonomic_hazard_option_rows', 'ergonomic_hazard_option_delete_impact', 'delete_ergonomic_hazard_options', 'ergonomics_reviews', 'ergonomics_work_elements', 'process_ergonomics_risk_work_element_ids', 'ergonomics_review_audit_history', '_ergonomics_review_has_real_content', '_ergonomics_review_merge_plan', 'ergonomics_review_save_plan', 'save_ergonomics_review_rows', 'save_ergonomics_review', 'delete_ergonomics_reviews']
+
+def create_legacy_ergonomics_review(
+    project_id: str,
+    scenario_id: str,
+    legacy_description: str,
+    *,
+    risk_classification: str = "Not yet assessed",
+    status: str = "Started",
+    reviewer: str = "",
+    hazard_option_ids: list[str] | None = None,
+    notes: str = "",
+    requested_due_date: str | None = None,
+    editor_name: str = "",
+) -> dict:
+    """Create a new unlinked legacy ergonomics review."""
+    title = str(legacy_description or "").strip()
+    if not title:
+        raise ValueError("Please provide a legacy concern title or description.")
+    review_values = {
+        "id": str(uuid4()),
+        "work_element_id": None,
+        "process_part_option_id": None,
+        "legacy_description": title,
+        "status": status,
+        "risk_classification": risk_classification,
+        "reviewer": reviewer,
+        "hazard_option_ids": hazard_option_ids or [],
+        "notes": notes,
+        "requested_due_date": requested_due_date,
+    }
+    result = save_ergonomics_review(project_id, scenario_id, review_values)
+    record_audit_event(
+        project_id,
+        "Ergonomics reviews",
+        "Create legacy review",
+        1,
+        editor_name,
+        {
+            "scenario_id": scenario_id,
+            "review_id": result["id"],
+            "legacy_description": title,
+        },
+    )
+    return {**result, "legacy_description": title, "work_element_id": None}
+
+
+def delete_unlinked_ergonomics_reviews(
+    project_id: str,
+    scenario_id: str,
+    review_ids: list[str] | None = None,
+    editor_name: str = "",
+) -> dict:
+    """Purge unlinked reviews from the active scenario, with optional id filtering."""
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        if review_ids is not None:
+            clean_ids = list(dict.fromkeys(str(v).strip() for v in review_ids if str(v).strip()))
+            if not clean_ids:
+                return {"row_count": 0, "timestamp": now_iso()}
+            placeholders = ",".join("?" for _ in clean_ids)
+            unlinked = conn.execute(
+                f"""SELECT id FROM ergonomics_reviews
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IS NULL AND id IN ({placeholders})""",
+                (project_id, scenario_id, *clean_ids),
+            ).fetchall()
+        else:
+            unlinked = conn.execute(
+                """SELECT id FROM ergonomics_reviews
+                    WHERE project_id=? AND scenario_id=? AND work_element_id IS NULL""",
+                (project_id, scenario_id),
+            ).fetchall()
+        target_ids = [str(r["id"]) for r in unlinked]
+        if not target_ids:
+            return {"row_count": 0, "timestamp": now_iso()}
+    result = delete_ergonomics_reviews(project_id, scenario_id, target_ids)
+    if result.get("row_count"):
+        record_audit_event(
+            project_id,
+            "Ergonomics reviews",
+            "Delete unlinked reviews",
+            result["row_count"],
+            editor_name,
+            {"scenario_id": scenario_id, "deleted_review_ids": target_ids},
+        )
+    return result
+
+
+def link_legacy_concern_to_work_element(
+    project_id: str,
+    scenario_id: str,
+    legacy_review_id: str,
+    target_work_element_id: str,
+    editor_name: str = "",
+) -> dict:
+    """Merge an unlinked legacy Ergonomics concern into a target Process step's review."""
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        work_elem = conn.execute(
+            "SELECT id, operation FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+            (target_work_element_id, project_id, scenario_id),
+        ).fetchone()
+        if not work_elem:
+            raise ValueError("The target Process step no longer exists.")
+
+        legacy_row = conn.execute(
+            """SELECT * FROM ergonomics_reviews
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (legacy_review_id, project_id, scenario_id),
+        ).fetchone()
+        if not legacy_row:
+            raise ValueError("The selected legacy concern no longer exists.")
+
+        legacy_review = dict(legacy_row)
+        legacy_hazards = [
+            str(r["hazard_option_id"])
+            for r in conn.execute(
+                """SELECT hazard_option_id FROM ergonomics_review_hazard_selections
+                   WHERE ergonomics_review_id=?""",
+                (legacy_review_id,),
+            ).fetchall()
+        ]
+
+        existing_rows = conn.execute(
+            """SELECT * FROM ergonomics_reviews
+               WHERE project_id=? AND scenario_id=? AND work_element_id=? AND id != ?""",
+            (project_id, scenario_id, target_work_element_id, legacy_review_id),
+        ).fetchall()
+
+        legacy_title = (
+            str(legacy_review.get("legacy_description") or "").strip()
+            or str(legacy_review.get("notes") or "").strip()
+            or "Legacy concern"
+        )
+
+        risk_ranks = {
+            "Red": 5,
+            "Favorable Red": 4,
+            "Favorable Green": 3,
+            "Green": 2,
+            "Not yet assessed": 1,
+        }
+
+        if existing_rows:
+            target_review = dict(existing_rows[0])
+            surviving_id = target_review["id"]
+            target_hazards = [
+                str(r["hazard_option_id"])
+                for r in conn.execute(
+                    """SELECT hazard_option_id FROM ergonomics_review_hazard_selections
+                       WHERE ergonomics_review_id=?""",
+                    (surviving_id,),
+                ).fetchall()
+            ]
+
+            # Merge notes
+            l_notes = str(legacy_review.get("notes") or "").strip()
+            t_notes = str(target_review.get("notes") or "").strip()
+            if l_notes and t_notes:
+                if l_notes == t_notes:
+                    merged_notes = l_notes
+                else:
+                    merged_notes = f"[Legacy Concern]: {l_notes}\n\n[Process Step Review]: {t_notes}"
+            else:
+                merged_notes = l_notes or t_notes
+
+            # Merge hazard tags
+            merged_hazards = list(dict.fromkeys([*target_hazards, *legacy_hazards]))
+
+            # Merge risk classification
+            l_risk = str(legacy_review.get("risk_classification") or "Not yet assessed")
+            t_risk = str(target_review.get("risk_classification") or "Not yet assessed")
+            merged_risk = l_risk if risk_ranks.get(l_risk, 0) >= risk_ranks.get(t_risk, 0) else t_risk
+
+            # Merge status
+            l_status = str(legacy_review.get("status") or "Started")
+            t_status = str(target_review.get("status") or "Started")
+            merged_status = l_status if t_status == "Started" else t_status
+
+            # Reviewer
+            merged_reviewer = (
+                str(legacy_review.get("reviewer") or "").strip()
+                or str(target_review.get("reviewer") or "").strip()
+            )
+
+            # Due date
+            merged_due_date = (
+                str(target_review.get("requested_due_date") or "").strip()
+                or str(legacy_review.get("requested_due_date") or "").strip()
+                or None
+            )
+
+            conn.execute(
+                """UPDATE ergonomics_reviews
+                   SET legacy_description=?, notes=?, risk_classification=?,
+                       status=?, reviewer=?, requested_due_date=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    legacy_title,
+                    merged_notes,
+                    merged_risk,
+                    merged_status,
+                    merged_reviewer,
+                    merged_due_date,
+                    timestamp,
+                    surviving_id,
+                ),
+            )
+
+            # Hazard selections on surviving review
+            conn.execute(
+                "DELETE FROM ergonomics_review_hazard_selections WHERE ergonomics_review_id=?",
+                (surviving_id,),
+            )
+            for idx, h_id in enumerate(merged_hazards):
+                conn.execute(
+                    """INSERT INTO ergonomics_review_hazard_selections
+                       (id, project_id, scenario_id, ergonomics_review_id, hazard_option_id, sequence, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(uuid4()), project_id, scenario_id, surviving_id, h_id, idx * 10, timestamp, timestamp),
+                )
+
+            # Re-point visual media from legacy review to surviving review
+            conn.execute(
+                "UPDATE ergonomics_visual_media SET review_id=?, updated_at=? WHERE review_id=?",
+                (surviving_id, timestamp, legacy_review_id),
+            )
+
+            # Delete legacy review and its hazard selections
+            conn.execute(
+                "DELETE FROM ergonomics_review_hazard_selections WHERE ergonomics_review_id=?",
+                (legacy_review_id,),
+            )
+            conn.execute(
+                "DELETE FROM ergonomics_reviews WHERE id=?",
+                (legacy_review_id,),
+            )
+            discarded_id = legacy_review_id
+        else:
+            surviving_id = legacy_review_id
+            conn.execute(
+                """UPDATE ergonomics_reviews
+                   SET work_element_id=?, legacy_description=?, updated_at=?
+                   WHERE id=?""",
+                (target_work_element_id, legacy_title, timestamp, surviving_id),
+            )
+            discarded_id = None
+
+    record_audit_event(
+        project_id,
+        "Ergonomics reviews",
+        "Link legacy concern",
+        1,
+        editor_name,
+        {
+            "scenario_id": scenario_id,
+            "legacy_review_id": legacy_review_id,
+            "target_work_element_id": target_work_element_id,
+            "surviving_review_id": surviving_id,
+            "discarded_review_id": discarded_id,
+            "legacy_title": legacy_title,
+        },
+    )
+    return {
+        "surviving_id": surviving_id,
+        "discarded_id": discarded_id,
+        "legacy_title": legacy_title,
+        "timestamp": timestamp,
+    }
+
+
+MAX_VISUAL_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_VISUAL_VIDEO_BYTES = 25 * 1024 * 1024
+
+
+def get_ergonomics_visual_media(
+    project_id: str,
+    scenario_id: str,
+    review_id: str | None = None,
+) -> list[dict]:
+    """Return ergonomics visual media records for the given project, scenario, and optional review."""
+    query_str = """
+        SELECT m.id, m.project_id, m.scenario_id, m.review_id, m.media_type,
+               m.file_path, m.original_file_path, m.annotations_json, m.caption,
+               m.sequence, m.created_at, m.created_by, m.updated_at
+        FROM ergonomics_visual_media m
+        WHERE m.project_id = ? AND m.scenario_id = ?
+    """
+    params: list[Any] = [project_id, scenario_id]
+    if review_id:
+        query_str += " AND m.review_id = ?"
+        params.append(review_id)
+    query_str += " ORDER BY m.sequence, m.created_at, m.id"
+
+    with connection() as conn:
+        rows = conn.execute(query_str, params).fetchall()
+        result: list[dict] = []
+        for r in rows:
+            item = dict(r)
+            fpath = Path(item["file_path"])
+            item["exists_on_disk"] = fpath.exists() and fpath.is_file()
+            if item["exists_on_disk"] and item["media_type"] == "image":
+                try:
+                    raw_b = fpath.read_bytes()
+                    sfx = fpath.suffix.lower()
+                    mime = "image/png" if sfx == ".png" else "image/webp" if sfx == ".webp" else "image/jpeg"
+                    b64 = base64.b64encode(raw_b).decode("ascii")
+                    item["data_url"] = f"data:{mime};base64,{b64}"
+                except Exception:
+                    item["data_url"] = ""
+            else:
+                item["data_url"] = ""
+            result.append(item)
+        return result
+
+
+def save_ergonomics_visual_media(
+    project_id: str,
+    scenario_id: str,
+    review_id: str,
+    filename: str,
+    file_bytes: bytes,
+    media_type: str | None = None,
+    caption: str = "",
+    sequence: int = 10,
+    current_editor: str = "Collaborator",
+    annotations_json: str = "",
+    original_file_bytes: bytes | None = None,
+) -> dict:
+    """Save an uploaded image or video visual aid for an Ergonomics review and record audit."""
+    normalized_review_id = str(review_id or "").strip()
+    if not normalized_review_id:
+        raise ValueError("Choose an Ergonomics review.")
+    if not file_bytes:
+        raise ValueError("No file content provided.")
+
+    suffix = Path(str(filename or "")).suffix.lower()
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+    video_suffixes = {".mp4", ".mov", ".webm"}
+    if suffix in image_suffixes:
+        detected_type = "image"
+        if len(file_bytes) > MAX_VISUAL_IMAGE_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"Image is {size_mb:.1f} MB. Photos and screenshots must be under 10 MB for fast slide rendering."
+            )
+    elif suffix in video_suffixes:
+        detected_type = "video"
+        if len(file_bytes) > MAX_VISUAL_VIDEO_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"Video is {size_mb:.1f} MB. For fast slide loading and smooth presentation playback, please trim or compress clips under 25 MB."
+            )
+    else:
+        raise ValueError(
+            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB)."
+        )
+
+    resolved_media_type = media_type or detected_type
+    if resolved_media_type not in {"image", "video"}:
+        raise ValueError("Media type must be 'image' or 'video'.")
+
+    timestamp = now_iso()
+    media_id = str(uuid4())
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = UPLOAD_DIR / f"ergo_visual_{normalized_review_id}_{media_id}{suffix}"
+    target_path.write_bytes(file_bytes)
+
+    orig_path_str = ""
+    if resolved_media_type == "image":
+        if original_file_bytes and original_file_bytes != file_bytes:
+            orig_target_path = UPLOAD_DIR / f"ergo_visual_{normalized_review_id}_{media_id}_orig{suffix}"
+            orig_target_path.write_bytes(original_file_bytes)
+            orig_path_str = str(orig_target_path)
+        else:
+            orig_path_str = str(target_path)
+
+    with connection() as conn:
+        review = conn.execute(
+            """SELECT id, work_element_id, status, risk_classification
+               FROM ergonomics_reviews
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (normalized_review_id, project_id, scenario_id),
+        ).fetchone()
+        if not review:
+            target_path.unlink(missing_ok=True)
+            if orig_path_str and orig_path_str != str(target_path):
+                Path(orig_path_str).unlink(missing_ok=True)
+            raise ValueError("The selected Ergonomics review does not exist in the active planning scenario.")
+
+        conn.execute(
+            """INSERT INTO ergonomics_visual_media
+               (id, project_id, scenario_id, review_id, media_type, file_path, original_file_path,
+                annotations_json, caption, sequence, created_at, created_by, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                media_id,
+                project_id,
+                scenario_id,
+                normalized_review_id,
+                resolved_media_type,
+                str(target_path),
+                orig_path_str,
+                str(annotations_json or "").strip(),
+                str(caption or "").strip(),
+                int(sequence),
+                timestamp,
+                str(current_editor or "").strip(),
+                timestamp,
+            ),
+        )
+
+    record_audit_event(
+        project_id,
+        "ergonomics_visual_media",
+        "Upload visual aid",
+        1,
+        str(current_editor or "").strip(),
+        {
+            "review_id": normalized_review_id,
+            "filename": filename,
+            "caption": caption,
+            "annotated": bool(annotations_json),
+        },
+    )
+    return {
+        "id": media_id,
+        "file_path": str(target_path),
+        "original_file_path": orig_path_str,
+        "media_type": resolved_media_type,
+        "caption": caption,
+        "sequence": sequence,
+    }
+
+
+def update_ergonomics_visual_media(
+    project_id: str,
+    scenario_id: str,
+    media_id: str,
+    caption: str | None = None,
+    sequence: int | None = None,
+    current_editor: str = "Collaborator",
+) -> None:
+    """Update caption and/or sequence order for an ergonomics visual aid."""
+    normalized_media_id = str(media_id or "").strip()
+    if not normalized_media_id:
+        raise ValueError("Choose a visual aid to update.")
+
+    timestamp = now_iso()
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT id, review_id, caption, sequence FROM ergonomics_visual_media
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (normalized_media_id, project_id, scenario_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Visual aid not found.")
+
+        new_caption = str(caption if caption is not None else row["caption"]).strip()
+        new_seq = int(sequence if sequence is not None else row["sequence"])
+
+        conn.execute(
+            """UPDATE ergonomics_visual_media
+               SET caption=?, sequence=?, updated_at=?
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (new_caption, new_seq, timestamp, normalized_media_id, project_id, scenario_id),
+        )
+
+    record_audit_event(
+        project_id,
+        "ergonomics_visual_media",
+        "Update visual aid",
+        1,
+        str(current_editor or "").strip(),
+        {"media_id": normalized_media_id, "caption": new_caption, "sequence": new_seq},
+    )
+    return {
+        "id": normalized_media_id,
+        "caption": new_caption,
+        "sequence": new_seq,
+    }
+
+
+def update_ergonomics_visual_annotations(
+    project_id: str,
+    scenario_id: str,
+    media_id: str,
+    annotations_json: str,
+    composite_image_bytes: bytes | None = None,
+    current_editor: str = "Collaborator",
+) -> dict:
+    """Update annotations vector JSON and composite display image for an existing ergonomics visual aid."""
+    normalized_media_id = str(media_id or "").strip()
+    if not normalized_media_id:
+        raise ValueError("Choose a visual aid to annotate.")
+
+    timestamp = now_iso()
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT m.id, m.file_path, m.original_file_path, m.caption, m.review_id
+               FROM ergonomics_visual_media m
+               WHERE m.id=? AND m.project_id=? AND m.scenario_id=?""",
+            (normalized_media_id, project_id, scenario_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Visual aid not found.")
+
+        file_path_str = row["file_path"]
+        orig_path_str = row["original_file_path"] or file_path_str
+        review_id = row["review_id"]
+        caption = row["caption"]
+
+        if not row["original_file_path"] or row["original_file_path"] == file_path_str:
+            curr_path = Path(file_path_str)
+            if curr_path.exists() and curr_path.is_file():
+                suffix = curr_path.suffix or ".png"
+                new_orig_target = UPLOAD_DIR / f"ergo_visual_{review_id}_{normalized_media_id}_orig{suffix}"
+                new_orig_target.write_bytes(curr_path.read_bytes())
+                orig_path_str = str(new_orig_target)
+                conn.execute(
+                    "UPDATE ergonomics_visual_media SET original_file_path=? WHERE id=?",
+                    (orig_path_str, normalized_media_id),
+                )
+
+        if composite_image_bytes:
+            target = Path(file_path_str)
+            target.write_bytes(composite_image_bytes)
+
+        conn.execute(
+            """UPDATE ergonomics_visual_media
+               SET annotations_json=?, updated_at=?
+               WHERE id=? AND project_id=? AND scenario_id=?""",
+            (str(annotations_json or "").strip(), timestamp, normalized_media_id, project_id, scenario_id),
+        )
+
+    record_audit_event(
+        project_id,
+        "ergonomics_visual_media",
+        "Annotate visual aid",
+        1,
+        str(current_editor or "").strip(),
+        {"review_id": review_id, "summary": f"Annotated ergonomics visual aid: '{caption or normalized_media_id}'"},
+    )
+    return {
+        "id": normalized_media_id,
+        "annotations_json": str(annotations_json or "").strip(),
+        "file_path": file_path_str,
+        "original_file_path": orig_path_str,
+    }
+
+
+def delete_ergonomics_visual_media(
+    project_id: str,
+    scenario_id: str,
+    media_id: str,
+    current_editor: str = "Collaborator",
+) -> None:
+    """Delete an ergonomics visual aid and underlying media files on disk."""
+    normalized_media_id = str(media_id or "").strip()
+    if not normalized_media_id:
+        raise ValueError("Choose a visual aid to delete.")
+
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT m.id, m.file_path, m.original_file_path, m.caption, m.review_id
+               FROM ergonomics_visual_media m
+               WHERE m.id=? AND m.project_id=? AND m.scenario_id=?""",
+            (normalized_media_id, project_id, scenario_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Visual aid not found.")
+
+        file_path_str = row["file_path"]
+        orig_path_str = row["original_file_path"] or ""
+        caption = row["caption"]
+        review_id = row["review_id"]
+
+        conn.execute(
+            "DELETE FROM ergonomics_visual_media WHERE id=? AND project_id=? AND scenario_id=?",
+            (normalized_media_id, project_id, scenario_id),
+        )
+
+    if file_path_str:
+        p = Path(file_path_str)
+        try:
+            if p.exists() and p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if orig_path_str and orig_path_str != file_path_str:
+        op = Path(orig_path_str)
+        try:
+            if op.exists() and op.is_file() and UPLOAD_DIR.resolve() in op.resolve().parents:
+                op.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    record_audit_event(
+        project_id,
+        "ergonomics_visual_media",
+        "Delete visual aid",
+        1,
+        str(current_editor or "").strip(),
+        {"review_id": review_id, "summary": f"Deleted ergonomics visual aid: '{caption or normalized_media_id}'"},
+    )
+
+
+def ergonomics_slide_summary(
+    project_id: str,
+    scenario_id: str,
+    review_id: str,
+) -> dict:
+    """Return all context and details required to render a complete 16:9 Ergonomics Review slide."""
+    normalized_review_id = str(review_id or "").strip()
+    if not normalized_review_id:
+        raise ValueError("Choose an Ergonomics review.")
+
+    with connection() as conn:
+        proj = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
+        project_name = str(proj["name"]) if proj else ""
+
+        scen = conn.execute(
+            "SELECT id, name, takt_time_s, takt_time_unit FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone()
+        if not scen:
+            raise ValueError("The active planning scenario no longer exists.")
+        scenario_name = str(scen["name"])
+        takt_time_s = float(scen["takt_time_s"] or 0)
+        takt_time_unit = str(scen["takt_time_unit"] or "seconds")
+
+        review_row = conn.execute(
+            """SELECT r.id, r.work_element_id, r.process_part_option_id,
+                      r.status, r.risk_classification, r.reviewer, r.notes,
+                      r.requested_due_date, r.legacy_description, r.created_at, r.updated_at
+               FROM ergonomics_reviews r
+               WHERE r.id=? AND r.project_id=? AND r.scenario_id=?""",
+            (normalized_review_id, project_id, scenario_id),
+        ).fetchone()
+        if not review_row:
+            raise ValueError("The selected Ergonomics review no longer exists.")
+        review = dict(review_row)
+
+        hazard_rows = conn.execute(
+            """SELECT opt.id, opt.label, sel.sequence
+               FROM ergonomics_review_hazard_selections sel
+               JOIN ergonomic_hazard_options opt ON opt.id=sel.hazard_option_id
+               WHERE sel.ergonomics_review_id=? AND sel.project_id=? AND sel.scenario_id=?
+               ORDER BY sel.sequence, opt.label""",
+            (normalized_review_id, project_id, scenario_id),
+        ).fetchall()
+        hazards = [str(hr["label"]) for hr in hazard_rows]
+
+        work_element_id = review.get("work_element_id")
+        work_info: dict[str, Any] = {}
+        parts_info: list[dict[str, Any]] = []
+        equipment_info: list[dict[str, Any]] = []
+
+        if work_element_id:
+            we_row = conn.execute(
+                """SELECT w.id, w.operation, w.tool, w.sequence AS work_sequence,
+                          w.model_applicability, w.cycle_time_s AS cycle_time,
+                          y.id AS yamazumi_element_id, y.description AS yamazumi_description,
+                          y.time_s, y.pitch_id,
+                          p.pitch_number, p.pitch_name,
+                          a.name AS area_name, sec.name AS section_name
+                   FROM work_elements w
+                   LEFT JOIN yamazumi_elements y
+                     ON (y.process_element_id=w.id OR (y.process_element_id IS NULL AND y.id=w.id))
+                    AND y.project_id=w.project_id
+                   LEFT JOIN yamazumi_pitches p ON p.id=y.pitch_id AND p.project_id=w.project_id
+                   LEFT JOIN yamazumi_areas a ON a.id=p.area_id AND a.scenario_id=w.scenario_id
+                   LEFT JOIN assembly_sections sec ON sec.id=a.section_id AND sec.project_id=w.project_id
+                   WHERE w.id=? AND w.project_id=? AND w.scenario_id=?""",
+                (work_element_id, project_id, scenario_id),
+            ).fetchone()
+            if we_row:
+                work_info = dict(we_row)
+
+            p_rows = conn.execute(
+                """SELECT p.id AS part_id, p.part_number, p.description, p.factory_nickname,
+                          p.weight_lb, grp.quantity, opt.handling_type
+                   FROM process_part_groups grp
+                   JOIN process_part_options opt ON opt.group_id=grp.id
+                   JOIN parts p ON p.id=opt.part_id AND p.project_id=grp.project_id
+                   WHERE grp.work_element_id=? AND grp.project_id=? AND grp.scenario_id=?
+                   ORDER BY p.part_number""",
+                (work_element_id, project_id, scenario_id),
+            ).fetchall()
+            for pr in p_rows:
+                parts_info.append(dict(pr))
+
+            eq_rows = conn.execute(
+                """SELECT e.id, e.name, t.label AS type_name
+                   FROM equipment_process_links l
+                   JOIN equipment_placements pl ON pl.id=l.placement_id AND pl.scenario_id=l.scenario_id
+                   JOIN equipment_assets e ON e.id=pl.equipment_id AND e.project_id=l.project_id
+                   LEFT JOIN equipment_types t ON t.id=e.equipment_type_id AND t.project_id=l.project_id
+                   WHERE l.work_element_id=? AND l.project_id=? AND l.scenario_id=?""",
+                (work_element_id, project_id, scenario_id),
+            ).fetchall()
+            for er in eq_rows:
+                equipment_info.append(dict(er))
+
+        media_list = get_ergonomics_visual_media(project_id, scenario_id, normalized_review_id)
+
+        max_part_weight = 0.0
+        total_parts_weight = 0.0
+        has_heavy_part = False
+        for p in parts_info:
+            w = float(p.get("weight_lb") or 0.0)
+            qty = float(p.get("quantity") or 1.0)
+            if w > max_part_weight:
+                max_part_weight = w
+            total_parts_weight += w * qty
+            if w >= 33.0 or (w * qty) >= 33.0:
+                has_heavy_part = True
+
+        return {
+            "project_name": project_name,
+            "scenario_name": scenario_name,
+            "takt_time_s": takt_time_s,
+            "takt_time_unit": takt_time_unit,
+            "review": review,
+            "hazards": hazards,
+            "work_info": work_info,
+            "parts": parts_info,
+            "equipment": equipment_info,
+            "media": media_list,
+            "max_part_weight": max_part_weight,
+            "total_parts_weight": total_parts_weight,
+            "has_heavy_part": has_heavy_part,
+        }
+
+
+__domain_exports__ = [
+    'ergonomic_hazard_options',
+    'save_ergonomic_hazard_option_rows',
+    'ergonomic_hazard_option_delete_impact',
+    'delete_ergonomic_hazard_options',
+    'ergonomics_reviews',
+    'ergonomics_work_elements',
+    'process_ergonomics_risk_work_element_ids',
+    'ergonomics_review_audit_history',
+    '_ergonomics_review_has_real_content',
+    '_ergonomics_review_merge_plan',
+    'ergonomics_review_save_plan',
+    'save_ergonomics_review_rows',
+    'save_ergonomics_review',
+    'delete_ergonomics_reviews',
+    'create_legacy_ergonomics_review',
+    'delete_unlinked_ergonomics_reviews',
+    'link_legacy_concern_to_work_element',
+    'ensure_default_ergonomic_hazard_options',
+    'create_or_get_ergonomic_hazard_option',
+    'get_ergonomics_visual_media',
+    'save_ergonomics_visual_media',
+    'update_ergonomics_visual_media',
+    'update_ergonomics_visual_annotations',
+    'delete_ergonomics_visual_media',
+    'ergonomics_slide_summary',
+]
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])
