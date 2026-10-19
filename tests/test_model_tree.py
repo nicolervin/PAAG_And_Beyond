@@ -310,6 +310,87 @@ class ModelTreeTests(unittest.TestCase):
         sel = at.selectbox(key="model_tree_selected_model")
         self.assertEqual(sel.value, new_mid)
 
+    def test_model_tree_with_duplicate_parts_across_subassemblies(self) -> None:
+        import_id = str(uuid4())
+        ts = store.now_iso()
+        store.execute(
+            """INSERT INTO pits_bom_imports (
+                id, project_id, import_sequence, workbook_name, workbook_sha256,
+                bom_sheet_name, source_row_count, occurrence_count, issue_count,
+                imported_by, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (import_id, self.project_id, 100, "car.xlsx", "sha_car", "BOM", 5, 5, 0, "tester", ts),
+        )
+
+        # L1: Root car
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), self.project_id, "", "ROOT-CAR", 1, 1.0, "1", 1, "fp1", import_id, import_id, ts, ts, ts, "Needs review"),
+        )
+        # L2: Front assembly
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), self.project_id, "ROOT-CAR", "FRONT-ASM", 2, 1.0, "1", 2, "fp2", import_id, import_id, ts, ts, ts, "Needs review"),
+        )
+        # L2: Rear assembly
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), self.project_id, "ROOT-CAR", "REAR-ASM", 2, 1.0, "1", 3, "fp3", import_id, import_id, ts, ts, ts, "Needs review"),
+        )
+        # Shared part under both FRONT-ASM and REAR-ASM (using subassembly definition lookup in pits_bom_model_tree Case B)
+        # Subassembly under FRONT-ASM:
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), self.project_id, "FRONT-ASM", "WHEEL-ASM", 3, 2.0, "2", 4, "fp4", import_id, import_id, ts, ts, ts, "Needs review"),
+        )
+        # Same subassembly reference under REAR-ASM:
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), self.project_id, "REAR-ASM", "WHEEL-ASM", 3, 2.0, "2", 5, "fp5", import_id, import_id, ts, ts, ts, "Needs review"),
+        )
+        # Leaf child under WHEEL-ASM (which attaches to both occurrences of WHEEL-ASM)
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), self.project_id, "WHEEL-ASM", "TIRE-PART", 4, 1.0, "1", 6, "fp6", import_id, import_id, ts, ts, ts, "Needs review"),
+        )
+
+        file_path = str(Path(__file__).parent.parent / "app_pages" / "bom_tree.py")
+        at = AppTest.from_file(file_path)
+        at.session_state["project_id"] = self.project_id
+        at.session_state["scenario_id"] = self.scenario_id
+        at.run()
+        self.assertEqual(at.exception, [])
+
 
 if __name__ == "__main__":
     unittest.main()

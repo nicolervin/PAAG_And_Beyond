@@ -170,6 +170,16 @@ def _clean_optional_text(value) -> str:
     return "" if value is None or pd.isna(value) else str(value).strip()
 
 
+def clean_bom_cell_text(value: Any) -> str:
+    """Return a clean string for BOM cells, converting None, NaN, and bogus null-strings to empty string."""
+    if value is None or pd.isna(value):
+        return ""
+    s = str(value).strip()
+    if s.lower() in {"nan", "none", "null", "undefined", "<na>"}:
+        return ""
+    return s
+
+
 def _validated_part_catalog_fields(values, previous: dict | None = None) -> dict[str, str]:
     prev = previous or {}
     prev_de = _clean_optional_text(prev.get("design_engineer") or prev.get("technology_engineer"))
@@ -3356,6 +3366,22 @@ def is_g_format_number(number_str: str) -> bool:
     return bool(G_FORMAT_REGEX.search(str(number_str).strip()))
 
 
+def is_drawing_group(part_number: str) -> bool:
+    """Return True if part number matches a drawing group assembly convention (e.g. Gxxx)."""
+    pn = clean_bom_cell_text(part_number).upper()
+    if not pn:
+        return False
+    return bool(re.search(r'G\d{2,4}$', pn) or is_g_format_number(pn))
+
+
+def is_piece_part(part_number: str) -> bool:
+    """Return True if part number matches a piece part convention (e.g. Pxxx)."""
+    pn = clean_bom_cell_text(part_number).upper()
+    if not pn:
+        return False
+    return bool(re.search(r'P\d{2,4}$', pn))
+
+
 def model_bom_tree_nodes(
     project_id: str, model_id: str, include_staged: bool = True
 ) -> list[dict]:
@@ -4541,20 +4567,29 @@ def detect_unexpanded_subassemblies(
         }
     ]
     """
-    clean_items = [it for it in items if str(it.get("part_number") or "").strip()]
+    clean_items = [it for it in items if clean_bom_cell_text(it.get("part_number"))]
     if not clean_items:
         return []
 
-    existing_pns = {str(it["part_number"]).strip().upper() for it in clean_items}
+    existing_pns = {clean_bom_cell_text(it["part_number"]).upper() for it in clean_items}
     detected: list[dict[str, Any]] = []
     seen_detected_pns: set[str] = set()
 
     def _execute(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         for it in clean_items:
-            pn = str(it["part_number"]).strip()
+            pn = clean_bom_cell_text(it["part_number"])
             pn_upper = pn.upper()
             if pn_upper in seen_detected_pns:
                 continue
+
+            # Piece parts (P-parts) should NOT be detected as subassemblies unless explicitly structured with child parts
+            if is_piece_part(pn) and not is_drawing_group(pn):
+                has_explicit_children = conn.execute(
+                    "SELECT 1 FROM pits_bom_occurrences WHERE project_id=? AND (UPPER(parent_tracker_number)=UPPER(?) OR UPPER(parent_tracker_number) LIKE UPPER(?) || '#%') LIMIT 1",
+                    (project_id, pn, pn),
+                ).fetchone()
+                if not has_explicit_children:
+                    continue
 
             sub_children = get_known_subassembly_structure(project_id, pn, _conn=conn)
             if not sub_children:
@@ -4563,14 +4598,14 @@ def detect_unexpanded_subassemblies(
             # Identify which children are not already in the BOM
             missing_children = [
                 c for c in sub_children
-                if c["part_number"].upper() not in existing_pns
+                if clean_bom_cell_text(c["part_number"]).upper() not in existing_pns
             ]
             if missing_children:
                 seen_detected_pns.add(pn_upper)
                 detected.append({
                     "part_number": pn,
                     "level": int(it.get("level", 1) or 1),
-                    "description": str(it.get("description") or ""),
+                    "description": clean_bom_cell_text(it.get("description")),
                     "children": missing_children,
                 })
         return detected
@@ -4700,7 +4735,7 @@ def save_manual_model_bom(
 
         cleaned_items: list[dict[str, Any]] = []
         for idx, it in enumerate(items):
-            p_num = str(it.get("part_number") or "").strip()
+            p_num = clean_bom_cell_text(it.get("part_number"))
             if not p_num:
                 continue
             raw_lvl = it.get("level")
@@ -4717,9 +4752,9 @@ def save_manual_model_bom(
                 raise ValueError(f"Row {idx + 1} ('{p_num}'): Quantity must be a valid number.")
             if qty <= 0:
                 raise ValueError(f"Row {idx + 1} ('{p_num}'): Quantity must be greater than 0.")
-            desc = str(it.get("description") or "").strip()
-            grp = str(it.get("group_number") or "").strip()
-            trk = str(it.get("child_tracker") or it.get("tracker") or p_num).strip()
+            desc = clean_bom_cell_text(it.get("description"))
+            grp = clean_bom_cell_text(it.get("group_number"))
+            trk = clean_bom_cell_text(it.get("child_tracker") or it.get("tracker") or p_num)
             cleaned_items.append({
                 "level": lvl,
                 "group_number": grp,
@@ -4803,10 +4838,12 @@ def save_manual_model_bom(
         now_ts = now_iso()
         if auto_add_parts:
             for it in cleaned_items:
-                pn = it["part_number"]
-                raw_pits_id = str(it.get("pits_tracker_number") or it.get("pits_id") or "").strip()
+                pn = clean_bom_cell_text(it.get("part_number"))
+                if not pn:
+                    continue
+                raw_pits_id = clean_bom_cell_text(it.get("pits_tracker_number") or it.get("pits_id"))
                 pits_id = raw_pits_id if raw_pits_id and raw_pits_id != pn else ""
-                desc_val = str(it.get("description") or "").strip()
+                desc_val = clean_bom_cell_text(it.get("description"))
                 if pn not in part_lookup:
                     new_pid = str(uuid4())
                     conn.execute(
@@ -5137,9 +5174,9 @@ def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: st
                 except (TypeError, ValueError):
                     pass
             if "Part #" in edits:
-                base_items[idx]["part_number"] = str(edits["Part #"]).strip()
+                base_items[idx]["part_number"] = clean_bom_cell_text(edits["Part #"])
             if "Description" in edits:
-                base_items[idx]["description"] = str(edits["Description"]).strip()
+                base_items[idx]["description"] = clean_bom_cell_text(edits["Description"])
             if "Qty" in edits:
                 try:
                     base_items[idx]["quantity"] = max(0.00001, round(float(edits["Qty"]), 5))
@@ -5162,8 +5199,8 @@ def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: st
             qty = 1.0
         base_items.append({
             "level": lvl,
-            "part_number": str(add.get("Part #") or "").strip(),
-            "description": str(add.get("Description") or "").strip(),
+            "part_number": clean_bom_cell_text(add.get("Part #")),
+            "description": clean_bom_cell_text(add.get("Description")),
             "quantity": qty,
             "_uid": str(uuid4())[:8],
         })
@@ -5217,6 +5254,549 @@ def delete_bom_rows(items: list[dict[str, Any]], selected_indices: set[int] | li
     return new_items, {next_sel}
 
 
+def check_group_number_conflicts(
+    project_id: str,
+    current_model_id: str,
+    items: list[dict[str, Any]],
+    _conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Scan other models in the project for BOM component/quantity conflicts on shared group numbers.
+
+    Extracts subassembly/drawing group structures from the provided items and compares
+    them against existing saved BOMs for all other models in the project.
+    A conflict occurs when two models use the same group number or drawing group assembly,
+    but contain different child components or quantities.
+    """
+    clean_items = []
+    for it in items:
+        pn = clean_bom_cell_text(it.get("part_number"))
+        if not pn:
+            continue
+        try:
+            lvl = int(it.get("level", 1) or 1)
+        except (TypeError, ValueError):
+            lvl = 1
+        try:
+            qty = round(float(it.get("quantity", 1.0) or 1.0), 5)
+        except (TypeError, ValueError):
+            qty = 1.0
+        grp = clean_bom_cell_text(it.get("group_number"))
+        clean_items.append({
+            "level": lvl,
+            "part_number": pn,
+            "group_number": grp,
+            "quantity": qty,
+        })
+
+    if not clean_items:
+        return []
+
+    def _extract_groups(bom_items: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+        """Map group_identifier -> { child_part_number: quantity }."""
+        groups: dict[str, dict[str, float]] = {}
+        stack: list[dict[str, Any]] = []
+
+        for row in bom_items:
+            lvl = row["level"]
+            while stack and stack[-1]["level"] >= lvl:
+                stack.pop()
+
+            grp_num = row.get("group_number")
+            if grp_num:
+                g_key = grp_num.upper()
+                if g_key not in groups:
+                    groups[g_key] = {}
+                p_key = row["part_number"].upper()
+                groups[g_key][p_key] = round(groups[g_key].get(p_key, 0.0) + row["quantity"], 5)
+
+            if stack:
+                parent = stack[-1]
+                parent_key = (parent.get("group_number") or parent["part_number"]).upper()
+                if parent_key not in groups:
+                    groups[parent_key] = {}
+                c_key = row["part_number"].upper()
+                groups[parent_key][c_key] = round(groups[parent_key].get(c_key, 0.0) + row["quantity"], 5)
+
+            stack.append(row)
+
+        return groups
+
+    curr_groups = _extract_groups(clean_items)
+    if not curr_groups:
+        return []
+
+    def _execute(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        other_models = conn.execute(
+            "SELECT id, model_number FROM project_models WHERE project_id=? AND id <> ?",
+            (project_id, current_model_id),
+        ).fetchall()
+
+        conflicts: list[dict[str, Any]] = []
+        for om in other_models:
+            o_mid = str(om["id"])
+            o_mnum = str(om["model_number"]).strip()
+            o_bom = get_manual_model_bom(project_id, o_mid, _conn=conn)
+            if not o_bom:
+                continue
+
+            o_items = []
+            for it in o_bom:
+                pn = clean_bom_cell_text(it.get("part_number"))
+                if not pn:
+                    continue
+                try:
+                    lvl = int(it.get("level", 1) or 1)
+                except (TypeError, ValueError):
+                    lvl = 1
+                try:
+                    qty = round(float(it.get("quantity", 1.0) or 1.0), 5)
+                except (TypeError, ValueError):
+                    qty = 1.0
+                grp = clean_bom_cell_text(it.get("group_number"))
+                o_items.append({
+                    "level": lvl,
+                    "part_number": pn,
+                    "group_number": grp,
+                    "quantity": qty,
+                })
+
+            o_groups = _extract_groups(o_items)
+
+            for g_id, curr_comps in curr_groups.items():
+                if g_id in o_groups:
+                    other_comps = o_groups[g_id]
+                    all_parts = set(curr_comps.keys()) | set(other_comps.keys())
+                    diffs = []
+                    for p in sorted(all_parts):
+                        c_qty = curr_comps.get(p, 0.0)
+                        o_qty = other_comps.get(p, 0.0)
+                        if c_qty == 0.0:
+                            diffs.append({
+                                "part_number": p,
+                                "current_qty": 0.0,
+                                "other_qty": o_qty,
+                                "type": "missing_in_current",
+                            })
+                        elif o_qty == 0.0:
+                            diffs.append({
+                                "part_number": p,
+                                "current_qty": c_qty,
+                                "other_qty": 0.0,
+                                "type": "extra_in_current",
+                            })
+                        elif abs(c_qty - o_qty) > 0.00001:
+                            diffs.append({
+                                "part_number": p,
+                                "current_qty": c_qty,
+                                "other_qty": o_qty,
+                                "type": "quantity_mismatch",
+                            })
+
+                    if diffs:
+                        g_type = "Drawing Group" if is_drawing_group(g_id) else "Group Number"
+                        conflicts.append({
+                            "group_identifier": g_id,
+                            "group_type": g_type,
+                            "conflicting_model_id": o_mid,
+                            "conflicting_model_number": o_mnum,
+                            "current_components": curr_comps,
+                            "other_components": other_comps,
+                            "differences": diffs,
+                        })
+
+        return conflicts
+
+    if _conn is not None:
+        return _execute(_conn)
+    with connection() as conn:
+        return _execute(conn)
+
+
+def _extract_part_root(pn: str) -> str:
+    """Extract common drawing or part family prefix (e.g. 999D8503P001 -> 999D8503)."""
+    clean = re.sub(r"[^A-Za-z0-9]", "", str(pn or "").upper())
+    m = re.match(r"^([A-Z0-9]+?)([GP]\d{1,4}|\d{3,})$", clean)
+    if m and len(m.group(1)) >= 4:
+        return m.group(1)
+    return clean[:8] if len(clean) >= 8 else clean
+
+
+def _extract_desc_tokens(text: str) -> set[str]:
+    """Extract descriptive keywords excluding generic stopwords."""
+    stopwords = {
+        "asm", "assembly", "the", "and", "for", "with", "part", "kit", "model",
+        "car", "unit", "system", "top", "sub", "main", "type", "black", "white",
+        "teal", "smoke", "matte", "red", "blue", "green", "yellow", "orange",
+    }
+    words = re.findall(r"[a-zA-Z]{3,}", (text or "").lower())
+    return {w for w in words if w not in stopwords}
+
+
+def _part_type(pn: str) -> str:
+    """Return 'G' for group/assembly or 'P' for piece part if evident from part number."""
+    upper = (pn or "").upper()
+    if "G" in upper and "P" not in upper:
+        return "G"
+    m = re.search(r"[GP]\d+", upper)
+    return m.group(0)[0] if m else ""
+
+
+def predict_model_bom_from_features(
+    project_id: str,
+    model_id: str,
+    top_level_part_number: str | None = None,
+    top_level_description: str | None = None,
+    _conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """Predict and generate a draft hierarchical BOM for a model based on Complexity Tree feature choices.
+
+    Uses assigned feature choices in model_feature_values and part rules in part_feature_rules:
+    1. Loads assigned features and values for target model.
+    2. Identifies base parts ('All models') and feature-matched parts.
+    3. Finds the closest existing saved model BOM to use as a structural template.
+    4. Combines the structural template hierarchy with the target model's feature-matched parts,
+       applying part substitutions only where feature choices differ and counterpart matches exist.
+    """
+    def _execute(conn: sqlite3.Connection) -> dict[str, Any]:
+        m_row = conn.execute(
+            "SELECT id, model_number, display_name FROM project_models WHERE id=? AND project_id=?",
+            (model_id, project_id),
+        ).fetchone()
+        if not m_row:
+            raise ValueError("Selected model not found in this project.")
+        target_model_number = str(m_row["model_number"]).strip()
+        target_model_name = str(m_row["display_name"] or "").strip()
+
+        target_feat_rows = conn.execute(
+            """SELECT mfv.feature_id, mfv.value, cf.name as feature_name, cf.category
+               FROM model_feature_values mfv
+               JOIN complexity_features cf ON mfv.feature_id = cf.id
+               WHERE mfv.project_id=? AND mfv.model_id=?""",
+            (project_id, model_id),
+        ).fetchall()
+        target_features = {
+            str(r["feature_id"]): {
+                "name": str(r["feature_name"]).strip(),
+                "category": str(r["category"] or "").strip(),
+                "value": str(r["value"] or "").strip(),
+            }
+            for r in target_feat_rows
+        }
+
+        candidate_models = conn.execute(
+            "SELECT id, model_number, display_name FROM project_models WHERE project_id=? AND id <> ?",
+            (project_id, model_id),
+        ).fetchall()
+
+        best_template_id = None
+        best_template_number = None
+        best_template_name = ""
+        best_template_score = -1
+        best_template_bom = []
+
+        for cand in candidate_models:
+            c_mid = str(cand["id"])
+            c_bom = get_manual_model_bom(project_id, c_mid, _conn=conn)
+            if not c_bom:
+                continue
+
+            c_feat_rows = conn.execute(
+                "SELECT feature_id, value FROM model_feature_values WHERE project_id=? AND model_id=?",
+                (project_id, c_mid),
+            ).fetchall()
+            c_features = {str(r["feature_id"]): str(r["value"] or "").strip() for r in c_feat_rows}
+
+            score = 0
+            for f_id, f_data in target_features.items():
+                if f_id in c_features and c_features[f_id] == f_data["value"]:
+                    score += 1
+
+            if score > best_template_score or best_template_id is None:
+                best_template_score = score
+                best_template_id = c_mid
+                best_template_number = str(cand["model_number"]).strip()
+                best_template_name = str(cand["display_name"] or "").strip()
+                best_template_bom = c_bom
+
+        cat_rows = conn.execute(
+            "SELECT id, part_number, description, model_applicability FROM parts WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+        part_by_id = {str(r["id"]): dict(r) for r in cat_rows}
+        part_by_num = {str(r["part_number"]).strip().upper(): dict(r) for r in cat_rows}
+
+        level1_assemblies = get_model_level1_assemblies(project_id, _conn=conn)
+
+        rules_rows = conn.execute(
+            """SELECT pfr.part_id, pfr.feature_id, pfr.value, cf.name as feature_name
+               FROM part_feature_rules pfr
+               JOIN complexity_features cf ON pfr.feature_id = cf.id
+               WHERE pfr.project_id=?""",
+            (project_id,),
+        ).fetchall()
+
+        rule_map: dict[tuple[str, str], list[str]] = {}
+        part_rules: dict[str, list[dict[str, str]]] = {}
+        for r in rules_rows:
+            p_id = str(r["part_id"])
+            f_id = str(r["feature_id"])
+            val = str(r["value"] or "").strip()
+            rule_map.setdefault((f_id, val), []).append(p_id)
+            part_rules.setdefault(p_id, []).append({
+                "feature_id": f_id,
+                "feature_name": str(r["feature_name"]).strip(),
+                "value": val,
+            })
+
+        feature_matches: list[dict[str, Any]] = []
+        target_matched_part_ids: set[str] = set()
+        for f_id, f_data in target_features.items():
+            f_val = f_data["value"]
+            matched_pids = rule_map.get((f_id, f_val), [])
+            matched_pns = []
+            for pid in matched_pids:
+                if pid in part_by_id:
+                    matched_pns.append(str(part_by_id[pid]["part_number"]).strip())
+                    target_matched_part_ids.add(pid)
+            feature_matches.append({
+                "feature_name": f_data["name"],
+                "category": f_data["category"],
+                "selected_value": f_val,
+                "matched_parts": matched_pns,
+            })
+
+        predicted_items: list[dict[str, Any]] = []
+        substitutions: list[dict[str, Any]] = []
+
+        top_pn = str(top_level_part_number or "").strip()
+        top_desc = str(top_level_description or "").strip()
+
+        if best_template_bom:
+            is_leaf = [True] * len(best_template_bom)
+            for idx in range(len(best_template_bom) - 1):
+                if int(best_template_bom[idx + 1].get("level", 1) or 1) > int(best_template_bom[idx].get("level", 1) or 1):
+                    is_leaf[idx] = False
+
+            template_feat_rows = conn.execute(
+                "SELECT feature_id, value FROM model_feature_values WHERE project_id=? AND model_id=?",
+                (project_id, best_template_id),
+            ).fetchall()
+            template_features = {str(r["feature_id"]): str(r["value"] or "").strip() for r in template_feat_rows}
+
+            diff_features = {
+                fid: fdata for fid, fdata in target_features.items()
+                if template_features.get(fid) != fdata["value"]
+            }
+
+            replacements_by_idx: dict[int, dict[str, str]] = {}
+            used_replacement_pids: set[str] = set()
+
+            for f_id, f_data in diff_features.items():
+                f_val = f_data["value"]
+                old_val = template_features.get(f_id, "")
+                target_pids = rule_map.get((f_id, f_val), [])
+                for t_pid in target_pids:
+                    if t_pid in used_replacement_pids:
+                        continue
+                    cand_part = part_by_id.get(t_pid)
+                    if not cand_part:
+                        continue
+                    cand_pn = str(cand_part["part_number"]).strip()
+                    cand_desc = str(cand_part["description"] or "").strip()
+                    cand_type = _part_type(cand_pn)
+
+                    if cand_pn.upper() in level1_assemblies or (top_pn and cand_pn.upper() == top_pn.upper()):
+                        continue
+
+                    cand_root = _extract_part_root(cand_pn)
+                    cand_toks = _extract_desc_tokens(cand_desc)
+
+                    best_match_idx = None
+                    best_match_score = -1
+                    best_src_val = old_val
+
+                    for idx, item in enumerate(best_template_bom):
+                        if idx in replacements_by_idx:
+                            continue
+                        lvl = int(item.get("level", 1) or 1)
+                        if lvl <= 1:
+                            continue
+
+                        it_pn = str(item.get("part_number") or "").strip()
+                        it_desc = str(item.get("description") or "").strip()
+                        if it_pn.upper() == cand_pn.upper():
+                            continue
+
+                        it_type = _part_type(it_pn)
+                        if cand_type and it_type and cand_type != it_type:
+                            continue
+                        if not is_leaf[idx] and cand_type != "G":
+                            continue
+
+                        it_root = _extract_part_root(it_pn)
+                        it_toks = _extract_desc_tokens(it_desc)
+
+                        root_match = bool(cand_root and it_root and cand_root.upper() == it_root.upper())
+                        overlap = cand_toks & it_toks
+
+                        cat_p = part_by_num.get(it_pn.upper())
+                        has_diff_feature_rule = False
+                        src_val = None
+                        if cat_p:
+                            it_p_id = str(cat_p["id"])
+                            for pr in part_rules.get(it_p_id, []):
+                                if pr["feature_id"] == f_id and pr["value"] != f_val:
+                                    has_diff_feature_rule = True
+                                    src_val = pr["value"]
+                                    break
+
+                        # Must have root match or keyword overlap to be a valid counterpart
+                        if not root_match and len(overlap) == 0:
+                            continue
+
+                        score = 0
+                        if root_match:
+                            score += 200
+                        score += len(overlap) * 40
+                        if has_diff_feature_rule:
+                            score += 50
+                        if cand_type and it_type and cand_type == it_type:
+                            score += 20
+
+                        if score > best_match_score:
+                            best_match_score = score
+                            best_match_idx = idx
+                            if src_val:
+                                best_src_val = src_val
+
+                    if best_match_idx is not None and best_match_score > 0:
+                        matched_item = best_template_bom[best_match_idx]
+                        orig_pn = str(matched_item.get("part_number") or "").strip()
+                        substitutions.append({
+                            "from_part": orig_pn,
+                            "to_part": cand_pn,
+                            "feature_name": f_data["name"],
+                            "from_value": best_src_val or "original",
+                            "to_value": f_val,
+                        })
+                        replacements_by_idx[best_match_idx] = {
+                            "part_number": cand_pn,
+                            "description": cand_desc,
+                        }
+                        used_replacement_pids.add(t_pid)
+
+            first_l1_done = False
+            for idx, item in enumerate(best_template_bom):
+                lvl = int(item.get("level", 1) or 1)
+                qty = round(float(item.get("quantity", 1.0) or 1.0), 5)
+                if lvl == 1 and not first_l1_done:
+                    predicted_items.append({
+                        "level": 1,
+                        "part_number": top_pn,
+                        "description": top_desc,
+                        "quantity": 1.0,
+                        "_uid": str(uuid4())[:8],
+                    })
+                    first_l1_done = True
+                elif idx in replacements_by_idx:
+                    predicted_items.append({
+                        "level": lvl if lvl > 1 else 2,
+                        "part_number": replacements_by_idx[idx]["part_number"],
+                        "description": replacements_by_idx[idx]["description"],
+                        "quantity": qty,
+                        "_uid": str(uuid4())[:8],
+                    })
+                else:
+                    predicted_items.append({
+                        "level": lvl if lvl > 1 else 2,
+                        "part_number": str(item.get("part_number") or "").strip(),
+                        "description": str(item.get("description") or "").strip(),
+                        "quantity": qty,
+                        "_uid": str(uuid4())[:8],
+                    })
+
+            # Append additive feature parts (e.g. features present in target but not in template)
+            existing_pns = {str(it["part_number"]).strip().upper() for it in predicted_items}
+            for f_id, f_data in diff_features.items():
+                f_val = f_data["value"]
+                target_pids = rule_map.get((f_id, f_val), [])
+                for t_pid in target_pids:
+                    if t_pid in used_replacement_pids:
+                        continue
+                    cand_part = part_by_id.get(t_pid)
+                    if not cand_part:
+                        continue
+                    cand_pn = str(cand_part["part_number"]).strip()
+                    cand_desc = str(cand_part["description"] or "").strip()
+
+                    if cand_pn.upper() in level1_assemblies or (top_pn and cand_pn.upper() == top_pn.upper()):
+                        continue
+                    if cand_pn.upper() in existing_pns:
+                        continue
+
+                    predicted_items.append({
+                        "level": 2,
+                        "part_number": cand_pn,
+                        "description": cand_desc,
+                        "quantity": 1.0,
+                        "_uid": str(uuid4())[:8],
+                    })
+                    existing_pns.add(cand_pn.upper())
+                    used_replacement_pids.add(t_pid)
+
+            if not any(it["level"] == 1 for it in predicted_items):
+                predicted_items.insert(0, {
+                    "level": 1,
+                    "part_number": top_pn,
+                    "description": top_desc,
+                    "quantity": 1.0,
+                    "_uid": str(uuid4())[:8],
+                })
+        else:
+            predicted_items.append({
+                "level": 1,
+                "part_number": top_pn,
+                "description": top_desc,
+                "quantity": 1.0,
+                "_uid": str(uuid4())[:8],
+            })
+            for r in cat_rows:
+                pid = str(r["id"])
+                pn = str(r["part_number"]).strip()
+                desc = str(r["description"] or "").strip()
+                app = str(r["model_applicability"] or "All").strip()
+                if top_pn and pn.upper() == top_pn.upper():
+                    continue
+                if pn.upper() in level1_assemblies:
+                    continue
+                if pid in target_matched_part_ids or app.lower() == "all" or target_model_number.upper() in app.upper():
+                    predicted_items.append({
+                        "level": 2,
+                        "part_number": pn,
+                        "description": desc,
+                        "quantity": 1.0,
+                        "_uid": str(uuid4())[:8],
+                    })
+
+        return {
+            "model_id": model_id,
+            "model_number": target_model_number,
+            "model_name": target_model_name,
+            "template_model_id": best_template_id,
+            "template_model_number": best_template_number,
+            "template_model_name": best_template_name,
+            "feature_matches": feature_matches,
+            "substitutions": substitutions,
+            "predicted_items": predicted_items,
+            "total_parts": len(predicted_items),
+        }
+
+    if _conn is not None:
+        return _execute(_conn)
+    with connection() as conn:
+        return _execute(conn)
+
+
 __domain_exports__ = [
     'pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES',
     'project_table', 'part_scenario_activity', 'active_part_ids',
@@ -5239,13 +5819,14 @@ __domain_exports__ = [
     'import_pits_id_snapshot', 'apply_pits_updates', 'set_mbom_review_status',
     'sync_confirmed_mbom_parts', 'pits_bom_occurrences',
     'review_pits_bom_occurrences', 'escalate_pits_bom_occurrence',
-    'G_FORMAT_REGEX', 'is_g_format_number', 'model_bom_tree_nodes',
-    'pits_bom_model_tree', 'pits_assembly_mini_bom', 'get_manual_model_bom',
+    'G_FORMAT_REGEX', 'is_g_format_number', 'is_drawing_group', 'is_piece_part', 'clean_bom_cell_text',
+    'model_bom_tree_nodes', 'pits_bom_model_tree', 'pits_assembly_mini_bom', 'get_manual_model_bom',
     'save_manual_model_bom', 'get_known_subassembly_structure',
     'get_model_level1_assemblies', 'detect_unexpanded_subassemblies',
     'expand_subassembly_items', 'sort_bom_hierarchy',
     'sync_builder_inputs_to_items', 'get_live_bom_editor_items',
-    'move_bom_rows_up', 'move_bom_rows_down', 'delete_bom_rows'
+    'move_bom_rows_up', 'move_bom_rows_down', 'delete_bom_rows',
+    'check_group_number_conflicts', 'predict_model_bom_from_features'
 ]
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):

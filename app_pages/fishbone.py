@@ -61,7 +61,7 @@ from utils.table_ui import (
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 page_title_with_scope(
-    "Parts to fishbone",
+    "Fishbone",
     scope="scenario-aware",
     help_text=(
         "The Fishbone framework is shared across every scenario. Which parts are visible and "

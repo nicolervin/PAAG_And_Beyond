@@ -104,15 +104,16 @@ project_exchange_page = st.Page(
 
 pages = {
     "Project": [
+        project_exchange_page,
         st.Page("app_pages/overview.py", title="Overview", icon=":material/dashboard:"),
         st.Page("app_pages/concerns.py", title="Questions and concerns", icon=":material/forum:"),
     ],
     "Product structure": [
-        st.Page("app_pages/pits_exchange.py", title="Import/Export PITS", icon=":material/sync_alt:"),
-        st.Page("app_pages/models.py", title="Model definitions", icon=":material/view_in_ar:"),
+        st.Page("app_pages/pits_exchange.py", title="Import PITs", icon=":material/sync_alt:"),
+        st.Page("app_pages/models.py", title="Complexity Trees", icon=":material/view_in_ar:"),
         st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
-        st.Page("app_pages/bom_tree.py", title="Model Tree", icon=":material/account_tree:"),
-        st.Page("app_pages/fishbone.py", title="Parts to fishbone", icon=":material/device_hub:"),
+        st.Page("app_pages/bom_tree.py", title="BOM", icon=":material/account_tree:"),
+        st.Page("app_pages/fishbone.py", title="Fishbone", icon=":material/device_hub:"),
     ],
     "Process planning": [
         st.Page("app_pages/yamazumi.py", title="Yamazumi", icon=":material/view_column:"),
@@ -151,10 +152,7 @@ pages = {
         ),
     ],
 }
-registered_pages = {
-    section: ([*section_pages, project_exchange_page] if section == "Project" else section_pages)
-    for section, section_pages in pages.items()
-}
+registered_pages = pages
 unlisted_pages = [
     st.Page("app_pages/functional_equipment.py", title="Equipment", url_path="Equipment"),
     st.Page("app_pages/functional_ergonomics.py", title="Ergonomics", url_path="Ergonomics"),
