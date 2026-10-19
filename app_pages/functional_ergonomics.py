@@ -165,6 +165,7 @@ if reviews.empty:
 if "legacy_description" not in reviews.columns:
     reviews["legacy_description"] = ""
 reviews["legacy_description"] = reviews["legacy_description"].fillna("").astype(str)
+reviews["pitch"] = reviews["pitch"].fillna("").astype(str)
 reviews["link_filter"] = reviews["work_element_id"].apply(
     lambda value: "Unlinked" if not _clean_text(value) else "Linked"
 )
@@ -270,13 +271,13 @@ if top_actions.button(
 visible_reviews = filter_table(
     reviews,
     key=f"ergonomics_reviews_filters_{project_id}_{scenario_id}",
-    dropdown_columns=["link_filter", "status", "risk_classification", "reviewer"],
-    search_columns=["work_element_label", "legacy_description", "pitch", "reviewer", "notes", "hazard_labels"],
+    dropdown_columns=["link_filter", "pitch", "status", "risk_classification"],
+    search_columns=["work_element_label", "legacy_description", "pitch", "notes", "hazard_labels"],
     labels={
         "link_filter": "Link status",
+        "pitch": "Pitch",
         "status": "Status",
         "risk_classification": "Risk classification",
-        "reviewer": "Reviewer",
     },
     reset_widget_keys=[editor_key],
 )
@@ -297,9 +298,9 @@ reviews_for_editing = direct_entry_editor_rows(
         "link_filter",
         "work_element_label",
         "legacy_description",
+        "pitch",
         "status",
         "risk_classification",
-        "reviewer",
         "requested_due_date",
         "updated_at",
     ],
@@ -307,6 +308,7 @@ reviews_for_editing = direct_entry_editor_rows(
         "link_filter": "Link status",
         "work_element_label": "Process step description",
         "legacy_description": "Legacy concern / title",
+        "pitch": "Pitch",
         "requested_due_date": "Requested due date",
     },
 )
@@ -322,9 +324,9 @@ edited = st.data_editor(
         "view_slide",
         "work_element_id",
         "legacy_description",
+        "pitch",
         "status",
         "risk_classification",
-        "reviewer",
         "hazard_option_ids",
         "notes",
         "requested_due_date",
@@ -341,6 +343,7 @@ edited = st.data_editor(
         "hazard_labels",
         "work_element_label",
         "pitch",
+        "reviewer",
     ],
     column_config={
         "id": None,
@@ -352,7 +355,7 @@ edited = st.data_editor(
         "updated_at": None,
         "hazard_labels": None,
         "work_element_label": None,
-        "pitch": None,
+        "reviewer": None,
         "link_status": st.column_config.MultiselectColumn(
             "Link",
             options=["Linked", "Unlinked"],
@@ -385,6 +388,11 @@ edited = st.data_editor(
             help="Title or description of legacy ergonomics concern before linking to a Process step.",
             width="large",
         ),
+        "pitch": st.column_config.TextColumn(
+            "Pitch",
+            disabled=True,
+            help="Pitch of the linked Process at a Glance step.",
+        ),
         "status": st.column_config.SelectboxColumn(
             "Status",
             options=list(ERGONOMICS_REVIEW_STATUSES),
@@ -401,11 +409,6 @@ edited = st.data_editor(
                 "non-production-intent part awaiting confirmation. Red and Green are "
                 "confirmed on the production-intent part."
             ),
-        ),
-        "reviewer": st.column_config.TextColumn(
-            "Reviewer",
-            default=_clean_text(st.session_state.get("current_editor")),
-            help="Free-text attribution. New manual rows start with Current editor.",
         ),
         "hazard_option_ids": st.column_config.MultiselectColumn(
             "Hazard tags",
@@ -439,7 +442,6 @@ st.download_button(
                 "pitch",
                 "status",
                 "risk_classification",
-                "reviewer",
                 "hazard_labels",
                 "notes",
                 "requested_due_date",
@@ -452,7 +454,6 @@ st.download_button(
                 "pitch": "Pitch",
                 "status": "Status",
                 "risk_classification": "Risk classification",
-                "reviewer": "Reviewer",
                 "hazard_labels": "Hazard tags",
                 "notes": "Notes",
                 "requested_due_date": "Requested due date",
@@ -1293,7 +1294,6 @@ if footer.save_and_refresh:
                 "legacy_description",
                 "status",
                 "risk_classification",
-                "reviewer",
                 "hazard_option_ids",
                 "notes",
                 "requested_due_date",

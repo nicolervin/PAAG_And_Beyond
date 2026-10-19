@@ -255,8 +255,18 @@ def ergonomics_reviews(
                                 ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
                                NULLIF(TRIM(work.operation), ''),
                                ''
-                           ) AS work_element_label,
-                           COALESCE(work.station, '') AS pitch
+                            ) AS work_element_label,
+                           COALESCE(
+                               NULLIF(TRIM(work.station), ''),
+                               (SELECT NULLIF(TRIM(pitch.pitch_number), '')
+                                FROM yamazumi_elements yamazumi
+                                JOIN yamazumi_pitches pitch ON pitch.id=yamazumi.pitch_id
+                                WHERE yamazumi.project_id=review.project_id
+                                  AND (yamazumi.process_element_id=review.work_element_id
+                                       OR (yamazumi.process_element_id IS NULL AND yamazumi.id=review.work_element_id))
+                                ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                               ''
+                           ) AS pitch
                     FROM ergonomics_reviews review
                     LEFT JOIN work_elements work
                       ON work.id=review.work_element_id
@@ -311,7 +321,17 @@ def ergonomics_work_elements(project_id: str, scenario_id: str) -> pd.DataFrame:
                           NULLIF(TRIM(work.operation), ''),
                           ''
                       ) AS work_element_label,
-                      COALESCE(work.station, '') AS pitch,
+                      COALESCE(
+                          NULLIF(TRIM(work.station), ''),
+                          (SELECT NULLIF(TRIM(pitch.pitch_number), '')
+                           FROM yamazumi_elements yamazumi
+                           JOIN yamazumi_pitches pitch ON pitch.id=yamazumi.pitch_id
+                           WHERE yamazumi.project_id=work.project_id
+                             AND (yamazumi.process_element_id=work.id
+                                  OR (yamazumi.process_element_id IS NULL AND yamazumi.id=work.id))
+                           ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                          ''
+                      ) AS pitch,
                       work.sequence
                FROM work_elements work
                WHERE work.project_id=? AND work.scenario_id=?

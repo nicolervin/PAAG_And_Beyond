@@ -99,6 +99,13 @@ class ErgonomicsPageTests(unittest.TestCase):
             widget for widget in app.multiselect if widget.label == "Link status"
         )
         self.assertEqual(set(link_filter.options), {"Linked", "Unlinked"})
+        pitch_filter = next(
+            widget for widget in app.multiselect if widget.label == "Pitch"
+        )
+        self.assertIn("P-900", set(pitch_filter.options))
+        self.assertFalse(
+            any(widget.label == "Reviewer" for widget in app.multiselect)
+        )
         captions = " ".join(caption.value for caption in app.caption)
         self.assertIn("legacy item or pre-PAAG concern", captions)
         self.assertIn("Unlinked", captions)
@@ -106,6 +113,8 @@ class ErgonomicsPageTests(unittest.TestCase):
         page_source = PAGE_PATH.read_text(encoding="utf-8")
         self.assertIn('st.column_config.SelectboxColumn(\n            "Risk classification"', page_source)
         self.assertIn("options=list(ERGONOMICS_RISK_CLASSIFICATIONS)", page_source)
+        self.assertIn('"pitch": st.column_config.TextColumn(\n            "Pitch"', page_source)
+        self.assertIn('"reviewer": None', page_source)
 
     def test_page_displays_active_scenario_takt_time_with_frequency_help(self) -> None:
         with store.connection() as conn:
