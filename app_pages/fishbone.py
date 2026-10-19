@@ -787,12 +787,15 @@ with fishbone_tab:
 
         # Canvas draft management
         canvas_draft_key = f"fishbone_canvas_draft_{project_id}"
+        persistent_conn_nodes_key = f"fishbone_conn_nodes_{project_id}"
+        persistent_conn_nodes = st.session_state.setdefault(persistent_conn_nodes_key, {})
         draft = st.session_state.setdefault(
             canvas_draft_key,
             {
                 "positions": {},
                 "connections": [],
                 "deleted_connections": set(),
+                "connection_nodes": {},
                 "new_assignments": [],
                 "updated_assignments": [],
                 "deleted_assignments": set(),
@@ -800,11 +803,17 @@ with fishbone_tab:
         )
         if "updated_assignments" not in draft:
             draft["updated_assignments"] = []
+        if "connection_nodes" not in draft:
+            draft["connection_nodes"] = {}
 
         canvas_key = f"interactive_fishbone_{project_id}"
         canvas_state = st.session_state.get(canvas_key)
         if canvas_state is not None:
             if p := getattr(canvas_state, "create_section", None):
+                try:
+                    delattr(canvas_state, "create_section")
+                except (AttributeError, TypeError):
+                    pass
                 sec_name = str(p.get("name") or "").strip()
                 sec_type = str(p.get("section_type") or "Subassembly")
                 parent_id = p.get("parent_id") or None
@@ -858,15 +867,29 @@ with fishbone_tab:
                     except ValueError as exc:
                         st.error(str(exc))
             if p := getattr(canvas_state, "move_node", None):
+                try:
+                    delattr(canvas_state, "move_node")
+                except (AttributeError, TypeError):
+                    pass
                 if sec_id := p.get("section_id"):
                     draft["positions"][sec_id] = (p.get("grid_x"), p.get("grid_y"))
             if p := getattr(canvas_state, "auto_arrange", None):
+                try:
+                    delattr(canvas_state, "auto_arrange")
+                except (AttributeError, TypeError):
+                    pass
                 if pos_map := p.get("positions"):
                     draft["positions"].update(pos_map)
             if p := getattr(canvas_state, "create_connection", None):
+                try:
+                    delattr(canvas_state, "create_connection")
+                except (AttributeError, TypeError):
+                    pass
                 f_id = p.get("from_section_id")
                 t_id = p.get("to_section_id")
                 c_type = p.get("connection_type", "subassembly")
+                from_node = p.get("from_node")
+                to_node = p.get("to_node")
                 if f_id and t_id and f_id != t_id:
                     if not any(
                         dc["from_section_id"] == f_id and dc["to_section_id"] == t_id
@@ -877,13 +900,25 @@ with fishbone_tab:
                             "to_section_id": t_id,
                             "connection_type": c_type,
                             "sequence": 10,
+                            "from_node": from_node,
+                            "to_node": to_node,
                         })
+                    if from_node or to_node:
+                        nodes_dict = {"from_node": from_node, "to_node": to_node}
+                        draft["connection_nodes"][f"{f_id}->{t_id}"] = nodes_dict
+                        persistent_conn_nodes[f"{f_id}->{t_id}"] = nodes_dict
             if p := getattr(canvas_state, "move_connection", None):
+                try:
+                    delattr(canvas_state, "move_connection")
+                except (AttributeError, TypeError):
+                    pass
                 cid = str(p.get("connection_id") or "").strip()
                 f_id = str(p.get("from_section_id") or "").strip()
                 new_t_id = str(p.get("to_section_id") or "").strip()
                 old_t_id = str(p.get("old_to_section_id") or "").strip()
                 c_type = str(p.get("connection_type") or "subassembly").strip()
+                from_node = p.get("from_node")
+                to_node = p.get("to_node")
                 if cid and not cid.startswith("draft_") and not cid.startswith("init_"):
                     draft["deleted_connections"].add(cid)
                 draft["connections"] = [
@@ -900,8 +935,54 @@ with fishbone_tab:
                             "to_section_id": new_t_id,
                             "connection_type": c_type,
                             "sequence": 10,
+                            "from_node": from_node,
+                            "to_node": to_node,
                         })
+                    if from_node or to_node:
+                        nodes_dict = {"from_node": from_node, "to_node": to_node}
+                        draft["connection_nodes"][f"{f_id}->{new_t_id}"] = nodes_dict
+                        persistent_conn_nodes[f"{f_id}->{new_t_id}"] = nodes_dict
+                        if cid:
+                            draft["connection_nodes"][cid] = nodes_dict
+                            persistent_conn_nodes[cid] = nodes_dict
+            if p := getattr(canvas_state, "update_connection_nodes", None):
+                try:
+                    delattr(canvas_state, "update_connection_nodes")
+                except (AttributeError, TypeError):
+                    pass
+                cid = str(p.get("connection_id") or "").strip()
+                f_id = str(p.get("from_section_id") or "").strip()
+                t_id = str(p.get("to_section_id") or "").strip()
+                from_node = p.get("from_node")
+                to_node = p.get("to_node")
+                existing = (
+                    draft.get("connection_nodes", {}).get(f"{f_id}->{t_id}")
+                    or draft.get("connection_nodes", {}).get(cid)
+                    or persistent_conn_nodes.get(f"{f_id}->{t_id}")
+                    or persistent_conn_nodes.get(cid)
+                    or {}
+                )
+                final_from = from_node or existing.get("from_node")
+                final_to = to_node or existing.get("to_node")
+                nodes_dict = {"from_node": final_from, "to_node": final_to}
+                if f_id and t_id:
+                    draft["connection_nodes"][f"{f_id}->{t_id}"] = nodes_dict
+                    persistent_conn_nodes[f"{f_id}->{t_id}"] = nodes_dict
+                if cid:
+                    draft["connection_nodes"][cid] = nodes_dict
+                    persistent_conn_nodes[cid] = nodes_dict
+                for dc in draft.get("connections", []):
+                    if (dc.get("from_section_id") == f_id and dc.get("to_section_id") == t_id) or (cid and cid.startswith("draft_")):
+                        if final_from:
+                            dc["from_node"] = final_from
+                        if final_to:
+                            dc["to_node"] = final_to
+                st.toast("Updated arrow snap position", icon=":material/near_me:")
             if p := getattr(canvas_state, "delete_connection", None):
+                try:
+                    delattr(canvas_state, "delete_connection")
+                except (AttributeError, TypeError):
+                    pass
                 if cid := p.get("connection_id"):
                     cid_str = str(cid).strip()
                     if not cid_str.startswith("draft_") and not cid_str.startswith("init_"):
@@ -919,6 +1000,10 @@ with fishbone_tab:
                 except (AttributeError, TypeError):
                     pass
             if p := getattr(canvas_state, "drop_part", None):
+                try:
+                    delattr(canvas_state, "drop_part")
+                except (AttributeError, TypeError):
+                    pass
                 pid = p.get("part_id")
                 sid = p.get("section_id")
                 if pid and sid:
@@ -938,6 +1023,10 @@ with fishbone_tab:
                             "use_description": str(p.get("use_description") or ""),
                         })
             if p := getattr(canvas_state, "drop_assembly", None):
+                try:
+                    delattr(canvas_state, "drop_assembly")
+                except (AttributeError, TypeError):
+                    pass
                 asm_pid = p.get("assembly_part_id")
                 built_sid = p.get("built_section_id")
                 inst_sid = p.get("installed_section_id")
@@ -995,6 +1084,10 @@ with fishbone_tab:
                                 "use_description": "Installed assembly" if include_children else "Assembly group part",
                             })
             if p := getattr(canvas_state, "remove_part", None):
+                try:
+                    delattr(canvas_state, "remove_part")
+                except (AttributeError, TypeError):
+                    pass
                 if aid := p.get("assignment_id"):
                     draft["deleted_assignments"].add(aid)
                 for a_item in p.get("assignment_ids", []):
@@ -1008,6 +1101,10 @@ with fishbone_tab:
                         if not (str(na.get("part_id")) == str(pid) and (sec_id is None or str(na.get("section_id")) == str(sec_id)))
                     ]
             if p := getattr(canvas_state, "move_part_assignment", None):
+                try:
+                    delattr(canvas_state, "move_part_assignment")
+                except (AttributeError, TypeError):
+                    pass
                 aid = p.get("assignment_id")
                 aids = p.get("assignment_ids") or ([aid] if aid else [])
                 from_sid = p.get("from_section_id")
@@ -1058,6 +1155,10 @@ with fishbone_tab:
                                 "ordered_assignment_ids": ordered_aids,
                             },
                         )
+                        st.rerun()
+                    elif moved_draft:
+                        target_name = section_name_by_id.get(to_sid, "section")
+                        st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
                         st.rerun()
 
         image_path_by_part = (
@@ -1317,48 +1418,78 @@ with fishbone_tab:
             })
 
         # Connection rows
+        def _get_nodes_for_conn(cid, from_id, to_id):
+            d = draft.get("connection_nodes", {}).get(cid) or draft.get("connection_nodes", {}).get(f"{from_id}->{to_id}")
+            if not d:
+                d = persistent_conn_nodes.get(cid) or persistent_conn_nodes.get(f"{from_id}->{to_id}") or {}
+            return d.get("from_node"), d.get("to_node")
+
         conn_rows = []
         if not connections_df.empty:
             for _, conn_r in connections_df.iterrows():
                 cid = str(conn_r["id"])
                 if cid in draft["deleted_connections"]:
                     continue
+                f_id = str(conn_r["from_section_id"])
+                t_id = str(conn_r["to_section_id"])
+                fn, tn = _get_nodes_for_conn(cid, f_id, t_id)
                 conn_rows.append({
                     "id": cid,
-                    "from_section_id": str(conn_r["from_section_id"]),
-                    "to_section_id": str(conn_r["to_section_id"]),
+                    "from_section_id": f_id,
+                    "to_section_id": t_id,
                     "connection_type": str(conn_r["connection_type"]),
                     "sequence": int(conn_r["sequence"]),
+                    "from_node": fn,
+                    "to_node": tn,
                 })
         else:
             for sec_id, row in records.items():
                 pid = normalized_parent_id(row.get("parent_id"))
                 if pid and pid in records:
+                    cid = f"init_{sec_id}_{pid}"
+                    fn, tn = _get_nodes_for_conn(cid, sec_id, pid)
                     conn_rows.append({
-                        "id": f"init_{sec_id}_{pid}",
+                        "id": cid,
                         "from_section_id": sec_id,
                         "to_section_id": pid,
                         "connection_type": "subassembly",
                         "sequence": 10,
+                        "from_node": fn,
+                        "to_node": tn,
                     })
             main_sec_ids = [
                 str(r["id"]) for _, r in visible_sections.iterrows() if r["section_type"] == "Main spine"
             ]
             for left_id, right_id in zip(main_sec_ids, main_sec_ids[1:]):
+                cid = f"init_{left_id}_{right_id}"
+                fn, tn = _get_nodes_for_conn(cid, left_id, right_id)
                 conn_rows.append({
-                    "id": f"init_{left_id}_{right_id}",
+                    "id": cid,
                     "from_section_id": left_id,
                     "to_section_id": right_id,
                     "connection_type": "series",
                     "sequence": 10,
+                    "from_node": fn,
+                    "to_node": tn,
                 })
         for idx, dc in enumerate(draft["connections"]):
+            cid = f"draft_{idx}"
+            f_id = dc["from_section_id"]
+            t_id = dc["to_section_id"]
+            fn = dc.get("from_node")
+            tn = dc.get("to_node")
+            if not fn or not tn:
+                dfn, dtn = _get_nodes_for_conn(cid, f_id, t_id)
+                fn = fn or dfn
+                tn = tn or dtn
             conn_rows.append({
-                "id": f"draft_{idx}",
-                "from_section_id": dc["from_section_id"],
-                "to_section_id": dc["to_section_id"],
+                "id": cid,
+                "from_section_id": f_id,
+                "to_section_id": t_id,
                 "connection_type": dc["connection_type"],
                 "sequence": dc.get("sequence", 10),
+                "from_node": fn,
+                "to_node": tn,
             })
 
         # Render Interactive Fishbone Canvas Builder
@@ -1577,6 +1708,7 @@ with fishbone_tab:
             draft["positions"]
             or draft["connections"]
             or draft["deleted_connections"]
+            or draft.get("connection_nodes")
             or draft["new_assignments"]
             or draft.get("updated_assignments")
             or draft["deleted_assignments"]
@@ -1586,6 +1718,7 @@ with fishbone_tab:
                 len(draft["positions"])
                 + len(draft["connections"])
                 + len(draft["deleted_connections"])
+                + len(draft.get("connection_nodes", {}))
                 + len(draft["new_assignments"])
                 + len(draft.get("updated_assignments", []))
                 + len(draft["deleted_assignments"])
@@ -1622,6 +1755,8 @@ with fishbone_tab:
                     deleted_assignment_ids=list(draft["deleted_assignments"]) if draft["deleted_assignments"] else None,
                     editor_name=st.session_state.get("current_editor", ""),
                 )
+                if draft.get("connection_nodes"):
+                    persistent_conn_nodes.update(draft["connection_nodes"])
                 st.session_state.pop(canvas_draft_key, None)
                 request_table_editor_reset(pool_editor_key)
                 request_table_editor_reset(assignment_editor_key)

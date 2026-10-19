@@ -4036,26 +4036,27 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
             }
             all_nodes.append(node)
 
-            if has_any_model_usages:
-                # Outline stack hierarchy for Master BOM
+            p_tr = node["parent_tracker"]
+            if p_tr:
+                if p_tr not in children_map:
+                    children_map[p_tr] = []
+                children_map[p_tr].append(node)
+            elif depth > 1:
+                # Fallback for legacy outline rows lacking parent_tracker
                 parent_node = stack_b.get(depth - 1)
                 if parent_node:
                     parent_node["children"].append(node)
                     node["parent_tracker"] = parent_node["child_tracker"]
-                stack_b[depth] = node
-                stack_b = {lvl: n for lvl, n in stack_b.items() if lvl <= depth}
-            else:
-                # Legacy parent_tracker mapping
-                p_tr = node["parent_tracker"]
-                if p_tr not in children_map:
-                    children_map[p_tr] = []
-                children_map[p_tr].append(node)
 
-        if not has_any_model_usages:
-            for node in all_nodes:
-                c_tr = node["child_tracker"]
-                if c_tr in children_map:
-                    node["children"] = children_map[c_tr]
+            stack_b[depth] = node
+            stack_b = {lvl: n for lvl, n in stack_b.items() if lvl <= depth}
+
+        for node in all_nodes:
+            c_tr = node["child_tracker"]
+            if c_tr and c_tr in children_map:
+                for ch in children_map[c_tr]:
+                    if ch not in node["children"]:
+                        node["children"].append(ch)
 
         roots = [n for n in all_nodes if not n["parent_tracker"] or n["depth"] == 1]
         if not roots and all_nodes:
