@@ -663,7 +663,7 @@ def confirm_yamazumi_reset() -> None:
         st.warning(
             f"This will permanently remove the Yamazumi area **{area['name']}**, including all of its pitches, work elements, takt time, and pending IE review items."
         )
-    st.caption("Fishbone sections and existing Process at a Glance records will not be deleted or changed.")
+    st.caption("Fishbone sections, their linked Yamazumi areas, and existing Process at a Glance records will not be deleted or changed.")
     confirmation = st.text_input(
         "Type CLEAR to confirm",
         key="yamazumi_reset_confirmation",
@@ -2583,9 +2583,17 @@ else:
         additional_action_key=f"yamazumi_move_pitches_request_{scenario_id}_{area_id}",
         additional_action_disabled=move_pitch_disabled,
         additional_action_help=(
-            "Save or undo other Yamazumi changes and clear delete selections first."
-            if move_pitch_disabled and len(area_labels) >= 2
-            else "Move saved pitches and their assigned work to another area in this scenario."
+            "At least two Yamazumi areas are required in this scenario before moving pitches."
+            if len(area_labels) < 2
+            else (
+                "Clear the delete row selection in the Pitch addresses table first, then click Move pitches to select pitches to move."
+                if not selected_pitches.empty
+                else (
+                    "Save or undo other Yamazumi changes first."
+                    if move_pitch_disabled
+                    else "Move saved pitches and their assigned work to another area in this scenario."
+                )
+            )
         ),
     )
     if pitch_actions.additional_action:

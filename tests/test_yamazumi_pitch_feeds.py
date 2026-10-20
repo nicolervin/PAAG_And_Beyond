@@ -1090,6 +1090,37 @@ class YamazumiPitchFeedTests(unittest.TestCase):
             0,
         )
 
+    def test_clear_yamazumi_data_preserves_fishbone_linked_areas(self) -> None:
+        store.add_assembly_section(
+            self.project_id, "Assembly 1", "Main spine", None, ""
+        )
+        store.add_assembly_section(
+            self.project_id, "Assembly 2", "Main spine", None, ""
+        )
+        areas = store.yamazumi_areas(self.project_id, self.scenario_id)
+        asm1_id = str(areas.loc[areas["name"] == "Assembly 1", "id"].iloc[0])
+        asm2_id = str(areas.loc[areas["name"] == "Assembly 2", "id"].iloc[0])
+        self.add_pitch("P-ASM1", area_id=asm1_id)
+        store.clear_yamazumi_data(self.project_id, self.scenario_id, asm1_id)
+        areas_after_single = store.yamazumi_areas(self.project_id, self.scenario_id)
+        self.assertIn("Assembly 1", set(areas_after_single["name"].astype(str)))
+        self.assertIn("Assembly 2", set(areas_after_single["name"].astype(str)))
+        self.assertEqual(
+            store.query("SELECT COUNT(*) AS count FROM yamazumi_pitches WHERE area_id=?", (asm1_id,))[0]["count"],
+            0,
+        )
+
+        store.clear_yamazumi_data(self.project_id, self.scenario_id, None)
+        areas_after_all = store.yamazumi_areas(self.project_id, self.scenario_id)
+        self.assertEqual(
+            set(areas_after_all["name"].astype(str)),
+            {"Assembly 1", "Assembly 2"},
+        )
+        self.assertEqual(
+            str(areas_after_all.loc[areas_after_all["name"] == "Assembly 2", "id"].iloc[0]),
+            asm2_id,
+        )
+
     def test_import_blocks_compatibility_null_feeder_edit_atomically(self) -> None:
         timestamp = store.now_iso()
         with store.connection() as conn:

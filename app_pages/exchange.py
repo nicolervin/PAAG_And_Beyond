@@ -13,6 +13,7 @@ from utils.project_transfer import (
 from utils.store import (
     audit_history,
     projects,
+    set_last_active_workspace,
 )
 from utils.scope_ui import page_title_with_scope
 from utils.table_ui import selectable_dataframe
@@ -69,6 +70,9 @@ def complete_project_import(pending: dict) -> None:
         st.session_state.pop(key, None)
     st.session_state["project_id"] = result["project_id"]
     st.session_state["scenario_id"] = result["scenario_id"]
+    st.session_state.pop("global_project", None)
+    st.session_state.pop("global_scenario", None)
+    set_last_active_workspace(result["project_id"], result["scenario_id"])
     st.toast(
         f"Imported project {result['project_name']}", icon=":material/check_circle:"
     )

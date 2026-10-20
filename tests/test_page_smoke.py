@@ -833,6 +833,10 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (empty_project_id, "Empty Test Project", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
             )
+        store.upsert_part(
+            empty_project_id,
+            {"part_number": "PART-EMPTY-SEC", "description": "Part with no sections"},
+        )
         old_proj = self.project_id
         self.project_id = empty_project_id
         try:
@@ -1726,6 +1730,128 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             pitch_table["pitch_number"] == "SUB-1", "feed_target_status"
         ].iloc[0]
         self.assertEqual(status, "")
+
+    def test_yamazumi_import_and_normalization_keep_unique_variants_per_pitch(
+        self,
+    ) -> None:
+        pitches_df = pd.DataFrame(
+            [
+                {
+                    "Sub-Line": "Pedestal",
+                    "Pitch_number": "01-PED-003",
+                    "Pitch_status": "Active",
+                    "Pitch_name": "",
+                    "Pitch_Takt_time": 120.0,
+                    "Model_variants": ["Base_Variant_PED"],
+                },
+                {
+                    "Sub-Line": "Pedestal",
+                    "Pitch_number": "01-PED-004",
+                    "Pitch_status": "Active",
+                    "Pitch_name": "",
+                    "Pitch_Takt_time": 120.0,
+                    "Model_variants": ["Base_Variant_PED", "Export_Variant_PED", "base_variant_ped"],
+                },
+            ]
+        )
+        elements_df = pd.DataFrame(
+            [
+                {
+                    "Sub-Line": "Pedestal",
+                    "Pitch_number": "01-PED-003",
+                    "Pitch_status": "Active",
+                    "Pitch_name": "",
+                    "Pitch_Takt_time": 120.0,
+                    "Model_variant": "Base_Variant_PED",
+                    "Work_Type": "Cycle",
+                    "Work_Description": "Load Pedestal",
+                    "Work_Time_to_complete": 12.6,
+                    "Work_region": "None",
+                },
+                {
+                    "Sub-Line": "Pedestal",
+                    "Pitch_number": "01-PED-004",
+                    "Pitch_status": "Active",
+                    "Pitch_name": "",
+                    "Pitch_Takt_time": 120.0,
+                    "Model_variant": "Export_Variant_PED",
+                    "Work_Type": "Cycle",
+                    "Work_Description": "Install Export Bracket",
+                    "Work_Time_to_complete": 8.4,
+                    "Work_region": "None",
+                },
+            ]
+        )
+        store.import_yamazumi_rows(
+            self.project_id,
+            self.scenario_id,
+            elements_df,
+            {},
+            source_label="PDF import",
+            pitch_rows=pitches_df,
+        )
+        pitches = store.yamazumi_pitches_for_scenario(self.project_id, self.scenario_id)
+        ped_003 = pitches.loc[pitches["pitch_number"] == "01-PED-003"].iloc[0]
+        ped_004 = pitches.loc[pitches["pitch_number"] == "01-PED-004"].iloc[0]
+        self.assertEqual(
+            json.loads(ped_003["model_variants"]),
+            ["Base_Variant_PED"],
+        )
+        self.assertEqual(
+            json.loads(ped_004["model_variants"]),
+            ["Base_Variant_PED", "Export_Variant_PED"],
+        )
+        elements = store.yamazumi_elements_for_scenario(
+            self.project_id, self.scenario_id
+        )
+        ped_003_element = elements.loc[
+            elements["description"] == "Load Pedestal"
+        ].iloc[0]
+        self.assertEqual(ped_003_element["model_variant"], "Base_Variant_PED")
+        self.assertEqual(
+            json.loads(ped_003_element["model_variants"]),
+            ["Base_Variant_PED"],
+        )
+
+        # Simulate legacy case-duplicated pitch/element state and verify automatic cleanup
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE yamazumi_pitches SET model_variants=? WHERE id=?",
+                (json.dumps(["Base_Variant_PED", "Base_Variant_Ped"]), str(ped_003["id"])),
+            )
+            conn.execute(
+                "UPDATE yamazumi_elements SET model_variant=?, model_variants=? WHERE id=?",
+                (
+                    "Base_Variant_Ped",
+                    json.dumps(["Base_Variant_Ped"]),
+                    str(ped_003_element["id"]),
+                ),
+            )
+        migration = store.rename_yamazumi_variants(
+            self.project_id, self.scenario_id, {}
+        )
+        self.assertGreaterEqual(int(migration["changed_count"]), 2)
+        pitches_after = store.yamazumi_pitches_for_scenario(
+            self.project_id, self.scenario_id
+        )
+        ped_003_after = pitches_after.loc[
+            pitches_after["pitch_number"] == "01-PED-003"
+        ].iloc[0]
+        self.assertEqual(
+            json.loads(ped_003_after["model_variants"]),
+            ["Base_Variant_PED"],
+        )
+        elements_after = store.yamazumi_elements_for_scenario(
+            self.project_id, self.scenario_id
+        )
+        ped_003_elem_after = elements_after.loc[
+            elements_after["description"] == "Load Pedestal"
+        ].iloc[0]
+        self.assertEqual(ped_003_elem_after["model_variant"], "Base_Variant_PED")
+        self.assertEqual(
+            json.loads(ped_003_elem_after["model_variants"]),
+            ["Base_Variant_PED"],
+        )
 
     def test_process_at_a_glance_smoke(self) -> None:
         app = self.run_page("app_pages/process.py")

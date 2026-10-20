@@ -94,7 +94,7 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 
 ### `complexity_features`
 
-- **Purpose:** Defines manufacturing-relevant product characteristics and their allowed choices, such as a door or control configuration.
+- **Purpose:** Defines manufacturing-relevant product characteristics, their optional target part subsystem (`subsystem`), and their allowed choices, such as a door or control configuration. In auto-assigned part feature applicability (`infer_part_feature_rules`), if a subsystem is assigned to one or more active features, catalog parts belonging to that subsystem can only be assigned features associated with that subsystem (and cannot be assigned any other features, including features with no subsystem association). Catalog parts belonging to a subsystem that is not assigned to any feature (or with no subsystem) can be assigned any matching feature.
 - **Key relationships:** Belongs to `projects`. Parent of `model_feature_values` and `part_feature_rules`.
 - **Scope:** Project-wide.
 
@@ -1661,3 +1661,22 @@ Future issued-document generation and approval (not implemented)
         - `stencil_json TEXT NOT NULL DEFAULT '{}'`
         - `created_at TEXT NOT NULL`
         - `updated_at TEXT NOT NULL`
+
+### Optional Subsystem Field on Complexity Features (Feature Definitions)
+
+- **Proposed by:** Collaborator (KF_UI)
+- **Date recorded:** October 16, 2026
+- **Approval status:** Approved on October 16, 2026 for implementation on branch `KF_UI`.
+- **Purpose:** Add an optional **Subsystem** dropdown column (`subsystem`) to the **Feature definitions** table (`complexity_features`) on the **Models** page and use it in `infer_part_feature_rules` to restrict subsystem-tagged features to parts with a matching subsystem in the Parts Catalog.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects `complexity_features` (Feature definitions on the Models page) to `parts.subsystem` / `pits_records.subsystem` (Parts Catalog) and `part_feature_rules` (Part-to-feature applicability rules).
+  2. *Critical thread relationship:* Refines the upstream link in *Product Architecture / Models & Feature definitions -> Parts Catalog (`part_feature_rules` / `model_applicability`) -> Fishbone -> Yamazumi -> Process at a Glance*. In `infer_part_feature_rules`, features with a non-blank `subsystem` only auto-assign to parts with a matching effective `subsystem` value (case-insensitively), while features with a blank `subsystem` remain unrestricted, and explicit subsystem matches take priority over blank-subsystem ties when candidate features have identical model sets.
+  3. *Scope:* Project-wide (`complexity_features` is a project-wide table).
+  4. *Table requirement:* No new table required. Existing table `complexity_features` is extended with:
+     - `subsystem TEXT NOT NULL DEFAULT ''`
+     - Dropdown options in the Feature definitions table are populated dynamically from distinct non-blank `subsystem` values in the project's Parts Catalog (`parts.subsystem` and `pits_records.subsystem`, plus any already-saved `complexity_features.subsystem` values).
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Optional `Subsystem` `SelectboxColumn` in the Feature definitions `st.data_editor` on `app_pages/models.py` (and included in table filters and Excel export).
+     - Saved atomically with **Save & Refresh** (`update_complexity_features`) and included in `complexity_planning_snapshot()` / `restore_complexity_planning_snapshot()` for **Undo**.
+     - Logged via `record_audit_event()` under `"Feature definitions"` with Current editor attribution and displayed in the bottom **History** expander.
+     - Uses existing project-wide scope badge and clear column help text.
