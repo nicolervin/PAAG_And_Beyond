@@ -320,6 +320,45 @@ class EditableTableFooterTests(unittest.TestCase):
         self.assertEqual(move_call.kwargs["key"], "move_pitches")
         self.assertTrue(actions.additional_action)
 
+    def test_filter_table_returns_range_index_when_filtered(self) -> None:
+        df = pd.DataFrame(
+            {
+                "id": ["id-1", "id-2", "id-3"],
+                "part_number": ["P-100", "P-200", "P-300"],
+                "description": ["Alpha", "Beta", "Gamma"],
+            }
+        )
+        controls = Mock()
+        controls.text_input.return_value = "Beta"
+        session_state: dict[str, object] = {}
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_filters.st, "container", return_value=controls),
+            patch.object(table_filters.st, "caption"),
+        ):
+            filtered = table_filters.filter_table(
+                df,
+                key="test_filter",
+                search_columns=["part_number", "description"],
+            )
+        self.assertEqual(len(filtered), 1)
+        self.assertIsInstance(filtered.index, pd.RangeIndex)
+        self.assertEqual(list(filtered.index), [0])
+
+        controls.text_input.return_value = "NoSuchPart"
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_filters.st, "container", return_value=controls),
+            patch.object(table_filters.st, "caption"),
+        ):
+            empty_filtered = table_filters.filter_table(
+                df,
+                key="test_filter",
+                search_columns=["part_number", "description"],
+            )
+        self.assertTrue(empty_filtered.empty)
+        self.assertIsInstance(empty_filtered.index, pd.RangeIndex)
+
 
 if __name__ == "__main__":
     unittest.main()

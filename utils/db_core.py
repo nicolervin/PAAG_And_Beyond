@@ -86,6 +86,14 @@ ERGONOMICS_RISK_CLASSIFICATIONS = (
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
+
+def _safe_positive_float(value: object, default: float = 60.0) -> float:
+    try:
+        parsed = float(value or default)
+        return parsed if parsed > 0 else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
 def _drop_yamazumi_flags_schema(conn: sqlite3.Connection) -> None:
     """Retire legacy Yamazumi flags without disturbing work-element identities."""
     element_columns = {
@@ -2470,7 +2478,7 @@ def init_db() -> None:
                                'Migrated from the original project plan', ?, ?, ?)""",
                     (
                         str(uuid4()), project["id"], str(project["revision"] or "A"),
-                        float(project["takt_time_s"] or 60),
+                        _safe_positive_float(project["takt_time_s"], 60.0),
                         normalize_time_unit(project["takt_time_unit"]),
                         str(project["owner"] or ""),
                         timestamp, timestamp,

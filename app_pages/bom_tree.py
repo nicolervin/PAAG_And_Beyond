@@ -7,6 +7,7 @@ and Fishbone diagram, and a Properties inspector panel.
 
 import csv
 import io
+import re
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -23,6 +24,7 @@ from utils.store import (
     audit_history,
     check_group_number_conflicts,
     clean_bom_cell_text,
+    clear_model_boms,
     delete_bom_rows,
     detect_unexpanded_subassemblies,
     expand_subassembly_items,
@@ -40,6 +42,7 @@ from utils.store import (
     query,
     save_manual_model_bom,
     sync_builder_inputs_to_items,
+    sync_group_parts_to_models,
 )
 from utils.table_filters import (
     _EDITOR_INSTANCE_MARKER,
@@ -95,7 +98,7 @@ active_models = (
     else models_df
 )
 for _, row in active_models.iterrows():
-    disp = str(row.get("display_name") or "").strip()
+    disp = " ".join(str(row.get("display_name") or row.get("description") or "").split())
     num = str(row.get("model_number") or "").strip()
     label = f"{num} · {disp}".rstrip(" ·") if disp else num
     model_options[str(row["id"])] = label
@@ -366,12 +369,13 @@ with tab_view:
                     photo_badge = " 📷" if has_photo else ""
                     match_badge = " 🔍 MATCH" if self_matches else ""
 
+                    base_child_trk = re.sub(r"#\d+$", "", str(node.get("child_tracker") or "").strip())
                     has_distinct_trk = bool(
-                        node.get("child_tracker")
-                        and str(node["child_tracker"]).strip() != str(node.get("part_number") or "").strip()
+                        base_child_trk
+                        and base_child_trk != str(node.get("part_number") or "").strip()
                     )
-                    trk_bracket = f" [{node['child_tracker']}]" if has_distinct_trk else ""
-                    trk_caption = f" · Tracker #{node['child_tracker']}" if has_distinct_trk else ""
+                    trk_bracket = f" [{base_child_trk}]" if has_distinct_trk else ""
+                    trk_caption = f" · Tracker #{base_child_trk}" if has_distinct_trk else ""
 
                     if has_children:
                         sub_count = len(node["children"])
@@ -442,13 +446,14 @@ with tab_view:
                         has_img = bool(img_p and Path(str(img_p)).is_file())
                         photo_uri = part_thumbnail(img_p) if has_img else None
 
+                        n_base_trk = re.sub(r"#\d+$", "", str(n.get("child_tracker") or "").strip())
                         table_rows.append({
                             "Photo": photo_uri,
                             "Tree Structure": f"{prefix}{n['part_number']}",
                             "Description": n["description"],
                             "Level": f"L{d}",
                             "PITS Qty": round(float(n["quantity"]), 5),
-                            "PITS Tracker": f"#{n['child_tracker']}" if n.get("child_tracker") and str(n["child_tracker"]).strip() != str(n.get("part_number") or "").strip() else "—",
+                            "PITS Tracker": f"#{n_base_trk}" if n_base_trk and n_base_trk != str(n.get("part_number") or "").strip() else "—",
                             "Fishbone Status": fb_badge,
                             "Parts Catalog": cat_badge,
                         })
@@ -531,12 +536,14 @@ with tab_view:
                     st.markdown("##### :material/account_tree: BOM Hierarchy")
                     p_col1, p_col2 = st.columns(2)
                     with p_col1:
-                        distinct_trk = selected_node.get("child_tracker") if (selected_node.get("child_tracker") and str(selected_node["child_tracker"]).strip() != str(selected_node.get("part_number") or "").strip()) else ""
+                        sel_base_trk = re.sub(r"#\d+$", "", str(selected_node.get("child_tracker") or "").strip())
+                        distinct_trk = sel_base_trk if (sel_base_trk and sel_base_trk != str(selected_node.get("part_number") or "").strip()) else ""
                         st.write("**Hierarchy Level:**", f"Level {selected_node['depth']}")
                         st.write("**Tracker / ID:**", f"#{distinct_trk}" if distinct_trk else "—")
                         st.write("**Quantity:**", format_clean_number(selected_node["quantity"], decimal_places=5))
                     with p_col2:
-                        st.write("**Parent Tracker:**", f"#{selected_node['parent_tracker']}" if selected_node['parent_tracker'] else "— (Root)")
+                        sel_parent_trk = re.sub(r"#\d+$", "", str(selected_node.get("parent_tracker") or "").strip())
+                        st.write("**Parent Tracker:**", f"#{sel_parent_trk}" if sel_parent_trk else "— (Root)")
                         st.write("**Source Row:**", f"Row #{selected_node['source_row']}")
                         st.write("**Review Status:**", selected_node["review_status"] or "Needs review")
 
@@ -1119,6 +1126,7 @@ def _commit_bom_save(
     d_key: str,
     ed_logical_key: str,
     s_model_key: str,
+    extra_toast_msg: str = "",
 ) -> None:
     editor_name = st.session_state.get("current_editor", "")
     source_mid = st.session_state.get(s_model_key)
@@ -1146,9 +1154,10 @@ def _commit_bom_save(
         request_table_editor_reset(ed_logical_key)
         feat_inf = save_res.get("features_inferred", 0)
         feat_msg = f", {feat_inf} feature rules updated" if feat_inf else ""
+        extra_suffix = f" · {extra_toast_msg}" if extra_toast_msg else ""
         st.toast(
             f"Saved {save_res['saved_count']} BOM items for {save_res['model_number']} "
-            f"({save_res['parts_created']} new parts onboarded{feat_msg})",
+            f"({save_res['parts_created']} new parts onboarded{feat_msg}){extra_suffix}",
             icon=":material/check_circle:",
         )
         st.rerun()
@@ -1249,88 +1258,6 @@ def autofill_bom_dialog(
             request_table_editor_reset(ed_logical_key)
             st.toast("Autofill and subassembly expansion applied!", icon=":material/check_circle:")
             st.rerun()
-
-
-@st.dialog("Expand Subassembly Groups Before Saving?")
-def save_subassembly_prompt_dialog(
-    proj_id: str,
-    curr_model_id: str,
-    d_key: str,
-    ed_logical_key: str,
-    s_model_key: str,
-) -> None:
-    flow_data = st.session_state.get(f"_pending_save_flow_{curr_model_id}")
-    if not flow_data:
-        st.rerun()
-        return
-
-    rows = flow_data["rows"]
-    detected = flow_data["detected"]
-    auto_add = flow_data.get("auto_add", True)
-
-    st.markdown("#### :material/account_tree: Known Subassembly Structure Detected")
-    st.markdown(
-        f"We found **{len(detected)}** part/group number(s) with known child components from other models or PITS records in this project. "
-        "Would you like to insert these child parts into your BOM structure before saving?"
-    )
-
-    selected_pns: set[str] = set()
-    for sub in detected:
-        pn = sub["part_number"]
-        lvl = sub["level"]
-        ch = sub["children"]
-        st.markdown(f"**`{pn}`** (Level {lvl}) &mdash; {len(ch)} child part(s)")
-        preview_text = ", ".join(f"`{c['part_number']}` (L{min(11, lvl + c['relative_level'])})" for c in ch[:4])
-        if len(ch) > 4:
-            preview_text += f", ... (+{len(ch) - 4} more)"
-        st.caption(preview_text)
-        chk = st.checkbox(
-            f"Expand child parts under `{pn}`",
-            value=True,
-            key=f"save_dlg_chk_{pn}_{curr_model_id}",
-        )
-        if chk:
-            selected_pns.add(pn.upper())
-
-    st.caption(":material/info: New rows will be added in between assemblies. Top-level and subsequent assemblies will not be overwritten.")
-
-    b_col1, b_col2, b_col3, b_col4 = st.columns([1, 1.3, 1.4, 1.5], gap="small")
-    with b_col1:
-        if st.button("Cancel", key="btn_cancel_save_prompt"):
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
-            st.rerun()
-    with b_col2:
-        if st.button("Save As-Is", key="btn_save_asis_prompt", help="Save the BOM exactly as entered without expanding subassemblies"):
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
-            _commit_bom_save(proj_id, curr_model_id, rows, auto_add, d_key, ed_logical_key, s_model_key)
-    with b_col3:
-        if st.button("Expand into Editor", key="btn_expand_editor_prompt", help="Insert child rows into the editor to review and edit before saving"):
-            cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,))
-            cat_parts = {
-                str(r["part_number"]).strip().upper(): str(r["description"] or "").strip()
-                for r in cat_rows
-            }
-            expanded = expand_subassembly_items(rows, detected, selected_pns, cat_parts)
-            for it in expanded:
-                if "_uid" not in it:
-                    it["_uid"] = str(uuid4())[:8]
-            st.session_state[d_key] = expanded
-            st.session_state[f"_draft_modified_{curr_model_id}"] = True
-            _clear_bld_widget_keys(curr_model_id)
-            request_table_editor_reset(ed_logical_key)
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
-            st.toast("Child rows inserted into editor! Review them and click Save when ready.", icon=":material/check_circle:")
-            st.rerun()
-    with b_col4:
-        if st.button("Expand & Save", type="primary", key="btn_expand_save_prompt", help="Insert child rows between assemblies and save BOM"):
-            cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,))
-            cat_parts = {
-                str(r["part_number"]).strip().upper(): str(r["description"] or "").strip()
-                for r in cat_rows
-            }
-            expanded = expand_subassembly_items(rows, detected, selected_pns, cat_parts)
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
-            _commit_bom_save(proj_id, curr_model_id, expanded, auto_add, d_key, ed_logical_key, s_model_key)
 
 
 @st.dialog("📋 Paste BOM from Excel")
@@ -1544,8 +1471,13 @@ def generate_bom_from_features_dialog(
             help="Description for the Level 1 assembly.",
         ))
 
-    st.markdown(f"##### Preview Predicted Structure ({len(predicted_items)} items)")
-    prev_items = [dict(it) for it in predicted_items]
+    prev_items = [
+        dict(it)
+        for idx, it in enumerate(predicted_items)
+        if idx == 0 or not lvl1_pn or str(it.get("part_number") or "").strip().upper() != lvl1_pn.strip().upper()
+    ]
+    st.markdown(f"##### Preview Predicted Structure ({len(prev_items)} items)")
+
     if prev_items and prev_items[0].get("level") == 1:
         prev_items[0]["part_number"] = lvl1_pn or "(Required: enter Level 1 assembly above)"
         prev_items[0]["description"] = lvl1_desc or ""
@@ -1607,7 +1539,11 @@ def generate_bom_from_features_dialog(
                 )
                 return
 
-            final_items = [dict(it) for it in predicted_items]
+            final_items = [
+                dict(it)
+                for idx, it in enumerate(predicted_items)
+                if idx == 0 or str(it.get("part_number") or "").strip().upper() != lvl1_pn.strip().upper()
+            ]
             if final_items and final_items[0].get("level") == 1:
                 final_items[0]["part_number"] = lvl1_pn
                 final_items[0]["description"] = lvl1_desc
@@ -1634,7 +1570,7 @@ def generate_bom_from_features_dialog(
             st.rerun()
 
 
-@st.dialog("⚠️ Group Number Structure Conflict")
+@st.dialog("⚠️ Group Number Structure Conflict", width="large")
 def group_conflict_dialog(
     proj_id: str,
     curr_model_id: str,
@@ -1658,43 +1594,377 @@ def group_conflict_dialog(
         "In manufacturing engineering, identical group numbers should represent identical assemblies unless a designated variation is intended."
     )
 
+    # Map part numbers to descriptions from Parts Catalog, BOM occurrences, and current rows
+    part_desc_map: dict[str, str] = {}
+    for cr in query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,)):
+        c_pn = clean_bom_cell_text(cr.get("part_number")).upper()
+        c_desc = clean_bom_cell_text(cr.get("description"))
+        if c_pn and c_desc:
+            part_desc_map[c_pn] = c_desc
+    for pr in query("SELECT part_number, description FROM pits_records WHERE project_id=?", (proj_id,)):
+        p_pn = clean_bom_cell_text(pr.get("part_number")).upper()
+        p_desc = clean_bom_cell_text(pr.get("description"))
+        if p_pn and p_desc and p_pn not in part_desc_map:
+            part_desc_map[p_pn] = p_desc
     for cf in conflicts:
-        g_id = cf["group_identifier"]
+        g_up = clean_bom_cell_text(cf.get("group_identifier")).upper()
+        g_d = clean_bom_cell_text(cf.get("group_description"))
+        if g_up and g_d and g_up not in part_desc_map:
+            part_desc_map[g_up] = g_d
+        for d in cf.get("differences", []):
+            d_pn = clean_bom_cell_text(d.get("part_number")).upper()
+            d_desc = clean_bom_cell_text(d.get("description"))
+            if d_pn and d_desc and d_pn not in part_desc_map:
+                part_desc_map[d_pn] = d_desc
+    for r in rows:
+        r_pn = clean_bom_cell_text(r.get("part_number")).upper()
+        r_desc = clean_bom_cell_text(r.get("description"))
+        if r_pn and r_desc and r_pn not in part_desc_map:
+            part_desc_map[r_pn] = r_desc
+
+    model_name_map: dict[str, str] = {}
+    model_num_map: dict[str, str] = {}
+    for _, m_r in models_df.iterrows():
+        m_id_s = str(m_r.get("id") or "").strip()
+        m_num_s = str(m_r.get("model_number") or "").strip()
+        m_disp_s = " ".join(str(m_r.get("display_name") or m_r.get("description") or "").split())
+        if m_id_s:
+            model_num_map[m_id_s] = m_num_s
+            if m_disp_s:
+                model_name_map[m_id_s] = m_disp_s
+        if m_num_s and m_disp_s:
+            model_name_map[m_num_s.upper()] = m_disp_s
+
+    curr_num = model_num_map.get(curr_model_id, "")
+    curr_name = model_name_map.get(curr_model_id, "")
+    curr_qty_col = (
+        f"Current ({curr_num} · {curr_name}) Qty"
+        if (curr_num and curr_name)
+        else (f"Current ({curr_num}) Qty" if curr_num else "Current Qty")
+    )
+
+    conflict_groups: list[str] = []
+    conflicting_model_ids: list[str] = []
+    candidate_parts_meta: dict[str, dict[str, Any]] = {}
+    has_missing_in_current = False
+
+    for cf in conflicts:
+        g_id = str(cf["group_identifier"]).strip().upper()
+        if g_id and g_id not in conflict_groups:
+            conflict_groups.append(g_id)
         g_type = cf.get("group_type", "Group Number")
+        other_mid = str(cf.get("conflicting_model_id") or "").strip()
         other_num = cf["conflicting_model_number"]
+        if other_mid and other_mid not in conflicting_model_ids:
+            conflicting_model_ids.append(other_mid)
         diffs = cf.get("differences", [])
 
-        st.markdown(f"##### {g_type} `{g_id}` conflicts with Model **{other_num}**")
+        g_desc = part_desc_map.get(g_id, "")
+        g_title = f"`{g_id}` — **{g_desc}**" if g_desc else f"`{g_id}`"
+        other_name = " ".join(
+            str(
+                cf.get("conflicting_model_name")
+                or model_name_map.get(other_mid, "")
+                or model_name_map.get(str(other_num).strip().upper(), "")
+            ).split()
+        )
+        other_model_title = f"**{other_num} · {other_name}**" if other_name else f"**{other_num}**"
+        other_qty_col = f"Model {other_num} · {other_name} Qty" if other_name else f"Model {other_num} Qty"
+        st.markdown(f"##### {g_type} {g_title} conflicts with Model {other_model_title}")
         diff_rows = []
         for d in diffs:
             t = d["type"]
-            t_label = "Qty Mismatch" if t == "quantity_mismatch" else ("Missing in Current" if t == "missing_in_current" else "Extra in Current")
+            pn_up = str(d["part_number"]).strip().upper()
+            if t == "missing_in_current":
+                has_missing_in_current = True
+            elif t in ("extra_in_current", "quantity_mismatch"):
+                if pn_up not in candidate_parts_meta:
+                    candidate_parts_meta[pn_up] = {
+                        "part_number": pn_up,
+                        "description": part_desc_map.get(pn_up, ""),
+                        "qty": d.get("current_qty"),
+                        "issue": "New in Current" if t == "extra_in_current" else "Qty Updated",
+                        "group_id": g_id,
+                    }
+            t_label = (
+                "Qty Mismatch"
+                if t == "quantity_mismatch"
+                else ("Missing in Current" if t == "missing_in_current" else "Extra in Current")
+            )
             diff_rows.append({
                 "Component Part": d["part_number"],
+                "Part Name": part_desc_map.get(pn_up, ""),
                 "Issue": t_label,
-                "Current Qty": d["current_qty"],
-                f"Model {other_num} Qty": d["other_qty"],
+                curr_qty_col: d["current_qty"],
+                other_qty_col: d["other_qty"],
             })
         st.dataframe(pd.DataFrame(diff_rows), hide_index=True, width="stretch")
 
+    # ------------------------------------------------------------------
+    # Option to propagate new/updated parts to multiple model BOMs
+    # ------------------------------------------------------------------
+    with st.container(border=True):
+        st.markdown("##### :material/sync: Keep Group Numbers the Same Across Models")
+        st.caption(
+            "Select which other model BOMs should receive the new or updated group parts so shared group numbers "
+            "maintain an identical part structure across models."
+        )
+
+        # Build list of all other active models with saved BOMs (conflicting models first, then other models)
+        target_model_labels: dict[str, str] = {}
+        for mid in conflicting_model_ids:
+            fallback_num = model_num_map.get(mid, mid)
+            fallback_name = model_name_map.get(mid, "")
+            fallback_lbl = f"{fallback_num} · {fallback_name}" if fallback_name else fallback_num
+            base_lbl = model_options.get(mid, fallback_lbl)
+            target_model_labels[mid] = f"{base_lbl} (Shares conflicting group)"
+
+        for _, m_row in active_models.iterrows():
+            mid = str(m_row["id"])
+            if mid == curr_model_id or mid in target_model_labels:
+                continue
+            saved_m_bom = get_manual_model_bom(proj_id, mid)
+            if not saved_m_bom:
+                continue
+            m_pns = {clean_bom_cell_text(it.get("part_number")).upper() for it in saved_m_bom}
+            shares_grp = any(g in m_pns for g in conflict_groups)
+            base_lbl = model_options.get(mid, str(m_row.get("model_number") or mid))
+            suffix_note = " (Shares group)" if shares_grp else " (Will add group + parts)"
+            target_model_labels[mid] = f"{base_lbl}{suffix_note}"
+
+        candidate_part_keys = list(candidate_parts_meta.keys())
+        selected_part_pns: list[str] = []
+        if candidate_part_keys:
+            def _fmt_part_opt(pn_key: str) -> str:
+                meta = candidate_parts_meta[pn_key]
+                desc_str = f" — {meta['description']}" if meta["description"] else ""
+                grp_id = meta["group_id"]
+                grp_desc = part_desc_map.get(grp_id, "")
+                grp_label = f"{grp_id} — {grp_desc}" if grp_desc else grp_id
+                return f"{pn_key}{desc_str} (Qty: {meta['qty']}, {meta['issue']} in {grp_label})"
+
+            selected_part_pns = st.multiselect(
+                "New / updated parts from Current BOM to add to selected models",
+                options=candidate_part_keys,
+                default=candidate_part_keys,
+                format_func=_fmt_part_opt,
+                key=f"conflict_sync_parts_{curr_model_id}",
+                help="Choose which new or quantity-updated parts from your current BOM should be propagated to the selected model BOMs.",
+            )
+
+        selected_target_models = st.multiselect(
+            "Target model BOMs to update",
+            options=list(target_model_labels.keys()),
+            default=conflicting_model_ids,
+            format_func=lambda k: target_model_labels.get(k, k),
+            key=f"conflict_sync_models_{curr_model_id}",
+            help="Select one or more models whose BOMs should be updated to keep the group structure consistent.",
+        )
+
+        sync_mode = "add_new_parts"
+        if has_missing_in_current:
+            sync_mode = st.radio(
+                "How should parts that exist only in the other model(s) be handled?",
+                options=["merge_both_ways", "add_new_parts", "match_current_exact"],
+                format_func=lambda m: (
+                    "Add new parts to selected models AND pull missing group parts into Current BOM (Recommended — keeps group 100% identical)"
+                    if m == "merge_both_ways"
+                    else (
+                        "Only add selected new parts to the other model BOMs (keep each model's existing parts)"
+                        if m == "add_new_parts"
+                        else "Overwrite group in selected models to match Current BOM exactly (removes parts not in Current BOM)"
+                    )
+                ),
+                key=f"conflict_sync_mode_{curr_model_id}",
+            )
+
+        btn_sync_disabled = not selected_target_models or (
+            sync_mode == "add_new_parts" and bool(candidate_part_keys) and not selected_part_pns
+        )
+        if st.button(
+            "Add Parts to Selected Models & Save",
+            type="primary",
+            icon=":material/sync:",
+            key="btn_sync_group_models_dlg",
+            width="stretch",
+            disabled=btn_sync_disabled,
+            help="Propagate the selected group parts across the chosen model BOMs and save the current BOM.",
+        ):
+            editor_name = st.session_state.get("current_editor", "")
+            try:
+                sync_res = sync_group_parts_to_models(
+                    proj_id,
+                    curr_model_id,
+                    rows,
+                    selected_target_models,
+                    conflict_groups,
+                    selected_part_numbers=selected_part_pns if candidate_part_keys else None,
+                    sync_mode=sync_mode,
+                    auto_add_parts=auto_add,
+                    editor=editor_name,
+                )
+                updated_rows = sync_res.get("updated_source_items") or rows
+                updated_models = sync_res.get("updated_models", [])
+                updated_mids = sync_res.get("updated_model_ids", [])
+
+                # Clear cached draft state for any modified target models so switching to them reloads fresh DB data
+                for t_mid in updated_mids:
+                    st.session_state.pop(f"_bom_draft_{proj_id}_{t_mid}", None)
+                    st.session_state.pop(f"_draft_modified_{t_mid}", None)
+                    st.session_state.pop(f"row_tools_idx_{t_mid}", None)
+                    _clear_bld_widget_keys(t_mid)
+                    request_table_editor_reset(f"bom_author_grid_{proj_id}_{t_mid}")
+
+                # Clear source_model_key so save_manual_model_bom does not auto-append _V1 after syncing
+                st.session_state.pop(s_model_key, None)
+                st.session_state.pop(f"_pending_group_conflict_{curr_model_id}", None)
+
+                sync_msg = (
+                    f"Synced group {', '.join(conflict_groups)} to {', '.join(updated_models)}"
+                    if updated_models
+                    else f"Synced group {', '.join(conflict_groups)}"
+                )
+
+                _commit_bom_save(
+                    proj_id,
+                    curr_model_id,
+                    updated_rows,
+                    auto_add,
+                    d_key,
+                    ed_logical_key,
+                    s_model_key,
+                    extra_toast_msg=sync_msg,
+                )
+            except ValueError as val_err:
+                st.error(f":material/error: {val_err}")
+
     c1, c2 = st.columns([1, 1.5], gap="small")
     with c1:
-        if st.button("Revise Group in Editor", key="btn_cancel_conflict_dlg", help="Return to editor to adjust group number or parts"):
+        if st.button("Revise Group in Editor", key="btn_cancel_conflict_dlg", width="stretch", help="Return to editor to adjust group number or parts"):
             st.session_state.pop(f"_pending_group_conflict_{curr_model_id}", None)
             st.rerun()
     with c2:
-        if st.button("Confirm Variation & Proceed", type="primary", key="btn_bypass_conflict_dlg", help="Confirm that this variation is intended and proceed with saving"):
+        if st.button("Confirm Variation & Proceed (Current Model Only)", key="btn_bypass_conflict_dlg", width="stretch", help="Confirm that this variation is intended and save only the current model"):
             st.session_state.pop(f"_pending_group_conflict_{curr_model_id}", None)
-            detected = detect_unexpanded_subassemblies(proj_id, rows)
-            if detected:
-                st.session_state[f"_pending_save_flow_{curr_model_id}"] = {
-                    "rows": rows,
-                    "detected": detected,
-                    "auto_add": auto_add,
-                }
-                st.rerun()
-            else:
-                _commit_bom_save(proj_id, curr_model_id, rows, auto_add, d_key, ed_logical_key, s_model_key)
+            _commit_bom_save(proj_id, curr_model_id, rows, auto_add, d_key, ed_logical_key, s_model_key)
+
+
+# ==============================================================================
+@st.dialog("🗑️ Clear BOM Structure", width="large", dismissible=False)
+def clear_bom_dialog(
+    proj_id: str,
+    curr_model_id: str,
+    d_key: str,
+    ed_logical_key: str,
+    s_model_key: str,
+):
+    curr_model_label = model_options.get(curr_model_id, curr_model_id)
+    st.warning(
+        ":material/delete_sweep: **Clear BOM structure to start over?**\n\n"
+        "This removes the hierarchical BOM tree structure (parent–child assembly links and model usages) "
+        "without deleting any parts from the **Parts Catalog**."
+    )
+
+    scope_choice = st.radio(
+        "Which BOM structure would you like to clear?",
+        options=[
+            "current",
+            "all",
+            "selected",
+            "editor_only",
+        ],
+        format_func=lambda opt: {
+            "current": f"Current model only ({curr_model_label}) — clears saved BOM & editor grid",
+            "all": "All models in this project — clears all saved model BOMs & editor grids",
+            "selected": "Select specific models to clear...",
+            "editor_only": f"Unsaved spreadsheet editor grid only ({curr_model_label}) — keep saved database BOM",
+        }[opt],
+        index=0,
+        key=f"clear_bom_scope_{curr_model_id}",
+    )
+
+    selected_mids: list[str] = []
+    if scope_choice == "selected":
+        all_model_ids = [str(r["id"]) for _, r in models_df.iterrows()]
+        selected_mids = st.multiselect(
+            "Models to clear",
+            options=all_model_ids,
+            default=[curr_model_id] if curr_model_id in all_model_ids else [],
+            format_func=lambda mid: model_options.get(mid, mid),
+            key=f"clear_bom_models_select_{curr_model_id}",
+        )
+
+    st.divider()
+    c_cancel, c_confirm = st.columns(2)
+    with c_cancel:
+        if st.button("Cancel", key=f"cancel_clear_bom_{curr_model_id}", width="stretch"):
+            st.session_state.pop(f"_pending_clear_bom_{curr_model_id}", None)
+            st.rerun()
+    with c_confirm:
+        confirm_disabled = scope_choice == "selected" and not selected_mids
+        if st.button(
+            "Clear BOM Structure",
+            type="primary",
+            icon=":material/delete_sweep:",
+            key=f"destructive_confirm_clear_bom_{curr_model_id}",
+            disabled=confirm_disabled,
+            width="stretch",
+        ):
+            editor_name = st.session_state.get("current_editor", "").strip()
+            try:
+                if scope_choice == "editor_only":
+                    st.session_state[d_key] = [
+                        {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
+                    ]
+                    st.session_state[f"_draft_modified_{curr_model_id}"] = True
+                    st.session_state.pop(s_model_key, None)
+                    st.session_state.pop(f"row_tools_idx_{curr_model_id}", None)
+                    st.session_state.pop(f"bom_anchor_row_{curr_model_id}", None)
+                    _clear_bld_widget_keys(curr_model_id)
+                    request_table_editor_reset(ed_logical_key)
+                    st.session_state.pop(f"_pending_clear_bom_{curr_model_id}", None)
+                    st.toast(f"Cleared spreadsheet editor grid for {curr_model_label}.", icon=":material/check_circle:")
+                    st.rerun()
+                else:
+                    target_ids = (
+                        [curr_model_id]
+                        if scope_choice == "current"
+                        else (None if scope_choice == "all" else selected_mids)
+                    )
+                    clear_model_boms(proj_id, model_ids=target_ids, editor=editor_name)
+
+                    # Reset session state drafts for all affected models
+                    affected_mids = (
+                        [str(r["id"]) for _, r in models_df.iterrows()]
+                        if target_ids is None
+                        else [str(m) for m in target_ids]
+                    )
+                    for mid in affected_mids:
+                        m_draft_key = f"_bom_draft_{proj_id}_{mid}"
+                        st.session_state[m_draft_key] = [
+                            {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
+                        ]
+                        st.session_state.pop(f"_draft_modified_{mid}", None)
+                        st.session_state.pop(f"_bom_source_model_{proj_id}_{mid}", None)
+                        st.session_state.pop(f"row_tools_idx_{mid}", None)
+                        st.session_state.pop(f"bom_anchor_row_{mid}", None)
+                        _clear_bld_widget_keys(mid)
+                        request_table_editor_reset(f"bom_grid_editor_{mid}")
+
+                    st.session_state.pop(f"_pending_clear_bom_{curr_model_id}", None)
+                    scope_msg = (
+                        f"Cleared BOM structure for {curr_model_label}."
+                        if scope_choice == "current"
+                        else (
+                            "Cleared BOM structures for all project models."
+                            if scope_choice == "all"
+                            else f"Cleared BOM structures for {len(affected_mids)} model(s)."
+                        )
+                    )
+                    st.toast(f"{scope_msg} Parts Catalog preserved.", icon=":material/check_circle:")
+                    st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
 
 # ==============================================================================
@@ -1744,8 +2014,8 @@ with tab_author:
                 bom_editor_logical_key,
                 source_model_key,
             )
-        elif f"_pending_save_flow_{selected_model_id}" in st.session_state:
-            save_subassembly_prompt_dialog(
+        elif f"_pending_clear_bom_{selected_model_id}" in st.session_state:
+            clear_bom_dialog(
                 project_id,
                 selected_model_id,
                 draft_key,
@@ -1952,9 +2222,9 @@ with tab_author:
                     "Qty": st.column_config.NumberColumn(
                         "Qty",
                         min_value=0.00001,
-                        step=1.0,
+                        step=0.00001,
                         default=1.0,
-                        format="%.5f",
+                        format="%g",
                         help="Quantity per unit",
                         width="small",
                     ),
@@ -1965,6 +2235,20 @@ with tab_author:
                 width="stretch",
                 height=560,
             )
+
+            # ── Clear BOM action at bottom of table editor ──
+            _, clear_btn_col = st.columns([2.6, 1.4])
+            with clear_btn_col:
+                if st.button(
+                    "Clear BOM Structure",
+                    icon=":material/delete_sweep:",
+                    type="primary",
+                    key=f"destructive_clear_bom_btn_{selected_model_id}",
+                    help="Clear the BOM structure (without deleting parts from the Parts Catalog) so you can start over",
+                    width="stretch",
+                ):
+                    st.session_state[f"_pending_clear_bom_{selected_model_id}"] = True
+                    st.rerun()
 
             # ── Save action ──
             if save_clicked:
@@ -2014,26 +2298,17 @@ with tab_author:
                         }
                         st.rerun()
 
-                    detected = detect_unexpanded_subassemblies(project_id, rows_to_save)
-                    if detected:
-                        st.session_state[f"_pending_save_flow_{selected_model_id}"] = {
-                            "rows": rows_to_save,
-                            "detected": detected,
-                            "auto_add": auto_add_grid,
-                        }
-                        st.rerun()
-                    else:
-                        st.session_state.pop(draft_mod_key, None)
-                        st.session_state.pop(row_tools_idx_key, None)
-                        _commit_bom_save(
-                            project_id,
-                            selected_model_id,
-                            rows_to_save,
-                            auto_add_grid,
-                            draft_key,
-                            bom_editor_logical_key,
-                            source_model_key,
-                        )
+                    st.session_state.pop(draft_mod_key, None)
+                    st.session_state.pop(row_tools_idx_key, None)
+                    _commit_bom_save(
+                        project_id,
+                        selected_model_id,
+                        rows_to_save,
+                        auto_add_grid,
+                        draft_key,
+                        bom_editor_logical_key,
+                        source_model_key,
+                    )
 
 
 

@@ -713,6 +713,12 @@ def create_project(
     building_location: str = "",
 ) -> str:
     project_id, timestamp = str(uuid4()), now_iso()
+    try:
+        takt_time_s = float(takt_time_s)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Project takt time must be a number.") from exc
+    if takt_time_s <= 0:
+        raise ValueError("Project takt time must be greater than zero.")
     takt_unit = normalize_time_unit(takt_time_unit)
     execute(
         """INSERT INTO projects

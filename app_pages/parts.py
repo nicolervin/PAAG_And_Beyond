@@ -1,3 +1,4 @@
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -110,6 +111,9 @@ parts_draft_key = f"parts_catalog_draft_{project_id}_{scenario_id}"
 parts_draft_values_key = f"{parts_draft_key}_values"
 parts_draft_state_key = f"{parts_draft_key}_captured_state"
 parts_draft_visible_key = f"{parts_draft_key}_visible"
+parts_draft_added_key = f"{parts_draft_key}_added_rows"
+parts_draft_last_editor_key = f"{parts_draft_key}_last_editor_key"
+parts_editor_baseline_draft_key = f"{parts_draft_key}_baseline_draft"
 page_title_with_scope(
     "Parts Catalog",
     scope="scenario-aware",
@@ -155,6 +159,9 @@ if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state.pop(parts_draft_values_key, None)
     st.session_state.pop(parts_draft_state_key, None)
     st.session_state.pop(parts_draft_visible_key, None)
+    st.session_state.pop(parts_draft_added_key, None)
+    st.session_state.pop(parts_draft_last_editor_key, None)
+    st.session_state.pop(parts_editor_baseline_draft_key, None)
     request_table_editor_reset(parts_base_editor_key)
     st.rerun()
 pending_view_reset = st.session_state.pop(parts_view_pending_key, None)
@@ -437,7 +444,7 @@ parts_view_layout_token = hashlib.sha256(
 parts_editor_key = f"{parts_base_editor_key}_{parts_view_layout_token}"
 parts_view_has_unsaved_changes = selected_parts_columns != saved_parts_column_order
 editable_columns = [
-    "id", "part_number", "description", "subsystem", "design_maturity",
+    "id", "part_number", "description", "weight_lb", "subsystem", "design_maturity",
     "factory_nickname", "official_windchill_part_name",
     "design_engineer", "technology_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
     "ame_tooling_engineer", "part_code", "pits_tracker_number", "source_code", "make_buy",
@@ -499,9 +506,101 @@ parts_for_editing["updated_display"] = updated_values.dt.strftime(
 ).fillna("")
 
 
+def _is_blank_cell(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    try:
+        if bool(pd.isna(value)):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() == ""
+
+
+def _build_draft_added_part_row(raw_row: dict[str, object]) -> dict[str, object] | None:
+    if _is_blank_cell(raw_row.get("part_number")) and _is_blank_cell(raw_row.get("description")):
+        return None
+    raw_features = raw_row.get("feature_applicability")
+    if isinstance(raw_features, (list, tuple, set)):
+        feature_list = [str(item) for item in raw_features if not _is_blank_cell(item)]
+    else:
+        feature_list = []
+    if not feature_list:
+        feature_list = ["All models"]
+    raw_active = raw_row.get("active")
+    is_active = True if _is_blank_cell(raw_active) else bool(raw_active)
+    raw_weight = raw_row.get("weight_lb")
+    try:
+        weight_val = None if _is_blank_cell(raw_weight) else float(raw_weight)
+    except (TypeError, ValueError):
+        weight_val = None
+    draft_id = str(raw_row.get("id") or "").strip()
+    if not draft_id or not draft_id.startswith("__draft_new__"):
+        draft_id = f"__draft_new__{uuid4()}"
+    return {
+        "id": draft_id,
+        "part_number": "" if _is_blank_cell(raw_row.get("part_number")) else str(raw_row.get("part_number")).strip(),
+        "description": "" if _is_blank_cell(raw_row.get("description")) else str(raw_row.get("description")).strip(),
+        "weight_lb": weight_val,
+        "subsystem": "" if _is_blank_cell(raw_row.get("subsystem")) else str(raw_row.get("subsystem")).strip(),
+        "design_maturity": "" if _is_blank_cell(raw_row.get("design_maturity")) else str(raw_row.get("design_maturity")).strip(),
+        "factory_nickname": "" if _is_blank_cell(raw_row.get("factory_nickname")) else str(raw_row.get("factory_nickname")).strip(),
+        "official_windchill_part_name": "" if _is_blank_cell(raw_row.get("factory_nickname")) else str(raw_row.get("factory_nickname")).strip(),
+        "design_engineer": "" if _is_blank_cell(raw_row.get("design_engineer")) else str(raw_row.get("design_engineer")).strip(),
+        "technology_engineer": "" if _is_blank_cell(raw_row.get("design_engineer")) else str(raw_row.get("design_engineer")).strip(),
+        "ppm": "" if _is_blank_cell(raw_row.get("ppm")) else str(raw_row.get("ppm")).strip(),
+        "buyer_gcl": "" if _is_blank_cell(raw_row.get("buyer_gcl")) else str(raw_row.get("buyer_gcl")).strip(),
+        "pmqe_aqe": "" if _is_blank_cell(raw_row.get("pmqe_aqe")) else str(raw_row.get("pmqe_aqe")).strip(),
+        "ame_tooling_engineer": "" if _is_blank_cell(raw_row.get("ame_tooling_engineer")) else str(raw_row.get("ame_tooling_engineer")).strip(),
+        "part_code": "" if _is_blank_cell(raw_row.get("part_code")) else str(raw_row.get("part_code")).strip(),
+        "pits_tracker_number": "" if _is_blank_cell(raw_row.get("pits_tracker_number")) else str(raw_row.get("pits_tracker_number")).strip(),
+        "source_code": "" if _is_blank_cell(raw_row.get("source_code")) else str(raw_row.get("source_code")).strip(),
+        "make_buy": "" if _is_blank_cell(raw_row.get("make_buy")) else str(raw_row.get("make_buy")).strip(),
+        "quantity": 1,
+        "revision": "" if _is_blank_cell(raw_row.get("design_maturity")) else str(raw_row.get("design_maturity")).strip(),
+        "model_applicability": "All",
+        "notes": "" if _is_blank_cell(raw_row.get("notes")) else str(raw_row.get("notes")).strip(),
+        "source": "Manual",
+        "image_path": "",
+        "updated_at": "",
+        "assembly_id": "",
+        "assembly_number": "",
+        "active": is_active,
+        "feature_applicability": feature_list,
+        "applicability_status": "; ".join(feature_list),
+        "view_details": ":material/visibility: View details",
+        "photo_status": "❌ Missing",
+        "updated_display": "",
+    }
+
+
+def harvest_added_rows_into_draft(added_rows: list[dict[str, object]] | None) -> bool:
+    if not added_rows:
+        return False
+    existing_draft_rows = list(st.session_state.get(parts_draft_added_key, []))
+    harvested_any = False
+    for raw_row in added_rows:
+        if not isinstance(raw_row, dict):
+            continue
+        draft_row = _build_draft_added_part_row(raw_row)
+        if draft_row is not None:
+            existing_draft_rows.append(draft_row)
+            harvested_any = True
+    if harvested_any:
+        st.session_state[parts_draft_added_key] = existing_draft_rows
+    return harvested_any
+
+
 def merge_parts_editor_draft(source: pd.DataFrame) -> pd.DataFrame:
     """Capture positional edits by part ID and overlay the complete pending draft."""
-    state = st.session_state.get(parts_editor_key, {}) or {}
+    last_editor_key = st.session_state.get(parts_draft_last_editor_key) or parts_editor_key
+    state = st.session_state.get(last_editor_key, {}) or {}
+    if last_editor_key != parts_editor_key:
+        harvest_added_rows_into_draft(state.get("added_rows"))
+        st.session_state.pop(last_editor_key, None)
+    st.session_state[parts_draft_last_editor_key] = parts_editor_key
     previous_visible = pd.DataFrame(
         st.session_state.get(parts_draft_visible_key, [])
     )
@@ -521,13 +620,26 @@ def clear_parts_editor_draft() -> None:
         parts_draft_values_key,
         parts_draft_state_key,
         parts_draft_visible_key,
+        parts_draft_added_key,
+        parts_draft_last_editor_key,
+        parts_editor_baseline_draft_key,
     ):
         st.session_state.pop(key, None)
 
 
+draft_added_records = list(st.session_state.get(parts_draft_added_key, []))
+if draft_added_records:
+    draft_added_df = pd.DataFrame(draft_added_records).reindex(
+        columns=parts_for_editing.columns
+    )
+    parts_for_editing = pd.concat(
+        [parts_for_editing, draft_added_df], ignore_index=True, sort=False
+    )
 parts_saved_for_editing = parts_for_editing.copy()
 parts_full_for_editing = merge_parts_editor_draft(parts_saved_for_editing)
-has_parts_draft = bool(st.session_state.get(parts_draft_values_key, {}))
+has_parts_draft = bool(st.session_state.get(parts_draft_values_key, {})) or bool(
+    st.session_state.get(parts_draft_added_key, [])
+)
 parts_for_editing = parts_saved_for_editing
 selected_part_key = f"parts_selected_id_{project_id}"
 
@@ -576,6 +688,9 @@ if qp_part_id or qp_part_number:
         pass
 
 with st.expander("Filter columns", icon=":material/filter_list:", expanded=True):
+    pre_filter_added_rows = deepcopy(
+        (st.session_state.get(parts_editor_key, {}) or {}).get("added_rows", [])
+    )
     parts_for_editing = filter_table(
         parts_for_editing,
         key="part_catalog_filters",
@@ -614,12 +729,17 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
         reset_widget_keys=[parts_editor_key],
         multi_value_columns=["feature_applicability"],
     )
+    if parts_editor_key not in st.session_state and pre_filter_added_rows:
+        if harvest_added_rows_into_draft(pre_filter_added_rows):
+            st.rerun()
     clear_filter_actions = st.container(horizontal=True, horizontal_alignment="right")
     if clear_filter_actions.button(
         "Clear filters",
         icon=":material/filter_alt_off:",
         key="clear_part_catalog_filters",
     ):
+        if harvest_added_rows_into_draft(pre_filter_added_rows):
+            st.session_state.pop(parts_editor_key, None)
         st.session_state.pop("part_catalog_filters_keyword", None)
         for filter_column in [
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
@@ -667,10 +787,14 @@ if not (
     or current_editor_state.get("added_rows")
     or current_editor_state.get("deleted_rows")
 ):
-    parts_editor_rows = apply_id_keyed_editor_draft(
-        parts_editor_rows,
-        st.session_state.get(parts_draft_values_key, {}),
+    st.session_state[parts_editor_baseline_draft_key] = deepcopy(
+        st.session_state.get(parts_draft_values_key, {})
     )
+parts_editor_rows = apply_id_keyed_editor_draft(
+    parts_editor_rows,
+    st.session_state.get(parts_editor_baseline_draft_key, {}),
+)
+
 parts_for_editing = parts_editor_rows.copy()
 visible_editor_columns = [
     "id",
@@ -862,6 +986,10 @@ st.download_button(
 )
 
 selected_saved_parts = native_selected_rows(parts_editor_display_rows, editor_key=parts_editor_key)
+if not selected_saved_parts.empty:
+    selected_saved_parts = selected_saved_parts.loc[
+        ~selected_saved_parts["id"].astype(str).str.startswith("__draft_new__")
+    ].copy()
 bulk_controls = selected_rows_action_bar(
     parent=parts_action_slot,
 )
@@ -1039,6 +1167,21 @@ if save_part_table:
             parts_for_editing,
             edited_parts,
         )
+        def _normalize_row_feature_applicability(row: pd.Series) -> list[str]:
+            raw_val = row.get("feature_applicability")
+            if isinstance(raw_val, (list, tuple, set)):
+                cleaned = [str(item) for item in raw_val if not _is_blank_cell(item)]
+            else:
+                cleaned = []
+            row_id = "" if _is_blank_cell(row.get("id")) else str(row.get("id")).strip()
+            is_new = not row_id or row_id.startswith("__draft_new__")
+            if is_new and not cleaned:
+                return ["All models"]
+            return cleaned
+
+        edited_parts["feature_applicability"] = edited_parts.apply(
+            _normalize_row_feature_applicability, axis=1
+        )
         validation_errors = required_field_errors(edited_parts, {"part_number": "Part number"})
         if validation_errors:
             raise ValueError(" ".join(validation_errors))
@@ -1059,7 +1202,11 @@ if save_part_table:
         parts_to_save = edited_parts.drop(
             columns=["view_details", "active", "photo_status", "feature_applicability", "applicability_status", "updated_display", "assembly_id", "assembly_number"]
         ).copy()
-        new_row_mask = parts_to_save["id"].isna() | parts_to_save["id"].astype(str).str.strip().eq("")
+        new_row_mask = (
+            parts_to_save["id"].isna()
+            | parts_to_save["id"].astype(str).str.strip().eq("")
+            | parts_to_save["id"].astype(str).str.startswith("__draft_new__")
+        )
         parts_to_save.loc[new_row_mask, "id"] = [str(uuid4()) for _ in range(int(new_row_mask.sum()))]
         edited_parts = edited_parts.copy()
         edited_parts.loc[new_row_mask, "id"] = parts_to_save.loc[new_row_mask, "id"]

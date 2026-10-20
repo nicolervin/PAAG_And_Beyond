@@ -5,6 +5,7 @@ from typing import Literal
 import streamlit as st
 
 from utils.time_units import TIME_UNITS, display_to_seconds, seconds_to_display, time_unit
+from utils.split_workspace import build_page_url
 from utils.store import (
     clone_planning_scenario,
     next_scenario_revision_label,
@@ -195,8 +196,9 @@ def page_title_with_scope(
     scenario_name: str | None = None,
     help_text: str | None = None,
     selector_key: str | None = None,
+    show_popout: bool = True,
 ) -> None:
-    """Render a page title, boundary badge, and applicable scenario switcher."""
+    """Render a page title, boundary badge, scenario switcher, and pop-out window action."""
     row = st.container(horizontal=True, vertical_alignment="center", gap="small")
     row.title(title)
     scope_badge(
@@ -233,6 +235,15 @@ def page_title_with_scope(
                         source_scenario=selected_scenario,
                         key_prefix=stable_key,
                     )
+    if show_popout:
+        current_page_key = str(st.session_state.get("current_url_path") or "")
+        popout_url = build_page_url(current_page_key)
+        row.link_button(
+            "Open in new window",
+            url=popout_url,
+            icon=":material/open_in_new:",
+            help=f"Open {title} in a separate browser window or tab",
+        )
 
 
 def section_heading_with_scope(

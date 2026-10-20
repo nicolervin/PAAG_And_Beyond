@@ -6,8 +6,19 @@ from utils.time_units import format_seconds
 from utils.fishbone_ui import FISHBONE_LINKED_PAGES, render_fishbone_sidebar_context
 from utils.scope_ui import scenario_view_selector
 
-from utils.split_workspace import component_event, split_divider, split_navigation
-from utils.store import get_project, init_db, migrate_legacy_yamazumi_flags, projects
+from utils.split_workspace import (
+    build_page_url,
+    component_event,
+    split_divider,
+    split_navigation,
+)
+from utils.store import (
+    get_project,
+    init_db,
+    migrate_legacy_yamazumi_flags,
+    planning_scenarios,
+    projects,
+)
 
 
 st.set_page_config(page_title="Process at a Glance", page_icon=":material/precision_manufacturing:", layout="wide")
@@ -90,11 +101,32 @@ if pending_project_id and any(
     st.session_state.pop("global_scenario", None)
 
 valid_project_ids = {str(project["id"]) for project in all_projects}
+
+# Synchronize project context from URL query params (e.g. pop-out window or shared tab)
+qp_project_id = st.query_params.get("project_id")
+if (
+    qp_project_id
+    and str(qp_project_id) in valid_project_ids
+    and str(qp_project_id) != str(st.session_state.get("project_id"))
+):
+    st.session_state.project_id = str(qp_project_id)
+    st.session_state.scenario_id = None
+    st.session_state.pop("global_project", None)
+    st.session_state.pop("global_scenario", None)
+
 if st.session_state.get("project_id") not in valid_project_ids:
     st.session_state.project_id = all_projects[0]["id"] if all_projects else None
     st.session_state.scenario_id = None
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
+
+# Synchronize scenario context from URL query params
+qp_scenario_id = st.query_params.get("scenario_id")
+if qp_scenario_id and st.session_state.get("project_id"):
+    available_scenarios = planning_scenarios(st.session_state["project_id"])
+    if any(str(s["id"]) == str(qp_scenario_id) for s in available_scenarios):
+        st.session_state.scenario_id = str(qp_scenario_id)
+        st.session_state["global_scenario"] = str(qp_scenario_id)
 
 project_exchange_page = st.Page(
     "app_pages/exchange.py",
@@ -178,6 +210,24 @@ page_by_url_path = {
     _workspace_page_key(app_page): app_page for app_page in all_registered_pages
 }
 active_page_key = _workspace_page_key(navigation)
+st.session_state["current_url_path"] = active_page_key
+
+qp_page = st.query_params.get("page")
+if qp_page and qp_page in page_by_url_path and qp_page != active_page_key:
+    st.switch_page(page_by_url_path[qp_page])
+
+if active_page_key and active_page_key != "__default__":
+    st.query_params["page"] = active_page_key
+elif "page" in st.query_params:
+    try:
+        del st.query_params["page"]
+    except Exception:
+        pass
+
+if st.session_state.get("project_id"):
+    st.query_params["project_id"] = str(st.session_state["project_id"])
+if st.session_state.get("scenario_id"):
+    st.query_params["scenario_id"] = str(st.session_state["scenario_id"])
 
 split_secondary_key = "split_workspace_secondary_url_path"
 split_ratio_key = "split_workspace_ratio"
@@ -292,6 +342,8 @@ with st.sidebar:
             active_url_path=active_page_key,
             secondary_url_path=secondary_url_path,
             secondary_title=secondary_page.title if secondary_page else "",
+            project_id=str(st.session_state.get("project_id") or ""),
+            scenario_id=str(st.session_state.get("scenario_id") or ""),
             key=split_navigation_key,
             on_navigate_change=_on_split_navigation,
             on_split_change=_on_split_open,
@@ -398,6 +450,12 @@ else:
                     vertical_alignment="center",
                 )
                 split_header.caption(f"Split pane · {secondary_page.title}")
+                split_header.link_button(
+                    "Pop out",
+                    url=build_page_url(secondary_url_path),
+                    icon=":material/open_in_new:",
+                    help=f"Pop out {secondary_page.title} to a separate browser window",
+                )
                 if split_header.button(
                     "Top & Bottom",
                     icon=":material/splitscreen:",
@@ -423,8 +481,8 @@ else:
         st.markdown("---")
         split_bar = st.container(border=True, key="split_divider_toolbar")
         with split_bar:
-            b_info, b_swap, b_orient, b_close = st.columns(
-                [2.8, 1.1, 1.1, 0.9],
+            b_info, b_swap, b_orient, b_popout, b_close = st.columns(
+                [2.3, 0.9, 0.9, 0.9, 0.8],
                 vertical_alignment="center",
                 gap="small",
             )
@@ -457,6 +515,14 @@ else:
                 ):
                     st.session_state[split_orientation_key] = "side_by_side"
                     st.rerun()
+            with b_popout:
+                st.link_button(
+                    "Pop out",
+                    url=build_page_url(secondary_url_path),
+                    icon=":material/open_in_new:",
+                    help=f"Pop out {secondary_page.title} to a separate browser window",
+                    width="stretch",
+                )
             with b_close:
                 if st.button(
                     "Close",

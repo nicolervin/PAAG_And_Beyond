@@ -618,6 +618,92 @@ class PartsCatalogFieldTests(unittest.TestCase):
         # Ensure it is also completely retired from unlisted_pages
         self.assertNotIn('st.Page("app_pages/assemblies.py"', streamlit_app_code)
 
+    def test_add_parts_while_keyword_filter_is_active_and_after_clearing_filter(self) -> None:
+        from streamlit.testing.v1 import AppTest
+
+        script_path = str(store.ROOT / "app_pages" / "parts.py")
+        initial_parts = store.project_table("parts", self.project_id, "part_number")
+        initial_count = len(initial_parts)
+        first_part_num = str(initial_parts.iloc[0]["part_number"])
+
+        app = AppTest.from_file(script_path, default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Tester"
+        app.run()
+        self.assertFalse(app.exception)
+
+        # 1. Filter by keyword so only one existing part (or zero) is shown
+        app.text_input(key="part_catalog_filters_keyword").set_value(first_part_num)
+        app.run()
+        self.assertFalse(app.exception)
+
+        draft_last_key = f"parts_catalog_draft_{self.project_id}_{self.scenario_id}_last_editor_key"
+        editor_key = str(app.session_state[draft_last_key])
+
+        # Simulate adding a new part while keyword filter is active and saving immediately
+        app.session_state[editor_key] = {
+            "edited_rows": {},
+            "added_rows": [
+                {
+                    "part_number": "KW-ADDED-001",
+                    "description": "Added While Filtered",
+                    "weight_lb": 4.5,
+                    "active": True,
+                    "feature_applicability": ["All models"],
+                }
+            ],
+            "deleted_rows": [],
+        }
+        app.button(key="parts_catalog_save_refresh").click()
+        app.run()
+        self.assertFalse(app.exception)
+
+        after_first_save = store.project_table("parts", self.project_id, "part_number")
+        self.assertEqual(len(after_first_save), initial_count + 1)
+        saved_row_1 = after_first_save.loc[
+            after_first_save["part_number"].eq("KW-ADDED-001")
+        ]
+        self.assertEqual(len(saved_row_1), 1)
+        self.assertEqual(saved_row_1.iloc[0]["description"], "Added While Filtered")
+        self.assertAlmostEqual(float(saved_row_1.iloc[0]["weight_lb"]), 4.5)
+
+        # 2. Add another part while filtered by a non-matching keyword, then clear the filter before saving
+        app.text_input(key="part_catalog_filters_keyword").set_value("NO-MATCH-KEYWORD-XYZ")
+        app.run()
+        self.assertFalse(app.exception)
+
+        editor_key = str(app.session_state[draft_last_key])
+        app.session_state[editor_key] = {
+            "edited_rows": {},
+            "added_rows": [
+                {
+                    "part_number": "KW-ADDED-002",
+                    "description": "Added Before Clearing Filter",
+                }
+            ],
+            "deleted_rows": [],
+        }
+        # Clear filters before clicking Save & Refresh
+        app.button(key="clear_part_catalog_filters").click()
+        app.run()
+        self.assertFalse(app.exception)
+
+        # Now click Save & Refresh
+        app.button(key="parts_catalog_save_refresh").click()
+        app.run()
+        self.assertFalse(app.exception)
+
+        after_second_save = store.project_table("parts", self.project_id, "part_number")
+        self.assertEqual(len(after_second_save), initial_count + 2)
+        saved_row_2 = after_second_save.loc[
+            after_second_save["part_number"].eq("KW-ADDED-002")
+        ]
+        self.assertEqual(len(saved_row_2), 1)
+        self.assertEqual(
+            saved_row_2.iloc[0]["description"], "Added Before Clearing Filter"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

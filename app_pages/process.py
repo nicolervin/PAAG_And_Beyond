@@ -57,6 +57,7 @@ from utils.equipment_store import (
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.image_annotator import decode_data_url, image_annotator
 from utils.scope_ui import page_title_with_scope
+from utils.split_workspace import build_page_url
 from utils.process_pitch_visual import (
     clamp_media_page,
     clamp_page,
@@ -1063,11 +1064,31 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
 
 
 tab_plan, tab_flow, tab_slides = st.tabs(
-    ["Process plan", "Process Flow Diagram", "PAAG slides"]
+    ["Process plan", "Process Flow Diagram", "PAAG slides"],
+    key="paag_tab",
+    bind="query-params",
 )
 
 with tab_plan:
-    st.subheader("Create PAAG Elements")
+    hdr_col_title, hdr_col_links = st.columns([3, 2], vertical_alignment="center")
+    with hdr_col_title:
+        st.subheader("Create PAAG Elements")
+    with hdr_col_links:
+        pop_col1, pop_col2 = st.columns(2)
+        with pop_col1:
+            st.link_button(
+                "Open Slides in new window",
+                url=build_page_url("process", query_params={"paag_tab": "PAAG slides"}),
+                icon=":material/open_in_new:",
+                help="Open PAAG Slides in a separate browser window to view slides alongside your process plan",
+            )
+        with pop_col2:
+            st.link_button(
+                "Open Parts in new window",
+                url=build_page_url("parts"),
+                icon=":material/open_in_new:",
+                help="Open Parts Catalog in a separate browser window to cross-reference parts",
+            )
     st.caption(
         "The selected fishbone section controls both lists. Use **Choose one** for alternatives such "
         "as black or silver versions of the same panel."
@@ -4359,7 +4380,7 @@ with tab_slides:
 
             with nav_col_act:
                 # Presentation, Print, Alerts, Equipment action buttons
-                act_col1, act_col2, act_col3, act_col4 = st.columns([1, 1, 1.3, 1], vertical_alignment="center")
+                act_col1, act_col2, act_col3, act_col4, act_col5 = st.columns([1, 1, 1.3, 1, 1.3], vertical_alignment="center")
                 with act_col1:
                     if st.button("Present", icon=":material/slideshow:", key=f"btn_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
                         st.session_state[f"paag_present_active_{scenario_id}"] = True
@@ -4385,6 +4406,13 @@ with tab_slides:
                     t_label = f"Tools ({tools_cnt})" if tools_cnt > 0 else "Tools"
                     if st.button(t_label, icon=":material/construction:", key=f"btn_tools_{scenario_id}", help="View tools and equipment details"):
                         tools_detail_dialog(pitch_summary.get("tools", []))
+                with act_col5:
+                    st.link_button(
+                        "Open Plan",
+                        url=build_page_url("process", query_params={"paag_tab": "Process plan"}),
+                        icon=":material/open_in_new:",
+                        help="Open Process plan in a separate browser window or tab to edit elements alongside slides",
+                    )
 
             if st.session_state.get(f"paag_present_active_{scenario_id}"):
                 presentation_mode_dialog(

@@ -1022,9 +1022,12 @@ def infer_part_feature_rules(
                     part_models[pid] = mods
                     models_with_bom.update(mods)
 
+    top_level_pns = _identify_top_level_assembly_pns(project_id, part_rows, _conn=_conn)
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
         pid = str(p["id"])
+        if str(p.get("part_number") or "").strip().upper() in top_level_pns:
+            continue
         raw_models = part_models.get(pid, set())
         p_models = raw_models & configured_tree_models
 
@@ -3887,7 +3890,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                         break
 
             qualifying_nodes: list[dict[str, Any]] = []
-            stack: dict[int, dict[str, Any]] = {}
+            pre_stack: dict[int, dict[str, Any]] = {}
 
             for pr in parsed_rows:
                 r = pr["r"]
@@ -3926,11 +3929,32 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 p_desc = r["description"] or pr_data.get("description") or "—"
                 depth = int(r["proposed_depth"] or 1)
 
+                seq = None
+                if isinstance(pr_data, dict):
+                    ms = pr_data.get("model_sequence")
+                    if isinstance(ms, dict):
+                        if target_model in ms:
+                            seq = ms[target_model]
+                        elif matched_model_key and matched_model_key in ms:
+                            seq = ms[matched_model_key]
+                        else:
+                            for mk, val in ms.items():
+                                if re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target:
+                                    seq = val
+                                    break
+
+                raw_pt = str(r["parent_tracker_number"] or "").strip()
+                if not raw_pt and depth > 1:
+                    p_fallback = pre_stack.get(depth - 1)
+                    if p_fallback:
+                        raw_pt = str(p_fallback.get("child_tracker") or "").strip()
+
                 node: dict[str, Any] = {
                     "id": str(r["id"]),
                     "part_id": pid,
+                    "level": depth,
                     "depth": depth,
-                    "parent_tracker": "",
+                    "parent_tracker": raw_pt,
                     "child_tracker": str(r["child_tracker_number"] or "").strip(),
                     "part_number": p_num,
                     "description": p_desc,
@@ -3960,18 +3984,39 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                     "source_state": r["source_state"],
                     "review_status": r["review_status"],
                     "source_row": r["source_row"],
+                    "model_seq": seq,
                     "children": [],
                 }
 
-                # Outline rule: parent is the level right above the child
-                parent_node = stack.get(depth - 1)
-                if parent_node:
+                pre_stack[depth] = node
+                pre_stack = {lvl: n for lvl, n in pre_stack.items() if lvl <= depth}
+                qualifying_nodes.append(node)
+
+            l1_pns_tree = {
+                str(n["part_number"]).strip().upper()
+                for n in qualifying_nodes
+                if int(n.get("level", 1) or 1) == 1 and str(n.get("part_number") or "").strip()
+            }
+            if l1_pns_tree:
+                qualifying_nodes = [
+                    n for n in qualifying_nodes
+                    if int(n.get("level", 1) or 1) == 1
+                    or str(n.get("part_number") or "").strip().upper() not in l1_pns_tree
+                ]
+            qualifying_nodes = sort_bom_hierarchy(qualifying_nodes, model_number=target_model)
+            stack: dict[int, dict[str, Any]] = {}
+            for node in qualifying_nodes:
+                lvl = int(node.get("level", node.get("depth", 1)) or 1)
+                node["depth"] = lvl
+                node["children"] = []
+                parent_node = stack.get(lvl - 1)
+                if parent_node and lvl > 1:
                     parent_node["children"].append(node)
                     node["parent_tracker"] = parent_node["child_tracker"]
-
-                stack[depth] = node
-                stack = {lvl: n for lvl, n in stack.items() if lvl <= depth}
-                qualifying_nodes.append(node)
+                else:
+                    node["parent_tracker"] = ""
+                stack[lvl] = node
+                stack = {lvl_k: n_v for lvl_k, n_v in stack.items() if lvl_k <= lvl}
 
             all_roots = [n for n in qualifying_nodes if n["depth"] == 1 or not n["parent_tracker"]]
             # Prioritize active roots that have children (e.g. main assembly BOM)
@@ -4007,8 +4052,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
 
         # Case B: Master BOM or legacy data without model usages
         all_nodes: list[dict[str, Any]] = []
-        stack_b: dict[int, dict[str, Any]] = {}
-        children_map: dict[str, list[dict[str, Any]]] = {}
+        pre_stack_b: dict[int, dict[str, Any]] = {}
 
         for pr in parsed_rows:
             r = pr["r"]
@@ -4024,11 +4068,18 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
             p_desc = r["description"] or pr_data.get("description") or "—"
             depth = int(r["proposed_depth"] or 1)
 
+            raw_pt = str(r["parent_tracker_number"] or "").strip()
+            if not raw_pt and depth > 1:
+                parent_fallback = pre_stack_b.get(depth - 1)
+                if parent_fallback:
+                    raw_pt = str(parent_fallback.get("child_tracker") or "").strip()
+
             node: dict[str, Any] = {
                 "id": str(r["id"]),
                 "part_id": pid,
+                "level": depth,
                 "depth": depth,
-                "parent_tracker": str(r["parent_tracker_number"] or "").strip(),
+                "parent_tracker": raw_pt,
                 "child_tracker": str(r["child_tracker_number"] or "").strip(),
                 "part_number": p_num,
                 "description": p_desc,
@@ -4061,28 +4112,23 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 "children": [],
             }
             all_nodes.append(node)
+            pre_stack_b[depth] = node
+            pre_stack_b = {lvl: n for lvl, n in pre_stack_b.items() if lvl <= depth}
 
-            p_tr = node["parent_tracker"]
-            if p_tr:
-                if p_tr not in children_map:
-                    children_map[p_tr] = []
-                children_map[p_tr].append(node)
-            elif depth > 1:
-                # Fallback for legacy outline rows lacking parent_tracker
-                parent_node = stack_b.get(depth - 1)
-                if parent_node:
-                    parent_node["children"].append(node)
-                    node["parent_tracker"] = parent_node["child_tracker"]
-
-            stack_b[depth] = node
-            stack_b = {lvl: n for lvl, n in stack_b.items() if lvl <= depth}
-
+        all_nodes = sort_bom_hierarchy(all_nodes, model_number=target_model or "")
+        stack_b: dict[int, dict[str, Any]] = {}
         for node in all_nodes:
-            c_tr = node["child_tracker"]
-            if c_tr and c_tr in children_map:
-                for ch in children_map[c_tr]:
-                    if ch not in node["children"]:
-                        node["children"].append(ch)
+            lvl = int(node.get("level", node.get("depth", 1)) or 1)
+            node["depth"] = lvl
+            node["children"] = []
+            parent_node = stack_b.get(lvl - 1)
+            if parent_node and lvl > 1:
+                parent_node["children"].append(node)
+                node["parent_tracker"] = parent_node["child_tracker"]
+            else:
+                node["parent_tracker"] = ""
+            stack_b[lvl] = node
+            stack_b = {lvl_k: n_v for lvl_k, n_v in stack_b.items() if lvl_k <= lvl}
 
         roots = [n for n in all_nodes if not n["parent_tracker"] or n["depth"] == 1]
         if not roots and all_nodes:
@@ -4264,17 +4310,19 @@ def sort_bom_hierarchy(
     - Child components never appear above their group number.
     - Levels naturally progress (1 -> 2 -> 3) and never jump (1 -> 3 -> 2).
     - Preserves sibling order using model-specific sequence or source_row.
+    - Disambiguates and partitions children across multiple occurrences of the same subassembly/group.
     """
     if not raw_items or len(raw_items) <= 1:
         return [dict(it) for it in raw_items]
 
+    items_copy = [dict(it) for it in raw_items]
     # Assign an initial index to guarantee stable sorting among siblings
-    for i, it in enumerate(raw_items):
+    for i, it in enumerate(items_copy):
         it["_orig_idx"] = i
 
     all_child_trackers = {
         str(it.get("child_tracker") or it.get("part_number") or "").strip().upper()
-        for it in raw_items
+        for it in items_copy
         if it.get("child_tracker") or it.get("part_number")
     }
 
@@ -4288,9 +4336,14 @@ def sort_bom_hierarchy(
         )
 
     children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    parents_by_ct: dict[str, list[dict[str, Any]]] = {}
     roots: list[dict[str, Any]] = []
 
-    for it in raw_items:
+    for it in items_copy:
+        ct_self = str(it.get("child_tracker") or it.get("part_number") or "").strip().upper()
+        if ct_self:
+            parents_by_ct.setdefault(ct_self, []).append(it)
+
         pt = str(it.get("parent_tracker") or "").strip()
         lvl = int(it.get("level", 1) or 1)
         # Root if level 1, or empty parent tracker, or parent tracker not present in this set of items
@@ -4306,6 +4359,49 @@ def sort_bom_hierarchy(
     for pt_clean in children_by_parent:
         children_by_parent[pt_clean].sort(key=_sort_key)
 
+    # Map each parent node's _orig_idx to its specific direct children
+    children_by_parent_idx: dict[int, list[dict[str, Any]]] = {}
+    for ct, ch_list in children_by_parent.items():
+        p_list = sorted(parents_by_ct.get(ct, []), key=_sort_key)
+        if not p_list:
+            continue
+        if len(p_list) == 1:
+            children_by_parent_idx[p_list[0]["_orig_idx"]] = ch_list
+            continue
+
+        # Multiple parent occurrences share the same child_tracker (e.g. legacy un-suffixed duplicate subassembly)
+        buckets: list[list[dict[str, Any]]] = [[] for _ in p_list]
+        for ch in ch_list:
+            ch_key = _sort_key(ch)
+            chosen_idx = 0
+            for p_idx, p_node in enumerate(p_list):
+                if _sort_key(p_node) < ch_key:
+                    chosen_idx = p_idx
+                else:
+                    break
+            buckets[chosen_idx].append(ch)
+
+        # Fallback healing for already-scrambled saves where 2nd+ parent ended up after its #k-suffixed children
+        for p_idx in range(1, len(p_list)):
+            if not buckets[p_idx]:
+                suffix = f"#{p_idx + 1}"
+                reclaimed: list[dict[str, Any]] = []
+                for prev_idx in range(p_idx):
+                    kept: list[dict[str, Any]] = []
+                    for ch in buckets[prev_idx]:
+                        c_trk = str(ch.get("child_tracker") or "").strip().upper()
+                        if c_trk.endswith(suffix):
+                            reclaimed.append(ch)
+                        else:
+                            kept.append(ch)
+                    buckets[prev_idx] = kept
+                if reclaimed:
+                    buckets[p_idx].extend(reclaimed)
+                    buckets[p_idx].sort(key=_sort_key)
+
+        for p_idx, p_node in enumerate(p_list):
+            children_by_parent_idx[p_node["_orig_idx"]] = buckets[p_idx]
+
     ordered: list[dict[str, Any]] = []
     visited: set[Any] = set()
 
@@ -4320,9 +4416,7 @@ def sort_bom_hierarchy(
         node_copy.pop("_orig_idx", None)
         ordered.append(node_copy)
 
-        ct = str(node.get("child_tracker") or node.get("part_number") or "").strip().upper()
-        # Direct children by child_tracker
-        children = children_by_parent.get(ct, [])
+        children = children_by_parent_idx.get(node["_orig_idx"], [])
         for ch in children:
             _traverse(ch, current_depth + 1)
 
@@ -4330,7 +4424,7 @@ def sort_bom_hierarchy(
         _traverse(r, 1)
 
     # Any remaining unvisited items (e.g. disconnected nodes) are appended in original order
-    for it in raw_items:
+    for it in items_copy:
         oid = it.get("occurrence_id") or it.get("_uid") or it["_orig_idx"]
         if oid not in visited:
             node_copy = dict(it)
@@ -4454,6 +4548,17 @@ def get_manual_model_bom(
                 "model_seq": seq,
             })
 
+        l1_pns = {
+            str(it["part_number"]).strip().upper()
+            for it in results
+            if int(it.get("level", 1) or 1) == 1 and str(it.get("part_number") or "").strip()
+        }
+        if l1_pns:
+            results = [
+                it for it in results
+                if int(it.get("level", 1) or 1) == 1
+                or str(it.get("part_number") or "").strip().upper() not in l1_pns
+            ]
         return sort_bom_hierarchy(results, model_number=target_model)
 
     if _conn is not None:
@@ -4490,9 +4595,8 @@ def get_known_subassembly_structure(
             part_id = str(part_row["id"] if isinstance(part_row, (sqlite3.Row, dict)) else part_row[0])
 
         results: list[dict[str, Any]] = []
-        visited = {clean_pn.upper()}
 
-        def _dfs(parent_trk: str, parent_pid: str | None, rel_lvl: int) -> None:
+        def _dfs(parent_trk: str, parent_pid: str | None, rel_lvl: int, ancestors: set[str]) -> None:
             if rel_lvl > max_depth:
                 return
 
@@ -4510,11 +4614,16 @@ def get_known_subassembly_structure(
                 (project_id, parent_trk, parent_trk, parent_pid, parent_pid),
             ).fetchall()
 
+            seen_under_parent: set[str] = set()
             for cr in child_rows:
-                c_pn = str(cr["part_number"] or cr["child_tracker_number"] or "").strip()
-                if not c_pn or c_pn.upper() in visited:
+                raw_c_pn = str(cr["part_number"] or cr["child_tracker_number"] or "").strip()
+                c_pn = re.sub(r"#\d+$", "", raw_c_pn).strip()
+                if not c_pn:
                     continue
-                visited.add(c_pn.upper())
+                c_pn_upper = c_pn.upper()
+                if c_pn_upper in seen_under_parent or c_pn_upper in ancestors:
+                    continue
+                seen_under_parent.add(c_pn_upper)
 
                 c_desc = str(cr["description"] or "").strip()
                 if not c_desc:
@@ -4538,9 +4647,9 @@ def get_known_subassembly_structure(
                 })
 
                 # Recursively visit children of this child immediately (DFS Pre-order)
-                _dfs(c_pn, c_pid, rel_lvl + 1)
+                _dfs(c_pn, c_pid, rel_lvl + 1, ancestors | {c_pn_upper})
 
-        _dfs(clean_pn, part_id, 1)
+        _dfs(clean_pn, part_id, 1, {clean_pn.upper()})
         return results
 
     if _conn is not None:
@@ -4555,7 +4664,8 @@ def detect_unexpanded_subassemblies(
     _conn: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     """Scan items in a BOM draft for any part/group numbers that have known child components
-    in pits_bom_occurrences across the project which are not yet present in the draft.
+    in pits_bom_occurrences across the project (or in another occurrence within the same draft)
+    which are not yet present beneath that specific occurrence in the draft.
 
     Returns a list of dicts:
     [
@@ -4571,43 +4681,110 @@ def detect_unexpanded_subassemblies(
     if not clean_items:
         return []
 
-    existing_pns = {clean_bom_cell_text(it["part_number"]).upper() for it in clean_items}
+    # Also capture local subassembly definitions from expanded occurrences within clean_items itself
+    local_sub_defs: dict[str, list[dict[str, Any]]] = {}
+    for idx, it in enumerate(clean_items):
+        pn = clean_bom_cell_text(it["part_number"])
+        pn_up = pn.upper()
+        p_lvl = int(it.get("level", 1) or 1)
+        end_idx = idx + 1
+        while end_idx < len(clean_items) and int(clean_items[end_idx].get("level", 1) or 1) > p_lvl:
+            end_idx += 1
+        if end_idx > idx + 1:
+            sub_rows: list[dict[str, Any]] = []
+            for j in range(idx + 1, end_idx):
+                c_it = clean_items[j]
+                c_pn = clean_bom_cell_text(c_it.get("part_number"))
+                c_lvl = int(c_it.get("level", 1) or 1)
+                try:
+                    c_qty = round(float(c_it.get("quantity", 1.0) or 1.0), 5)
+                except (TypeError, ValueError):
+                    c_qty = 1.0
+                sub_rows.append({
+                    "part_number": c_pn,
+                    "description": clean_bom_cell_text(c_it.get("description")),
+                    "quantity": c_qty,
+                    "relative_level": max(1, c_lvl - p_lvl),
+                    "parent_tracker": pn,
+                    "child_tracker": c_pn,
+                })
+            if pn_up not in local_sub_defs:
+                local_sub_defs[pn_up] = sub_rows
+            else:
+                existing_def_pns = {clean_bom_cell_text(r["part_number"]).upper() for r in local_sub_defs[pn_up]}
+                for sr in sub_rows:
+                    sr_up = clean_bom_cell_text(sr["part_number"]).upper()
+                    if sr_up and sr_up not in existing_def_pns:
+                        local_sub_defs[pn_up].append(sr)
+                        existing_def_pns.add(sr_up)
+
     detected: list[dict[str, Any]] = []
-    seen_detected_pns: set[str] = set()
+    detected_by_pn: dict[str, dict[str, Any]] = {}
 
     def _execute(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-        for it in clean_items:
+        for idx, it in enumerate(clean_items):
             pn = clean_bom_cell_text(it["part_number"])
             pn_upper = pn.upper()
-            if pn_upper in seen_detected_pns:
-                continue
+            p_lvl = int(it.get("level", 1) or 1)
+
+            # Determine this specific occurrence's descendant block
+            end_idx = idx + 1
+            while end_idx < len(clean_items) and int(clean_items[end_idx].get("level", 1) or 1) > p_lvl:
+                end_idx += 1
+            local_existing_pns = {
+                clean_bom_cell_text(clean_items[j]["part_number"]).upper()
+                for j in range(idx + 1, end_idx)
+                if clean_bom_cell_text(clean_items[j].get("part_number"))
+            }
 
             # Piece parts (P-parts) should NOT be detected as subassemblies unless explicitly structured with child parts
             if is_piece_part(pn) and not is_drawing_group(pn):
-                has_explicit_children = conn.execute(
-                    "SELECT 1 FROM pits_bom_occurrences WHERE project_id=? AND (UPPER(parent_tracker_number)=UPPER(?) OR UPPER(parent_tracker_number) LIKE UPPER(?) || '#%') LIMIT 1",
-                    (project_id, pn, pn),
-                ).fetchone()
+                has_explicit_children = (pn_upper in local_sub_defs) or bool(
+                    conn.execute(
+                        "SELECT 1 FROM pits_bom_occurrences WHERE project_id=? AND (UPPER(parent_tracker_number)=UPPER(?) OR UPPER(parent_tracker_number) LIKE UPPER(?) || '#%') LIMIT 1",
+                        (project_id, pn, pn),
+                    ).fetchone()
+                )
                 if not has_explicit_children:
                     continue
 
             sub_children = get_known_subassembly_structure(project_id, pn, _conn=conn)
+            if not sub_children and pn_upper in local_sub_defs:
+                sub_children = local_sub_defs[pn_upper]
+            elif sub_children and pn_upper in local_sub_defs:
+                known_set = {clean_bom_cell_text(c["part_number"]).upper() for c in sub_children}
+                for lc in local_sub_defs[pn_upper]:
+                    if clean_bom_cell_text(lc["part_number"]).upper() not in known_set:
+                        sub_children.append(lc)
+
             if not sub_children:
                 continue
 
-            # Identify which children are not already in the BOM
+            # Identify which children are not already beneath THIS specific occurrence of the subassembly
             missing_children = [
                 c for c in sub_children
-                if clean_bom_cell_text(c["part_number"]).upper() not in existing_pns
+                if clean_bom_cell_text(c["part_number"]).upper() not in local_existing_pns
             ]
             if missing_children:
-                seen_detected_pns.add(pn_upper)
-                detected.append({
-                    "part_number": pn,
-                    "level": int(it.get("level", 1) or 1),
-                    "description": clean_bom_cell_text(it.get("description")),
-                    "children": missing_children,
-                })
+                if pn_upper not in detected_by_pn:
+                    entry = {
+                        "part_number": pn,
+                        "level": p_lvl,
+                        "description": clean_bom_cell_text(it.get("description")),
+                        "children": list(missing_children),
+                    }
+                    detected_by_pn[pn_upper] = entry
+                    detected.append(entry)
+                else:
+                    existing_entry_pns = {
+                        clean_bom_cell_text(c["part_number"]).upper()
+                        for c in detected_by_pn[pn_upper]["children"]
+                    }
+                    for mc in missing_children:
+                        mc_up = clean_bom_cell_text(mc["part_number"]).upper()
+                        if mc_up not in existing_entry_pns:
+                            detected_by_pn[pn_upper]["children"].append(mc)
+                            existing_entry_pns.add(mc_up)
         return detected
 
     if _conn is not None:
@@ -4622,11 +4799,11 @@ def expand_subassembly_items(
     selected_pns: set[str] | None = None,
     catalog_parts: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Insert child components directly beneath their parent subassembly, preserving all assemblies.
+    """Insert child components directly beneath each occurrence of their parent subassembly, preserving all assemblies.
 
-    Rows are inserted between the parent assembly and whatever rows follow it.
+    Rows are inserted between each parent assembly occurrence and whatever sibling/higher rows follow it.
     Existing assemblies, including top-level assemblies and subsequent assemblies, are never overwritten.
-    Child components are inserted in strict Pre-order Depth-First tree order beneath the group number.
+    Child components are inserted in strict Pre-order Depth-First tree order beneath each occurrence of the group number.
     """
     sub_map = {
         d["part_number"].strip().upper(): d["children"]
@@ -4638,9 +4815,9 @@ def expand_subassembly_items(
         return [dict(it) for it in items]
 
     expanded: list[dict[str, Any]] = []
-    seen_pns = {str(it.get("part_number") or "").strip().upper() for it in items if it.get("part_number")}
+    insert_after_idx: dict[int, list[list[dict[str, Any]]]] = {}
 
-    for it in items:
+    for idx, it in enumerate(items):
         curr = dict(it)
         pn = str(curr.get("part_number") or "").strip()
         pn_upper = pn.upper()
@@ -4652,14 +4829,24 @@ def expand_subassembly_items(
         # 1. ALWAYS preserve the parent / current item itself intact!
         expanded.append(curr)
 
-        # 2. If this item was selected for subassembly expansion, insert its children
+        # 2. If this item was selected for subassembly expansion, queue missing children for THIS occurrence
         if pn_upper in sub_map:
             parent_lvl = int(curr.get("level", 1) or 1)
+            block_end = idx + 1
+            while block_end < len(items) and int(items[block_end].get("level", 1) or 1) > parent_lvl:
+                block_end += 1
+            local_seen_pns = {
+                str(items[j].get("part_number") or "").strip().upper()
+                for j in range(idx + 1, block_end)
+                if items[j].get("part_number")
+            }
+
+            new_children_rows: list[dict[str, Any]] = []
             for child in sub_map[pn_upper]:
                 c_pn = str(child.get("part_number") or "").strip()
-                if not c_pn or c_pn.upper() in seen_pns:
+                if not c_pn or c_pn.upper() in local_seen_pns:
                     continue
-                seen_pns.add(c_pn.upper())
+                local_seen_pns.add(c_pn.upper())
 
                 c_desc = str(child.get("description") or "").strip()
                 if not c_desc and catalog_parts and c_pn.upper() in catalog_parts:
@@ -4671,13 +4858,21 @@ def expand_subassembly_items(
                     c_qty = 1.0
 
                 rel_lvl = int(child.get("relative_level", 1) or 1)
-                expanded.append({
+                new_children_rows.append({
                     "level": min(11, parent_lvl + rel_lvl),
                     "part_number": c_pn,
                     "description": c_desc,
                     "quantity": c_qty,
                     "_uid": str(uuid4())[:8],
                 })
+
+            if new_children_rows:
+                insert_after_idx.setdefault(block_end - 1, []).append(new_children_rows)
+
+        # 3. Emit any queued child insertions whose parent block ends at this row (innermost parent first)
+        if idx in insert_after_idx:
+            for child_batch in reversed(insert_after_idx[idx]):
+                expanded.extend(child_batch)
 
     return expanded
 
@@ -4754,7 +4949,8 @@ def save_manual_model_bom(
                 raise ValueError(f"Row {idx + 1} ('{p_num}'): Quantity must be greater than 0.")
             desc = clean_bom_cell_text(it.get("description"))
             grp = clean_bom_cell_text(it.get("group_number"))
-            trk = clean_bom_cell_text(it.get("child_tracker") or it.get("tracker") or p_num)
+            raw_trk = clean_bom_cell_text(it.get("child_tracker") or it.get("tracker") or p_num)
+            trk = re.sub(r"#\d+$", "", raw_trk).strip() or p_num
             cleaned_items.append({
                 "level": lvl,
                 "group_number": grp,
@@ -4785,6 +4981,10 @@ def save_manual_model_bom(
         if not lvl1_items:
             raise ValueError("The BOM must contain at least one top-level item at Level 1.")
         curr_lvl1_pn = lvl1_items[0]["part_number"].strip().upper()
+        cleaned_items = [
+            it for idx, it in enumerate(cleaned_items)
+            if idx == 0 or it["part_number"].strip().upper() != curr_lvl1_pn
+        ]
 
         other_lvl1_map = get_model_level1_assemblies(project_id, exclude_model_id=model_id, _conn=conn)
         if curr_lvl1_pn in other_lvl1_map:
@@ -4898,10 +5098,12 @@ def save_manual_model_bom(
             )
 
         # 3. Resolve parentage via outline stack traversal
+        # Disambiguate child_tracker globally across the BOM so repeated subassemblies
+        # (e.g. Wheel Assembly under Front Nose and Wheel Assembly under Back Nose)
+        # receive distinct child_tracker keys ('WHEEL-ASM' vs 'WHEEL-ASM#2') and keep their own children separate.
         stack: dict[int, dict[str, Any]] = {}
         processed_occurrences: list[dict[str, Any]] = []
-        seen_parent_child_trackers: set[tuple[str, str]] = set()
-        dup_counter: dict[tuple[str, str], int] = {}
+        seen_child_trackers: dict[str, int] = {}
 
         for idx, it in enumerate(cleaned_items):
             lvl = it["level"]
@@ -4911,15 +5113,15 @@ def save_manual_model_bom(
 
             child_part_id = part_lookup.get(it["part_number"])
 
-            base_trk = str(it.get("child_tracker") or it.get("tracker") or it["part_number"]).strip()
-            pair_key = (parent_trk, base_trk)
-            if pair_key in seen_parent_child_trackers:
-                dup_idx = dup_counter.get(pair_key, 1) + 1
-                dup_counter[pair_key] = dup_idx
+            raw_base_trk = str(it.get("child_tracker") or it.get("tracker") or it["part_number"]).strip()
+            base_trk = re.sub(r"#\d+$", "", raw_base_trk).strip() or it["part_number"].strip()
+            trk_key = base_trk.upper()
+            if trk_key in seen_child_trackers:
+                dup_idx = seen_child_trackers[trk_key] + 1
+                seen_child_trackers[trk_key] = dup_idx
                 child_trk = f"{base_trk}#{dup_idx}"
             else:
-                seen_parent_child_trackers.add(pair_key)
-                dup_counter[pair_key] = 1
+                seen_child_trackers[trk_key] = 1
                 child_trk = base_trk
 
             stack[lvl] = {
@@ -4999,7 +5201,7 @@ def save_manual_model_bom(
                     model_seq = {}
                 for kp in keys_to_purge:
                     model_seq.pop(kp, None)
-                model_seq[clean_model_key] = idx + 1
+                model_seq[clean_model_key] = occ_data["source_row"]
                 data["model_sequence"] = model_seq
 
                 if occ_data["group_number"]:
@@ -5026,7 +5228,7 @@ def save_manual_model_bom(
                 # Insert new occurrence
                 occ_id = str(uuid4())
                 usages = {clean_model_key: qty}
-                model_seq = {clean_model_key: idx + 1}
+                model_seq = {clean_model_key: occ_data["source_row"]}
                 data = {
                     "model_usages": usages,
                     "model_sequence": model_seq,
@@ -5292,8 +5494,10 @@ def check_group_number_conflicts(
         return []
 
     def _extract_groups(bom_items: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
-        """Map group_identifier -> { child_part_number: quantity }."""
-        groups: dict[str, dict[str, float]] = {}
+        """Map group_identifier -> { child_part_number: per_group_instance_quantity }."""
+        tagged_groups: dict[str, dict[str, float]] = {}
+        parent_instances: list[tuple[str, dict[str, float]]] = []
+        instance_map: dict[int, dict[str, float]] = {}
         stack: list[dict[str, Any]] = []
 
         for row in bom_items:
@@ -5304,20 +5508,34 @@ def check_group_number_conflicts(
             grp_num = row.get("group_number")
             if grp_num:
                 g_key = grp_num.upper()
-                if g_key not in groups:
-                    groups[g_key] = {}
+                if g_key not in tagged_groups:
+                    tagged_groups[g_key] = {}
                 p_key = row["part_number"].upper()
-                groups[g_key][p_key] = round(groups[g_key].get(p_key, 0.0) + row["quantity"], 5)
+                tagged_groups[g_key][p_key] = round(tagged_groups[g_key].get(p_key, 0.0) + row["quantity"], 5)
 
             if stack:
                 parent = stack[-1]
-                parent_key = (parent.get("group_number") or parent["part_number"]).upper()
-                if parent_key not in groups:
-                    groups[parent_key] = {}
+                p_id = id(parent)
+                if p_id not in instance_map:
+                    parent_key = (parent.get("group_number") or parent["part_number"]).upper()
+                    inst_dict: dict[str, float] = {}
+                    instance_map[p_id] = inst_dict
+                    parent_instances.append((parent_key, inst_dict))
+                else:
+                    inst_dict = instance_map[p_id]
                 c_key = row["part_number"].upper()
-                groups[parent_key][c_key] = round(groups[parent_key].get(c_key, 0.0) + row["quantity"], 5)
+                inst_dict[c_key] = round(inst_dict.get(c_key, 0.0) + row["quantity"], 5)
 
             stack.append(row)
+
+        groups: dict[str, dict[str, float]] = {k: dict(v) for k, v in tagged_groups.items()}
+        for parent_key, inst_dict in parent_instances:
+            if parent_key not in groups:
+                groups[parent_key] = dict(inst_dict)
+            else:
+                for c_key, qty in inst_dict.items():
+                    if c_key not in groups[parent_key] or qty > groups[parent_key][c_key]:
+                        groups[parent_key][c_key] = qty
 
         return groups
 
@@ -5327,14 +5545,31 @@ def check_group_number_conflicts(
 
     def _execute(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         other_models = conn.execute(
-            "SELECT id, model_number FROM project_models WHERE project_id=? AND id <> ?",
+            "SELECT id, model_number, display_name, description FROM project_models WHERE project_id=? AND id <> ?",
             (project_id, current_model_id),
         ).fetchall()
 
+        desc_by_part: dict[str, str] = {}
+        for cr in conn.execute("SELECT part_number, description FROM parts WHERE project_id=?", (project_id,)).fetchall():
+            c_pn = clean_bom_cell_text(cr["part_number"]).upper()
+            c_desc = clean_bom_cell_text(cr["description"])
+            if c_pn and c_desc:
+                desc_by_part[c_pn] = c_desc
+        for pr in conn.execute("SELECT part_number, description FROM pits_records WHERE project_id=?", (project_id,)).fetchall():
+            p_pn = clean_bom_cell_text(pr["part_number"]).upper()
+            p_desc = clean_bom_cell_text(pr["description"])
+            if p_pn and p_desc and p_pn not in desc_by_part:
+                desc_by_part[p_pn] = p_desc
+        for it in items:
+            i_pn = clean_bom_cell_text(it.get("part_number")).upper()
+            i_desc = clean_bom_cell_text(it.get("description"))
+            if i_pn and i_desc and i_pn not in desc_by_part:
+                desc_by_part[i_pn] = i_desc
         conflicts: list[dict[str, Any]] = []
         for om in other_models:
             o_mid = str(om["id"])
             o_mnum = str(om["model_number"]).strip()
+            o_mname = " ".join(clean_bom_cell_text(om["display_name"] or om["description"]).split())
             o_bom = get_manual_model_bom(project_id, o_mid, _conn=conn)
             if not o_bom:
                 continue
@@ -5353,6 +5588,11 @@ def check_group_number_conflicts(
                 except (TypeError, ValueError):
                     qty = 1.0
                 grp = clean_bom_cell_text(it.get("group_number"))
+                o_desc = clean_bom_cell_text(it.get("description"))
+                if pn.upper() not in desc_by_part and o_desc:
+                    desc_by_part[pn.upper()] = o_desc
+                if grp and grp.upper() not in desc_by_part and o_desc and not is_piece_part(pn):
+                    desc_by_part[grp.upper()] = o_desc
                 o_items.append({
                     "level": lvl,
                     "part_number": pn,
@@ -5393,12 +5633,17 @@ def check_group_number_conflicts(
                             })
 
                     if diffs:
+                        for d_item in diffs:
+                            d_item["description"] = desc_by_part.get(str(d_item["part_number"]).strip().upper(), "")
                         g_type = "Drawing Group" if is_drawing_group(g_id) else "Group Number"
+                        g_desc = desc_by_part.get(g_id, "")
                         conflicts.append({
                             "group_identifier": g_id,
+                            "group_description": g_desc,
                             "group_type": g_type,
                             "conflicting_model_id": o_mid,
                             "conflicting_model_number": o_mnum,
+                            "conflicting_model_name": o_mname,
                             "current_components": curr_comps,
                             "other_components": other_comps,
                             "differences": diffs,
@@ -5410,6 +5655,521 @@ def check_group_number_conflicts(
         return _execute(_conn)
     with connection() as conn:
         return _execute(conn)
+
+
+def _extract_group_children_from_items(
+    items: list[dict[str, Any]],
+    group_id: str,
+) -> list[dict[str, Any]]:
+    """Locate all occurrences of `group_id` in `items` and extract their direct children and subtrees."""
+    g_upper = clean_bom_cell_text(group_id).upper()
+    if not g_upper or not items:
+        return []
+
+    norm: list[dict[str, Any]] = []
+    for it in items:
+        pn = clean_bom_cell_text(it.get("part_number"))
+        if not pn:
+            continue
+        try:
+            lvl = max(1, min(11, int(it.get("level", 1) or 1)))
+        except (TypeError, ValueError):
+            lvl = 1
+        try:
+            qty = max(0.00001, round(float(it.get("quantity", 1.0) or 1.0), 5))
+        except (TypeError, ValueError):
+            qty = 1.0
+        norm.append({
+            "level": lvl,
+            "part_number": pn,
+            "description": clean_bom_cell_text(it.get("description")),
+            "quantity": qty,
+            "group_number": clean_bom_cell_text(it.get("group_number")),
+        })
+
+    blocks: list[dict[str, Any]] = []
+    for idx, row in enumerate(norm):
+        pn_up = row["part_number"].upper()
+        grp_up = row["group_number"].upper()
+        p_lvl = row["level"]
+        end_idx = idx + 1
+        while end_idx < len(norm) and norm[end_idx]["level"] > p_lvl:
+            end_idx += 1
+
+        is_parent_match = (pn_up == g_upper) or (grp_up == g_upper and end_idx > idx + 1)
+        if not is_parent_match:
+            continue
+
+        direct_children: list[dict[str, Any]] = []
+        c_idx = idx + 1
+        while c_idx < end_idx:
+            c_row = norm[c_idx]
+            if c_row["level"] == p_lvl + 1:
+                c_end = c_idx + 1
+                while c_end < end_idx and norm[c_end]["level"] > p_lvl + 1:
+                    c_end += 1
+                subtree = [
+                    {
+                        "rel_level": max(1, r["level"] - p_lvl),
+                        "part_number": r["part_number"],
+                        "description": r["description"],
+                        "quantity": r["quantity"],
+                        "group_number": r["group_number"],
+                    }
+                    for r in norm[c_idx:c_end]
+                ]
+                direct_children.append({
+                    "part_number": c_row["part_number"],
+                    "part_upper": c_row["part_number"].upper(),
+                    "description": c_row["description"],
+                    "quantity": c_row["quantity"],
+                    "group_number": c_row["group_number"],
+                    "start_idx": c_idx,
+                    "end_idx": c_end,
+                    "subtree": subtree,
+                })
+                c_idx = c_end
+            else:
+                c_idx += 1
+
+        blocks.append({
+            "mode": "parent_row",
+            "parent_idx": idx,
+            "parent_level": p_lvl,
+            "parent_row": dict(row),
+            "block_start": idx + 1,
+            "block_end": end_idx,
+            "direct_children": direct_children,
+        })
+
+    if blocks:
+        return blocks
+
+    # Fallback: rows tagged via `group_number == g_upper` without a dedicated parent assembly row
+    tagged_indices = [
+        i for i, r in enumerate(norm)
+        if r["group_number"].upper() == g_upper
+    ]
+    if tagged_indices:
+        first_idx = tagged_indices[0]
+        base_lvl = max(1, norm[first_idx]["level"] - 1)
+        direct_children = []
+        last_end = first_idx
+        for c_idx in tagged_indices:
+            c_row = norm[c_idx]
+            c_lvl = c_row["level"]
+            c_end = c_idx + 1
+            while c_end < len(norm) and norm[c_end]["level"] > c_lvl:
+                c_end += 1
+            last_end = max(last_end, c_end)
+            subtree = [
+                {
+                    "rel_level": max(1, r["level"] - base_lvl),
+                    "part_number": r["part_number"],
+                    "description": r["description"],
+                    "quantity": r["quantity"],
+                    "group_number": r["group_number"],
+                }
+                for r in norm[c_idx:c_end]
+            ]
+            direct_children.append({
+                "part_number": c_row["part_number"],
+                "part_upper": c_row["part_number"].upper(),
+                "description": c_row["description"],
+                "quantity": c_row["quantity"],
+                "group_number": c_row["group_number"],
+                "start_idx": c_idx,
+                "end_idx": c_end,
+                "subtree": subtree,
+            })
+        blocks.append({
+            "mode": "group_tag",
+            "parent_idx": None,
+            "parent_level": base_lvl,
+            "parent_row": None,
+            "block_start": first_idx,
+            "block_end": last_end,
+            "direct_children": direct_children,
+        })
+
+    return blocks
+
+
+def _normalize_bom_levels(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure BOM items start at Level 1 and do not skip levels."""
+    cleaned: list[dict[str, Any]] = []
+    for it in items:
+        pn = clean_bom_cell_text(it.get("part_number"))
+        if not pn:
+            continue
+        try:
+            lvl = max(1, min(11, int(it.get("level", 1) or 1)))
+        except (TypeError, ValueError):
+            lvl = 1
+        try:
+            qty = max(0.00001, round(float(it.get("quantity", 1.0) or 1.0), 5))
+        except (TypeError, ValueError):
+            qty = 1.0
+        cleaned.append({
+            "level": lvl,
+            "part_number": pn,
+            "description": clean_bom_cell_text(it.get("description")),
+            "quantity": qty,
+            "group_number": clean_bom_cell_text(it.get("group_number")),
+            "_uid": it.get("_uid") or str(uuid4())[:8],
+        })
+    if not cleaned:
+        return []
+    cleaned[0]["level"] = 1
+    for i in range(1, len(cleaned)):
+        if cleaned[i]["level"] > cleaned[i - 1]["level"] + 1:
+            cleaned[i]["level"] = cleaned[i - 1]["level"] + 1
+    return cleaned
+
+
+def _apply_group_sync_to_bom(
+    target_items: list[dict[str, Any]],
+    source_items: list[dict[str, Any]],
+    group_id: str,
+    selected_parts_upper: set[str] | None,
+    sync_mode: str,
+    catalog_desc_map: dict[str, str],
+) -> tuple[list[dict[str, Any]], int]:
+    """Synchronize `group_id` from `source_items` into `target_items`.
+
+    Returns `(updated_target_items, changed_parts_count)`.
+    """
+    src_blocks = _extract_group_children_from_items(source_items, group_id)
+    if not src_blocks:
+        return _normalize_bom_levels(target_items), 0
+
+    src_block = src_blocks[0]
+    src_children: list[dict[str, Any]] = []
+    src_by_part: dict[str, dict[str, Any]] = {}
+    for sb in src_blocks:
+        for sc in sb["direct_children"]:
+            p_up = sc["part_upper"]
+            if p_up not in src_by_part:
+                src_by_part[p_up] = sc
+                src_children.append(sc)
+            elif sc["quantity"] > src_by_part[p_up]["quantity"]:
+                src_by_part[p_up] = sc
+
+    norm_target = _normalize_bom_levels(target_items)
+    tgt_blocks = _extract_group_children_from_items(norm_target, group_id)
+    changes_count = 0
+
+    if tgt_blocks:
+        # Process from last block to first so index replacements stay valid
+        for tb in reversed(tgt_blocks):
+            t_lvl = max(1, tb["parent_level"])
+            tgt_children = tb["direct_children"]
+            tgt_by_part = {c["part_upper"]: c for c in tgt_children}
+            rebuilt_block: list[dict[str, Any]] = []
+
+            if tb["mode"] == "parent_row":
+                for tc in tgt_children:
+                    p_up = tc["part_upper"]
+                    if p_up in src_by_part:
+                        sc = src_by_part[p_up]
+                        if selected_parts_upper is None or p_up in selected_parts_upper:
+                            # Update quantity and description from source
+                            new_qty = sc["quantity"]
+                            if abs(new_qty - tc["quantity"]) > 0.00001:
+                                changes_count += 1
+                            for idx_sub, r in enumerate(tc["subtree"]):
+                                desc_val = r["description"]
+                                if idx_sub == 0 and sc["description"]:
+                                    desc_val = sc["description"]
+                                if not desc_val:
+                                    desc_val = catalog_desc_map.get(r["part_number"].upper(), "")
+                                rebuilt_block.append({
+                                    "level": min(11, t_lvl + r["rel_level"]),
+                                    "part_number": r["part_number"],
+                                    "description": desc_val,
+                                    "quantity": new_qty if idx_sub == 0 else r["quantity"],
+                                    "group_number": r["group_number"],
+                                    "_uid": str(uuid4())[:8],
+                                })
+                        else:
+                            for r in tc["subtree"]:
+                                rebuilt_block.append({
+                                    "level": min(11, t_lvl + r["rel_level"]),
+                                    "part_number": r["part_number"],
+                                    "description": r["description"] or catalog_desc_map.get(r["part_number"].upper(), ""),
+                                    "quantity": r["quantity"],
+                                    "group_number": r["group_number"],
+                                    "_uid": str(uuid4())[:8],
+                                })
+                    else:
+                        # Part exists in target under this group, but not in source
+                        if sync_mode == "match_current_exact":
+                            changes_count += 1
+                            continue
+                        for r in tc["subtree"]:
+                            rebuilt_block.append({
+                                "level": min(11, t_lvl + r["rel_level"]),
+                                "part_number": r["part_number"],
+                                "description": r["description"] or catalog_desc_map.get(r["part_number"].upper(), ""),
+                                "quantity": r["quantity"],
+                                "group_number": r["group_number"],
+                                "_uid": str(uuid4())[:8],
+                            })
+
+                # Append new parts from source (extra_in_current)
+                for sc in src_children:
+                    p_up = sc["part_upper"]
+                    if p_up not in tgt_by_part:
+                        if selected_parts_upper is None or p_up in selected_parts_upper:
+                            changes_count += 1
+                            for r in sc["subtree"]:
+                                rebuilt_block.append({
+                                    "level": min(11, t_lvl + r["rel_level"]),
+                                    "part_number": r["part_number"],
+                                    "description": r["description"] or catalog_desc_map.get(r["part_number"].upper(), ""),
+                                    "quantity": r["quantity"],
+                                    "group_number": r["group_number"],
+                                    "_uid": str(uuid4())[:8],
+                                })
+
+                norm_target[tb["block_start"]:tb["block_end"]] = rebuilt_block
+            else:
+                # Tagged group_number rows without a parent assembly row
+                append_rows: list[dict[str, Any]] = []
+                for sc in src_children:
+                    p_up = sc["part_upper"]
+                    if p_up not in tgt_by_part and (selected_parts_upper is None or p_up in selected_parts_upper):
+                        changes_count += 1
+                        for idx_sub, r in enumerate(sc["subtree"]):
+                            append_rows.append({
+                                "level": min(11, t_lvl + r["rel_level"]),
+                                "part_number": r["part_number"],
+                                "description": r["description"] or catalog_desc_map.get(r["part_number"].upper(), ""),
+                                "quantity": r["quantity"],
+                                "group_number": group_id if idx_sub == 0 else r["group_number"],
+                                "_uid": str(uuid4())[:8],
+                            })
+                if append_rows:
+                    norm_target[tb["block_end"]:tb["block_end"]] = append_rows
+    else:
+        # Target model does not contain this group yet; append the complete group at Level 2 and its children at Level 3+
+        p_row = src_block.get("parent_row")
+        g_pn = p_row["part_number"] if p_row else group_id
+        g_desc = (p_row.get("description") if p_row else "") or catalog_desc_map.get(g_pn.upper(), "")
+        g_qty = p_row.get("quantity", 1.0) if p_row else 1.0
+        norm_target.append({
+            "level": 2,
+            "part_number": g_pn,
+            "description": g_desc,
+            "quantity": g_qty,
+            "group_number": "",
+            "_uid": str(uuid4())[:8],
+        })
+        for sc in src_children:
+            changes_count += 1
+            for r in sc["subtree"]:
+                norm_target.append({
+                    "level": min(11, 2 + r["rel_level"]),
+                    "part_number": r["part_number"],
+                    "description": r["description"] or catalog_desc_map.get(r["part_number"].upper(), ""),
+                    "quantity": r["quantity"],
+                    "group_number": r["group_number"],
+                    "_uid": str(uuid4())[:8],
+                })
+
+    return _normalize_bom_levels(norm_target), changes_count
+
+
+def sync_group_parts_to_models(
+    project_id: str,
+    source_model_id: str,
+    source_items: list[dict[str, Any]],
+    target_model_ids: list[str],
+    group_identifiers: list[str] | None = None,
+    selected_part_numbers: list[str] | None = None,
+    sync_mode: str = "add_new_parts",
+    auto_add_parts: bool = True,
+    editor: str = "",
+) -> dict[str, Any]:
+    """Propagate new parts and/or synchronize shared group structures across multiple models' BOMs.
+
+    Args:
+        project_id: Active project ID.
+        source_model_id: The model currently being authored.
+        source_items: The BOM rows from the current model editor.
+        target_model_ids: List of other model IDs whose BOMs should be updated.
+        group_identifiers: Shared group/drawing numbers to synchronize. Defaults to all conflicting groups.
+        selected_part_numbers: Optional list of part numbers from current BOM to propagate. Defaults to all.
+        sync_mode:
+            - 'add_new_parts': Add selected new parts & update quantities in target models under the shared group(s).
+            - 'merge_both_ways': Add new parts to target models AND pull missing group parts from target models into source_items.
+            - 'match_current_exact': Make target models' group(s) match source_items's group(s) (removing extra target parts).
+        auto_add_parts: Whether to auto-add unknown parts to the Parts Catalog when saving.
+        editor: Current editor name for audit logging.
+
+    Returns:
+        dict with 'updated_source_items', 'updated_models', 'total_changes', 'synced_groups'.
+    """
+    clean_targets = [str(mid).strip() for mid in (target_model_ids or []) if str(mid).strip() and str(mid).strip() != str(source_model_id)]
+    selected_parts_upper = (
+        {clean_bom_cell_text(p).upper() for p in selected_part_numbers if clean_bom_cell_text(p)}
+        if selected_part_numbers is not None
+        else None
+    )
+
+    with connection() as conn:
+        cat_rows = conn.execute(
+            "SELECT part_number, description FROM parts WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+        catalog_desc_map = {
+            str(r["part_number"]).strip().upper(): str(r["description"] or "").strip()
+            for r in cat_rows
+        }
+        for it in source_items:
+            pn = clean_bom_cell_text(it.get("part_number"))
+            desc = clean_bom_cell_text(it.get("description"))
+            if pn and desc:
+                catalog_desc_map[pn.upper()] = desc
+
+        if not group_identifiers:
+            conflicts = check_group_number_conflicts(project_id, source_model_id, source_items, _conn=conn)
+            group_identifiers = list(dict.fromkeys(cf["group_identifier"] for cf in conflicts))
+        else:
+            group_identifiers = list(dict.fromkeys(clean_bom_cell_text(g).upper() for g in group_identifiers if clean_bom_cell_text(g)))
+
+        updated_source = _normalize_bom_levels(source_items)
+        if not updated_source:
+            raise ValueError("The current BOM must contain at least one item with a valid Part Number.")
+
+        lvl1_items = [it for it in updated_source if it["level"] == 1]
+        if lvl1_items:
+            curr_lvl1_pn = lvl1_items[0]["part_number"].strip().upper()
+            updated_source = [
+                it for idx, it in enumerate(updated_source)
+                if idx == 0 or it["part_number"].strip().upper() != curr_lvl1_pn
+            ]
+            other_lvl1_map = get_model_level1_assemblies(project_id, exclude_model_id=source_model_id, _conn=conn)
+            if curr_lvl1_pn in other_lvl1_map:
+                conflict_model = other_lvl1_map[curr_lvl1_pn]
+                raise ValueError(
+                    f"Level 1 Assembly Number '{lvl1_items[0]['part_number']}' is already assigned to model '{conflict_model}'. "
+                    f"Each model must have a distinct Level 1 Assembly Number."
+                )
+
+        # Preload target BOMs
+        target_boms: dict[str, list[dict[str, Any]]] = {}
+        target_model_numbers: dict[str, str] = {}
+        for t_mid in clean_targets:
+            m_row = conn.execute(
+                "SELECT model_number FROM project_models WHERE id=? AND project_id=?",
+                (t_mid, project_id),
+            ).fetchone()
+            if not m_row:
+                continue
+            target_model_numbers[t_mid] = str(m_row["model_number"]).strip()
+            t_bom = get_manual_model_bom(project_id, t_mid, _conn=conn)
+            if t_bom:
+                target_boms[t_mid] = t_bom
+
+        # Step 1: If sync_mode == 'merge_both_ways', pull any missing group parts from target models into all occurrences in updated_source
+        if sync_mode == "merge_both_ways":
+            for g_id in group_identifiers:
+                src_blocks = _extract_group_children_from_items(updated_source, g_id)
+                if not src_blocks:
+                    continue
+                for src_b in reversed(src_blocks):
+                    if src_b["mode"] != "parent_row":
+                        continue
+                    s_lvl = max(1, src_b["parent_level"])
+                    existing_src_parts = {c["part_upper"] for c in src_b["direct_children"]}
+                    pulled_rows: list[dict[str, Any]] = []
+
+                    for t_mid, t_bom in target_boms.items():
+                        t_blocks = _extract_group_children_from_items(t_bom, g_id)
+                        for tb in t_blocks:
+                            for tc in tb["direct_children"]:
+                                p_up = tc["part_upper"]
+                                if p_up not in existing_src_parts:
+                                    existing_src_parts.add(p_up)
+                                    for r in tc["subtree"]:
+                                        pulled_rows.append({
+                                            "level": min(11, s_lvl + r["rel_level"]),
+                                            "part_number": r["part_number"],
+                                            "description": r["description"] or catalog_desc_map.get(r["part_number"].upper(), ""),
+                                            "quantity": r["quantity"],
+                                            "group_number": r["group_number"],
+                                            "_uid": str(uuid4())[:8],
+                                        })
+                    if pulled_rows:
+                        updated_source[src_b["block_end"]:src_b["block_end"]] = pulled_rows
+                updated_source = _normalize_bom_levels(updated_source)
+
+        # Also ensure that if updated_source contains multiple occurrences of the same group_id, all occurrences in updated_source stay consistent
+        for g_id in group_identifiers:
+            src_blocks = _extract_group_children_from_items(updated_source, g_id)
+            if len(src_blocks) > 1:
+                eff_selected = None if sync_mode == "merge_both_ways" else selected_parts_upper
+                updated_source, _ = _apply_group_sync_to_bom(
+                    updated_source,
+                    updated_source,
+                    g_id,
+                    eff_selected,
+                    sync_mode,
+                    catalog_desc_map,
+                )
+
+    # Step 2: Apply group updates to each selected target model and save via save_manual_model_bom
+    updated_models: list[str] = []
+    total_changes = 0
+
+    for t_mid in clean_targets:
+        if t_mid not in target_boms:
+            continue
+        t_bom = target_boms[t_mid]
+        t_mnum = target_model_numbers[t_mid]
+        model_changes = 0
+        for g_id in group_identifiers:
+            # When merge_both_ways is used, all parts in updated_source's group should sync to target
+            eff_selected = None if sync_mode == "merge_both_ways" else selected_parts_upper
+            t_bom, chg = _apply_group_sync_to_bom(
+                t_bom,
+                updated_source,
+                g_id,
+                eff_selected,
+                sync_mode,
+                catalog_desc_map,
+            )
+            model_changes += chg
+
+        if model_changes > 0:
+            save_manual_model_bom(
+                project_id,
+                t_mid,
+                t_bom,
+                auto_add_parts=auto_add_parts,
+                editor=editor,
+                source_model_id=None,
+            )
+            with connection() as conn:
+                record_audit_event(
+                    project_id,
+                    "Model Tree BOM",
+                    f"Synced shared group ({', '.join(group_identifiers)}) structure to model '{t_mnum}'",
+                    model_changes,
+                    editor_name=editor,
+                    _conn=conn,
+                )
+            updated_models.append(t_mnum)
+            total_changes += model_changes
+
+    return {
+        "updated_source_items": updated_source,
+        "updated_models": updated_models,
+        "updated_model_ids": [t_mid for t_mid in clean_targets if target_model_numbers.get(t_mid) in updated_models],
+        "total_changes": total_changes,
+        "synced_groups": group_identifiers,
+    }
 
 
 def _extract_part_root(pn: str) -> str:
@@ -5439,6 +6199,86 @@ def _part_type(pn: str) -> str:
         return "G"
     m = re.search(r"[GP]\d+", upper)
     return m.group(0)[0] if m else ""
+
+
+def _identify_top_level_assembly_pns(
+    project_id: str,
+    cat_rows: list[Any],
+    level1_assemblies: dict[str, str] | None = None,
+    top_pn: str = "",
+    *,
+    _conn: sqlite3.Connection | None = None,
+) -> set[str]:
+    """Identify uppercase part numbers of Level 1 top-level model assemblies in the project."""
+    top_level_pns: set[str] = set()
+    if level1_assemblies:
+        for k in level1_assemblies.keys():
+            if str(k or "").strip():
+                top_level_pns.add(str(k).strip().upper())
+    if str(top_pn or "").strip():
+        top_level_pns.add(str(top_pn).strip().upper())
+
+    read_rows = (
+        lambda sql, params=(): [dict(row) for row in _conn.execute(sql, params).fetchall()]
+        if _conn is not None
+        else query(sql, params)
+    )
+    occ_rows = read_rows(
+        """SELECT o.proposed_depth, o.parent_tracker_number, o.child_tracker_number, p.part_number
+           FROM pits_bom_occurrences o
+           LEFT JOIN parts p ON p.id = o.child_part_id
+           WHERE o.project_id=?""",
+        (project_id,),
+    )
+    l2_plus_pns: set[str] = set()
+    parents_of_l3_plus: set[str] = set()
+    for r in occ_rows:
+        depth = int(r.get("proposed_depth") or 1)
+        p_trk = re.sub(r"#\d+$", "", str(r.get("parent_tracker_number") or "").strip()).upper()
+        c_trk = re.sub(r"#\d+$", "", str(r.get("child_tracker_number") or "").strip()).upper()
+        p_num = str(r.get("part_number") or "").strip().upper()
+        if depth <= 1 or not p_trk:
+            if c_trk:
+                top_level_pns.add(c_trk)
+            if p_num:
+                top_level_pns.add(p_num)
+        else:
+            if c_trk:
+                l2_plus_pns.add(c_trk)
+            if p_num:
+                l2_plus_pns.add(p_num)
+            if depth >= 3 and p_trk:
+                parents_of_l3_plus.add(p_trk)
+    subassembly_pns = l2_plus_pns & parents_of_l3_plus
+
+    final_asm_pattern = re.compile(
+        r"\b(?:final\s*(?:asm|assembly|assy)|top[\s-]*level\s*(?:asm|assembly|assy))\b",
+        re.IGNORECASE,
+    )
+    for r in cat_rows:
+        pn = str((r.get("part_number") if isinstance(r, dict) else r["part_number"]) or "").strip()
+        desc = str((r.get("description") if isinstance(r, dict) else r["description"]) or "").strip()
+        pn_u = pn.upper()
+        if not pn_u or pn_u in subassembly_pns:
+            continue
+        if final_asm_pattern.search(desc):
+            top_level_pns.add(pn_u)
+
+    l1_roots = {
+        _extract_part_root(pn)
+        for pn in top_level_pns
+        if _part_type(pn) == "G" and len(_extract_part_root(pn)) >= 6
+    }
+    if l1_roots:
+        for r in cat_rows:
+            pn = str((r.get("part_number") if isinstance(r, dict) else r["part_number"]) or "").strip()
+            pn_u = pn.upper()
+            if not pn_u or pn_u in subassembly_pns:
+                continue
+            if _part_type(pn) == "G" and _extract_part_root(pn) in l1_roots:
+                top_level_pns.add(pn_u)
+
+    return top_level_pns
 
 
 def predict_model_bom_from_features(
@@ -5526,6 +6366,15 @@ def predict_model_bom_from_features(
         part_by_num = {str(r["part_number"]).strip().upper(): dict(r) for r in cat_rows}
 
         level1_assemblies = get_model_level1_assemblies(project_id, _conn=conn)
+        top_pn = str(top_level_part_number or "").strip()
+        top_desc = str(top_level_description or "").strip()
+        top_level_assembly_pns = _identify_top_level_assembly_pns(
+            project_id,
+            cat_rows,
+            level1_assemblies=level1_assemblies,
+            top_pn=top_pn,
+            _conn=conn,
+        )
 
         rules_rows = conn.execute(
             """SELECT pfr.part_id, pfr.feature_id, pfr.value, cf.name as feature_name
@@ -5556,7 +6405,10 @@ def predict_model_bom_from_features(
             matched_pns = []
             for pid in matched_pids:
                 if pid in part_by_id:
-                    matched_pns.append(str(part_by_id[pid]["part_number"]).strip())
+                    pn_str = str(part_by_id[pid]["part_number"]).strip()
+                    if pn_str.upper() in top_level_assembly_pns:
+                        continue
+                    matched_pns.append(pn_str)
                     target_matched_part_ids.add(pid)
             feature_matches.append({
                 "feature_name": f_data["name"],
@@ -5605,7 +6457,7 @@ def predict_model_bom_from_features(
                     cand_desc = str(cand_part["description"] or "").strip()
                     cand_type = _part_type(cand_pn)
 
-                    if cand_pn.upper() in level1_assemblies or (top_pn and cand_pn.upper() == top_pn.upper()):
+                    if cand_pn.upper() in top_level_assembly_pns or cand_pn.upper() in level1_assemblies or (top_pn and cand_pn.upper() == top_pn.upper()):
                         continue
 
                     cand_root = _extract_part_root(cand_pn)
@@ -5679,10 +6531,12 @@ def predict_model_bom_from_features(
                             "from_value": best_src_val or "original",
                             "to_value": f_val,
                         })
-                        replacements_by_idx[best_match_idx] = {
-                            "part_number": cand_pn,
-                            "description": cand_desc,
-                        }
+                        for r_idx, r_item in enumerate(best_template_bom):
+                            if int(r_item.get("level", 1) or 1) > 1 and str(r_item.get("part_number") or "").strip().upper() == orig_pn.upper():
+                                replacements_by_idx[r_idx] = {
+                                    "part_number": cand_pn,
+                                    "description": cand_desc,
+                                }
                         used_replacement_pids.add(t_pid)
 
             first_l1_done = False
@@ -5698,6 +6552,8 @@ def predict_model_bom_from_features(
                         "_uid": str(uuid4())[:8],
                     })
                     first_l1_done = True
+                elif idx not in replacements_by_idx and str(item.get("part_number") or "").strip().upper() in top_level_assembly_pns:
+                    continue
                 elif idx in replacements_by_idx:
                     predicted_items.append({
                         "level": lvl if lvl > 1 else 2,
@@ -5729,7 +6585,7 @@ def predict_model_bom_from_features(
                     cand_pn = str(cand_part["part_number"]).strip()
                     cand_desc = str(cand_part["description"] or "").strip()
 
-                    if cand_pn.upper() in level1_assemblies or (top_pn and cand_pn.upper() == top_pn.upper()):
+                    if cand_pn.upper() in top_level_assembly_pns or cand_pn.upper() in level1_assemblies or (top_pn and cand_pn.upper() == top_pn.upper()):
                         continue
                     if cand_pn.upper() in existing_pns:
                         continue
@@ -5767,7 +6623,7 @@ def predict_model_bom_from_features(
                 app = str(r["model_applicability"] or "All").strip()
                 if top_pn and pn.upper() == top_pn.upper():
                     continue
-                if pn.upper() in level1_assemblies:
+                if pn.upper() in top_level_assembly_pns or pn.upper() in level1_assemblies:
                     continue
                 if pid in target_matched_part_ids or app.lower() == "all" or target_model_number.upper() in app.upper():
                     predicted_items.append({
@@ -5789,6 +6645,150 @@ def predict_model_bom_from_features(
             "substitutions": substitutions,
             "predicted_items": predicted_items,
             "total_parts": len(predicted_items),
+        }
+
+    if _conn is not None:
+        return _execute(_conn)
+    with connection() as conn:
+        return _execute(conn)
+
+
+def clear_model_boms(
+    project_id: str,
+    model_ids: list[str] | None = None,
+    *,
+    editor: str = "",
+    _conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """Clear saved BOM structure (pits_bom_occurrences usages) for the specified model(s) or all models in the project.
+
+    Does NOT delete any parts from the Parts Catalog (`parts` table).
+    """
+    if not project_id:
+        raise ValueError("Project ID is required.")
+
+    def _execute(conn: sqlite3.Connection) -> dict[str, Any]:
+        all_models = conn.execute(
+            "SELECT id, model_number, display_name FROM project_models WHERE project_id=? ORDER BY model_number",
+            (project_id,),
+        ).fetchall()
+        if not all_models:
+            return {"cleared_models": [], "cleared_model_ids": [], "occurrences_removed": 0}
+
+        if model_ids is None:
+            target_rows = list(all_models)
+        else:
+            wanted = {str(mid).strip() for mid in model_ids if str(mid).strip()}
+            target_rows = [r for r in all_models if str(r["id"]).strip() in wanted]
+
+        if not target_rows:
+            return {"cleared_models": [], "cleared_model_ids": [], "occurrences_removed": 0}
+
+        cleared_mids = [str(r["id"]).strip() for r in target_rows]
+        cleared_mnums = [str(r["model_number"]).strip() for r in target_rows]
+        cleared_clean_targets = {re.sub(r"[^A-Za-z0-9]", "", mn).upper() for mn in cleared_mnums if mn}
+        clearing_all_models = len(cleared_mids) == len(all_models)
+
+        occ_rows = conn.execute(
+            "SELECT id, raw_levels_json, proposed_quantity, approved_assignment_id, confirmed_section_id FROM pits_bom_occurrences WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+
+        now_ts = now_iso()
+        removed_count = 0
+
+        for occ in occ_rows:
+            occ_id = str(occ["id"])
+            has_fishbone_link = bool(occ["approved_assignment_id"] or occ["confirmed_section_id"])
+            if clearing_all_models:
+                if not has_fishbone_link:
+                    conn.execute("DELETE FROM pits_bom_occurrences WHERE id=?", (occ_id,))
+                else:
+                    try:
+                        data = json.loads(occ["raw_levels_json"] or "{}")
+                        if not isinstance(data, dict):
+                            data = {}
+                    except Exception:
+                        data = {}
+                    data["model_usages"] = {}
+                    data["model_sequence"] = {}
+                    conn.execute(
+                        "UPDATE pits_bom_occurrences SET raw_levels_json=?, updated_at=? WHERE id=?",
+                        (json.dumps(data, ensure_ascii=False), now_ts, occ_id),
+                    )
+                removed_count += 1
+                continue
+
+            try:
+                data = json.loads(occ["raw_levels_json"] or "{}")
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception:
+                data = {}
+
+            usages = data.get("model_usages")
+            if not isinstance(usages, dict):
+                default_q = float(occ["proposed_quantity"] if occ["proposed_quantity"] is not None else 1.0)
+                usages = {
+                    str(r["model_number"]).strip(): default_q
+                    for r in all_models
+                    if str(r["model_number"]).strip()
+                }
+
+            keys_to_purge = []
+            for mk in list(usages.keys()):
+                mk_str = str(mk).strip()
+                clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk_str).upper()
+                matched = False
+                if mk_str in cleared_mnums or clean_mk in cleared_clean_targets:
+                    matched = True
+                else:
+                    for ct in cleared_clean_targets:
+                        if len(ct) >= 6 and (ct[:6] in clean_mk or (len(clean_mk) >= 6 and clean_mk[:6] in ct)):
+                            matched = True
+                            break
+                if matched:
+                    keys_to_purge.append(mk)
+
+            if not keys_to_purge:
+                continue
+
+            for kp in keys_to_purge:
+                usages.pop(kp, None)
+            data["model_usages"] = usages
+
+            if isinstance(data.get("model_sequence"), dict):
+                for kp in keys_to_purge:
+                    data["model_sequence"].pop(kp, None)
+
+            if not usages and not has_fishbone_link:
+                conn.execute("DELETE FROM pits_bom_occurrences WHERE id=?", (occ_id,))
+            else:
+                conn.execute(
+                    "UPDATE pits_bom_occurrences SET raw_levels_json=?, updated_at=? WHERE id=?",
+                    (json.dumps(data, ensure_ascii=False), now_ts, occ_id),
+                )
+            removed_count += 1
+
+        action_desc = (
+            f"Cleared all model BOMs ({', '.join(cleared_mnums)})"
+            if clearing_all_models
+            else f"Cleared BOM for model(s): {', '.join(cleared_mnums)}"
+        )
+        record_audit_event(
+            project_id,
+            "Model Tree BOM",
+            action_desc,
+            removed_count,
+            editor_name=editor,
+            details={"cleared_models": cleared_mnums, "occurrences_affected": removed_count},
+            _conn=conn,
+        )
+
+        return {
+            "cleared_models": cleared_mnums,
+            "cleared_model_ids": cleared_mids,
+            "occurrences_removed": removed_count,
         }
 
     if _conn is not None:
@@ -5826,7 +6826,8 @@ __domain_exports__ = [
     'expand_subassembly_items', 'sort_bom_hierarchy',
     'sync_builder_inputs_to_items', 'get_live_bom_editor_items',
     'move_bom_rows_up', 'move_bom_rows_down', 'delete_bom_rows',
-    'check_group_number_conflicts', 'predict_model_bom_from_features'
+    'check_group_number_conflicts', 'sync_group_parts_to_models',
+    'predict_model_bom_from_features', 'clear_model_boms'
 ]
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):

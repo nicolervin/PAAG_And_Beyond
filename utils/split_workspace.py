@@ -59,6 +59,35 @@ _NAV_CSS = """
 .split-nav-title {
   flex: 1;
   font-size: .9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.split-nav-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: .25rem;
+}
+.split-nav-popout {
+  align-items: center;
+  border-radius: .25rem;
+  color: color-mix(in srgb, var(--text-color) 45%, transparent);
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  line-height: 1;
+  padding: .15rem .2rem;
+  text-decoration: none;
+  transition: color .15s ease, background .15s ease;
+}
+.split-nav-popout:hover {
+  background: color-mix(in srgb, var(--primary-color) 18%, transparent);
+  color: var(--primary-color);
+}
+.split-nav-popout-icon {
+  font-family: "Material Symbols Rounded", "Material Symbols Outlined", sans-serif;
+  font-size: 1.05rem;
+  line-height: 1;
 }
 .split-nav-grip {
   color: color-mix(in srgb, var(--text-color) 48%, transparent);
@@ -121,8 +150,40 @@ export default function(component) {
 
   const help = document.createElement('div')
   help.className = 'split-nav-help'
-  help.textContent = 'Click to open. Drag a page to the split target to view two pages together.'
+  help.textContent = 'Click to open. Use ⧉ to pop out to a new window. Drag to split view.'
   root.appendChild(help)
+
+  const makePageUrl = (urlPath) => {
+    try {
+      const parts = window.location.pathname.split('/').filter(Boolean)
+      if (parts.length > 0) {
+        const last = parts[parts.length - 1]
+        if (last === data.active_url_path || last === data.secondary_url_path) {
+          parts.pop()
+        }
+      }
+      const basePath = '/' + (parts.length > 0 ? parts.join('/') + '/' : '')
+      const cleanPath = (urlPath && urlPath !== '__default__') ? urlPath : ''
+      const targetUrl = new URL(basePath + cleanPath, window.location.origin)
+      if (cleanPath) {
+        targetUrl.searchParams.set('page', cleanPath)
+      }
+      if (data.project_id) {
+        targetUrl.searchParams.set('project_id', data.project_id)
+      }
+      if (data.scenario_id) {
+        targetUrl.searchParams.set('scenario_id', data.scenario_id)
+      }
+      return targetUrl.toString()
+    } catch (e) {
+      const q = []
+      if (urlPath && urlPath !== '__default__') q.push('page=' + encodeURIComponent(urlPath))
+      if (data.project_id) q.push('project_id=' + encodeURIComponent(data.project_id))
+      if (data.scenario_id) q.push('scenario_id=' + encodeURIComponent(data.scenario_id))
+      const qs = q.length > 0 ? '?' + q.join('&') : ''
+      return (urlPath && urlPath !== '__default__') ? `./${urlPath}${qs}` : `./${qs}`
+    }
+  }
 
   let draggedPath = ''
   let suppressClick = false
@@ -150,11 +211,32 @@ export default function(component) {
       title.textContent = page.title
       item.appendChild(title)
 
+      const actions = document.createElement('div')
+      actions.className = 'split-nav-actions'
+
+      const popout = document.createElement('a')
+      popout.className = 'split-nav-popout'
+      popout.title = `Open ${page.title} in new window or tab`
+      popout.setAttribute('aria-label', `Open ${page.title} in new window or tab`)
+      popout.target = '_blank'
+      popout.rel = 'noopener noreferrer'
+      popout.href = makePageUrl(page.url_path)
+      popout.onclick = (event) => {
+        event.stopPropagation()
+      }
+      const popoutIcon = document.createElement('span')
+      popoutIcon.className = 'split-nav-popout-icon'
+      popoutIcon.textContent = 'open_in_new'
+      popout.appendChild(popoutIcon)
+      actions.appendChild(popout)
+
       const grip = document.createElement('span')
       grip.className = 'split-nav-grip'
       grip.title = 'Drag to split view'
       grip.textContent = '⠿'
-      item.appendChild(grip)
+      actions.appendChild(grip)
+
+      item.appendChild(actions)
 
       item.onclick = () => {
         if (suppressClick) return
@@ -198,6 +280,21 @@ export default function(component) {
     const label = document.createElement('span')
     label.textContent = `Split: ${data.secondary_title}`
     open.appendChild(label)
+
+    const popoutSecondary = document.createElement('a')
+    popoutSecondary.className = 'split-nav-popout'
+    popoutSecondary.title = `Pop out ${data.secondary_title} to separate window`
+    popoutSecondary.setAttribute('aria-label', `Pop out ${data.secondary_title} to separate window`)
+    popoutSecondary.target = '_blank'
+    popoutSecondary.rel = 'noopener noreferrer'
+    popoutSecondary.href = makePageUrl(data.secondary_url_path)
+    popoutSecondary.onclick = (e) => e.stopPropagation()
+    const popSecIcon = document.createElement('span')
+    popSecIcon.className = 'split-nav-popout-icon'
+    popSecIcon.textContent = 'open_in_new'
+    popoutSecondary.appendChild(popSecIcon)
+    open.appendChild(popoutSecondary)
+
     const close = document.createElement('button')
     close.className = 'split-nav-close'
     close.title = 'Close split view'
@@ -211,7 +308,7 @@ export default function(component) {
 """
 
 _SPLIT_NAVIGATION = st.components.v2.component(
-    "paag_split_navigation_v1",
+    "paag_split_navigation_v2",
     html=_NAV_HTML,
     css=_NAV_CSS,
     js=_NAV_JS,
@@ -323,12 +420,55 @@ def _is_app_test() -> bool:
     return bool(context and context.session_id == "test session id")
 
 
+def build_page_url(
+    url_path: str = "",
+    *,
+    project_id: str | None = None,
+    scenario_id: str | None = None,
+    query_params: dict[str, Any] | None = None,
+) -> str:
+    """Build a relative URL targeting a page with project and scenario query parameters.
+
+    This helper is suitable for st.link_button and <a> tags to pop out pages into
+    separate browser windows or tabs while maintaining project and scenario context.
+    """
+    pid = project_id if project_id is not None else st.session_state.get("project_id")
+    sid = scenario_id if scenario_id is not None else st.session_state.get("scenario_id")
+
+    clean_path = url_path.strip() if url_path and url_path != "__default__" else ""
+    if not clean_path and not url_path:
+        curr = str(st.session_state.get("current_url_path") or "")
+        if curr and curr != "__default__":
+            clean_path = curr
+
+    params: dict[str, Any] = {}
+    if clean_path:
+        params["page"] = clean_path
+    if pid:
+        params["project_id"] = str(pid)
+    if sid:
+        params["scenario_id"] = str(sid)
+    if query_params:
+        for k, v in query_params.items():
+            if v is not None:
+                params[k] = str(v)
+
+    from urllib.parse import urlencode
+
+    qs = f"?{urlencode(params)}" if params else ""
+    if clean_path:
+        return f"./{clean_path}{qs}"
+    return f"./{qs}" if qs else "./"
+
+
 def split_navigation(
     sections: list[dict[str, Any]],
     *,
     active_url_path: str,
     secondary_url_path: str,
     secondary_title: str,
+    project_id: str = "",
+    scenario_id: str = "",
     key: str,
     on_navigate_change: Callable[[], None],
     on_split_change: Callable[[], None],
@@ -344,6 +484,8 @@ def split_navigation(
             "active_url_path": active_url_path,
             "secondary_url_path": secondary_url_path,
             "secondary_title": secondary_title,
+            "project_id": str(project_id or ""),
+            "scenario_id": str(scenario_id or ""),
         },
         on_navigate_change=on_navigate_change,
         on_split_change=on_split_change,
