@@ -7,13 +7,16 @@ from utils import db_core as _db_core
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
+@cached_store_read
 def projects() -> list[dict]:
     return query("SELECT * FROM projects ORDER BY updated_at DESC")
 
+@cached_store_read
 def get_project(project_id: str) -> dict | None:
     rows = query("SELECT * FROM projects WHERE id = ?", (project_id,))
     return rows[0] if rows else None
 
+@cached_store_read
 def planning_scenarios(project_id: str, include_archived: bool = False) -> list[dict]:
     archived_clause = "" if include_archived else "AND s.status <> 'Archived'"
     return query(
@@ -25,6 +28,7 @@ def planning_scenarios(project_id: str, include_archived: bool = False) -> list[
         (project_id,),
     )
 
+@cached_store_read
 def get_planning_scenario(project_id: str, scenario_id: str) -> dict | None:
     rows = query(
         "SELECT * FROM planning_scenarios WHERE id=? AND project_id=?",
@@ -32,6 +36,7 @@ def get_planning_scenario(project_id: str, scenario_id: str) -> dict | None:
     )
     return rows[0] if rows else None
 
+@cached_store_read
 def table_view_preference(
     project_id: str,
     editor_name: str,

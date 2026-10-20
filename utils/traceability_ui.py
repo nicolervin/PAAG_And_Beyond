@@ -522,10 +522,9 @@ def render_traceability_matrix_tab(
 
         # Excel export
         try:
-            excel_bytes = dataframe_to_excel(table_df)
             st.download_button(
                 "📥 Export Traceability Matrix (Excel)",
-                data=excel_bytes,
+                data=lambda: dataframe_to_excel(table_df),
                 file_name=f"traceability_matrix_{project_id}_{scenario_id}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key=f"export_matrix_excel_{project_id}",

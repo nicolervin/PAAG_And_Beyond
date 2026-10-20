@@ -864,12 +864,13 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                             )
                         preview = mapped_bom(raw, mapping)
                         preview_for_display = preview.copy()
-                        preview_for_display["model_applicability"] = preview_for_display["model_applicability"].apply(
-                            lambda value: ", ".join(
+                        preview_for_display["model_applicability"] = [
+                            ", ".join(
                                 "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
                                 for model in (split_filter_values(value) or ["All"])
                             )
-                        )
+                            for value in preview_for_display["model_applicability"]
+                        ]
                         mapped_preview = filter_table(
                             preview_for_display,
                             key="mapped_bom_preview_filters",
@@ -910,12 +911,17 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
         st.write("The workbook contains project, confirmed parts, Manufacturing BOM review, work elements, and concerns sheets, plus a flattened **Lucid Data Link** sheet.")
         st.caption("This is a snapshot export. A later release can add a controlled sync and Lucid-specific identifier strategy.")
         project = get_project(project_id)
-        workbook = export_workbook(project_id, scenario_id)
         scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
         safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in project["name"])
         revision_label = scenario["revision_label"] if scenario else project["revision"]
-        st.download_button("Download Excel workbook", workbook, file_name=f"{safe_name}_rev_{revision_label}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", icon=":material/download:")
+        st.download_button(
+            "Download Excel workbook",
+            data=lambda: export_workbook(project_id, scenario_id),
+            file_name=f"{safe_name}_rev_{revision_label}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            icon=":material/download:",
+        )
 
 
 

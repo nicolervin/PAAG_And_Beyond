@@ -6,6 +6,7 @@ from typing import Any
 
 import sys as _sys
 from utils import db_core as _db_core
+from utils.cache_store import cached_store_read
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -13,6 +14,7 @@ PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
 
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
 
+@cached_store_read
 def project_table(
     table: str,
     project_id: str,
@@ -86,6 +88,7 @@ def project_table(
         frame["part_code"] = derived_part_code.where(derived_part_code != "", existing_part_code)
     return frame
 
+@cached_store_read
 def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]:
     """Return explicit per-scenario part activity; missing rows default to active."""
     rows = query(
@@ -99,6 +102,7 @@ def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]
     )
     return {str(row["part_id"]): bool(row["active"]) for row in rows}
 
+@cached_store_read
 def active_part_ids(project_id: str, scenario_id: str) -> set[str]:
     """Return project part IDs active in a scenario, defaulting new/unmapped parts to active."""
     rows = query(
@@ -648,9 +652,11 @@ def delete_part_image(image_id: str) -> None:
                 pass
     execute("DELETE FROM part_images WHERE id=?", (image_id,))
 
+@cached_store_read
 def part_images(part_id: str) -> list[dict]:
     return query("SELECT * FROM part_images WHERE part_id = ? ORDER BY created_at", (part_id,))
 
+@cached_store_read
 def complexity_features(project_id: str) -> pd.DataFrame:
     rows = query(
         "SELECT * FROM complexity_features WHERE project_id=? ORDER BY sequence, category, name",
@@ -710,6 +716,7 @@ def complexity_feature_delete_impacts(
         columns=columns,
     )
 
+@cached_store_read
 def complexity_tree(project_id: str) -> pd.DataFrame:
     models = project_models(project_id)
     if models.empty:
@@ -802,6 +809,7 @@ def potential_duplicate_models(project_id: str, edited: pd.DataFrame) -> list[di
                 )
     return conflicts
 
+@cached_store_read
 def part_feature_rules(project_id: str) -> pd.DataFrame:
     """Return saved part rules for catalog parts."""
     return pd.DataFrame(query(
@@ -1333,6 +1341,7 @@ def apply_inferred_part_feature_rules(
             )
     return updated
 
+@cached_store_read
 def complexity_planning_snapshot(project_id: str) -> dict:
     with connection() as conn:
         return {
@@ -1519,6 +1528,7 @@ def update_complexity_tree(project_id: str, edited: pd.DataFrame) -> int:
             )
     return saved
 
+@cached_store_read
 def model_planning_snapshot(project_id: str) -> dict:
     """Capture model definitions and every project field affected by model renames."""
     with connection() as conn:
@@ -1784,9 +1794,11 @@ def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
             raise ValueError("Official model numbers must be unique.") from exc
     return len(edited)
 
+@cached_store_read
 def pits_records(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query("SELECT * FROM pits_records WHERE project_id = ? ORDER BY CAST(pits_id AS INTEGER), pits_id", (project_id,)))
 
+@cached_store_read
 def pits_revisions(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query(
         """SELECT p.pits_id, r.revision_no, r.imported_at, r.source_payload
@@ -1795,6 +1807,7 @@ def pits_revisions(project_id: str) -> pd.DataFrame:
         (project_id,),
     ))
 
+@cached_store_read
 def pits_bom_occurrences(
     project_id: str, *, actionable_only: bool = False
 ) -> pd.DataFrame:
@@ -3775,6 +3788,7 @@ def model_bom_tree_nodes(
         return nodes
 
 
+@cached_store_read
 def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[str, Any]:
     """Retrieve the PITS BOM tree structure with reconciliation status against Parts Catalog and Fishbone.
 
@@ -3890,6 +3904,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                         break
 
             qualifying_nodes: list[dict[str, Any]] = []
+            qualifying_trackers: set[str] = set()
             pre_stack: dict[int, dict[str, Any]] = {}
 
             for pr in parsed_rows:
@@ -3944,7 +3959,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                                     break
 
                 raw_pt = str(r["parent_tracker_number"] or "").strip()
-                if not raw_pt and depth > 1:
+                if (not raw_pt or raw_pt not in qualifying_trackers) and depth > 1:
                     p_fallback = pre_stack.get(depth - 1)
                     if p_fallback:
                         raw_pt = str(p_fallback.get("child_tracker") or "").strip()
@@ -3990,6 +4005,8 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
 
                 pre_stack[depth] = node
                 pre_stack = {lvl: n for lvl, n in pre_stack.items() if lvl <= depth}
+                if node["child_tracker"]:
+                    qualifying_trackers.add(node["child_tracker"])
                 qualifying_nodes.append(node)
 
             l1_pns_tree = {
@@ -4195,6 +4212,7 @@ def _occurrence_has_active_usages(raw_levels_str: str | None) -> bool:
     return True
 
 
+@cached_store_read
 def pits_assembly_mini_bom(
     project_id: str,
     part_id: str = "",
@@ -4513,6 +4531,7 @@ def sort_bom_hierarchy(
     return ordered
 
 
+@cached_store_read
 def get_manual_model_bom(
     project_id: str,
     model_id: str,
@@ -4637,6 +4656,7 @@ def get_manual_model_bom(
         return _execute(conn)
 
 
+@cached_store_read
 def get_known_subassembly_structure(
     project_id: str,
     part_number: str,
@@ -6407,6 +6427,11 @@ def _identify_top_level_assembly_pns(
            WHERE o.project_id=?""",
         (project_id,),
     )
+    parents_of_l2_plus: set[str] = {
+        re.sub(r"#\d+$", "", str(r.get("parent_tracker_number") or "").strip()).upper()
+        for r in occ_rows
+        if int(r.get("proposed_depth") or 1) >= 2 and str(r.get("parent_tracker_number") or "").strip()
+    }
     l2_plus_pns: set[str] = set()
     parents_of_l3_plus: set[str] = set()
     for r in occ_rows:
@@ -6415,10 +6440,11 @@ def _identify_top_level_assembly_pns(
         c_trk = re.sub(r"#\d+$", "", str(r.get("child_tracker_number") or "").strip()).upper()
         p_num = str(r.get("part_number") or "").strip().upper()
         if depth <= 1 or not p_trk:
-            if c_trk:
-                top_level_pns.add(c_trk)
-            if p_num:
-                top_level_pns.add(p_num)
+            if (c_trk and c_trk in parents_of_l2_plus) or (p_num and p_num in parents_of_l2_plus):
+                if c_trk:
+                    top_level_pns.add(c_trk)
+                if p_num:
+                    top_level_pns.add(p_num)
         else:
             if c_trk:
                 l2_plus_pns.add(c_trk)
@@ -6729,7 +6755,11 @@ def predict_model_bom_from_features(
                         "_uid": str(uuid4())[:8],
                     })
                     first_l1_done = True
-                elif idx not in replacements_by_idx and str(item.get("part_number") or "").strip().upper() in top_level_assembly_pns:
+                elif (
+                    lvl > 1
+                    and idx not in replacements_by_idx
+                    and str(item.get("part_number") or "").strip().upper() in top_level_assembly_pns
+                ) or str(item.get("part_number") or "").strip().upper() == top_pn.strip().upper():
                     continue
                 elif idx in replacements_by_idx:
                     predicted_items.append({

@@ -253,12 +253,11 @@ def render_pin_map_tab(
             with col_dl:
                 if has_cad_file:
                     try:
-                        cad_bytes = cad_p.read_bytes()
                         size_mb = cad_size_int / (1024 * 1024)
                         btn_txt = f"Download AutoCAD ({cad_name_str})" if size_mb < 0.1 else f"Download AutoCAD ({cad_name_str} · {size_mb:.1f} MB)"
                         st.download_button(
                             btn_txt,
-                            data=cad_bytes,
+                            data=cad_p.read_bytes,
                             file_name=cad_name_str,
                             mime="application/octet-stream",
                             icon=":material/download:",
@@ -575,7 +574,7 @@ def render_pin_map_tab(
     ]
     st.download_button(
         "Export filtered Pin Map data",
-        data=dataframe_to_excel(visible.reindex(columns=export_columns), "Pin Map"),
+        data=lambda: dataframe_to_excel(visible.reindex(columns=export_columns), "Pin Map"),
         file_name="pin_map_filtered.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon=":material/download:",

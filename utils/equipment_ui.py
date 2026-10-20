@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
+from utils.media_cache import cached_image_bytes
 from utils.equipment_store import (
     CONVEYOR_ZONE_COLUMNS,
     EQUIPMENT_FUNCTION_AREAS,
@@ -118,7 +119,19 @@ def _equipment_export(frame: pd.DataFrame) -> pd.DataFrame:
     export["Description"] = export.get("description", "")
     export["Manufacturer"] = export.get("manufacturer", "")
     export["Model"] = export.get("model", "")
-    export["Station / Pitch"] = export.apply(_pitch_label, axis=1) if not export.empty else ""
+    export["Station / Pitch"] = (
+        [
+            f"{_text(num) or 'Unassigned'} — {_text(nm)}"
+            if _text(nm)
+            else (_text(num) or "Unassigned")
+            for num, nm in zip(
+                export.get("pitch_number", []),
+                export.get("pitch_name", []),
+            )
+        ]
+        if not export.empty
+        else ""
+    )
     export["Notes"] = export.get("notes", "")
     return export.reindex(
         columns=[
@@ -225,7 +238,7 @@ def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = T
         )
         st.download_button(
             "Export filtered rows",
-            dataframe_to_excel(
+            lambda: dataframe_to_excel(
                 visible[["label", "tier", "functional_areas", "updated_at"]],
                 sheet_name="Equipment Types",
             ),
@@ -470,7 +483,7 @@ def _render_equipment_table(
     )
     st.download_button(
         "Export filtered rows",
-        dataframe_to_excel(_equipment_export(visible), sheet_name="Equipment"),
+        lambda: dataframe_to_excel(_equipment_export(visible), sheet_name="Equipment"),
         file_name=f"{functional_area.lower()}_{type_label.lower().replace(' ', '_')}_equipment.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon=":material/download:",
@@ -594,7 +607,7 @@ def _render_equipment_detail(
         st.subheader(_text(asset["name"]))
         image_path = Path(_text(asset.get("image_path")))
         if image_path.is_file():
-            st.image(str(image_path), caption=_text(asset["name"]), width=420)
+            st.image(cached_image_bytes(image_path, max_dim=900) or str(image_path), caption=_text(asset["name"]), width=420)
         else:
             st.caption("No primary equipment image attached.")
         upload = st.file_uploader(
@@ -1529,7 +1542,7 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
         curr_img_path = str(current_zone.get("orientation_image_path") or "")
         with img_col1:
             if curr_img_path and Path(curr_img_path).exists():
-                st.image(curr_img_path, caption="Saved Orientation Visual", width="stretch")
+                st.image(cached_image_bytes(curr_img_path, max_dim=900) or curr_img_path, caption="Saved Orientation Visual", width="stretch")
                 if is_editing and st.button(
                     "Delete visual",
                     icon=":material/delete:",
@@ -1832,9 +1845,17 @@ def render_equipment_overview(
         )
         display = visible.copy()
         if not display.empty:
-            display["station_pitch"] = display.apply(_pitch_label, axis=1)
-            display["functional_areas_display"] = display["functional_areas"].map(lambda values: ", ".join(values))
-            display["image"] = display["image_path"].map(lambda value: "Attached" if _text(value) else "None")
+            display["station_pitch"] = [
+                f"{_text(num) or 'Unassigned'} — {_text(nm)}"
+                if _text(nm)
+                else (_text(num) or "Unassigned")
+                for num, nm in zip(
+                    display.get("pitch_number", []),
+                    display.get("pitch_name", []),
+                )
+            ]
+            display["functional_areas_display"] = [", ".join(values) for values in display["functional_areas"]]
+            display["image"] = ["Attached" if _text(value) else "None" for value in display["image_path"]]
         else:
             display["station_pitch"] = pd.Series(dtype="string")
             display["functional_areas_display"] = pd.Series(dtype="string")
@@ -1880,7 +1901,7 @@ def render_equipment_overview(
         )
         st.download_button(
             "Export filtered rows",
-            dataframe_to_excel(_equipment_export(visible), sheet_name="Project Equipment"),
+            lambda: dataframe_to_excel(_equipment_export(visible), sheet_name="Project Equipment"),
             file_name="project_equipment_filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             icon=":material/download:",

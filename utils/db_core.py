@@ -21,6 +21,14 @@ from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
+import os
+import threading as _threading
+from utils.cache_store import (
+    bump_write_epoch,
+    cached_store_read,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
 
 from utils.quality_store import (
     clone_quality_requirement_assignments,
@@ -1292,14 +1300,47 @@ def parse_yamazumi_model_variants(value, fallback: str | None = "Base") -> list[
         return [fallback]
     return variants
 
+_THREAD_LOCAL = _threading.local()
+_INITIALIZED_DB_SIGNATURES: set[tuple[str, int, bool]] = set()
+_WAL_CONFIGURED_DB_SIGNATURES: set[tuple[str, int]] = set()
+
+
+def _db_file_identity(path: Path) -> tuple[str, int, bool]:
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    try:
+        st_res = os.stat(path)
+        return (resolved, int(st_res.st_ctime_ns), st_res.st_size > 0)
+    except OSError:
+        return (resolved, 0, False)
+
+
 @contextmanager
 def connection():
     conn = get_db_connection()
+    changes_before = conn.total_changes
     try:
         yield conn
+        had_writes = bool(conn.in_transaction or conn.total_changes > changes_before)
         conn.commit()
+        if had_writes:
+            bump_write_epoch()
     finally:
         conn.close()
+
+
+def ensure_db_initialized() -> None:
+    """Initialize SQLite schema once per resolved database file instead of on every rerun."""
+    if not is_cacheable_runtime():
+        init_db()
+        return
+    ident = _db_file_identity(Path(DB_PATH))
+    if ident[2] and ident in _INITIALIZED_DB_SIGNATURES:
+        return
+    init_db()
+
 
 def init_db() -> None:
     with connection() as conn:
@@ -2669,14 +2710,21 @@ def init_db() -> None:
                     json.dumps({"assembly_parts": changes}, ensure_ascii=False), timestamp,
                 ),
             )
+    if is_cacheable_runtime():
+        ident = _db_file_identity(Path(DB_PATH))
+        if ident[2]:
+            _INITIALIZED_DB_SIGNATURES.add(ident)
+
 
 def query(sql: str, params: tuple = ()) -> list[dict]:
     with connection() as conn:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
+
 def execute(sql: str, params: tuple = ()) -> None:
     with connection() as conn:
         conn.execute(sql, params)
+
 
 def record_audit_event(
     project_id: str,
@@ -2703,6 +2751,8 @@ def record_audit_event(
     else:
         execute(sql, params)
 
+
+@cached_store_read
 def audit_history(project_id: str, table_name: str | None = None, limit: int = 100) -> pd.DataFrame:
     """Return the newest audit entries for a project or one logical table."""
     if table_name:
@@ -2719,6 +2769,7 @@ def audit_history(project_id: str, table_name: str | None = None, limit: int = 1
             (project_id, int(limit)),
         )
     return pd.DataFrame(rows)
+
 
 def backup_database(target_path: str | Path) -> Path:
     """Create and validate a consistent SQLite backup without modifying the source DB."""
@@ -2751,6 +2802,7 @@ def backup_database(target_path: str | Path) -> Path:
         raise ValueError("The PAAG database backup was not created successfully.")
     return target
 
+
 def get_db_connection() -> sqlite3.Connection:
     """Return a configured SQLite connection owned by the caller."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -2758,9 +2810,22 @@ def get_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    ident = _db_file_identity(Path(DB_PATH))
+    wal_key = (ident[0], ident[1])
+    if wal_key not in _WAL_CONFIGURED_DB_SIGNATURES:
+        conn.execute("PRAGMA journal_mode = WAL")
+        if ident[1] != 0:
+            _WAL_CONFIGURED_DB_SIGNATURES.add(wal_key)
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
+
+
+_DEFAULT_CONNECTION = connection
+_DEFAULT_QUERY = query
+_DEFAULT_EXECUTE = execute
+_DEFAULT_GET_DB_CONNECTION = get_db_connection
 
 
 import functools as _functools
@@ -2770,6 +2835,30 @@ import types as _types
 
 _DOMAIN_MODULES: list[_types.ModuleType] = []
 _DOMAIN_EXPORTS: dict[str, list[str]] = {}
+_RUNTIME_REVISION: int = 0
+_SYNCED_REVISION: int = -1
+_STORE_MODULE: _types.ModuleType | None = None
+
+
+def bump_runtime_revision() -> int:
+    """Increment the store runtime revision when symbols are registered or monkeypatched."""
+    global _RUNTIME_REVISION
+    _RUNTIME_REVISION += 1
+    return _RUNTIME_REVISION
+
+
+def get_runtime_revision() -> int:
+    return _RUNTIME_REVISION
+
+
+def is_cacheable_runtime() -> bool:
+    """Return True when the standard SQLite connection/query pipeline is active (not mocked)."""
+    return (
+        connection is _DEFAULT_CONNECTION
+        and query is _DEFAULT_QUERY
+        and execute is _DEFAULT_EXECUTE
+        and get_db_connection is _DEFAULT_GET_DB_CONNECTION
+    )
 
 
 def register_domain_module(module: _types.ModuleType, exports: list[str]) -> None:
@@ -2777,7 +2866,8 @@ def register_domain_module(module: _types.ModuleType, exports: list[str]) -> Non
     if module not in _DOMAIN_MODULES:
         _DOMAIN_MODULES.append(module)
     _DOMAIN_EXPORTS[module.__name__] = list(exports)
-    sync_store_runtime()
+    bump_runtime_revision()
+    sync_store_runtime(force=True)
 
 
 def store_runtime_symbols() -> dict[str, object]:
@@ -2787,7 +2877,10 @@ def store_runtime_symbols() -> dict[str, object]:
         if not name.startswith("__")
         and name not in {
             "_DOMAIN_MODULES", "_DOMAIN_EXPORTS", "_functools", "_importlib",
-            "_sys", "_types",
+            "_sys", "_types", "_RUNTIME_REVISION", "_SYNCED_REVISION",
+            "_STORE_MODULE", "_THREAD_LOCAL", "_INITIALIZED_DB_SIGNATURES",
+            "_WAL_CONFIGURED_DB_SIGNATURES", "_DEFAULT_CONNECTION",
+            "_DEFAULT_QUERY", "_DEFAULT_EXECUTE", "_DEFAULT_GET_DB_CONNECTION",
         }
     }
     for module in _DOMAIN_MODULES:
@@ -2801,20 +2894,35 @@ def store_runtime_symbols() -> dict[str, object]:
     return symbols
 
 
-def sync_store_runtime() -> None:
+def sync_store_runtime(*, force: bool = False) -> None:
+    global _SYNCED_REVISION
+    facade = _sys.modules.get("utils.store")
+    if (
+        not force
+        and facade is not None
+        and _SYNCED_REVISION == _RUNTIME_REVISION
+        and facade.__dict__.get("DB_PATH", DB_PATH) == DB_PATH
+    ):
+        return
     symbols = store_runtime_symbols()
     globals().update(symbols)
     for module in _DOMAIN_MODULES:
         module.__dict__.update(symbols)
+    if facade is not None:
+        _SYNCED_REVISION = _RUNTIME_REVISION
 
 
 def domain_entrypoint(function):
     """Ensure every domain can also be imported and called directly."""
     @_functools.wraps(function)
     def wrapped(*args, **kwargs):
-        _importlib.import_module("utils.store")
-        sync_store_runtime()
+        global _STORE_MODULE
+        if _STORE_MODULE is None:
+            _STORE_MODULE = _importlib.import_module("utils.store")
+            sync_store_runtime(force=True)
+        elif _SYNCED_REVISION != _RUNTIME_REVISION:
+            sync_store_runtime()
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']

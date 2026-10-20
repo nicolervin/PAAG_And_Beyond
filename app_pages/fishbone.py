@@ -169,8 +169,7 @@ metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_par
 
 
 fishbone_tab, assign_parts_tab = st.tabs(
-    ["Interactive Fishbone", "Parts Placement Table"],
-    key=f"fishbone_main_tabs_{project_id}",
+    ["Interactive Fishbone", "Parts Placement Table"]
 )
 
 with assign_parts_tab:
@@ -263,9 +262,10 @@ with assign_parts_tab:
         part_pool["quantity"] = [m[2] for m in meta_results]
         part_pool = part_pool.sort_values(by=["_master_order", "part_number"], ascending=[True, True]).reset_index(drop=True)
 
-        part_pool["feature_applicability"] = part_pool.apply(
-            lambda row: feature_applicability(row["id"], row["model_applicability"]), axis=1
-        )
+        part_pool["feature_applicability"] = [
+            feature_applicability(pid, m_app)
+            for pid, m_app in zip(part_pool["id"], part_pool["model_applicability"])
+        ]
         part_pool["fishbone_section"] = part_pool["id"].map(placed_by_part).fillna("Not placed")
         part_pool.loc[
             part_pool["id"].astype(str).isin(pending_use_ids), "fishbone_section"
@@ -300,15 +300,13 @@ with assign_parts_tab:
             searchable = visible_parts[["part_number", "description", "level"]].fillna("").astype(str).agg(" ".join, axis=1)
             visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
         if selected_pool_features:
+            _sel_pool_feat_set = set(selected_pool_features)
             visible_parts = visible_parts[
-                visible_parts.apply(
-                    lambda row: row["feature_applicability"] == "All models"
-                    or bool(
-                        set(selected_pool_features)
-                        & set(feature_labels_by_part.get(str(row["id"]), []))
-                    ),
-                    axis=1,
-                )
+                [
+                    f_app == "All models"
+                    or bool(_sel_pool_feat_set & set(feature_labels_by_part.get(str(pid), [])))
+                    for pid, f_app in zip(visible_parts["id"], visible_parts["feature_applicability"])
+                ]
             ]
 
         pool_key = pool_editor_key
@@ -497,12 +495,17 @@ with assign_parts_tab:
                     pass
             return status
         full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_option_labels)
-        full_assignment_editor["model_applicability"] = full_assignment_editor.apply(
-            lambda row: feature_applicability(row["part_id"], row["model_applicability"]), axis=1
-        )
-        full_assignment_editor["pits_sync_status"] = full_assignment_editor.apply(
-            _format_pits_sync_status, axis=1
-        )
+        full_assignment_editor["model_applicability"] = [
+            feature_applicability(pid, m_app)
+            for pid, m_app in zip(
+                full_assignment_editor["part_id"],
+                full_assignment_editor["model_applicability"],
+            )
+        ]
+        full_assignment_editor["pits_sync_status"] = [
+            _format_pits_sync_status(row)
+            for row in full_assignment_editor.to_dict(orient="records")
+        ]
         assignment_editor = filter_table(
             full_assignment_editor,
             key="fishbone_assignment_filters",
@@ -1311,6 +1314,13 @@ with fishbone_tab:
             key=f"fishbone_visual_features_{project_id}",
             help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
         )
+        if visual_controls.button(
+            "Edit parts & photos",
+            icon=":material/edit:",
+            key="fishbone_edit_parts_visual",
+            help="Open the Parts Catalog to edit part details or add more photos.",
+        ):
+            st.switch_page("app_pages/parts.py")
 
         # Effective assignments (DB minus deleted plus draft new)
         effective_assigned_part_ids = set()
@@ -2027,35 +2037,34 @@ def _render_framework_maintenance():
             framework_walk["depth"].astype(int),
         ))
         framework = framework_walk.drop(columns=["depth"])
-        framework["section_type"] = framework["section_type"].apply(
-            lambda val: "Support Operations" if str(val or "") == "Support Operations" else "Assembly"
-        )
-        framework["hierarchy"] = framework.apply(
-            lambda row: (
-                f"🟪  {row['name']}"
-                if str(row.get("section_type") or "") == "Support Operations"
-                else (
-                    f"🟦  {row['name']}"
-                    if framework_depth.get(str(row["id"]), 0) == 0
-                    else f"{' ' * framework_depth.get(str(row['id']), 0)}└─ 🟧  {row['name']}"
+        framework["section_type"] = [
+            "Support Operations" if str(val or "") == "Support Operations" else "Assembly"
+            for val in framework["section_type"]
+        ]
+        framework["hierarchy"] = [
+            f"🟪  {name}"
+            if sec_type == "Support Operations"
+            else (
+                f"🟦  {name}"
+                if framework_depth.get(str(sec_id), 0) == 0
+                else f"{' ' * framework_depth.get(str(sec_id), 0)}└─ 🟧  {name}"
+            )
+            for sec_id, name, sec_type in zip(
+                framework["id"], framework["name"], framework["section_type"]
+            )
+        ]
+        framework["parent_assembly"] = [
+            "Independent / Support"
+            if sec_type == "Support Operations" and not normalized_parent_id(parent_id)
+            else (
+                "Product / main assembly"
+                if not normalized_parent_id(parent_id)
+                else section_option_labels.get(
+                    normalized_parent_id(parent_id), normalized_parent_id(parent_id)
                 )
-            ),
-            axis=1,
-        )
-        framework["parent_assembly"] = framework.apply(
-            lambda row: (
-                "Independent / Support"
-                if str(row.get("section_type") or "") == "Support Operations" and not normalized_parent_id(row.get("parent_id"))
-                else (
-                    "Product / main assembly"
-                    if not normalized_parent_id(row.get("parent_id"))
-                    else section_option_labels.get(
-                        normalized_parent_id(row.get("parent_id")), normalized_parent_id(row.get("parent_id"))
-                    )
-                )
-            ),
-            axis=1,
-        )
+            )
+            for sec_type, parent_id in zip(framework["section_type"], framework["parent_id"])
+        ]
         framework["order_actions"] = [[
             ":material/first_page: Move to start",
             ":material/arrow_upward: Move earlier",

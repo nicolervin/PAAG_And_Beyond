@@ -8,6 +8,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from utils.fishbone_ui import section_breadcrumb_labels
+from utils.media_cache import cached_image_bytes, cached_image_data_url
 from utils.store import (
     assign_parts_to_section,
     assembly_section_walk_order,
@@ -981,11 +982,13 @@ def annotate_visual_media_dialog(
             st.rerun()
         return
 
-    raw_bytes = source_path.read_bytes()
-    suffix = source_path.suffix.lower()
-    mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
-    b64 = base64.b64encode(raw_bytes).decode("ascii")
-    data_url = f"data:{mime};base64,{b64}"
+    data_url = cached_image_data_url(source_path, max_dim=None, output_format=None)
+    if not data_url:
+        raw_bytes = source_path.read_bytes()
+        suffix = source_path.suffix.lower()
+        mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        data_url = f"data:{mime};base64,{b64}"
 
     annotator_res = image_annotator(
         image_data_url=data_url,
@@ -1064,9 +1067,7 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
 
 
 tab_plan, tab_flow, tab_slides = st.tabs(
-    ["Process plan", "Process Flow Diagram", "PAAG slides"],
-    key="paag_tab",
-    bind="query-params",
+    ["Process plan", "Process Flow Diagram", "PAAG slides"]
 )
 
 with tab_plan:
@@ -1121,12 +1122,13 @@ with tab_plan:
                 .str.capitalize()
                 .replace({"": "Cycle"})
             )
-            yamazumi_rows["model_variants"] = yamazumi_rows.apply(
-                lambda row: parse_yamazumi_model_variants(
-                    row.get("model_variants"), str(row.get("model_variant") or "Base")
-                ),
-                axis=1,
-            )
+            yamazumi_rows["model_variants"] = [
+                parse_yamazumi_model_variants(mv, str(m_single or "Base"))
+                for mv, m_single in zip(
+                    yamazumi_rows["model_variants"],
+                    yamazumi_rows["model_variant"],
+                )
+            ]
             reflected_in_process = yamazumi_rows["process_reflected"].fillna(0).astype(bool)
             all_section_yamazumi_rows = yamazumi_rows.copy()
             yamazumi_rows = yamazumi_rows.loc[~reflected_in_process].copy()
@@ -1221,7 +1223,9 @@ with tab_plan:
             return "Unassigned"
 
         if not available_parts.empty:
-            available_parts["handling"] = available_parts["part_id"].apply(_calc_part_handling)
+            available_parts["handling"] = [
+                _calc_part_handling(pid) for pid in available_parts["part_id"]
+            ]
             if "factory_nickname" not in available_parts.columns:
                 available_parts["factory_nickname"] = ""
         else:
@@ -2699,14 +2703,20 @@ with tab_plan:
             )
         )
 
-        def _format_resource(row):
-            rtype = str(row.get("resource_type") or "Human").strip()
-            rdet = str(row.get("resource_detail") or "").strip()
+        def _format_resource_vals(rtype_val, rdet_val) -> str:
+            rtype = str(rtype_val or "Human").strip()
+            rdet = str(rdet_val or "").strip()
             if rtype.casefold() == "autonomous equipment":
                 return f"Autonomous: {rdet}" if rdet else "Autonomous equipment"
             return rtype or "Human"
 
-        elements["resource"] = elements.apply(_format_resource, axis=1)
+        elements["resource"] = [
+            _format_resource_vals(rt, rd)
+            for rt, rd in zip(
+                elements["resource_type"] if "resource_type" in elements.columns else [None] * len(elements),
+                elements["resource_detail"] if "resource_detail" in elements.columns else [None] * len(elements),
+            )
+        ]
 
         yamazumi_context = yamazumi_context_for_process(project_id, scenario_id)
         if yamazumi_context.empty:
@@ -2744,12 +2754,13 @@ with tab_plan:
         lambda work_element_id: list(criticality_by_work_element.get(work_element_id, []))
     )
 
-    elements["model_applicability"] = elements["model_applicability"].apply(
-        lambda value: [
+    elements["model_applicability"] = [
+        [
             "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
             for model in (split_filter_values(value) or ["All"])
         ]
-    )
+        for value in elements["model_applicability"]
+    ]
 
     editable_table_heading("Process at a Glance by pitch")
     st.caption("Complete and review ordered work elements by pitch, station, and model applicability.")
@@ -4753,14 +4764,14 @@ with tab_slides:
                                     if p.exists():
                                         st.download_button(
                                             "Download STEP",
-                                            data=p.read_bytes(),
+                                            data=p.read_bytes,
                                             file_name=p.name,
                                             mime="application/step",
                                             icon=":material/download:",
                                             key=f"dl_cad_gallery_{media_item['id']}",
                                         )
                                 else:
-                                    st.image(m_path, width=140)
+                                    st.image(cached_image_bytes(m_path, max_dim=320) or m_path, width=140)
                             with g_col2:
                                 st.markdown(f"**Caption:** {media_item.get('caption') or '*(None)*'}")
                                 st.caption(f"Type: `{media_item.get('media_type')}` | Sequence: `{media_item.get('sequence', 10)}`")

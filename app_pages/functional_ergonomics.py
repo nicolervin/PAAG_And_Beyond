@@ -165,27 +165,48 @@ if reviews.empty:
 if "legacy_description" not in reviews.columns:
     reviews["legacy_description"] = ""
 reviews["legacy_description"] = reviews["legacy_description"].fillna("").astype(str)
-reviews["link_filter"] = reviews["work_element_id"].apply(
-    lambda value: "Unlinked" if not _clean_text(value) else "Linked"
+reviews["link_filter"] = pd.Series(
+    [
+        "Unlinked" if not _clean_text(value) else "Linked"
+        for value in reviews["work_element_id"]
+    ],
+    index=reviews.index,
+    dtype="string",
 )
-reviews["link_status"] = reviews["link_filter"].apply(lambda value: [value])
-reviews["hazard_option_ids"] = reviews["hazard_option_ids"].apply(_id_list)
+reviews["link_status"] = pd.Series(
+    [[value] for value in reviews["link_filter"]],
+    index=reviews.index,
+    dtype="object",
+)
+reviews["hazard_option_ids"] = pd.Series(
+    [_id_list(value) for value in reviews["hazard_option_ids"]],
+    index=reviews.index,
+    dtype="object",
+)
 reviews["requested_due_date"] = pd.to_datetime(
     reviews["requested_due_date"], errors="coerce"
 )
 reviews["view_slide"] = "View Slide"
-reviews["work_element_label"] = reviews.apply(
-    lambda r: (
-        _clean_text(r.get("work_element_label"))
-        or (
-            f"Unlinked · {_clean_text(r.get('legacy_description'))}"
-            if _clean_text(r.get("legacy_description"))
-            else "Unlinked — no Process step"
+reviews["work_element_label"] = pd.Series(
+    [
+        (
+            _clean_text(we_lbl)
+            or (
+                f"Unlinked · {_clean_text(leg_desc)}"
+                if _clean_text(leg_desc)
+                else "Unlinked — no Process step"
+            )
         )
-    )
-    if not _clean_text(r.get("work_element_id"))
-    else _clean_text(r.get("work_element_label")),
-    axis=1,
+        if not _clean_text(we_id)
+        else _clean_text(we_lbl)
+        for we_id, we_lbl, leg_desc in zip(
+            reviews["work_element_id"],
+            reviews["work_element_label"],
+            reviews["legacy_description"],
+        )
+    ],
+    index=reviews.index,
+    dtype="string",
 )
 
 work_elements = ergonomics_work_elements(project_id, scenario_id)
@@ -430,7 +451,7 @@ footer = editable_table_footer(
 )
 st.download_button(
     "Export filtered rows",
-    data=dataframe_to_excel(
+    data=lambda: dataframe_to_excel(
         visible_reviews[
             [
                 "link_filter",

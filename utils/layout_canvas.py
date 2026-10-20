@@ -6321,25 +6321,16 @@ _LAYOUT_CANVAS = st.components.v2.component(
 )
 
 
-@st.cache_data(show_spinner=False, max_entries=128)
 def layout_image_data_url(image_path: str, modified_ns: int) -> str:
     """Read a local layout image file and encode it as a high-fidelity data URL."""
     del modified_ns
-    path = Path(image_path)
-    if not path.is_file():
+    if not image_path:
         return ""
-    try:
-        suffix = path.suffix.lower()
-        mime = "image/png"
-        if suffix in {".jpg", ".jpeg"}:
-            mime = "image/jpeg"
-        elif suffix == ".webp":
-            mime = "image/webp"
-        data = path.read_bytes()
-        encoded = base64.b64encode(data).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
-    except (OSError, ValueError):
-        return ""
+    from utils.media_cache import cached_image_data_url
+
+    return cached_image_data_url(
+        image_path, max_dim=None, output_format="WEBP", quality=88
+    ) or ""
 
 
 def layout_canvas(

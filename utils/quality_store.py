@@ -15,6 +15,12 @@ from uuid import uuid4
 
 import pandas as pd
 
+from utils.cache_store import (
+    cached_store_read,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
+
 
 REQUIREMENT_COLUMNS = [
     "id", "project_id", "requirement_type", "description", "unique_identifier",
@@ -170,6 +176,8 @@ def _ensure_quality_requirement_types(
     conn: sqlite3.Connection, project_id: str
 ) -> None:
     """Seed reusable defaults and exact legacy Type values without rewriting requirements."""
+    if is_scenario_task_completed("ensure_quality_req_types", project_id, ""):
+        return
     timestamp = datetime.now(timezone.utc).isoformat()
     existing_rows = conn.execute(
         "SELECT label FROM quality_requirement_types WHERE project_id=?",
@@ -204,6 +212,7 @@ def _ensure_quality_requirement_types(
             (str(uuid4()), project_id, cleaned, default_units, timestamp, timestamp),
         )
         existing_keys.add(key)
+    mark_scenario_task_completed("ensure_quality_req_types", project_id, "")
 
 
 def _quality_requirement_type_row(
@@ -407,6 +416,7 @@ def _normalized_ids(record_ids: list[str]) -> list[str]:
     ))
 
 
+@cached_store_read
 def quality_requirement_types(project_id: str) -> pd.DataFrame:
     """Return the project Type catalog with case-insensitive requirement usage counts."""
     store = _store_module()
@@ -699,6 +709,7 @@ def delete_quality_requirement_types(
     }
 
 
+@cached_store_read
 def quality_requirements(project_id: str) -> pd.DataFrame:
     """Return project-wide repository definitions with their assignment counts."""
     store = _store_module()
@@ -1051,6 +1062,7 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
         return int(cursor.rowcount)
 
 
+@cached_store_read
 def quality_requirement_torque_details(
     project_id: str, quality_requirement_id: str | None = None
 ) -> pd.DataFrame:
@@ -1076,6 +1088,7 @@ def quality_requirement_torque_details(
     return pd.DataFrame(rows, columns=TORQUE_DETAIL_COLUMNS)
 
 
+@cached_store_read
 def torque_screw_bit_types(project_id: str) -> list[str]:
     """Return distinct saved Screw bit type values for project suggestions."""
     store = _store_module()
@@ -1186,6 +1199,7 @@ def delete_quality_requirement_torque_details(
         return int(cursor.rowcount)
 
 
+@cached_store_read
 def quality_requirement_assignments(
     project_id: str, scenario_id: str, work_element_id: str | None = None
 ) -> pd.DataFrame:
@@ -1226,6 +1240,7 @@ def quality_requirement_assignments(
     ])
 
 
+@cached_store_read
 def quality_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return active-scenario Process steps with the labels shown in Process at a Glance."""
     store = _store_module()
@@ -1286,6 +1301,7 @@ def quality_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
     return frame
 
 
+@cached_store_read
 def quality_requirement_links(
     project_id: str, quality_requirement_id: str | None = None
 ) -> pd.DataFrame:
@@ -1566,6 +1582,7 @@ def bulk_assign_quality_requirement(
     }
 
 
+@cached_store_read
 def step_equipment_tooling_status(
     project_id: str,
     scenario_id: str,
@@ -1614,6 +1631,7 @@ def step_equipment_tooling_status(
     return result
 
 
+@cached_store_read
 def project_equipment_assets(
     project_id: str, torque_only: bool = False
 ) -> list[dict[str, Any]]:
@@ -1650,6 +1668,7 @@ def project_equipment_assets(
     return assets
 
 
+@cached_store_read
 def quality_requirement_assignment(
     project_id: str, assignment_id: str
 ) -> dict[str, object]:
@@ -1743,6 +1762,7 @@ def delete_quality_requirement_assignments(
         return int(cursor.rowcount)
 
 
+@cached_store_read
 def quality_assignment_pfmea_impact(
     project_id: str, scenario_id: str, assignment_ids: list[str]
 ) -> dict:
@@ -1883,6 +1903,7 @@ def clone_quality_requirement_assignments(
     return cloned_count
 
 
+@cached_store_read
 def unlinked_quality_records(project_id: str, scenario_id: str) -> dict:
     """Return all unlinked Quality assignments, PFMEA entries, and Equipment links for reconciliation."""
     store = _store_module()
@@ -2221,6 +2242,7 @@ def bulk_delete_unlinked_records(
     return deleted_count
 
 
+@cached_store_read
 def upstream_modified_quality_assignments(
     project_id: str, scenario_id: str | None = None
 ) -> list[dict]:

@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 from openpyxl.styles import Alignment
 
+from utils.cache_store import is_scenario_task_completed, mark_scenario_task_completed
 from utils.control_plan_store import control_plan_pfmea_delete_impact
 
 from utils.pfmea_store import (
@@ -540,11 +541,33 @@ def _pfmea_row_identity(row: pd.Series) -> str:
     return f"draft:{draft_id}" if draft_id else ""
 
 
+def _pfmea_row_identities(rows: pd.DataFrame) -> pd.Series:
+    """Vectorized/list-comprehension version of _pfmea_row_identity for a DataFrame."""
+    if rows.empty:
+        return pd.Series(dtype="string", index=rows.index)
+    ids = rows["id"] if "id" in rows.columns else pd.Series("", index=rows.index)
+    draft_ids = (
+        rows["draft_row_id"]
+        if "draft_row_id" in rows.columns
+        else pd.Series("", index=rows.index)
+    )
+    return pd.Series(
+        [
+            f"saved:{s}"
+            if (s := _plain_text(sid))
+            else (f"draft:{d}" if (d := _plain_text(did)) else "")
+            for sid, did in zip(ids, draft_ids)
+        ],
+        index=rows.index,
+        dtype="string",
+    )
+
+
 def _deduplicate_pfmea_draft_rows(rows: pd.DataFrame) -> pd.DataFrame:
     """Recover stale duplicate draft copies created by the former ID-only merge."""
     if rows.empty or "draft_row_id" not in rows:
         return rows.copy()
-    identities = rows.apply(_pfmea_row_identity, axis=1)
+    identities = _pfmea_row_identities(rows)
     duplicate_drafts = identities.str.startswith("draft:") & identities.duplicated(keep="last")
     return rows.loc[~duplicate_drafts].reset_index(drop=True)
 
@@ -564,10 +587,10 @@ def _merge_pfmea_filtered_edits(
         return edited_dataframe.copy().reset_index(drop=True)
     visible_identities = {
         identity
-        for identity in filtered_dataframe.apply(_pfmea_row_identity, axis=1)
+        for identity in _pfmea_row_identities(filtered_dataframe)
         if identity
     }
-    full_identities = full_dataframe.apply(_pfmea_row_identity, axis=1)
+    full_identities = _pfmea_row_identities(full_dataframe)
     hidden = full_dataframe.loc[~full_identities.isin(visible_identities)].copy()
     return _deduplicate_pfmea_draft_rows(
         pd.concat([hidden, edited_dataframe], ignore_index=True, sort=False)
@@ -920,7 +943,7 @@ def _insert_pfmea_duplicate(
     duplicate_anchors: dict[str, str],
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     """Insert a draft copy after its source and any earlier session copies."""
-    identities = rows.apply(_pfmea_row_identity, axis=1).tolist()
+    identities = _pfmea_row_identities(rows).tolist()
     try:
         source_position = identities.index(source_key)
     except ValueError as exc:
@@ -1547,7 +1570,7 @@ def _render_control_catalog(project_id: str, control_type: str) -> None:
             st.error(str(exc))
     st.download_button(
         "Export filtered rows",
-        data=dataframe_to_excel(visible[["label", "active", "selection_count"]]),
+        data=lambda: dataframe_to_excel(visible[["label", "active", "selection_count"]]),
         file_name=f"pfmea_{control_type.casefold()}_options.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"pfmea_{control_type.casefold()}_options_export_{project_id}",
@@ -1789,7 +1812,7 @@ def _render_entries(project_id: str, scenario_id: str, work_element_id: str) -> 
                 st.error(str(exc))
     st.download_button(
         "Export filtered rows",
-        data=dataframe_to_excel(
+        data=lambda: dataframe_to_excel(
             visible.drop(columns=["id"], errors="ignore"), "PFMEA failure modes"
         ),
         file_name="pfmea_failure_modes_filtered.xlsx",
@@ -2039,18 +2062,26 @@ def _render_actions(project_id: str, scenario_id: str, entry_id: str, causes: pd
 
 def _recalculate_flat_rpn(rows: pd.DataFrame) -> pd.DataFrame:
     recalculated = rows.copy()
-    recalculated["rpn"] = recalculated.apply(
-        lambda row: _rpn_value(row.get("severity"), row.get("occurrence"), row.get("detection")),
-        axis=1,
-    )
-    recalculated["resulting_rpn"] = recalculated.apply(
-        lambda row: _rpn_value(
-            row.get("resulting_severity"),
-            row.get("resulting_occurrence"),
-            row.get("resulting_detection"),
-        ),
-        axis=1,
-    )
+    if recalculated.empty:
+        recalculated["rpn"] = pd.Series(dtype="float64", index=recalculated.index)
+        recalculated["resulting_rpn"] = pd.Series(dtype="float64", index=recalculated.index)
+        return recalculated
+    recalculated["rpn"] = [
+        _rpn_value(s, o, d)
+        for s, o, d in zip(
+            recalculated.get("severity", pd.Series(None, index=recalculated.index)),
+            recalculated.get("occurrence", pd.Series(None, index=recalculated.index)),
+            recalculated.get("detection", pd.Series(None, index=recalculated.index)),
+        )
+    ]
+    recalculated["resulting_rpn"] = [
+        _rpn_value(rs, ro, rd)
+        for rs, ro, rd in zip(
+            recalculated.get("resulting_severity", pd.Series(None, index=recalculated.index)),
+            recalculated.get("resulting_occurrence", pd.Series(None, index=recalculated.index)),
+            recalculated.get("resulting_detection", pd.Series(None, index=recalculated.index)),
+        )
+    ]
     return recalculated
 
 
@@ -3155,7 +3186,7 @@ def _render_pattern_manager(
         )
         st.download_button(
             "Export filtered patterns",
-            data=dataframe_to_excel(
+            data=lambda: dataframe_to_excel(
                 visible.drop(columns=["id"], errors="ignore"), "PFMEA patterns"
             ),
             file_name="pfmea_patterns_filtered.xlsx",
@@ -3694,7 +3725,7 @@ def _render_flat_pfmea_table(
         st.session_state.pop(completion_focus_key, None)
         focus = ""
     if focus:
-        focus_mask = visible.apply(_pfmea_row_identity, axis=1).eq(focus)
+        focus_mask = _pfmea_row_identities(visible).eq(focus)
         visible = visible.loc[focus_mask].copy()
     editor_rows = direct_entry_editor_rows(
         visible,
@@ -3921,49 +3952,55 @@ def _render_flat_pfmea_table(
         _clear_pfmea_copy_state(project_id, scenario_id)
         _undo(editor_key, "Discarded the unsaved PFMEA line-item and control edits")
 
-    export_rows = visible.copy()
-    for control_column in ("prevention_controls", "detection_controls"):
-        if control_column in export_rows.columns:
-            export_rows[control_column] = export_rows[control_column].map(
-                lambda value: "\n".join(
-                    control_labels.get(source_key, "Unavailable control")
-                    for source_key in _list_values(value)
+    def _prepare_export_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+        exp_rows = visible.copy()
+        for control_column in ("prevention_controls", "detection_controls"):
+            if control_column in exp_rows.columns:
+                exp_rows[control_column] = exp_rows[control_column].map(
+                    lambda value: "\n".join(
+                        control_labels.get(source_key, "Unavailable control")
+                        for source_key in _list_values(value)
+                    )
                 )
-            )
 
-    def _combine_resp_target(r):
-        resp = str(r.get("responsibility") or "").strip() if pd.notna(r.get("responsibility")) else ""
-        target = str(r.get("target_completion_date") or "").strip() if pd.notna(r.get("target_completion_date")) else ""
-        if resp and target:
-            return f"{resp} | {target}"
-        if target:
-            return f"Target: {target}"
-        if resp:
-            return resp
-        return str(r.get("responsibility_target") or "").strip() if pd.notna(r.get("responsibility_target")) else ""
+        resps = exp_rows.get("responsibility", pd.Series("", index=exp_rows.index))
+        targets = exp_rows.get("target_completion_date", pd.Series("", index=exp_rows.index))
+        fallbacks = exp_rows.get("responsibility_target", pd.Series("", index=exp_rows.index))
+        combined_rt: list[str] = []
+        for r_val, t_val, fb_val in zip(resps, targets, fallbacks):
+            resp = str(r_val or "").strip() if pd.notna(r_val) else ""
+            target = str(t_val or "").strip() if pd.notna(t_val) else ""
+            if resp and target:
+                combined_rt.append(f"{resp} | {target}")
+            elif target:
+                combined_rt.append(f"Target: {target}")
+            elif resp:
+                combined_rt.append(resp)
+            else:
+                combined_rt.append(str(fb_val or "").strip() if pd.notna(fb_val) else "")
+        exp_rows["responsibility_target"] = combined_rt
 
-    export_rows["responsibility_target"] = export_rows.apply(_combine_resp_target, axis=1)
-
-    export_col_order = [
-        "item_number", "process_function", "potential_failure_mode", "potential_effects",
-        "severity", "classification", "potential_causes", "occurrence",
-        "prevention_controls", "detection_controls", "detection", "rpn",
-        "recommended_action", "responsibility_target", "actions_taken",
-        "resulting_severity", "resulting_occurrence", "resulting_detection", "resulting_rpn",
-    ]
-    export_rows_final = export_rows[[c for c in export_col_order if c in export_rows.columns]].rename(columns={
-        "item_number": "Item #", "process_function": "Process Function",
-        "potential_failure_mode": "Potential Failure Mode",
-        "potential_effects": "Potential Effect(s) of Failure", "severity": "Severity",
-        "classification": "Classification", "potential_causes": "Potential Causes(s) of Failure",
-        "occurrence": "Occurrence", "prevention_controls": "Current Process Controls — Prevention",
-        "detection_controls": "Current Process Controls — Detection", "detection": "Detection",
-        "rpn": "RPN", "recommended_action": "Recommended Action",
-        "responsibility_target": "Responsibility & Target Completion Date",
-        "actions_taken": "Actions Taken", "resulting_severity": "Resulting Severity",
-        "resulting_occurrence": "Resulting Occurrence",
-        "resulting_detection": "Resulting Detection", "resulting_rpn": "Resulting RPN",
-    })
+        export_col_order = [
+            "item_number", "process_function", "potential_failure_mode", "potential_effects",
+            "severity", "classification", "potential_causes", "occurrence",
+            "prevention_controls", "detection_controls", "detection", "rpn",
+            "recommended_action", "responsibility_target", "actions_taken",
+            "resulting_severity", "resulting_occurrence", "resulting_detection", "resulting_rpn",
+        ]
+        exp_rows_final = exp_rows[[c for c in export_col_order if c in exp_rows.columns]].rename(columns={
+            "item_number": "Item #", "process_function": "Process Function",
+            "potential_failure_mode": "Potential Failure Mode",
+            "potential_effects": "Potential Effect(s) of Failure", "severity": "Severity",
+            "classification": "Classification", "potential_causes": "Potential Causes(s) of Failure",
+            "occurrence": "Occurrence", "prevention_controls": "Current Process Controls — Prevention",
+            "detection_controls": "Current Process Controls — Detection", "detection": "Detection",
+            "rpn": "RPN", "recommended_action": "Recommended Action",
+            "responsibility_target": "Responsibility & Target Completion Date",
+            "actions_taken": "Actions Taken", "resulting_severity": "Resulting Severity",
+            "resulting_occurrence": "Resulting Occurrence",
+            "resulting_detection": "Resulting Detection", "resulting_rpn": "Resulting RPN",
+        })
+        return exp_rows, exp_rows_final
 
     with st.container(border=True):
         table_actions = st.container(horizontal=True)
@@ -4073,6 +4110,7 @@ def _render_flat_pfmea_table(
                         st.success(f"Reactivated '{reactivate_choice}'.")
                         st.rerun()
 
+        export_rows, export_rows_final = _prepare_export_frames()
         table_actions.download_button(
             "Export filtered rows",
             data=_pfmea_export_bytes(export_rows_final),
@@ -4233,18 +4271,16 @@ def _render_flat_pfmea_table(
         control_plan_impact = control_plan_pfmea_delete_impact(
             project_id, scenario_id, selected_entries["entry_id"].astype(str).tolist()
         )
-        selected_labels = selected_entries.apply(
-            lambda row: (
-                f"{_plain_text(row.get('item_number')) or 'Unassigned'} — "
-                f"{_plain_text(row.get('process_function')) or 'Unnamed Process Function'}"
-                + (
-                    f" — {_plain_text(row.get('potential_failure_mode'))}"
-                    if _plain_text(row.get("potential_failure_mode"))
-                    else ""
-                )
-            ),
-            axis=1,
-        ).tolist()
+        selected_labels = [
+            f"{_plain_text(item_no) or 'Unassigned'} — "
+            f"{_plain_text(proc_fn) or 'Unnamed Process Function'}"
+            + (f" — {_plain_text(fm)}" if _plain_text(fm) else "")
+            for item_no, proc_fn, fm in zip(
+                selected_entries.get("item_number", []),
+                selected_entries.get("process_function", []),
+                selected_entries.get("potential_failure_mode", []),
+            )
+        ]
         delete_rows = (
             selected_entries[["entry_id", "potential_failure_mode"]]
             .rename(columns={"entry_id": "id"})
@@ -4294,13 +4330,19 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         f"Scenario-specific to {scenario_name}. Ratings are whole-number selections from "
         "1 through 10; this module does not define company Severity, Occurrence, or Detection scales."
     )
+    classification_migration: dict = {}
+    migration: dict = {}
     try:
-        classification_migration = migrate_pfmea_classifications(
-            project_id, st.session_state.get("current_editor", "")
-        )
-        migration = migrate_legacy_pfmea_controls(
-            project_id, st.session_state.get("current_editor", "")
-        )
+        if not is_scenario_task_completed("migrate_pfmea_classifications", project_id):
+            classification_migration = migrate_pfmea_classifications(
+                project_id, st.session_state.get("current_editor", "")
+            )
+            mark_scenario_task_completed("migrate_pfmea_classifications", project_id)
+        if not is_scenario_task_completed("migrate_legacy_pfmea_controls", project_id):
+            migration = migrate_legacy_pfmea_controls(
+                project_id, st.session_state.get("current_editor", "")
+            )
+            mark_scenario_task_completed("migrate_legacy_pfmea_controls", project_id)
     except ValueError as exc:
         st.error(str(exc))
         st.info("Enter Current editor to complete the pending one-time PFMEA migration.")

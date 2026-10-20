@@ -13,6 +13,7 @@ from utils.split_workspace import (
     split_navigation,
 )
 from utils.store import (
+    ensure_db_initialized,
     get_project,
     init_db,
     migrate_legacy_yamazumi_flags,
@@ -85,7 +86,7 @@ st.html(
     </style>
     """
 )
-init_db()
+ensure_db_initialized()
 
 all_projects = projects()
 st.session_state.setdefault("project_id", all_projects[0]["id"] if all_projects else None)

@@ -17,6 +17,8 @@ from uuid import uuid4
 
 import pandas as pd
 
+from utils.cache_store import cached_store_read
+
 
 PLACEMENTS = ("", "Product / Part", "Process")
 SOURCE_KINDS = ("quality", "pfmea_only")
@@ -1104,6 +1106,7 @@ def _live_projection_conn(
     )
 
 
+@cached_store_read
 def control_plan_projection(project_id: str, scenario_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
@@ -1111,6 +1114,7 @@ def control_plan_projection(project_id: str, scenario_id: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@cached_store_read
 def control_plan_flow_projection(
     project_id: str, scenario_id: str
 ) -> ControlPlanFlowProjection:
@@ -1362,6 +1366,7 @@ def control_plan_flow_projection(
     }
 
 
+@cached_store_read
 def control_plan_review_items(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return excluded, orphaned, or currently source-ineligible persisted items."""
     with _store().connection() as conn:
@@ -1592,6 +1597,7 @@ def exclude_control_plan_projection_keys(
     return {"row_count": len(item_ids), "affected_ids": item_ids, "timestamp": timestamp}
 
 
+@cached_store_read
 def control_plan_evidence(
     project_id: str, scenario_id: str, pfmea_entry_id: str
 ) -> dict[str, list[str]]:
@@ -1650,6 +1656,7 @@ def control_plan_evidence(
     return result
 
 
+@cached_store_read
 def control_plan_relink_candidates(
     project_id: str, scenario_id: str, item_id: str
 ) -> pd.DataFrame:
@@ -1696,6 +1703,7 @@ def restore_control_plan_item(project_id: str, scenario_id: str, item_id: str) -
     return {"row_count": 1, "affected_ids": [item_id], "timestamp": timestamp}
 
 
+@cached_store_read
 def control_plan_assignment_impact(
     project_id: str, scenario_id: str, assignment_ids: list[str]
 ) -> dict:
@@ -1783,6 +1791,7 @@ def relink_control_plan_item(
     return {"row_count": 1, "affected_ids": [item_id], "timestamp": timestamp}
 
 
+@cached_store_read
 def control_plan_pfmea_delete_impact(
     project_id: str, scenario_id: str, entry_ids: list[str]
 ) -> dict:

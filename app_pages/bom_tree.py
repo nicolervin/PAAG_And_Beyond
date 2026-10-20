@@ -17,7 +17,9 @@ import streamlit as st
 
 from utils.cad_tree import cad_model_tree
 from utils.bom_table_listener import bom_table_listener
+from utils.cache_store import cached_computation
 from utils.fishbone_visual import part_thumbnail
+from utils.media_cache import cached_image_bytes
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     add_project_model,
@@ -65,7 +67,7 @@ if not project_id:
 
 # 1. Official models
 models_df = project_models(project_id)
-if models_df.empty:
+if project_id and models_df.empty:
     st.info("No official models are defined for this project yet. Add your first official model number below to start building the Model Tree.")
     with st.expander(":material/add_circle: Add Official Model Number", expanded=True):
         with st.form("first_model_form"):
@@ -156,19 +158,20 @@ with col_m_select:
 with col_m_add:
     st.write("")
     st.write("")
-    with st.popover(":material/add: New Model", help="Quickly define a new official model"):
-        with st.form("quick_add_model_popover"):
-            m_num = st.text_input("Model Number *", placeholder="e.g. GTE19").strip()
-            m_name = st.text_input("Display Name", placeholder="e.g. 19 cu.ft. Top Mount").strip()
-            if st.form_submit_button("Add Model", type="primary"):
-                if m_num:
-                    try:
-                        new_mid = add_project_model(project_id, m_num, m_name, "")
-                        st.session_state["_pending_model_tree_model"] = new_mid
-                        st.success(f"Model '{m_num}' created!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
+    if project_id:
+        with st.popover(":material/add: New Model", help="Quickly define a new official model"):
+            with st.form("quick_add_model_popover"):
+                m_num = st.text_input("Model Number *", placeholder="e.g. GTE19").strip()
+                m_name = st.text_input("Display Name", placeholder="e.g. 19 cu.ft. Top Mount").strip()
+                if st.form_submit_button("Add Model", type="primary"):
+                    if m_num:
+                        try:
+                            new_mid = add_project_model(project_id, m_num, m_name, "")
+                            st.session_state["_pending_model_tree_model"] = new_mid
+                            st.success(f"Model '{m_num}' created!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
 
 def _component_event(component_key: str, event_name: str) -> dict:
@@ -509,7 +512,10 @@ with tab_view:
                     rendered_img = False
                     if img_file and img_file.is_file():
                         try:
-                            st.image(str(img_file), caption=f"{p_num} · CAD preview")
+                            st.image(
+                                cached_image_bytes(img_file, max_dim=1200) or str(img_file),
+                                caption=f"{p_num} · CAD preview",
+                            )
                             rendered_img = True
                         except Exception:
                             pass
@@ -638,6 +644,7 @@ def generate_bom_excel_template(items: list[dict[str, Any]] | None = None) -> by
     return buf.getvalue()
 
 
+@cached_computation(scope="upload")
 def parse_uploaded_bom_file(uploaded_file: Any) -> list[dict[str, Any]]:
     """Parse an uploaded Excel or CSV BOM file into normalized row items."""
     fname = getattr(uploaded_file, "name", "").lower()
@@ -2146,7 +2153,7 @@ with tab_author:
                 )
                 st.download_button(
                     label="📥 Download Template",
-                    data=generate_bom_excel_template(live_for_dl),
+                    data=lambda items=live_for_dl: generate_bom_excel_template(items),
                     file_name=dl_file_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"dl_template_{selected_model_id}",

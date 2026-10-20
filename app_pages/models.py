@@ -706,8 +706,10 @@ else:
         confirm_models_auto_assign()
     if st.session_state.get(f"pending_multi_feature_review_{project_id}"):
         review_multi_feature_applicability_dialog(project_id)
-    tree = complexity_tree(project_id)
-    tree = tree.loc[tree["model_id"].astype(str).isin(active_model_ids)].copy()
+    full_complexity_tree = complexity_tree(project_id)
+    tree = full_complexity_tree.loc[
+        full_complexity_tree["model_id"].astype(str).isin(active_model_ids)
+    ].copy()
     active_feature_ids = active_features["id"].astype(str).tolist()
     tree["id"] = tree["model_id"]
     tree = tree[["id", "model_id", "common_name", "official_model_number", *active_feature_ids]]
@@ -958,7 +960,7 @@ else:
         models["active"].fillna(1).astype(bool),
         ["id", "display_name", "model_number"],
     ].copy()
-    visual_tree = complexity_tree(project_id).set_index("model_id")
+    visual_tree = full_complexity_tree.set_index("model_id")
     visual_model_groups: list[dict[str, object]] = []
     if visual_features is not None:
         feature_ids = [str(feature_id) for feature_id in visual_features["id"]]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys as _sys
 from utils import db_core as _db_core
+from utils.cache_store import cached_store_read
 from utils.safety_store import parse_ppe
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
@@ -124,6 +125,7 @@ def _validate_process_part_option_handling(
             "in this scenario."
         )
 
+@cached_store_read
 def process_part_placement_options(
     project_id: str,
     scenario_id: str,
@@ -227,6 +229,7 @@ def validate_process_part_option_pairings(
                 exclude_group_id=exclude_group_id,
             )
 
+@cached_store_read
 def yamazumi_elements_for_section(
     project_id: str, scenario_id: str, section_id: str
 ) -> pd.DataFrame:
@@ -264,6 +267,7 @@ def yamazumi_elements_for_section(
         )
     return pd.DataFrame(rows)
 
+@cached_store_read
 def yamazumi_context_for_process(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return Yamazumi source labels linked to Process at a Glance rows."""
     rows = query(
@@ -283,6 +287,7 @@ def yamazumi_context_for_process(project_id: str, scenario_id: str) -> pd.DataFr
     )
     return pd.DataFrame(rows)
 
+@cached_store_read
 def process_element_id_for_yamazumi(
     project_id: str, scenario_id: str, yamazumi_element_id: str
 ) -> str | None:
@@ -297,6 +302,7 @@ def process_element_id_for_yamazumi(
         return None
     return str(rows[0].get("process_element_id") or "").strip() or None
 
+@cached_store_read
 def process_part_groups(
     project_id: str,
     scenario_id: str,
@@ -595,6 +601,7 @@ def set_process_part_option_handling_type(
         )
     return timestamp
 
+@cached_store_read
 def work_element_criticality(
     project_id: str, scenario_id: str
 ) -> dict[str, list[str]]:
@@ -699,6 +706,7 @@ def delete_process_part_group(
 ) -> bool:
     return bool(delete_process_part_groups(project_id, scenario_id, [group_id]))
 
+@cached_store_read
 def pin_map_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load pitches and their explicitly linked Process work for one scenario."""
     rows = pd.DataFrame(query(
@@ -878,6 +886,7 @@ def parse_yamazumi_pitch_address(value: object) -> dict[str, object]:
         "position_number": int(match.group("position")),
     }
 
+@cached_store_read
 def work_element_op_contexts(
     project_id: str,
     scenario_id: str,
@@ -1164,6 +1173,7 @@ def work_element_op_contexts(
         result[work_id].pop("sort_key", None)
     return result
 
+@cached_store_read
 def work_element_op_ids(
     project_id: str,
     scenario_id: str,
@@ -1173,6 +1183,7 @@ def work_element_op_ids(
     contexts = work_element_op_contexts(project_id, scenario_id, work_element_ids)
     return {work_id: str(context["op_id"]) for work_id, context in contexts.items()}
 
+@cached_store_read
 def work_element_op_id(project_id: str, scenario_id: str, work_element_id: str) -> str:
     """Compute one Op ID through the shared batch implementation."""
     normalized_id = str(work_element_id or "").strip()
@@ -1180,6 +1191,7 @@ def work_element_op_id(project_id: str, scenario_id: str, work_element_id: str) 
         raise ValueError("Choose a Process at a Glance Work Element.")
     return work_element_op_ids(project_id, scenario_id, [normalized_id])[normalized_id]
 
+@cached_store_read
 def get_pitch_visual_media(
     project_id: str, scenario_id: str, pitch_id: str
 ) -> list[dict]:
@@ -1941,6 +1953,7 @@ def _enrich_parts_with_minibom(
         p_data["mini_bom"] = comps
 
 
+@cached_store_read
 def process_pitch_visual_summary(
     project_id: str, scenario_id: str, pitch_id: str
 ) -> dict:
@@ -2616,6 +2629,7 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
                 (project_id, scenario_id, *removed),
             )
 
+@cached_store_read
 def get_pitch_unclassified_part_options(
     project_id: str,
     scenario_id: str,
@@ -2672,6 +2686,7 @@ def get_pitch_unclassified_part_options(
             result.append(opt)
         return result
 
+@cached_store_read
 def get_scenario_part_handling_options(
     project_id: str,
     scenario_id: str,

@@ -169,11 +169,13 @@ footer = editable_table_footer(
     key_prefix=f"safety_requirements_{project_id}_{scenario_id}",
     native_row_selection=True,
 )
-export_df = visible[["pitch", "work_element_label", "ppe", "requirement_description", "active"]].copy()
-export_df["ppe"] = export_df["ppe"].apply(lambda p: ", ".join(p) if isinstance(p, list) else str(p or ""))
-st.download_button(
-    "Export filtered",
-    data=dataframe_to_excel(
+def _export_safety_bytes() -> bytes:
+    export_df = visible[["pitch", "work_element_label", "ppe", "requirement_description", "active"]].copy()
+    export_df["ppe"] = [
+        ", ".join(p) if isinstance(p, list) else str(p or "")
+        for p in export_df["ppe"]
+    ]
+    return dataframe_to_excel(
         export_df.rename(
             columns={
                 "pitch": "Pitch",
@@ -184,7 +186,12 @@ st.download_button(
             }
         ),
         "Safety requirements",
-    ),
+    )
+
+
+st.download_button(
+    "Export filtered",
+    data=_export_safety_bytes,
     file_name="safety_requirements_filtered.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     icon=":material/download:",

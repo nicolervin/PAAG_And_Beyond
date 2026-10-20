@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pandas as pd
 
+from utils.cache_store import cached_store_read
 from utils.pfmea_store import PFMEA_CLASSIFICATIONS
 
 
@@ -162,6 +163,7 @@ def _validate_scenario(conn: sqlite3.Connection, project_id: str, scenario_id: s
         raise ValueError("The active planning scenario no longer exists in this project.")
 
 
+@cached_store_read
 def pfmea_patterns(project_id: str, *, active_only: bool = False) -> pd.DataFrame:
     active_filter = " AND pattern.active=1" if active_only else ""
     with _store().connection() as conn:
@@ -242,6 +244,7 @@ def _source_rows(
     return result
 
 
+@cached_store_read
 def pfmea_pattern_graph(project_id: str, pattern_id: str) -> dict:
     with _store().connection() as conn:
         _validate_project(conn, project_id)
@@ -275,6 +278,7 @@ def pfmea_pattern_graph(project_id: str, pattern_id: str) -> dict:
     }
 
 
+@cached_store_read
 def pfmea_pattern_source_candidates(project_id: str, control_type: str) -> pd.DataFrame:
     """Return friendly project-wide Quality definitions and manual choices with state."""
     if control_type == "Prevention":
@@ -774,6 +778,7 @@ def capture_pfmea_entry_as_pattern(
     return result
 
 
+@cached_store_read
 def resolve_pfmea_pattern(
     project_id: str,
     scenario_id: str,
@@ -877,6 +882,7 @@ def delete_pfmea_patterns(project_id: str, pattern_ids: list[str]) -> dict:
     return {"row_count": int(cursor.rowcount), "deleted_ids": ids, "timestamp": timestamp}
 
 
+@cached_store_read
 def pattern_quality_reference_count(project_id: str, requirement_ids: list[str]) -> int:
     ids = list(dict.fromkeys(_text(value) for value in requirement_ids if _text(value)))
     if not ids:
@@ -900,6 +906,7 @@ def pattern_quality_reference_count(project_id: str, requirement_ids: list[str])
         )
 
 
+@cached_store_read
 def pattern_manual_reference_count(
     project_id: str, control_type: str, option_ids: list[str]
 ) -> int:

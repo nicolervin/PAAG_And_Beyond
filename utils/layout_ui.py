@@ -1592,13 +1592,13 @@ def render_layouts_tab(
             st.session_state[draft_shapes_key] = draft
             st.session_state[selected_shape_id_key] = s_id
 
-    def handle_canvas_commit() -> None:
+    def handle_canvas_commit() -> bool:
         state = st.session_state.get(canvas_key)
         trigger = getattr(state, "canvas_commit", None) if state is not None else None
         if not trigger and isinstance(state, dict):
             trigger = state.get("canvas_commit")
         if not trigger or not isinstance(trigger, dict):
-            return
+            return False
 
         action = str(trigger.get("action") or "save")
         bg_raw = str(trigger.get("background_data_url") or "")
@@ -1628,7 +1628,7 @@ def render_layouts_tab(
         )
         commit_sig = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()
         if st.session_state.get(last_commit_sig_key) == commit_sig:
-            return
+            return False
         st.session_state[last_commit_sig_key] = commit_sig
 
         if "selected_shape_id" in trigger:
@@ -1811,30 +1811,41 @@ def render_layouts_tab(
                 st.session_state["_open_pin_map_dialog"] = "cad_revisions"
         except ValueError as exc:
             st.error(str(exc))
-            return
+            return False
+        return True
 
     # Process any pending canvas commit before building props so post-commit state is fresh
-    handle_canvas_commit()
+    committed = handle_canvas_commit()
 
-    # Reload active page/revision/shapes/layers/background after commit processing
-    layouts = list_layouts(project_id)
-    layout_by_id = {str(l["id"]): l for l in layouts}
-    active_layout_id = str(st.session_state.get("active_layout_id") or "")
-    if active_layout_id not in layout_by_id:
-        active_layout_id = str(layouts[0]["id"])
-        st.session_state["active_layout_id"] = active_layout_id
-    current_layout = layout_by_id[active_layout_id]
+    if committed:
+        # Reload active page/revision/shapes/layers/background after commit processing
+        layouts = list_layouts(project_id)
+        layout_by_id = {str(l["id"]): l for l in layouts}
+        active_layout_id = str(st.session_state.get("active_layout_id") or "")
+        if active_layout_id not in layout_by_id:
+            active_layout_id = str(layouts[0]["id"])
+            st.session_state["active_layout_id"] = active_layout_id
+        current_layout = layout_by_id[active_layout_id]
 
-    revisions = list_layout_revisions(active_layout_id)
-    rev_by_id = {str(r["id"]): r for r in revisions}
-    active_rev_id = str(st.session_state.get("active_revision_id") or "")
-    if active_rev_id not in rev_by_id:
-        active_rev_id = str(revisions[0]["id"])
-        st.session_state["active_revision_id"] = active_rev_id
-    active_rev = get_layout_revision(active_rev_id) or rev_by_id[active_rev_id]
-    rev_id = str(active_rev["id"])
-    st.session_state["layout_plan_selector"] = active_layout_id
-    st.session_state["layout_revision_selector"] = rev_id
+        revisions = list_layout_revisions(active_layout_id)
+        rev_by_id = {str(r["id"]): r for r in revisions}
+        active_rev_id = str(st.session_state.get("active_revision_id") or "")
+        if active_rev_id not in rev_by_id:
+            active_rev_id = str(revisions[0]["id"])
+            st.session_state["active_revision_id"] = active_rev_id
+        active_rev = get_layout_revision(active_rev_id) or rev_by_id[active_rev_id]
+        rev_id = str(active_rev["id"])
+        st.session_state["layout_plan_selector"] = active_layout_id
+        st.session_state["layout_revision_selector"] = rev_id
+
+        draft_shapes_key = f"layout_shapes_draft_{rev_id}"
+        draft_layers_key = f"layout_layers_draft_{rev_id}"
+        selected_shape_id_key = f"layout_selected_shape_{rev_id}"
+        canvas_key = f"layout_canvas_{rev_id}"
+
+        ensure_default_layers_for_revision(rev_id)
+        persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+        persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
 
     w_in = float(active_rev.get("scale_width_in") or 2400.0)
     h_in = float(active_rev.get("scale_height_in") or 1200.0)
@@ -1845,14 +1856,6 @@ def render_layouts_tab(
     px_per_in_x = (w_px / w_in) if w_in > 0 else 1.0
     px_per_in_y = (h_px / h_in) if h_in > 0 else 1.0
 
-    draft_shapes_key = f"layout_shapes_draft_{rev_id}"
-    draft_layers_key = f"layout_layers_draft_{rev_id}"
-    selected_shape_id_key = f"layout_selected_shape_{rev_id}"
-    canvas_key = f"layout_canvas_{rev_id}"
-
-    ensure_default_layers_for_revision(rev_id)
-    persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
-    persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
     selected_shape_id: str | None = st.session_state.get(selected_shape_id_key)
 
     all_project_pitches = list_project_yamazumi_pitches(project_id)

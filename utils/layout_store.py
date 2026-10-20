@@ -13,6 +13,12 @@ from uuid import uuid4
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from utils.cache_store import (
+    cached_store_read,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
+
 SUPPORTED_LAYOUT_EXTENSIONS: tuple[str, ...] = (
     ".png",
     ".jpg",
@@ -261,6 +267,7 @@ def init_layout_schema(conn: sqlite3.Connection) -> None:
 # --- Layout Plan Operations ---
 
 
+@cached_store_read
 def list_layouts(project_id: str) -> list[dict[str, Any]]:
     """Return all floor plan layouts for a project, along with latest revision info."""
     store = _store_module()
@@ -288,6 +295,7 @@ def list_layouts(project_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+@cached_store_read
 def get_layout(project_id: str, layout_id: str) -> dict[str, Any] | None:
     """Return a single layout plan by ID."""
     store = _store_module()
@@ -380,6 +388,7 @@ def update_layout(
         )
 
 
+@cached_store_read
 def layout_deletion_impact(project_id: str, layout_id: str) -> dict[str, Any]:
     """Calculate deletion impact for a layout."""
     store = _store_module()
@@ -442,6 +451,7 @@ def delete_layout(project_id: str, layout_id: str, editor_name: str) -> dict[str
 # --- Revision Operations ---
 
 
+@cached_store_read
 def list_layout_revisions(layout_id: str) -> list[dict[str, Any]]:
     """Return all revisions for a layout, newest revision first."""
     store = _store_module()
@@ -461,6 +471,7 @@ def list_layout_revisions(layout_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+@cached_store_read
 def get_layout_revision(revision_id: str) -> dict[str, Any] | None:
     """Return a single revision by ID with its shape count."""
     store = _store_module()
@@ -482,6 +493,7 @@ def get_layout_revision(revision_id: str) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+@cached_store_read
 def get_latest_layout_revision(layout_id: str) -> dict[str, Any] | None:
     """Return the latest revision for a layout with its shape count."""
     store = _store_module()
@@ -1428,6 +1440,7 @@ def _infer_default_layer_type_for_shape(shape: dict[str, Any]) -> str:
     return "pitches"
 
 
+@cached_store_read
 def ensure_default_layers_for_revision(
     revision_id: str, _conn: sqlite3.Connection | None = None
 ) -> list[dict[str, Any]]:
@@ -1491,6 +1504,7 @@ def ensure_default_layers_for_revision(
         return _run(conn)
 
 
+@cached_store_read
 def list_layout_layers(
     revision_id: str, scenario_id: str | None = None
 ) -> list[dict[str, Any]]:
@@ -1916,6 +1930,7 @@ def create_blank_scaled_revision(
 # --- Shape Operations ---
 
 
+@cached_store_read
 def list_layout_shapes(revision_id: str) -> list[dict[str, Any]]:
     """Return all drawn shapes and workstation/equipment footprints for a revision with layer metadata."""
     store = _store_module()
@@ -2432,6 +2447,7 @@ def import_shapes_from_revision(
 # --- Section Pitch Dimensional Standards ---
 
 
+@cached_store_read
 def get_section_pitch_standards(layout_id: str) -> dict[str, dict[str, Any]]:
     """Return all section pitch standards configured for a layout keyed by section_id."""
     store = _store_module()
@@ -2548,6 +2564,7 @@ def set_section_pitch_standard(
 # --- Cross-Scenario Yamazumi Pitch Queries & Live Pin Map Metrics ---
 
 
+@cached_store_read
 def list_project_yamazumi_pitches(project_id: str) -> list[dict[str, Any]]:
     """List unique workstation pitches across all planning scenarios with scenario and area metadata."""
     store = _store_module()
@@ -2579,6 +2596,7 @@ def list_project_yamazumi_pitches(project_id: str) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+@cached_store_read
 def get_scenario_pitch_metrics_for_pin_map(
     project_id: str, scenario_id: str
 ) -> dict[str, dict[str, Any]]:
@@ -2698,6 +2716,7 @@ def get_scenario_pitch_metrics_for_pin_map(
         return metrics
 
 
+@cached_store_read
 def get_pitch_layout_footprints(project_id: str, scenario_id: str) -> list[dict[str, Any]]:
     """Return placed layout shapes linked to pitches in this scenario, providing real-world coordinates for the Pin Map."""
     store = _store_module()
@@ -2952,6 +2971,7 @@ def update_revision_background_from_data_url(
 # --- Saved Custom Shapes / Stencils Operations ---
 
 
+@cached_store_read
 def list_layout_custom_stencils(project_id: str) -> list[dict[str, Any]]:
     """Return all user-saved custom shapes/stencils for a project."""
     store = _store_module()

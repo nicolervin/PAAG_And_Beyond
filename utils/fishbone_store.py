@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sys as _sys
 from utils import db_core as _db_core
+from utils.cache_store import cached_store_read
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
+@cached_store_read
 def assembly_sections(project_id: str) -> pd.DataFrame:
     rows = query(
         "SELECT * FROM assembly_sections WHERE project_id = ? ORDER BY sequence, name",
@@ -29,6 +31,7 @@ def assembly_sections(project_id: str) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
+@cached_store_read
 def assembly_section_walk_order(project_id: str) -> pd.DataFrame:
     """Return Fishbone sections in deterministic depth-first framework order."""
     sections = assembly_sections(project_id)
@@ -1012,6 +1015,7 @@ def update_assembly_section_rows(
         raise ValueError("Framework names must be unique within the project.") from exc
     return len(records)
 
+@cached_store_read
 def fishbone_part_assignments(
     project_id: str, scenario_id: str | None = None
 ) -> pd.DataFrame:
@@ -1652,9 +1656,11 @@ def import_fishbone_nodes(project_id: str, nodes: pd.DataFrame, replace: bool = 
             )
     return len(nodes)
 
+@cached_store_read
 def project_models(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query("SELECT * FROM project_models WHERE project_id = ? ORDER BY model_number", (project_id,)))
 
+@cached_store_read
 def fishbone_plan_snapshot(project_id: str) -> dict:
     """Capture the framework and every section-linked record needed for saved-state Undo."""
     with connection() as conn:
@@ -1700,6 +1706,7 @@ def fishbone_plan_snapshot(project_id: str) -> dict:
             ).fetchall()],
         }
 
+@cached_store_read
 def fishbone_assignment_snapshot(project_id: str) -> list[dict]:
     """Capture assigned part uses without changing the assembly framework."""
     with connection() as conn:
@@ -1942,6 +1949,7 @@ def update_fishbone_assignment_use(
             _conn=conn,
         )
 
+@cached_store_read
 def assembly_section_connections(project_id: str) -> pd.DataFrame:
     """Return all directed flow connections between sections for a project."""
     return pd.DataFrame(query(

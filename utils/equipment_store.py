@@ -10,6 +10,12 @@ from uuid import uuid4
 import pandas as pd
 from PIL import Image
 
+from utils.cache_store import (
+    cached_store_read,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
+
 
 EQUIPMENT_FUNCTION_AREAS = (
     "Quality",
@@ -299,10 +305,13 @@ def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -
         existing_types.add(label.strip().casefold())
 
 
+@cached_store_read
 def equipment_types(project_id: str, functional_area: str | None = None) -> pd.DataFrame:
     store = _store_module()
     with store.connection() as conn:
-        _ensure_default_equipment_types(conn, project_id)
+        if not is_scenario_task_completed("ensure_default_equipment_types", project_id, ""):
+            _ensure_default_equipment_types(conn, project_id)
+            mark_scenario_task_completed("ensure_default_equipment_types", project_id, "")
         area_filter = " AND EXISTS (SELECT 1 FROM equipment_type_function_links f WHERE f.equipment_type_id=t.id AND f.functional_area=?)" if functional_area else ""
         params = (project_id, functional_area) if functional_area else (project_id,)
         rows = conn.execute(
@@ -474,6 +483,7 @@ def delete_equipment_types(
     return {"row_count": len(normalized), "timestamp": timestamp}
 
 
+@cached_store_read
 def equipment_assets(
     project_id: str,
     scenario_id: str | None = None,
@@ -519,6 +529,7 @@ def equipment_assets(
     return frame
 
 
+@cached_store_read
 def equipment_pitch_options(project_id: str, scenario_id: str) -> pd.DataFrame:
     store = _store_module()
     rows = store.query(
@@ -857,6 +868,7 @@ def delete_equipment_assets(
     return {"row_count": len(normalized), "timestamp": timestamp, "impact": impact}
 
 
+@cached_store_read
 def equipment_process_options(project_id: str, scenario_id: str, pitch_id: str) -> pd.DataFrame:
     store = _store_module()
     _ = equipment_pitch_options(project_id, scenario_id)
@@ -887,6 +899,7 @@ def equipment_process_options(project_id: str, scenario_id: str, pitch_id: str) 
     return frame
 
 
+@cached_store_read
 def equipment_placement_detail(project_id: str, scenario_id: str, equipment_id: str) -> dict[str, object]:
     store = _store_module()
     rows = store.query(
@@ -1016,6 +1029,7 @@ def save_equipment_placement(
     return {"row_count": int(changed), "placement_id": placement_id, "timestamp": timestamp}
 
 
+@cached_store_read
 def equipment_placement_mismatches(project_id: str, scenario_id: str) -> pd.DataFrame:
     store = _store_module()
     rows = store.query(
@@ -1124,6 +1138,7 @@ def unlink_moved_equipment_links(
     return {"row_count": count, "timestamp": timestamp}
 
 
+@cached_store_read
 def torque_requirements(project_id: str) -> pd.DataFrame:
     store = _store_module()
     rows = store.query(
@@ -1145,6 +1160,7 @@ def torque_requirements(project_id: str) -> pd.DataFrame:
     ])
 
 
+@cached_store_read
 def equipment_torque_requirement_ids(project_id: str, equipment_id: str) -> list[str]:
     store = _store_module()
     return [
@@ -1160,6 +1176,7 @@ def equipment_torque_requirement_ids(project_id: str, equipment_id: str) -> list
     ]
 
 
+@cached_store_read
 def equipment_torque_published_specifications(
     project_id: str,
     scenario_id: str,
@@ -1278,6 +1295,7 @@ def save_equipment_torque_requirements(
     return {"row_count": int(changed), "timestamp": timestamp}
 
 
+@cached_store_read
 def equipment_torque_compatibility_warnings(
     project_id: str, scenario_id: str, equipment_id: str
 ) -> list[str]:
@@ -1470,11 +1488,14 @@ def clone_equipment_scenario(
             )
 
 
+@cached_store_read
 def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return a unified Equipment Needs vs Placements matrix DataFrame."""
     store = _store_module()
     with store.connection() as conn:
-        init_equipment_schema(conn)
+        if not is_scenario_task_completed("init_equipment_schema_for_matrix", project_id, ""):
+            init_equipment_schema(conn)
+            mark_scenario_task_completed("init_equipment_schema_for_matrix", project_id, "")
 
         work_rows = conn.execute(
             """SELECT id, station, operation, sequence
@@ -1673,6 +1694,7 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
     return df.sort_values(by=["op_id", "source_stage"], kind="stable").reset_index(drop=True)
 
 
+@cached_store_read
 def conveyor_zones(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return scenario conveyor zones with dynamic pitch count and length calculations."""
     store = _store_module()
@@ -2086,6 +2108,7 @@ def delete_conveyor_zone_image(
         store._remove_owned_upload(previous)
 
 
+@cached_store_read
 def scenario_pitches_ergonomics_geometry(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return workstation pitches with their platform elevation, pit depth, and assigned zone."""
     store = _store_module()
@@ -2155,6 +2178,7 @@ def save_pitch_ergonomics_geometry(
     return {"row_count": count, "timestamp": timestamp}
 
 
+@cached_store_read
 def scenario_conveyor_line_sizing(project_id: str, scenario_id: str) -> dict[str, object]:
     """Calculate aggregate conveyor line sizing across zones and active pitches."""
     store = _store_module()
