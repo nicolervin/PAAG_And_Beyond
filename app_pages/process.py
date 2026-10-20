@@ -1142,9 +1142,12 @@ with tab_plan:
             "Unassigned": "Unassigned",
         }
         if not all_section_yamazumi_rows.empty:
-            for _, r in all_section_yamazumi_rows.iterrows():
-                p_num = str(r.get("pitch_number") or "").strip()
-                p_name = str(r.get("pitch_name") or "").strip()
+            for p_num_val, p_name_val in zip(
+                all_section_yamazumi_rows["pitch_number"],
+                all_section_yamazumi_rows["pitch_name"],
+            ):
+                p_num = str(p_num_val or "").strip()
+                p_name = str(p_name_val or "").strip()
                 if p_num and p_num not in pitch_label_map:
                     pitch_options.append(p_num)
                     pitch_label_map[p_num] = f"{p_num} — {p_name}" if p_name else p_num

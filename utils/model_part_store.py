@@ -664,10 +664,33 @@ def complexity_features(project_id: str) -> pd.DataFrame:
     )
     frame = pd.DataFrame(rows)
     if not frame.empty:
+        if "subsystem" not in frame.columns:
+            frame["subsystem"] = ""
+        else:
+            frame["subsystem"] = frame["subsystem"].fillna("").astype(str).str.strip()
         frame["allowed_choices"] = frame["allowed_values"].apply(
             lambda value: ", ".join(json.loads(value or "[]"))
         )
     return frame
+
+
+@cached_store_read
+def project_part_subsystems(project_id: str) -> list[str]:
+    """Return sorted distinct non-blank subsystem values across project parts, PITS records, and feature definitions."""
+    rows = query(
+        """SELECT DISTINCT subsystem FROM parts WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''
+           UNION
+           SELECT DISTINCT subsystem FROM pits_records WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''
+           UNION
+           SELECT DISTINCT subsystem FROM complexity_features WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''""",
+        (project_id, project_id, project_id),
+    )
+    by_casefold: dict[str, str] = {}
+    for row in rows:
+        value = str(row.get("subsystem") or "").strip()
+        if value and value.casefold() not in by_casefold:
+            by_casefold[value.casefold()] = value
+    return sorted(by_casefold.values(), key=str.casefold)
 
 def complexity_feature_delete_impacts(
     project_id: str, feature_ids: list[str]
@@ -942,7 +965,7 @@ def infer_part_feature_rules(
         return {}
 
     feature_rows = read_rows(
-        "SELECT id, name, category, allowed_values, active FROM complexity_features WHERE project_id=?",
+        "SELECT id, name, category, subsystem, allowed_values, active FROM complexity_features WHERE project_id=?",
         (project_id,),
     )
     active_features_by_id = {
@@ -974,7 +997,7 @@ def infer_part_feature_rules(
     if not configured_tree_models:
         return {}
 
-    sql_parts = "SELECT id, part_number, description, model_applicability, pits_tracker_number FROM parts WHERE project_id=?"
+    sql_parts = "SELECT id, part_number, description, subsystem, model_applicability, pits_tracker_number FROM parts WHERE project_id=?"
     params_parts: list[Any] = [project_id]
     if part_ids is not None:
         if not part_ids:
@@ -985,6 +1008,18 @@ def infer_part_feature_rules(
     part_rows = read_rows(sql_parts, tuple(params_parts))
     if not part_rows:
         return {}
+
+    pits_subsystem_rows = read_rows(
+        """SELECT pits_id, subsystem
+           FROM pits_records
+           WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''""",
+        (project_id,),
+    )
+    subsystem_by_pits_id = {
+        str(row["pits_id"]).strip(): str(row["subsystem"]).strip()
+        for row in pits_subsystem_rows
+        if str(row.get("pits_id") or "").strip() and str(row.get("subsystem") or "").strip()
+    }
 
     part_by_id = {str(row["id"]): row for row in part_rows}
     part_by_tracker = {
@@ -1000,6 +1035,7 @@ def infer_part_feature_rules(
     )
     part_models: dict[str, set[str]] = {}
     models_with_bom: set[str] = set()
+    all_bom_models: set[str] = set()
     for b in bom_rows:
         cid = str(b.get("child_part_id") or "").strip()
         ctracker = str(b.get("child_tracker_number") or "").strip()
@@ -1008,15 +1044,11 @@ def infer_part_feature_rules(
             levels = json.loads(b["raw_levels_json"] or "{}")
             usages = levels.get("model_usages") or {}
             if isinstance(usages, dict):
-                for m in usages:
-                    m_clean = str(m).strip()
-                    if m_clean and m_clean in active_models:
-                        models_with_bom.add(m_clean)
+                row_models = {str(m).strip() for m in usages if str(m).strip()}
+                all_bom_models.update(row_models)
+                models_with_bom.update(row_models & active_models)
                 if p:
-                    pid = str(p["id"])
-                    part_models.setdefault(pid, set()).update(
-                        str(m).strip() for m in usages if str(m).strip() and str(m).strip() in active_models
-                    )
+                    part_models.setdefault(str(p["id"]), set()).update(row_models)
         except Exception:
             pass
 
@@ -1031,80 +1063,174 @@ def infer_part_feature_rules(
                     models_with_bom.update(mods)
 
     top_level_pns = _identify_top_level_assembly_pns(project_id, part_rows, _conn=_conn)
+    all_bom_tree_models = all_bom_models & configured_tree_models
+    if all_bom_tree_models and all(
+        bool(mods & all_bom_tree_models)
+        for mods in feature_choice_models.values()
+        if mods
+    ):
+        eval_tree_models = all_bom_tree_models
+    else:
+        eval_tree_models = configured_tree_models
+
+    configured_feature_subsystems = {
+        str(row.get("subsystem") or "").strip().casefold()
+        for row in active_features_by_id.values()
+        if str(row.get("subsystem") or "").strip()
+    }
+    precomputed_choices: list[dict[str, Any]] = []
+    for (fid, val), c_models in feature_choice_models.items():
+        if not c_models:
+            continue
+        if val.strip().upper() in ("N/A", "NONE"):
+            continue
+        c_eval_models = c_models & eval_tree_models
+        if not c_eval_models:
+            continue
+        feat = active_features_by_id[fid]
+        f_subsystem = str(feat.get("subsystem") or "").strip()
+        f_sub_key = f_subsystem.casefold()
+        allowed = json.loads(feat.get("allowed_values") or "[]")
+        other_eval_models_union: set[str] = set()
+        for other_val in allowed:
+            if other_val != val:
+                other_eval_models_union |= (
+                    feature_choice_models.get((fid, other_val), set()) & eval_tree_models
+                )
+        f_name = str(feat.get("name") or "")
+        f_cat = str(feat.get("category") or "")
+        f_tokens = (
+            _tokenize_part_text(f_name)
+            | _tokenize_part_text(f_cat)
+            | _tokenize_part_text(val)
+        )
+        precomputed_choices.append(
+            {
+                "fid": fid,
+                "val": val,
+                "c_models": c_models,
+                "c_eval_models": c_eval_models,
+                "f_subsystem": f_subsystem,
+                "f_sub_key": f_sub_key,
+                "other_eval_models_union": other_eval_models_union,
+                "f_name": f_name,
+                "f_cat": f_cat,
+                "f_tokens": f_tokens,
+            }
+        )
+
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
         pid = str(p["id"])
         if str(p.get("part_number") or "").strip().upper() in top_level_pns:
             continue
         raw_models = part_models.get(pid, set())
-        p_models = raw_models & configured_tree_models
+        p_models = raw_models & eval_tree_models
 
         if not p_models:
             if str(p.get("model_applicability") or "").strip().lower() == "all":
                 inferred[pid] = ["All models"]
             continue
 
-        if p_models >= configured_tree_models or len(raw_models) >= len(configured_tree_models):
+        if p_models >= eval_tree_models or len(raw_models) >= len(configured_tree_models):
             inferred[pid] = ["All models"]
             continue
 
         desc = str(p.get("description") or "")
         part_num = str(p.get("part_number") or "")
+        tracker = str(p.get("pits_tracker_number") or "").strip()
+        p_subsystem = (
+            subsystem_by_pits_id.get(tracker)
+            or str(p.get("subsystem") or "").strip()
+        )
+        p_sub_key = p_subsystem.casefold()
+        part_has_assigned_subsystem = bool(p_sub_key) and (
+            p_sub_key in configured_feature_subsystems
+        )
         p_tokens = _tokenize_part_text(desc) | _tokenize_part_text(part_num)
 
         candidates: list[dict[str, Any]] = []
-        for (fid, val), c_models in feature_choice_models.items():
-            if not c_models:
-                continue
-            if val.strip().upper() in ("N/A", "NONE"):
-                continue
-            if not (p_models <= c_models):
+        for choice in precomputed_choices:
+            c_eval_models = choice["c_eval_models"]
+            if not (p_models <= c_eval_models):
                 continue
 
-            feat = active_features_by_id[fid]
-            allowed = json.loads(feat.get("allowed_values") or "[]")
-            conflicts = False
-            for other_val in allowed:
-                if other_val != val:
-                    other_models = feature_choice_models.get((fid, other_val), set())
-                    if p_models & other_models:
-                        conflicts = True
-                        break
-            if conflicts:
+            f_sub_key = choice["f_sub_key"]
+            if part_has_assigned_subsystem and f_sub_key != p_sub_key:
+                continue
+            subsystem_match = (
+                1
+                if (f_sub_key and p_sub_key and f_sub_key == p_sub_key)
+                else 0
+            )
+
+            if p_models & choice["other_eval_models_union"]:
                 continue
 
-            f_name = str(feat.get("name") or "")
-            f_cat = str(feat.get("category") or "")
-            f_tokens = _tokenize_part_text(f_name) | _tokenize_part_text(f_cat) | _tokenize_part_text(val)
-            overlap = len(p_tokens & f_tokens)
+            overlap = len(p_tokens & choice["f_tokens"])
 
-            exact_match = 1.0 if p_models == c_models else 0.0
-            coverage = len(p_models) / len(c_models) if c_models else 0.0
-            specificity = 1.0 / len(c_models) if c_models else 0.0
+            exact_match = 1.0 if p_models == c_eval_models else 0.0
+            coverage = len(p_models) / len(c_eval_models) if c_eval_models else 0.0
+            specificity = 1.0 / len(c_eval_models) if c_eval_models else 0.0
 
-            score = (overlap * 100.0) + (exact_match * 50.0) + (coverage * 20.0) + specificity
+            score = (
+                (subsystem_match * 200.0)
+                + (overlap * 100.0)
+                + (exact_match * 50.0)
+                + (coverage * 20.0)
+                + specificity
+            )
             candidates.append({
                 "score": score,
-                "feature_id": fid,
-                "value": val,
+                "feature_id": choice["fid"],
+                "value": choice["val"],
                 "overlap": overlap,
+                "subsystem_match": subsystem_match,
                 "exact_match": exact_match,
-                "category": f_cat,
-                "name": f_name,
-                "c_models": c_models,
+                "category": choice["f_cat"],
+                "name": choice["f_name"],
+                "eval_models": c_eval_models,
+                "raw_models": choice["c_models"],
             })
 
         if not candidates:
             continue
 
+        # Exclude any candidate whose model set is a strict superset of another candidate's
+        # model set (i.e., found on more models than the tighter matching feature choices).
+        candidates = [
+            c
+            for c in candidates
+            if not any(
+                other["eval_models"] < c["eval_models"]
+                or (
+                    other["eval_models"] == c["eval_models"]
+                    and other["raw_models"] < c["raw_models"]
+                )
+                for other in candidates
+            )
+        ]
+
+        # Exclude any candidate with an unset subsystem when another candidate has an
+        # explicit subsystem match for this part and covers the same or a tighter model set.
+        candidates = [
+            c
+            for c in candidates
+            if not any(
+                other["subsystem_match"] > c["subsystem_match"]
+                and other["eval_models"] <= c["eval_models"]
+                for other in candidates
+            )
+        ]
+
         candidates.sort(key=lambda c: c["score"], reverse=True)
         top = candidates[0]
 
-        # If there is no keyword overlap:
+        # If there is no keyword overlap or subsystem match:
         # Check if variance across models has been established yet.
         # If fewer than 2 models have BOMs built, default to "All models"
         # until multiple model BOMs exist and differ (Answer 3).
-        if top["overlap"] == 0 and len(models_with_bom) < 2:
+        if top["overlap"] == 0 and top["subsystem_match"] == 0 and len(models_with_bom) < 2:
             inferred[pid] = ["All models"]
             continue
 
@@ -1114,15 +1240,12 @@ def infer_part_feature_rules(
         chosen_tokens.append(f"{top['feature_id']}::{top['value']}")
         features_seen.add(top["feature_id"])
 
-        if top["overlap"] > 0:
+        if top["overlap"] > 0 or top["subsystem_match"] > 0:
             for other in candidates[1:]:
                 if other["feature_id"] in features_seen:
                     continue
-                if other["overlap"] > 0:
-                    combined_models = (
-                        feature_choice_models.get((top["feature_id"], top["value"]), set())
-                        & feature_choice_models.get((other["feature_id"], other["value"]), set())
-                    )
+                if other["overlap"] > 0 or other["subsystem_match"] > 0:
+                    combined_models = top["eval_models"] & other["eval_models"]
                     if p_models <= combined_models:
                         chosen_tokens.append(f"{other['feature_id']}::{other['value']}")
                         features_seen.add(other["feature_id"])
@@ -1198,17 +1321,6 @@ def preview_inferred_part_feature_rules(
             feature_token_by_label[label] = token
     feature_options = list(feature_token_by_label.keys())
 
-    if not inferred:
-        return {
-            "direct": {},
-            "review": [],
-            "feature_options": feature_options,
-            "feature_token_by_label": feature_token_by_label,
-            "skipped_existing_count": 0,
-            "skipped_assembly_count": 0,
-            "total_inferred": 0,
-        }
-
     existing_rules = {
         str(row["part_id"])
         for row in read_rows(
@@ -1216,6 +1328,36 @@ def preview_inferred_part_feature_rules(
             (project_id,),
         )
     }
+    linked_assemblies = {
+        str(row["catalog_part_id"])
+        for row in read_rows(
+            "SELECT catalog_part_id FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id IS NOT NULL",
+            (project_id,),
+        )
+    }
+    evaluated_existing_ids = (
+        existing_rules & {str(pid) for pid in part_ids}
+        if part_ids is not None
+        else existing_rules
+    )
+    stale_rule_part_ids = (
+        sorted(evaluated_existing_ids - linked_assemblies - set(inferred.keys()))
+        if overwrite_existing
+        else []
+    )
+
+    if not inferred:
+        return {
+            "direct": {},
+            "review": [],
+            "stale_rule_part_ids": stale_rule_part_ids,
+            "feature_options": feature_options,
+            "feature_token_by_label": feature_token_by_label,
+            "skipped_existing_count": 0,
+            "skipped_assembly_count": 0,
+            "total_inferred": 0,
+        }
+
     existing_applicability = {
         str(row["id"]): str(row["model_applicability"] or "").strip()
         for row in read_rows(
@@ -1288,6 +1430,7 @@ def preview_inferred_part_feature_rules(
     return {
         "direct": direct_to_apply,
         "review": review_rows,
+        "stale_rule_part_ids": stale_rule_part_ids,
         "feature_options": feature_options,
         "feature_token_by_label": feature_token_by_label,
         "skipped_existing_count": skipped_existing_count,
@@ -1322,13 +1465,20 @@ def apply_inferred_part_feature_rules(
     if not skip_multi_feature:
         for r in preview["review"]:
             to_apply[r["part_id"]] = r["inferred_tokens"]
+    stale_rule_part_ids = preview.get("stale_rule_part_ids") or []
 
-    if not to_apply:
+    if not to_apply and not stale_rule_part_ids:
         return 0
 
     context = nullcontext(_conn) if _conn is not None else connection()
     with context as conn:
-        updated = update_part_feature_rules(project_id, to_apply, _conn=conn)
+        updated = update_part_feature_rules(project_id, to_apply, _conn=conn) if to_apply else 0
+        for stale_part_id in stale_rule_part_ids:
+            conn.execute(
+                "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
+                (project_id, stale_part_id),
+            )
+            updated += 1
         if updated > 0:
             record_audit_event(
                 project_id,
@@ -1377,6 +1527,7 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
     required = {"id", "category", "name", "allowed_choices", "description", "active"}
     if not required.issubset(edited.columns):
         raise ValueError("The feature definitions table is missing required columns.")
+    has_subsystem_col = "subsystem" in edited.columns
 
     def clean(value) -> str:
         return "" if value is None or pd.isna(value) else str(value).strip()
@@ -1397,18 +1548,27 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
             raise ValueError(f"Add at least one allowed choice for {name}.")
         names.append(name)
         records.append({
-            "id": clean(row.get("id")) or str(uuid4()), "category": category, "name": name,
-            "allowed_values": json.dumps(choices), "description": clean(row.get("description")),
-            "active": 1 if bool(row.get("active")) else 0, "sequence": (index + 1) * 10,
+            "id": clean(row.get("id")) or str(uuid4()),
+            "category": category,
+            "subsystem": clean(row.get("subsystem")) if has_subsystem_col else None,
+            "name": name,
+            "allowed_values": json.dumps(choices),
+            "description": clean(row.get("description")),
+            "active": 1 if bool(row.get("active")) else 0,
+            "sequence": (index + 1) * 10,
         })
     if len({name.casefold() for name in names}) != len(names):
         raise ValueError("Feature names must be unique within this project.")
 
     timestamp = now_iso()
     with connection() as conn:
-        existing_ids = {row[0] for row in conn.execute(
-            "SELECT id FROM complexity_features WHERE project_id=?", (project_id,)
-        )}
+        existing_rows = conn.execute(
+            "SELECT id, subsystem FROM complexity_features WHERE project_id=?", (project_id,)
+        ).fetchall()
+        existing_ids = {row[0] for row in existing_rows}
+        existing_subsystem_by_id = {
+            str(row[0]): str(row[1] or "").strip() for row in existing_rows
+        }
         retained_ids = {record["id"] for record in records}
         for feature_id in existing_ids - retained_ids:
             affected_part_ids = [row[0] for row in conn.execute(
@@ -1422,14 +1582,19 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
                     (timestamp, part_id, project_id),
                 )
         for record in records:
+            subsystem_val = (
+                record["subsystem"]
+                if record["subsystem"] is not None
+                else existing_subsystem_by_id.get(record["id"], "")
+            )
             conn.execute(
                 """INSERT INTO complexity_features
-                   (id, project_id, category, name, allowed_values, description, sequence, active, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET category=excluded.category, name=excluded.name,
-                   allowed_values=excluded.allowed_values, description=excluded.description,
+                   (id, project_id, category, subsystem, name, allowed_values, description, sequence, active, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET category=excluded.category, subsystem=excluded.subsystem,
+                   name=excluded.name, allowed_values=excluded.allowed_values, description=excluded.description,
                    sequence=excluded.sequence, active=excluded.active, updated_at=excluded.updated_at""",
-                (record["id"], project_id, record["category"], record["name"], record["allowed_values"],
+                (record["id"], project_id, record["category"], subsystem_val, record["name"], record["allowed_values"],
                  record["description"], record["sequence"], record["active"], timestamp),
             )
             choices = json.loads(record["allowed_values"])
@@ -1912,18 +2077,6 @@ def _import_pits_bom_snapshot(
 ) -> dict[str, int | str]:
     occurrences = list(bom_snapshot.get("occurrences") or [])
     duplicates = list(bom_snapshot.get("duplicates") or [])
-    blocking_issues = [
-        issue for issue in (bom_snapshot.get("issues") or []) if issue.get("blocking")
-    ]
-    if blocking_issues:
-        examples = ", ".join(
-            f"row {issue.get('source_row')}: {issue.get('issue')}"
-            for issue in blocking_issues[:5]
-        )
-        raise ValueError(
-            "The BOM hierarchy contains rows without stable occurrence identities. "
-            f"Resolve them before importing: {examples}"
-        )
 
     duplicate_rows_by_key: dict[tuple[str, str], set[int]] = {}
     for duplicate in duplicates:
@@ -2599,25 +2752,31 @@ def detect_pits_new_and_changed_parts(
     records: list[dict],
     bom_snapshot: dict | None = None,
 ) -> list[dict]:
-    """Detect new part numbers and modified descriptions from uploaded PITS records and BOM occurrences.
+    """Detect new part numbers, modified descriptions, and deleted parts from uploaded PITS records and BOM occurrences.
 
+    Only compares when a prior PITS upload exists for the project; returns an empty list on the first PITS upload.
     Deduplicates incoming records by part number so each part is reviewed once.
-    Detects if an incoming part replaces a previous part number sharing the same PITS tracker ID.
-    Returns a list of dicts for each detected new part or modified description.
+    Detects if an incoming part replaces a previous part number sharing the same PITS tracker ID,
+    and flags prior PITS parts that have been removed from the incoming snapshot.
+    Returns a list of dicts for each detected change.
     """
     seen_part_numbers: dict[str, dict] = {}
     for record in records:
         part_number = str(record.get("part_number") or "").strip()
         if not part_number:
             continue
+        part_key = part_number.casefold()
         pits_id = str(record.get("pits_id") or "").strip()
         desc = str(record.get("description") or "").strip()
-        if part_number not in seen_part_numbers:
-            seen_part_numbers[part_number] = {
+        status = str(record.get("status") or "").strip()
+        if part_key not in seen_part_numbers:
+            seen_part_numbers[part_key] = {
                 "part_number": part_number,
                 "incoming_description": desc,
                 "pits_id": pits_id,
                 "all_pits_ids": [pits_id] if pits_id else [],
+                "record_descriptions": {pits_id: desc} if pits_id else {},
+                "record_statuses": {pits_id: status} if pits_id else {},
                 "subsystem": str(record.get("subsystem") or "").strip(),
                 "design_maturity": str(record.get("design_maturity") or record.get("revision") or "").strip(),
                 "design_engineer": str(record.get("design_engineer") or record.get("technology_engineer") or "").strip(),
@@ -2627,10 +2786,13 @@ def detect_pits_new_and_changed_parts(
                 "comments": str(record.get("comments") or "").strip(),
             }
         else:
-            item = seen_part_numbers[part_number]
+            item = seen_part_numbers[part_key]
             if pits_id and pits_id not in item["all_pits_ids"]:
                 item["all_pits_ids"].append(pits_id)
-            if not item["incoming_description"] and desc:
+            if pits_id:
+                item["record_descriptions"][pits_id] = desc
+                item["record_statuses"][pits_id] = status
+            if desc:
                 item["incoming_description"] = desc
 
     if bom_snapshot and isinstance(bom_snapshot.get("occurrences"), list):
@@ -2638,31 +2800,16 @@ def detect_pits_new_and_changed_parts(
             part_number = str(occ.get("part_number") or "").strip()
             if not part_number:
                 continue
+            part_key = part_number.casefold()
+            if part_key not in seen_part_numbers:
+                continue
             pits_id = str(occ.get("child_tracker_number") or "").strip()
             desc = str(occ.get("description") or "").strip()
-            if part_number not in seen_part_numbers:
-                seen_part_numbers[part_number] = {
-                    "part_number": part_number,
-                    "incoming_description": desc,
-                    "pits_id": pits_id,
-                    "all_pits_ids": [pits_id] if pits_id else [],
-                    "subsystem": "",
-                    "design_maturity": "",
-                    "design_engineer": "",
-                    "ppm": "",
-                    "buyer_gcl": "",
-                    "source_code": "",
-                    "comments": "",
-                }
-            else:
-                item = seen_part_numbers[part_number]
-                if pits_id and pits_id not in item["all_pits_ids"]:
-                    item["all_pits_ids"].append(pits_id)
-                if not item["incoming_description"] and desc:
-                    item["incoming_description"] = desc
-
-    if not seen_part_numbers:
-        return []
+            item = seen_part_numbers[part_key]
+            if pits_id and pits_id.casefold() not in {"n", "no"} and pits_id not in item["all_pits_ids"]:
+                item["all_pits_ids"].append(pits_id)
+            if not item["incoming_description"] and desc:
+                item["incoming_description"] = desc
 
     all_incoming_pits_ids = {
         pid
@@ -2672,53 +2819,184 @@ def detect_pits_new_and_changed_parts(
     }
 
     with connection() as conn:
-        placeholders = ",".join("?" for _ in seen_part_numbers)
+        has_prior_pits_upload = conn.execute(
+            """SELECT 1 FROM pits_records WHERE project_id=?
+               UNION ALL
+               SELECT 1 FROM pits_bom_imports WHERE project_id=?
+               LIMIT 1""",
+            (project_id, project_id),
+        ).fetchone()
+        if not has_prior_pits_upload:
+            return []
+
         rows = conn.execute(
-            f"""SELECT id, part_number, description, subsystem, design_maturity,
-                       design_engineer, technology_engineer, ppm, buyer_gcl, pits_tracker_number
-                FROM parts
-                WHERE project_id=? AND part_number IN ({placeholders})""",
-            (project_id, *seen_part_numbers.keys()),
+            """SELECT id, part_number, description, subsystem, design_maturity,
+                      design_engineer, technology_engineer, ppm, buyer_gcl, pits_tracker_number
+               FROM parts
+               WHERE project_id=?""",
+            (project_id,),
         ).fetchall()
-        existing_by_part = {
-            str(row["part_number"]): dict(row)
-            for row in rows
+        existing_by_part: dict[str, dict] = {}
+        tracker_owners: dict[str, dict] = {}
+        for row in rows:
+            row_dict = dict(row)
+            pn_clean = str(row_dict.get("part_number") or "").strip()
+            if pn_clean:
+                existing_by_part[pn_clean.casefold()] = row_dict
+            tracker_num = str(row_dict.get("pits_tracker_number") or "").strip()
+            if tracker_num and tracker_num in all_incoming_pits_ids:
+                tracker_owners[tracker_num] = row_dict
+
+        prior_pits_rows = conn.execute(
+            """SELECT pits_id, part_number, description, subsystem, design_maturity,
+                      comments, status, last_seen_at
+               FROM pits_records
+               WHERE project_id=?""",
+            (project_id,),
+        ).fetchall()
+        prior_pits_by_id = {
+            str(r["pits_id"]).strip(): dict(r)
+            for r in prior_pits_rows
+            if str(r["pits_id"] or "").strip()
+        }
+        prior_part_keys = {
+            str(r["part_number"]).strip().casefold()
+            for r in prior_pits_rows
+            if str(r["part_number"] or "").strip()
         }
 
-        tracker_owners: dict[str, dict] = {}
-        if all_incoming_pits_ids:
-            t_placeholders = ",".join("?" for _ in all_incoming_pits_ids)
-            t_rows = conn.execute(
-                f"""SELECT id, part_number, description, pits_tracker_number
-                    FROM parts
-                    WHERE project_id=? AND pits_tracker_number IN ({t_placeholders})""",
-                (project_id, *all_incoming_pits_ids),
-            ).fetchall()
-            for r in t_rows:
-                tracker_owners[str(r["pits_tracker_number"])] = dict(r)
+    if not seen_part_numbers and not prior_pits_rows:
+        return []
 
     detected = []
-    for part_number, item in seen_part_numbers.items():
-        if part_number not in existing_by_part:
-            item["change_type"] = "new_part"
+    replaced_part_keys: set[str] = set()
+    for part_key, item in seen_part_numbers.items():
+        record_descs: dict[str, str] = item.pop("record_descriptions", {})
+        record_statuses: dict[str, str] = item.pop("record_statuses", {})
+        unchanged_in_pits = bool(record_descs) and all(
+            pid in prior_pits_by_id
+            and str(prior_pits_by_id[pid].get("part_number") or "").strip().casefold() == part_key
+            and str(prior_pits_by_id[pid].get("description") or "").strip() == r_desc
+            and str(prior_pits_by_id[pid].get("status") or "").strip().casefold()
+            == str(record_statuses.get(pid) or "").strip().casefold()
+            for pid, r_desc in record_descs.items()
+        )
+        newly_marked_deleted = (
+            bool(record_statuses)
+            and all(s.casefold() == "deleted" for s in record_statuses.values() if s)
+            and any(s.casefold() == "deleted" for s in record_statuses.values())
+            and not all(
+                pid in prior_pits_by_id
+                and str(prior_pits_by_id[pid].get("status") or "").strip().casefold() == "deleted"
+                for pid in record_statuses
+            )
+        )
+        if part_key not in existing_by_part:
+            if part_key in prior_part_keys and unchanged_in_pits:
+                continue
+            item["change_type"] = "deleted_part" if newly_marked_deleted else "new_part"
             item["current_description"] = ""
             for pid in item["all_pits_ids"]:
-                if pid in tracker_owners and tracker_owners[pid]["part_number"] != part_number:
+                if (
+                    pid in tracker_owners
+                    and str(tracker_owners[pid].get("part_number") or "").strip().casefold() != part_key
+                ):
                     replaces = tracker_owners[pid]
                     item["replaces_part_number"] = replaces["part_number"]
                     item["replaces_description"] = replaces.get("description", "")
                     item["replaces_part_id"] = replaces.get("id", "")
                     item["replaces_tracker_id"] = pid
+                    replaced_part_keys.add(str(replaces["part_number"]).strip().casefold())
                     break
             detected.append(item)
         else:
-            existing = existing_by_part[part_number]
+            existing = existing_by_part[part_key]
             curr_desc = str(existing.get("description") or "").strip()
+            if newly_marked_deleted:
+                item["change_type"] = "deleted_part"
+                item["current_description"] = curr_desc
+                detected.append(item)
+                continue
+            if unchanged_in_pits:
+                continue
             inc_desc = item["incoming_description"]
-            if inc_desc and inc_desc != curr_desc:
+            changed_pits_desc: tuple[str, str] | None = None
+            for pid, r_desc in record_descs.items():
+                if (
+                    pid in prior_pits_by_id
+                    and str(prior_pits_by_id[pid].get("part_number") or "").strip().casefold() == part_key
+                ):
+                    prior_desc = str(prior_pits_by_id[pid].get("description") or "").strip()
+                    if r_desc and r_desc != prior_desc:
+                        changed_pits_desc = (prior_desc, r_desc)
+                        break
+            if changed_pits_desc is not None:
+                prior_desc, new_desc = changed_pits_desc
+                item["change_type"] = "changed_description"
+                item["current_description"] = prior_desc or curr_desc
+                item["incoming_description"] = new_desc
+                detected.append(item)
+            elif inc_desc and inc_desc != curr_desc:
                 item["change_type"] = "changed_description"
                 item["current_description"] = curr_desc
                 detected.append(item)
+
+    if prior_pits_rows:
+        latest_seen_at = max(
+            (str(r["last_seen_at"] or "").strip() for r in prior_pits_rows),
+            default="",
+        )
+        active_prior_rows = [
+            dict(r)
+            for r in prior_pits_rows
+            if not latest_seen_at or str(r["last_seen_at"] or "").strip() == latest_seen_at
+        ]
+        deleted_by_part: dict[str, dict] = {}
+        for r in active_prior_rows:
+            pn = str(r.get("part_number") or "").strip()
+            if not pn:
+                continue
+            part_key = pn.casefold()
+            if part_key in seen_part_numbers or part_key in replaced_part_keys:
+                continue
+            if str(r.get("status") or "").strip().casefold() == "deleted":
+                continue
+            pits_id = str(r.get("pits_id") or "").strip()
+            catalog_row = existing_by_part.get(part_key, {})
+            if part_key not in deleted_by_part:
+                deleted_by_part[part_key] = {
+                    "part_number": str(catalog_row.get("part_number") or pn).strip(),
+                    "change_type": "deleted_part",
+                    "current_description": str(
+                        catalog_row.get("description") or r.get("description") or ""
+                    ).strip(),
+                    "incoming_description": "",
+                    "pits_id": pits_id,
+                    "all_pits_ids": [pits_id] if pits_id else [],
+                    "subsystem": str(
+                        catalog_row.get("subsystem") or r.get("subsystem") or ""
+                    ).strip(),
+                    "design_maturity": str(
+                        catalog_row.get("design_maturity") or r.get("design_maturity") or ""
+                    ).strip(),
+                    "design_engineer": str(
+                        catalog_row.get("design_engineer")
+                        or catalog_row.get("technology_engineer")
+                        or ""
+                    ).strip(),
+                    "ppm": str(catalog_row.get("ppm") or "").strip(),
+                    "buyer_gcl": str(catalog_row.get("buyer_gcl") or "").strip(),
+                    "source_code": "",
+                    "comments": str(r.get("comments") or "").strip(),
+                }
+            else:
+                del_item = deleted_by_part[part_key]
+                if pits_id and pits_id not in del_item["all_pits_ids"]:
+                    del_item["all_pits_ids"].append(pits_id)
+                if not del_item["current_description"] and r.get("description"):
+                    del_item["current_description"] = str(r.get("description") or "").strip()
+
+        detected.extend(deleted_by_part.values())
 
     return detected
 
@@ -2734,7 +3012,7 @@ def pits_part_downstream_impacts(
     part_number = str(part_number or "").strip()
     with connection() as conn:
         part_row = conn.execute(
-            "SELECT id, part_number, description FROM parts WHERE project_id=? AND part_number=?",
+            "SELECT id, part_number, description FROM parts WHERE project_id=? AND LOWER(part_number)=LOWER(?)",
             (project_id, part_number),
         ).fetchone()
         part_id = part_row["id"] if part_row else None
@@ -2742,7 +3020,7 @@ def pits_part_downstream_impacts(
         replaces_part_id = None
         if replaces_part_number:
             replaces_row = conn.execute(
-                "SELECT id, part_number, description FROM parts WHERE project_id=? AND part_number=?",
+                "SELECT id, part_number, description FROM parts WHERE project_id=? AND LOWER(part_number)=LOWER(?)",
                 (project_id, replaces_part_number),
             ).fetchone()
             replaces_part_id = replaces_row["id"] if replaces_row else None
@@ -6427,11 +6705,7 @@ def _identify_top_level_assembly_pns(
            WHERE o.project_id=?""",
         (project_id,),
     )
-    parents_of_l2_plus: set[str] = {
-        re.sub(r"#\d+$", "", str(r.get("parent_tracker_number") or "").strip()).upper()
-        for r in occ_rows
-        if int(r.get("proposed_depth") or 1) >= 2 and str(r.get("parent_tracker_number") or "").strip()
-    }
+    l1_candidate_pns: set[str] = set()
     l2_plus_pns: set[str] = set()
     parents_of_l3_plus: set[str] = set()
     for r in occ_rows:
@@ -6440,11 +6714,10 @@ def _identify_top_level_assembly_pns(
         c_trk = re.sub(r"#\d+$", "", str(r.get("child_tracker_number") or "").strip()).upper()
         p_num = str(r.get("part_number") or "").strip().upper()
         if depth <= 1 or not p_trk:
-            if (c_trk and c_trk in parents_of_l2_plus) or (p_num and p_num in parents_of_l2_plus):
-                if c_trk:
-                    top_level_pns.add(c_trk)
-                if p_num:
-                    top_level_pns.add(p_num)
+            if c_trk:
+                l1_candidate_pns.add(c_trk)
+            if p_num:
+                l1_candidate_pns.add(p_num)
         else:
             if c_trk:
                 l2_plus_pns.add(c_trk)
@@ -6452,6 +6725,8 @@ def _identify_top_level_assembly_pns(
                 l2_plus_pns.add(p_num)
             if depth >= 3 and p_trk:
                 parents_of_l3_plus.add(p_trk)
+    if l2_plus_pns:
+        top_level_pns.update(l1_candidate_pns)
     subassembly_pns = l2_plus_pns & parents_of_l3_plus
 
     final_asm_pattern = re.compile(
@@ -7012,6 +7287,7 @@ __domain_exports__ = [
     'update_part_rows', 'part_delete_impact', 'delete_project_part',
     'set_part_image', 'set_part_image_url', 'clear_part_image', 'add_part_image', 'add_part_image_url', 'delete_part_image', 'part_images',
     'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'complexity_features',
+    'project_part_subsystems',
     'complexity_feature_delete_impacts', 'complexity_tree',
     'potential_duplicate_models', 'part_feature_rules',
     'update_part_feature_rules', 'infer_part_feature_rules',

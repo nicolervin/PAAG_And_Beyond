@@ -141,15 +141,20 @@ def _clean_value(value):
     return value
 
 
-def _excel_column_value(row: pd.Series, column: str) -> str:
-    """Read a source value by its stable spreadsheet column position."""
+def _excel_column_index(column: str) -> int:
     position = 0
     for character in column.upper():
         position = position * 26 + ord(character) - ord("A") + 1
-    zero_based_position = position - 1
-    if zero_based_position >= len(row):
+    return position - 1
+
+
+def _excel_column_value(row, column: str | int) -> str:
+    """Read a source value by its stable spreadsheet column position."""
+    zero_based_position = column if isinstance(column, int) else _excel_column_index(column)
+    if zero_based_position < 0 or zero_based_position >= len(row):
         return ""
-    value = _clean_value(row.iloc[zero_based_position])
+    raw_val = row.iloc[zero_based_position] if hasattr(row, "iloc") else row[zero_based_position]
+    value = _clean_value(raw_val)
     return "" if value is None else str(value).strip()
 
 
@@ -166,8 +171,8 @@ def _normalized_row(row: pd.Series) -> dict[str, object]:
 def _detect_header_row(raw_df: pd.DataFrame, required_tokens: set[str]) -> int:
     best_row = 0
     best_score = -1
-    for row_index, row in raw_df.iterrows():
-        row_values = [str(value).strip() for value in row.to_list() if value is not None and not pd.isna(value)]
+    for row_index, row_vals in enumerate(raw_df.to_numpy(dtype=object)):
+        row_values = [str(value).strip() for value in row_vals if value is not None and not pd.isna(value)]
         if not row_values:
             continue
         score = 0
@@ -232,14 +237,16 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
             "level_columns": [],
         }
 
+    data_matrix = data.to_numpy(dtype=object)
+    n_data_cols = data_matrix.shape[1] if data_matrix.ndim == 2 else 0
     populated_source_levels = [
         level_number
-        for _, row in data.iterrows()
+        for row_vals in data_matrix
         for level_number, column_index in level_columns.items()
-        if column_index < len(row)
-        and row.iloc[column_index] is not None
-        and not pd.isna(row.iloc[column_index])
-        and str(row.iloc[column_index]).strip()
+        if column_index < n_data_cols
+        and row_vals[column_index] is not None
+        and not pd.isna(row_vals[column_index])
+        and str(row_vals[column_index]).strip()
     ]
     source_root_depth = min(populated_source_levels) if populated_source_levels else 1
     occurrences: list[dict] = []
@@ -265,13 +272,13 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
                         model_columns[col_idx] = s_val
                         break
 
-    for source_index, row in data.iterrows():
+    for source_index, row_vals in enumerate(data_matrix):
         source_row = int(source_index) + int(header_row) + 2
-        child_tracker = _clean_tracker_number(row.iloc[0] if len(row) else "")
-        part_number = _clean_tracker_number(row.iloc[1] if len(row) > 1 else "")
-        description = _clean_tracker_number(row.iloc[2] if len(row) > 2 else "")
+        child_tracker = _clean_tracker_number(row_vals[0] if n_data_cols else "")
+        part_number = _clean_tracker_number(row_vals[1] if n_data_cols > 1 else "")
+        description = _clean_tracker_number(row_vals[2] if n_data_cols > 2 else "")
         level_values = {
-            level_number: row.iloc[column_index] if column_index < len(row) else None
+            level_number: row_vals[column_index] if column_index < n_data_cols else None
             for level_number, column_index in level_columns.items()
         }
         populated_levels = [
@@ -326,8 +333,8 @@ def _parse_pits_bom_sheet(raw_df: pd.DataFrame, sheet_name: str) -> dict:
 
         model_usages: dict[str, float] = {}
         for col_idx, m_name in model_columns.items():
-            if col_idx < len(row):
-                u_val = row.iloc[col_idx]
+            if col_idx < n_data_cols:
+                u_val = row_vals[col_idx]
                 if u_val is not None:
                     try:
                         u_qty = float(u_val)
@@ -413,18 +420,19 @@ def parse_pits_combined_workbook(uploaded_file) -> tuple[list[dict], list[dict],
     if bom_sheet is not None:
         bom_raw = workbook.parse(sheet_name=bom_sheet, header=None, dtype=object)
         bom = _sheet_with_header(bom_raw, {"tracker", "part", "description"})
-        for _, row in bom.iterrows():
-            bom_pits_id = _excel_column_value(row, "A")
-            bom_part_number = _excel_column_value(row, "B")
+        for row_vals in bom.to_numpy(dtype=object):
+            bom_pits_id = _excel_column_value(row_vals, 0)
+            bom_part_number = _excel_column_value(row_vals, 1)
             if bom_pits_id and bom_part_number:
                 bom_pits_ids_by_part.setdefault(bom_part_number, set()).add(bom_pits_id)
 
     parts = _sheet_with_header(parts_raw, {"id", "part", "description", "status", "subsystem", "design"})
     models_df = _sheet_with_header(models_raw, {"model", "item", "platform", "package", "appearance", "base"})
 
+    parts_norm_cols = [normalize_header(col) for col in parts.columns]
     records = []
-    for source_index, row in parts.iterrows():
-        source = _normalized_row(row)
+    for source_index, row in enumerate(parts.to_numpy(dtype=object)):
+        source = {col_key: _clean_value(val) for col_key, val in zip(parts_norm_cols, row)}
         pits_id = str(source.get("idnumber", "")).strip() or str(source.get("id", "")).strip()
         if not pits_id:
             continue
@@ -441,36 +449,37 @@ def parse_pits_combined_workbook(uploaded_file) -> tuple[list[dict], list[dict],
             ) if str(source.get(alias, "")).strip()),
             "",
         )
-        source_code = _source_code_number(_excel_column_value(row, "T"))
+        source_code = _source_code_number(_excel_column_value(row, 19))
         catalog_part_number = part_number or str(source.get("partnumber1", "")).strip()
-        subsystem = _excel_column_value(row, "F") or str(source.get("subsystem", "")).strip()
-        design_maturity = _excel_column_value(row, "G") or str(source.get("designmaturity", "")).strip()
-        raw_revision = _excel_column_value(row, "BL")
+        subsystem = _excel_column_value(row, 5) or str(source.get("subsystem", "")).strip()
+        design_maturity = _excel_column_value(row, 6) or str(source.get("designmaturity", "")).strip()
+        raw_revision = _excel_column_value(row, 63)
         revision = design_maturity or raw_revision
-        design_engineer = _excel_column_value(row, "I") or next(
+        col_i_val = _excel_column_value(row, 8)
+        design_engineer = col_i_val or next(
             (str(source.get(alias, "")).strip() for alias in (
                 "designengineer", "technologyengineer", "leadengineer",
             ) if str(source.get(alias, "")).strip()),
             "",
         )
-        technology_engineer = _excel_column_value(row, "I") or design_engineer
-        ppm = _excel_column_value(row, "J") or next(
+        technology_engineer = col_i_val or design_engineer
+        ppm = _excel_column_value(row, 9) or next(
             (str(source.get(alias, "")).strip() for alias in ("ppm", "partprojectmanager") if str(source.get(alias, "")).strip()),
             "",
         )
-        buyer_gcl = _excel_column_value(row, "K") or next(
+        buyer_gcl = _excel_column_value(row, 10) or next(
             (str(source.get(alias, "")).strip() for alias in ("buyergcl", "buyer", "gcl") if str(source.get(alias, "")).strip()),
             "",
         )
-        pmqe_aqe = _excel_column_value(row, "L") or next(
+        pmqe_aqe = _excel_column_value(row, 11) or next(
             (str(source.get(alias, "")).strip() for alias in ("pmqeaqe", "pmqe", "aqe") if str(source.get(alias, "")).strip()),
             "",
         )
-        ame_tooling_engineer = _excel_column_value(row, "M") or next(
+        ame_tooling_engineer = _excel_column_value(row, 12) or next(
             (str(source.get(alias, "")).strip() for alias in ("ametoolingengineer", "toolingengineer", "ame") if str(source.get(alias, "")).strip()),
             "",
         )
-        part_code = _excel_column_value(row, "N") or next(
+        part_code = _excel_column_value(row, 13) or next(
             (str(source.get(alias, "")).strip() for alias in ("partcode", "code") if str(source.get(alias, "")).strip()),
             "",
         )
@@ -510,9 +519,10 @@ def parse_pits_combined_workbook(uploaded_file) -> tuple[list[dict], list[dict],
             "source_payload": source,
         })
 
+    models_norm_cols = [normalize_header(col) for col in models_df.columns]
     models = []
-    for _, row in models_df.iterrows():
-        source = _normalized_row(row)
+    for row in models_df.to_numpy(dtype=object):
+        source = {col_key: _clean_value(val) for col_key, val in zip(models_norm_cols, row)}
         model_number = str(source.get("modelnumber", "")).strip() or str(source.get("model", "")).strip()
         if not model_number:
             continue
@@ -578,7 +588,7 @@ def parse_pits(df: pd.DataFrame) -> pd.DataFrame:
     area_col = next((column for normalized, column in columns_by_normalized.items() if normalized.startswith("areaworkstation")), None)
     nodes = []
     stack: dict[int, int] = {}
-    for source_index, row in df.iterrows():
+    for source_index, row in enumerate(df.to_dict(orient="records")):
         part_number = str(row.get(part_col, "")).strip()
         description = str(row.get(desc_col, "")).strip()
         if not part_number and not description:
@@ -926,7 +936,7 @@ def export_pfmea_to_company_template(
         return str(val).strip()
 
     start_row = 21
-    for idx, (_, row) in enumerate(rows.iterrows()):
+    for idx, row in enumerate(rows.to_dict(orient="records")):
         r = start_row + idx
         ws.cell(r, 1, _cell_str(row.get("item_number")))
         ws.cell(r, 2, _cell_str(row.get("process_function")))

@@ -13,9 +13,12 @@ from utils.store import (
     complexity_tree,
     delete_project_models,
     model_planning_snapshot,
+    part_feature_rules,
     potential_duplicate_models,
     preview_inferred_part_feature_rules,
     project_models,
+    project_part_subsystems,
+    project_table,
     record_audit_event,
     restore_model_planning_snapshot,
     restore_complexity_planning_snapshot,
@@ -279,6 +282,7 @@ if save_requested:
 
 st.divider()
 features = complexity_features(project_id)
+subsystem_options = project_part_subsystems(project_id)
 current_complexity_snapshot = complexity_planning_snapshot(project_id)
 feature_undo_key = f"complexity_features_undo_{project_id}"
 feature_has_unsaved = table_has_unsaved_changes(
@@ -291,32 +295,40 @@ st.caption(
     "Define the manufacturing characteristics that matter to this project. "
     "Enter allowed choices as a comma-separated list; for example, Dispenser, Non-dispenser."
 )
-feature_columns = ["id", "active", "category", "name", "allowed_choices", "description"]
+feature_columns = ["id", "active", "category", "subsystem", "name", "allowed_choices", "description"]
 if features.empty:
     feature_rows = pd.DataFrame({
         "id": pd.Series(dtype="string"),
         "active": pd.Series(dtype="bool"),
         "category": pd.Series(dtype="string"),
+        "subsystem": pd.Series(dtype="string"),
         "name": pd.Series(dtype="string"),
         "allowed_choices": pd.Series(dtype="string"),
         "description": pd.Series(dtype="string"),
     })
 else:
-    feature_rows = features.reindex(columns=feature_columns)
+    feature_rows = features.reindex(columns=feature_columns).copy()
+    feature_rows["subsystem"] = (
+        feature_rows["subsystem"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace({"": None})
+    )
 
 visible_features = filter_table(
     feature_rows,
     key="feature_definition_filters",
-    dropdown_columns=["active", "category"],
-    search_columns=["category", "name", "allowed_choices", "description"],
-    labels={"active": "Planning status", "category": "Category"},
+    dropdown_columns=["active", "category", "subsystem"],
+    search_columns=["category", "subsystem", "name", "allowed_choices", "description"],
+    labels={"active": "Planning status", "category": "Category", "subsystem": "Subsystem"},
     reset_widget_keys=[feature_editor_key],
 )
 
 feature_editor_rows = direct_entry_editor_rows(
     visible_features,
     editor_key=feature_editor_key,
-    sort_columns=["active", "category", "name", "allowed_choices", "description"],
+    sort_columns=["active", "category", "subsystem", "name", "allowed_choices", "description"],
     labels={"active": "Active", "name": "Feature"},
 )
 edited_features = st.data_editor(
@@ -326,12 +338,18 @@ edited_features = st.data_editor(
     num_rows="dynamic",
     height=320,
     disabled=["id"],
-    column_order=["active", "category", "name", "allowed_choices", "description"],
+    column_order=["active", "category", "subsystem", "name", "allowed_choices", "description"],
     column_config={
         "id": None,
         "active": st.column_config.CheckboxColumn("Active", default=True),
         "category": st.column_config.TextColumn(
             "Category", required=True, help="A team-defined grouping such as Door, Controls, or Installation."
+        ),
+        "subsystem": st.column_config.SelectboxColumn(
+            "Subsystem",
+            options=subsystem_options,
+            required=False,
+            help="Optional Parts Catalog subsystem filter to limit which parts can receive this feature during auto-assign.",
         ),
         "name": st.column_config.TextColumn(
             "Feature", required=True, help="A manufacturing-relevant characteristic."
@@ -612,98 +630,6 @@ else:
     st.caption(
         "Assign one team-defined choice per feature to each official model. Models may share the same process-relevant choices."
     )
-    tree_bar = st.container(horizontal=True)
-    if tree_bar.button(
-        "Auto-assign to Parts Catalog",
-        icon=":material/auto_awesome:",
-        help="Infer and apply feature applicability rules to parts in the Parts Catalog based on this Complexity Tree.",
-    ):
-        if tree_has_unsaved:
-            st.warning(
-                "Save your Complexity Tree changes with 'Save & Refresh' below before auto-assigning to the Parts Catalog."
-            )
-        else:
-            st.session_state["models_pending_auto_assign"] = True
-
-    def dismiss_models_auto_assign() -> None:
-        st.session_state.pop("models_pending_auto_assign", None)
-
-    @st.dialog(
-        "Auto-assign to Parts Catalog?",
-        dismissible=True,
-        on_dismiss=dismiss_models_auto_assign,
-    )
-    def confirm_models_auto_assign() -> None:
-        if tree_has_unsaved:
-            st.warning(
-                "Save your Complexity Tree changes with 'Save & Refresh' below before auto-assigning to the Parts Catalog."
-            )
-            if st.button("Close", key=f"close_models_auto_assign_{project_id}"):
-                st.session_state.pop("models_pending_auto_assign", None)
-                st.rerun()
-            return
-        st.write(
-            "Detect and assign feature applicability (such as Fascia = LCD or All models) "
-            "to parts in the Parts Catalog based on their model occurrences and this Complexity Tree."
-        )
-        overwrite = st.checkbox(
-            "Overwrite existing manual feature rules",
-            value=False,
-            help="When unchecked (recommended for incremental additions), only parts without rules or marked 'Needs feature tagging' will be assigned. When checked, re-evaluates and updates all parts according to the latest Complexity Tree.",
-            key=f"models_auto_assign_overwrite_{project_id}",
-        )
-        dlg_cols = st.container(horizontal=True)
-        if dlg_cols.button("Cancel", key=f"cancel_models_auto_assign_{project_id}"):
-            st.session_state.pop("models_pending_auto_assign", None)
-            st.rerun()
-        if dlg_cols.button(
-            "Run auto-assign",
-            type="primary",
-            icon=":material/auto_awesome:",
-            key=f"confirm_models_auto_assign_{project_id}",
-        ):
-            try:
-                editor = st.session_state.get("current_editor", "")
-                preview = preview_inferred_part_feature_rules(
-                    project_id,
-                    overwrite_existing=overwrite,
-                )
-                if preview["review"]:
-                    st.session_state.pop("models_pending_auto_assign", None)
-                    st.session_state[f"pending_multi_feature_review_{project_id}"] = {
-                        "preview": preview,
-                        "source_page": "models",
-                    }
-                    st.rerun()
-                elif preview["direct"]:
-                    updated = apply_inferred_part_feature_rules(
-                        project_id,
-                        overwrite_existing=overwrite,
-                        editor_name=editor,
-                    )
-                    st.session_state.pop("models_pending_auto_assign", None)
-                    st.toast(
-                        f"Auto-assigned feature applicability for {updated} parts in the Parts Catalog",
-                        icon=":material/check_circle:",
-                    )
-                    st.rerun()
-                elif not overwrite and preview["skipped_existing_count"] > 0:
-                    st.warning(
-                        "No unassigned parts were updated because existing parts already have feature rules. "
-                        "Check 'Overwrite existing manual feature rules' above and click 'Run auto-assign' again to re-apply the latest Complexity Tree mappings."
-                    )
-                else:
-                    st.session_state.pop("models_pending_auto_assign", None)
-                    st.toast(
-                        "Parts Catalog is already up to date with the Complexity Tree.",
-                        icon=":material/info:",
-                    )
-                    st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-    if st.session_state.get("models_pending_auto_assign"):
-        confirm_models_auto_assign()
     if st.session_state.get(f"pending_multi_feature_review_{project_id}"):
         review_multi_feature_applicability_dialog(project_id)
     full_complexity_tree = complexity_tree(project_id)
@@ -820,10 +746,19 @@ else:
         )
         auto_assigned_count = apply_inferred_part_feature_rules(
             project_id,
-            overwrite_existing=False,
+            overwrite_existing=True,
             editor_name=editor_name,
             skip_multi_feature=True,
         )
+        preview = preview_inferred_part_feature_rules(
+            project_id,
+            overwrite_existing=True,
+        )
+        if preview["review"]:
+            st.session_state[f"pending_multi_feature_review_{project_id}"] = {
+                "preview": {**preview, "direct": {}},
+                "source_page": "models",
+            }
         st.session_state[tree_undo_key] = pending.get(
             "snapshot", current_complexity_snapshot
         )
@@ -928,12 +863,25 @@ else:
             if str(category).strip()
         }
     )
-    visual_category = st.selectbox(
+    visual_category_key = f"complexity_tree_visual_category_{project_id}"
+    existing_visual_category = st.session_state.get(visual_category_key)
+    if isinstance(existing_visual_category, str):
+        st.session_state[visual_category_key] = (
+            [existing_visual_category]
+            if existing_visual_category in category_values
+            else []
+        )
+    elif isinstance(existing_visual_category, list):
+        valid_categories = [
+            cat for cat in existing_visual_category if cat in category_values
+        ]
+        if valid_categories != existing_visual_category:
+            st.session_state[visual_category_key] = valid_categories
+    visual_categories = st.multiselect(
         "Category",
-        ["", *category_values],
-        index=0,
-        format_func=lambda value: value or "Select a category",
-        key=f"complexity_tree_visual_category_{project_id}",
+        category_values,
+        placeholder="Select one or more categories",
+        key=visual_category_key,
     )
     visual_model_label = st.selectbox(
         "Model label",
@@ -943,18 +891,46 @@ else:
         key=f"complexity_tree_visual_model_label_{project_id}",
         help="Choose which model identifier appears in the visual headers.",
     )
-    if not visual_category or not visual_model_label:
-        if not visual_category and not visual_model_label:
-            st.info("Select a category and model label to generate the complexity tree visual.")
-        elif not visual_category:
-            st.info("Select a category to generate the complexity tree visual.")
+    visual_feature_display = st.selectbox(
+        "Feature",
+        ["Feature", "Part number"],
+        index=0,
+        key=f"complexity_tree_visual_feature_display_{project_id}",
+        help="Choose whether the visual displays feature values from the complexity tree or assigned part numbers from the Parts Catalog.",
+    )
+    selected_categories = [
+        str(category).strip()
+        for category in (visual_categories or [])
+        if str(category).strip()
+    ]
+    if not selected_categories or not visual_model_label:
+        if not selected_categories and not visual_model_label:
+            st.info("Select at least one category and a model label to generate the complexity tree visual.")
+        elif not selected_categories:
+            st.info("Select at least one category to generate the complexity tree visual.")
         else:
             st.info("Select a model label to generate the complexity tree visual.")
         visual_features = None
     else:
-        visual_features = active_features.loc[
-            active_features["category"].fillna("").astype(str).eq(visual_category)
-        ]
+        category_order = {cat: idx for idx, cat in enumerate(selected_categories)}
+        visual_features = (
+            active_features.loc[
+                active_features["category"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .isin(selected_categories)
+            ]
+            .assign(
+                _category_order=lambda df: df["category"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .map(category_order)
+            )
+            .sort_values(by="_category_order", kind="stable")
+            .drop(columns=["_category_order"])
+        )
 
     visual_models = models.loc[
         models["active"].fillna(1).astype(bool),
@@ -981,11 +957,24 @@ else:
             group["model_ids"].append(model_id)
             group["model_names"].append(str(model["display_name"] or "").strip())
             group["model_numbers"].append(str(model["model_number"]).strip())
-        visual_model_groups = list(groups_by_values.values())
+        value_ranks: list[dict[str, int]] = [
+            {} for _ in range(len(feature_ids))
+        ]
+        for values in groups_by_values:
+            for idx, val in enumerate(values):
+                if val not in value_ranks[idx]:
+                    value_ranks[idx][val] = len(value_ranks[idx])
+        sorted_group_keys = sorted(
+            groups_by_values.keys(),
+            key=lambda vals: tuple(
+                value_ranks[idx][val] for idx, val in enumerate(vals)
+            ),
+        )
+        visual_model_groups = [groups_by_values[key] for key in sorted_group_keys]
     if visual_features is None:
         pass
     elif visual_features.empty:
-        st.info("No active features match this category.")
+        st.info("No active features match the selected categories.")
     elif not visual_model_groups:
         st.info("No active models are available for the complexity tree visual.")
     else:
@@ -1027,6 +1016,34 @@ else:
             for _ in visual_model_groups
         )
 
+        part_numbers_by_feature_value: dict[tuple[str, str], list[str]] = {}
+        if visual_feature_display == "Part number":
+            catalog_parts = project_table("parts", project_id)
+            rules = part_feature_rules(project_id)
+            if not catalog_parts.empty and not rules.empty:
+                part_number_by_id = {
+                    str(pid).strip(): str(pnum or "").strip()
+                    for pid, pnum in zip(catalog_parts["id"], catalog_parts["part_number"])
+                    if str(pid).strip() and str(pnum or "").strip()
+                }
+                for raw_pid, raw_fid, raw_val in zip(
+                    rules["part_id"], rules["feature_id"], rules["value"]
+                ):
+                    part_id = str(raw_pid or "").strip()
+                    rule_feature_id = str(raw_fid or "").strip()
+                    rule_value = str(raw_val or "").strip()
+                    part_number = part_number_by_id.get(part_id, "")
+                    if not part_number or not rule_feature_id or not rule_value:
+                        continue
+                    bucket = part_numbers_by_feature_value.setdefault(
+                        (rule_feature_id, rule_value),
+                        [],
+                    )
+                    if part_number not in bucket:
+                        bucket.append(part_number)
+                for key, bucket in part_numbers_by_feature_value.items():
+                    part_numbers_by_feature_value[key] = sorted(bucket)
+
         row_hues = [220, 145, 35, 295, 5, 180, 75, 255, 330, 110]
         feature_count = len(visual_features)
         for feature_index, (_, feature) in enumerate(visual_features.iterrows()):
@@ -1042,9 +1059,16 @@ else:
                 )
                 for index, choice in enumerate(choices)
             }
+            feature_name = str(feature["name"]).strip()
+            feature_category = str(feature.get("category") or "").strip()
+            feature_row_label = (
+                f"{feature_category} · {feature_name}"
+                if len(selected_categories) > 1 and feature_category
+                else feature_name
+            )
             visual_html.append(
                 '<div style="font-weight:700;">'
-                f"{escape(str(feature['name']).strip())}</div>"
+                f"{escape(feature_row_label)}</div>"
             )
             values: list[str] = []
             for group in visual_model_groups:
@@ -1063,11 +1087,23 @@ else:
                 text_color = "#ffffff" if choice_index >= 4 else "#17324d"
                 if not selected_value:
                     text_color = "#64748b"
-                label = escape(selected_value or "Not assigned")
+                    label = escape("Not assigned")
+                elif visual_feature_display == "Part number":
+                    matching_parts = part_numbers_by_feature_value.get(
+                        (feature_id, selected_value),
+                        [],
+                    )
+                    if matching_parts:
+                        label = "<br>".join(escape(pn) for pn in matching_parts)
+                    else:
+                        text_color = "#64748b"
+                        label = escape("No parts assigned")
+                else:
+                    label = escape(selected_value)
                 visual_html.append(
                     f'<div style="grid-column:span {end - start};background:{background};'
                     'border-radius:8px;padding:10px 12px;text-align:center;display:flex;'
-                    'align-items:center;justify-content:center;'
+                    'align-items:center;justify-content:center;line-height:1.45;overflow-wrap:anywhere;'
                     f'color:{text_color};"><strong>{label}</strong></div>'
                 )
                 start = end

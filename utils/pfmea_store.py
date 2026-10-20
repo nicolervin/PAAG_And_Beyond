@@ -989,11 +989,10 @@ def pfmea_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
         op_contexts = _store().work_element_op_contexts(
             project_id, scenario_id, result["id"].astype(str).tolist()
         )
-        result["work_element"] = result.apply(
-            lambda row: work_element_labels.get(str(row["id"]))
-            or _text(row.get("work_element")),
-            axis=1,
-        )
+        result["work_element"] = [
+            work_element_labels.get(str(wid)) or _text(we_val)
+            for wid, we_val in zip(result["id"], result["work_element"])
+        ]
         result["op_id"] = result["id"].astype(str).map(
             lambda work_element_id: op_contexts[work_element_id]["op_id"]
         )

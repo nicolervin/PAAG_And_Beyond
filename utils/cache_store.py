@@ -195,12 +195,26 @@ def current_db_state_token() -> tuple[Any, ...] | None:
 
 
 def _normalize_cache_arg(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+    if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) <= 256:
+            return bytes(value)
+        return ("__bytes__", len(value), hashlib.sha256(value).hexdigest())
     if isinstance(value, Path):
         return ("__path__", str(value))
     if isinstance(value, sqlite3.Connection):
         raise TypeError("sqlite3.Connection is not cacheable")
+    if callable(getattr(value, "getvalue", None)):
+        digest = uploaded_file_digest(value)
+        if digest is not None:
+            return ("__upload__", digest)
+    if hasattr(value, "columns") and hasattr(value, "shape") and hasattr(value, "to_numpy"):
+        try:
+            raw_df = pickle.dumps(value, protocol=5)
+            return ("__df__", value.shape, hashlib.sha256(raw_df).hexdigest())
+        except Exception as exc:
+            raise TypeError("DataFrame is not cacheable") from exc
     if isinstance(value, (tuple, list)):
         return tuple(_normalize_cache_arg(item) for item in value)
     if isinstance(value, (set, frozenset)):

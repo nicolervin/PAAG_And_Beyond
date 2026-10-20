@@ -16,17 +16,104 @@ def get_project(project_id: str) -> dict | None:
     rows = query("SELECT * FROM projects WHERE id = ?", (project_id,))
     return rows[0] if rows else None
 
+def _last_active_workspace_path() -> Path:
+    db_path = Path(DB_PATH)
+    return db_path.with_name(f"{db_path.name}-session")
+
+
+def get_last_active_workspace() -> dict[str, str | None]:
+    """Return the last active project_id and scenario_id for the current local database."""
+    path = _last_active_workspace_path()
+    if not path.is_file():
+        return {"project_id": None, "scenario_id": None}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {"project_id": None, "scenario_id": None}
+    if not isinstance(payload, dict):
+        return {"project_id": None, "scenario_id": None}
+    project_id = str(payload.get("project_id") or "").strip() or None
+    scenario_id = str(payload.get("scenario_id") or "").strip() or None
+    return {"project_id": project_id, "scenario_id": scenario_id}
+
+
+def set_last_active_workspace(
+    project_id: str | None,
+    scenario_id: str | None = None,
+) -> None:
+    """Persist the last active project_id and scenario_id for the current local database."""
+    path = _last_active_workspace_path()
+    normalized_project_id = str(project_id or "").strip() or None
+    normalized_scenario_id = (
+        (str(scenario_id or "").strip() or None) if normalized_project_id else None
+    )
+    current = get_last_active_workspace()
+    if (
+        current.get("project_id") == normalized_project_id
+        and current.get("scenario_id") == normalized_scenario_id
+        and path.is_file()
+    ):
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "project_id": normalized_project_id,
+                    "scenario_id": normalized_scenario_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 @cached_store_read
 def planning_scenarios(project_id: str, include_archived: bool = False) -> list[dict]:
     archived_clause = "" if include_archived else "AND s.status <> 'Archived'"
-    return query(
-        f"""SELECT s.*, parent.name AS parent_name, parent.revision_label AS parent_revision_label
+    sql = f"""SELECT s.*, parent.name AS parent_name, parent.revision_label AS parent_revision_label
             FROM planning_scenarios s
             LEFT JOIN planning_scenarios parent ON parent.id=s.parent_scenario_id
             WHERE s.project_id=? {archived_clause}
-            ORDER BY s.revision_sequence DESC, s.created_at DESC""",
-        (project_id,),
-    )
+            ORDER BY s.revision_sequence DESC, s.created_at DESC"""
+    rows = query(sql, (project_id,))
+    if not rows and project_id and is_cacheable_runtime():
+        created_default = False
+        with connection() as conn:
+            has_any = conn.execute(
+                "SELECT 1 FROM planning_scenarios WHERE project_id=? LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            if not has_any:
+                proj = conn.execute(
+                    "SELECT id, revision, takt_time_s, takt_time_unit, owner FROM projects WHERE id=?",
+                    (project_id,),
+                ).fetchone()
+                if proj:
+                    timestamp = now_iso()
+                    conn.execute(
+                        """INSERT INTO planning_scenarios
+                           (id, project_id, name, revision_label, revision_sequence, status,
+                            takt_time_s, takt_time_unit, change_summary, created_by,
+                            created_at, updated_at)
+                           VALUES (?, ?, 'Current plan', ?, 1, 'Working', ?, ?,
+                                   'Migrated from the original project plan', ?, ?, ?)""",
+                        (
+                            str(uuid4()),
+                            proj["id"],
+                            str(proj["revision"] or "A"),
+                            _safe_positive_float(proj["takt_time_s"], 60.0),
+                            normalize_time_unit(proj["takt_time_unit"]),
+                            str(proj["owner"] or ""),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    created_default = True
+        if created_default:
+            rows = query(sql, (project_id,))
+    return rows
 
 @cached_store_read
 def get_planning_scenario(project_id: str, scenario_id: str) -> dict | None:
@@ -844,7 +931,7 @@ def delete_project(project_id: str, editor_name: str = "") -> dict[str, Any]:
         "deleted_files_count": deleted_files_count,
     }
 
-__domain_exports__ = ['projects', 'get_project', 'planning_scenarios', 'get_planning_scenario', 'table_view_preference', 'save_table_view_preference', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns', 'get_project_deletion_impact', 'delete_project']
+__domain_exports__ = ['projects', 'get_project', 'get_last_active_workspace', 'set_last_active_workspace', 'planning_scenarios', 'get_planning_scenario', 'table_view_preference', 'save_table_view_preference', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns', 'get_project_deletion_impact', 'delete_project']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

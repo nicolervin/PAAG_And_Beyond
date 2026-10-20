@@ -14,7 +14,6 @@ from utils.store import (
     PART_SOURCE_CODES,
     add_part_image,
     add_part_image_url,
-    apply_inferred_part_feature_rules,
     assembly_bom_components,
     pits_assembly_mini_bom,
     audit_history,
@@ -28,7 +27,6 @@ from utils.store import (
     part_feature_rules,
     part_images,
     part_scenario_activity,
-    preview_inferred_part_feature_rules,
     project_models,
     project_table,
     record_audit_event,
@@ -39,7 +37,6 @@ from utils.store import (
     update_part_feature_rules,
     update_part_rows,
 )
-from utils.part_feature_dialog import review_multi_feature_applicability_dialog
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_id_keyed_editor_draft,
@@ -96,7 +93,7 @@ PARTS_COLUMN_LABELS = {
     "ppm": "PPM", "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
     "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
     "pits_tracker_number": "PITS ID", "source_code": "Source Code",
-    "make_buy": "Make vs Buy", "feature_applicability": "Feature applicability",
+    "make_buy": "Make vs Buy", "feature_applicability": "Feature",
     "applicability_status": "Applicability status", "notes": "Notes",
     "source": "Source", "updated_display": "Updated",
 }
@@ -163,7 +160,7 @@ if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state.pop(parts_draft_added_key, None)
     st.session_state.pop(parts_draft_last_editor_key, None)
     st.session_state.pop(parts_editor_baseline_draft_key, None)
-    request_table_editor_reset(f"parts_catalog_editor_v7_{scenario_id}")
+    request_table_editor_reset(parts_base_editor_key)
     parts_base_editor_key = apply_pending_table_editor_reset(
         f"parts_catalog_editor_v7_{scenario_id}"
     )
@@ -198,10 +195,10 @@ else:
     active_models = models.loc[models["active"].fillna(1).astype(bool)].copy()
     active_model_numbers = active_models["model_number"].fillna("").astype(str).tolist()
     model_labels = {
-        str(row["model_number"]): (
-            str(row["display_name"]).strip() or "Common name not defined"
+        str(mnum): (
+            str(dname).strip() or "Common name not defined"
         )
-        for _, row in models.iterrows()
+        for mnum, dname in zip(models["model_number"], models["display_name"])
     }
 
 
@@ -232,22 +229,33 @@ def split_model_applicability(value) -> list[str]:
 
 
 feature_option_labels: dict[str, str] = {"All models": "All models"}
-for _, feature in active_features.iterrows():
-    for choice in json.loads(feature["allowed_values"] or "[]"):
-        token = f"{feature['id']}::{choice}"
-        feature_option_labels[token] = f"{feature['category']} · {feature['name']} = {choice}"
+if not active_features.empty:
+    for fid, fcat, fname, fallowed in zip(
+        active_features["id"],
+        active_features["category"],
+        active_features["name"],
+        active_features["allowed_values"],
+    ):
+        for choice in json.loads(fallowed or "[]"):
+            token = f"{fid}::{choice}"
+            feature_option_labels[token] = f"{fcat} · {fname} = {choice}"
 feature_token_by_label = {label: token for token, label in feature_option_labels.items()}
 feature_options = list(feature_token_by_label)
 rules_by_part: dict[str, list[str]] = {}
 if not rules.empty:
-    for part_id, part_rules in rules.groupby("part_id", sort=False):
-        rules_by_part[str(part_id)] = [
+    for part_id, fid, val, cat, fname in zip(
+        rules["part_id"],
+        rules["feature_id"],
+        rules["value"],
+        rules["category"],
+        rules["feature_name"],
+    ):
+        rules_by_part.setdefault(str(part_id), []).append(
             feature_option_labels.get(
-                f"{row['feature_id']}::{row['value']}",
-                f"{row['category']} · {row['feature_name']} = {row['value']}",
+                f"{fid}::{val}",
+                f"{cat} · {fname} = {val}",
             )
-            for _, row in part_rules.iterrows()
-        ]
+        )
 
 
 def readable_feature_applicability(part_id: str, legacy_value) -> str:
@@ -264,94 +272,6 @@ st.caption(
     "Edit catalog fields directly, then save. Select View details on a row to open its "
     "photos, full information, and completed-subassembly mini-BOM below."
 )
-top_action_bar = st.container(horizontal=True)
-if top_action_bar.button(
-    "Auto-assign from Complexity Tree",
-    icon=":material/auto_awesome:",
-    help=(
-        "Detect and assign feature applicability (such as Fascia = LCD or All models) "
-        "to parts based on their model occurrences in PITS and the Complexity Tree."
-    ),
-):
-    st.session_state["parts_pending_auto_assign"] = True
-
-
-def dismiss_parts_auto_assign() -> None:
-    st.session_state.pop("parts_pending_auto_assign", None)
-
-
-@st.dialog(
-    "Auto-assign feature applicability?",
-    dismissible=True,
-    on_dismiss=dismiss_parts_auto_assign,
-)
-def confirm_auto_assign() -> None:
-    st.write(
-        "Detect and assign feature applicability (such as Fascia = LCD or All models) "
-        "to parts based on their model occurrences in PITS and the Complexity Tree."
-    )
-    overwrite = st.checkbox(
-        "Overwrite existing manual feature rules",
-        value=False,
-        help="When unchecked (recommended for incremental additions), only parts without rules or marked 'Needs feature tagging' will be assigned. When checked, re-evaluates and updates all parts according to the latest Complexity Tree.",
-    )
-    dlg_cols = st.container(horizontal=True)
-    if dlg_cols.button("Cancel", key="cancel_auto_assign_dlg"):
-        st.session_state.pop("parts_pending_auto_assign", None)
-        st.rerun()
-    if dlg_cols.button(
-        "Run auto-assign",
-        type="primary",
-        icon=":material/auto_awesome:",
-        key="confirm_auto_assign_dlg",
-    ):
-        try:
-            editor = st.session_state.get("current_editor", "")
-            preview = preview_inferred_part_feature_rules(
-                project_id,
-                overwrite_existing=overwrite,
-            )
-            if preview["review"]:
-                st.session_state.pop("parts_pending_auto_assign", None)
-                st.session_state[f"pending_multi_feature_review_{project_id}"] = {
-                    "preview": preview,
-                    "source_page": "parts",
-                    "parts_editor_key": parts_base_editor_key,
-                }
-                st.rerun()
-            elif preview["direct"]:
-                updated = apply_inferred_part_feature_rules(
-                    project_id,
-                    overwrite_existing=overwrite,
-                    editor_name=editor,
-                )
-                st.session_state.pop("parts_pending_auto_assign", None)
-                request_table_editor_reset(parts_base_editor_key)
-                st.toast(
-                    f"Auto-assigned feature applicability for {updated} parts",
-                    icon=":material/check_circle:",
-                )
-                st.rerun()
-            elif not overwrite and preview["skipped_existing_count"] > 0:
-                st.warning(
-                    "No unassigned parts were updated because existing parts already have feature rules. "
-                    "Check 'Overwrite existing manual feature rules' above and click 'Run auto-assign' again to re-apply the latest Complexity Tree mappings."
-                )
-            else:
-                st.session_state.pop("parts_pending_auto_assign", None)
-                st.toast(
-                    "All parts already match the Complexity Tree.",
-                    icon=":material/info:",
-                )
-                st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
-
-
-if st.session_state.get("parts_pending_auto_assign"):
-    confirm_auto_assign()
-if st.session_state.get(f"pending_multi_feature_review_{project_id}"):
-    review_multi_feature_applicability_dialog(project_id)
 
 with st.expander(
     "Saved table view — hide and move columns here",
@@ -466,12 +386,23 @@ parts_for_editing["factory_nickname"] = parts_for_editing["factory_nickname"].fi
 parts_for_editing["design_engineer"] = parts_for_editing["design_engineer"].fillna(
     parts_for_editing["technology_engineer"]
 ).fillna("").astype("string")
-for col in ("ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code"):
+for col in (
+    "id", "part_number", "description", "ppm", "buyer_gcl", "pmqe_aqe",
+    "ame_tooling_engineer", "part_code", "pits_tracker_number", "make_buy",
+    "revision", "model_applicability", "notes", "source", "image_path",
+    "updated_at", "assembly_id", "assembly_number",
+):
     parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
+_part_id_strs = [str(pid) for pid in parts_for_editing["id"]]
+_model_app_vals = parts_for_editing["model_applicability"].tolist()
 linked_assembly_by_part = {
-    str(row["id"]): str(row.get("assembly_number") or "")
-    for _, row in parts_for_editing.iterrows()
-    if str(row.get("assembly_id") or "").strip()
+    pid: str(asm_num or "")
+    for pid, asm_id, asm_num in zip(
+        _part_id_strs,
+        parts_for_editing["assembly_id"],
+        parts_for_editing["assembly_number"],
+    )
+    if str(asm_id or "").strip()
 }
 
 
@@ -479,22 +410,28 @@ def assembly_grid_applicability_status(part_id: str, value) -> str:
     return readable_feature_applicability(part_id, value)
 
 
-_part_id_strs = [str(pid) for pid in parts_for_editing["id"]]
-_model_app_vals = parts_for_editing["model_applicability"].tolist()
 parts_for_editing["active"] = pd.Series(
     [bool(activity_by_part.get(pid, True)) for pid in _part_id_strs],
     index=parts_for_editing.index,
     dtype=bool,
 )
-parts_for_editing["feature_applicability"] = [
-    rules_by_part.get(pid, [])
-    or (["All models"] if str(m_app or "").strip().casefold() in {"all", "all models"} else [])
-    for pid, m_app in zip(_part_id_strs, _model_app_vals)
-]
-parts_for_editing["applicability_status"] = [
-    assembly_grid_applicability_status(pid, m_app)
-    for pid, m_app in zip(_part_id_strs, _model_app_vals)
-]
+parts_for_editing["feature_applicability"] = (
+    pd.Series(dtype="object")
+    if parts_for_editing.empty
+    else [
+        rules_by_part.get(pid, [])
+        or (["All models"] if str(m_app or "").strip().casefold() in {"all", "all models"} else [])
+        for pid, m_app in zip(_part_id_strs, _model_app_vals)
+    ]
+)
+parts_for_editing["applicability_status"] = (
+    pd.Series(dtype="string")
+    if parts_for_editing.empty
+    else [
+        assembly_grid_applicability_status(pid, m_app)
+        for pid, m_app in zip(_part_id_strs, _model_app_vals)
+    ]
+)
 parts_for_editing["source_code"] = pd.Series(
     [
         ""
@@ -507,7 +444,11 @@ parts_for_editing["source_code"] = pd.Series(
     index=parts_for_editing.index,
     dtype="string",
 )
-parts_for_editing["view_details"] = ":material/visibility: View details"
+parts_for_editing["view_details"] = pd.Series(
+    [":material/visibility: View details"] * len(parts_for_editing),
+    index=parts_for_editing.index,
+    dtype="string",
+)
 parts_for_editing["photo_status"] = [
     "✅ Added" if str(value or "").strip() else "❌ Missing"
     for value in parts_for_editing["image_path"]
@@ -516,6 +457,10 @@ updated_values = pd.to_datetime(parts_for_editing["updated_at"], errors="coerce"
 parts_for_editing["updated_display"] = updated_values.dt.strftime(
     "%b %d, %Y %H:%M"
 ).fillna("")
+
+
+for col in ("applicability_status", "photo_status", "updated_display"):
+    parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
 
 
 def _is_blank_cell(value: object) -> bool:
@@ -736,7 +681,7 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
             "make_buy": "Make vs Buy",
             "technology_engineer": "Technology Engineer",
             "pits_tracker_number": "PITS ID",
-            "applicability_status": "Feature applicability",
+            "applicability_status": "Feature",
         },
         reset_widget_keys=[parts_editor_key],
         multi_value_columns=["feature_applicability"],
@@ -785,7 +730,7 @@ parts_editor_rows = direct_entry_editor_rows(
         "design_engineer": "Design Engineer", "ppm": "PPM",
         "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
         "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
-        "feature_applicability": "Feature applicability",
+        "feature_applicability": "Feature",
         "applicability_status": "Applicability status", "updated_at": "Updated",
     },
     additional_unsaved_changes=has_parts_draft,
@@ -943,7 +888,7 @@ edited_parts = st.data_editor(
         "model_applicability": None,
         "image_path": None,
         "feature_applicability": st.column_config.MultiselectColumn(
-            "Feature applicability",
+            "Feature",
             options=feature_options,
             help="Choose All models alone, or feature choices. Within-feature choices are OR; across-feature choices are AND.",
             width="large",
@@ -1021,52 +966,7 @@ apply_bulk_applicability = bulk_controls.button(
     icon=":material/checklist:",
     disabled=selected_saved_parts.empty,
 )
-auto_assign_selected = bulk_controls.button(
-    "Auto-assign selected",
-    icon=":material/auto_awesome:",
-    disabled=selected_saved_parts.empty,
-    help="Infer and apply feature applicability from the Complexity Tree for the selected parts.",
-)
 request_delete_bulk_parts = not selected_saved_parts.empty
-
-if auto_assign_selected:
-    if has_parts_draft or table_has_unsaved_changes(
-        parts_editor_key, native_row_selection=True
-    ):
-        st.warning("Save or undo other table edits before auto-assigning selected parts.")
-    else:
-        try:
-            selected_ids = selected_saved_parts["id"].astype(str).tolist()
-            preview = preview_inferred_part_feature_rules(
-                project_id,
-                overwrite_existing=True,
-                part_ids=selected_ids,
-            )
-            if preview["review"]:
-                st.session_state[f"pending_multi_feature_review_{project_id}"] = {
-                    "preview": preview,
-                    "source_page": "parts",
-                    "parts_editor_key": parts_editor_key,
-                }
-                st.rerun()
-            elif preview["direct"]:
-                updated = apply_inferred_part_feature_rules(
-                    project_id,
-                    overwrite_existing=True,
-                    part_ids=selected_ids,
-                    editor_name=st.session_state.get("current_editor", ""),
-                )
-                request_table_editor_reset(parts_editor_key)
-                if updated > 0:
-                    st.toast(
-                        f"Auto-assigned feature applicability for {updated} selected parts",
-                        icon=":material/check_circle:",
-                    )
-                st.rerun()
-            else:
-                st.info("No matching feature rules could be inferred from the Complexity Tree for the selected parts.")
-        except ValueError as exc:
-            st.error(str(exc))
 
 if apply_bulk_applicability:
     if has_parts_draft or table_has_unsaved_changes(

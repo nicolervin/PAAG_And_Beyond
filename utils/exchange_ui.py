@@ -6,7 +6,6 @@ import streamlit as st
 import pandas as pd
 
 from utils.excel_io import (
-    export_workbook,
     has_pits_id_sheets,
     is_pits_format,
     mapped_bom,
@@ -18,8 +17,6 @@ from utils.excel_io import (
 from utils.store import (
     audit_history,
     detect_pits_new_and_changed_parts,
-    get_planning_scenario,
-    get_project,
     import_fishbone_nodes,
     import_pits_id_snapshot,
     pits_catalog_id_resolution,
@@ -533,10 +530,293 @@ def _pits_part_verification_dialog(project_id: str) -> None:
                 st.rerun()
 
 
+def _build_pits_flagged_changes_summary(
+    project_id: str,
+    scenario_id: str | None,
+    pending_part_reviews: list[dict],
+    bom_snapshot: dict | None = None,
+) -> tuple[pd.DataFrame, list[dict]]:
+    """Build a tabular summary and downstream impact list for all flagged PITS part changes."""
+    summary_rows: list[dict[str, str]] = []
+    impact_details: list[dict] = []
+
+    for item in pending_part_reviews:
+        part_number = str(item.get("part_number") or "").strip()
+        change_type = item.get("change_type", "new_part")
+        replaces_pn = item.get("replaces_part_number")
+        replaces_desc = str(item.get("replaces_description") or "").strip()
+        current_desc = str(item.get("current_description") or "").strip()
+        incoming_desc = str(item.get("incoming_description") or "").strip()
+
+        if replaces_pn:
+            change_label = "Part replacement"
+            previous_value = (
+                f"{replaces_pn} ({replaces_desc})" if replaces_desc else str(replaces_pn)
+            )
+            incoming_value = incoming_desc or "(blank)"
+        elif change_type == "new_part":
+            change_label = "New part"
+            previous_value = "—"
+            incoming_value = incoming_desc or "(blank)"
+        elif change_type == "deleted_part":
+            change_label = "Deleted part"
+            previous_value = current_desc or "(blank)"
+            incoming_value = "—"
+        else:
+            change_label = "Modified description"
+            previous_value = current_desc or "(blank)"
+            incoming_value = incoming_desc or "(blank)"
+
+        pits_display = (
+            ", ".join(item.get("all_pits_ids") or [item.get("pits_id", "")]) or "—"
+        )
+
+        impacts = pits_part_downstream_impacts(
+            project_id,
+            part_number,
+            scenario_id=scenario_id,
+            bom_snapshot=bom_snapshot,
+            replaces_part_number=replaces_pn,
+        )
+        fb = impacts["fishbone"]
+        mt = impacts["model_tree"]
+        yz = impacts["yamazumi"]
+        pr = impacts["process"]
+        cn = impacts["concerns"]
+
+        fb_total = int(fb.get("count", 0)) + int(fb.get("replaces_count", 0))
+        mt_total = len(mt.get("occurrences") or []) + int(mt.get("replaces_count", 0))
+        yz_total = int(yz.get("count", 0)) + int(yz.get("replaces_count", 0))
+        pr_total = int(pr.get("count", 0)) + int(pr.get("replaces_count", 0))
+        cn_total = int(cn.get("count", 0)) + int(cn.get("replaces_count", 0))
+
+        impact_parts: list[str] = []
+        if fb_total:
+            impact_parts.append(f"Fishbone ({fb_total})")
+        if mt_total:
+            impact_parts.append(f"Model Tree ({mt_total})")
+        if yz_total:
+            impact_parts.append(f"Yamazumi ({yz_total})")
+        if pr_total:
+            impact_parts.append(f"Process ({pr_total})")
+        if cn_total:
+            impact_parts.append(f"Concerns ({cn_total})")
+
+        if fb_total or yz_total or pr_total or cn_total:
+            impact_details.append(
+                {
+                    "part_number": part_number,
+                    "replaces_part_number": replaces_pn,
+                    "change_label": change_label,
+                    "fishbone_total": fb_total,
+                    "yamazumi_total": yz_total,
+                    "process_total": pr_total,
+                    "concerns_total": cn_total,
+                    "impacts": impacts,
+                }
+            )
+
+        summary_rows.append(
+            {
+                "change_type_label": change_label,
+                "part_number": part_number,
+                "pits_ids": pits_display,
+                "previous_value": previous_value,
+                "incoming_description": incoming_value,
+                "subsystem": str(item.get("subsystem") or "—"),
+                "downstream_impacts": ", ".join(impact_parts) if impact_parts else "None",
+            }
+        )
+
+    if not summary_rows:
+        empty_df = pd.DataFrame(
+            columns=[
+                "change_type_label",
+                "part_number",
+                "pits_ids",
+                "previous_value",
+                "incoming_description",
+                "subsystem",
+                "downstream_impacts",
+            ]
+        ).astype("string")
+        return empty_df, []
+
+    return pd.DataFrame(summary_rows), impact_details
+
+
+def _render_pits_flagged_changes_summary(
+    project_id: str,
+    scenario_id: str | None,
+    pending_part_reviews: list[dict],
+    bom_snapshot: dict | None = None,
+) -> None:
+    """Render the right-side summary panel for flagged PITS changes."""
+    with st.container(border=True):
+        st.subheader("Flagged changes summary")
+        replacements_count = sum(
+            1 for r in pending_part_reviews if r.get("replaces_part_number")
+        )
+        new_count = sum(
+            1
+            for r in pending_part_reviews
+            if r.get("change_type") == "new_part" and not r.get("replaces_part_number")
+        )
+        changed_count = sum(
+            1
+            for r in pending_part_reviews
+            if r.get("change_type") == "changed_description"
+        )
+        deleted_count = sum(
+            1
+            for r in pending_part_reviews
+            if r.get("change_type") == "deleted_part" and not r.get("replaces_part_number")
+        )
+
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Part replacements", replacements_count)
+        metric_cols[1].metric("New parts", new_count)
+        metric_cols[2].metric("Modified descriptions", changed_count)
+        metric_cols[3].metric("Deleted parts", deleted_count)
+
+        if not pending_part_reviews:
+            st.success(
+                "No flagged part changes require review for this PITS upload.",
+                icon=":material/check_circle:",
+            )
+            st.caption(
+                "When a prior PITS upload exists, part replacements, new part numbers, "
+                "modified descriptions, and deleted parts are summarized here."
+            )
+            return
+
+        st.info(
+            f"{len(pending_part_reviews):,} flagged part change(s) detected compared to prior PITS data. "
+            "Review the summary below before importing.",
+            icon=":material/rule:",
+        )
+
+        summary_df, impact_details = _build_pits_flagged_changes_summary(
+            project_id,
+            scenario_id,
+            pending_part_reviews,
+            bom_snapshot=bom_snapshot,
+        )
+        filtered_summary = filter_table(
+            summary_df,
+            key=f"pits_flagged_changes_filter_{project_id}",
+            dropdown_columns=["change_type_label", "subsystem"],
+            search_columns=[
+                "part_number",
+                "pits_ids",
+                "previous_value",
+                "incoming_description",
+                "downstream_impacts",
+            ],
+        )
+        selectable_dataframe(
+            filtered_summary,
+            key=f"pits_flagged_changes_table_{project_id}",
+            hide_index=True,
+            height=360,
+            column_config={
+                "change_type_label": st.column_config.TextColumn(
+                    "Change type", pinned=True
+                ),
+                "part_number": st.column_config.TextColumn("Part number", pinned=True),
+                "pits_ids": st.column_config.TextColumn("PITS ID(s)"),
+                "previous_value": st.column_config.TextColumn(
+                    "Previous part / description"
+                ),
+                "incoming_description": st.column_config.TextColumn(
+                    "Incoming description"
+                ),
+                "subsystem": st.column_config.TextColumn("Subsystem"),
+                "downstream_impacts": st.column_config.TextColumn("Downstream impacts"),
+            },
+        )
+
+        if impact_details:
+            with st.expander(
+                f"Downstream planning impacts ({len(impact_details):,} part{'s' if len(impact_details) != 1 else ''})",
+                icon=":material/account_tree:",
+            ):
+                impact_rows: list[dict[str, str]] = []
+                for detail in impact_details:
+                    pn = detail["part_number"]
+                    replaces_pn = detail.get("replaces_part_number")
+                    imp = detail["impacts"]
+                    for a in imp["fishbone"].get("assignments") or []:
+                        impact_rows.append(
+                            {
+                                "part_number": pn,
+                                "area": "Fishbone",
+                                "location": a.get("section_name", ""),
+                                "detail": f"Qty {a.get('quantity', 1)} — {a.get('use_description', '')}".strip(" —"),
+                            }
+                        )
+                    for a in imp["fishbone"].get("replaces_assignments") or []:
+                        impact_rows.append(
+                            {
+                                "part_number": f"{pn} (replaces {replaces_pn})",
+                                "area": "Fishbone",
+                                "location": a.get("section_name", ""),
+                                "detail": f"Qty {a.get('quantity', 1)} — {a.get('use_description', '')}".strip(" —"),
+                            }
+                        )
+                    for e in imp["yamazumi"].get("elements") or []:
+                        impact_rows.append(
+                            {
+                                "part_number": pn,
+                                "area": "Yamazumi",
+                                "location": f"{e.get('station', '')} / {e.get('operation', '')}".strip(" /"),
+                                "detail": e.get("description", ""),
+                            }
+                        )
+                    for e in imp["yamazumi"].get("replaces_elements") or []:
+                        impact_rows.append(
+                            {
+                                "part_number": f"{pn} (replaces {replaces_pn})",
+                                "area": "Yamazumi",
+                                "location": f"{e.get('station', '')} / {e.get('operation', '')}".strip(" /"),
+                                "detail": e.get("description", ""),
+                            }
+                        )
+                    for o in imp["process"].get("options") or []:
+                        impact_rows.append(
+                            {
+                                "part_number": pn,
+                                "area": "Process at a Glance",
+                                "location": f"{o.get('station', '')} / {o.get('operation', '')}".strip(" /"),
+                                "detail": f"{o.get('group_name', '')} ({o.get('handling_type', '')})",
+                            }
+                        )
+                    for o in imp["process"].get("replaces_options") or []:
+                        impact_rows.append(
+                            {
+                                "part_number": f"{pn} (replaces {replaces_pn})",
+                                "area": "Process at a Glance",
+                                "location": f"{o.get('station', '')} / {o.get('operation', '')}".strip(" /"),
+                                "detail": f"{o.get('group_name', '')} ({o.get('handling_type', '')})",
+                            }
+                        )
+                if impact_rows:
+                    selectable_dataframe(
+                        pd.DataFrame(impact_rows),
+                        key=f"pits_flagged_downstream_impacts_{project_id}",
+                        hide_index=True,
+                        column_config={
+                            "part_number": st.column_config.TextColumn("Part number"),
+                            "area": st.column_config.TextColumn("Module"),
+                            "location": st.column_config.TextColumn("Section / station"),
+                            "detail": st.column_config.TextColumn("Detail"),
+                        },
+                    )
+
+
 def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
     wizard_key = f"pits_verification_wizard_{project_id}"
-    if wizard_key in st.session_state:
-        _pits_part_verification_dialog(project_id)
+    st.session_state.pop(wizard_key, None)
 
     defined_models = project_models(project_id)
     model_labels = {
@@ -544,8 +824,7 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
         for _, row in defined_models.iterrows()
     }
 
-    import_col, export_col = st.columns(2)
-    with import_col.container(border=True):
+    with st.container(border=True):
         st.subheader("Import a BOM draft")
         completion_key = f"pits_import_completed_{project_id}"
         if completion_key in st.session_state:
@@ -554,7 +833,7 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
             ack = completed_data.get("acknowledged_parts") or []
             if ack:
                 st.info(
-                    f"Acknowledged {len(ack):,} part number(s) during verification: {', '.join(ack[:10])}{'...' if len(ack) > 10 else ''}",
+                    f"Recorded {len(ack):,} flagged part change(s) on import: {', '.join(ack[:10])}{'...' if len(ack) > 10 else ''}",
                     icon=":material/verified:",
                 )
             summary = completed_data.get("summary") or {}
@@ -584,220 +863,198 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                 if has_pits_id_sheets(uploaded):
                     records, models, bom_snapshot = parse_pits_combined_workbook(uploaded)
                     id_resolution = pits_catalog_id_resolution(records)
-                    st.success("ID-based PITS tracker detected", icon=":material/key:")
-                    summary_cols = st.columns(3)
-                    summary_cols[0].metric("PITS records", len(records))
-                    summary_cols[1].metric("Unique IDs", len({record["pits_id"] for record in records}))
-                    summary_cols[2].metric("Models", len(models))
-                    st.caption(
-                        "ID Number is the stable source key. When a tracker part number has multiple IDs, "
-                        "the BOM sheet's column-A PITS ID is used if it provides one unique match. Re-imports "
-                        "create source revisions and flag changed MBOM candidates without overwriting collaborator decisions."
+                    pending_part_reviews = detect_pits_new_and_changed_parts(
+                        project_id, records, bom_snapshot=bom_snapshot
                     )
-                    preview = [
-                        {
-                            key: value for key, value in record.items()
-                            if key != "source_payload" and not key.startswith("_")
-                        }
-                        for record in records
-                    ]
-                    preview_table = filter_table(
-                        pd.DataFrame(preview),
-                        key="pits_import_preview_filters",
-                        dropdown_columns=["status", "subsystem", "design_maturity", "workstation"],
-                        search_columns=["pits_id", "part_number", "description", "comments", "subsystem"],
-                    )
-                    selectable_dataframe(preview_table.head(50), key="pits_import_preview_table", hide_index=True, height=360,
-                                 column_config={"pits_id": st.column_config.TextColumn("PITS ID", pinned=True), "part_number": st.column_config.TextColumn("Part number", pinned=True), "description": st.column_config.TextColumn("Part Name")})
-                    with st.expander("Models in this workbook", icon=":material/precision_manufacturing:"):
-                        model_preview = [{key: value for key, value in model.items() if key != "source_payload"} for model in models]
-                        model_preview_table = filter_table(
-                            pd.DataFrame(model_preview),
-                            key="pits_model_preview_filters",
-                            dropdown_columns=["platform_size", "package_type", "base_model"],
-                            search_columns=["model_number", "appearance", "sku_upc"],
+                    left_col, right_col = st.columns([3, 2], gap="medium")
+                    with left_col:
+                        st.success("ID-based PITS tracker detected", icon=":material/key:")
+                        summary_cols = st.columns(3)
+                        summary_cols[0].metric("PITS records", len(records))
+                        summary_cols[1].metric("Unique IDs", len({record["pits_id"] for record in records}))
+                        summary_cols[2].metric("Models", len(models))
+                        st.caption(
+                            "ID Number is the stable source key. When a tracker part number has multiple IDs, "
+                            "the BOM sheet's column-A PITS ID is used if it provides one unique match. Re-imports "
+                            "create source revisions and flag changed MBOM candidates without overwriting collaborator decisions."
                         )
-                        selectable_dataframe(model_preview_table, key="pits_model_preview_table", hide_index=True)
-                    bom_occurrences = list(bom_snapshot.get("occurrences") or [])
-                    bom_issues = list(bom_snapshot.get("issues") or [])
-                    bom_duplicates = list(bom_snapshot.get("duplicates") or [])
-                    blocking_bom_issues = [
-                        issue for issue in bom_issues if issue.get("blocking")
-                    ]
-                    if bom_snapshot.get("sheet_name"):
-                        source_root_depth = int(bom_snapshot.get("source_root_depth") or 1)
-                        if source_root_depth > 1:
-                            st.info(
-                                f"This BOM starts at Level {source_root_depth}; that level will be "
-                                "treated as the workbook's root while its original level is preserved.",
-                                icon=":material/account_tree:",
+                        preview = [
+                            {
+                                key: value for key, value in record.items()
+                                if key != "source_payload" and not key.startswith("_")
+                            }
+                            for record in records
+                        ]
+                        preview_table = filter_table(
+                            pd.DataFrame(preview),
+                            key="pits_import_preview_filters",
+                            dropdown_columns=["status", "subsystem", "design_maturity", "workstation"],
+                            search_columns=["pits_id", "part_number", "description", "comments", "subsystem"],
+                        )
+                        selectable_dataframe(
+                            preview_table.head(50),
+                            key="pits_import_preview_table",
+                            hide_index=True,
+                            height=360,
+                            column_config={
+                                "pits_id": st.column_config.TextColumn("PITS ID", pinned=True),
+                                "part_number": st.column_config.TextColumn("Part number", pinned=True),
+                                "description": st.column_config.TextColumn("Part Name"),
+                            },
+                        )
+                        with st.expander("Models in this workbook", icon=":material/precision_manufacturing:"):
+                            model_preview = [{key: value for key, value in model.items() if key != "source_payload"} for model in models]
+                            model_preview_table = filter_table(
+                                pd.DataFrame(model_preview),
+                                key="pits_model_preview_filters",
+                                dropdown_columns=["platform_size", "package_type", "base_model"],
+                                search_columns=["model_number", "appearance", "sku_upc"],
                             )
-                        with st.expander(
-                            f"BOM structure in this workbook ({len(bom_occurrences):,} occurrences)",
-                            icon=":material/account_tree:",
-                        ):
-                            bom_preview = pd.DataFrame(bom_occurrences)
-                            if not bom_preview.empty:
-                                selectable_dataframe(
-                                    bom_preview.head(50),
-                                    key=f"pits_bom_preview_{project_id}",
-                                    hide_index=True,
-                                    height=360,
-                                    column_config={
-                                        "parent_tracker_number": "Parent tracker number",
-                                        "child_tracker_number": "Child tracker number",
-                                        "part_number": "Part number",
-                                        "description": "Part Name",
-                                        "proposed_depth": "Level",
-                                        "raw_quantity_text": "PITS quantity source",
-                                        "proposed_quantity": "PITS quantity",
-                                        "source_row": "BOM row",
-                                        "raw_levels": None,
-                                    },
+                            selectable_dataframe(model_preview_table, key="pits_model_preview_table", hide_index=True)
+                        bom_occurrences = list(bom_snapshot.get("occurrences") or [])
+                        bom_issues = list(bom_snapshot.get("issues") or [])
+                        bom_duplicates = list(bom_snapshot.get("duplicates") or [])
+                        blocking_bom_issues = [
+                            issue for issue in bom_issues if issue.get("blocking")
+                        ]
+                        if bom_snapshot.get("sheet_name"):
+                            source_root_depth = int(bom_snapshot.get("source_root_depth") or 1)
+                            if source_root_depth > 1:
+                                st.info(
+                                    f"This BOM starts at Level {source_root_depth}; that level will be "
+                                    "treated as the workbook's root while its original level is preserved.",
+                                    icon=":material/account_tree:",
                                 )
-                            if bom_issues:
-                                issue_message = (
-                                    f"Import is blocked by {len(blocking_bom_issues):,} BOM row issue(s)."
-                                    if blocking_bom_issues
-                                    else f"Found {len(bom_issues):,} nonblocking BOM row issue(s)."
-                                )
-                                if blocking_bom_issues:
-                                    st.error(issue_message, icon=":material/error:")
-                                else:
+                            with st.expander(
+                                f"BOM structure in this workbook ({len(bom_occurrences):,} occurrences)",
+                                icon=":material/account_tree:",
+                            ):
+                                bom_preview = pd.DataFrame(bom_occurrences)
+                                if not bom_preview.empty:
+                                    selectable_dataframe(
+                                        bom_preview.head(50),
+                                        key=f"pits_bom_preview_{project_id}",
+                                        hide_index=True,
+                                        height=360,
+                                        column_config={
+                                            "parent_tracker_number": "Parent tracker number",
+                                            "child_tracker_number": "Child tracker number",
+                                            "part_number": "Part number",
+                                            "description": "Part Name",
+                                            "proposed_depth": "Level",
+                                            "raw_quantity_text": "PITS quantity source",
+                                            "proposed_quantity": "PITS quantity",
+                                            "source_row": "BOM row",
+                                            "raw_levels": None,
+                                        },
+                                    )
+                                if bom_issues:
+                                    issue_message = (
+                                        f"Found {len(blocking_bom_issues):,} BOM row(s) without a complete tracker hierarchy that will be skipped from the Model Tree."
+                                        if blocking_bom_issues
+                                        else f"Found {len(bom_issues):,} nonblocking BOM row issue(s)."
+                                    )
                                     st.warning(issue_message, icon=":material/warning:")
-                                issue_preview = pd.DataFrame(
-                                    [
-                                        {
-                                            "result": (
-                                                "Blocks import"
-                                                if issue.get("blocking")
-                                                else "Flagged only"
+                                    issue_preview = pd.DataFrame(
+                                        [
+                                            {
+                                                "result": (
+                                                    "Skipped from BOM"
+                                                    if issue.get("blocking")
+                                                    else "Flagged only"
+                                                ),
+                                                "source_row": issue.get("source_row"),
+                                                "issue": issue.get("issue"),
+                                                "child_tracker_number": issue.get(
+                                                    "child_tracker_number", ""
+                                                ),
+                                                "part_number": issue.get("part_number", ""),
+                                                "description": issue.get("description", ""),
+                                                "proposed_depth": issue.get("proposed_depth"),
+                                                "expected_parent_level": issue.get(
+                                                    "expected_parent_level"
+                                                ),
+                                                "raw_quantity_text": issue.get(
+                                                    "raw_quantity_text", ""
+                                                ),
+                                            }
+                                            for issue in bom_issues
+                                        ]
+                                    )
+                                    selectable_dataframe(
+                                        issue_preview,
+                                        key=f"pits_bom_issue_preview_{project_id}",
+                                        hide_index=True,
+                                        height=360,
+                                        column_config={
+                                            "result": "Import result",
+                                            "source_row": st.column_config.NumberColumn(
+                                                "Excel row", format="%d"
                                             ),
-                                            "source_row": issue.get("source_row"),
-                                            "issue": issue.get("issue"),
-                                            "child_tracker_number": issue.get(
-                                                "child_tracker_number", ""
+                                            "issue": st.column_config.TextColumn(
+                                                "Issue", width="large"
                                             ),
-                                            "part_number": issue.get("part_number", ""),
-                                            "description": issue.get("description", ""),
-                                            "proposed_depth": issue.get("proposed_depth"),
-                                            "expected_parent_level": issue.get(
-                                                "expected_parent_level"
-                                            ),
-                                            "raw_quantity_text": issue.get(
-                                                "raw_quantity_text", ""
-                                            ),
-                                        }
-                                        for issue in bom_issues
-                                    ]
-                                )
-                                selectable_dataframe(
-                                    issue_preview,
-                                    key=f"pits_bom_issue_preview_{project_id}",
-                                    hide_index=True,
-                                    height=360,
-                                    column_config={
-                                        "result": "Import result",
-                                        "source_row": st.column_config.NumberColumn(
-                                            "Excel row", format="%d"
-                                        ),
-                                        "issue": st.column_config.TextColumn(
-                                            "Issue", width="large"
-                                        ),
-                                        "child_tracker_number": "Tracker number (Column A)",
-                                        "part_number": "Part number (Column B)",
-                                        "description": "Description (Column C)",
-                                        "proposed_depth": "Populated level",
-                                        "expected_parent_level": "Expected parent level",
-                                        "raw_quantity_text": "Level-cell value",
-                                    },
-                                )
-                            if bom_duplicates:
+                                            "child_tracker_number": "Tracker number (Column A)",
+                                            "part_number": "Part number (Column B)",
+                                            "description": "Description (Column C)",
+                                            "proposed_depth": "Populated level",
+                                            "expected_parent_level": "Expected parent level",
+                                            "raw_quantity_text": "Level-cell value",
+                                        },
+                                    )
+                                if bom_duplicates:
+                                    st.warning(
+                                        f"Found {len(bom_duplicates):,} additional duplicate BOM occurrence row(s). "
+                                        "The retained occurrences will be flagged for review.",
+                                        icon=":material/warning:",
+                                    )
+                            if blocking_bom_issues:
                                 st.warning(
-                                    f"Found {len(bom_duplicates):,} additional duplicate BOM occurrence row(s). "
-                                    "The retained occurrences will be flagged for review.",
+                                    f"{len(blocking_bom_issues):,} BOM worksheet row(s) could not be linked to a complete tracker hierarchy "
+                                    "and will be skipped from the Model Tree (expand BOM structure above for details). "
+                                    "Tracker records, models, and valid BOM occurrences will still import.",
                                     icon=":material/warning:",
                                 )
-                    else:
-                        st.warning(
-                            "This PITS workbook has no recognized BOM worksheet. Tracker and Models "
-                            "can still be imported, but Model Tree will remain unchanged.",
-                            icon=":material/warning:",
-                        )
-                    excluded_records = [
-                        record for record in records
-                        if str(record.get("used_bom") or "").strip().casefold() in {"n", "no"}
-                    ]
-                    if excluded_records:
-                        st.warning(
-                            f"{len(excluded_records):,} workbook row(s) marked Used BOM = N will remain in the "
-                            "Parts Catalog but will be marked inactive for the selected planning scenario.",
-                            icon=":material/warning:",
-                        )
-                    if id_resolution["multiple_bom_ids"]:
-                        st.warning(
-                            "Multiple PITS IDs are assigned to "
-                            f"{len(id_resolution['multiple_bom_ids']):,} part(s) in the BOM sheet. "
-                            "Those part numbers cannot be resolved to one catalog PITS ID from the BOM.",
-                            icon=":material/warning:",
-                        )
-                    conflict_parts = pits_import_conflict_parts(project_id, records)
-                    manual_conflicts = [c for c in conflict_parts if c.get("conflict_type") == "manual_values"]
-                    tracker_conflicts = [c for c in conflict_parts if c.get("conflict_type") == "tracker_number_reassigned"]
-                    confirm_overwrite_manual = False
-                    if manual_conflicts:
-                        st.warning(
-                            f"Found {len(manual_conflicts):,} existing part(s) in the Parts Catalog with manual collaborator edits. "
-                            "By default, manual edits are preserved. Check the box below if you wish to overwrite them.",
-                            icon=":material/warning:",
-                        )
-                        confirm_overwrite_manual = st.checkbox(
-                            f"Confirm overwriting manual edits for {len(manual_conflicts):,} catalog part(s) with PITS values",
-                            key=f"confirm_overwrite_manual_{project_id}",
-                        )
-                    pending_part_reviews = detect_pits_new_and_changed_parts(project_id, records, bom_snapshot=bom_snapshot)
-                    if pending_part_reviews:
-                        replacements_count = sum(1 for r in pending_part_reviews if r.get("replaces_part_number"))
-                        new_count = sum(1 for r in pending_part_reviews if r["change_type"] == "new_part" and not r.get("replaces_part_number"))
-                        changed_count = sum(1 for r in pending_part_reviews if r["change_type"] == "changed_description")
-                        details = []
-                        if replacements_count:
-                            details.append(f"{replacements_count} part replacement(s)")
-                        if new_count:
-                            details.append(f"{new_count} new part number(s)")
-                        if changed_count:
-                            details.append(f"{changed_count} modified description(s)")
-                        st.info(
-                            f"PITS upload contains {' and '.join(details)} that require verification before import.",
-                            icon=":material/rule:",
-                        )
-                        if st.button(
-                            f"Review & Import PITS snapshot ({len(pending_part_reviews)} to verify)",
-                            type="primary",
-                            icon=":material/verified_user:",
-                            disabled=bool(blocking_bom_issues),
-                            key=f"start_pits_review_{project_id}",
-                        ):
-                            uploaded_wrapper = _UploadedFileWrapper(uploaded)
-                            st.session_state[wizard_key] = {
-                                "project_id": project_id,
-                                "scenario_id": scenario_id,
-                                "records": records,
-                                "models": models,
-                                "bom_snapshot": bom_snapshot,
-                                "uploaded": uploaded_wrapper,
-                                "confirm_overwrite_manual": confirm_overwrite_manual,
-                                "pending_reviews": pending_part_reviews,
-                                "current_step": 0,
-                                "acknowledged_parts": [],
-                            }
-                            st.rerun()
-                    else:
+                        else:
+                            st.warning(
+                                "This PITS workbook has no recognized BOM worksheet. Tracker and Models "
+                                "can still be imported, but Model Tree will remain unchanged.",
+                                icon=":material/warning:",
+                            )
+                        excluded_records = [
+                            record for record in records
+                            if str(record.get("used_bom") or "").strip().casefold() in {"n", "no"}
+                        ]
+                        if excluded_records:
+                            st.warning(
+                                f"{len(excluded_records):,} workbook row(s) marked Used BOM = N will remain in the "
+                                "Parts Catalog but will be marked inactive for the selected planning scenario.",
+                                icon=":material/warning:",
+                            )
+                        if id_resolution["multiple_bom_ids"]:
+                            st.warning(
+                                "Multiple PITS IDs are assigned to "
+                                f"{len(id_resolution['multiple_bom_ids']):,} part(s) in the BOM sheet. "
+                                "Those part numbers cannot be resolved to one catalog PITS ID from the BOM.",
+                                icon=":material/warning:",
+                            )
+                        conflict_parts = pits_import_conflict_parts(project_id, records)
+                        manual_conflicts = [c for c in conflict_parts if c.get("conflict_type") == "manual_values"]
+                        confirm_overwrite_manual = False
+                        if manual_conflicts:
+                            st.warning(
+                                f"Found {len(manual_conflicts):,} existing part(s) in the Parts Catalog with manual collaborator edits. "
+                                "By default, manual edits are preserved. Check the box below if you wish to overwrite them.",
+                                icon=":material/warning:",
+                            )
+                            confirm_overwrite_manual = st.checkbox(
+                                f"Confirm overwriting manual edits for {len(manual_conflicts):,} catalog part(s) with PITS values",
+                                key=f"confirm_overwrite_manual_{project_id}",
+                            )
                         if st.button(
                             "Import PITS snapshot",
                             type="primary",
                             icon=":material/upload:",
-                            disabled=bool(blocking_bom_issues),
                             key=f"import_pits_snapshot_{project_id}",
                         ):
                             result = _execute_pits_import(
@@ -809,10 +1066,19 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                                 uploaded,
                                 overwrite_manual=confirm_overwrite_manual,
                                 editor_name=st.session_state.get("current_editor", ""),
-                                acknowledged_parts=[],
+                                acknowledged_parts=[
+                                    r["part_number"] for r in pending_part_reviews
+                                ],
                             )
                             st.session_state[completion_key] = result
                             st.rerun()
+                    with right_col:
+                        _render_pits_flagged_changes_summary(
+                            project_id,
+                            scenario_id,
+                            pending_part_reviews,
+                            bom_snapshot=bom_snapshot,
+                        )
                 else:
                     raw = read_bom(uploaded)
                     if is_pits_format(raw):
@@ -905,24 +1171,6 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                                 st.success(f"Imported or updated {len(preview):,} parts.", icon=":material/check_circle:")
             except Exception as exc:
                 st.error(f"Could not read this file: {exc}")
-
-    with export_col.container(border=True):
-        st.subheader("Export planning snapshot")
-        st.write("The workbook contains project, confirmed parts, Manufacturing BOM review, work elements, and concerns sheets, plus a flattened **Lucid Data Link** sheet.")
-        st.caption("This is a snapshot export. A later release can add a controlled sync and Lucid-specific identifier strategy.")
-        project = get_project(project_id)
-        scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
-        safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in project["name"])
-        revision_label = scenario["revision_label"] if scenario else project["revision"]
-        st.download_button(
-            "Download Excel workbook",
-            data=lambda: export_workbook(project_id, scenario_id),
-            file_name=f"{safe_name}_rev_{revision_label}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            icon=":material/download:",
-        )
-
 
 
 def render_pits_exchange_history(project_id: str) -> None:
