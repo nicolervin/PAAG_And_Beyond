@@ -687,6 +687,230 @@ class LayoutStoreTests(unittest.TestCase):
 
         delete_layout(self.project_id, layout_id, self.editor)
 
+    def test_default_layers_and_layer_crud(self) -> None:
+        """Verify default engineering layers and custom layer creation, updates, reordering, and deletion."""
+        from utils.layout_store import (
+            DEFAULT_ENGINEERING_LAYERS,
+            create_blank_scaled_revision,
+            create_layout_layer,
+            delete_layout_layer,
+            list_layout_layers,
+            reorder_layout_layers,
+            update_layout_layer,
+        )
+
+        layout = create_layout(self.project_id, "Layered Plant", "Layer tests", self.editor)
+        rev = create_blank_scaled_revision(
+            project_id=self.project_id,
+            layout_id=layout["id"],
+            width_value=200.0,
+            height_value=100.0,
+            unit="feet",
+            notes="Blank scaled canvas with default layers",
+            editor_name=self.editor,
+        )
+
+        layers = list_layout_layers(rev["id"])
+        self.assertEqual(len(layers), len(DEFAULT_ENGINEERING_LAYERS))
+        self.assertEqual(layers[0]["name"], DEFAULT_ENGINEERING_LAYERS[0][0])
+
+        # Create a custom layer
+        custom = create_layout_layer(
+            project_id=self.project_id,
+            revision_id=rev["id"],
+            name="AGV Tugger Routes",
+            color="#00897B",
+            editor_name=self.editor,
+        )
+        self.assertEqual(custom["name"], "AGV Tugger Routes")
+        self.assertTrue(custom["visible"])
+        self.assertFalse(custom["locked"])
+
+        # Update layer visibility, lock, opacity, and color
+        updated = update_layout_layer(
+            project_id=self.project_id,
+            layer_id=custom["id"],
+            editor_name=self.editor,
+            name="AGV & Forklift Aisles",
+            visible=False,
+            locked=True,
+            opacity=0.65,
+            color="#D32F2F",
+        )
+        self.assertEqual(updated["name"], "AGV & Forklift Aisles")
+        self.assertFalse(updated["visible"])
+        self.assertTrue(updated["locked"])
+        self.assertAlmostEqual(updated["opacity"], 0.65)
+        self.assertEqual(updated["color"], "#D32F2F")
+
+        # Reorder layers (put custom layer first)
+        all_ids = [custom["id"]] + [l["id"] for l in layers]
+        reordered = reorder_layout_layers(
+            project_id=self.project_id,
+            revision_id=rev["id"],
+            ordered_layer_ids=all_ids,
+            editor_name=self.editor,
+        )
+        self.assertEqual(reordered[0]["id"], custom["id"])
+        self.assertEqual(reordered[0]["z_index"], 10)
+
+        # Delete custom layer and verify shape fallback
+        save_layout_shapes(
+            self.project_id,
+            rev["id"],
+            [
+                {
+                    "shape_type": "agv_route",
+                    "label": "Tugger Loop 1",
+                    "x": 50.0,
+                    "y": 50.0,
+                    "width": 100.0,
+                    "height": 40.0,
+                    "layer_id": custom["id"],
+                }
+            ],
+            self.editor,
+        )
+        delete_layout_layer(self.project_id, custom["id"], self.editor)
+        remaining_layers = list_layout_layers(rev["id"])
+        self.assertEqual(len(remaining_layers), len(DEFAULT_ENGINEERING_LAYERS))
+        shapes_after = list_layout_shapes(rev["id"])
+        self.assertEqual(len(shapes_after), 1)
+        self.assertEqual(shapes_after[0]["layer_id"], remaining_layers[0]["id"])
+
+        delete_layout(self.project_id, layout["id"], self.editor)
+
+    def test_blank_scaled_revision_and_reference_calibration(self) -> None:
+        """Verify blank scaled canvas creation and 2-point interactive reference scale calibration."""
+        from utils.layout_store import (
+            calibrate_revision_scale_by_reference,
+            create_blank_scaled_revision,
+        )
+
+        layout = create_layout(self.project_id, "Calibration Plant", "", self.editor)
+        rev = create_blank_scaled_revision(
+            project_id=self.project_id,
+            layout_id=layout["id"],
+            width_value=100.0,
+            height_value=50.0,
+            unit="meters",
+            notes="Metric scaled canvas",
+            editor_name=self.editor,
+            canvas_width_px=2000,
+            canvas_height_px=1000,
+        )
+        self.assertEqual(rev["image_width_px"], 2000)
+        self.assertEqual(rev["image_height_px"], 1000)
+        self.assertEqual(rev["unit"], "meters")
+
+        # Suppose a 200 px reference line on the 2000x1000 canvas is calibrated as 25 feet:
+        # Total width should become (2000 / 200) * 25 = 250 feet, height = (1000 / 200) * 25 = 125 feet
+        calibrated = calibrate_revision_scale_by_reference(
+            project_id=self.project_id,
+            revision_id=rev["id"],
+            pixel_distance=200.0,
+            physical_distance=25.0,
+            unit="feet",
+            editor_name=self.editor,
+        )
+        self.assertEqual(calibrated["unit"], "feet")
+        self.assertAlmostEqual(calibrated["width_value"], 250.0, places=2)
+        self.assertAlmostEqual(calibrated["height_value"], 125.0, places=2)
+
+        delete_layout(self.project_id, layout["id"], self.editor)
+
+    def test_high_capacity_batch_persistence_and_smart_connectors(self) -> None:
+        """Verify fast batch persistence of thousands of shapes with layers, groups, Z-order, and smart connectors."""
+        from utils.layout_store import create_blank_scaled_revision, list_layout_layers
+
+        layout = create_layout(self.project_id, "High Capacity Plant", "", self.editor)
+        rev = create_blank_scaled_revision(
+            project_id=self.project_id,
+            layout_id=layout["id"],
+            width_value=400.0,
+            height_value=200.0,
+            unit="feet",
+            notes="2,000 shape batch test",
+            editor_name=self.editor,
+        )
+        layers = list_layout_layers(rev["id"])
+        pitch_layer_id = layers[1]["id"]
+        flow_layer_id = layers[4]["id"]
+
+        batch_shapes = []
+        for idx in range(2000):
+            sid = f"shape-{idx:04d}"
+            batch_shapes.append(
+                {
+                    "id": sid,
+                    "shape_type": "workstation" if idx % 2 == 0 else "worker",
+                    "label": f"Item {idx}",
+                    "x": float((idx % 50) * 30),
+                    "y": float((idx // 50) * 30),
+                    "width": 24.0,
+                    "height": 16.0,
+                    "rotation": 0.0,
+                    "color": "#1976D2",
+                    "layer_id": pitch_layer_id,
+                    "z_index": idx,
+                    "group_id": "grp-1" if idx < 10 else None,
+                    "locked": 1 if idx == 0 else 0,
+                    "source_shape_id": None,
+                    "target_shape_id": None,
+                }
+            )
+        # Add a smart connector linking shape-0000 and shape-0002
+        batch_shapes.append(
+            {
+                "id": "conn-0001",
+                "shape_type": "connector",
+                "label": "CAN Bus / Andon",
+                "x": 12.0,
+                "y": 8.0,
+                "width": 60.0,
+                "height": 10.0,
+                "rotation": 0.0,
+                "color": "#7B1FA2",
+                "layer_id": flow_layer_id,
+                "z_index": 2000,
+                "group_id": None,
+                "locked": 0,
+                "source_shape_id": "shape-0000",
+                "target_shape_id": "shape-0002",
+            }
+        )
+
+        save_layout_shapes(self.project_id, rev["id"], batch_shapes, self.editor)
+        saved = list_layout_shapes(rev["id"])
+        self.assertEqual(len(saved), 2001)
+        self.assertEqual(saved[0]["id"], "shape-0000")
+        self.assertTrue(saved[0]["locked"])
+        self.assertEqual(saved[0]["group_id"], "grp-1")
+        self.assertEqual(saved[-1]["id"], "conn-0001")
+        self.assertEqual(saved[-1]["source_shape_id"], "shape-0000")
+        self.assertEqual(saved[-1]["target_shape_id"], "shape-0002")
+
+        delete_layout(self.project_id, layout["id"], self.editor)
+
+    def test_scenario_pitch_metrics_for_pin_map(self) -> None:
+        """Verify get_scenario_pitch_metrics_for_pin_map returns live cycle time, takt, and PAAG steps."""
+        from utils.layout_store import get_scenario_pitch_metrics_for_pin_map
+
+        scenarios = store.query(
+            "SELECT id FROM planning_scenarios WHERE project_id = ? LIMIT 1",
+            (self.project_id,),
+        )
+        self.assertTrue(scenarios)
+        scenario_id = str(scenarios[0]["id"])
+        metrics = get_scenario_pitch_metrics_for_pin_map(self.project_id, scenario_id)
+        self.assertIsInstance(metrics, dict)
+        for pid, m in metrics.items():
+            self.assertIn("cycle_time_s", m)
+            self.assertIn("takt_time_s", m)
+            self.assertIn("utilization_pct", m)
+            self.assertIn("steps", m)
+
 
 if __name__ == "__main__":
     unittest.main()
+

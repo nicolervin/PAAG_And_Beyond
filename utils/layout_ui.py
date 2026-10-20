@@ -4,6 +4,7 @@ and interactive shape annotations to scale.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -15,35 +16,50 @@ import streamlit as st
 
 from utils.layout_canvas import layout_canvas, layout_image_data_url
 from utils.layout_store import (
+    IMPERIAL_LAYOUT_UNITS,
     LAYOUT_UNITS,
     UNIT_TO_INCHES,
     annotate_preview_with_dimensions,
     apply_image_crop,
     attach_layout_revision_cad,
     auto_detect_whitespace_crop,
+    calibrate_revision_scale_by_reference,
+    create_blank_scaled_revision,
     create_layout,
+    create_layout_layer,
     create_layout_revision,
     delete_layout,
+    delete_layout_custom_stencil,
+    delete_layout_layer,
     delete_layout_revision,
+    ensure_default_layers_for_revision,
+    ensure_default_pin_map_page,
     format_dimension,
     from_canonical_inches,
     get_layout,
     get_layout_revision,
     get_pdf_page_count,
+    get_scenario_pitch_metrics_for_pin_map,
     get_section_pitch_standards,
     import_shapes_from_revision,
     layout_deletion_impact,
+    list_layout_custom_stencils,
+    list_layout_layers,
     list_layout_revisions,
     list_layout_shapes,
     list_layouts,
     list_project_yamazumi_pitches,
     load_and_orient_layout_preview,
     remove_layout_revision_cad,
+    reorder_layout_layers,
+    save_layout_custom_stencil,
     save_layout_shapes,
     set_section_pitch_standard,
     to_canonical_inches,
     update_layout,
+    update_layout_layer,
     update_layout_revision_scale,
+    update_revision_background_from_data_url,
 )
 from utils.scope_ui import section_heading_with_scope
 from utils.store import assembly_sections, audit_history
@@ -51,30 +67,150 @@ from utils.table_ui import editable_table_footer, selectable_dataframe
 
 SHAPE_TYPES: list[str] = [
     "rectangle",
+    "square",
+    "rounded_rect",
+    "pill",
     "circle",
     "oval",
+    "semicircle",
+    "quarter_circle",
+    "arc_line",
+    "line",
     "triangle",
+    "right_triangle",
+    "diamond",
+    "pentagon",
     "hexagon",
+    "octagon",
+    "trapezoid",
+    "parallelogram",
+    "l_shape",
+    "t_shape",
+    "u_shape",
+    "cross",
+    "star",
+    "arrow_block",
+    "x_box",
+    "pitch_box",
+    "conveyor",
+    "conveyor_curve",
+    "turntable",
+    "area_header",
+    "custom_polygon",
+    "worker",
+    "screen",
+    "scanner",
+    "computer_kiosk",
+    "quality_gate",
+    "rack",
+    "supermarket",
+    "pallet",
+    "agv",
+    "callout",
+    "frame",
+    "safety_zone",
+    "dimension",
+    "connector",
     "arrow",
     "text",
 ]
 
 SHAPE_TYPE_LABELS: dict[str, str] = {
     "rectangle": "Rectangle / Cell",
+    "square": "Square",
+    "rounded_rect": "Rounded Rectangle",
+    "pill": "Pill / Capsule",
     "circle": "Circle",
     "oval": "Oval / Ellipse",
+    "semicircle": "Half-Circle (Semicircle)",
+    "quarter_circle": "Quarter-Circle Wedge",
+    "arc_line": "Half-Circle / Arc Line",
+    "line": "Straight Line",
     "triangle": "Triangle",
+    "right_triangle": "Right Triangle",
+    "diamond": "Diamond",
+    "pentagon": "Pentagon",
     "hexagon": "Hexagon",
+    "octagon": "Octagon",
+    "trapezoid": "Trapezoid",
+    "parallelogram": "Parallelogram",
+    "l_shape": "L-Shape Footprint",
+    "t_shape": "T-Shape Footprint",
+    "u_shape": "U-Shape Cell",
+    "cross": "Cross / Plus",
+    "star": "Star / Kaizen Burst",
+    "arrow_block": "Block Arrow",
+    "x_box": "Crossed Box (X-Footprint)",
+    "pitch_box": "Workstation Pitch",
+    "conveyor": "Straight Roller Conveyor",
+    "conveyor_curve": "90° Curved Roller Turn",
+    "turntable": "Turntable / Indexer",
+    "area_header": "Area / Section Header Badge",
+    "custom_polygon": "Custom / Welded Polygon",
+    "worker": "Operator / Worker (Top-Down)",
+    "screen": "HMI / Andon Display",
+    "scanner": "Barcode / RFID Scanner",
+    "computer_kiosk": "MES Terminal / Kiosk",
+    "quality_gate": "Quality Gate / Inspection",
+    "rack": "Lineside Flow Rack",
+    "supermarket": "Kanban Supermarket",
+    "pallet": "Pallet / Skid Drop",
+    "agv": "AGV / Tugger Path Stop",
+    "callout": "Engineering Callout",
+    "frame": "Area Frame / Boundary",
+    "safety_zone": "Safety / Keep-Out Zone",
+    "dimension": "Dimension Line",
+    "connector": "Smart Flow Connector",
     "arrow": "Arrow / Flow Direction",
     "text": "Text Box / Note",
 }
 
 SHAPE_TYPE_ICONS: dict[str, str] = {
     "rectangle": "⏹️",
+    "square": "🟦",
+    "rounded_rect": "▢",
+    "pill": "💊",
     "circle": "⏺️",
     "oval": "🥚",
+    "semicircle": "🌓",
+    "quarter_circle": "🍕",
+    "arc_line": "⌒",
+    "line": "➖",
     "triangle": "🔺",
+    "right_triangle": "📐",
+    "diamond": "🔷",
+    "pentagon": "⬠",
     "hexagon": "⬡",
+    "octagon": "🛑",
+    "trapezoid": "⏢",
+    "parallelogram": "▱",
+    "l_shape": "⌞",
+    "t_shape": "⊤",
+    "u_shape": "⊔",
+    "cross": "➕",
+    "star": "⭐",
+    "arrow_block": "⏩",
+    "x_box": "☒",
+    "pitch_box": "🏭",
+    "conveyor": "⛓️",
+    "conveyor_curve": "↪️",
+    "turntable": "🔄",
+    "area_header": "🏷️",
+    "custom_polygon": "⬟",
+    "worker": "👷",
+    "screen": "🖥️",
+    "scanner": "📡",
+    "computer_kiosk": "💻",
+    "quality_gate": "✅",
+    "rack": "🗄️",
+    "supermarket": "🛒",
+    "pallet": "📦",
+    "agv": "🤖",
+    "callout": "💬",
+    "frame": "🖼️",
+    "safety_zone": "⚠️",
+    "dimension": "📏",
+    "connector": "🔀",
     "arrow": "➡️",
     "text": "📝",
 }
@@ -335,21 +471,13 @@ def _px_to_units(px: float, px_per_in: float, unit: str) -> float:
     if px_per_in <= 0:
         return 0.0
     inches = px / px_per_in
-    unit_factor = (
-        12.0
-        if unit == "feet"
-        else (36.0 if unit == "yards" else (63360.0 if unit == "miles" else 1.0))
-    )
+    unit_factor = float(UNIT_TO_INCHES.get(unit, 12.0))
     return inches / unit_factor
 
 
 def _units_to_px(val: float, px_per_in: float, unit: str) -> float:
     """Convert real-world unit value to pixel dimension."""
-    unit_factor = (
-        12.0
-        if unit == "feet"
-        else (36.0 if unit == "yards" else (63360.0 if unit == "miles" else 1.0))
-    )
+    unit_factor = float(UNIT_TO_INCHES.get(unit, 12.0))
     inches = val * unit_factor
     return inches * px_per_in
 
@@ -357,19 +485,19 @@ def _units_to_px(val: float, px_per_in: float, unit: str) -> float:
 def _calculate_shape_area(shape_type: str, w_units: float, h_units: float) -> float:
     """Calculate geometric area in square units."""
     stype = (shape_type or "").lower()
-    if stype == "circle":
+    if stype in {"circle", "turntable", "worker"}:
         r = min(w_units, h_units) / 2.0
         return math.pi * r * r
     elif stype == "oval":
         return math.pi * (w_units / 2.0) * (h_units / 2.0)
     elif stype == "triangle":
         return (w_units * h_units) / 2.0
-    elif stype == "hexagon":
+    elif stype in {"hexagon", "quality_gate"}:
         r = min(w_units, h_units) / 2.0
         return (3.0 * math.sqrt(3.0) / 2.0) * r * r
-    elif stype in {"rectangle", "text"}:
-        return w_units * h_units
-    return 0.0
+    elif stype in {"connector", "arrow", "dimension"}:
+        return 0.0
+    return w_units * h_units
 
 
 def _format_shape_dim(px: float, px_per_in: float, unit: str) -> str:
@@ -378,9 +506,9 @@ def _format_shape_dim(px: float, px_per_in: float, unit: str) -> str:
     return f"{val:.1f} {unit}" if val >= 10 else f"{val:.2f} {unit}"
 
 
-@st.dialog("Create new floor plan layout", width="medium")
+@st.dialog("Create new Pin Map / floor plan layout", width="medium")
 def _create_layout_dialog(project_id: str, editor_name: str) -> None:
-    st.write("Add a new named 2D plant floor plan layout for this project.")
+    st.write("Add a new named 2D plant floor plan & Pin Map workspace for this project.")
     name = st.text_input(
         "Layout name",
         placeholder="e.g., Main Assembly Line, Building 2 Mezzanine",
@@ -391,6 +519,22 @@ def _create_layout_dialog(project_id: str, editor_name: str) -> None:
         placeholder="Brief context about this floor plan layout...",
         key="new_layout_desc",
     )
+
+    init_blank = st.checkbox(
+        "Initialize immediately with a Blank Scaled Canvas (no CAD image needed)",
+        value=True,
+        key="new_layout_init_blank",
+        help="Creates Revision 1 immediately as a high-resolution scaled engineering grid so you can start placing pitches, workers, screens, and flow arrows right away.",
+    )
+    blank_w, blank_h, blank_unit = 200.0, 100.0, "feet"
+    if init_blank:
+        bc1, bc2, bc3 = st.columns(3)
+        with bc1:
+            blank_w = st.number_input("Canvas Width", min_value=1.0, value=200.0, step=10.0, key="new_layout_blank_w")
+        with bc2:
+            blank_h = st.number_input("Canvas Height", min_value=1.0, value=100.0, step=10.0, key="new_layout_blank_h")
+        with bc3:
+            blank_unit = st.selectbox("Scale Unit", LAYOUT_UNITS, index=0, key="new_layout_blank_unit")
 
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -411,9 +555,23 @@ def _create_layout_dialog(project_id: str, editor_name: str) -> None:
                 st.session_state["active_layout_id"] = created["id"]
                 st.session_state["layout_plan_selector"] = created["id"]
                 st.session_state["_last_seen_active_layout_id"] = created["id"]
-                st.session_state.pop("active_revision_id", None)
-                st.session_state.pop("layout_revision_selector", None)
-                st.session_state.pop("_last_seen_active_rev_id", None)
+                if init_blank:
+                    rev = create_blank_scaled_revision(
+                        project_id=project_id,
+                        layout_id=str(created["id"]),
+                        width_value=blank_w,
+                        height_value=blank_h,
+                        unit=blank_unit,
+                        notes="Initial scaled engineering canvas",
+                        editor_name=editor_name,
+                    )
+                    st.session_state["active_revision_id"] = rev["id"]
+                    st.session_state["layout_revision_selector"] = rev["id"]
+                    st.session_state["_last_seen_active_rev_id"] = rev["id"]
+                else:
+                    st.session_state.pop("active_revision_id", None)
+                    st.session_state.pop("layout_revision_selector", None)
+                    st.session_state.pop("_last_seen_active_rev_id", None)
                 st.toast(f"Created layout '{name}'", icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
@@ -429,19 +587,24 @@ def _create_revision_dialog(
     current_draft_shapes: list[dict[str, Any]] | None = None,
 ) -> None:
     st.write(
-        f"Upload or paste an updated drawing revision for **{layout['name']}**."
+        f"Create a new scaled canvas or upload/paste an updated drawing revision for **{layout['name']}**."
     )
     st.caption(
-        "The calibrated scale will determine footprint dimensions and pitch scaling."
+        "The calibrated physical scale determines footprint dimensions, gridlines, rulers, and pitch scaling."
     )
 
     input_mode = st.radio(
         "Drawing source",
-        ["Upload drawing file", "Paste screenshot from clipboard"],
+        [
+            "Blank scaled canvas (no image required)",
+            "Upload drawing file",
+            "Paste screenshot from clipboard",
+        ],
         horizontal=True,
         key="rev_image_source_mode",
     )
 
+    is_blank_canvas = input_mode == "Blank scaled canvas (no image required)"
     image_file = None
     if input_mode == "Upload drawing file":
         image_file = st.file_uploader(
@@ -450,7 +613,7 @@ def _create_revision_dialog(
             key="rev_file_upload",
             help="Upload an architectural floor plan drawing. Vector PDFs and CAD DXFs will be automatically converted to high-resolution layout images.",
         )
-    else:
+    elif input_mode == "Paste screenshot from clipboard":
         st.caption(
             "Click inside the paste box below and press **Ctrl+V** (or Cmd+V) to paste a screenshot."
         )
@@ -468,16 +631,27 @@ def _create_revision_dialog(
             st.info(
                 "Clipboard paste component unavailable; please use Upload drawing file instead."
             )
+    else:
+        st.info(
+            ":material/grid_4x4: Creates a clean, high-resolution architectural grid scaled to your exact real-world dimensions—ideal for Lucidchart-style top-down line layout when a CAD image is not needed."
+        )
 
     default_unit = latest_rev["unit"] if latest_rev else "feet"
-    default_w = float(latest_rev["width_value"]) if latest_rev else 100.0
-    default_h = float(latest_rev["height_value"]) if latest_rev else 50.0
+    default_w = float(latest_rev["width_value"]) if latest_rev else 200.0
+    default_h = float(latest_rev["height_value"]) if latest_rev else 100.0
 
     selected_page = 1
     rotation_angle = 0
     filename = ""
+    crop_l = 0.0
+    crop_r = 0.0
+    crop_t = 0.0
+    crop_b = 0.0
+    preview_img = None
+    uncropped_img = None
+    preview_error = None
 
-    if image_file:
+    if image_file and not is_blank_canvas:
         filename = str(getattr(image_file, "name", "screenshot.png"))
         suffix = Path(filename).suffix.lower()
 
@@ -536,8 +710,6 @@ def _create_revision_dialog(
                 st.rerun()
 
         # Load oriented base image to support cropping and preview
-        uncropped_img = None
-        preview_error = None
         if image_file:
             try:
                 uncropped_img = load_and_orient_layout_preview(
@@ -603,12 +775,12 @@ def _create_revision_dialog(
 
     st.markdown("##### Calibrate Physical Scale")
     st.caption(
-        "Specify the real-world distance across the drawing. "
+        "Specify the real-world distance across the drawing or canvas. "
         "Physical Width applies horizontally (Left ↔ Right), and Physical Height / Length applies vertically (Top ↕ Bottom)."
     )
 
     unit_idx = (
-        LAYOUT_UNITS.index(default_unit) if default_unit in LAYOUT_UNITS else 0
+        IMPERIAL_LAYOUT_UNITS.index(default_unit) if default_unit in IMPERIAL_LAYOUT_UNITS else 0
     )
 
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -635,7 +807,7 @@ def _create_revision_dialog(
     with c3:
         unit = st.selectbox(
             "Scale Unit",
-            LAYOUT_UNITS,
+            IMPERIAL_LAYOUT_UNITS,
             index=unit_idx,
             key="rev_scale_unit",
         )
@@ -685,90 +857,94 @@ def _create_revision_dialog(
         key="rev_notes",
     )
 
-    # Live Preview before Save
-    st.markdown("##### Drawing Preview & Calibration Guides")
-    if preview_img:
-        rev_target_num = (latest_rev["revision_number"] + 1) if latest_rev else 1
-        st.caption(
-            f"Review the oriented and cropped drawing that will be saved to Revision {rev_target_num}."
-        )
-        with st.container(border=True):
-            # Dimension Orientation Cards
-            st.markdown(
-                f"""
-                <div style="display:flex; gap:12px; margin-bottom:12px;">
-                    <div style="flex:1; background:#e3f2fd; border-left:4px solid #1976d2; padding:8px 12px; border-radius:4px;">
-                        <div style="font-size:0.75rem; font-weight:600; color:#0d47a1; text-transform:uppercase; letter-spacing:0.5px;">↔ Horizontal Dimension (Width)</div>
-                        <div style="font-size:1.05rem; font-weight:700; color:#1565c0;">{width_val:g} {unit}</div>
-                        <div style="font-size:0.8rem; color:#546e7a;">Mapped across <b>{preview_img.width} px</b> horizontally</div>
+    if not is_blank_canvas:
+        # Live Preview before Save
+        st.markdown("##### Drawing Preview & Calibration Guides")
+        if preview_img:
+            rev_target_num = (latest_rev["revision_number"] + 1) if latest_rev else 1
+            st.caption(
+                f"Review the oriented and cropped drawing that will be saved to Revision {rev_target_num}."
+            )
+            with st.container(border=True):
+                # Dimension Orientation Cards
+                st.markdown(
+                    f"""
+                    <div style="display:flex; gap:12px; margin-bottom:12px;">
+                        <div style="flex:1; background:#e3f2fd; border-left:4px solid #1976d2; padding:8px 12px; border-radius:4px;">
+                            <div style="font-size:0.75rem; font-weight:600; color:#0d47a1; text-transform:uppercase; letter-spacing:0.5px;">↔ Horizontal Dimension (Width)</div>
+                            <div style="font-size:1.05rem; font-weight:700; color:#1565c0;">{width_val:g} {unit}</div>
+                            <div style="font-size:0.8rem; color:#546e7a;">Mapped across <b>{preview_img.width} px</b> horizontally</div>
+                        </div>
+                        <div style="flex:1; background:#f3e5f5; border-left:4px solid #7b1fa2; padding:8px 12px; border-radius:4px;">
+                            <div style="font-size:0.75rem; font-weight:600; color:#4a148c; text-transform:uppercase; letter-spacing:0.5px;">↕ Vertical Dimension (Height / Length)</div>
+                            <div style="font-size:1.05rem; font-weight:700; color:#6a1b9a;">{height_val:g} {unit}</div>
+                            <div style="font-size:0.8rem; color:#546e7a;">Mapped across <b>{preview_img.height} px</b> vertically</div>
+                        </div>
                     </div>
-                    <div style="flex:1; background:#f3e5f5; border-left:4px solid #7b1fa2; padding:8px 12px; border-radius:4px;">
-                        <div style="font-size:0.75rem; font-weight:600; color:#4a148c; text-transform:uppercase; letter-spacing:0.5px;">↕ Vertical Dimension (Height / Length)</div>
-                        <div style="font-size:1.05rem; font-weight:700; color:#6a1b9a;">{height_val:g} {unit}</div>
-                        <div style="font-size:0.8rem; color:#546e7a;">Mapped across <b>{preview_img.height} px</b> vertically</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            is_cropped = (crop_l > 0 or crop_r > 0 or crop_t > 0 or crop_b > 0)
-            if is_cropped and uncropped_img:
-                st.caption(
-                    f":material/crop: **Cropped drawing:** `{preview_img.width} × {preview_img.height} px` "
-                    f"(trimmed {crop_l}% left, {crop_r}% right, {crop_t}% top, {crop_b}% bottom from original `{uncropped_img.width} × {uncropped_img.height} px`). "
-                    f"Scale: **{(preview_img.width / to_canonical_inches(width_val, unit) * 12.0):.1f} px/ft**."
+                    """,
+                    unsafe_allow_html=True,
                 )
 
-            if copy_from_rev_id and target_copy_rev and copy_shapes_count > 0:
-                st.caption(
-                    f":material/check: Will import and align **{copy_shapes_count} shape(s)** from Rev {target_copy_rev['revision_number']} in the exact spots on this drawing."
+                is_cropped = (crop_l > 0 or crop_r > 0 or crop_t > 0 or crop_b > 0)
+                if is_cropped and uncropped_img:
+                    st.caption(
+                        f":material/crop: **Cropped drawing:** `{preview_img.width} × {preview_img.height} px` "
+                        f"(trimmed {crop_l}% left, {crop_r}% right, {crop_t}% top, {crop_b}% bottom from original `{uncropped_img.width} × {uncropped_img.height} px`). "
+                        f"Scale: **{(preview_img.width / to_canonical_inches(width_val, unit) * 12.0):.1f} px/ft**."
+                    )
+
+                if copy_from_rev_id and target_copy_rev and copy_shapes_count > 0:
+                    st.caption(
+                        f":material/check: Will import and align **{copy_shapes_count} shape(s)** from Rev {target_copy_rev['revision_number']} in the exact spots on this drawing."
+                    )
+
+                show_guides = st.checkbox(
+                    "Show dimension guides on preview (Width ↔ on top, Height/Length ↕ on left)",
+                    value=bool(st.session_state.get("rev_show_dim_guides", True)),
+                    key="rev_show_dim_guides",
+                    help="Draws architectural dimension markers on the preview frame to visually verify width and length orientation.",
                 )
 
-            show_guides = st.checkbox(
-                "Show dimension guides on preview (Width ↔ on top, Height/Length ↕ on left)",
-                value=bool(st.session_state.get("rev_show_dim_guides", True)),
-                key="rev_show_dim_guides",
-                help="Draws architectural dimension markers on the preview frame to visually verify width and length orientation.",
-            )
+                if show_guides:
+                    display_img = annotate_preview_with_dimensions(
+                        preview_img,
+                        width_val=width_val,
+                        height_val=height_val,
+                        unit=unit,
+                    )
+                else:
+                    display_img = preview_img
 
-            if show_guides:
-                display_img = annotate_preview_with_dimensions(
-                    preview_img,
-                    width_val=width_val,
-                    height_val=height_val,
-                    unit=unit,
+                st.image(
+                    display_img,
+                    caption=f"Preview: {filename or 'Clipboard'} ({preview_img.width} × {preview_img.height} px, {rotation_angle}° orientation)",
+                    width="stretch",
                 )
-            else:
-                display_img = preview_img
+        elif preview_error:
+            st.warning(f"Could not load drawing preview: {preview_error}")
+        else:
+            st.info("Upload or paste a drawing above to preview it in its correct orientation and crop here before saving.")
 
-            st.image(
-                display_img,
-                caption=f"Preview: {filename or 'Clipboard'} ({preview_img.width} × {preview_img.height} px, {rotation_angle}° orientation)",
-                width="stretch",
+    rev_cad_file = None
+    rev_cad_url = ""
+    if not is_blank_canvas:
+        with st.expander("Native AutoCAD Drawing (.dwg / .dxf) or CAD Web Link (Optional)", expanded=False):
+            st.caption(
+                "Attach the original native CAD file (.dwg or .dxf up to 100 MB) or provide a corporate CAD web link "
+                "(Autodesk Vault, BIM 360, SharePoint) for download by engineering collaborators."
             )
-    elif preview_error:
-        st.warning(f"Could not load drawing preview: {preview_error}")
-    else:
-        st.info("Upload or paste a drawing above to preview it in its correct orientation and crop here before saving.")
-
-    with st.expander("Native AutoCAD Drawing (.dwg / .dxf) or CAD Web Link (Optional)", expanded=False):
-        st.caption(
-            "Attach the original native CAD file (.dwg or .dxf up to 100 MB) or provide a corporate CAD web link "
-            "(Autodesk Vault, BIM 360, SharePoint) for download by engineering collaborators."
-        )
-        rev_cad_file = st.file_uploader(
-            "Attach AutoCAD drawing file (.dwg, .dxf - max 100 MB)",
-            type=["dwg", "dxf"],
-            key="rev_cad_file_upload",
-            help="Original AutoCAD drawing file. Max 100 MB per file.",
-        )
-        rev_cad_url = st.text_input(
-            "Or CAD Web Link (Autodesk Vault / Cloud / SharePoint)",
-            key="rev_cad_url_input",
-            placeholder="https://autodesk360.com/... or https://company.sharepoint.com/...",
-            help="Direct web link to open the drawing in Autodesk Vault, Autodesk Construction Cloud, or corporate PLM.",
-        )
+            rev_cad_file = st.file_uploader(
+                "Attach AutoCAD drawing file (.dwg, .dxf - max 100 MB)",
+                type=["dwg", "dxf"],
+                key="rev_cad_file_upload",
+                help="Original AutoCAD drawing file. Max 100 MB per file.",
+            )
+            rev_cad_url = st.text_input(
+                "Or CAD Web Link (Autodesk Vault / Cloud / SharePoint)",
+                key="rev_cad_url_input",
+                placeholder="https://autodesk360.com/... or https://company.sharepoint.com/...",
+                help="Direct web link to open the drawing in Autodesk Vault, Autodesk Construction Cloud, or corporate PLM.",
+            )
 
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -786,8 +962,8 @@ def _create_revision_dialog(
             width="stretch",
             key="submit_new_rev",
         ):
-            if not image_file:
-                st.error("Please provide a drawing or image by upload or paste.")
+            if not is_blank_canvas and not image_file:
+                st.error("Please provide a drawing or image by upload or paste, or choose Blank scaled canvas.")
                 return
             if not editor_name.strip():
                 st.error("Please specify a Current editor attribution.")
@@ -797,26 +973,39 @@ def _create_revision_dialog(
                 if current_draft_shapes and latest_rev and copy_from_rev_id == latest_rev.get("id"):
                     src_shapes = current_draft_shapes
 
-                new_rev = create_layout_revision(
-                    project_id=project_id,
-                    layout_id=str(layout["id"]),
-                    image_file=image_file,
-                    width_value=width_val,
-                    height_value=height_val,
-                    unit=unit,
-                    notes=notes,
-                    editor_name=editor_name,
-                    copy_from_revision_id=copy_from_rev_id,
-                    rotation_angle=rotation_angle,
-                    pdf_page=selected_page,
-                    source_shapes=src_shapes,
-                    crop_left_pct=crop_l,
-                    crop_top_pct=crop_t,
-                    crop_right_pct=crop_r,
-                    crop_bottom_pct=crop_b,
-                    cad_file=rev_cad_file,
-                    cad_web_url=rev_cad_url,
-                )
+                if is_blank_canvas:
+                    new_rev = create_blank_scaled_revision(
+                        project_id=project_id,
+                        layout_id=str(layout["id"]),
+                        width_value=width_val,
+                        height_value=height_val,
+                        unit=unit,
+                        notes=notes or "Scaled engineering canvas",
+                        editor_name=editor_name,
+                        copy_from_revision_id=copy_from_rev_id,
+                        source_shapes=src_shapes,
+                    )
+                else:
+                    new_rev = create_layout_revision(
+                        project_id=project_id,
+                        layout_id=str(layout["id"]),
+                        image_file=image_file,
+                        width_value=width_val,
+                        height_value=height_val,
+                        unit=unit,
+                        notes=notes,
+                        editor_name=editor_name,
+                        copy_from_revision_id=copy_from_rev_id,
+                        rotation_angle=rotation_angle,
+                        pdf_page=selected_page,
+                        source_shapes=src_shapes,
+                        crop_left_pct=crop_l,
+                        crop_top_pct=crop_t,
+                        crop_right_pct=crop_r,
+                        crop_bottom_pct=crop_b,
+                        cad_file=rev_cad_file,
+                        cad_web_url=rev_cad_url,
+                    )
                 st.session_state.pop("rev_crop_left", None)
                 st.session_state.pop("rev_crop_top", None)
                 st.session_state.pop("rev_crop_right", None)
@@ -1171,278 +1360,6 @@ def _section_standards_dialog(
                 st.error(str(exc))
 
 
-@st.dialog("Add shape to floor plan", width="large")
-def _add_shape_dialog(
-    active_rev: dict[str, Any],
-    px_per_in_x: float,
-    px_per_in_y: float,
-    unit: str,
-    draft_shapes_key: str,
-    has_unsaved_shapes_key: str,
-    selected_shape_id_key: str,
-) -> None:
-    st.markdown(_COLOR_PICKER_CSS, unsafe_allow_html=True)
-    st.write("Configure and place a scaled footprint annotation on this floor plan.")
-
-    preset_name = st.selectbox(
-        "Footprint Template Preset",
-        list(FOOTPRINT_PRESETS.keys()),
-        index=0,
-        key="add_shape_preset_select",
-    )
-    preset = FOOTPRINT_PRESETS[preset_name]
-
-    col_t1, col_t2 = st.columns([1, 1])
-    with col_t1:
-        shape_type = st.selectbox(
-            "Shape Geometry",
-            SHAPE_TYPES,
-            index=SHAPE_TYPES.index(preset["shape_type"]),
-            format_func=lambda s: f"{SHAPE_TYPE_ICONS.get(s, '')} {SHAPE_TYPE_LABELS.get(s, s)}",
-            key="add_shape_geom_type",
-        )
-    with col_t2:
-        label = st.text_input(
-            "Annotation Label / Pitch ID",
-            value=preset["label"],
-            key="add_shape_label_input",
-        )
-
-    st.markdown("##### Real-World Scaled Dimensions")
-    cd1, cd2, cd3 = st.columns([1, 1, 1])
-    with cd1:
-        w_units = st.number_input(
-            f"Width ({unit})",
-            min_value=0.01,
-            value=float(preset["w_default"]),
-            step=1.0,
-            format="%.2f",
-            key="add_shape_w_units",
-        )
-    with cd2:
-        h_units = st.number_input(
-            f"Height ({unit})",
-            min_value=0.01,
-            value=float(preset["h_default"]),
-            step=1.0,
-            format="%.2f",
-            key="add_shape_h_units",
-        )
-    with cd3:
-        area_units = _calculate_shape_area(shape_type, w_units, h_units)
-        unit_area_label = (
-            "sq ft"
-            if unit == "feet"
-            else ("sq in" if unit == "inches" else f"sq {unit}")
-        )
-        st.metric("Scaled Area", f"{area_units:,.1f} {unit_area_label}")
-
-    w_px = max(0.5, _units_to_px(w_units, px_per_in_x, unit))
-    h_px = max(0.5, _units_to_px(h_units, px_per_in_y, unit))
-    st.caption(f":material/straighten: Equivalent image footprint: **{w_px:.1f} × {h_px:.1f} px**")
-
-    st.markdown("##### Visual Styling & Contrast")
-    cs1, cs2, cs3 = st.columns(3)
-    with cs1:
-        stroke_color = _render_color_selector(
-            "Line / Border Color",
-            preset["stroke_color"],
-            key_prefix=f"add_shape_stroke_{preset_name}",
-        )
-        stroke_width = st.selectbox(
-            "Line Thickness",
-            LINE_THICKNESS_OPTIONS,
-            index=LINE_THICKNESS_OPTIONS.index(preset["stroke_width"]),
-            format_func=lambda t: f"{t} px",
-            key="add_shape_stroke_width",
-        )
-        stroke_style = st.selectbox(
-            "Line Style",
-            LINE_STYLE_OPTIONS,
-            index=LINE_STYLE_OPTIONS.index(preset["stroke_style"]),
-            key="add_shape_stroke_style",
-        )
-    with cs2:
-        fill_color = _render_color_selector(
-            "Fill Color",
-            preset["fill_color"],
-            key_prefix=f"add_shape_fill_{preset_name}",
-        )
-        fill_opacity = st.slider(
-            "Fill Opacity / Transparency",
-            min_value=0,
-            max_value=100,
-            value=int(preset["fill_opacity"] * 100),
-            step=5,
-            format="%d%%",
-            help="Semi-transparent fills let the underlying CAD lines remain visible.",
-            key="add_shape_fill_opacity",
-        )
-    with cs3:
-        font_size = st.selectbox(
-            "Font Size",
-            FONT_SIZE_OPTIONS,
-            index=FONT_SIZE_OPTIONS.index(preset["font_size"]),
-            format_func=lambda fs: f"{fs} pt",
-            key="add_shape_font_size",
-        )
-        font_color = _render_color_selector(
-            "Font Color",
-            preset["font_color"],
-            key_prefix=f"add_shape_font_{preset_name}",
-        )
-        col_b1, col_b2 = st.columns(2)
-        with col_b1:
-            bold = st.checkbox("Bold", value=preset["font_weight"] == "bold", key="add_shape_bold")
-        with col_b2:
-            bg_pill = st.checkbox(
-                "Label card",
-                value=preset["bg_pill"],
-                help="High-contrast pill card behind label text.",
-                key="add_shape_bg_pill",
-            )
-
-    st.markdown("##### Initial Position")
-    img_w = float(active_rev["image_width_px"])
-    img_h = float(active_rev["image_height_px"])
-    center_x = max(0.0, (img_w - w_px) / 2.0)
-    center_y = max(0.0, (img_h - h_px) / 2.0)
-
-    pos_c1, pos_c2 = st.columns(2)
-    with pos_c1:
-        x_units = st.number_input(
-            f"X position ({unit})",
-            value=float(_px_to_units(center_x, px_per_in_x, unit)),
-            step=1.0,
-            format="%.1f",
-            key="add_shape_x_units",
-        )
-    with pos_c2:
-        y_units = st.number_input(
-            f"Y position ({unit})",
-            value=float(_px_to_units(center_y, px_per_in_y, unit)),
-            step=1.0,
-            format="%.1f",
-            key="add_shape_y_units",
-        )
-
-    pos_x_px = _units_to_px(x_units, px_per_in_x, unit)
-    pos_y_px = _units_to_px(y_units, px_per_in_y, unit)
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("Cancel", width="stretch", key="cancel_add_shape"):
-            st.rerun()
-    with col2:
-        if st.button("Add shape to floor plan", type="primary", width="stretch", key="submit_add_shape"):
-            cur_w_units = float(st.session_state.get("add_shape_w_units", w_units))
-            cur_h_units = float(st.session_state.get("add_shape_h_units", h_units))
-            cur_x_units = float(st.session_state.get("add_shape_x_units", x_units))
-            cur_y_units = float(st.session_state.get("add_shape_y_units", y_units))
-
-            final_w_px = max(0.5, _units_to_px(cur_w_units, px_per_in_x, unit))
-            final_h_px = max(0.5, _units_to_px(cur_h_units, px_per_in_y, unit))
-            final_x_px = _units_to_px(cur_x_units, px_per_in_x, unit)
-            final_y_px = _units_to_px(cur_y_units, px_per_in_y, unit)
-
-            new_shape_id = str(uuid4())
-            style_dict = {
-                "stroke_color": stroke_color,
-                "stroke_width": stroke_width,
-                "stroke_style": stroke_style,
-                "fill_color": fill_color,
-                "fill_opacity": fill_opacity / 100.0,
-                "font_size": font_size,
-                "font_color": font_color,
-                "font_weight": "bold" if bold else "normal",
-                "bg_pill": bg_pill,
-            }
-            new_shape = {
-                "id": new_shape_id,
-                "revision_id": str(active_rev["id"]),
-                "shape_type": shape_type,
-                "label": label.strip(),
-                "x": round(final_x_px, 2),
-                "y": round(final_y_px, 2),
-                "width": round(final_w_px, 2),
-                "height": round(final_h_px, 2),
-                "rotation": 0.0,
-                "color": stroke_color,
-                "style_json": json.dumps(style_dict),
-                "pitch_id": None,
-                "equipment_id": None,
-            }
-            draft = list(st.session_state.get(draft_shapes_key, []))
-            draft.append(new_shape)
-            st.session_state[draft_shapes_key] = draft
-            st.session_state[has_unsaved_shapes_key] = True
-            st.session_state[selected_shape_id_key] = new_shape_id
-            st.toast(f"Placed '{label or shape_type}' on floor plan", icon=":material/check_circle:")
-            st.rerun()
-
-
-@st.dialog("Confirm delete shape", width="medium")
-def _delete_shape_dialog(
-    shape: dict[str, Any],
-    revision_number: int,
-    draft_shapes_key: str,
-    has_unsaved_shapes_key: str,
-    selected_shape_id_key: str,
-) -> None:
-    shape_label = shape.get("label") or shape.get("shape_type") or "Annotation"
-    st.write(f"Are you sure you want to delete **{shape_label}**?")
-    st.caption(f"This will remove the annotation from Revision {revision_number} draft.")
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("Cancel", width="stretch", key="cancel_del_single_shape"):
-            st.session_state["pending_delete_shape"] = None
-            st.rerun()
-    with col2:
-        if st.button(
-            "Delete shape",
-            type="primary",
-            width="stretch",
-            key=f"destructive_confirm_del_shape_{shape['id']}",
-        ):
-            draft = list(st.session_state.get(draft_shapes_key, []))
-            st.session_state[draft_shapes_key] = [s for s in draft if s.get("id") != shape.get("id")]
-            st.session_state[has_unsaved_shapes_key] = True
-            st.session_state[selected_shape_id_key] = None
-            st.session_state["pending_delete_shape"] = None
-            st.toast(f"Removed shape '{shape_label}'", icon=":material/delete:")
-            st.rerun()
-
-
-@st.dialog("Confirm clear all shapes", width="medium")
-def _clear_all_shapes_dialog(
-    count: int,
-    revision_number: int,
-    draft_shapes_key: str,
-    has_unsaved_shapes_key: str,
-    selected_shape_id_key: str,
-) -> None:
-    st.write(f"Clear all **{count}** annotation shapes from Revision {revision_number} draft?")
-    st.warning("All shapes will be cleared from the active workspace. Remember to click 'Save & Refresh' to commit.")
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("Cancel", width="stretch", key="cancel_clear_all_shapes"):
-            st.rerun()
-    with col2:
-        if st.button(
-            "Clear all shapes",
-            type="primary",
-            width="stretch",
-            key="destructive_confirm_clear_all_shapes",
-        ):
-            st.session_state[draft_shapes_key] = []
-            st.session_state[has_unsaved_shapes_key] = True
-            st.session_state[selected_shape_id_key] = None
-            st.toast(f"Cleared all shapes from Rev {revision_number} draft", icon=":material/delete_sweep:")
-            st.rerun()
-
-
 def _render_scale_bar_html(px_per_ft: float, unit: str) -> str:
     """Render an interactive visual scale reference bar in HTML."""
     if px_per_ft <= 0:
@@ -1494,481 +1411,166 @@ def _render_scale_bar_html(px_per_ft: float, unit: str) -> str:
     """
 
 
-def render_layouts_tab(project_id: str, editor_name: str) -> None:
-    """Render the Plant Floor Plan Layouts sub-tab with scale dashboard, canvas, and shape annotations."""
-    section_heading_with_scope(
-        "Plant Floor Plan Layouts",
-        scope="project",
-        help_text="Project-wide 2D architectural drawings, scaling, and equipment footprints",
-    )
-    st.markdown(_COLOR_PICKER_CSS, unsafe_allow_html=True)
+def _sync_draft_layers_to_db(
+    project_id: str,
+    revision_id: str,
+    draft_layers: list[dict[str, Any]],
+    editor_name: str,
+) -> dict[str, str]:
+    """Synchronize client-side layer edits (add/rename/visibility/lock/opacity/color/order/delete) to SQLite.
+    Returns a mapping from any temporary client layer ID to its persisted DB layer ID.
+    """
+    existing = list_layout_layers(revision_id)
+    existing_by_id = {str(l["id"]): l for l in existing}
+    id_map: dict[str, str] = {}
 
-    layouts = list_layouts(project_id)
+    draft_ids = {str(dl.get("id", "")) for dl in draft_layers if dl.get("id")}
 
-    # Top Control Bar
-    top_col1, top_col2 = st.columns([3, 1], vertical_alignment="bottom")
-    with top_col1:
-        if not layouts:
-            st.info("No floor plan layouts created yet. Click **New layout** to add your first plant layout.")
-            if st.button("+ New layout", type="primary", icon=":material/add:"):
-                _create_layout_dialog(project_id, editor_name)
-            return
+    # First create or update layers in draft_layers
+    ordered_real_ids: list[str] = []
+    for idx, dl in enumerate(draft_layers):
+        raw_id = str(dl.get("id") or "")
+        name = str(dl.get("name") or f"Layer {idx + 1}").strip()
+        color = str(dl.get("color") or "#1976D2").strip()
+        visible = bool(dl.get("visible", True))
+        locked = bool(dl.get("locked", False))
+        opacity = float(dl.get("opacity", 1.0))
+        target_z = int(dl.get("z_index", (idx + 1) * 10))
 
-        layout_options = {l["id"]: l["name"] for l in layouts}
-        saved_layout_id = st.session_state.get("active_layout_id")
-        if saved_layout_id not in layout_options:
-            saved_layout_id = layouts[0]["id"]
-            st.session_state["active_layout_id"] = saved_layout_id
-
-        if st.session_state.get("_last_seen_active_layout_id") != saved_layout_id:
-            st.session_state["layout_plan_selector"] = saved_layout_id
-            st.session_state["_last_seen_active_layout_id"] = saved_layout_id
-        elif st.session_state.get("layout_plan_selector") not in layout_options:
-            st.session_state["layout_plan_selector"] = saved_layout_id
-            st.session_state["_last_seen_active_layout_id"] = saved_layout_id
-
-        selected_layout_id = st.selectbox(
-            "Selected layout",
-            options=list(layout_options.keys()),
-            format_func=lambda lid: layout_options[lid],
-            key="layout_plan_selector",
-        )
-        st.session_state["active_layout_id"] = selected_layout_id
-        st.session_state["_last_seen_active_layout_id"] = selected_layout_id
-
-    with top_col2:
-        if st.button("+ New layout", icon=":material/add:", width="stretch", key="btn_open_new_layout"):
-            _create_layout_dialog(project_id, editor_name)
-
-    current_layout = get_layout(project_id, selected_layout_id)
-    if not current_layout:
-        st.warning("Selected layout could not be loaded.")
-        return
-
-    if current_layout.get("description"):
-        st.caption(f":material/description: {current_layout['description']}")
-
-    # Revisions for selected layout
-    revisions = list_layout_revisions(selected_layout_id)
-
-    # Revision Selector & Actions
-    rev_bar1, rev_bar2 = st.columns([3, 1], vertical_alignment="bottom")
-    with rev_bar1:
-        if not revisions:
-            st.warning(
-                f"Layout '{current_layout['name']}' has no revisions uploaded yet. "
-                f"Add your first CAD drawing or screenshot below."
+        if raw_id in existing_by_id:
+            ex = existing_by_id[raw_id]
+            changed = (
+                str(ex.get("name", "")) != name
+                or str(ex.get("color", "")) != color
+                or bool(ex.get("visible", True)) != visible
+                or bool(ex.get("locked", False)) != locked
+                or abs(float(ex.get("opacity", 1.0)) - opacity) > 1e-3
+                or int(ex.get("z_index", target_z)) != target_z
             )
-            if st.button("+ Add initial drawing revision", type="primary", icon=":material/upload:"):
-                _create_revision_dialog(project_id, current_layout, None, editor_name)
-            return
-
-        rev_map = {
-            r["id"]: f"Rev {r['revision_number']} ({r['width_value']:g} × {r['height_value']:g} {r['unit']}) — {r['created_at'][:10]}"
-            for r in revisions
-        }
-        saved_rev_id = st.session_state.get("active_revision_id")
-        if saved_rev_id not in rev_map:
-            saved_rev_id = revisions[0]["id"]
-            st.session_state["active_revision_id"] = saved_rev_id
-
-        if st.session_state.get("_last_seen_active_rev_id") != saved_rev_id:
-            st.session_state["layout_revision_selector"] = saved_rev_id
-            st.session_state["_last_seen_active_rev_id"] = saved_rev_id
-        elif st.session_state.get("layout_revision_selector") not in rev_map:
-            st.session_state["layout_revision_selector"] = saved_rev_id
-            st.session_state["_last_seen_active_rev_id"] = saved_rev_id
-
-        selected_rev_id = st.selectbox(
-            "Revision",
-            options=list(rev_map.keys()),
-            format_func=lambda rid: rev_map[rid],
-            key="layout_revision_selector",
-        )
-        st.session_state["active_revision_id"] = selected_rev_id
-        st.session_state["_last_seen_active_rev_id"] = selected_rev_id
-
-    with rev_bar2:
-        current_view_rev = get_layout_revision(selected_rev_id) or (revisions[0] if revisions else None)
-        active_drafts = st.session_state.get(f"layout_shapes_draft_{selected_rev_id}")
-        if st.button("+ New revision", icon=":material/upload:", width="stretch", key="btn_open_new_rev"):
-            _create_revision_dialog(
-                project_id, current_layout, current_view_rev, editor_name, current_draft_shapes=active_drafts
-            )
-
-    active_rev = get_layout_revision(selected_rev_id)
-    if not active_rev:
-        st.warning("Could not load revision details.")
-        return
-
-    # Scale metrics & parameters
-    w_in = float(active_rev["scale_width_in"])
-    h_in = float(active_rev["scale_height_in"])
-    w_px = int(active_rev["image_width_px"])
-    h_px = int(active_rev["image_height_px"])
-    unit = str(active_rev["unit"])
-
-    px_per_in_x = (w_px / w_in) if w_in > 0 else 0.0
-    px_per_in_y = (h_px / h_in) if h_in > 0 else 0.0
-    px_per_in = px_per_in_x
-    in_per_px_x = (w_in / w_px) if w_px > 0 else 0.0
-    in_per_px_y = (h_in / h_px) if h_px > 0 else 0.0
-    in_per_px = in_per_px_x
-    px_per_ft_x = px_per_in_x * 12.0
-    px_per_ft_y = px_per_in_y * 12.0
-    px_per_ft = px_per_ft_x
-
-    # Scale Dashboard Cards
-    with st.container(border=True):
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            st.metric(
-                "Physical Dimensions",
-                f"{active_rev['width_value']:g} × {active_rev['height_value']:g} {unit}",
-                help=f"Canonical Imperial: {w_in:,.1f} in × {h_in:,.1f} in",
-            )
-        with m2:
-            st.metric(
-                "Image Resolution",
-                f"{w_px:,} × {h_px:,} px",
-                help="Native pixel resolution of uploaded drawing",
-            )
-        with m3:
-            scale_label = f"1 px = {in_per_px_x:.2f} in" if in_per_px_x < 12 else f"1 px = {in_per_px_x/12:.2f} ft"
-            st.metric(
-                "Layout Scale",
-                scale_label,
-                help=f"X: {px_per_ft_x:.2f} px/ft ({px_per_in_x:.3f} px/in) · Y: {px_per_ft_y:.2f} px/ft ({px_per_in_y:.3f} px/in)",
-            )
-        with m4:
-            st.metric(
-                "Revision Details",
-                f"Rev {active_rev['revision_number']}",
-                help=str(active_rev.get("notes") or ""),
-            )
-            if active_rev["notes"]:
-                st.caption(f":material/notes: {active_rev['notes']}")
-
-        scale_bar_html = _render_scale_bar_html(px_per_ft_x, unit)
-        if scale_bar_html:
-            st.markdown(scale_bar_html, unsafe_allow_html=True)
-
-        cad_path_str = str(active_rev.get("cad_file_path") or "").strip()
-        cad_name_str = str(active_rev.get("cad_file_name") or "").strip()
-        cad_size_int = int(active_rev.get("cad_file_size_bytes") or 0)
-        cad_url_str = str(active_rev.get("cad_web_url") or "").strip()
-        cad_p = Path(cad_path_str) if cad_path_str else None
-        has_cad_file = bool(cad_p and cad_p.exists() and cad_p.is_file())
-        has_cad_url = bool(cad_url_str)
-
-        st.markdown("---")
-        cad_col1, cad_col2, cad_col3 = st.columns([3, 2, 2])
-        with cad_col1:
-            if has_cad_file:
-                size_mb = cad_size_int / (1024 * 1024)
-                st.markdown(
-                    f":material/architecture: **Native AutoCAD Source:** `{cad_name_str}` ({size_mb:.1f} MB)"
-                )
-            elif has_cad_url:
-                st.markdown(
-                    f":material/link: **CAD Web Link:** [{cad_url_str}]({cad_url_str})"
-                )
-            else:
-                st.caption(":material/architecture: No native AutoCAD drawing attached to this revision.")
-
-        with cad_col2:
-            if has_cad_file:
-                try:
-                    cad_bytes = cad_p.read_bytes()
-                    st.download_button(
-                        f"Download CAD ({cad_name_str})",
-                        data=cad_bytes,
-                        file_name=cad_name_str,
-                        mime="application/octet-stream",
-                        icon=":material/download:",
-                        key=f"dl_cad_bar_{active_rev['id']}",
-                        width="stretch",
-                    )
-                except Exception:
-                    st.caption("CAD file could not be read.")
-            elif has_cad_url:
-                st.link_button(
-                    "Open CAD in Vault / Web",
-                    url=cad_url_str,
-                    icon=":material/open_in_new:",
-                    width="stretch",
-                )
-
-        with cad_col3:
-            if st.button(
-                "Manage CAD Source...",
-                icon=":material/edit_document:",
-                key=f"btn_manage_cad_{active_rev['id']}",
-                help="Attach, update, or remove native AutoCAD (.dwg/.dxf) or CAD Web Links for this revision.",
-                width="stretch",
-            ):
-                _attach_cad_dialog(
+            if changed:
+                update_layout_layer(
                     project_id=project_id,
-                    layout_name=str(current_layout["name"]),
-                    revision=active_rev,
+                    layer_id=raw_id,
                     editor_name=editor_name,
+                    name=name,
+                    visible=visible,
+                    locked=locked,
+                    opacity=opacity,
+                    color=color,
+                    z_index=target_z,
                 )
-
-    # -------------------------------------------------------------------------
-    # 2D Interactive Layout & Shape Annotations Workspace
-    # -------------------------------------------------------------------------
-    img_path = Path(str(active_rev["image_path"]))
-    if not img_path.exists():
-        st.error(f"Image file not found at: {img_path}")
-        return
-
-    draft_shapes_key = f"layout_shapes_draft_{active_rev['id']}"
-    has_unsaved_shapes_key = f"layout_shapes_has_unsaved_{active_rev['id']}"
-    selected_shape_id_key = f"layout_selected_shape_{active_rev['id']}"
-    canvas_key = f"layout_canvas_{active_rev['id']}"
-
-    # Initialize draft shapes in session state if absent
-    if draft_shapes_key not in st.session_state:
-        persisted_shapes = list_layout_shapes(str(active_rev["id"]))
-        st.session_state[draft_shapes_key] = [dict(s) for s in persisted_shapes]
-
-    draft_shapes: list[dict[str, Any]] = st.session_state.get(draft_shapes_key, [])
-    has_unsaved_shapes: bool = st.session_state.get(has_unsaved_shapes_key, False)
-    selected_shape_id: str | None = st.session_state.get(selected_shape_id_key)
-
-    # Canvas Workspace Toolbar
-    with st.container(border=True):
-        tb1, tb2, tb3 = st.columns([2, 3, 3], vertical_alignment="center")
-        with tb1:
-            st.markdown("#### :material/draw: 2D Floor Plan Canvas")
-        with tb2:
-            st.caption(
-                f":material/layers: **{len(draft_shapes)}** annotation(s) placed on Rev {active_rev['revision_number']}. "
-                f"Drag canvas to pan · Scroll to zoom · Click shape to select / drag to move"
-            )
-        with tb3:
-            other_revs_with_shapes = [
-                r for r in revisions
-                if r["id"] != active_rev["id"] and r.get("shape_count", 0) > 0
-            ]
-            if other_revs_with_shapes:
-                btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
-                with btn_col1:
-                    if st.button(
-                        "Pitch Standards",
-                        icon=":material/straighten:",
-                        width="stretch",
-                        help="Configure section pitch dimensions (Length × Width)",
-                        key=f"btn_open_standards_{active_rev['id']}",
-                    ):
-                        _section_standards_dialog(
-                            project_id=project_id,
-                            layout_id=selected_layout_id,
-                            unit=unit,
-                            editor_name=editor_name,
-                        )
-                with btn_col2:
-                    if st.button(
-                        "Import Shapes",
-                        icon=":material/content_copy:",
-                        width="stretch",
-                        help="Import shapes from another revision into this revision with automatic scale alignment",
-                        key=f"btn_open_import_shapes_{active_rev['id']}",
-                    ):
-                        _import_shapes_dialog(
-                            project_id=project_id,
-                            layout=current_layout,
-                            active_rev=active_rev,
-                            other_revs=other_revs_with_shapes,
-                            editor_name=editor_name,
-                        )
-                with btn_col3:
-                    if st.button(
-                        "+ Add Shape",
-                        type="primary",
-                        icon=":material/add:",
-                        width="stretch",
-                        key=f"btn_open_add_shape_{active_rev['id']}",
-                    ):
-                        _add_shape_dialog(
-                            active_rev=active_rev,
-                            px_per_in_x=px_per_in_x,
-                            px_per_in_y=px_per_in_y,
-                            unit=unit,
-                            draft_shapes_key=draft_shapes_key,
-                            has_unsaved_shapes_key=has_unsaved_shapes_key,
-                            selected_shape_id_key=selected_shape_id_key,
-                        )
-            else:
-                btn_col1, btn_col2 = st.columns([1, 1])
-                with btn_col1:
-                    if st.button(
-                        "Pitch Standards",
-                        icon=":material/straighten:",
-                        width="stretch",
-                        help="Configure section pitch dimensions (Length × Width)",
-                        key=f"btn_open_standards_{active_rev['id']}",
-                    ):
-                        _section_standards_dialog(
-                            project_id=project_id,
-                            layout_id=selected_layout_id,
-                            unit=unit,
-                            editor_name=editor_name,
-                        )
-                with btn_col2:
-                    if st.button(
-                        "+ Add Shape",
-                        type="primary",
-                        icon=":material/add:",
-                        width="stretch",
-                        key=f"btn_open_add_shape_{active_rev['id']}",
-                    ):
-                        _add_shape_dialog(
-                            active_rev=active_rev,
-                            px_per_in_x=px_per_in_x,
-                            px_per_in_y=px_per_in_y,
-                            unit=unit,
-                            draft_shapes_key=draft_shapes_key,
-                            has_unsaved_shapes_key=has_unsaved_shapes_key,
-                            selected_shape_id_key=selected_shape_id_key,
-                        )
-
-    # Cross-Scenario Yamazumi Pitches Palette
-    project_pitches = list_project_yamazumi_pitches(project_id)
-    section_standards = get_section_pitch_standards(selected_layout_id)
-
-    with st.expander(
-        f":material/view_column: Yamazumi Pitches Palette ({len(project_pitches)} workstation pitches across scenarios)",
-        expanded=False,
-    ):
-        if not project_pitches:
-            st.info(
-                "No Yamazumi pitches found in this project. Create pitches under the "
-                "Yamazumi tab to place workstation footprints to scale.",
-                icon=":material/info:",
-            )
+            id_map[raw_id] = raw_id
+            ordered_real_ids.append(raw_id)
         else:
-            st.caption(
-                "Workstations adopt standard dimensions configured per section. "
-                "Pitches are magnetically aligned and snap into straight contiguous lines."
+            created = create_layout_layer(
+                project_id=project_id,
+                revision_id=revision_id,
+                name=name,
+                color=color,
+                editor_name=editor_name,
             )
-            # Group by area
-            areas_map: dict[str, list[dict[str, Any]]] = {}
-            for p in project_pitches:
-                area_key = f"{p['area_name']} (Section: {p.get('section_id') or 'Unlinked'})"
-                areas_map.setdefault(area_key, []).append(p)
+            real_id = str(created["id"])
+            if (
+                not visible
+                or locked
+                or abs(opacity - 1.0) > 1e-3
+                or target_z != int(created.get("z_index", target_z))
+            ):
+                update_layout_layer(
+                    project_id=project_id,
+                    layer_id=real_id,
+                    editor_name=editor_name,
+                    visible=visible,
+                    locked=locked,
+                    opacity=opacity,
+                    z_index=target_z,
+                )
+            if raw_id:
+                id_map[raw_id] = real_id
+            ordered_real_ids.append(real_id)
 
-            for area_title, area_pitch_list in areas_map.items():
-                first_p = area_pitch_list[0]
-                sec_id = str(first_p.get("section_id") or "")
-                std_dim = section_standards.get(sec_id, {})
-                std_w = std_dim.get("pitch_width", 12.0)
-                std_h = std_dim.get("pitch_height", 8.0)
+    # Delete any removed layers (keeping at least 1 layer)
+    remaining_existing = [lid for lid in existing_by_id if lid not in draft_ids]
+    if len(ordered_real_ids) >= 1:
+        for rem_id in remaining_existing:
+            try:
+                delete_layout_layer(project_id, rem_id, editor_name)
+            except ValueError:
+                pass
 
-                col_hdr1, col_hdr2 = st.columns([3, 1], vertical_alignment="center")
-                with col_hdr1:
-                    st.markdown(f"**{area_title}** · Standard Size: `{std_w:g} × {std_h:g} {unit}`")
-                with col_hdr2:
-                    if st.button("Edit Size", icon=":material/straighten:", key=f"btn_edit_sec_sz_{sec_id}_{area_title}"):
-                        _section_standards_dialog(project_id, selected_layout_id, unit, editor_name)
+    return id_map
 
-                pitch_cols = st.columns(3)
-                for idx, pitch in enumerate(area_pitch_list):
-                    col = pitch_cols[idx % 3]
-                    p_id = str(pitch["pitch_id"])
-                    is_placed = any(s.get("pitch_id") == p_id for s in draft_shapes)
-                    with col.container(border=True):
-                        st.markdown(f"**{pitch['pitch_number']}** — {pitch['pitch_name']}")
-                        st.caption(f":material/history_edu: Rev {pitch['scenario_revision_label']} · {pitch['scenario_name']}")
-                        if is_placed:
-                            st.caption(":green[:material/check_circle: Placed on layout]")
-                            if st.button("Select on canvas", key=f"sel_placed_{p_id}", width="stretch"):
-                                placed_shape = next((s for s in draft_shapes if s.get("pitch_id") == p_id), None)
-                                if placed_shape:
-                                    st.session_state[selected_shape_id_key] = placed_shape["id"]
-                                    st.rerun()
-                        else:
-                            if st.button(
-                                "+ Place on layout",
-                                key=f"btn_place_pitch_{p_id}",
-                                type="secondary",
-                                width="stretch",
-                            ):
-                                w_in_canon = to_canonical_inches(std_w, unit)
-                                h_in_canon = to_canonical_inches(std_h, unit)
-                                w_px_calc = max(0.5, round(w_in_canon * px_per_in_x, 2))
-                                h_px_calc = max(0.5, round(h_in_canon * px_per_in_y, 2))
 
-                                # Calculate snap placement adjacent to previous pitch in this area
-                                same_area_placed = [
-                                    s for s in draft_shapes
-                                    if any(
-                                        p2["pitch_id"] == s.get("pitch_id")
-                                        for p2 in area_pitch_list
-                                    )
-                                ]
-                                if same_area_placed:
-                                    prev_s = same_area_placed[-1]
-                                    new_x = float(prev_s["x"]) + float(prev_s["width"])
-                                    new_y = float(prev_s["y"])
-                                else:
-                                    new_x = 50.0
-                                    new_y = 50.0 + len(draft_shapes) * max(10.0, float(h_px_calc) + 4.0)
+def render_layouts_tab(
+    project_id: str,
+    editor_name: str,
+    scenario_id: str | None = None,
+    embedded_in_pin_map: bool = False,
+) -> None:
+    """Render the clean, zero-clutter Lucidchart-style Pin Map workspace."""
+    effective_scenario_id = scenario_id or st.session_state.get("scenario_id")
+    effective_editor = str(editor_name or "").strip() or "Workspace"
 
-                                new_shape_id = str(uuid4())
-                                new_pitch_shape = {
-                                    "id": new_shape_id,
-                                    "revision_id": str(active_rev["id"]),
-                                    "shape_type": "rectangle",
-                                    "x": round(new_x, 2),
-                                    "y": round(new_y, 2),
-                                    "width": round(w_px_calc, 2),
-                                    "height": round(h_px_calc, 2),
-                                    "rotation": 0.0,
-                                    "color": "#1976d2",
-                                    "label": str(pitch["pitch_number"]),
-                                    "style_json": json.dumps({
-                                        "stroke_color": "#1565c0",
-                                        "stroke_width": 1.5,
-                                        "stroke_style": "solid",
-                                        "fill_color": "#e3f2fd",
-                                        "fill_opacity": 0.6,
-                                        "font_size": 11,
-                                        "font_color": "#0d47a1",
-                                        "font_weight": "bold",
-                                        "bg_pill": True,
-                                    }),
-                                    "pitch_id": p_id,
-                                    "equipment_id": None,
-                                }
-                                draft_shapes.append(new_pitch_shape)
-                                st.session_state[draft_shapes_key] = draft_shapes
-                                st.session_state[has_unsaved_shapes_key] = True
-                                st.session_state[selected_shape_id_key] = new_shape_id
-                                st.toast(f"Placed workstation {pitch['pitch_number']} on floor plan!", icon=":material/add_box:")
-                                st.rerun()
-                st.divider()
+    # Ensure at least one layout page ("Page 1") and one scaled revision exist automatically
+    layouts = list_layouts(project_id)
+    if not layouts:
+        default_layout, default_rev = ensure_default_pin_map_page(project_id, effective_editor)
+        layouts = list_layouts(project_id)
+        st.session_state["active_layout_id"] = str(default_layout["id"])
+        st.session_state["active_revision_id"] = str(default_rev["id"])
 
-    # Custom component callback handlers
+    layout_by_id = {str(l["id"]): l for l in layouts}
+    active_layout_id = str(st.session_state.get("active_layout_id") or "")
+    if active_layout_id not in layout_by_id:
+        active_layout_id = str(layouts[0]["id"])
+        st.session_state["active_layout_id"] = active_layout_id
+
+    current_layout = layout_by_id[active_layout_id]
+    revisions = list_layout_revisions(active_layout_id)
+    if not revisions:
+        created_rev = create_blank_scaled_revision(
+            project_id=project_id,
+            layout_id=active_layout_id,
+            width_value=200.0,
+            height_value=100.0,
+            unit="feet",
+            notes="Blank scaled grid canvas",
+            editor_name=effective_editor,
+        )
+        revisions = list_layout_revisions(active_layout_id)
+        st.session_state["active_revision_id"] = str(created_rev["id"])
+
+    rev_by_id = {str(r["id"]): r for r in revisions}
+    active_rev_id = str(st.session_state.get("active_revision_id") or "")
+    if active_rev_id not in rev_by_id:
+        active_rev_id = str(revisions[0]["id"])
+        st.session_state["active_revision_id"] = active_rev_id
+
+    active_rev = get_layout_revision(active_rev_id) or rev_by_id[active_rev_id]
+    rev_id = str(active_rev["id"])
+    st.session_state["layout_plan_selector"] = active_layout_id
+    st.session_state["layout_revision_selector"] = rev_id
+
+    unit = str(active_rev.get("unit") or "feet")
+
+    draft_shapes_key = f"layout_shapes_draft_{rev_id}"
+    draft_layers_key = f"layout_layers_draft_{rev_id}"
+    has_unsaved_shapes_key = f"layout_shapes_has_unsaved_{rev_id}"
+    selected_shape_id_key = f"layout_selected_shape_{rev_id}"
+    last_commit_sig_key = f"layout_last_commit_sig_{rev_id}"
+    canvas_key = f"layout_canvas_{rev_id}"
+
+    ensure_default_layers_for_revision(rev_id)
+    persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+    persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
+
     def handle_select_shape() -> None:
         state = st.session_state.get(canvas_key)
         trigger = getattr(state, "select_shape", None) if state is not None else None
         if not trigger and isinstance(state, dict):
             trigger = state.get("select_shape")
         if trigger and "shape_id" in trigger:
-            sel_id = trigger["shape_id"] or None
-            st.session_state[selected_shape_id_key] = sel_id
-            if sel_id:
-                draft = st.session_state.get(draft_shapes_key, [])
-                for s in draft:
-                    if s.get("id") == sel_id:
-                        w_u = float(round(_px_to_units(float(s.get("width", 0)), px_per_in_x, unit), 2))
-                        h_u = float(round(_px_to_units(float(s.get("height", 0)), px_per_in_y, unit), 2))
-                        st.session_state[f"insp_w_{sel_id}"] = w_u
-                        st.session_state[f"insp_h_{sel_id}"] = h_u
-                        st.session_state[f"insp_label_{sel_id}"] = s.get("label", "")
-                        st.session_state[f"insp_rot_{sel_id}"] = int(s.get("rotation", 0))
-                        break
+            st.session_state[selected_shape_id_key] = trigger["shape_id"] or None
 
     def handle_shape_moved() -> None:
         state = st.session_state.get(canvas_key)
@@ -1986,19 +1588,433 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
                         s["width"] = float(trigger["width"])
                     if "height" in trigger:
                         s["height"] = float(trigger["height"])
-                    w_u = float(round(_px_to_units(float(s["width"]), px_per_in_x, unit), 2))
-                    h_u = float(round(_px_to_units(float(s["height"]), px_per_in_y, unit), 2))
-                    st.session_state[f"insp_w_{s_id}"] = w_u
-                    st.session_state[f"insp_h_{s_id}"] = h_u
                     break
             st.session_state[draft_shapes_key] = draft
-            st.session_state[has_unsaved_shapes_key] = True
             st.session_state[selected_shape_id_key] = s_id
 
-    # Render interactive layout canvas
+    def handle_canvas_commit() -> None:
+        state = st.session_state.get(canvas_key)
+        trigger = getattr(state, "canvas_commit", None) if state is not None else None
+        if not trigger and isinstance(state, dict):
+            trigger = state.get("canvas_commit")
+        if not trigger or not isinstance(trigger, dict):
+            return
+
+        action = str(trigger.get("action") or "save")
+        bg_raw = str(trigger.get("background_data_url") or "")
+        bg_digest = hashlib.sha256(bg_raw.encode("utf-8")).hexdigest() if bg_raw else ""
+        sig_payload = json.dumps(
+            {
+                "cid": trigger.get("commit_id"),
+                "a": action,
+                "shapes": trigger.get("shapes"),
+                "layers": trigger.get("layers"),
+                "sel": trigger.get("selected_shape_id"),
+                "cal": trigger.get("scale_calibration"),
+                "su": trigger.get("scale_update"),
+                "wv": trigger.get("width_value"),
+                "hv": trigger.get("height_value"),
+                "u": trigger.get("unit"),
+                "pxd": trigger.get("pixel_distance"),
+                "phd": trigger.get("physical_distance") or trigger.get("real_distance"),
+                "pt": trigger.get("page_title") or trigger.get("page_name"),
+                "pid": trigger.get("target_page_id") or trigger.get("page_id"),
+                "cs": trigger.get("custom_stencil"),
+                "csid": trigger.get("stencil_id"),
+                "bg": bg_digest,
+            },
+            sort_keys=True,
+            default=str,
+        )
+        commit_sig = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()
+        if st.session_state.get(last_commit_sig_key) == commit_sig:
+            return
+        st.session_state[last_commit_sig_key] = commit_sig
+
+        if "selected_shape_id" in trigger:
+            st.session_state[selected_shape_id_key] = trigger.get("selected_shape_id") or None
+
+        # Persist layers and shapes whenever included in the commit payload
+        incoming_layers = trigger.get("layers") if isinstance(trigger.get("layers"), list) else persisted_layers
+        incoming_shapes = trigger.get("shapes") if isinstance(trigger.get("shapes"), list) else persisted_shapes
+        try:
+            layer_id_map = _sync_draft_layers_to_db(
+                project_id=project_id,
+                revision_id=rev_id,
+                draft_layers=[dict(l) for l in incoming_layers],
+                editor_name=effective_editor,
+            )
+            cleaned_shapes = []
+            for raw_s in incoming_shapes:
+                s_copy = dict(raw_s)
+                raw_lid = str(s_copy.get("layer_id") or "")
+                if raw_lid in layer_id_map:
+                    s_copy["layer_id"] = layer_id_map[raw_lid]
+                cleaned_shapes.append(s_copy)
+            save_layout_shapes(
+                project_id=project_id,
+                revision_id=rev_id,
+                shapes=cleaned_shapes,
+                editor_name=effective_editor,
+            )
+            st.session_state[draft_shapes_key] = cleaned_shapes
+            st.session_state[draft_layers_key] = [dict(l) for l in list_layout_layers(rev_id)]
+            st.session_state[has_unsaved_shapes_key] = False
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+
+        try:
+            if action == "calibrate_scale":
+                cal = (
+                    trigger["scale_calibration"]
+                    if isinstance(trigger.get("scale_calibration"), dict)
+                    else trigger
+                )
+                px_dist = float(cal.get("pixel_distance") or 0.0)
+                if px_dist <= 0 and "x1_px" in cal and "x2_px" in cal:
+                    px_dist = math.hypot(
+                        float(cal.get("x2_px") or 0.0) - float(cal.get("x1_px") or 0.0),
+                        float(cal.get("y2_px") or 0.0) - float(cal.get("y1_px") or 0.0),
+                    )
+                phys_dist = float(
+                    cal.get("physical_distance") or cal.get("real_distance") or 0.0
+                )
+                cal_unit = str(cal.get("unit") or unit)
+                if px_dist > 0 and phys_dist > 0:
+                    calibrate_revision_scale_by_reference(
+                        project_id=project_id,
+                        revision_id=rev_id,
+                        pixel_distance=px_dist,
+                        physical_distance=phys_dist,
+                        unit=cal_unit,
+                        editor_name=effective_editor,
+                    )
+            elif action == "update_scale":
+                su = (
+                    trigger["scale_update"]
+                    if isinstance(trigger.get("scale_update"), dict)
+                    else trigger
+                )
+                new_w = max(1.0, float(su.get("width_value") or active_rev["width_value"] or 200.0))
+                new_h = max(1.0, float(su.get("height_value") or active_rev["height_value"] or 100.0))
+                new_u = str(su.get("unit") or unit)
+                update_layout_revision_scale(
+                    project_id=project_id,
+                    revision_id=rev_id,
+                    width_value=new_w,
+                    height_value=new_h,
+                    unit=new_u,
+                    notes=str(active_rev.get("notes") or ""),
+                    editor_name=effective_editor,
+                )
+            elif action == "rename_page":
+                target_id = str(trigger.get("target_page_id") or trigger.get("page_id") or active_layout_id or "").strip()
+                new_title = str(trigger.get("page_title") or "").strip()
+                target_layout = layout_by_id.get(target_id) if target_id else current_layout
+                if new_title and target_layout and new_title != str(target_layout["name"]):
+                    update_layout(
+                        project_id,
+                        str(target_layout["id"]),
+                        new_title,
+                        str(target_layout.get("description") or ""),
+                        effective_editor,
+                    )
+            elif action == "add_page":
+                existing_names = {str(l["name"]).strip().lower() for l in list_layouts(project_id)}
+                idx = len(existing_names) + 1
+                candidate_name = (
+                    str(trigger.get("page_name") or trigger.get("page_title") or f"Page {idx}").strip()
+                    or f"Page {idx}"
+                )
+                while candidate_name.lower() in existing_names:
+                    idx += 1
+                    candidate_name = f"Page {idx}"
+                new_layout = create_layout(
+                    project_id=project_id,
+                    name=candidate_name,
+                    description="Pin Map & Scaled Line Layout",
+                    editor_name=effective_editor,
+                )
+                new_rev = create_blank_scaled_revision(
+                    project_id=project_id,
+                    layout_id=str(new_layout["id"]),
+                    width_value=200.0,
+                    height_value=100.0,
+                    unit=unit,
+                    notes="Blank scaled grid canvas",
+                    editor_name=effective_editor,
+                )
+                st.session_state["active_layout_id"] = str(new_layout["id"])
+                st.session_state["active_revision_id"] = str(new_rev["id"])
+            elif action == "switch_page":
+                target_page_id = str(trigger.get("target_page_id") or trigger.get("page_id") or "")
+                if target_page_id and target_page_id in layout_by_id:
+                    st.session_state["active_layout_id"] = target_page_id
+                    target_revs = list_layout_revisions(target_page_id)
+                    if target_revs:
+                        st.session_state["active_revision_id"] = str(target_revs[0]["id"])
+            elif action == "delete_page":
+                target_page_id = str(trigger.get("target_page_id") or trigger.get("page_id") or "")
+                all_layouts = list_layouts(project_id)
+                if target_page_id and len(all_layouts) > 1:
+                    delete_layout(project_id, target_page_id, effective_editor)
+                    remaining = list_layouts(project_id)
+                    if remaining:
+                        st.session_state["active_layout_id"] = str(remaining[0]["id"])
+                        rem_revs = list_layout_revisions(str(remaining[0]["id"]))
+                        if rem_revs:
+                            st.session_state["active_revision_id"] = str(rem_revs[0]["id"])
+            elif action == "upload_background":
+                bg_data_url = str(trigger.get("background_data_url") or "")
+                if bg_data_url:
+                    update_revision_background_from_data_url(
+                        project_id=project_id,
+                        revision_id=rev_id,
+                        data_url=bg_data_url,
+                        editor_name=effective_editor,
+                    )
+            elif action == "clear_background":
+                update_revision_background_from_data_url(
+                    project_id=project_id,
+                    revision_id=rev_id,
+                    data_url="",
+                    editor_name=effective_editor,
+                )
+            elif action == "save_custom_stencil":
+                cs = trigger.get("custom_stencil")
+                if isinstance(cs, dict):
+                    cs_name = str(cs.get("name") or trigger.get("stencil_name") or "").strip()
+                    cs_data = cs.get("stencil_data") if isinstance(cs.get("stencil_data"), dict) else cs
+                    cs_cat = str(cs.get("category") or "Saved Shapes").strip() or "Saved Shapes"
+                    cs_id = str(cs.get("id") or trigger.get("stencil_id") or "").strip() or None
+                    if cs_name:
+                        save_layout_custom_stencil(
+                            project_id=project_id,
+                            name=cs_name,
+                            stencil_data=cs_data,
+                            editor_name=effective_editor,
+                            category=cs_cat,
+                            stencil_id=cs_id,
+                        )
+            elif action == "delete_custom_stencil":
+                cs_id = str(trigger.get("stencil_id") or "").strip()
+                if cs_id:
+                    delete_layout_custom_stencil(
+                        project_id=project_id,
+                        stencil_id=cs_id,
+                        editor_name=effective_editor,
+                    )
+            elif action == "open_section_standards":
+                st.session_state["_open_pin_map_dialog"] = "section_standards"
+            elif action == "open_cad_revisions":
+                st.session_state["_open_pin_map_dialog"] = "cad_revisions"
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+
+    # Process any pending canvas commit before building props so post-commit state is fresh
+    handle_canvas_commit()
+
+    # Reload active page/revision/shapes/layers/background after commit processing
+    layouts = list_layouts(project_id)
+    layout_by_id = {str(l["id"]): l for l in layouts}
+    active_layout_id = str(st.session_state.get("active_layout_id") or "")
+    if active_layout_id not in layout_by_id:
+        active_layout_id = str(layouts[0]["id"])
+        st.session_state["active_layout_id"] = active_layout_id
+    current_layout = layout_by_id[active_layout_id]
+
+    revisions = list_layout_revisions(active_layout_id)
+    rev_by_id = {str(r["id"]): r for r in revisions}
+    active_rev_id = str(st.session_state.get("active_revision_id") or "")
+    if active_rev_id not in rev_by_id:
+        active_rev_id = str(revisions[0]["id"])
+        st.session_state["active_revision_id"] = active_rev_id
+    active_rev = get_layout_revision(active_rev_id) or rev_by_id[active_rev_id]
+    rev_id = str(active_rev["id"])
+    st.session_state["layout_plan_selector"] = active_layout_id
+    st.session_state["layout_revision_selector"] = rev_id
+
+    w_in = float(active_rev.get("scale_width_in") or 2400.0)
+    h_in = float(active_rev.get("scale_height_in") or 1200.0)
+    w_px = int(active_rev.get("image_width_px") or 2400)
+    h_px = int(active_rev.get("image_height_px") or 1200)
+    unit = str(active_rev.get("unit") or "feet")
+
+    px_per_in_x = (w_px / w_in) if w_in > 0 else 1.0
+    px_per_in_y = (h_px / h_in) if h_in > 0 else 1.0
+
+    draft_shapes_key = f"layout_shapes_draft_{rev_id}"
+    draft_layers_key = f"layout_layers_draft_{rev_id}"
+    selected_shape_id_key = f"layout_selected_shape_{rev_id}"
+    canvas_key = f"layout_canvas_{rev_id}"
+
+    ensure_default_layers_for_revision(rev_id)
+    persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+    persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
+    selected_shape_id: str | None = st.session_state.get(selected_shape_id_key)
+
+    all_project_pitches = list_project_yamazumi_pitches(project_id)
+    project_pitches = [
+        p for p in all_project_pitches
+        if not effective_scenario_id or str(p.get("scenario_id") or "") == str(effective_scenario_id)
+    ]
+    cross_scenario_pitch_aliases: dict[str, str] = {}
+    if effective_scenario_id and project_pitches:
+        pitch_by_id_all = {str(p.get("pitch_id") or p.get("id") or ""): p for p in all_project_pitches}
+        active_pitch_ids = {str(p.get("pitch_id") or p.get("id") or "") for p in project_pitches}
+        active_by_sec_num = {
+            (str(p.get("section_id") or "").strip(), str(p.get("pitch_number") or "").strip().lower()): str(p.get("pitch_id") or p.get("id") or "")
+            for p in project_pitches
+            if str(p.get("section_id") or "").strip()
+        }
+        active_by_area_num = {
+            (str(p.get("area_name") or "").strip().lower(), str(p.get("pitch_number") or "").strip().lower()): str(p.get("pitch_id") or p.get("id") or "")
+            for p in project_pitches
+        }
+        for s_item in persisted_shapes:
+            raw_pid = str(s_item.get("pitch_id") or "")
+            if raw_pid and raw_pid not in active_pitch_ids and raw_pid in pitch_by_id_all:
+                src_p = pitch_by_id_all[raw_pid]
+                sec_id_str = str(src_p.get("section_id") or "").strip()
+                pnum_str = str(src_p.get("pitch_number") or "").strip().lower()
+                key_an = (
+                    str(src_p.get("area_name") or "").strip().lower(),
+                    pnum_str,
+                )
+                mapped_pid = (
+                    (active_by_sec_num.get((sec_id_str, pnum_str)) if sec_id_str else None)
+                    or active_by_area_num.get(key_an)
+                )
+                if mapped_pid:
+                    cross_scenario_pitch_aliases[raw_pid] = mapped_pid
+
+    st.session_state[draft_shapes_key] = persisted_shapes
+    st.session_state[draft_layers_key] = persisted_layers
+
+    other_revs = [r for r in revisions if str(r["id"]) != rev_id]
+    cad_file_name = str(active_rev.get("cad_file_name") or "").strip()
+    cad_file_path = str(active_rev.get("cad_file_path") or "").strip()
+    cad_web_url = str(active_rev.get("cad_web_url") or "").strip()
+    has_cad_file = bool(cad_file_path and Path(cad_file_path).is_file())
+
+    if len(revisions) > 1 or has_cad_file or cad_web_url:
+        with st.container(border=True):
+            rc1, rc2, rc3, rc4, rc5 = st.columns([2.4, 1.4, 1.4, 1.4, 1.1], vertical_alignment="center")
+            with rc1:
+                rev_labels = {
+                    str(r["id"]): f"Rev {r['revision_number']} ({int(r.get('shape_count', 0))} shapes — {str(r.get('created_at', ''))[:10]})"
+                    for r in revisions
+                }
+                rev_ids_list = list(rev_labels.keys())
+                sel_rev_idx = rev_ids_list.index(rev_id) if rev_id in rev_ids_list else 0
+                chosen_rev_id = st.selectbox(
+                    "Active drawing revision",
+                    options=rev_ids_list,
+                    index=sel_rev_idx,
+                    format_func=lambda rid: rev_labels.get(rid, rid),
+                    key=f"layout_rev_bar_select_{active_layout_id}",
+                    label_visibility="collapsed",
+                )
+                if chosen_rev_id != rev_id:
+                    st.session_state["active_revision_id"] = chosen_rev_id
+                    st.rerun()
+            with rc2:
+                if st.button(
+                    "New revision / PDF",
+                    icon=":material/add_photo_alternate:",
+                    key=f"btn_bar_new_rev_{rev_id}",
+                    width="stretch",
+                ):
+                    st.session_state["_open_pin_map_dialog"] = "cad_revisions"
+                    st.rerun()
+            with rc3:
+                if st.button(
+                    "Import shapes",
+                    icon=":material/content_copy:",
+                    key=f"btn_bar_imp_shapes_{rev_id}",
+                    disabled=not bool(other_revs),
+                    width="stretch",
+                ):
+                    st.session_state["_open_pin_map_dialog"] = "import_shapes"
+                    st.rerun()
+            with rc4:
+                if st.button(
+                    f"CAD ({cad_file_name[:12]}…)" if has_cad_file else ("CAD link" if cad_web_url else "Attach CAD"),
+                    icon=":material/architecture:",
+                    key=f"btn_bar_attach_cad_{rev_id}",
+                    width="stretch",
+                ):
+                    st.session_state["_open_pin_map_dialog"] = "attach_cad"
+                    st.rerun()
+            with rc5:
+                if st.button(
+                    "Delete rev",
+                    icon=":material/delete:",
+                    key=f"btn_bar_del_rev_{rev_id}",
+                    disabled=len(revisions) <= 1,
+                    width="stretch",
+                ):
+                    st.session_state["_open_pin_map_dialog"] = "delete_revision"
+                    st.rerun()
+
+    pending_dlg = st.session_state.pop("_open_pin_map_dialog", None)
+    if pending_dlg == "section_standards":
+        _section_standards_dialog(project_id, active_layout_id, unit, effective_editor)
+    elif pending_dlg == "cad_revisions":
+        _create_revision_dialog(
+            project_id,
+            current_layout,
+            active_rev,
+            effective_editor,
+            current_draft_shapes=persisted_shapes,
+        )
+    elif pending_dlg == "import_shapes" and other_revs:
+        _import_shapes_dialog(
+            project_id,
+            current_layout,
+            active_rev,
+            other_revs,
+            effective_editor,
+        )
+    elif pending_dlg == "attach_cad":
+        _attach_cad_dialog(
+            project_id,
+            str(current_layout["name"]),
+            active_rev,
+            effective_editor,
+        )
+    elif pending_dlg == "delete_revision" and len(revisions) > 1:
+        _delete_revision_dialog(
+            project_id,
+            str(current_layout["name"]),
+            active_rev,
+            effective_editor,
+        )
+
+    section_standards = get_section_pitch_standards(active_layout_id)
+    pitch_metrics = (
+        get_scenario_pitch_metrics_for_pin_map(project_id, str(effective_scenario_id))
+        if effective_scenario_id
+        else {}
+    )
+    for raw_pid, mapped_pid in cross_scenario_pitch_aliases.items():
+        if mapped_pid in pitch_metrics:
+            pitch_metrics[raw_pid] = pitch_metrics[mapped_pid]
+    custom_stencils = list_layout_custom_stencils(project_id)
+    pages_payload = [{"id": str(l["id"]), "name": str(l["name"])} for l in layouts]
+
+    notes_lower = str(active_rev.get("notes") or "").lower()
+    img_path_str = str(active_rev.get("image_path") or "")
+    is_blank_canvas = (
+        "blank scaled" in notes_lower
+        or "blank_scaled_canvas" in img_path_str.lower()
+    )
+    img_path = Path(img_path_str) if img_path_str else None
     image_data_url = (
         layout_image_data_url(str(img_path), img_path.stat().st_mtime_ns)
-        if img_path.is_file()
+        if (img_path and img_path.is_file() and not is_blank_canvas)
         else ""
     )
 
@@ -2010,545 +2026,40 @@ def render_layouts_tab(project_id: str, editor_name: str) -> None:
         scale_factor_px_per_in_x=px_per_in_x,
         scale_factor_px_per_in_y=px_per_in_y,
         unit=unit,
-        shapes=draft_shapes,
+        shapes=persisted_shapes,
+        layers=persisted_layers,
+        pitches=project_pitches,
+        pitch_metrics=pitch_metrics,
+        section_standards=section_standards,
+        custom_stencils=custom_stencils,
         selected_shape_id=selected_shape_id,
+        pages=pages_payload,
+        active_page_id=active_layout_id,
+        page_title=str(current_layout["name"]),
+        is_blank_canvas=is_blank_canvas,
         key=canvas_key,
         on_select_shape=handle_select_shape,
         on_shape_moved=handle_shape_moved,
+        on_canvas_commit=handle_canvas_commit,
     )
 
-    # -------------------------------------------------------------------------
-    # Selected Shape Inspector & Quick Editor
-    # -------------------------------------------------------------------------
-    selected_shape = next(
-        (s for s in draft_shapes if s.get("id") == selected_shape_id), None
-    )
-
-    if selected_shape:
-        st.markdown("---")
-        with st.container(border=True):
-            stype = selected_shape.get("shape_type", "rectangle")
-            slabel = selected_shape.get("label") or selected_shape.get("shape_type") or "Annotation"
-            icon = SHAPE_TYPE_ICONS.get(stype, "⏹️")
-            sw_units = _px_to_units(float(selected_shape.get("width", 0)), px_per_in_x, unit)
-            sh_units = _px_to_units(float(selected_shape.get("height", 0)), px_per_in_y, unit)
-            sarea = _calculate_shape_area(stype, sw_units, sh_units)
-            unit_area_label = (
-                "sq ft"
-                if unit == "feet"
-                else ("sq in" if unit == "inches" else f"sq {unit}")
-            )
-
-            # Inspector Header
-            ih1, ih2 = st.columns([3, 1], vertical_alignment="center")
-            with ih1:
-                st.markdown(
-                    f"##### {icon} Selected Shape: **{slabel}** "
-                    f"&nbsp;·&nbsp; <small style='color:#1976d2; font-weight:600;'>{sw_units:.1f} × {sh_units:.1f} {unit} ({sarea:,.1f} {unit_area_label})</small>",
-                    unsafe_allow_html=True,
-                )
-            with ih2:
-                if st.button("Deselect", icon=":material/close:", width="stretch", key="btn_deselect_shape"):
-                    st.session_state[selected_shape_id_key] = None
-                    st.rerun()
-
-            # Parse existing style JSON
-            style = {}
-            try:
-                style_raw = selected_shape.get("style_json")
-                style = json.loads(style_raw) if isinstance(style_raw, str) else (style_raw or {})
-            except Exception:
-                style = {}
-
-            # Editor Controls in 3 columns
-            ec1, ec2, ec3 = st.columns(3)
-            with ec1:
-                st.caption("**Identity & Scale**")
-                new_slabel = st.text_input(
-                    "Label / ID",
-                    value=selected_shape.get("label", ""),
-                    key=f"insp_label_{selected_shape['id']}",
-                )
-                cur_pitch_id = selected_shape.get("pitch_id") or ""
-                pitch_opts = {"": "None (Generic Shape)"}
-                for p in project_pitches:
-                    pitch_opts[p["pitch_id"]] = f"{p['pitch_number']} - {p['pitch_name']} ({p['scenario_name']})"
-
-                selected_pitch_link = st.selectbox(
-                    "Linked Workstation Pitch",
-                    options=list(pitch_opts.keys()),
-                    format_func=lambda pid: pitch_opts[pid],
-                    index=list(pitch_opts.keys()).index(cur_pitch_id) if cur_pitch_id in pitch_opts else 0,
-                    key=f"insp_pitch_link_{selected_shape['id']}",
-                )
-                new_w_units = st.number_input(
-                    f"Width ({unit})",
-                    min_value=0.1,
-                    value=float(sw_units),
-                    step=1.0,
-                    format="%.2f",
-                    key=f"insp_w_{selected_shape['id']}",
-                )
-                new_h_units = st.number_input(
-                    f"Height ({unit})",
-                    min_value=0.1,
-                    value=float(sh_units),
-                    step=1.0,
-                    format="%.2f",
-                    key=f"insp_h_{selected_shape['id']}",
-                )
-                new_rot = st.slider(
-                    "Rotation (degrees)",
-                    min_value=0,
-                    max_value=360,
-                    value=int(selected_shape.get("rotation", 0)),
-                    step=5,
-                    key=f"insp_rot_{selected_shape['id']}",
+    if not embedded_in_pin_map:
+        with st.expander("History", expanded=False):
+            history_df = audit_history(project_id, table_name="Layouts", limit=50)
+            if history_df.empty:
+                st.caption("No Layout history recorded yet.")
+            else:
+                selectable_dataframe(
+                    history_df.drop(columns=["details"], errors="ignore"),
+                    key=f"layout_audit_history_{project_id}",
+                    hide_index=True,
+                    column_config={
+                        "action": "Action",
+                        "row_count": "Count",
+                        "editor_name": "Editor",
+                        "created_at": st.column_config.DatetimeColumn(
+                            "When", format="MMM DD, YYYY HH:mm"
+                        ),
+                    },
                 )
 
-            with ec2:
-                st.caption("**Border & Fill Styling**")
-                cur_stroke = style.get("stroke_color") or selected_shape.get("color") or "#1976d2"
-                new_stroke = _render_color_selector(
-                    "Border Color",
-                    cur_stroke,
-                    key_prefix=f"insp_stroke_{selected_shape['id']}",
-                )
-                cur_thick = int(style.get("stroke_width", 2))
-                thick_idx = (
-                    LINE_THICKNESS_OPTIONS.index(cur_thick)
-                    if cur_thick in LINE_THICKNESS_OPTIONS
-                    else 1
-                )
-                new_thick = st.selectbox(
-                    "Line Thickness",
-                    LINE_THICKNESS_OPTIONS,
-                    index=thick_idx,
-                    format_func=lambda t: f"{t} px",
-                    key=f"insp_thick_{selected_shape['id']}",
-                )
-                cur_lstyle = style.get("stroke_style", "solid")
-                lstyle_idx = (
-                    LINE_STYLE_OPTIONS.index(cur_lstyle)
-                    if cur_lstyle in LINE_STYLE_OPTIONS
-                    else 0
-                )
-                new_lstyle = st.selectbox(
-                    "Line Style",
-                    LINE_STYLE_OPTIONS,
-                    index=lstyle_idx,
-                    key=f"insp_lstyle_{selected_shape['id']}",
-                )
-                cur_fill = style.get("fill_color") or selected_shape.get("color") or "#1976d2"
-                new_fill = _render_color_selector(
-                    "Fill Color",
-                    cur_fill,
-                    key_prefix=f"insp_fill_{selected_shape['id']}",
-                )
-                cur_opac = int(float(style.get("fill_opacity", 0.25)) * 100)
-                new_opac = st.slider(
-                    "Fill Opacity",
-                    min_value=0,
-                    max_value=100,
-                    value=cur_opac,
-                    step=5,
-                    format="%d%%",
-                    key=f"insp_opac_{selected_shape['id']}",
-                )
-
-            with ec3:
-                st.caption("**Text / Label Styling**")
-                cur_fsize = int(style.get("font_size", 14))
-                fsize_idx = (
-                    FONT_SIZE_OPTIONS.index(cur_fsize)
-                    if cur_fsize in FONT_SIZE_OPTIONS
-                    else 2
-                )
-                new_fsize = st.selectbox(
-                    "Font Size",
-                    FONT_SIZE_OPTIONS,
-                    index=fsize_idx,
-                    format_func=lambda fs: f"{fs} pt",
-                    key=f"insp_fsize_{selected_shape['id']}",
-                )
-                cur_fcolor = style.get("font_color", "#1a1a1a")
-                new_fcolor = _render_color_selector(
-                    "Font Color",
-                    cur_fcolor,
-                    key_prefix=f"insp_fcolor_{selected_shape['id']}",
-                )
-                new_bold = st.checkbox(
-                    "Bold",
-                    value=style.get("font_weight", "bold") == "bold",
-                    key=f"insp_bold_{selected_shape['id']}",
-                )
-                new_bg_pill = st.checkbox(
-                    "Contrast label card",
-                    value=bool(style.get("bg_pill", True)),
-                    key=f"insp_pill_{selected_shape['id']}",
-                )
-
-                st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-                # Action Buttons
-                col_dup, col_del = st.columns(2)
-                with col_dup:
-                    if st.button("Duplicate", icon=":material/content_copy:", width="stretch", key=f"btn_dup_{selected_shape['id']}"):
-                        dup_shape = dict(selected_shape)
-                        dup_shape["id"] = str(uuid4())
-                        dup_shape["label"] = f"{slabel} (Copy)"
-                        dup_shape["x"] = float(selected_shape.get("x", 0)) + 30.0
-                        dup_shape["y"] = float(selected_shape.get("y", 0)) + 30.0
-                        draft_shapes.append(dup_shape)
-                        st.session_state[draft_shapes_key] = draft_shapes
-                        st.session_state[has_unsaved_shapes_key] = True
-                        st.session_state[selected_shape_id_key] = dup_shape["id"]
-                        st.toast(f"Duplicated shape as '{dup_shape['label']}'", icon=":material/content_copy:")
-                        st.rerun()
-
-                with col_del:
-                    if st.button("Delete...", icon=":material/delete:", width="stretch", key=f"btn_del_shape_{selected_shape['id']}"):
-                        _delete_shape_dialog(
-                            shape=selected_shape,
-                            revision_number=int(active_rev["revision_number"]),
-                            draft_shapes_key=draft_shapes_key,
-                            has_unsaved_shapes_key=has_unsaved_shapes_key,
-                            selected_shape_id_key=selected_shape_id_key,
-                        )
-
-            # Check if inspector values changed and apply them to draft
-            cur_w_units = float(round(sw_units, 2))
-            cur_h_units = float(round(sh_units, 2))
-            w_changed_in_inspector = abs(float(new_w_units) - cur_w_units) > 0.001
-            h_changed_in_inspector = abs(float(new_h_units) - cur_h_units) > 0.001
-
-            target_w_px = (
-                round(_units_to_px(new_w_units, px_per_in_x, unit), 2)
-                if w_changed_in_inspector
-                else float(selected_shape.get("width", 0))
-            )
-            target_h_px = (
-                round(_units_to_px(new_h_units, px_per_in_y, unit), 2)
-                if h_changed_in_inspector
-                else float(selected_shape.get("height", 0))
-            )
-
-            new_style_dict = {
-                "stroke_color": new_stroke,
-                "stroke_width": new_thick,
-                "stroke_style": new_lstyle,
-                "fill_color": new_fill,
-                "fill_opacity": new_opac / 100.0,
-                "font_size": new_fsize,
-                "font_color": new_fcolor,
-                "font_weight": "bold" if new_bold else "normal",
-                "bg_pill": new_bg_pill,
-            }
-            new_style_json = json.dumps(new_style_dict)
-
-            inspector_changed = (
-                new_slabel != selected_shape.get("label", "")
-                or w_changed_in_inspector
-                or h_changed_in_inspector
-                or float(new_rot) != float(selected_shape.get("rotation", 0))
-                or new_stroke != cur_stroke
-                or new_thick != cur_thick
-                or new_lstyle != cur_lstyle
-                or new_fill != cur_fill
-                or new_opac != cur_opac
-                or new_fsize != cur_fsize
-                or new_fcolor != cur_fcolor
-                or (new_bold != (style.get("font_weight", "bold") == "bold"))
-                or (new_bg_pill != bool(style.get("bg_pill", True)))
-                or ((selected_pitch_link or None) != (selected_shape.get("pitch_id") or None))
-            )
-
-            if inspector_changed:
-                selected_shape["label"] = new_slabel
-                selected_shape["pitch_id"] = selected_pitch_link or None
-                selected_shape["width"] = target_w_px
-                selected_shape["height"] = target_h_px
-                selected_shape["rotation"] = float(new_rot)
-                selected_shape["color"] = new_stroke
-                selected_shape["style_json"] = new_style_json
-                st.session_state[draft_shapes_key] = draft_shapes
-                st.session_state[has_unsaved_shapes_key] = True
-                st.rerun()
-
-    # -------------------------------------------------------------------------
-    # Annotation Inventory Table
-    # -------------------------------------------------------------------------
-    with st.expander(f"Annotation Inventory ({len(draft_shapes)} shapes)", expanded=False):
-        if not draft_shapes:
-            st.caption("No annotations placed yet. Click **+ Add Shape** above to place your first footprint.")
-        else:
-            table_rows = []
-            for s in draft_shapes:
-                stype = s.get("shape_type", "rectangle")
-                icon = SHAPE_TYPE_ICONS.get(stype, "⏹️")
-                sw_u = _px_to_units(float(s.get("width", 0)), px_per_in_x, unit)
-                sh_u = _px_to_units(float(s.get("height", 0)), px_per_in_y, unit)
-                area_u = _calculate_shape_area(stype, sw_u, sh_u)
-                unit_area_label = (
-                    "sq ft"
-                    if unit == "feet"
-                    else ("sq in" if unit == "inches" else f"sq {unit}")
-                )
-
-                s_style = {}
-                try:
-                    s_style = json.loads(s.get("style_json", "{}"))
-                except Exception:
-                    pass
-
-                table_rows.append(
-                    {
-                        "id": s.get("id"),
-                        "Shape": f"{icon} {stype.capitalize()}",
-                        "Label": s.get("label") or "(No label)",
-                        "Dimensions": f"{sw_u:.1f} × {sh_u:.1f} {unit}",
-                        "Area": f"{area_u:,.1f} {unit_area_label}",
-                        "Border": f"{s_style.get('stroke_width', 2)}px {s_style.get('stroke_style', 'solid')}",
-                        "Border Color": s_style.get("stroke_color") or s.get("color", "#1976d2"),
-                        "Fill Color": s_style.get("fill_color") or s.get("color", "#1976d2"),
-                        "Opacity": f"{int(float(s_style.get('fill_opacity', 0.25)) * 100)}%",
-                    }
-                )
-
-            df_shapes = pd.DataFrame(table_rows)
-            st.dataframe(
-                df_shapes.drop(columns=["id"]),
-                hide_index=True,
-                width="stretch",
-            )
-
-            tc1, tc2 = st.columns([3, 1], vertical_alignment="center")
-            with tc1:
-                shape_picker_map = {s["id"]: f"{SHAPE_TYPE_ICONS.get(s.get('shape_type'), '')} {s.get('label') or s.get('shape_type')} [{_px_to_units(float(s.get('width', 0)), px_per_in, unit):.1f} × {_px_to_units(float(s.get('height', 0)), px_per_in, unit):.1f} {unit}]" for s in draft_shapes}
-                curr_sel_idx = (
-                    list(shape_picker_map.keys()).index(selected_shape_id)
-                    if selected_shape_id in shape_picker_map
-                    else 0
-                )
-                picked_shape_id = st.selectbox(
-                    "Select shape to inspect/edit",
-                    options=list(shape_picker_map.keys()),
-                    format_func=lambda sid: shape_picker_map[sid],
-                    index=curr_sel_idx,
-                    key="table_shape_picker",
-                )
-                if st.button("Inspect selected shape", icon=":material/edit:", key="btn_inspect_picked"):
-                    st.session_state[selected_shape_id_key] = picked_shape_id
-                    st.rerun()
-
-            with tc2:
-                if st.button("Clear all shapes...", icon=":material/delete_sweep:", width="stretch", key="btn_open_clear_all"):
-                    _clear_all_shapes_dialog(
-                        count=len(draft_shapes),
-                        revision_number=int(active_rev["revision_number"]),
-                        draft_shapes_key=draft_shapes_key,
-                        has_unsaved_shapes_key=has_unsaved_shapes_key,
-                        selected_shape_id_key=selected_shape_id_key,
-                    )
-
-    # -------------------------------------------------------------------------
-    # Universal Save Action Standard Footer for Shapes
-    # -------------------------------------------------------------------------
-    shape_footer_actions = editable_table_footer(
-        editor_key=f"layout_shapes_footer_{active_rev['id']}",
-        key_prefix=f"layout_shapes_{active_rev['id']}",
-        additional_unsaved_changes=has_unsaved_shapes,
-    )
-
-    if shape_footer_actions.undo:
-        st.session_state.pop(draft_shapes_key, None)
-        st.session_state.pop(has_unsaved_shapes_key, None)
-        st.session_state.pop(selected_shape_id_key, None)
-        st.toast("Restored last-saved annotations", icon=":material/undo:")
-        st.rerun()
-
-    if shape_footer_actions.save_and_refresh:
-        if not editor_name:
-            st.error("Please enter Current editor attribution.")
-        else:
-            try:
-                save_layout_shapes(
-                    project_id=project_id,
-                    revision_id=str(active_rev["id"]),
-                    shapes=draft_shapes,
-                    editor_name=editor_name,
-                )
-                st.session_state[has_unsaved_shapes_key] = False
-                st.toast(
-                    f"Saved {len(draft_shapes)} annotation(s) to Rev {active_rev['revision_number']}",
-                    icon=":material/check_circle:",
-                )
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-    # -------------------------------------------------------------------------
-    # Scale Adjustment / Calibration Form (Universal Save Action Standard)
-    # -------------------------------------------------------------------------
-    with st.expander("Calibrate / Edit Scale", expanded=False):
-        st.caption("Adjust the real-world physical dimensions represented by this floor plan.")
-        edit_w_key = f"edit_scale_w_{active_rev['id']}"
-        edit_h_key = f"edit_scale_h_{active_rev['id']}"
-        edit_u_key = f"edit_scale_u_{active_rev['id']}"
-        edit_n_key = f"edit_scale_n_{active_rev['id']}"
-
-        curr_unit_idx = LAYOUT_UNITS.index(unit) if unit in LAYOUT_UNITS else 0
-
-        ec1, ec2, ec3 = st.columns([1, 1, 1])
-        with ec1:
-            new_w = st.number_input(
-                "Width",
-                min_value=0.01,
-                value=float(active_rev["width_value"]),
-                step=1.0,
-                format="%.2f",
-                key=edit_w_key,
-            )
-        with ec2:
-            new_h = st.number_input(
-                "Height",
-                min_value=0.01,
-                value=float(active_rev["height_value"]),
-                step=1.0,
-                format="%.2f",
-                key=edit_h_key,
-            )
-        with ec3:
-            new_unit = st.selectbox(
-                "Unit",
-                LAYOUT_UNITS,
-                index=curr_unit_idx,
-                key=edit_u_key,
-            )
-
-        new_notes = st.text_input(
-            "Revision notes",
-            value=str(active_rev.get("notes") or ""),
-            key=edit_n_key,
-        )
-
-        scale_changed = (
-            abs(new_w - float(active_rev["width_value"])) > 1e-4
-            or abs(new_h - float(active_rev["height_value"])) > 1e-4
-            or new_unit != unit
-            or new_notes != str(active_rev.get("notes") or "")
-        )
-
-        fc1, fc2, fc3 = st.columns([3, 1, 1], vertical_alignment="center")
-        with fc1:
-            if scale_changed:
-                st.markdown(":orange[:material/warning: **Unsaved scale changes**]")
-        with fc2:
-            if st.button("Undo", icon=":material/undo:", disabled=not scale_changed, key=f"undo_scale_{active_rev['id']}"):
-                st.rerun()
-        with fc3:
-            if st.button(
-                "Save & Refresh",
-                type="primary",
-                icon=":material/save:",
-                key=f"save_scale_{active_rev['id']}",
-            ):
-                if not editor_name:
-                    st.error("Please enter Current editor attribution.")
-                    return
-                try:
-                    update_layout_revision_scale(
-                        project_id=project_id,
-                        revision_id=str(active_rev["id"]),
-                        width_value=new_w,
-                        height_value=new_h,
-                        unit=new_unit,
-                        notes=new_notes,
-                        editor_name=editor_name,
-                    )
-                    st.toast("Layout scale updated successfully", icon=":material/check_circle:")
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
-
-    # Revision History & Management
-    with st.expander("Revision History & Management", expanded=False):
-        st.markdown("##### All revisions for this layout")
-        rev_rows = []
-        for r in revisions:
-            rev_rows.append(
-                {
-                    "Rev": f"Rev {r['revision_number']}",
-                    "Scale": f"{r['width_value']:g} × {r['height_value']:g} {r['unit']}",
-                    "Dimensions (in)": f"{r['scale_width_in']:,.0f} × {r['scale_height_in']:,.0f} in",
-                    "Resolution": f"{r['image_width_px']} × {r['image_height_px']} px",
-                    "AutoCAD Source": r.get("cad_file_name") or ("CAD Link" if r.get("cad_web_url") else "—"),
-                    "Shapes": r.get("shape_count", 0),
-                    "Author": r["created_by"] or "Unknown",
-                    "Date": str(r["created_at"])[:19].replace("T", " "),
-                    "Notes": r["notes"],
-                }
-            )
-        st.dataframe(pd.DataFrame(rev_rows), hide_index=True, width="stretch")
-
-        if len(revisions) > 1:
-            st.markdown("---")
-            if st.button(
-                f"Delete Rev {active_rev['revision_number']}",
-                icon=":material/delete:",
-                key=f"btn_open_del_rev_{active_rev['id']}",
-                help="Delete only this revision while preserving other revisions.",
-            ):
-                _delete_revision_dialog(project_id, current_layout["name"], active_rev, editor_name)
-
-    # Layout Settings & Deletion Expander
-    with st.expander("Layout Settings & Deletion", expanded=False):
-        edit_lname = st.text_input(
-            "Layout name",
-            value=str(current_layout["name"]),
-            key=f"edit_layout_name_{current_layout['id']}",
-        )
-        edit_ldesc = st.text_area(
-            "Layout description",
-            value=str(current_layout.get("description") or ""),
-            key=f"edit_layout_desc_{current_layout['id']}",
-        )
-        col_save_l, col_del_l = st.columns([1, 1])
-        with col_save_l:
-            if st.button("Save layout details", icon=":material/save:", key=f"save_layout_meta_{current_layout['id']}"):
-                if not editor_name:
-                    st.error("Please enter Current editor attribution.")
-                    return
-                try:
-                    update_layout(project_id, str(current_layout["id"]), edit_lname, edit_ldesc, editor_name)
-                    st.toast("Layout details updated", icon=":material/check_circle:")
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
-        with col_del_l:
-            if st.button(
-                "Delete layout...",
-                icon=":material/delete_forever:",
-                key=f"btn_open_del_layout_{current_layout['id']}",
-                help="Permanently delete this entire layout, its revisions, and all owned uploads.",
-            ):
-                _delete_layout_dialog(project_id, current_layout, editor_name)
-
-    # Universal History Expander at bottom
-    with st.expander("History", expanded=False):
-        history_df = audit_history(project_id, table_name="Layouts", limit=50)
-        if history_df.empty:
-            st.caption("No Layout history recorded yet.")
-        else:
-            selectable_dataframe(
-                history_df.drop(columns=["details"], errors="ignore"),
-                key=f"layout_audit_history_{project_id}",
-                hide_index=True,
-                column_config={
-                    "action": "Action",
-                    "row_count": "Count",
-                    "editor_name": "Editor",
-                    "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
-                    ),
-                },
-            )

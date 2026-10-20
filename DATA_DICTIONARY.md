@@ -1611,3 +1611,53 @@ Future issued-document generation and approval (not implemented)
        - Provides a red destructive confirmation button (`key="destructive_confirm_delete_project_{target_project_id}"`).
        - On confirmation: calls `delete_project()`, clears session state references (`project_id`, `scenario_id`), redirects to the next available project (or empty state if no projects remain), displays a toast `"Project deleted"`, and triggers `st.rerun()`.
 
+### Unified Lucidchart-Style Pin Map Workspace, Scaled Canvas, and Layer Manager
+
+- **Proposed by:** Project Owner & Antigravity
+- **Date recorded:** October 16, 2026
+- **Approval status:** Approved by project owner on October 16, 2026.
+- **Purpose:** Unify the Pin Map and Layouts tabs into a single high-performance, Lucidchart-comparable top-down engineering workspace (`app_pages/pin_map.py`) capable of smoothly rendering and manipulating 2,500–20,000+ shapes via an HTML5 2D `<canvas>` engine with spatial indexing, on-canvas physical scale rulers/gridlines/HUD/2-point calibration, a full Layer Manager (show/hide, lock/unlock, opacity, Z-order, custom + default engineering layers), smart connectors/arrows for information and material flow, manufacturing stencil libraries (workstation pitches, operators, screens, conveyors, racks, callouts), multi-select/group/align/distribute/undo-redo, and live PAAG & Yamazumi data overlays with an inspection/Linear Flow drawer.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects `projects`, `planning_scenarios`, `layout_plans`, `layout_revisions`, `layout_layers`, `layout_shapes`, `yamazumi_pitches` (and through pitches to `work_elements` in Process at a Glance and `assembly_sections` in Fishbone), and `equipment_assets` / `project_equipment`.
+  2. *Critical thread relationship:* Connects to the 2D Plant Layouts and derived Pin Map layers of the critical thread (*Product Architecture -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> 2D Plant Layouts & Pin Map*).
+     - `layout_layers.revision_id -> layout_revisions.id -> layout_plans.project_id -> projects.id`
+     - `layout_shapes.layer_id -> layout_layers.id`
+     - `layout_shapes.pitch_id -> yamazumi_pitches.id` (linking placed workstation shapes directly to scenario Yamazumi pitches and their assigned Process at a Glance `work_elements`).
+  3. *Scope:* Base floor plans (`layout_plans`, `layout_revisions`) are project-wide, while the unified Pin Map workspace overlays active-scenario Yamazumi & Process at a Glance metrics (cycle time vs. takt, operator count, step count, Process step inspection drawer, and Linear Flow Cards drawer) and supports optional `scenario_id` scoping on `layout_layers` when a layer is scenario-specific.
+  4. *Table requirement:*
+     - New table `layout_layers`:
+       - `id TEXT PRIMARY KEY` (UUID)
+       - `revision_id TEXT NOT NULL REFERENCES layout_revisions(id) ON DELETE CASCADE`
+       - `scenario_id TEXT DEFAULT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE`
+       - `name TEXT NOT NULL`
+       - `layer_type TEXT NOT NULL DEFAULT 'custom'` (`'facility'`, `'pitches'`, `'operators_screens'`, `'information_flow'`, `'material_flow'`, `'equipment'`, `'safety_ergo'`, `'custom'`)
+       - `visible INTEGER NOT NULL DEFAULT 1`
+       - `locked INTEGER NOT NULL DEFAULT 0`
+       - `opacity REAL NOT NULL DEFAULT 1.0`
+       - `z_index INTEGER NOT NULL DEFAULT 0`
+       - `color TEXT NOT NULL DEFAULT '#2563EB'`
+       - `created_at TEXT NOT NULL`
+       - `updated_at TEXT NOT NULL`
+     - Extended `layout_shapes`:
+       - `layer_id TEXT DEFAULT NULL REFERENCES layout_layers(id) ON DELETE SET NULL`
+       - `z_index INTEGER NOT NULL DEFAULT 0`
+       - `group_id TEXT NOT NULL DEFAULT ''`
+       - `locked INTEGER NOT NULL DEFAULT 0`
+       - `source_shape_id TEXT DEFAULT NULL REFERENCES layout_shapes(id) ON DELETE SET NULL`
+       - `target_shape_id TEXT DEFAULT NULL REFERENCES layout_shapes(id) ON DELETE SET NULL`
+       - Extended `style_json` storing connector ports (`source_port`, `target_port`), routing mode (`orthogonal`, `curved`, `straight`), line dash/arrowheads, flow animation, waypoints, stencil subtype, and operator/screen metadata.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - Scope Badges: `page_title_with_scope()` indicating project-wide layout foundation + active scenario Pin Map overlays.
+     - Universal Save Action Standard: client-side interactive canvas state with explicit **Save & Sync Canvas** button and batched delta sync so dragging/selecting shapes runs at 60 FPS without triggering Python reruns on every mouse move.
+     - Universal Deletion Standard: confirmed deletion dialogs for layouts, revisions, and layers; in-canvas shape deletion with `Ctrl+Z` / `Ctrl+Y` undo/redo support.
+     - Universal Audit Trail & History Display Standard: `record_audit_event()` with Current editor attribution and bottom `audit_history()` expander.
+
+      - Extended `layout_shapes.style_json` (Pin Map v8): normalized polygon points (`points`), fill opacity (`fill_opacity`), text rotation (`text_rotation`: `0`, `90`, `-90`, `180`), text alignment (`text_align`), font weight (`font_weight`), and area header badges (`area_code`, `area_pills`).
+      - New table `layout_custom_stencils` (project-wide saved custom shapes library):
+        - `id TEXT PRIMARY KEY` (UUID)
+        - `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`
+        - `name TEXT NOT NULL`
+        - `category TEXT NOT NULL DEFAULT 'Saved Shapes'`
+        - `stencil_json TEXT NOT NULL DEFAULT '{}'`
+        - `created_at TEXT NOT NULL`
+        - `updated_at TEXT NOT NULL`

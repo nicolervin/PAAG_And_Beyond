@@ -770,17 +770,8 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertEqual(linked_labels[:4], expected)
 
         pin_map_app = self.run_page("app_pages/pin_map.py")
-        pin_map_areas = next(
-            widget
-            for widget in pin_map_app.multiselect
-            if widget.label == "Yamazumi areas"
-        )
-        linked_labels = [
-            option.split("Fishbone: ", 1)[1]
-            for option in pin_map_areas.options
-            if "Fishbone: " in option
-        ]
-        self.assertEqual(linked_labels[:4], expected)
+        self.assertEqual([], list(pin_map_app.exception))
+        self.assertTrue(bool(pin_map_app.session_state["active_layout_id"]))
 
     def test_fishbone_framework_walk_order_and_indentation_are_unchanged(self) -> None:
         child_id = store.add_assembly_section(
