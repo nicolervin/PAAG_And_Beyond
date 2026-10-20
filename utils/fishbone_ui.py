@@ -15,6 +15,7 @@ from utils.store import (
 
 ALL_ACTIVE_SECTIONS = "__all_active_sections__"
 FISHBONE_LINKED_PAGES = {
+    "Fishbone",
     "Parts to fishbone",
     "Yamazumi",
     "Process at a Glance",
@@ -342,7 +343,7 @@ def render_fishbone_sidebar_context(
     )
     parent.caption("Fishbone view")
     parent.markdown(f"**{context}**")
-    if page_title == "Parts to fishbone" or not valid_ids:
+    if page_title in {"Parts to fishbone", "Fishbone"} or not valid_ids:
         return
 
     options = list(valid_ids)

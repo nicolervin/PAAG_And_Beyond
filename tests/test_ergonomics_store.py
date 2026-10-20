@@ -1576,6 +1576,29 @@ class ErgonomicsStoreTests(unittest.TestCase):
         # Legacy unlinked row must be deleted
         self.assertTrue(reviews_df[reviews_df["id"] == legacy_id].empty)
 
+    def test_fishbone_canvas_delete_clears_or_repoints_process_part_options(self) -> None:
+        assignment_id = f"assignment-{self.part_id}"
+        store.set_process_part_option_handling_type(
+            self.project_id,
+            self.scenario_id,
+            self.option_id,
+            "Consume",
+            assignment_id,
+        )
+        res = store.save_fishbone_canvas_draft(
+            project_id=self.project_id,
+            positions={},
+            deleted_assignment_ids=[assignment_id],
+            editor_name="Tester",
+        )
+        self.assertEqual(res["assignments_deleted"], 1)
+        option_row = store.query(
+            "SELECT handling_type, fishbone_assignment_id FROM process_part_options WHERE id=?",
+            (self.option_id,),
+        )[0]
+        self.assertIsNone(option_row["handling_type"])
+        self.assertIsNone(option_row["fishbone_assignment_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

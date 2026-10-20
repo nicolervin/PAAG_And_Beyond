@@ -5,7 +5,9 @@ or authored from scratch per official model, with gap reconciliation against the
 and Fishbone diagram, and a Properties inspector panel.
 """
 
+import csv
 import io
+import re
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,6 +22,9 @@ from utils.scope_ui import page_title_with_scope
 from utils.store import (
     add_project_model,
     audit_history,
+    check_group_number_conflicts,
+    clean_bom_cell_text,
+    clear_model_boms,
     delete_bom_rows,
     detect_unexpanded_subassemblies,
     expand_subassembly_items,
@@ -27,13 +32,17 @@ from utils.store import (
     get_live_bom_editor_items,
     get_manual_model_bom,
     get_model_level1_assemblies,
+    is_drawing_group,
+    is_piece_part,
     move_bom_rows_down,
     move_bom_rows_up,
     pits_bom_model_tree,
+    predict_model_bom_from_features,
     project_models,
     query,
     save_manual_model_bom,
     sync_builder_inputs_to_items,
+    sync_group_parts_to_models,
 )
 from utils.table_filters import (
     _EDITOR_INSTANCE_MARKER,
@@ -43,9 +52,9 @@ from utils.table_filters import (
 )
 from utils.table_ui import format_clean_number
 
-page_title_with_scope("Model Tree", scope="project")
+page_title_with_scope("BOM", scope="project")
 st.caption(
-    "Interactive product structure and CAD-style Model Tree by official model, "
+    "Interactive product structure and CAD-style BOM tree by official model, "
     "with BOM authoring from scratch and gap reconciliation against the Parts Catalog and Fishbone diagram."
 )
 
@@ -89,7 +98,7 @@ active_models = (
     else models_df
 )
 for _, row in active_models.iterrows():
-    disp = str(row.get("display_name") or "").strip()
+    disp = " ".join(str(row.get("display_name") or row.get("description") or "").split())
     num = str(row.get("model_number") or "").strip()
     label = f"{num} · {disp}".rstrip(" ·") if disp else num
     model_options[str(row["id"])] = label
@@ -179,7 +188,7 @@ def on_cad_tree_select() -> None:
 
 # Top tabs: View vs Author
 tab_view, tab_author = st.tabs([
-    "🌲 View Model Tree",
+    "🌲 View BOM",
     "✏️ Build / Author BOM from Scratch",
 ])
 
@@ -339,7 +348,7 @@ with tab_view:
                 for r in roots:
                     check_matches(r)
 
-                def render_expander_branch(node: dict[str, Any], expand_all: bool) -> None:
+                def render_expander_branch(node: dict[str, Any], expand_all: bool, path: str = "0") -> None:
                     if has_filter and not descendant_matches.get(node["id"], False):
                         return
                     has_children = bool(node.get("children"))
@@ -360,12 +369,13 @@ with tab_view:
                     photo_badge = " 📷" if has_photo else ""
                     match_badge = " 🔍 MATCH" if self_matches else ""
 
+                    base_child_trk = re.sub(r"#\d+$", "", str(node.get("child_tracker") or "").strip())
                     has_distinct_trk = bool(
-                        node.get("child_tracker")
-                        and str(node["child_tracker"]).strip() != str(node.get("part_number") or "").strip()
+                        base_child_trk
+                        and base_child_trk != str(node.get("part_number") or "").strip()
                     )
-                    trk_bracket = f" [{node['child_tracker']}]" if has_distinct_trk else ""
-                    trk_caption = f" · Tracker #{node['child_tracker']}" if has_distinct_trk else ""
+                    trk_bracket = f" [{base_child_trk}]" if has_distinct_trk else ""
+                    trk_caption = f" · Tracker #{base_child_trk}" if has_distinct_trk else ""
 
                     if has_children:
                         sub_count = len(node["children"])
@@ -376,14 +386,14 @@ with tab_view:
                         with st.expander(expander_title, expanded=is_expanded):
                             c_btn, c_badge = st.columns([1.2, 4])
                             with c_btn:
-                                if st.button("Inspect properties", key=f"exp_insp_{node['id']}", type="primary" if is_active else "secondary"):
+                                if st.button("Inspect properties", key=f"exp_insp_{path}_{node['id']}", type="primary" if is_active else "secondary"):
                                     st.session_state["selected_model_tree_node_id"] = node["id"]
                                     st.rerun()
                             with c_badge:
                                 st.caption(f"Status: {status_txt}{trk_caption}")
 
-                            for child in node["children"]:
-                                render_expander_branch(child, expand_all)
+                            for c_idx, child in enumerate(node["children"]):
+                                render_expander_branch(child, expand_all, f"{path}_{c_idx}")
                     else:
                         indent_px = max(0, (d - 1) * 16)
                         c_item, c_act = st.columns([5, 1])
@@ -401,13 +411,13 @@ with tab_view:
                                 unsafe_allow_html=True,
                             )
                         with c_act:
-                            if st.button("Inspect", key=f"leaf_insp_{node['id']}", type="primary" if is_active else "secondary"):
+                            if st.button("Inspect", key=f"leaf_insp_{path}_{node['id']}", type="primary" if is_active else "secondary"):
                                 st.session_state["selected_model_tree_node_id"] = node["id"]
                                 st.rerun()
 
                 with st.container(height=560):
-                    for r in roots:
-                        render_expander_branch(r, expand_all_native)
+                    for r_idx, r in enumerate(roots):
+                        render_expander_branch(r, expand_all_native, f"r{r_idx}")
 
             with tab_table:
                 if not filtered_nodes:
@@ -436,13 +446,14 @@ with tab_view:
                         has_img = bool(img_p and Path(str(img_p)).is_file())
                         photo_uri = part_thumbnail(img_p) if has_img else None
 
+                        n_base_trk = re.sub(r"#\d+$", "", str(n.get("child_tracker") or "").strip())
                         table_rows.append({
                             "Photo": photo_uri,
                             "Tree Structure": f"{prefix}{n['part_number']}",
                             "Description": n["description"],
                             "Level": f"L{d}",
                             "PITS Qty": round(float(n["quantity"]), 5),
-                            "PITS Tracker": f"#{n['child_tracker']}" if n.get("child_tracker") and str(n["child_tracker"]).strip() != str(n.get("part_number") or "").strip() else "—",
+                            "PITS Tracker": f"#{n_base_trk}" if n_base_trk and n_base_trk != str(n.get("part_number") or "").strip() else "—",
                             "Fishbone Status": fb_badge,
                             "Parts Catalog": cat_badge,
                         })
@@ -525,12 +536,14 @@ with tab_view:
                     st.markdown("##### :material/account_tree: BOM Hierarchy")
                     p_col1, p_col2 = st.columns(2)
                     with p_col1:
-                        distinct_trk = selected_node.get("child_tracker") if (selected_node.get("child_tracker") and str(selected_node["child_tracker"]).strip() != str(selected_node.get("part_number") or "").strip()) else ""
+                        sel_base_trk = re.sub(r"#\d+$", "", str(selected_node.get("child_tracker") or "").strip())
+                        distinct_trk = sel_base_trk if (sel_base_trk and sel_base_trk != str(selected_node.get("part_number") or "").strip()) else ""
                         st.write("**Hierarchy Level:**", f"Level {selected_node['depth']}")
                         st.write("**Tracker / ID:**", f"#{distinct_trk}" if distinct_trk else "—")
                         st.write("**Quantity:**", format_clean_number(selected_node["quantity"], decimal_places=5))
                     with p_col2:
-                        st.write("**Parent Tracker:**", f"#{selected_node['parent_tracker']}" if selected_node['parent_tracker'] else "— (Root)")
+                        sel_parent_trk = re.sub(r"#\d+$", "", str(selected_node.get("parent_tracker") or "").strip())
+                        st.write("**Parent Tracker:**", f"#{sel_parent_trk}" if sel_parent_trk else "— (Root)")
                         st.write("**Source Row:**", f"Row #{selected_node['source_row']}")
                         st.write("**Review Status:**", selected_node["review_status"] or "Needs review")
 
@@ -589,7 +602,7 @@ def generate_bom_excel_template(items: list[dict[str, Any]] | None = None) -> by
 
     valid_items = [
         it for it in (items or [])
-        if str(it.get("part_number") or "").strip() or str(it.get("description") or "").strip()
+        if clean_bom_cell_text(it.get("part_number")) or clean_bom_cell_text(it.get("description"))
     ]
 
     if valid_items:
@@ -599,8 +612,8 @@ def generate_bom_excel_template(items: list[dict[str, Any]] | None = None) -> by
                 lvl = max(1, min(11, lvl))
             except (TypeError, ValueError):
                 lvl = 1
-            pn = str(it.get("part_number") or "").strip()
-            desc = str(it.get("description") or "").strip()
+            pn = clean_bom_cell_text(it.get("part_number"))
+            desc = " ".join(clean_bom_cell_text(it.get("description")).split())
             try:
                 qty = float(it.get("quantity", 1.0) or 1.0)
                 qty = max(0.00001, round(qty, 5))
@@ -647,8 +660,8 @@ def parse_uploaded_bom_file(uploaded_file: Any) -> list[dict[str, Any]]:
 
     items: list[dict[str, Any]] = []
     for _, r in df.iterrows():
-        pn = str(r.get(col_map.get("part_number", "Part #"), "") or "").strip()
-        desc = str(r.get(col_map.get("description", "Description"), "") or "").strip()
+        pn = clean_bom_cell_text(r.get(col_map.get("part_number", "Part #")))
+        desc = " ".join(clean_bom_cell_text(r.get(col_map.get("description", "Description"))).split())
         if not pn and not desc:
             continue
         lvl_raw = r.get(col_map.get("level", "Level"))
@@ -673,6 +686,110 @@ def parse_uploaded_bom_file(uploaded_file: Any) -> list[dict[str, Any]]:
     return items
 
 
+def parse_pasted_bom_text(text: str) -> list[dict[str, Any]]:
+    """Parse clipboard text (tab-separated or comma-separated from Excel) into normalized BOM row items.
+
+    Handles empty lines, header rows, multiline quoted descriptions, and converts any 'nan'/bogus null values to empty string.
+    """
+    if not text or not text.strip():
+        return []
+
+    # Detect delimiter: Excel clipboard uses tab; CSV uses comma
+    first_line = text.split("\n", 1)[0]
+    delim = "\t" if "\t" in first_line else ("," if "," in first_line else "\t")
+
+    try:
+        reader = csv.reader(io.StringIO(text.strip()), delimiter=delim)
+        raw_rows: list[list[str]] = []
+        for row in reader:
+            if not any(clean_bom_cell_text(cell) for cell in row):
+                continue
+            raw_rows.append([clean_bom_cell_text(cell) for cell in row])
+    except Exception:
+        lines = [line for line in text.splitlines() if line.strip()]
+        raw_rows = [[clean_bom_cell_text(c) for c in line.split(delim)] for line in lines]
+
+    if not raw_rows:
+        return []
+
+    header = [c.lower() for c in raw_rows[0]]
+    has_header = False
+    col_map = {"level": -1, "part_number": -1, "description": -1, "quantity": -1}
+
+    for idx, col_name in enumerate(header):
+        if "level" in col_name or col_name in ("lvl", "l"):
+            col_map["level"] = idx
+            has_header = True
+        elif any(k in col_name for k in ("part", "pn", "item", "number", "#", "p/n")):
+            col_map["part_number"] = idx
+            has_header = True
+        elif any(k in col_name for k in ("desc", "name", "title")):
+            col_map["description"] = idx
+            has_header = True
+        elif any(k in col_name for k in ("qty", "quantity", "count", "amount")):
+            col_map["quantity"] = idx
+            has_header = True
+
+    # If has_header is True but part_number was not explicitly matched, pick first unmapped column
+    if has_header and col_map["part_number"] == -1:
+        for i in range(len(header)):
+            if i not in (col_map["level"], col_map["description"], col_map["quantity"]):
+                col_map["part_number"] = i
+                break
+
+    start_idx = 1 if has_header else 0
+    items: list[dict[str, Any]] = []
+
+    for r in raw_rows[start_idx:]:
+        if not any(r):
+            continue
+
+        if has_header:
+            pn = r[col_map["part_number"]] if 0 <= col_map["part_number"] < len(r) else ""
+            desc = r[col_map["description"]] if 0 <= col_map["description"] < len(r) else ""
+            lvl_val = r[col_map["level"]] if 0 <= col_map["level"] < len(r) else ""
+            qty_val = r[col_map["quantity"]] if 0 <= col_map["quantity"] < len(r) else ""
+        else:
+            if len(r) >= 4:
+                lvl_val, pn, desc, qty_val = r[0], r[1], r[2], r[3]
+            elif len(r) == 3:
+                if r[0].isdigit() and 1 <= int(r[0]) <= 11:
+                    lvl_val, pn, desc, qty_val = r[0], r[1], r[2], "1.0"
+                else:
+                    lvl_val, pn, desc, qty_val = "2", r[0], r[1], r[2]
+            elif len(r) == 2:
+                lvl_val, pn, desc, qty_val = "2", r[0], r[1], "1.0"
+            else:
+                lvl_val, pn, desc, qty_val = "2", r[0], "", "1.0"
+
+        pn = clean_bom_cell_text(pn)
+        desc = " ".join(clean_bom_cell_text(desc).split())
+        if not pn and not desc:
+            continue
+
+        try:
+            lvl = int(float(lvl_val)) if lvl_val else 2
+            lvl = max(1, min(11, lvl))
+        except (TypeError, ValueError):
+            lvl = 2
+
+        try:
+            qty = float(qty_val) if qty_val else 1.0
+            qty = max(0.00001, round(qty, 5))
+        except (TypeError, ValueError):
+            qty = 1.0
+
+        items.append({
+            "level": lvl,
+            "part_number": pn,
+            "description": desc,
+            "quantity": qty,
+            "_uid": str(uuid4())[:8],
+        })
+
+    return items
+
+
 def build_live_assembly_hierarchy(
     items: list[dict[str, Any]],
     catalog_map: dict[str, Any],
@@ -682,19 +799,25 @@ def build_live_assembly_hierarchy(
     stack: list[tuple[int, dict[str, Any]]] = []
     warnings: list[str] = []
 
-    valid_items = [it for it in items if str(it.get("part_number") or "").strip() or str(it.get("description") or "").strip()]
+    valid_items = [it for it in items if clean_bom_cell_text(it.get("part_number")) or clean_bom_cell_text(it.get("description"))]
 
     if valid_items and int(valid_items[0].get("level", 1) or 1) != 1:
         warnings.append("Row 1 must be Level 1 (Top-Level Model Assembly).")
 
     prev_lvl = 0
     for idx, it in enumerate(items):
-        pn = str(it.get("part_number") or "").strip()
-        desc = str(it.get("description") or "").strip()
+        pn = clean_bom_cell_text(it.get("part_number"))
+        desc = clean_bom_cell_text(it.get("description"))
         if not pn and not desc:
             continue
-        qty = round(float(it.get("quantity", 1.0) or 1.0), 5)
-        lvl = int(it.get("level", 1) or 1)
+        try:
+            qty = round(float(it.get("quantity", 1.0) or 1.0), 5)
+        except (TypeError, ValueError):
+            qty = 1.0
+        try:
+            lvl = int(it.get("level", 1) or 1)
+        except (TypeError, ValueError):
+            lvl = 1
 
         if not pn:
             warnings.append(f"Row {idx + 1}: Missing Part Number.")
@@ -719,7 +842,7 @@ def build_live_assembly_hierarchy(
             "image_path": cat_info.get("image_path", ""),
             "factory_nickname": cat_info.get("nickname", ""),
             "children": [],
-            "is_assembly": (lvl == 1),
+            "is_assembly": (lvl == 1) or is_drawing_group(pn),
         }
 
         while stack and stack[-1][0] >= lvl:
@@ -747,14 +870,24 @@ def copy_bom_dialog(
 ) -> None:
     models_df = project_models(proj_id)
     available = []
+    curr_model_label = curr_model_id
     if not models_df.empty:
+        curr_m_row = models_df.loc[models_df["id"].astype(str) == str(curr_model_id)]
+        if not curr_m_row.empty:
+            curr_row = curr_m_row.iloc[0]
+            c_num = str(curr_row.get("model_number") or curr_model_id).strip()
+            c_disp = str(curr_row.get("display_name") or curr_row.get("name") or "").strip()
+            curr_model_label = f"{c_num} · {c_disp}".rstrip(" ·") if c_disp else c_num
+
         for _, m_row in models_df.iterrows():
             mid = str(m_row["id"])
             if mid == curr_model_id:
                 continue
             b = get_manual_model_bom(proj_id, mid)
             if b:
-                available.append((mid, str(m_row.get("model_number") or mid), b))
+                m_num = str(m_row.get("model_number") or mid).strip()
+                m_disp = str(m_row.get("display_name") or m_row.get("name") or "").strip()
+                available.append((mid, m_num, m_disp, b))
 
     if not available:
         st.info("No other models in this project currently have a saved BOM structure to copy from.")
@@ -762,10 +895,15 @@ def copy_bom_dialog(
             st.rerun()
         return
 
-    labels = {sid: f"{m_num} ({len(b)} items)" for sid, m_num, b in available}
+    st.markdown(f"#### Copy BOM for **{curr_model_label}**")
+
+    labels = {
+        sid: f"{m_num} · {m_disp} ({len(b)} items)" if m_disp else f"{m_num} ({len(b)} items)"
+        for sid, m_num, m_disp, b in available
+    }
     sel_src = st.selectbox(
         "Source Model *",
-        options=[sid for sid, _, _ in available],
+        options=[sid for sid, _, _, _ in available],
         format_func=lambda s: labels.get(s, s),
         help="Select the model whose BOM hierarchy will be copied as a template.",
     )
@@ -773,39 +911,150 @@ def copy_bom_dialog(
     src_data = next((item for item in available if item[0] == sel_src), None)
     if not src_data:
         return
-    _, src_num, src_bom = src_data
+    _, src_num, src_disp, src_bom = src_data
+    src_label = f"{src_num} · {src_disp}".rstrip(" ·") if src_disp else src_num
     src_lvl1 = next((r for r in src_bom if r.get("level") == 1), None)
     src_lvl1_pn = str(src_lvl1.get("part_number") or "") if src_lvl1 else ""
 
-    st.markdown(
+    st.info(
+        f":material/account_tree: **Source Model:** **{src_label}**\n\n"
         f"**Source Top-Level Assembly (Level 1):** `{src_lvl1_pn}`\n\n"
         f"This model will inherit {len(src_bom) - 1} component rows from levels 2+.\n\n"
         f":material/info: *Each model must have a unique Level 1 Assembly Number.*"
     )
 
-    new_lvl1 = st.text_input(
-        "New Level 1 Assembly Number *",
-        value="",
-        placeholder=f"e.g. {src_lvl1_pn}_NEW",
-        help="Enter the distinct top-level assembly or group number for this model.",
-        key="copy_new_lvl1_input",
-    ).strip()
+    st.markdown("##### :material/tag: Level 1 Assembly Number *")
+    st.caption(
+        "Specify the top-level assembly part number for this model. "
+        "You can search and select an assembly from the Parts Catalog, or type a part number directly."
+    )
 
-    new_desc = st.text_input(
-        "New Level 1 Description (optional)",
-        value="",
-        placeholder="Assembly description (optional)",
-        key="copy_new_desc_input",
-    ).strip()
+    cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=? ORDER BY part_number", (proj_id,))
+    cat_parts_dict = {
+        str(r["part_number"]).strip(): str(r["description"] or "").strip()
+        for r in cat_rows
+        if clean_bom_cell_text(r.get("part_number"))
+    }
+    cat_options = ["-- Select from Parts Catalog --"] + [
+        f"{pn} · {desc}".rstrip(" ·") for pn, desc in cat_parts_dict.items()
+    ]
 
-    c1, c2 = st.columns([1, 1.5])
+    pn_key = f"copy_lvl1_pn_{curr_model_id}"
+    desc_key = f"copy_lvl1_desc_{curr_model_id}"
+    last_sel_key = f"_last_copy_cat_select_{curr_model_id}"
+    cat_sel_key = f"copy_cat_select_{curr_model_id}"
+    show_all_key = f"show_all_copy_prev_{curr_model_id}"
+
+    if pn_key not in st.session_state:
+        curr_draft = st.session_state.get(d_key, [])
+        existing_l1 = next((r for r in curr_draft if r.get("level") == 1 and clean_bom_cell_text(r.get("part_number"))), None)
+        if existing_l1 and not str(existing_l1.get("part_number", "")).endswith("_TOP"):
+            st.session_state[pn_key] = str(existing_l1.get("part_number") or "").strip()
+            st.session_state[desc_key] = str(existing_l1.get("description") or "").strip()
+        else:
+            st.session_state[pn_key] = ""
+            st.session_state[desc_key] = ""
+
+    sel_cat = st.selectbox(
+        "Search & Choose from Parts Catalog",
+        options=cat_options,
+        key=cat_sel_key,
+        help="Search the Parts Catalog by part number or description to populate the Level 1 assembly.",
+    )
+
+    if sel_cat != "-- Select from Parts Catalog --":
+        if sel_cat != st.session_state.get(last_sel_key):
+            selected_pn = sel_cat.split(" · ")[0].strip()
+            selected_desc = cat_parts_dict.get(selected_pn, "")
+            st.session_state[last_sel_key] = sel_cat
+            st.session_state[pn_key] = selected_pn
+            st.session_state[desc_key] = selected_desc
+    else:
+        st.session_state[last_sel_key] = ""
+
+    c_pn, c_desc = st.columns([1, 1.4], gap="small")
+    with c_pn:
+        new_lvl1 = clean_bom_cell_text(st.text_input(
+            "New Level 1 Assembly Number *",
+            key=pn_key,
+            placeholder=f"e.g. {src_lvl1_pn}_NEW",
+            help="Enter the distinct top-level assembly or group number for this model.",
+        ))
+    with c_desc:
+        new_desc = clean_bom_cell_text(st.text_input(
+            "New Level 1 Description (optional)",
+            key=desc_key,
+            placeholder="Assembly description (optional)",
+            help="Description for the Level 1 assembly.",
+        ))
+
+    st.markdown(f"##### Preview Copied Structure ({len(src_bom)} items)")
+    prev_copied = []
+    first_l1_done_prev = False
+    for it in src_bom:
+        lvl = int(it.get("level", 1) or 1)
+        if lvl == 1 and not first_l1_done_prev:
+            prev_copied.append({
+                "level": 1,
+                "part_number": new_lvl1 or "(Required: enter Level 1 assembly above)",
+                "description": new_desc or "",
+                "quantity": round(float(it.get("quantity", 1.0) or 1.0), 5),
+            })
+            first_l1_done_prev = True
+        else:
+            prev_copied.append({
+                "level": lvl if lvl > 1 else 2,
+                "part_number": clean_bom_cell_text(it.get("part_number")),
+                "description": clean_bom_cell_text(it.get("description")),
+                "quantity": round(float(it.get("quantity", 1.0) or 1.0), 5),
+            })
+
+    show_all_copy = bool(st.session_state.get(show_all_key, False))
+    display_copied = prev_copied if show_all_copy else prev_copied[:12]
+
+    prev_df = pd.DataFrame([
+        {
+            "Level": it["level"],
+            "Part #": it["part_number"],
+            "Description": it["description"],
+            "Qty": it["quantity"],
+        }
+        for it in display_copied
+    ])
+    copy_df_kwargs: dict[str, Any] = {"hide_index": True, "width": "stretch"}
+    if show_all_copy:
+        copy_df_kwargs["height"] = 320
+    st.dataframe(prev_df, **copy_df_kwargs)
+    if len(prev_copied) > 12:
+        prev_c1, prev_c2 = st.columns([2, 1], vertical_alignment="center")
+        with prev_c1:
+            if not show_all_copy:
+                st.caption(f"... and {len(prev_copied) - 12} more items.")
+            else:
+                st.caption(f"Showing all {len(prev_copied)} items.")
+        with prev_c2:
+            if not show_all_copy:
+                if st.button(f"👁️ View all ({len(prev_copied)})", key=f"btn_expand_copy_{curr_model_id}", help="Show all rows in a scrollable preview"):
+                    st.session_state[show_all_key] = True
+                    st.rerun(scope="fragment")
+            else:
+                if st.button("Collapse preview", key=f"btn_collapse_copy_{curr_model_id}", help="Show first 12 items"):
+                    st.session_state[show_all_key] = False
+                    st.rerun(scope="fragment")
+
+    c1, c2 = st.columns([1, 1.5], gap="small")
     with c1:
         if st.button("Cancel", key="cancel_copy_dlg"):
+            st.session_state.pop(pn_key, None)
+            st.session_state.pop(desc_key, None)
+            st.session_state.pop(last_sel_key, None)
+            st.session_state.pop(cat_sel_key, None)
+            st.session_state.pop(show_all_key, None)
             st.rerun()
     with c2:
         if st.button("Copy to BOM Editor", type="primary", key="confirm_copy_dlg"):
             if not new_lvl1:
-                st.error("Please enter a new Level 1 Assembly Number.")
+                st.error("Level 1 Assembly Number is required. Please search the Parts Catalog or enter a part number.")
                 return
             if new_lvl1.upper() == src_lvl1_pn.upper():
                 st.error(f"Level 1 Assembly Number must be different from source model's Level 1 ('{src_lvl1_pn}').")
@@ -818,9 +1067,10 @@ def copy_bom_dialog(
                 return
 
             copied_draft = []
+            first_l1_done = False
             for it in src_bom:
                 lvl = int(it.get("level", 1) or 1)
-                if lvl == 1:
+                if lvl == 1 and not first_l1_done:
                     copied_draft.append({
                         "level": 1,
                         "part_number": new_lvl1,
@@ -828,20 +1078,27 @@ def copy_bom_dialog(
                         "quantity": round(float(it.get("quantity", 1.0) or 1.0), 5),
                         "_uid": str(uuid4())[:8],
                     })
+                    first_l1_done = True
                 else:
                     copied_draft.append({
-                        "level": lvl,
-                        "part_number": str(it.get("part_number") or ""),
-                        "description": str(it.get("description") or ""),
+                        "level": lvl if lvl > 1 else 2,
+                        "part_number": clean_bom_cell_text(it.get("part_number")),
+                        "description": clean_bom_cell_text(it.get("description")),
                         "quantity": round(float(it.get("quantity", 1.0) or 1.0), 5),
                         "_uid": str(uuid4())[:8],
                     })
 
             st.session_state[d_key] = copied_draft
             st.session_state[s_model_key] = sel_src
+            st.session_state.pop(f"_bom_predicted_{proj_id}_{curr_model_id}", None)
+            st.session_state.pop(pn_key, None)
+            st.session_state.pop(desc_key, None)
+            st.session_state.pop(last_sel_key, None)
+            st.session_state.pop(cat_sel_key, None)
+            st.session_state.pop(show_all_key, None)
             _clear_bld_widget_keys(curr_model_id)
             request_table_editor_reset(ed_logical_key)
-            st.toast(f"BOM copied from {src_num} with Level 1 assembly {new_lvl1}!", icon=":material/content_copy:")
+            st.toast(f"BOM copied from {src_label} with Level 1 assembly {new_lvl1}!", icon=":material/content_copy:")
             st.rerun()
 
 
@@ -870,6 +1127,7 @@ def _commit_bom_save(
     d_key: str,
     ed_logical_key: str,
     s_model_key: str,
+    extra_toast_msg: str = "",
 ) -> None:
     editor_name = st.session_state.get("current_editor", "")
     source_mid = st.session_state.get(s_model_key)
@@ -889,6 +1147,7 @@ def _commit_bom_save(
                 it["_uid"] = str(uuid4())[:8]
         st.session_state[d_key] = final_items
         st.session_state.pop(s_model_key, None)
+        st.session_state.pop(f"_bom_predicted_{proj_id}_{curr_model_id}", None)
         st.session_state.pop(f"_draft_modified_{curr_model_id}", None)
         st.session_state.pop(f"row_tools_idx_{curr_model_id}", None)
         st.session_state[f"bom_selected_indices_{curr_model_id}"] = set()
@@ -897,9 +1156,10 @@ def _commit_bom_save(
         request_table_editor_reset(ed_logical_key)
         feat_inf = save_res.get("features_inferred", 0)
         feat_msg = f", {feat_inf} feature rules updated" if feat_inf else ""
+        extra_suffix = f" · {extra_toast_msg}" if extra_toast_msg else ""
         st.toast(
             f"Saved {save_res['saved_count']} BOM items for {save_res['model_number']} "
-            f"({save_res['parts_created']} new parts onboarded{feat_msg})",
+            f"({save_res['parts_created']} new parts onboarded{feat_msg}){extra_suffix}",
             icon=":material/check_circle:",
         )
         st.rerun()
@@ -915,7 +1175,7 @@ def autofill_bom_dialog(
     ed_logical_key: str,
 ) -> None:
     current_items = _get_live_editor_items(curr_model_id, d_key, ed_logical_key)
-    valid_pns = [str(it.get("part_number") or "").strip() for it in current_items if str(it.get("part_number") or "").strip()]
+    valid_pns = [clean_bom_cell_text(it.get("part_number")) for it in current_items if clean_bom_cell_text(it.get("part_number"))]
     if not valid_pns:
         st.info("No parts entered in the BOM yet to analyze. Add part numbers in the editor first.")
         if st.button("Close", key="close_empty_autofill_dlg"):
@@ -931,8 +1191,8 @@ def autofill_bom_dialog(
 
     desc_matches = []
     for it in current_items:
-        pn = str(it.get("part_number") or "").strip()
-        desc = str(it.get("description") or "").strip()
+        pn = clean_bom_cell_text(it.get("part_number"))
+        desc = clean_bom_cell_text(it.get("description"))
         pn_upper = pn.upper()
         if pn and not desc and pn_upper in catalog_parts and catalog_parts[pn_upper]:
             desc_matches.append((pn, catalog_parts[pn_upper]))
@@ -976,8 +1236,8 @@ def autofill_bom_dialog(
         if st.button("Apply to Editor", type="primary", key="confirm_autofill_dlg"):
             # Apply descriptions
             for it in current_items:
-                pn = str(it.get("part_number") or "").strip().upper()
-                if pn and not str(it.get("description") or "").strip() and pn in catalog_parts and catalog_parts[pn]:
+                pn = clean_bom_cell_text(it.get("part_number")).upper()
+                if pn and not clean_bom_cell_text(it.get("description")) and pn in catalog_parts and catalog_parts[pn]:
                     it["description"] = catalog_parts[pn]
 
             # Apply subassemblies using expand_subassembly_items
@@ -1002,86 +1262,721 @@ def autofill_bom_dialog(
             st.rerun()
 
 
-@st.dialog("Expand Subassembly Groups Before Saving?")
-def save_subassembly_prompt_dialog(
+@st.dialog("📋 Paste BOM from Excel")
+def paste_bom_from_excel_dialog(
+    proj_id: str,
+    curr_model_id: str,
+    d_key: str,
+    ed_logical_key: str,
+) -> None:
+    st.markdown(
+        "Copy your BOM cells from Excel (**Ctrl+C**) and paste (**Ctrl+V**) into the box below.\n\n"
+        "Supported columns: `Level` (1–11), `Part #`, `Description`, `Qty`. "
+        "Header row is detected automatically."
+    )
+    pasted_text = st.text_area(
+        "Paste Excel data here",
+        placeholder="Level\tPart #\tDescription\tQty\n1\t999D8402G002\tMain Assembly\t1.0\n2\t999D8506P002\tBracket\t2.0",
+        height=180,
+        key=f"paste_bom_area_{curr_model_id}",
+    )
+
+    if pasted_text and pasted_text.strip():
+        parsed = parse_pasted_bom_text(pasted_text)
+        if parsed:
+            st.success(f":material/check_circle: Detected **{len(parsed)}** row(s) from clipboard:")
+            show_all_paste_key = f"show_all_paste_prev_{curr_model_id}"
+            show_all_paste = bool(st.session_state.get(show_all_paste_key, False))
+            display_parsed = parsed if show_all_paste else parsed[:10]
+
+            preview_df = pd.DataFrame([
+                {
+                    "Level": it["level"],
+                    "Part #": it["part_number"],
+                    "Description": it["description"],
+                    "Qty": it["quantity"],
+                }
+                for it in display_parsed
+            ])
+            paste_df_kwargs: dict[str, Any] = {"hide_index": True, "width": "stretch"}
+            if show_all_paste:
+                paste_df_kwargs["height"] = 320
+            st.dataframe(preview_df, **paste_df_kwargs)
+            if len(parsed) > 10:
+                pst_c1, pst_c2 = st.columns([2, 1], vertical_alignment="center")
+                with pst_c1:
+                    if not show_all_paste:
+                        st.caption(f"... and {len(parsed) - 10} more rows.")
+                    else:
+                        st.caption(f"Showing all {len(parsed)} rows.")
+                with pst_c2:
+                    if not show_all_paste:
+                        if st.button(f"👁️ View all ({len(parsed)})", key=f"btn_expand_paste_{curr_model_id}", help="Show all pasted rows in a scrollable preview"):
+                            st.session_state[show_all_paste_key] = True
+                            st.rerun(scope="fragment")
+                    else:
+                        if st.button("Collapse preview", key=f"btn_collapse_paste_{curr_model_id}", help="Show first 10 rows"):
+                            st.session_state[show_all_paste_key] = False
+                            st.rerun(scope="fragment")
+
+            c_act1, c_act2, c_act3 = st.columns([1, 1.4, 1.4], gap="small")
+            with c_act1:
+                if st.button("Cancel", key="btn_cancel_paste_dlg"):
+                    st.session_state.pop(show_all_paste_key, None)
+                    st.rerun()
+            with c_act2:
+                if st.button("Replace Editor BOM", type="primary", key="btn_replace_paste_dlg", help="Replace existing rows with pasted data"):
+                    st.session_state[d_key] = parsed
+                    st.session_state[f"_draft_modified_{curr_model_id}"] = True
+                    st.session_state.pop(show_all_paste_key, None)
+                    _clear_bld_widget_keys(curr_model_id)
+                    request_table_editor_reset(ed_logical_key)
+                    st.toast(f"Loaded {len(parsed)} rows into BOM editor!", icon=":material/check_circle:")
+                    st.rerun()
+            with c_act3:
+                if st.button("Append to BOM", key="btn_append_paste_dlg", help="Add pasted rows to bottom of current table"):
+                    current_items = _get_live_editor_items(curr_model_id, d_key, ed_logical_key)
+                    current_valid = [it for it in current_items if clean_bom_cell_text(it.get("part_number")) or clean_bom_cell_text(it.get("description"))]
+                    combined = current_valid + parsed
+                    st.session_state[d_key] = combined
+                    st.session_state[f"_draft_modified_{curr_model_id}"] = True
+                    st.session_state.pop(show_all_paste_key, None)
+                    _clear_bld_widget_keys(curr_model_id)
+                    request_table_editor_reset(ed_logical_key)
+                    st.toast(f"Appended {len(parsed)} rows to BOM editor!", icon=":material/check_circle:")
+                    st.rerun()
+        else:
+            st.warning("Could not extract any valid parts or rows from the pasted text. Please verify the columns.")
+            if st.button("Close", key="btn_close_invalid_paste"):
+                st.rerun()
+    else:
+        if st.button("Cancel", key="btn_cancel_empty_paste"):
+            st.rerun()
+
+
+@st.dialog("✨ Predict BOM from Feature Choices")
+def generate_bom_from_features_dialog(
+    proj_id: str,
+    curr_model_id: str,
+    d_key: str,
+    ed_logical_key: str,
+) -> None:
+    try:
+        prediction = predict_model_bom_from_features(proj_id, curr_model_id)
+    except Exception as e:
+        st.error(f"Error predicting BOM: {e}")
+        if st.button("Close", key="btn_close_pred_err"):
+            st.rerun()
+        return
+
+    model_num = prediction["model_number"]
+    model_name = str(prediction.get("model_name") or "").strip()
+    model_disp = f"{model_num} · {model_name}".rstrip(" ·") if model_name else model_num
+
+    tmpl_num = prediction.get("template_model_number")
+    tmpl_name = str(prediction.get("template_model_name") or "").strip()
+    tmpl_disp = f"{tmpl_num} · {tmpl_name}".rstrip(" ·") if tmpl_name else (tmpl_num or "")
+    feat_matches = prediction.get("feature_matches", [])
+    substitutions = prediction.get("substitutions", [])
+    predicted_items = prediction.get("predicted_items", [])
+
+    st.markdown(f"#### Predicted BOM for **{model_disp}**")
+
+    st.warning(
+        ":material/warning: **Disclaimer — Review Required:** "
+        "This BOM is an automated prediction based on feature choices and existing model structures. "
+        "You must still review the BOM for any inaccuracies (missing parts, extra parts, assembly levels, or quantities) before saving."
+    )
+
+    if tmpl_num:
+        st.info(
+            f":material/account_tree: **Structural Template:** Based on closest matching model **{tmpl_disp}** with "
+            f"**{len(substitutions)}** feature-based part substitution(s)."
+        )
+    else:
+        st.caption(":material/info: No existing model BOM was found to copy hierarchy from. Constructing flat Level 1/2 BOM from catalog parts.")
+
+    if feat_matches:
+        with st.expander(f":material/tune: Feature Choices ({len(feat_matches)})", expanded=False):
+            for fm in feat_matches:
+                parts_str = f" &rarr; Parts: `{', '.join(fm['matched_parts'])}`" if fm['matched_parts'] else " &rarr; *(No part rules)*"
+                st.markdown(f"• **{fm['feature_name']}**: `{fm['selected_value']}`{parts_str}")
+
+    if substitutions:
+        with st.expander(f":material/swap_horiz: Feature Part Substitutions ({len(substitutions)})", expanded=True):
+            sub_df = pd.DataFrame([
+                {
+                    "Feature": s["feature_name"],
+                    "Original Part": s["from_part"],
+                    "Replaced With": s["to_part"],
+                    "Choice": f"{s['from_value']} → {s['to_value']}",
+                }
+                for s in substitutions
+            ])
+            st.dataframe(sub_df, hide_index=True, width="stretch")
+
+    st.markdown("##### :material/tag: Level 1 Assembly Number *")
+    st.caption(
+        "Specify the top-level assembly part number for this model. "
+        "You can search and select an assembly from the Parts Catalog, or type a part number directly."
+    )
+
+    cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=? ORDER BY part_number", (proj_id,))
+    cat_parts_dict = {
+        str(r["part_number"]).strip(): str(r["description"] or "").strip()
+        for r in cat_rows
+        if clean_bom_cell_text(r.get("part_number"))
+    }
+    cat_options = ["-- Select from Parts Catalog --"] + [
+        f"{pn} · {desc}".rstrip(" ·") for pn, desc in cat_parts_dict.items()
+    ]
+
+    pn_key = f"pred_lvl1_pn_{curr_model_id}"
+    desc_key = f"pred_lvl1_desc_{curr_model_id}"
+    last_sel_key = f"_last_pred_cat_select_{curr_model_id}"
+    cat_sel_key = f"pred_cat_select_{curr_model_id}"
+
+    if pn_key not in st.session_state:
+        curr_draft = st.session_state.get(d_key, [])
+        existing_l1 = next((r for r in curr_draft if r.get("level") == 1 and clean_bom_cell_text(r.get("part_number"))), None)
+        if existing_l1 and not str(existing_l1.get("part_number", "")).endswith("_TOP"):
+            st.session_state[pn_key] = str(existing_l1.get("part_number") or "").strip()
+            st.session_state[desc_key] = str(existing_l1.get("description") or "").strip()
+        else:
+            st.session_state[pn_key] = ""
+            st.session_state[desc_key] = ""
+
+    sel_cat = st.selectbox(
+        "Search & Choose from Parts Catalog",
+        options=cat_options,
+        key=cat_sel_key,
+        help="Search the Parts Catalog by part number or description to populate the Level 1 assembly.",
+    )
+
+    if sel_cat != "-- Select from Parts Catalog --":
+        if sel_cat != st.session_state.get(last_sel_key):
+            selected_pn = sel_cat.split(" · ")[0].strip()
+            selected_desc = cat_parts_dict.get(selected_pn, "")
+            st.session_state[last_sel_key] = sel_cat
+            st.session_state[pn_key] = selected_pn
+            st.session_state[desc_key] = selected_desc
+    else:
+        st.session_state[last_sel_key] = ""
+
+    c_pn, c_desc = st.columns([1, 1.4], gap="small")
+    with c_pn:
+        lvl1_pn = clean_bom_cell_text(st.text_input(
+            "Level 1 Assembly Number *",
+            key=pn_key,
+            placeholder="e.g. 999D8842G001",
+            help="Required top-level assembly number.",
+        ))
+    with c_desc:
+        lvl1_desc = clean_bom_cell_text(st.text_input(
+            "Level 1 Description",
+            key=desc_key,
+            placeholder="e.g. Urban Coupe Final Assembly",
+            help="Description for the Level 1 assembly.",
+        ))
+
+    prev_items = [
+        dict(it)
+        for idx, it in enumerate(predicted_items)
+        if idx == 0 or not lvl1_pn or str(it.get("part_number") or "").strip().upper() != lvl1_pn.strip().upper()
+    ]
+    st.markdown(f"##### Preview Predicted Structure ({len(prev_items)} items)")
+
+    if prev_items and prev_items[0].get("level") == 1:
+        prev_items[0]["part_number"] = lvl1_pn or "(Required: enter Level 1 assembly above)"
+        prev_items[0]["description"] = lvl1_desc or ""
+
+    show_all_key = f"show_all_pred_prev_{curr_model_id}"
+    show_all = bool(st.session_state.get(show_all_key, False))
+    display_items = prev_items if show_all else prev_items[:12]
+
+    prev_df = pd.DataFrame([
+        {
+            "Level": it["level"],
+            "Part #": it["part_number"],
+            "Description": it["description"],
+            "Qty": it["quantity"],
+        }
+        for it in display_items
+    ])
+    pred_df_kwargs: dict[str, Any] = {"hide_index": True, "width": "stretch"}
+    if show_all:
+        pred_df_kwargs["height"] = 320
+    st.dataframe(prev_df, **pred_df_kwargs)
+    if len(prev_items) > 12:
+        prev_c1, prev_c2 = st.columns([2, 1], vertical_alignment="center")
+        with prev_c1:
+            if not show_all:
+                st.caption(f"... and {len(prev_items) - 12} more items.")
+            else:
+                st.caption(f"Showing all {len(prev_items)} items.")
+        with prev_c2:
+            if not show_all:
+                if st.button(f"👁️ View all ({len(prev_items)})", key=f"btn_expand_pred_{curr_model_id}", help="Show all predicted rows in a scrollable preview"):
+                    st.session_state[show_all_key] = True
+                    st.rerun(scope="fragment")
+            else:
+                if st.button("Collapse preview", key=f"btn_collapse_pred_{curr_model_id}", help="Show first 12 items"):
+                    st.session_state[show_all_key] = False
+                    st.rerun(scope="fragment")
+
+    c1, c2 = st.columns([1, 1.5], gap="small")
+    with c1:
+        if st.button("Cancel", key="btn_cancel_pred_dlg"):
+            st.session_state.pop(pn_key, None)
+            st.session_state.pop(desc_key, None)
+            st.session_state.pop(last_sel_key, None)
+            st.session_state.pop(cat_sel_key, None)
+            st.session_state.pop(show_all_key, None)
+            st.rerun()
+    with c2:
+        if st.button("Apply to BOM Editor", type="primary", key="btn_apply_pred_dlg"):
+            if not lvl1_pn:
+                st.error("Level 1 Assembly Number is required. Please search the Parts Catalog or enter a part number.")
+                return
+
+            other_l1 = get_model_level1_assemblies(proj_id, exclude_model_id=curr_model_id)
+            if lvl1_pn.upper() in other_l1:
+                st.error(
+                    f"Level 1 Assembly Number '{lvl1_pn}' is already assigned to model '{other_l1[lvl1_pn.upper()]}'. "
+                    f"Each model must have a distinct Level 1 Assembly Number."
+                )
+                return
+
+            final_items = [
+                dict(it)
+                for idx, it in enumerate(predicted_items)
+                if idx == 0 or str(it.get("part_number") or "").strip().upper() != lvl1_pn.strip().upper()
+            ]
+            if final_items and final_items[0].get("level") == 1:
+                final_items[0]["part_number"] = lvl1_pn
+                final_items[0]["description"] = lvl1_desc
+                final_items[0]["quantity"] = 1.0
+            else:
+                final_items.insert(0, {
+                    "level": 1,
+                    "part_number": lvl1_pn,
+                    "description": lvl1_desc,
+                    "quantity": 1.0,
+                    "_uid": str(uuid4())[:8],
+                })
+
+            st.session_state[d_key] = final_items
+            st.session_state[f"_draft_modified_{curr_model_id}"] = True
+            st.session_state[f"_bom_predicted_{proj_id}_{curr_model_id}"] = True
+            _clear_bld_widget_keys(curr_model_id)
+            request_table_editor_reset(ed_logical_key)
+            st.session_state.pop(pn_key, None)
+            st.session_state.pop(desc_key, None)
+            st.session_state.pop(last_sel_key, None)
+            st.session_state.pop(cat_sel_key, None)
+            st.session_state.pop(show_all_key, None)
+            st.toast(f"Loaded predicted BOM ({len(final_items)} items) with Level 1 assembly {lvl1_pn} into editor!", icon=":material/check_circle:")
+            st.rerun()
+
+
+@st.dialog("⚠️ Group Number Structure Conflict", width="large")
+def group_conflict_dialog(
     proj_id: str,
     curr_model_id: str,
     d_key: str,
     ed_logical_key: str,
     s_model_key: str,
 ) -> None:
-    flow_data = st.session_state.get(f"_pending_save_flow_{curr_model_id}")
-    if not flow_data:
+    conflict_data = st.session_state.get(f"_pending_group_conflict_{curr_model_id}")
+    if not conflict_data:
         st.rerun()
         return
 
-    rows = flow_data["rows"]
-    detected = flow_data["detected"]
-    auto_add = flow_data.get("auto_add", True)
+    rows = conflict_data["rows"]
+    conflicts = conflict_data["conflicts"]
+    auto_add = conflict_data.get("auto_add", True)
 
-    st.markdown("#### :material/account_tree: Known Subassembly Structure Detected")
-    st.markdown(
-        f"We found **{len(detected)}** part/group number(s) with known child components from other models or PITS records in this project. "
-        "Would you like to insert these child parts into your BOM structure before saving?"
+    st.warning(
+        ":material/warning: **Structure Discrepancy on Shared Group / Drawing Number**\n\n"
+        "One or more group numbers or drawing assemblies in your BOM have a different set of child components "
+        "or quantities compared to existing saved BOMs in this project. "
+        "In manufacturing engineering, identical group numbers should represent identical assemblies unless a designated variation is intended."
     )
 
-    selected_pns: set[str] = set()
-    for sub in detected:
-        pn = sub["part_number"]
-        lvl = sub["level"]
-        ch = sub["children"]
-        st.markdown(f"**`{pn}`** (Level {lvl}) &mdash; {len(ch)} child part(s)")
-        preview_text = ", ".join(f"`{c['part_number']}` (L{min(11, lvl + c['relative_level'])})" for c in ch[:4])
-        if len(ch) > 4:
-            preview_text += f", ... (+{len(ch) - 4} more)"
-        st.caption(preview_text)
-        chk = st.checkbox(
-            f"Expand child parts under `{pn}`",
-            value=True,
-            key=f"save_dlg_chk_{pn}_{curr_model_id}",
+    # Map part numbers to descriptions from Parts Catalog, BOM occurrences, and current rows
+    part_desc_map: dict[str, str] = {}
+    for cr in query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,)):
+        c_pn = clean_bom_cell_text(cr.get("part_number")).upper()
+        c_desc = clean_bom_cell_text(cr.get("description"))
+        if c_pn and c_desc:
+            part_desc_map[c_pn] = c_desc
+    for pr in query("SELECT part_number, description FROM pits_records WHERE project_id=?", (proj_id,)):
+        p_pn = clean_bom_cell_text(pr.get("part_number")).upper()
+        p_desc = clean_bom_cell_text(pr.get("description"))
+        if p_pn and p_desc and p_pn not in part_desc_map:
+            part_desc_map[p_pn] = p_desc
+    for cf in conflicts:
+        g_up = clean_bom_cell_text(cf.get("group_identifier")).upper()
+        g_d = clean_bom_cell_text(cf.get("group_description"))
+        if g_up and g_d and g_up not in part_desc_map:
+            part_desc_map[g_up] = g_d
+        for d in cf.get("differences", []):
+            d_pn = clean_bom_cell_text(d.get("part_number")).upper()
+            d_desc = clean_bom_cell_text(d.get("description"))
+            if d_pn and d_desc and d_pn not in part_desc_map:
+                part_desc_map[d_pn] = d_desc
+    for r in rows:
+        r_pn = clean_bom_cell_text(r.get("part_number")).upper()
+        r_desc = clean_bom_cell_text(r.get("description"))
+        if r_pn and r_desc and r_pn not in part_desc_map:
+            part_desc_map[r_pn] = r_desc
+
+    model_name_map: dict[str, str] = {}
+    model_num_map: dict[str, str] = {}
+    for _, m_r in models_df.iterrows():
+        m_id_s = str(m_r.get("id") or "").strip()
+        m_num_s = str(m_r.get("model_number") or "").strip()
+        m_disp_s = " ".join(str(m_r.get("display_name") or m_r.get("description") or "").split())
+        if m_id_s:
+            model_num_map[m_id_s] = m_num_s
+            if m_disp_s:
+                model_name_map[m_id_s] = m_disp_s
+        if m_num_s and m_disp_s:
+            model_name_map[m_num_s.upper()] = m_disp_s
+
+    curr_num = model_num_map.get(curr_model_id, "")
+    curr_name = model_name_map.get(curr_model_id, "")
+    curr_qty_col = (
+        f"Current ({curr_num} · {curr_name}) Qty"
+        if (curr_num and curr_name)
+        else (f"Current ({curr_num}) Qty" if curr_num else "Current Qty")
+    )
+
+    conflict_groups: list[str] = []
+    conflicting_model_ids: list[str] = []
+    candidate_parts_meta: dict[str, dict[str, Any]] = {}
+    has_missing_in_current = False
+
+    for cf in conflicts:
+        g_id = str(cf["group_identifier"]).strip().upper()
+        if g_id and g_id not in conflict_groups:
+            conflict_groups.append(g_id)
+        g_type = cf.get("group_type", "Group Number")
+        other_mid = str(cf.get("conflicting_model_id") or "").strip()
+        other_num = cf["conflicting_model_number"]
+        if other_mid and other_mid not in conflicting_model_ids:
+            conflicting_model_ids.append(other_mid)
+        diffs = cf.get("differences", [])
+
+        g_desc = part_desc_map.get(g_id, "")
+        g_title = f"`{g_id}` — **{g_desc}**" if g_desc else f"`{g_id}`"
+        other_name = " ".join(
+            str(
+                cf.get("conflicting_model_name")
+                or model_name_map.get(other_mid, "")
+                or model_name_map.get(str(other_num).strip().upper(), "")
+            ).split()
         )
-        if chk:
-            selected_pns.add(pn.upper())
+        other_model_title = f"**{other_num} · {other_name}**" if other_name else f"**{other_num}**"
+        other_qty_col = f"Model {other_num} · {other_name} Qty" if other_name else f"Model {other_num} Qty"
+        st.markdown(f"##### {g_type} {g_title} conflicts with Model {other_model_title}")
+        diff_rows = []
+        for d in diffs:
+            t = d["type"]
+            pn_up = str(d["part_number"]).strip().upper()
+            if t == "missing_in_current":
+                has_missing_in_current = True
+            elif t in ("extra_in_current", "quantity_mismatch"):
+                if pn_up not in candidate_parts_meta:
+                    candidate_parts_meta[pn_up] = {
+                        "part_number": pn_up,
+                        "description": part_desc_map.get(pn_up, ""),
+                        "qty": d.get("current_qty"),
+                        "issue": "New in Current" if t == "extra_in_current" else "Qty Updated",
+                        "group_id": g_id,
+                    }
+            t_label = (
+                "Qty Mismatch"
+                if t == "quantity_mismatch"
+                else ("Missing in Current" if t == "missing_in_current" else "Extra in Current")
+            )
+            diff_rows.append({
+                "Component Part": d["part_number"],
+                "Part Name": part_desc_map.get(pn_up, ""),
+                "Issue": t_label,
+                curr_qty_col: d["current_qty"],
+                other_qty_col: d["other_qty"],
+            })
+        st.dataframe(pd.DataFrame(diff_rows), hide_index=True, width="stretch")
 
-    st.caption(":material/info: New rows will be added in between assemblies. Top-level and subsequent assemblies will not be overwritten.")
+    # ------------------------------------------------------------------
+    # Option to propagate new/updated parts to multiple model BOMs
+    # ------------------------------------------------------------------
+    with st.container(border=True):
+        st.markdown("##### :material/sync: Keep Group Numbers the Same Across Models")
+        st.caption(
+            "Select which other model BOMs should receive the new or updated group parts so shared group numbers "
+            "maintain an identical part structure across models."
+        )
 
-    b_col1, b_col2, b_col3, b_col4 = st.columns([1, 1.3, 1.4, 1.5], gap="small")
-    with b_col1:
-        if st.button("Cancel", key="btn_cancel_save_prompt"):
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
+        # Build list of all other active models with saved BOMs (conflicting models first, then other models)
+        target_model_labels: dict[str, str] = {}
+        for mid in conflicting_model_ids:
+            fallback_num = model_num_map.get(mid, mid)
+            fallback_name = model_name_map.get(mid, "")
+            fallback_lbl = f"{fallback_num} · {fallback_name}" if fallback_name else fallback_num
+            base_lbl = model_options.get(mid, fallback_lbl)
+            target_model_labels[mid] = f"{base_lbl} (Shares conflicting group)"
+
+        for _, m_row in active_models.iterrows():
+            mid = str(m_row["id"])
+            if mid == curr_model_id or mid in target_model_labels:
+                continue
+            saved_m_bom = get_manual_model_bom(proj_id, mid)
+            if not saved_m_bom:
+                continue
+            m_pns = {clean_bom_cell_text(it.get("part_number")).upper() for it in saved_m_bom}
+            shares_grp = any(g in m_pns for g in conflict_groups)
+            if not shares_grp:
+                continue
+            base_lbl = model_options.get(mid, str(m_row.get("model_number") or mid))
+            target_model_labels[mid] = f"{base_lbl} (Shares group)"
+
+        candidate_part_keys = list(candidate_parts_meta.keys())
+        selected_part_pns: list[str] = []
+        if candidate_part_keys:
+            def _fmt_part_opt(pn_key: str) -> str:
+                meta = candidate_parts_meta[pn_key]
+                desc_str = f" — {meta['description']}" if meta["description"] else ""
+                grp_id = meta["group_id"]
+                grp_desc = part_desc_map.get(grp_id, "")
+                grp_label = f"{grp_id} — {grp_desc}" if grp_desc else grp_id
+                return f"{pn_key}{desc_str} (Qty: {meta['qty']}, {meta['issue']} in {grp_label})"
+
+            selected_part_pns = st.multiselect(
+                "New / updated parts from Current BOM to add to selected models",
+                options=candidate_part_keys,
+                default=candidate_part_keys,
+                format_func=_fmt_part_opt,
+                key=f"conflict_sync_parts_{curr_model_id}",
+                help="Choose which new or quantity-updated parts from your current BOM should be propagated to the selected model BOMs.",
+            )
+
+        selected_target_models = st.multiselect(
+            "Target model BOMs to update",
+            options=list(target_model_labels.keys()),
+            default=conflicting_model_ids,
+            format_func=lambda k: target_model_labels.get(k, k),
+            key=f"conflict_sync_models_{curr_model_id}",
+            help="Select one or more models whose BOMs should be updated to keep the group structure consistent.",
+        )
+
+        sync_mode = "add_new_parts"
+        if has_missing_in_current:
+            sync_mode = st.radio(
+                "How should parts that exist only in the other model(s) be handled?",
+                options=["match_current_exact", "merge_both_ways", "add_new_parts"],
+                format_func=lambda m: (
+                    "Update group in selected models to match Current BOM exactly (Recommended — removes parts not in Current BOM)"
+                    if m == "match_current_exact"
+                    else (
+                        "Add new parts to selected models AND pull missing group parts into Current BOM (merges both lists)"
+                        if m == "merge_both_ways"
+                        else "Only add selected new parts to the other model BOMs (keep each model's existing parts)"
+                    )
+                ),
+                key=f"conflict_sync_mode_{curr_model_id}",
+            )
+
+        btn_sync_disabled = not selected_target_models or (
+            sync_mode == "add_new_parts" and bool(candidate_part_keys) and not selected_part_pns
+        )
+        if st.button(
+            "Add Parts to Selected Models & Save",
+            type="primary",
+            icon=":material/sync:",
+            key="btn_sync_group_models_dlg",
+            width="stretch",
+            disabled=btn_sync_disabled,
+            help="Propagate the selected group parts across the chosen model BOMs and save the current BOM.",
+        ):
+            editor_name = st.session_state.get("current_editor", "")
+            try:
+                sync_res = sync_group_parts_to_models(
+                    proj_id,
+                    curr_model_id,
+                    rows,
+                    selected_target_models,
+                    conflict_groups,
+                    selected_part_numbers=selected_part_pns if candidate_part_keys else None,
+                    sync_mode=sync_mode,
+                    auto_add_parts=auto_add,
+                    editor=editor_name,
+                )
+                updated_rows = sync_res.get("updated_source_items") or rows
+                updated_models = sync_res.get("updated_models", [])
+                updated_mids = sync_res.get("updated_model_ids", [])
+
+                # Clear cached draft state for any modified target models so switching to them reloads fresh DB data
+                for t_mid in updated_mids:
+                    st.session_state.pop(f"_bom_draft_{proj_id}_{t_mid}", None)
+                    st.session_state.pop(f"_draft_modified_{t_mid}", None)
+                    st.session_state.pop(f"row_tools_idx_{t_mid}", None)
+                    _clear_bld_widget_keys(t_mid)
+                    request_table_editor_reset(f"bom_author_grid_{proj_id}_{t_mid}")
+
+                # Clear source_model_key so save_manual_model_bom does not auto-append _V1 after syncing
+                st.session_state.pop(s_model_key, None)
+                st.session_state.pop(f"_pending_group_conflict_{curr_model_id}", None)
+
+                sync_msg = (
+                    f"Synced group {', '.join(conflict_groups)} to {', '.join(updated_models)}"
+                    if updated_models
+                    else f"Synced group {', '.join(conflict_groups)}"
+                )
+
+                _commit_bom_save(
+                    proj_id,
+                    curr_model_id,
+                    updated_rows,
+                    auto_add,
+                    d_key,
+                    ed_logical_key,
+                    s_model_key,
+                    extra_toast_msg=sync_msg,
+                )
+            except ValueError as val_err:
+                st.error(f":material/error: {val_err}")
+
+    c1, c2 = st.columns([1, 1.5], gap="small")
+    with c1:
+        if st.button("Revise Group in Editor", key="btn_cancel_conflict_dlg", width="stretch", help="Return to editor to adjust group number or parts"):
+            st.session_state.pop(f"_pending_group_conflict_{curr_model_id}", None)
             st.rerun()
-    with b_col2:
-        if st.button("Save As-Is", key="btn_save_asis_prompt", help="Save the BOM exactly as entered without expanding subassemblies"):
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
+    with c2:
+        if st.button("Confirm Variation & Proceed (Current Model Only)", key="btn_bypass_conflict_dlg", width="stretch", help="Confirm that this variation is intended and save only the current model"):
+            st.session_state.pop(f"_pending_group_conflict_{curr_model_id}", None)
             _commit_bom_save(proj_id, curr_model_id, rows, auto_add, d_key, ed_logical_key, s_model_key)
-    with b_col3:
-        if st.button("Expand into Editor", key="btn_expand_editor_prompt", help="Insert child rows into the editor to review and edit before saving"):
-            cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,))
-            cat_parts = {
-                str(r["part_number"]).strip().upper(): str(r["description"] or "").strip()
-                for r in cat_rows
-            }
-            expanded = expand_subassembly_items(rows, detected, selected_pns, cat_parts)
-            for it in expanded:
-                if "_uid" not in it:
-                    it["_uid"] = str(uuid4())[:8]
-            st.session_state[d_key] = expanded
-            st.session_state[f"_draft_modified_{curr_model_id}"] = True
-            _clear_bld_widget_keys(curr_model_id)
-            request_table_editor_reset(ed_logical_key)
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
-            st.toast("Child rows inserted into editor! Review them and click Save when ready.", icon=":material/check_circle:")
+
+
+# ==============================================================================
+@st.dialog("🗑️ Clear BOM Structure", width="large", dismissible=False)
+def clear_bom_dialog(
+    proj_id: str,
+    curr_model_id: str,
+    d_key: str,
+    ed_logical_key: str,
+    s_model_key: str,
+):
+    curr_model_label = model_options.get(curr_model_id, curr_model_id)
+    st.warning(
+        ":material/delete_sweep: **Clear BOM structure to start over?**\n\n"
+        "This removes the hierarchical BOM tree structure (parent–child assembly links and model usages) "
+        "without deleting any parts from the **Parts Catalog**."
+    )
+
+    scope_choice = st.radio(
+        "Which BOM structure would you like to clear?",
+        options=[
+            "current",
+            "all",
+            "selected",
+            "editor_only",
+        ],
+        format_func=lambda opt: {
+            "current": f"Current model only ({curr_model_label}) — clears saved BOM & editor grid",
+            "all": "All models in this project — clears all saved model BOMs & editor grids",
+            "selected": "Select specific models to clear...",
+            "editor_only": f"Unsaved spreadsheet editor grid only ({curr_model_label}) — keep saved database BOM",
+        }[opt],
+        index=0,
+        key=f"clear_bom_scope_{curr_model_id}",
+    )
+
+    selected_mids: list[str] = []
+    if scope_choice == "selected":
+        all_model_ids = [str(r["id"]) for _, r in models_df.iterrows()]
+        selected_mids = st.multiselect(
+            "Models to clear",
+            options=all_model_ids,
+            default=[curr_model_id] if curr_model_id in all_model_ids else [],
+            format_func=lambda mid: model_options.get(mid, mid),
+            key=f"clear_bom_models_select_{curr_model_id}",
+        )
+
+    st.divider()
+    c_cancel, c_confirm = st.columns(2)
+    with c_cancel:
+        if st.button("Cancel", key=f"cancel_clear_bom_{curr_model_id}", width="stretch"):
+            st.session_state.pop(f"_pending_clear_bom_{curr_model_id}", None)
             st.rerun()
-    with b_col4:
-        if st.button("Expand & Save", type="primary", key="btn_expand_save_prompt", help="Insert child rows between assemblies and save BOM"):
-            cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,))
-            cat_parts = {
-                str(r["part_number"]).strip().upper(): str(r["description"] or "").strip()
-                for r in cat_rows
-            }
-            expanded = expand_subassembly_items(rows, detected, selected_pns, cat_parts)
-            st.session_state.pop(f"_pending_save_flow_{curr_model_id}", None)
-            _commit_bom_save(proj_id, curr_model_id, expanded, auto_add, d_key, ed_logical_key, s_model_key)
+    with c_confirm:
+        confirm_disabled = scope_choice == "selected" and not selected_mids
+        if st.button(
+            "Clear BOM Structure",
+            type="primary",
+            icon=":material/delete_sweep:",
+            key=f"destructive_confirm_clear_bom_{curr_model_id}",
+            disabled=confirm_disabled,
+            width="stretch",
+        ):
+            editor_name = st.session_state.get("current_editor", "").strip()
+            try:
+                if scope_choice == "editor_only":
+                    st.session_state[d_key] = [
+                        {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
+                    ]
+                    st.session_state[f"_draft_modified_{curr_model_id}"] = True
+                    st.session_state.pop(s_model_key, None)
+                    st.session_state.pop(f"_bom_predicted_{proj_id}_{curr_model_id}", None)
+                    st.session_state.pop(f"row_tools_idx_{curr_model_id}", None)
+                    st.session_state.pop(f"bom_anchor_row_{curr_model_id}", None)
+                    _clear_bld_widget_keys(curr_model_id)
+                    request_table_editor_reset(ed_logical_key)
+                    st.session_state.pop(f"_pending_clear_bom_{curr_model_id}", None)
+                    st.toast(f"Cleared spreadsheet editor grid for {curr_model_label}.", icon=":material/check_circle:")
+                    st.rerun()
+                else:
+                    target_ids = (
+                        [curr_model_id]
+                        if scope_choice == "current"
+                        else (None if scope_choice == "all" else selected_mids)
+                    )
+                    clear_model_boms(proj_id, model_ids=target_ids, editor=editor_name)
+
+                    # Reset session state drafts for all affected models
+                    affected_mids = (
+                        [str(r["id"]) for _, r in models_df.iterrows()]
+                        if target_ids is None
+                        else [str(m) for m in target_ids]
+                    )
+                    for mid in affected_mids:
+                        m_draft_key = f"_bom_draft_{proj_id}_{mid}"
+                        st.session_state[m_draft_key] = [
+                            {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
+                        ]
+                        st.session_state.pop(f"_draft_modified_{mid}", None)
+                        st.session_state.pop(f"_bom_source_model_{proj_id}_{mid}", None)
+                        st.session_state.pop(f"_bom_predicted_{proj_id}_{mid}", None)
+                        st.session_state.pop(f"row_tools_idx_{mid}", None)
+                        st.session_state.pop(f"bom_anchor_row_{mid}", None)
+                        _clear_bld_widget_keys(mid)
+                        request_table_editor_reset(f"bom_grid_editor_{mid}")
+
+                    st.session_state.pop(f"_pending_clear_bom_{curr_model_id}", None)
+                    scope_msg = (
+                        f"Cleared BOM structure for {curr_model_label}."
+                        if scope_choice == "current"
+                        else (
+                            "Cleared BOM structures for all project models."
+                            if scope_choice == "all"
+                            else f"Cleared BOM structures for {len(affected_mids)} model(s)."
+                        )
+                    )
+                    st.toast(f"{scope_msg} Parts Catalog preserved.", icon=":material/check_circle:")
+                    st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
 
 # ==============================================================================
@@ -1122,9 +2017,17 @@ with tab_author:
                 if "_uid" not in it:
                     it["_uid"] = str(uuid4())[:8]
 
-        # Check if a pending save prompt flow is awaiting user action
-        if f"_pending_save_flow_{selected_model_id}" in st.session_state:
-            save_subassembly_prompt_dialog(
+        # Check if a pending group conflict or save prompt flow is awaiting user action
+        if f"_pending_group_conflict_{selected_model_id}" in st.session_state:
+            group_conflict_dialog(
+                project_id,
+                selected_model_id,
+                draft_key,
+                bom_editor_logical_key,
+                source_model_key,
+            )
+        elif f"_pending_clear_bom_{selected_model_id}" in st.session_state:
+            clear_bom_dialog(
                 project_id,
                 selected_model_id,
                 draft_key,
@@ -1132,26 +2035,8 @@ with tab_author:
                 source_model_key,
             )
 
-        # ── Toolbar: Copy from Model & Auto-detect / Autofill ──
-        tb_col1, tb_col2, tb_col_space = st.columns([1.5, 1.4, 2.5], gap="small")
-        with tb_col1:
-            if st.button(
-                "Copy BOM from another model",
-                icon=":material/content_copy:",
-                key=f"btn_copy_bom_{selected_model_id}",
-                help="Copy the hierarchical BOM structure from another model and assign a new Level 1 Assembly Number.",
-            ):
-                copy_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key, source_model_key)
-        with tb_col2:
-            if st.button(
-                "Auto-detect & Autofill",
-                icon=":material/auto_fix_high:",
-                key=f"btn_autofill_bom_{selected_model_id}",
-                help="Auto-fill part descriptions from the Parts Catalog and detect known subassemblies to expand.",
-            ):
-                autofill_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
 
-        # ── Banner if draft was copied from a model ──
+        # ── Banner if draft was copied from a model or predicted from features ──
         if st.session_state.get(source_model_key):
             src_mid = st.session_state[source_model_key]
             src_row = models_df[models_df["id"].astype(str) == str(src_mid)]
@@ -1162,6 +2047,12 @@ with tab_author:
                 f":material/content_copy: **Draft copied from model `{src_name}`.** "
                 f"Level 1 assembly set to `{curr_lvl1}`. "
                 f"Per manufacturing planning rules, at least one Level 2+ component or quantity must be modified before saving."
+            )
+        elif st.session_state.get(f"_bom_predicted_{project_id}_{selected_model_id}"):
+            st.warning(
+                ":material/warning: **Disclaimer — Review Required:** "
+                "This BOM draft was automatically generated by the feature prediction model. "
+                "You must still review all part numbers, assembly levels, and quantities for any inaccuracies before saving."
             )
 
         # ── Side-by-Side BOM Authoring Workspace (55% Spreadsheet / 45% Live Tree) ──
@@ -1187,87 +2078,9 @@ with tab_author:
                 ]
                 st.session_state[draft_key] = current_draft
 
-            # Selection keys
             row_tools_idx_key = f"row_tools_idx_{selected_model_id}"
-            sel_indices_key = f"bom_selected_indices_{selected_model_id}"
-            anchor_row_key = f"bom_anchor_row_{selected_model_id}"
 
-            # Selection state initialization: DEFAULT TO EMPTY SET (Never auto-select row 0!)
-            if sel_indices_key not in st.session_state or not isinstance(st.session_state[sel_indices_key], set):
-                st.session_state[sel_indices_key] = set()
-            if anchor_row_key not in st.session_state:
-                st.session_state[anchor_row_key] = 0
-            if row_tools_idx_key not in st.session_state:
-                st.session_state[row_tools_idx_key] = 0
-
-            # Shift-click range listener
-            client_event = bom_table_listener(key=f"bom_tbl_listener_{selected_model_id}")
-            if client_event and isinstance(client_event, dict):
-                if "range_select" in client_event:
-                    rng = client_event["range_select"]
-                    from_r = max(0, min(len(current_draft) - 1, int(rng.get("from", 0))))
-                    to_r = max(0, min(len(current_draft) - 1, int(rng.get("to", 0))))
-                    st.session_state[sel_indices_key] = set(range(min(from_r, to_r), max(from_r, to_r) + 1))
-                    st.session_state[anchor_row_key] = to_r
-                    st.session_state[row_tools_idx_key] = to_r
-                    request_table_editor_reset(bom_editor_logical_key)
-                    st.rerun()
-                elif "shortcut" in client_event:
-                    action = client_event["shortcut"].get("action")
-                    if action == "move_up" and current_draft:
-                        live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                        cur_sel = st.session_state.get(sel_indices_key, set())
-                        if cur_sel and not (0 in cur_sel and sorted(cur_sel) == list(range(len(cur_sel)))):
-                            new_items, new_sel = move_bom_rows_up(live_items, cur_sel)
-                            st.session_state[draft_key] = new_items
-                            st.session_state[draft_mod_key] = True
-                            st.session_state[sel_indices_key] = new_sel
-                            st.session_state[anchor_row_key] = min(new_sel) if new_sel else 0
-                            st.session_state[row_tools_idx_key] = min(new_sel) if new_sel else 0
-                            request_table_editor_reset(bom_editor_logical_key)
-                            st.rerun()
-                    elif action == "move_down" and current_draft:
-                        live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                        cur_sel = st.session_state.get(sel_indices_key, set())
-                        if cur_sel and not (len(current_draft) - 1 in cur_sel and sorted(cur_sel) == list(range(len(current_draft) - len(cur_sel), len(current_draft)))):
-                            new_items, new_sel = move_bom_rows_down(live_items, cur_sel)
-                            st.session_state[draft_key] = new_items
-                            st.session_state[draft_mod_key] = True
-                            st.session_state[sel_indices_key] = new_sel
-                            st.session_state[anchor_row_key] = max(new_sel) if new_sel else 0
-                            st.session_state[row_tools_idx_key] = max(new_sel) if new_sel else 0
-                            request_table_editor_reset(bom_editor_logical_key)
-                            st.rerun()
-                elif "row_anchor" in client_event:
-                    st.session_state[anchor_row_key] = int(client_event["row_anchor"].get("row", 0))
-
-            # Read user edits on the Select checkbox column
-            generation = int(st.session_state.get(f"_table_editor_generation_{bom_editor_logical_key}", 0) or 0)
-            active_inst_key = f"{bom_editor_logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
-            ed_state = st.session_state.get(active_inst_key)
-            if isinstance(ed_state, dict):
-                edited_rows = ed_state.get("edited_rows") or {}
-                for idx_str, edits in edited_rows.items():
-                    try:
-                        idx = int(idx_str)
-                    except (TypeError, ValueError):
-                        continue
-                    if "Select" in edits:
-                        if edits["Select"]:
-                            st.session_state[sel_indices_key].add(idx)
-                            st.session_state[anchor_row_key] = idx
-                            st.session_state[row_tools_idx_key] = idx
-                        else:
-                            st.session_state[sel_indices_key].discard(idx)
-                    elif edits:
-                        st.session_state[row_tools_idx_key] = idx
-
-            # Valid selection (NO forced fallback to row 0)
-            valid_indices = {i for i in st.session_state.get(sel_indices_key, set()) if 0 <= i < len(current_draft)}
-            st.session_state[sel_indices_key] = valid_indices
-            selected_indices = valid_indices
-
-            # ── Top Action Bar ──
+            # ── Action Bar (Row 1): Checkbox & Save Actions ──
             bar_left, bar_right = st.columns([1.8, 2.2], vertical_alignment="center")
             with bar_left:
                 auto_add_grid = st.checkbox(
@@ -1300,7 +2113,7 @@ with tab_author:
                                 {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
                             ]
                         st.session_state.pop(draft_mod_key, None)
-                        st.session_state[sel_indices_key] = set()
+                        st.session_state.pop(f"_bom_predicted_{project_id}_{selected_model_id}", None)
                         st.session_state.pop(f"row_tools_idx_{selected_model_id}", None)
                         st.session_state.pop(f"bom_anchor_row_{selected_model_id}", None)
                         _clear_bld_widget_keys(selected_model_id)
@@ -1316,252 +2129,92 @@ with tab_author:
                         width="stretch",
                     )
 
-            # ── Excel-Style Hierarchy & Row Toolbar ──
-            with st.container(border=True):
-                # Row 1: Indent, Outdent, Move, Delete
-                h_c1, h_c2, h_c3, h_c4, h_c5 = st.columns([1.2, 1.2, 0.9, 0.9, 1.1], gap="small")
-                with h_c1:
-                    btn_indent = st.button(
-                        "Indent →",
-                        icon=":material/format_indent_increase:",
-                        key=f"btn_indent_{selected_model_id}",
-                        help="Increase Level (+1) for selected row(s) or specified range",
-                        width="stretch",
-                    )
-                with h_c2:
-                    btn_outdent = st.button(
-                        "← Outdent",
-                        icon=":material/format_indent_decrease:",
-                        key=f"btn_outdent_{selected_model_id}",
-                        help="Decrease Level (-1) for selected row(s) or specified range",
-                        width="stretch",
-                    )
-                with h_c3:
-                    btn_move_up = st.button(
-                        "⬆️ Up",
-                        key=f"btn_mv_up_{selected_model_id}",
-                        help="Move selected row(s) up",
-                        width="stretch",
-                    )
-                with h_c4:
-                    btn_move_down = st.button(
-                        "⬇️ Down",
-                        key=f"btn_mv_dn_{selected_model_id}",
-                        help="Move selected row(s) down",
-                        width="stretch",
-                    )
-                with h_c5:
-                    btn_delete_rows = st.button(
-                        "🗑️ Delete",
-                        key=f"btn_del_rows_{selected_model_id}",
-                        help="Delete selected row(s) or specified range",
-                        width="stretch",
-                    )
-
-                # Row 2: Range selector & Selection pills
-                rng_c1, rng_c2, rng_c3, rng_c4, rng_c5, rng_c6 = st.columns(
-                    [1.2, 0.9, 0.3, 0.9, 1.3, 1.4],
-                    vertical_alignment="center",
+            # ── Action Bar (Row 2): Template, Import/Paste, Copy, Predict ──
+            tool_c1, tool_c2, tool_c3, tool_c4 = st.columns([1.05, 0.95, 1.05, 1.15], gap="small")
+            with tool_c1:
+                live_for_dl = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
+                has_tree_items = any(
+                    bool(clean_bom_cell_text(it.get("part_number")) or clean_bom_cell_text(it.get("description")))
+                    for it in live_for_dl
                 )
-                with rng_c1:
-                    st.caption("**:material/tune: Range Tool:**")
-                with rng_c2:
-                    default_from = min(selected_indices) + 1 if selected_indices else 1
-                    range_from = st.number_input(
-                        "From Row",
-                        min_value=1,
-                        max_value=max(1, len(current_draft)),
-                        value=default_from,
-                        step=1,
-                        label_visibility="collapsed",
-                        key=f"rng_from_{selected_model_id}",
+                clean_model_tag = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(target_model_label).strip())
+                dl_file_name = f"BOM_{clean_model_tag}.xlsx" if has_tree_items else f"BOM_Template_{clean_model_tag}.xlsx"
+                dl_help = (
+                    f"Download the existing BOM hierarchy for {target_model_label} (Level, Part #, Description, Qty) to edit in Excel"
+                    if has_tree_items
+                    else "Download an Excel template pre-formatted with Level, Part #, Description, Qty"
+                )
+                st.download_button(
+                    label="📥 Download Template",
+                    data=generate_bom_excel_template(live_for_dl),
+                    file_name=dl_file_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_template_{selected_model_id}",
+                    help=dl_help,
+                    width="stretch",
+                )
+            with tool_c2:
+                with st.popover(
+                    "📤 Import File",
+                    help="Upload a BOM spreadsheet or paste rows from Excel to populate the table",
+                    width="stretch",
+                ):
+                    up_file = st.file_uploader(
+                        "Upload spreadsheet (.xlsx, .csv)",
+                        type=["xlsx", "xls", "csv"],
+                        key=f"up_bom_{selected_model_id}",
                     )
-                with rng_c3:
-                    st.markdown("<div style='text-align:center; font-size:0.85rem; color:gray;'>to</div>", unsafe_allow_html=True)
-                with rng_c4:
-                    default_to = max(selected_indices) + 1 if selected_indices else min(len(current_draft), default_from + 2)
-                    range_to = st.number_input(
-                        "To Row",
-                        min_value=1,
-                        max_value=max(1, len(current_draft)),
-                        value=default_to,
-                        step=1,
-                        label_visibility="collapsed",
-                        key=f"rng_to_{selected_model_id}",
-                    )
-                with rng_c5:
-                    btn_apply_range = st.button(
-                        ":material/arrow_range: Select Range",
-                        key=f"btn_apply_range_{selected_model_id}",
-                        help=f"Select rows {range_from} to {range_to}",
+                    if up_file is not None:
+                        if st.button("Apply to Editor", type="primary", key=f"btn_apply_up_{selected_model_id}", width="stretch"):
+                            try:
+                                parsed = parse_uploaded_bom_file(up_file)
+                                if not parsed:
+                                    st.error("No valid BOM rows found in the uploaded file.")
+                                else:
+                                    st.session_state[draft_key] = parsed
+                                    st.session_state[draft_mod_key] = True
+                                    st.session_state.pop(f"_bom_predicted_{project_id}_{selected_model_id}", None)
+                                    request_table_editor_reset(bom_editor_logical_key)
+                                    st.toast(f"Imported {len(parsed)} rows from {up_file.name}!", icon=":material/check_circle:")
+                                    st.rerun()
+                            except Exception as up_err:
+                                st.error(f"Failed to read file: {up_err}")
+                    st.divider()
+                    st.caption("Or copy & paste rows directly from Excel:")
+                    if st.button(
+                        "📋 Paste from Excel",
+                        key=f"btn_paste_{selected_model_id}",
+                        help="Paste tabular data directly from Excel clipboard",
                         width="stretch",
-                    )
-                with rng_c6:
-                    b_sel_all, b_clr_sel = st.columns(2)
-                    with b_sel_all:
-                        btn_select_all = st.button(":material/select_all: All", key=f"btn_sel_all_{selected_model_id}", help="Select all rows", width="stretch")
-                    with b_clr_sel:
-                        btn_clear_sel = st.button(":material/deselect: Clear", key=f"btn_clr_sel_{selected_model_id}", help="Clear selection", width="stretch")
-
-                # Row 3: Transfer & Tools (Insert, Copy Model, Autofill)
-                t_c1, t_c2, t_c3, t_c4 = st.columns([1.3, 1.3, 1.3, 1.3], gap="small")
-                with t_c1:
-                    if st.button("➕ Insert Above", key=f"btn_ins_above_{selected_model_id}", help="Insert a blank row above selected position", width="stretch"):
-                        live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                        ins_pos = min(selected_indices) if selected_indices else (int(range_from) - 1)
-                        ins_pos = max(0, min(len(live_items), ins_pos))
-                        ref_lvl = int(live_items[ins_pos].get("level", 1) or 1) if ins_pos < len(live_items) else 1
-                        live_items.insert(ins_pos, {"level": ref_lvl, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]})
-                        st.session_state[draft_key] = live_items
-                        st.session_state[draft_mod_key] = True
-                        request_table_editor_reset(bom_editor_logical_key)
-                        st.rerun()
-                with t_c2:
-                    if st.button("➕ Insert Below", key=f"btn_ins_below_{selected_model_id}", help="Insert a blank row below selected position", width="stretch"):
-                        live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                        ref_pos = max(selected_indices) if selected_indices else (int(range_to) - 1)
-                        ref_pos = max(0, min(len(live_items) - 1, ref_pos))
-                        ins_pos = min(len(live_items), ref_pos + 1)
-                        ref_lvl = int(live_items[ref_pos].get("level", 1) or 1) if ref_pos < len(live_items) else 1
-                        live_items.insert(ins_pos, {"level": ref_lvl, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]})
-                        st.session_state[draft_key] = live_items
-                        st.session_state[draft_mod_key] = True
-                        request_table_editor_reset(bom_editor_logical_key)
-                        st.rerun()
-                with t_c3:
-                    if st.button(":material/content_copy: Copy Model", key=f"btn_open_copy_{selected_model_id}", help="Copy BOM hierarchy from another model", width="stretch"):
-                        copy_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key, source_model_key)
-                with t_c4:
-                    if st.button(":material/auto_fix_high: Autofill", key=f"btn_open_autofill_{selected_model_id}", help="Autofill descriptions from catalog & expand known subassemblies", width="stretch"):
-                        autofill_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
-
-                # Row 4: Excel Tools row
-                ex_c1, ex_c2 = st.columns([1, 1], gap="small")
-                with ex_c1:
-                    live_for_dl = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                    has_tree_items = any(
-                        bool(str(it.get("part_number") or "").strip() or str(it.get("description") or "").strip())
-                        for it in live_for_dl
-                    )
-                    clean_model_tag = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(target_model_label).strip())
-                    dl_file_name = f"BOM_{clean_model_tag}.xlsx" if has_tree_items else f"BOM_Template_{clean_model_tag}.xlsx"
-                    dl_help = (
-                        f"Download the existing BOM hierarchy for {target_model_label} (Level, Part #, Description, Qty) to edit in Excel"
-                        if has_tree_items
-                        else "Download an Excel template pre-formatted with Level, Part #, Description, Qty"
-                    )
-                    st.download_button(
-                        label="📥 Download Excel Template",
-                        data=generate_bom_excel_template(live_for_dl),
-                        file_name=dl_file_name,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_template_{selected_model_id}",
-                        help=dl_help,
-                        width="stretch",
-                    )
-                with ex_c2:
-                    with st.popover("📤 Import Excel / CSV", help="Upload a BOM spreadsheet to populate the table"):
-                        up_file = st.file_uploader("Upload spreadsheet (.xlsx, .csv)", type=["xlsx", "xls", "csv"], key=f"up_bom_{selected_model_id}")
-                        if up_file is not None:
-                            if st.button("Apply to Editor", type="primary", key=f"btn_apply_up_{selected_model_id}"):
-                                try:
-                                    parsed = parse_uploaded_bom_file(up_file)
-                                    if not parsed:
-                                        st.error("No valid BOM rows found in the uploaded file.")
-                                    else:
-                                        st.session_state[draft_key] = parsed
-                                        st.session_state[draft_mod_key] = True
-                                        request_table_editor_reset(bom_editor_logical_key)
-                                        st.toast(f"Imported {len(parsed)} rows from {up_file.name}!", icon=":material/check_circle:")
-                                        st.rerun()
-                                except Exception as up_err:
-                                    st.error(f"Failed to read file: {up_err}")
-
-            # Hierarchy action processing
-            target_indices = selected_indices if selected_indices else set(range(min(int(range_from) - 1, int(range_to) - 1), max(int(range_from) - 1, int(range_to) - 1) + 1))
-
-            if btn_indent and current_draft:
-                live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                if target_indices:
-                    for idx in target_indices:
-                        if 0 <= idx < len(live_items):
-                            c_lvl = int(live_items[idx].get("level", 1) or 1)
-                            live_items[idx]["level"] = min(11, c_lvl + 1)
-                    st.session_state[draft_key] = live_items
-                    st.session_state[draft_mod_key] = True
-                    request_table_editor_reset(bom_editor_logical_key)
-                    st.toast(f"Indented {len(target_indices)} row(s) (+1 Level)", icon=":material/format_indent_increase:")
-                    st.rerun()
-
-            if btn_outdent and current_draft:
-                live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                if target_indices:
-                    for idx in target_indices:
-                        if 0 <= idx < len(live_items):
-                            c_lvl = int(live_items[idx].get("level", 1) or 1)
-                            live_items[idx]["level"] = max(1, c_lvl - 1)
-                    st.session_state[draft_key] = live_items
-                    st.session_state[draft_mod_key] = True
-                    request_table_editor_reset(bom_editor_logical_key)
-                    st.toast(f"Outdented {len(target_indices)} row(s) (-1 Level)", icon=":material/format_indent_decrease:")
-                    st.rerun()
-
-            if btn_move_up and current_draft and target_indices:
-                live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                new_items, new_sel = move_bom_rows_up(live_items, target_indices)
-                st.session_state[draft_key] = new_items
-                st.session_state[draft_mod_key] = True
-                st.session_state[sel_indices_key] = new_sel
-                request_table_editor_reset(bom_editor_logical_key)
-                st.rerun()
-
-            if btn_move_down and current_draft and target_indices:
-                live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                new_items, new_sel = move_bom_rows_down(live_items, target_indices)
-                st.session_state[draft_key] = new_items
-                st.session_state[draft_mod_key] = True
-                st.session_state[sel_indices_key] = new_sel
-                request_table_editor_reset(bom_editor_logical_key)
-                st.rerun()
-
-            if btn_delete_rows and current_draft and target_indices:
-                live_items = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                new_items, new_sel = delete_bom_rows(live_items, target_indices)
-                st.session_state[draft_key] = new_items
-                st.session_state[draft_mod_key] = True
-                st.session_state[sel_indices_key] = new_sel
-                request_table_editor_reset(bom_editor_logical_key)
-                st.toast(f"Deleted {len(target_indices)} row(s)", icon=":material/delete:")
-                st.rerun()
-
-            if btn_apply_range and current_draft:
-                f_idx = max(0, min(len(current_draft) - 1, int(range_from) - 1))
-                t_idx = max(0, min(len(current_draft) - 1, int(range_to) - 1))
-                st.session_state[sel_indices_key] = set(range(min(f_idx, t_idx), max(f_idx, t_idx) + 1))
-                request_table_editor_reset(bom_editor_logical_key)
-                st.rerun()
-
-            if btn_select_all and current_draft:
-                st.session_state[sel_indices_key] = set(range(len(current_draft)))
-                request_table_editor_reset(bom_editor_logical_key)
-                st.rerun()
-
-            if btn_clear_sel and current_draft:
-                st.session_state[sel_indices_key] = set()
-                request_table_editor_reset(bom_editor_logical_key)
-                st.rerun()
+                    ):
+                        paste_bom_from_excel_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
+            with tool_c3:
+                if st.button(
+                    "👥 Copy from Model",
+                    key=f"btn_copy_model_{selected_model_id}",
+                    help="Copy the BOM hierarchy from another saved model in this project",
+                    width="stretch",
+                ):
+                    copy_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key, source_model_key)
+            with tool_c4:
+                if st.button(
+                    "✨ Predict from Features",
+                    key=f"btn_predict_features_{selected_model_id}",
+                    help="Predict BOM structure based on Complexity Trees feature choices",
+                    width="stretch",
+                ):
+                    generate_bom_from_features_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
 
             # ── Build DataFrame from current draft ──
-            # Columns match Excel order: Level, Part #, Description, Qty, Select
+            # Columns match Excel order: Level, Part #, Description, Qty
             df_editor_data = pd.DataFrame([
                 {
                     "Level": int(it.get("level", 1) or 1),
                     "Part #": str(it.get("part_number", "") or ""),
                     "Description": str(it.get("description", "") or ""),
                     "Qty": round(float(it.get("quantity", 1.0) or 1.0), 5),
-                    "Select": idx in selected_indices,
                 }
-                for idx, it in enumerate(current_draft)
+                for it in current_draft
             ])
             if df_editor_data.empty:
                 df_editor_data = pd.DataFrame([{
@@ -1569,7 +2222,6 @@ with tab_author:
                     "Part #": "",
                     "Description": "",
                     "Qty": 1.0,
-                    "Select": False,
                 }])
 
             # ── Spreadsheet data_editor with native dynamic rows ──
@@ -1599,33 +2251,41 @@ with tab_author:
                     "Qty": st.column_config.NumberColumn(
                         "Qty",
                         min_value=0.00001,
-                        step=1.0,
+                        step=0.00001,
                         default=1.0,
-                        format="%.5f",
+                        format="%g",
                         help="Quantity per unit",
                         width="small",
                     ),
-                    "Select": st.column_config.CheckboxColumn(
-                        "Select",
-                        help="Check to select row for Indent/Outdent/Move actions",
-                        width="small",
-                        default=False,
-                    ),
                 },
                 num_rows="dynamic",
-                hide_index=False,
+                hide_index=True,
                 key=bom_editor_key,
                 width="stretch",
                 height=560,
             )
+
+            # ── Clear BOM action at bottom of table editor ──
+            _, clear_btn_col = st.columns([2.6, 1.4])
+            with clear_btn_col:
+                if st.button(
+                    "Clear BOM Structure",
+                    icon=":material/delete_sweep:",
+                    type="primary",
+                    key=f"destructive_clear_bom_btn_{selected_model_id}",
+                    help="Clear the BOM structure (without deleting parts from the Parts Catalog) so you can start over",
+                    width="stretch",
+                ):
+                    st.session_state[f"_pending_clear_bom_{selected_model_id}"] = True
+                    st.rerun()
 
             # ── Save action ──
             if save_clicked:
                 rows_to_save = []
                 validation_errors = []
                 for pos_idx, (_, r) in enumerate(edited_df.iterrows(), start=1):
-                    pn = str(r.get("Part #") or "").strip()
-                    desc = str(r.get("Description") or "").strip()
+                    pn = clean_bom_cell_text(r.get("Part #"))
+                    desc = " ".join(clean_bom_cell_text(r.get("Description")).split())
                     qty_raw = r.get("Qty")
                     lvl_raw = r.get("Level")
                     # Skip completely blank rows silently
@@ -1635,12 +2295,12 @@ with tab_author:
                         validation_errors.append(f"Row {pos_idx}: Part # is required.")
                         continue
                     try:
-                        lvl = int(float(lvl_raw)) if lvl_raw is not None else 1
+                        lvl = int(float(lvl_raw)) if lvl_raw is not None and not pd.isna(lvl_raw) else 1
                         lvl = max(1, min(11, lvl))
                     except (TypeError, ValueError):
                         lvl = 1
                     try:
-                        qty = float(qty_raw) if qty_raw is not None else 1.0
+                        qty = float(qty_raw) if qty_raw is not None and not pd.isna(qty_raw) else 1.0
                         qty = max(0.00001, round(qty, 5))
                     except (TypeError, ValueError):
                         qty = 1.0
@@ -1658,26 +2318,26 @@ with tab_author:
                 elif not rows_to_save:
                     st.warning("No valid BOM rows to save. Fill in at least one Part # before saving.")
                 else:
-                    detected = detect_unexpanded_subassemblies(project_id, rows_to_save)
-                    if detected:
-                        st.session_state[f"_pending_save_flow_{selected_model_id}"] = {
+                    conflicts = check_group_number_conflicts(project_id, selected_model_id, rows_to_save)
+                    if conflicts:
+                        st.session_state[f"_pending_group_conflict_{selected_model_id}"] = {
                             "rows": rows_to_save,
-                            "detected": detected,
+                            "conflicts": conflicts,
                             "auto_add": auto_add_grid,
                         }
                         st.rerun()
-                    else:
-                        st.session_state.pop(draft_mod_key, None)
-                        st.session_state.pop(row_tools_idx_key, None)
-                        _commit_bom_save(
-                            project_id,
-                            selected_model_id,
-                            rows_to_save,
-                            auto_add_grid,
-                            draft_key,
-                            bom_editor_logical_key,
-                            source_model_key,
-                        )
+
+                    st.session_state.pop(draft_mod_key, None)
+                    st.session_state.pop(row_tools_idx_key, None)
+                    _commit_bom_save(
+                        project_id,
+                        selected_model_id,
+                        rows_to_save,
+                        auto_add_grid,
+                        draft_key,
+                        bom_editor_logical_key,
+                        source_model_key,
+                    )
 
 
 
@@ -1713,22 +2373,6 @@ with tab_author:
                 f"Max depth: **L{max_depth}**"
             )
 
-            # Quick tree shortcuts
-            t_col_add1, t_col_add2 = st.columns(2)
-            with t_col_add1:
-                if st.button("➕ Add Subassembly (L2)", key=f"btn_add_sub_{selected_model_id}", help="Append a new Level 2 subassembly to the BOM", width="stretch"):
-                    live_items.append({"level": 2, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]})
-                    st.session_state[draft_key] = live_items
-                    st.session_state[draft_mod_key] = True
-                    request_table_editor_reset(bom_editor_logical_key)
-                    st.rerun()
-            with t_col_add2:
-                if st.button("➕ Add Component (L3)", key=f"btn_add_comp_{selected_model_id}", help="Append a new Level 3 child part to the BOM", width="stretch"):
-                    live_items.append({"level": 3, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]})
-                    st.session_state[draft_key] = live_items
-                    st.session_state[draft_mod_key] = True
-                    request_table_editor_reset(bom_editor_logical_key)
-                    st.rerun()
 
             # Structural validation callouts
             if warnings:

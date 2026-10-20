@@ -23,7 +23,7 @@ def filter_table(
 ) -> pd.DataFrame:
     """Render consistent keyword/dropdown controls and return the visible rows."""
     if dataframe.empty:
-        return dataframe.copy()
+        return dataframe.reset_index(drop=True)
     labels = labels or {}
     multi_value_columns = set(multi_value_columns)
     universal_values = universal_values or {}
@@ -102,7 +102,7 @@ def filter_table(
         for widget_key in reset_widget_keys:
             st.session_state.pop(widget_key, None)
     st.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
-    return visible.copy()
+    return visible.reset_index(drop=True)
 
 
 def split_filter_values(value) -> list[str]:

@@ -52,6 +52,9 @@ _HTML = """
           <marker id="arrow-selected" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M 0 1 L 10 5 L 0 9 z" fill="#ef4444" />
           </marker>
+          <marker id="arrow-snap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#22c55e" />
+          </marker>
         </defs>
         <g id="fishbone-world"></g>
       </svg>
@@ -119,9 +122,9 @@ _HTML = """
               <input type="text" id="add-section-name" placeholder="e.g. Door Subassembly, Freezer Op 1" style="box-sizing:border-box; width:100%; padding:8px 10px; border:1px solid var(--st-border-color); border-radius:6px; background:var(--st-background-color); color:var(--st-text-color); font-size:.88rem; font-family:inherit;" />
             </label>
             <label class="modal-label">
-              Section category
+              Section type
               <select id="add-section-type" class="modal-select">
-                <option value="Subassembly" selected>Assembly Section</option>
+                <option value="Assembly" selected>Assembly</option>
                 <option value="Support Operations">Support Operations / Fabrication</option>
               </select>
             </label>
@@ -154,7 +157,30 @@ _HTML = """
           </div>
         </div>
       </div>
-      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle (•) to connect · Drag end of arrow or click × to move connector · Drag parts to re-order within section or move between sections · Click stacked cards to cycle variants</div>
+      <!-- Part Replicate / Manage Section Uses Modal -->
+      <div id="part-uses-modal" class="canvas-modal" hidden>
+        <div class="modal-card part-uses-modal-card">
+          <h4 id="part-uses-title">Replicate / Manage Section Uses</h4>
+          <p id="part-uses-desc">Select all Fishbone sections where this part or assembly is used, and adjust the quantity per section:</p>
+          <div class="part-uses-quick-bar">
+            <span id="part-uses-summary-badge" class="part-uses-badge">Used in 1 section</span>
+            <div class="part-uses-quick-actions">
+              <button id="btn-part-uses-same-qty" type="button" class="btn-quick-action" title="Set every selected section to the same quantity">Same qty in each</button>
+              <button id="btn-part-uses-split-qty" type="button" class="btn-quick-action" title="Split total quantity evenly across selected sections">Split qty evenly</button>
+            </div>
+          </div>
+          <div id="part-uses-sections-list" class="part-uses-list"></div>
+          <label id="part-uses-children-wrap" class="part-uses-children-toggle" hidden>
+            <input id="part-uses-include-children" type="checkbox" checked />
+            <span id="part-uses-children-label">Also replicate sub-component parts into newly selected sections</span>
+          </label>
+          <div class="modal-buttons">
+            <button id="btn-part-uses-confirm" type="button" class="btn-modal btn-primary">Apply Section Uses</button>
+            <button id="btn-part-uses-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle or edge snap nodes to connect · Drag either end of arrow to snap to any node on the section · Click arrow or × to edit/delete</div>
     </div>
   </div>
 </div>
@@ -209,11 +235,24 @@ _CSS = """
 .port-handle { cursor: crosshair; fill: #3b82f6; stroke: white; stroke-width: 2; opacity: 0.88; transition: r .12s ease, opacity .12s ease; }
 .port-handle:hover { r: 10; opacity: 1; fill: #1d4ed8; }
 
+/* Edge Snap Node Points on section blocks */
+.section-snap-node { cursor: crosshair; fill: white; stroke: #94a3b8; stroke-width: 1.5; opacity: 0; transition: opacity .15s ease, r .12s ease, fill .12s ease, stroke .12s ease; }
+.section-node:hover .section-snap-node { opacity: 0.75; }
+.section-snap-node:hover { opacity: 1 !important; r: 7.5px !important; fill: #2563eb !important; stroke: white !important; stroke-width: 2px !important; filter: drop-shadow(0 0 4px rgba(37,99,235,0.6)); }
+.section-snap-node.connecting-active { opacity: 0.8 !important; stroke: #3b82f6 !important; }
+.section-snap-node.snap-target-highlight { opacity: 1 !important; r: 8.5px !important; fill: #22c55e !important; stroke: white !important; stroke-width: 2.5px !important; filter: drop-shadow(0 0 6px rgba(34,197,94,0.7)); }
+
 /* Connection line */
-.conn-line { cursor: pointer; fill: none !important; stroke-linecap: round; transition: stroke .15s ease, stroke-width .15s ease; pointer-events: stroke; }
+.conn-line { cursor: pointer; fill: none !important; stroke-linecap: round; transition: stroke .15s ease, stroke-width .15s ease, opacity .15s ease; pointer-events: stroke; }
 .conn-line:hover { stroke-width: 5 !important; filter: drop-shadow(0 0 5px rgba(37,99,235,0.4)); }
 .conn-line.selected { stroke: #ef4444 !important; stroke-width: 5 !important; }
-.conn-hit-area { cursor: pointer; stroke: transparent !important; fill: none !important; stroke-width: 22px; pointer-events: stroke; }
+.conn-line.dragging-dimmed, .conn-handle-group.dragging-dimmed, .conn-hit-area.dragging-dimmed { opacity: 0.2 !important; pointer-events: none !important; }
+.conn-hit-area { cursor: grab; stroke: transparent !important; fill: none !important; stroke-width: 26px; pointer-events: stroke; }
+.conn-hit-area:active { cursor: grabbing; }
+.conn-start-handle, .conn-arrow-handle { cursor: grab; transition: r .12s ease, fill .12s ease; }
+.conn-start-handle:hover, .conn-arrow-handle:hover { r: 9px !important; }
+.conn-handle-group { cursor: grab; }
+.conn-handle-group:active { cursor: grabbing; }
 .conn-delete-btn { cursor: pointer; opacity: 0.92; transition: opacity .12s ease; }
 .conn-delete-btn:hover { opacity: 1; }
 
@@ -236,9 +275,16 @@ _CSS = """
 .part-remove-btn { cursor: pointer; opacity: 0; transition: opacity .12s ease; }
 .part-card:hover .part-remove-btn { opacity: 0.95; }
 .part-remove-btn:hover { opacity: 1; }
+.part-replicate-btn { cursor: pointer; opacity: 0; transition: opacity .12s ease; }
+.part-card:hover .part-replicate-btn { opacity: 0.95; }
+.part-replicate-btn:hover { opacity: 1; }
+.part-multiuse-badge { cursor: pointer; }
+.part-multiuse-badge rect { transition: fill .12s ease; }
+.part-multiuse-badge:hover rect { fill: #0369a1; }
+.palette-replicate-btn { margin-left: auto; padding: 2px 6px; font-size: .7rem; font-weight: 700; border: 1px solid #0284c7; border-radius: 4px; background: rgba(2, 132, 199, 0.1); color: #0284c7; cursor: pointer; flex-shrink: 0; }
+.palette-replicate-btn:hover { background: #0284c7; color: white; }
 .part-drag-ghost { pointer-events: none; }
 
-.fishbone-hint { position: absolute; right: 12px; bottom: 10px; padding: 5px 8px; border-radius: 6px; color: var(--st-secondary-text-color); background: color-mix(in srgb, var(--st-background-color) 88%, transparent); font-size: .75rem; pointer-events: none; }
 .fishbone-tooltip { position: absolute; z-index: 20; width: 360px; max-width: 90vw; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--st-primary-color); border-radius: 10px; background: var(--st-background-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .24); pointer-events: none; }
 .fishbone-tooltip[hidden] { display: none !important; }
 .tooltip-header { display: flex; align-items: center; gap: 12px; min-width: 0; }
@@ -271,9 +317,36 @@ _CSS = """
 .btn-modal { padding: 9px 14px; border: 1px solid var(--st-border-color); border-radius: 6px; font-weight: 600; font-size: .86rem; cursor: pointer; text-align: center; }
 .btn-primary { background: var(--st-primary-color); color: white; border-color: var(--st-primary-color); }
 .btn-cancel { background: transparent; color: var(--st-secondary-text-color); }
+.part-uses-modal-card { max-width: 540px; }
+.part-uses-quick-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; background: var(--st-secondary-background-color); border: 1px solid var(--st-border-color); border-radius: 8px; }
+.part-uses-badge { font-size: .78rem; font-weight: 700; color: #0284c7; background: rgba(2, 132, 199, 0.12); padding: 3px 8px; border-radius: 999px; }
+.part-uses-quick-actions { display: flex; align-items: center; gap: 6px; }
+.btn-quick-action { padding: 4px 8px; font-size: .75rem; font-weight: 600; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); cursor: pointer; }
+.btn-quick-action:hover { border-color: var(--st-primary-color); color: var(--st-primary-color); }
+.part-uses-list { max-height: 290px; overflow-y: auto; border: 1px solid var(--st-border-color); border-radius: 8px; display: flex; flex-direction: column; background: var(--st-background-color); }
+.part-use-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--st-border-color); transition: background .12s ease; }
+.part-use-row:last-child { border-bottom: none; }
+.part-use-row.active-use { background: rgba(2, 132, 199, 0.06); }
+.part-use-row-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.part-use-check-label { display: flex; align-items: center; gap: 8px; font-size: .85rem; font-weight: 600; color: var(--st-text-color); cursor: pointer; flex: 1; min-width: 0; }
+.part-use-sec-type { font-size: .72rem; font-weight: 500; color: var(--st-secondary-text-color); background: var(--st-secondary-background-color); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.part-use-controls { display: flex; align-items: center; gap: 8px; padding-left: 24px; }
+.part-use-controls[hidden] { display: none !important; }
+.part-use-qty-wrap { display: flex; align-items: center; gap: 4px; font-size: .78rem; color: var(--st-secondary-text-color); font-weight: 600; }
+.part-use-qty-input { width: 68px; padding: 4px 6px; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); font-size: .82rem; font-weight: 600; }
+.part-use-note-input { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); font-size: .8rem; }
+.part-uses-children-toggle { display: flex; align-items: center; gap: 8px; font-size: .82rem; font-weight: 600; color: var(--st-text-color); padding: 8px 10px; border-radius: 8px; background: rgba(79, 70, 229, 0.08); border: 1px solid rgba(79, 70, 229, 0.25); cursor: pointer; }
+.part-uses-children-toggle[hidden] { display: none !important; }
+
+/* Start and End Arrow Handles */
 .conn-arrow-handle { cursor: grab; opacity: 0.88; transition: r .12s ease, fill .12s ease, opacity .12s ease; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.3)); }
 .conn-arrow-handle:hover { r: 10px !important; opacity: 1 !important; fill: #1d4ed8 !important; }
 .conn-arrow-handle:active { cursor: grabbing; }
+
+.conn-start-handle { cursor: grab; opacity: 0.85; transition: r .12s ease, fill .12s ease, opacity .12s ease; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.3)); }
+.conn-start-handle:hover { r: 9px !important; opacity: 1 !important; fill: #1d4ed8 !important; }
+.conn-start-handle:active { cursor: grabbing; }
+
 .buffer-badge rect { fill: #1e293b; stroke: #94a3b8; stroke-width: 1.5; rx: 6px; }
 .buffer-badge text { fill: #f8fafc; font-size: 10px; font-weight: 700; user-select: none; }
 
@@ -284,6 +357,45 @@ _CSS = """
 _JS = """
 const SVG_NS = "http://www.w3.org/2000/svg"
 const instanceState = new WeakMap()
+
+function getSavedFishboneView(key) {
+  if (typeof window === "undefined" || !key) return null
+  window.__paag_fishbone_views = window.__paag_fishbone_views || {}
+  const mem = window.__paag_fishbone_views[key]
+  if (mem && typeof mem.scale === "number" && isFinite(mem.scale) && mem.scale > 0 && typeof mem.x === "number" && isFinite(mem.x) && typeof mem.y === "number" && isFinite(mem.y)) {
+    return mem
+  }
+  try {
+    const raw = sessionStorage.getItem("paag_fishbone_view_" + key)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed.scale === "number" && isFinite(parsed.scale) && parsed.scale > 0 && typeof parsed.x === "number" && isFinite(parsed.x) && typeof parsed.y === "number" && isFinite(parsed.y)) {
+        window.__paag_fishbone_views[key] = parsed
+        return parsed
+      }
+    }
+  } catch (e) {}
+  return null
+}
+
+function saveFishboneView(key, vState) {
+  if (typeof window === "undefined" || !key || !vState) return
+  if (typeof vState.scale !== "number" || !isFinite(vState.scale) || vState.scale <= 0) return
+  if (typeof vState.x !== "number" || !isFinite(vState.x)) return
+  if (typeof vState.y !== "number" || !isFinite(vState.y)) return
+  window.__paag_fishbone_views = window.__paag_fishbone_views || {}
+  const toStore = {
+    scale: vState.scale,
+    x: vState.x,
+    y: vState.y,
+    fitted: Boolean(vState.fitted),
+    hasUserInteracted: Boolean(vState.hasUserInteracted)
+  }
+  window.__paag_fishbone_views[key] = toStore
+  try {
+    sessionStorage.setItem("paag_fishbone_view_" + key, JSON.stringify(toStore))
+  } catch (e) {}
+}
 
 function svgElement(name, attributes = {}) {
   const element = document.createElementNS(SVG_NS, name)
@@ -297,6 +409,244 @@ function clamp(value, minimum, maximum) {
 
 function snap(val, step = 20) {
   return Math.round(val / step) * step
+}
+
+function getSectionNodePoints(sec) {
+  const w = sec.secWidth || 220
+  const h = sec.secHeight || 64
+  const halfW = w / 2
+  const halfH = h / 2
+  const nodes = []
+
+  // Top edge (5 points, outward normal: 0, -1)
+  const topFractions = [-0.4, -0.2, 0, 0.2, 0.4]
+  topFractions.forEach((f, i) => {
+    const lx = f * w
+    const ly = -halfH
+    nodes.push({
+      id: `top_${i}`,
+      edge: 'top',
+      lx: lx,
+      ly: ly,
+      x: sec.sx + lx,
+      y: sec.sy + ly,
+      nx: 0,
+      ny: -1
+    })
+  })
+
+  // Bottom edge (5 points, outward normal: 0, 1)
+  const botFractions = [-0.4, -0.2, 0, 0.2, 0.4]
+  botFractions.forEach((f, i) => {
+    const lx = f * w
+    const ly = halfH
+    nodes.push({
+      id: `bottom_${i}`,
+      edge: 'bottom',
+      lx: lx,
+      ly: ly,
+      x: sec.sx + lx,
+      y: sec.sy + ly,
+      nx: 0,
+      ny: 1
+    })
+  })
+
+  // Left edge (3 points, outward normal: -1, 0)
+  const leftFractions = [-0.25, 0, 0.25]
+  leftFractions.forEach((f, i) => {
+    const lx = -halfW
+    const ly = f * h
+    nodes.push({
+      id: `left_${i}`,
+      edge: 'left',
+      lx: lx,
+      ly: ly,
+      x: sec.sx + lx,
+      y: sec.sy + ly,
+      nx: -1,
+      ny: 0
+    })
+  })
+
+  // Right edge (3 points, outward normal: 1, 0)
+  const rightFractions = [-0.25, 0, 0.25]
+  rightFractions.forEach((f, i) => {
+    const lx = halfW
+    const ly = f * h
+    nodes.push({
+      id: `right_${i}`,
+      edge: 'right',
+      lx: lx,
+      ly: ly,
+      x: sec.sx + lx,
+      y: sec.sy + ly,
+      nx: 1,
+      ny: 0
+    })
+  })
+
+  return nodes
+}
+
+function findNearestNodePoint(sec, wx, wy) {
+  const nodes = getSectionNodePoints(sec)
+  let best = null
+  let bestDist = Infinity
+  for (const node of nodes) {
+    const d = Math.hypot(node.x - wx, node.y - wy)
+    if (d < bestDist) {
+      bestDist = d
+      best = node
+    }
+  }
+  return best
+}
+
+function findBestSnapTarget(candidateSections, currX, currY, snapRadius = 140) {
+  let bestSec = null
+  let bestNode = null
+  let bestDist = Infinity
+
+  for (const sec of candidateSections) {
+    const w = sec.secWidth || 220
+    const h = sec.secHeight || 64
+    const halfW = w / 2
+    const halfH = h / 2
+
+    const isInside = (Math.abs(currX - sec.sx) <= halfW + 15) && (Math.abs(currY - sec.sy) <= halfH + 15)
+
+    const nodes = getSectionNodePoints(sec)
+    for (const node of nodes) {
+      const d = Math.hypot(node.x - currX, node.y - currY)
+      const effectiveDist = isInside ? d * 0.7 : d
+      if (effectiveDist < bestDist) {
+        bestDist = effectiveDist
+        bestSec = sec
+        bestNode = node
+      }
+    }
+  }
+
+  if (bestNode && (bestDist <= snapRadius || (bestSec && Math.abs(currX - bestSec.sx) <= (bestSec.secWidth || 220) / 2 + 30 && Math.abs(currY - bestSec.sy) <= (bestSec.secHeight || 64) / 2 + 30))) {
+    return { section: bestSec, node: bestNode, distance: bestDist }
+  }
+  return null
+}
+
+function computeSmoothConnectionPath(p1, p2) {
+  const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y)
+  const k = Math.max(35, Math.min(180, dist * 0.45))
+  const c1x = p1.x + (p1.nx !== undefined ? p1.nx : 1) * k
+  const c1y = p1.y + (p1.ny !== undefined ? p1.ny : 0) * k
+  const c2x = p2.x + (p2.nx !== undefined ? p2.nx : -1) * k
+  const c2y = p2.y + (p2.ny !== undefined ? p2.ny : 0) * k
+
+  const pathData = `M ${p1.x} ${p1.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`
+  const midX = 0.125 * p1.x + 0.375 * c1x + 0.375 * c2x + 0.125 * p2.x
+  const midY = 0.125 * p1.y + 0.375 * c1y + 0.375 * c2y + 0.125 * p2.y
+
+  return {
+    d: pathData,
+    midX,
+    midY,
+    c1: { x: c1x, y: c1y },
+    c2: { x: c2x, y: c2y }
+  }
+}
+
+function resolveConnectionEndpoints(connections, sectionById) {
+  const outCounts = new Map()
+  const inCounts = new Map()
+
+  connections.forEach(conn => {
+    outCounts.set(conn.from_section_id, (outCounts.get(conn.from_section_id) || 0) + 1)
+    inCounts.set(conn.to_section_id, (inCounts.get(conn.to_section_id) || 0) + 1)
+  })
+
+  const outIndices = new Map()
+  const inIndices = new Map()
+
+  return connections.map(conn => {
+    const start = sectionById.get(conn.from_section_id)
+    const end = sectionById.get(conn.to_section_id)
+    if (!start || !end) return null
+
+    const startNodes = getSectionNodePoints(start)
+    const endNodes = getSectionNodePoints(end)
+
+    const startNodeMap = new Map(startNodes.map(n => [n.id, n]))
+    const endNodeMap = new Map(endNodes.map(n => [n.id, n]))
+
+    let p1 = null
+    let p2 = null
+
+    if (conn.from_node && startNodeMap.has(conn.from_node)) {
+      p1 = startNodeMap.get(conn.from_node)
+    }
+    if (conn.to_node && endNodeMap.has(conn.to_node)) {
+      p2 = endNodeMap.get(conn.to_node)
+    }
+
+    const dx = end.sx - start.sx
+    const dy = end.sy - start.sy
+
+    if (!p1) {
+      const outIdx = outIndices.get(conn.from_section_id) || 0
+      outIndices.set(conn.from_section_id, outIdx + 1)
+      const totalOut = outCounts.get(conn.from_section_id) || 1
+
+      if (Math.abs(dy) > Math.abs(dx) * 1.5) {
+        if (dy > 0) {
+          const slot = (totalOut <= 1) ? 2 : (outIdx % 5)
+          p1 = startNodeMap.get(`bottom_${slot}`) || startNodeMap.get("bottom_2")
+        } else {
+          const slot = (totalOut <= 1) ? 2 : (outIdx % 5)
+          p1 = startNodeMap.get(`top_${slot}`) || startNodeMap.get("top_2")
+        }
+      } else {
+        if (dx >= 0) {
+          const slot = (totalOut <= 1) ? 1 : (outIdx % 3)
+          p1 = startNodeMap.get(`right_${slot}`) || startNodeMap.get("right_1")
+        } else {
+          const slot = (totalOut <= 1) ? 1 : (outIdx % 3)
+          p1 = startNodeMap.get(`left_${slot}`) || startNodeMap.get("left_1")
+        }
+      }
+    }
+
+    if (!p2) {
+      const inIdx = inIndices.get(conn.to_section_id) || 0
+      inIndices.set(conn.to_section_id, inIdx + 1)
+      const totalIn = inCounts.get(conn.to_section_id) || 1
+
+      if (Math.abs(dy) > Math.abs(dx) * 1.5) {
+        if (dy > 0) {
+          const slot = (totalIn <= 1) ? 2 : (inIdx % 5)
+          p2 = endNodeMap.get(`top_${slot}`) || endNodeMap.get("top_2")
+        } else {
+          const slot = (totalIn <= 1) ? 2 : (inIdx % 5)
+          p2 = endNodeMap.get(`bottom_${slot}`) || endNodeMap.get("bottom_2")
+        }
+      } else {
+        if (dx >= 0) {
+          const slot = (totalIn <= 1) ? 1 : (inIdx % 3)
+          p2 = endNodeMap.get(`left_${slot}`) || endNodeMap.get("left_1")
+        } else {
+          const slot = (totalIn <= 1) ? 1 : (inIdx % 3)
+          p2 = endNodeMap.get(`right_${slot}`) || endNodeMap.get("right_1")
+        }
+      }
+    }
+
+    return {
+      conn,
+      start,
+      end,
+      p1,
+      p2
+    }
+  }).filter(Boolean)
 }
 
 export default function renderFishbone(component) {
@@ -358,16 +708,53 @@ export default function renderFishbone(component) {
   const btnConnDelete = parentElement.querySelector("#btn-conn-delete")
   const btnConnCancel = parentElement.querySelector("#btn-conn-cancel")
 
+  const partUsesModal = parentElement.querySelector("#part-uses-modal")
+  const partUsesTitle = parentElement.querySelector("#part-uses-title")
+  const partUsesDesc = parentElement.querySelector("#part-uses-desc")
+  const partUsesSummaryBadge = parentElement.querySelector("#part-uses-summary-badge")
+  const btnPartUsesSameQty = parentElement.querySelector("#btn-part-uses-same-qty")
+  const btnPartUsesSplitQty = parentElement.querySelector("#btn-part-uses-split-qty")
+  const partUsesSectionsList = parentElement.querySelector("#part-uses-sections-list")
+  const partUsesChildrenWrap = parentElement.querySelector("#part-uses-children-wrap")
+  const partUsesIncludeChildren = parentElement.querySelector("#part-uses-include-children")
+  const partUsesChildrenLabel = parentElement.querySelector("#part-uses-children-label")
+  const btnPartUsesConfirm = parentElement.querySelector("#btn-part-uses-confirm")
+  const btnPartUsesCancel = parentElement.querySelector("#btn-part-uses-cancel")
+
   if (!shell || !viewport || !svg || !world || !data) return
 
+  const storageKey = (data && data.component_key) ? data.component_key : "fishbone_default"
   let state = instanceState.get(parentElement)
-  if (!state) {
+  if (!state || (state.storageKey && state.storageKey !== storageKey)) {
+    const saved = getSavedFishboneView(storageKey)
     state = {
-      scale: 1, x: 0, y: 0, dragging: false, pointerX: 0, pointerY: 0, fitted: false, signature: "",
-      selectedConnId: null, selectedSectionId: null, pendingConnection: null, reconnectingConnection: null,
-      hasUserInteracted: false, observerAttached: false, clusterActiveIndices: new Map()
+      storageKey: storageKey,
+      scale: saved ? saved.scale : 1,
+      x: saved ? saved.x : 0,
+      y: saved ? saved.y : 0,
+      dragging: false,
+      pointerX: 0,
+      pointerY: 0,
+      fitted: saved ? Boolean(saved.fitted) : false,
+      signature: "",
+      selectedConnId: null,
+      selectedSectionId: null,
+      pendingConnection: null,
+      reconnectingConnection: null,
+      hasUserInteracted: saved ? Boolean(saved.hasUserInteracted) : false,
+      observerAttached: false,
+      clusterActiveIndices: new Map()
     }
     instanceState.set(parentElement, state)
+  } else if (!state.fitted) {
+    const saved = getSavedFishboneView(storageKey)
+    if (saved) {
+      state.scale = saved.scale
+      state.x = saved.x
+      state.y = saved.y
+      state.fitted = Boolean(saved.fitted)
+      state.hasUserInteracted = Boolean(saved.hasUserInteracted)
+    }
   }
   if (!state.clusterActiveIndices) {
     state.clusterActiveIndices = new Map()
@@ -380,10 +767,30 @@ export default function renderFishbone(component) {
   const paletteItems = data.palette_items || []
   const allSections = data.all_sections || sections
 
-  const dataSignature = `${sections.map(s => `${s.id}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}`).join("|")}::${paletteItems.length}`
+  const dataSignature = `${sections.map(s => `${s.id}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}:${p.quantity}:${p.use_description || ''}`).join("|")}::${paletteItems.length}`
+
+  // Track which sections each part_id is placed in
+  const partSectionsMap = new Map()
+  parts.forEach((p) => {
+    if (!p.part_id || !p.section_id) return
+    if (!partSectionsMap.has(p.part_id)) partSectionsMap.set(p.part_id, new Map())
+    const secMap = partSectionsMap.get(p.part_id)
+    if (secMap.has(p.section_id)) {
+      const entry = secMap.get(p.section_id)
+      entry.quantity = (Number(entry.quantity) || 0) + (Number(p.quantity) || 1)
+      if (p.use_description && !entry.use_description) entry.use_description = p.use_description
+      entry.assignment_ids.push(p.id)
+    } else {
+      secMap.set(p.section_id, {
+        quantity: Number(p.quantity) || 1,
+        use_description: p.use_description || "",
+        assignment_ids: [p.id]
+      })
+    }
+  })
+  const paletteByPartId = new Map(paletteItems.map(item => [item.part_id, item]))
   if (state.signature !== dataSignature) {
     state.signature = dataSignature
-    state.fitted = false
   }
   summary.textContent = `${sections.length} sections · ${connections.length} connections · ${parts.length} placed parts`
 
@@ -407,7 +814,7 @@ export default function renderFishbone(component) {
         addSectionParent.replaceChildren()
         const noneOpt = document.createElement("option")
         noneOpt.value = ""
-        noneOpt.textContent = isSupport ? "(None - Standalone fabrication)" : "(None - Root assembly / Main spine)"
+        noneOpt.textContent = isSupport ? "(None - Standalone fabrication)" : "(None - Root / final assembly)"
         addSectionParent.appendChild(noneOpt)
         allSections.forEach(s => {
           const opt = document.createElement("option")
@@ -420,7 +827,7 @@ export default function renderFishbone(component) {
 
     addSectionBtn.onclick = () => {
       if (addSectionName) addSectionName.value = ""
-      if (addSectionType) addSectionType.value = "Subassembly"
+      if (addSectionType) addSectionType.value = "Assembly"
       updateAddSectionParentVisibility()
       addSectionModal.hidden = false
       setTimeout(() => { if (addSectionName) addSectionName.focus() }, 50)
@@ -443,14 +850,9 @@ export default function renderFishbone(component) {
           alert("Please enter a section name.")
           return
         }
-        const categoryVal = addSectionType ? addSectionType.value : "Subassembly"
-        let chosenType = categoryVal
+        const categoryVal = addSectionType ? addSectionType.value : "Assembly"
+        const chosenType = categoryVal === "Support Operations" ? "Support Operations" : "Assembly"
         let parentId = addSectionParent && addSectionParent.value ? addSectionParent.value : null
-        if (categoryVal === "Support Operations") {
-          chosenType = "Support Operations"
-        } else {
-          chosenType = parentId ? "Subassembly" : "Main spine"
-        }
         addSectionModal.hidden = true
 
         let nextX = 160
@@ -553,6 +955,205 @@ export default function renderFishbone(component) {
     }
   }
 
+  // Replicate / Manage Section Uses Modal Handling
+  function openPartUsesModal(targetPart, currentSection) {
+    if (!partUsesModal || !partUsesSectionsList || !targetPart) return
+    const partId = targetPart.part_id
+    const partNumber = targetPart.part_number || "Part"
+    const partDesc = targetPart.description || ""
+    const paletteItem = paletteByPartId.get(partId) || paletteItems.find(it => it.part_number === partNumber) || null
+    const secMap = partSectionsMap.get(partId) || new Map()
+    const defaultCatalogQty = (paletteItem && Number(paletteItem.quantity) > 0)
+      ? Number(paletteItem.quantity)
+      : (Number(targetPart.quantity) > 0 ? Number(targetPart.quantity) : 1)
+
+    if (partUsesTitle) {
+      partUsesTitle.textContent = `Replicate / Manage Uses: ${partNumber}`
+    }
+    if (partUsesDesc) {
+      partUsesDesc.textContent = partDesc
+        ? `${partDesc} — Check every Fishbone section where this item is used and set the quantity per section:`
+        : `Check every Fishbone section where this item is used and set the quantity per section:`
+    }
+
+    const sortedSections = [...allSections].sort((a, b) => {
+      const aCurr = (currentSection && a.id === currentSection.id) ? 1 : 0
+      const bCurr = (currentSection && b.id === currentSection.id) ? 1 : 0
+      if (aCurr !== bCurr) return bCurr - aCurr
+      const aPlaced = secMap.has(a.id) ? 1 : 0
+      const bPlaced = secMap.has(b.id) ? 1 : 0
+      if (aPlaced !== bPlaced) return bPlaced - aPlaced
+      return 0
+    })
+
+    partUsesSectionsList.replaceChildren()
+    const rowRecords = []
+
+    function updateSummaryBadge() {
+      const checkedRows = rowRecords.filter(r => r.checkbox.checked)
+      const count = checkedRows.length
+      const totalQty = checkedRows.reduce((acc, r) => acc + (parseFloat(r.qtyInput.value) || 0), 0)
+      const roundedTotal = Math.round(totalQty * 1000) / 1000
+      if (partUsesSummaryBadge) {
+        partUsesSummaryBadge.textContent = `Used in ${count} section${count === 1 ? "" : "s"} · Total Qty: ${roundedTotal}`
+      }
+    }
+
+    sortedSections.forEach(sec => {
+      const existingUse = secMap.get(sec.id)
+      const isChecked = Boolean(existingUse) || Boolean(currentSection && sec.id === currentSection.id)
+      const initialQty = existingUse ? existingUse.quantity : defaultCatalogQty
+      const initialNote = existingUse ? (existingUse.use_description || "") : ""
+
+      const row = document.createElement("div")
+      row.className = `part-use-row${isChecked ? " active-use" : ""}`
+
+      const header = document.createElement("div")
+      header.className = "part-use-row-header"
+
+      const checkLabel = document.createElement("label")
+      checkLabel.className = "part-use-check-label"
+
+      const checkbox = document.createElement("input")
+      checkbox.type = "checkbox"
+      checkbox.checked = isChecked
+
+      const nameSpan = document.createElement("span")
+      nameSpan.textContent = sec.name + (currentSection && sec.id === currentSection.id ? " (current)" : "")
+
+      checkLabel.appendChild(checkbox)
+      checkLabel.appendChild(nameSpan)
+      header.appendChild(checkLabel)
+
+      const typeBadge = document.createElement("span")
+      typeBadge.className = "part-use-sec-type"
+      typeBadge.textContent = (sec.type === "Main spine" || sec.type === "Subassembly") ? "Assembly" : (sec.type || "Assembly")
+      header.appendChild(typeBadge)
+
+      const controls = document.createElement("div")
+      controls.className = "part-use-controls"
+      controls.hidden = !isChecked
+
+      const qtyWrap = document.createElement("label")
+      qtyWrap.className = "part-use-qty-wrap"
+      const qtySpan = document.createElement("span")
+      qtySpan.textContent = "Qty:"
+      const qtyInput = document.createElement("input")
+      qtyInput.type = "number"
+      qtyInput.className = "part-use-qty-input"
+      qtyInput.step = "any"
+      qtyInput.min = "0.01"
+      qtyInput.value = String(initialQty)
+      qtyInput.oninput = updateSummaryBadge
+      qtyWrap.appendChild(qtySpan)
+      qtyWrap.appendChild(qtyInput)
+
+      const noteInput = document.createElement("input")
+      noteInput.type = "text"
+      noteInput.className = "part-use-note-input"
+      noteInput.placeholder = "Location / note (e.g. Front LH/RH, Rear)..."
+      noteInput.value = initialNote
+
+      controls.appendChild(qtyWrap)
+      controls.appendChild(noteInput)
+
+      checkbox.onchange = () => {
+        const on = checkbox.checked
+        controls.hidden = !on
+        row.classList.toggle("active-use", on)
+        updateSummaryBadge()
+      }
+
+      row.appendChild(header)
+      row.appendChild(controls)
+      partUsesSectionsList.appendChild(row)
+
+      rowRecords.push({
+        sectionId: sec.id,
+        sectionName: sec.name,
+        checkbox,
+        qtyInput,
+        noteInput
+      })
+    })
+
+    updateSummaryBadge()
+
+    if (btnPartUsesSameQty) {
+      btnPartUsesSameQty.onclick = () => {
+        const checkedRows = rowRecords.filter(r => r.checkbox.checked)
+        if (checkedRows.length === 0) return
+        const refQty = parseFloat(checkedRows[0].qtyInput.value) || defaultCatalogQty || 1
+        checkedRows.forEach(r => {
+          r.qtyInput.value = String(refQty)
+        })
+        updateSummaryBadge()
+      }
+    }
+
+    if (btnPartUsesSplitQty) {
+      btnPartUsesSplitQty.onclick = () => {
+        const checkedRows = rowRecords.filter(r => r.checkbox.checked)
+        if (checkedRows.length === 0) return
+        const currentSum = checkedRows.reduce((acc, r) => acc + (parseFloat(r.qtyInput.value) || 0), 0)
+        const baseTotal = defaultCatalogQty > 1 ? defaultCatalogQty : (currentSum > 0 ? currentSum : 1)
+        const splitVal = Math.round((baseTotal / checkedRows.length) * 10000) / 10000
+        checkedRows.forEach(r => {
+          r.qtyInput.value = String(splitVal)
+        })
+        updateSummaryBadge()
+      }
+    }
+
+    const hasChildren = Boolean(paletteItem && paletteItem.is_assembly && Array.isArray(paletteItem.child_parts) && paletteItem.child_parts.length > 0)
+    if (partUsesChildrenWrap) {
+      partUsesChildrenWrap.hidden = !hasChildren
+      if (hasChildren && partUsesChildrenLabel) {
+        partUsesChildrenLabel.textContent = `Also replicate ${paletteItem.child_parts.length} sub-component part(s) into newly selected sections`
+      }
+      if (partUsesIncludeChildren) {
+        partUsesIncludeChildren.checked = true
+      }
+    }
+
+    if (btnPartUsesCancel) {
+      btnPartUsesCancel.onclick = () => {
+        partUsesModal.hidden = true
+      }
+    }
+
+    if (btnPartUsesConfirm) {
+      btnPartUsesConfirm.onclick = () => {
+        const selectedUses = rowRecords
+          .filter(r => r.checkbox.checked)
+          .map(r => {
+            const q = parseFloat(r.qtyInput.value)
+            return {
+              section_id: r.sectionId,
+              quantity: (isFinite(q) && q > 0) ? q : 1,
+              use_description: (r.noteInput.value || "").trim()
+            }
+          })
+        partUsesModal.hidden = true
+        component.setTriggerValue("replicate_part_uses", {
+          part_id: partId,
+          part_number: partNumber,
+          source_section_id: currentSection ? currentSection.id : null,
+          include_children: Boolean(hasChildren && partUsesIncludeChildren && partUsesIncludeChildren.checked),
+          section_uses: selectedUses
+        })
+      }
+    }
+
+    partUsesModal.hidden = false
+  }
+
+  if (partUsesModal) {
+    partUsesModal.onclick = (e) => {
+      if (e.target === partUsesModal) partUsesModal.hidden = true
+    }
+  }
+
   // Populate Palette
   function renderPalette() {
     paletteList.replaceChildren()
@@ -609,13 +1210,25 @@ export default function renderFishbone(component) {
 
       const meta = document.createElement("div")
       meta.className = "palette-meta"
-      meta.textContent = `Qty ${item.quantity || 1}`
+      const secCount = partSectionsMap.has(item.part_id) ? partSectionsMap.get(item.part_id).size : 0
+      meta.textContent = secCount > 1 ? `Qty ${item.quantity || 1} · ${secCount} sections` : `Qty ${item.quantity || 1}`
       if (item.is_assembly) {
         const badge = document.createElement("span")
         badge.className = "palette-badge"
         badge.textContent = `Asm (${item.child_count})`
         meta.appendChild(badge)
       }
+      const repBtn = document.createElement("button")
+      repBtn.type = "button"
+      repBtn.className = "palette-replicate-btn"
+      repBtn.title = "Place or replicate across multiple sections"
+      repBtn.textContent = secCount > 0 ? `+ Uses (${secCount})` : "+ Multi-use"
+      repBtn.onclick = (e) => {
+        e.stopPropagation()
+        e.preventDefault()
+        openPartUsesModal(item, null)
+      }
+      meta.appendChild(repBtn)
       info.appendChild(meta)
 
       card.appendChild(info)
@@ -633,15 +1246,13 @@ export default function renderFishbone(component) {
   paletteUnplacedOnly.onchange = renderPalette
   renderPalette()
 
-  // Helper for clustering similar parts (same base drawing number, differing suffix)
+  // Helper for clustering similar parts (same base drawing number, differing suffix, segregated by P vs G)
   function getPartBaseCode(pn) {
     const clean = String(pn || "").trim().toUpperCase()
-    const match = clean.match(/^([A-Z0-9]+?)([PG]\\d{2,4}[A-Z]?)$/)
-    if (match && match[1].length >= 5) {
-      return match[1]
-    }
-    if (clean.length >= 10) {
-      return clean.slice(0, 8)
+    // Match base drawing number, followed by P (piece part) or G (group/assembly), followed by sequence/variant
+    const match = clean.match(/^([A-Z0-9#]+?)[-_\\s]?([PG])[-_\\s]?(\\d{1,5}[A-Z]?|[#X]+)(?:_.*)?$/)
+    if (match && match[1].length >= 4) {
+      return `${match[1]}-${match[2]}`
     }
     return clean
   }
@@ -719,14 +1330,21 @@ export default function renderFishbone(component) {
   // Layers
   const edgeLayer = svgElement("g", { id: "edge-layer" })
   const sectionLayer = svgElement("g", { id: "section-layer" })
+  const activeEdgeLayer = svgElement("g", { id: "active-edge-layer" })
   const ghostLayer = svgElement("g", { id: "ghost-layer" })
   world.appendChild(edgeLayer)
   world.appendChild(sectionLayer)
+  world.appendChild(activeEdgeLayer)
   world.appendChild(ghostLayer)
 
   // Auto-arrange sections logically
   autoArrangeBtn.onclick = () => {
     state.hasUserInteracted = false
+    state.fitted = false
+    try {
+      sessionStorage.removeItem("paag_fishbone_view_" + storageKey)
+      if (window.__paag_fishbone_views) delete window.__paag_fishbone_views[storageKey]
+    } catch (e) {}
     const supportSections = sections.filter(s => s.type === "Support Operations")
     const assemblySections = sections.filter(s => s.type !== "Support Operations")
 
@@ -797,24 +1415,26 @@ export default function renderFishbone(component) {
     component.setTriggerValue("auto_arrange", { positions })
   }
 
-  // Draw Connections (Smooth Parent / Child Flow Arrows)
-  connections.forEach((conn) => {
-    const start = sectionById.get(conn.from_section_id)
-    const end = sectionById.get(conn.to_section_id)
-    if (!start || !end) return
+  // Draw Connections (Smooth Parent / Child Flow Arrows with Edge Snap Points)
+  const resolvedConns = resolveConnectionEndpoints(connections, sectionById)
+  const edgeRefs = []
 
+  const selectedResolved = resolvedConns.find(rc => rc.conn.id === state.selectedConnId) || null
+  const orderedConns = [...resolvedConns].sort((a, b) => {
+    const aSel = a.conn.id === state.selectedConnId ? 1 : 0
+    const bSel = b.conn.id === state.selectedConnId ? 1 : 0
+    return aSel - bSel
+  })
+
+  orderedConns.forEach(({ conn, start, end, p1, p2 }) => {
+    const targetEdgeLayer = (state.selectedConnId === conn.id) ? activeEdgeLayer : edgeLayer
     const isFromSupport = start.type === "Support Operations"
     const isSelected = state.selectedConnId === conn.id
 
-    // Start from right handle of start section
-    const p1x = start.sx + start.secWidth / 2
-    const p1y = start.sy - start.secHeight / 2 + 21
-    // End at left border of target section
-    const p2x = end.sx - end.secWidth / 2
-    const p2y = end.sy - end.secHeight / 2 + 21
-
-    const cdx = Math.max(40, Math.abs(p2x - p1x) * 0.45)
-    const pathData = `M ${p1x} ${p1y} C ${p1x + cdx} ${p1y}, ${p2x - cdx} ${p2y}, ${p2x} ${p2y}`
+    const curve = computeSmoothConnectionPath(p1, p2)
+    const pathData = curve.d
+    const midX = curve.midX
+    const midY = curve.midY
 
     let marker = "url(#arrow-flow)"
     let color = "#2563eb"
@@ -827,12 +1447,14 @@ export default function renderFishbone(component) {
     }
 
     const path = svgElement("path", {
+      id: "conn-path-" + conn.id,
       d: pathData,
       fill: "none",
       stroke: color,
       "stroke-width": isSelected ? 4.5 : 3,
       "stroke-linecap": "round",
       "marker-end": marker,
+      "data-conn-id": conn.id,
       class: `conn-line${isSelected ? " selected" : ""}`
     })
     if (isFromSupport) {
@@ -843,25 +1465,70 @@ export default function renderFishbone(component) {
       d: pathData,
       fill: "none",
       stroke: "transparent",
-      "stroke-width": 22,
+      "stroke-width": 26,
+      "data-conn-id": conn.id,
       class: "conn-hit-area"
     })
 
-    const midX = (p1x + p2x) / 2
-    const midY = (p1y + p2y) / 2
+    hitArea.onmousedown = (e) => {
+      e.stopPropagation()
+      const rect = svg.getBoundingClientRect()
+      const clickX = (e.clientX - rect.left - state.x) / state.scale
+      const clickY = (e.clientY - rect.top - state.y) / state.scale
+      if (!isSelected && selectedResolved) {
+        const sd1 = Math.hypot(clickX - selectedResolved.p1.x, clickY - selectedResolved.p1.y)
+        const sd2 = Math.hypot(clickX - selectedResolved.p2.x, clickY - selectedResolved.p2.y)
+        if (sd1 <= 28 || sd2 <= 28) {
+          const selHandleType = (sd1 <= sd2) ? "start" : "end"
+          state.hasUserInteracted = true
+          state.reconnectingConnection = {
+            handleType: selHandleType,
+            connId: selectedResolved.conn.id,
+            fromId: selectedResolved.start.id,
+            fromName: selectedResolved.start.name,
+            oldToId: selectedResolved.end.id,
+            fromNode: selectedResolved.p1.id,
+            toNode: selectedResolved.p2.id,
+            fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
+            connType: selectedResolved.conn.connection_type || "subassembly",
+            originX: e.clientX,
+            originY: e.clientY,
+            isDrag: false,
+            fromHandle: true
+          }
+          return
+        }
+      }
+      const d1 = Math.hypot(clickX - p1.x, clickY - p1.y)
+      const d2 = Math.hypot(clickX - p2.x, clickY - p2.y)
+      const handleType = (d1 < d2) ? "start" : "end"
+      state.reconnectingConnection = {
+        handleType: handleType,
+        connId: conn.id,
+        fromId: start.id,
+        fromName: start.name,
+        oldToId: end.id,
+        fromNode: p1.id,
+        toNode: p2.id,
+        fixedPoint: (handleType === "start") ? p2 : p1,
+        connType: conn.connection_type || "subassembly",
+        originX: e.clientX,
+        originY: e.clientY,
+        isDrag: false
+      }
+    }
 
     hitArea.onclick = (e) => {
       e.stopPropagation()
-      state.selectedConnId = isSelected ? null : conn.id
-      renderWorld()
     }
 
-    edgeLayer.appendChild(path)
-    edgeLayer.appendChild(hitArea)
+    targetEdgeLayer.appendChild(path)
+    targetEdgeLayer.appendChild(hitArea)
 
     // Storage Buffer badge for Support Operations
+    let bufGroup = null
     if (isFromSupport && !isSelected) {
-      const bufGroup = svgElement("g", {
+      bufGroup = svgElement("g", {
         transform: `translate(${midX} ${midY})`,
         class: "buffer-badge",
         title: "Fabrication buffer / storage supermarket"
@@ -874,41 +1541,107 @@ export default function renderFishbone(component) {
       })
       bufTxt.textContent = "📦 Buffer / Storage"
       bufGroup.appendChild(bufTxt)
-      edgeLayer.appendChild(bufGroup)
+      targetEdgeLayer.appendChild(bufGroup)
     }
 
-    // Arrow-end handle for dragging to a different section or clicking to re-route
-    const endHandle = svgElement("circle", {
-      cx: p2x,
-      cy: p2y,
-      r: isSelected ? 8.5 : 6.5,
-      fill: isSelected ? "#ef4444" : (isFromSupport ? "#64748b" : "#2563eb"),
-      stroke: "white",
-      "stroke-width": 2,
-      class: "conn-arrow-handle",
-      title: "Drag end of arrow to connect to a different section, or click to re-route"
+    // Start-point handle for adjusting where the arrow leaves the source section
+    const startHandleG = svgElement("g", {
+      class: "conn-handle-group",
+      "data-conn-id": conn.id,
+      title: "Drag to change start snap node on this section"
     })
-    endHandle.onmousedown = (e) => {
+    const startHit = svgElement("circle", {
+      cx: p1.x, cy: p1.y, r: isSelected ? 22 : 18,
+      fill: "transparent", stroke: "transparent"
+    })
+    const startDot = svgElement("circle", {
+      cx: p1.x, cy: p1.y,
+      r: isSelected ? 8 : 6.5,
+      fill: isSelected ? "#ef4444" : "#3b82f6",
+      stroke: "white", "stroke-width": 2,
+      class: "conn-start-handle"
+    })
+    startHandleG.appendChild(startHit)
+    startHandleG.appendChild(startDot)
+    startHandleG.onmousedown = (e) => {
       e.stopPropagation()
+      state.hasUserInteracted = true
       state.reconnectingConnection = {
+        handleType: "start",
         connId: conn.id,
         fromId: start.id,
         fromName: start.name,
         oldToId: end.id,
+        fromNode: p1.id,
+        toNode: p2.id,
+        fixedPoint: p2,
+        fromHandle: true,
         connType: conn.connection_type || "subassembly",
-        startX: p1x,
-        startY: p1y,
-        isDrag: false,
         originX: e.clientX,
         originY: e.clientY,
-        isFromDelGroup: false
+        isDrag: false
       }
     }
-    edgeLayer.appendChild(endHandle)
+    if (!isSelected && selectedResolved) {
+      const sharesWithSelectedStart = (selectedResolved.start.id === start.id && selectedResolved.p1.id === p1.id)
+      const sharesWithSelectedEnd = (selectedResolved.end.id === start.id && selectedResolved.p2.id === p1.id)
+      if (sharesWithSelectedStart || sharesWithSelectedEnd) {
+        startHandleG.style.pointerEvents = "none"
+      }
+    }
+    targetEdgeLayer.appendChild(startHandleG)
+
+    // Arrow-end handle for dragging to a different snap node or different section
+    const endHandleG = svgElement("g", {
+      class: "conn-handle-group",
+      "data-conn-id": conn.id,
+      title: "Drag arrowhead to snap to any node on this section, or move to another section"
+    })
+    const endHit = svgElement("circle", {
+      cx: p2.x, cy: p2.y, r: isSelected ? 24 : 20,
+      fill: "transparent", stroke: "transparent"
+    })
+    const endDot = svgElement("circle", {
+      cx: p2.x, cy: p2.y,
+      r: isSelected ? 8.5 : 7,
+      fill: isSelected ? "#ef4444" : (isFromSupport ? "#64748b" : "#2563eb"),
+      stroke: "white", "stroke-width": 2,
+      class: "conn-arrow-handle"
+    })
+    endHandleG.appendChild(endHit)
+    endHandleG.appendChild(endDot)
+    endHandleG.onmousedown = (e) => {
+      e.stopPropagation()
+      state.hasUserInteracted = true
+      state.reconnectingConnection = {
+        handleType: "end",
+        connId: conn.id,
+        fromId: start.id,
+        fromName: start.name,
+        oldToId: end.id,
+        fromNode: p1.id,
+        toNode: p2.id,
+        fixedPoint: p1,
+        fromHandle: true,
+        connType: conn.connection_type || "subassembly",
+        originX: e.clientX,
+        originY: e.clientY,
+        isDrag: false
+      }
+    }
+    if (!isSelected && selectedResolved) {
+      const sharesWithSelectedStart = (selectedResolved.start.id === end.id && selectedResolved.p1.id === p2.id)
+      const sharesWithSelectedEnd = (selectedResolved.end.id === end.id && selectedResolved.p2.id === p2.id)
+      if (sharesWithSelectedStart || sharesWithSelectedEnd) {
+        endHandleG.style.pointerEvents = "none"
+      }
+    }
+    targetEdgeLayer.appendChild(endHandleG)
 
     // Selected Connection Action Button (Red X)
+    let delGroup = null
     if (isSelected) {
-      const delGroup = svgElement("g", {
+      delGroup = svgElement("g", {
         transform: `translate(${midX} ${midY})`,
         class: "conn-delete-btn",
         title: "Click to move or delete connection, or drag to reconnect"
@@ -920,25 +1653,69 @@ export default function renderFishbone(component) {
       delText.textContent = "×"
       delGroup.appendChild(delText)
 
-      delGroup.onmousedown = (e) => {
+      delGroup.onclick = (e) => {
         e.stopPropagation()
-        state.reconnectingConnection = {
+        openConnEditModal({
           connId: conn.id,
           fromId: start.id,
           fromName: start.name,
           oldToId: end.id,
-          connType: conn.connection_type || "subassembly",
-          startX: p1x,
-          startY: p1y,
-          isDrag: false,
-          originX: e.clientX,
-          originY: e.clientY,
-          isFromDelGroup: true
-        }
+          connType: conn.connection_type || "subassembly"
+        })
       }
-      edgeLayer.appendChild(delGroup)
+      targetEdgeLayer.appendChild(delGroup)
     }
+
+    edgeRefs.push({
+      conn,
+      start,
+      end,
+      fromNodeId: p1.id,
+      toNodeId: p2.id,
+      path,
+      hitArea,
+      startHit,
+      startDot,
+      endHit,
+      endDot,
+      bufGroup,
+      delGroup
+    })
   })
+
+  function updateConnectedEdges(secId) {
+    edgeRefs.forEach(edge => {
+      if (edge.start.id !== secId && edge.end.id !== secId) return
+      const startNodes = getSectionNodePoints(edge.start)
+      const endNodes = getSectionNodePoints(edge.end)
+      const startMap = new Map(startNodes.map(n => [n.id, n]))
+      const endMap = new Map(endNodes.map(n => [n.id, n]))
+      const curP1 = startMap.get(edge.fromNodeId) || startNodes[0]
+      const curP2 = endMap.get(edge.toNodeId) || endNodes[0]
+      if (!curP1 || !curP2) return
+
+      const curve = computeSmoothConnectionPath(curP1, curP2)
+      edge.path.setAttribute("d", curve.d)
+      edge.hitArea.setAttribute("d", curve.d)
+
+      edge.startHit.setAttribute("cx", curP1.x)
+      edge.startHit.setAttribute("cy", curP1.y)
+      edge.startDot.setAttribute("cx", curP1.x)
+      edge.startDot.setAttribute("cy", curP1.y)
+
+      edge.endHit.setAttribute("cx", curP2.x)
+      edge.endHit.setAttribute("cy", curP2.y)
+      edge.endDot.setAttribute("cx", curP2.x)
+      edge.endDot.setAttribute("cy", curP2.y)
+
+      if (edge.bufGroup) {
+        edge.bufGroup.setAttribute("transform", `translate(${curve.midX} ${curve.midY})`)
+      }
+      if (edge.delGroup) {
+        edge.delGroup.setAttribute("transform", `translate(${curve.midX} ${curve.midY})`)
+      }
+    })
+  }
 
   // Draw Simple Section Blocks
   if (sections.length === 0) {
@@ -1030,6 +1807,60 @@ export default function renderFishbone(component) {
     }
     group.appendChild(count)
 
+    // Perimeter Snap Nodes (16 points around the section block)
+    const snapNodes = getSectionNodePoints(section)
+    const snapGroup = svgElement("g", { class: "section-snap-nodes" })
+    snapNodes.forEach(sNode => {
+      const snapCircle = svgElement("circle", {
+        cx: sNode.lx,
+        cy: sNode.ly,
+        r: 5.5,
+        class: "section-snap-node",
+        "data-node-id": sNode.id,
+        "data-section-id": section.id,
+        title: `Snap node (${sNode.edge}) - Drag to start connection or snap incoming arrow here`
+      })
+      snapCircle.onmousedown = (e) => {
+        e.stopPropagation()
+        state.hasUserInteracted = true
+        if (selectedResolved) {
+          const isSelStart = (selectedResolved.start.id === section.id && selectedResolved.p1.id === sNode.id)
+          const isSelEnd = (selectedResolved.end.id === section.id && selectedResolved.p2.id === sNode.id)
+          if (isSelStart || isSelEnd) {
+            const selHandleType = isSelStart ? "start" : "end"
+            state.reconnectingConnection = {
+              handleType: selHandleType,
+              connId: selectedResolved.conn.id,
+              fromId: selectedResolved.start.id,
+              fromName: selectedResolved.start.name,
+              oldToId: selectedResolved.end.id,
+              fromNode: selectedResolved.p1.id,
+              toNode: selectedResolved.p2.id,
+              fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
+              connType: selectedResolved.conn.connection_type || "subassembly",
+              originX: e.clientX,
+              originY: e.clientY,
+              isDrag: false,
+              fromHandle: true
+            }
+            return
+          }
+        }
+        e.stopPropagation()
+        state.hasUserInteracted = true
+        state.pendingConnection = {
+          fromId: section.id,
+          fromName: section.name,
+          fromNode: sNode.id,
+          startX: sNode.x,
+          startY: sNode.y,
+          startNormal: { nx: sNode.nx, ny: sNode.ny }
+        }
+      }
+      snapGroup.appendChild(snapCircle)
+    })
+    group.appendChild(snapGroup)
+
     // Connection Port Handle (on right border of header)
     const port = svgElement("circle", {
       cx: secWidth / 2, cy: -secHeight / 2 + 21, r: 8, class: "port-handle",
@@ -1037,11 +1868,41 @@ export default function renderFishbone(component) {
     })
     port.onmousedown = (e) => {
       e.stopPropagation()
+      state.hasUserInteracted = true
+      if (selectedResolved) {
+        const portX = section.sx + secWidth / 2
+        const portY = section.sy - secHeight / 2 + 21
+        const isSelStart = (selectedResolved.start.id === section.id && (selectedResolved.p1.id === "right_1" || Math.hypot(selectedResolved.p1.x - portX, selectedResolved.p1.y - portY) <= 28))
+        const isSelEnd = (selectedResolved.end.id === section.id && (selectedResolved.p2.id === "right_1" || Math.hypot(selectedResolved.p2.x - portX, selectedResolved.p2.y - portY) <= 28))
+        if (isSelStart || isSelEnd) {
+          const selHandleType = isSelStart ? "start" : "end"
+          state.reconnectingConnection = {
+            handleType: selHandleType,
+            connId: selectedResolved.conn.id,
+            fromId: selectedResolved.start.id,
+            fromName: selectedResolved.start.name,
+            oldToId: selectedResolved.end.id,
+            fromNode: selectedResolved.p1.id,
+            toNode: selectedResolved.p2.id,
+            fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
+            connType: selectedResolved.conn.connection_type || "subassembly",
+            originX: e.clientX,
+            originY: e.clientY,
+            isDrag: false,
+            fromHandle: true
+          }
+          return
+        }
+      }
+      e.stopPropagation()
+      state.hasUserInteracted = true
       state.pendingConnection = {
         fromId: section.id,
         fromName: section.name,
+        fromNode: "right_1",
         startX: section.sx + secWidth / 2,
-        startY: section.sy - secHeight / 2 + 21
+        startY: section.sy - secHeight / 2 + 21,
+        startNormal: { nx: 1, ny: 0 }
       }
     }
     group.appendChild(port)
@@ -1188,10 +2049,65 @@ export default function renderFishbone(component) {
             x: cardX + cardW / 2, y: cardY + 76, "text-anchor": "middle",
             fill: "#6366f1", "font-size": 7.5, "font-weight": 600
           })
-          const suf = pnStr.length >= 8 ? pnStr.slice(8) : pnStr
+          let suf = pnStr
+          const sufMatch = pnStr.match(/^([A-Z0-9#]+?)[-_\\s]?([PG])[-_\\s]?(\\d{1,5}[A-Z]?|[#X]+)(?:_.*)?$/)
+          if (sufMatch && sufMatch[1].length >= 4) {
+            suf = `${sufMatch[2]}${sufMatch[3]}`
+          } else if (pnStr.length >= 8) {
+            suf = pnStr.slice(8)
+          }
           sufTxt.textContent = `[${activeIdx + 1}/${cluster.parts.length}] ${suf}`
           card.appendChild(sufTxt)
         }
+
+        // Multi-section indicator badge (when placed in 2+ sections)
+        const partSecMap = partSectionsMap.get(activePart.part_id)
+        const totalPlacedSections = partSecMap ? partSecMap.size : 1
+        if (totalPlacedSections > 1) {
+          const multiBadge = svgElement("g", {
+            class: "part-multiuse-badge",
+            title: `Used in ${totalPlacedSections} sections — click to manage section uses`
+          })
+          multiBadge.appendChild(svgElement("rect", {
+            x: cardX + 3, y: cardY + 41, width: 36, height: 13, rx: 3.5,
+            fill: "#0284c7", stroke: "white", "stroke-width": 1
+          }))
+          const multiTxt = svgElement("text", {
+            x: cardX + 21, y: cardY + 50, "text-anchor": "middle",
+            fill: "white", "font-size": 7.8, "font-weight": 700
+          })
+          multiTxt.textContent = `${totalPlacedSections} uses`
+          multiBadge.appendChild(multiTxt)
+          multiBadge.onclick = (e) => {
+            e.stopPropagation()
+            openPartUsesModal(activePart, section)
+          }
+          card.appendChild(multiBadge)
+        }
+
+        // Replicate / Manage Uses (+) Button at bottom-left (where 'uses' badge lives)
+        const repCx = totalPlacedSections > 1 ? (cardX + 47.5) : (cardX + 10.5)
+        const repCy = cardY + 47.5
+        const replicateBtn = svgElement("g", {
+          class: "part-replicate-btn",
+          title: `Replicate ${activePart.part_number} to other sections or split quantity`,
+          style: "cursor: pointer;"
+        })
+        replicateBtn.appendChild(svgElement("circle", {
+          cx: repCx, cy: repCy, r: 7.5,
+          fill: "#0284c7", stroke: "white", "stroke-width": 1.5
+        }))
+        const repTxt = svgElement("text", {
+          x: repCx, y: repCy + 3.2, "text-anchor": "middle",
+          fill: "white", "font-size": 10.5, "font-weight": 700
+        })
+        repTxt.textContent = "+"
+        replicateBtn.appendChild(repTxt)
+        replicateBtn.onclick = (e) => {
+          e.stopPropagation()
+          openPartUsesModal(activePart, section)
+        }
+        card.appendChild(replicateBtn)
 
         // Remove (x) Button
         const removeBtn = svgElement("g", {
@@ -1222,17 +2138,20 @@ export default function renderFishbone(component) {
 
         // Mouse Drag to re-order within section or move to another section & Click to cycle variants
         card.onmousedown = (e) => {
-          if (e.target.closest(".part-remove-btn")) return
+          if (e.target.closest(".part-remove-btn") || e.target.closest(".part-replicate-btn") || e.target.closest(".part-multiuse-badge")) return
           e.stopPropagation()
           const startMouseX = e.clientX
           const startMouseY = e.clientY
           let isDragging = false
+          state.draggingPart = true
+          tooltip.hidden = true
           let ghostEl = null
 
           const onMouseMove = (moveEvt) => {
             const dist = Math.hypot(moveEvt.clientX - startMouseX, moveEvt.clientY - startMouseY)
             if (dist > 4 && !isDragging) {
               isDragging = true
+              state.hasUserInteracted = true
               tooltip.hidden = true
               ghostEl = document.createElement("div")
               ghostEl.className = "part-drag-ghost"
@@ -1338,6 +2257,7 @@ export default function renderFishbone(component) {
           }
 
           const onMouseUp = (upEvt) => {
+            state.draggingPart = false
             window.removeEventListener("mousemove", onMouseMove)
             window.removeEventListener("mouseup", onMouseUp)
             window.removeEventListener("keydown", onKeyDown)
@@ -1349,6 +2269,8 @@ export default function renderFishbone(component) {
               ghostEl = null
             }
             if (isDragging) {
+              state.hasUserInteracted = true
+              saveFishboneView(storageKey, state)
               const rect = svg.getBoundingClientRect()
               const currX = (upEvt.clientX - rect.left - state.x) / state.scale
               const currY = (upEvt.clientY - rect.top - state.y) / state.scale
@@ -1456,7 +2378,8 @@ export default function renderFishbone(component) {
 
           const onKeyDown = (keyEvt) => {
             if (keyEvt.key === "Escape") {
-              window.removeEventListener("mousemove", onMouseMove)
+              state.draggingPart = false
+            window.removeEventListener("mousemove", onMouseMove)
               window.removeEventListener("mouseup", onMouseUp)
               window.removeEventListener("keydown", onKeyDown)
               document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
@@ -1466,6 +2389,7 @@ export default function renderFishbone(component) {
                 ghostEl.remove()
                 ghostEl = null
               }
+              state.draggingPart = false
               isDragging = false
             }
           }
@@ -1477,6 +2401,7 @@ export default function renderFishbone(component) {
 
         // Hover tooltip
         card.onmouseenter = (e) => {
+          if (state.draggingPart || state.dragging) return
           if (activePart.image) {
             tooltipImage.src = activePart.image
             tooltipImage.hidden = false
@@ -1504,8 +2429,8 @@ export default function renderFishbone(component) {
           const rect = viewport.getBoundingClientRect()
           const tipWidth = tooltip.offsetWidth || 360
           const tipHeight = tooltip.offsetHeight || 150
-          tooltip.style.left = `${clamp(e.clientX - rect.left + 16, 12, Math.max(12, rect.width - tipWidth - 16))}px`
-          tooltip.style.top = `${clamp(e.clientY - rect.top + 16, 12, Math.max(12, rect.height - tipHeight - 16))}px`
+          tooltip.style.left = `${e.clientX - rect.left + 16}px`
+          tooltip.style.top = `${e.clientY - rect.top + 16}px`
         }
         card.onmouseleave = () => {
           tooltip.hidden = true
@@ -1541,10 +2466,12 @@ export default function renderFishbone(component) {
         const dy = (moveEvt.clientY - startMouseY) / state.scale
         if (Math.hypot(dx, dy) > 3) {
           didMove = true
+          state.hasUserInteracted = true
           group.classList.add("dragging")
           section.sx = origSx + dx
           section.sy = origSy + dy
           group.setAttribute("transform", `translate(${section.sx} ${section.sy})`)
+          updateConnectedEdges(section.id)
         }
       }
 
@@ -1553,8 +2480,11 @@ export default function renderFishbone(component) {
         window.removeEventListener("mouseup", onMouseUp)
         group.classList.remove("dragging")
         if (didMove) {
+          state.hasUserInteracted = true
+          saveFishboneView(storageKey, state)
           section.sx = snap(section.sx, 20)
           section.sy = snap(section.sy, 20)
+          updateConnectedEdges(section.id)
           component.setTriggerValue("move_node", {
             section_id: section.id,
             grid_x: section.sx,
@@ -1577,16 +2507,63 @@ export default function renderFishbone(component) {
       const rect = svg.getBoundingClientRect()
       const currX = (e.clientX - rect.left - state.x) / state.scale
       const currY = (e.clientY - rect.top - state.y) / state.scale
-      const ghost = svgElement("line", {
-        x1: state.pendingConnection.startX,
-        y1: state.pendingConnection.startY,
-        x2: currX,
-        y2: currY,
-        stroke: "#3b82f6",
-        "stroke-width": 3,
-        "stroke-dasharray": "6 4"
+
+      // Light up snap nodes on potential target sections
+      document.querySelectorAll(".section-snap-node").forEach(el => {
+        if (el.getAttribute("data-section-id") !== state.pendingConnection.fromId) {
+          el.classList.add("connecting-active")
+        }
+      })
+      document.querySelectorAll(".snap-target-highlight").forEach(el => el.classList.remove("snap-target-highlight"))
+
+      const candidateSections = sections.filter(s => s.id !== state.pendingConnection.fromId)
+      const snapRes = findBestSnapTarget(candidateSections, currX, currY, 140)
+
+      if (snapRes) {
+        const matchedCircle = document.querySelector(`.section-snap-node[data-section-id="${snapRes.section.id}"][data-node-id="${snapRes.node.id}"]`)
+        if (matchedCircle) matchedCircle.classList.add("snap-target-highlight")
+      }
+
+      const p1 = {
+        x: state.pendingConnection.startX,
+        y: state.pendingConnection.startY,
+        nx: state.pendingConnection.startNormal ? state.pendingConnection.startNormal.nx : 1,
+        ny: state.pendingConnection.startNormal ? state.pendingConnection.startNormal.ny : 0
+      }
+
+      let ghostPathD = ""
+      if (snapRes) {
+        const p2 = { x: snapRes.node.x, y: snapRes.node.y, nx: snapRes.node.nx, ny: snapRes.node.ny }
+        const pathData = computeSmoothConnectionPath(p1, p2)
+        ghostPathD = pathData.d
+      } else {
+        const dx = currX - p1.x
+        const dy = currY - p1.y
+        const dist = Math.hypot(dx, dy)
+        const bend = Math.min(Math.max(dist * 0.4, 30), 120)
+        const c1x = p1.x + p1.nx * bend
+        const c1y = p1.y + p1.ny * bend
+        ghostPathD = `M ${p1.x} ${p1.y} Q ${c1x} ${c1y} ${currX} ${currY}`
+      }
+
+      const ghost = svgElement("path", {
+        d: ghostPathD,
+        fill: "none",
+        stroke: snapRes ? "#22c55e" : "#3b82f6",
+        "stroke-width": 3.5,
+        "stroke-dasharray": "6 4",
+        "marker-end": snapRes ? "url(#arrow-snap)" : "url(#arrow-flow)"
       })
       ghostLayer.appendChild(ghost)
+      const ghostHandle = svgElement("circle", {
+        cx: snapRes ? snapRes.node.x : currX,
+        cy: snapRes ? snapRes.node.y : currY,
+        r: 7.5,
+        fill: snapRes ? "#22c55e" : "#3b82f6",
+        stroke: "white",
+        "stroke-width": 2
+      })
+      ghostLayer.appendChild(ghostHandle)
       return
     }
 
@@ -1600,38 +2577,112 @@ export default function renderFishbone(component) {
         const rect = svg.getBoundingClientRect()
         const currX = (e.clientX - rect.left - state.x) / state.scale
         const currY = (e.clientY - rect.top - state.y) / state.scale
+        const rConn = state.reconnectingConnection
 
-        const cdx = Math.max(40, Math.abs(currX - state.reconnectingConnection.startX) * 0.45)
-        const ghost = svgElement("path", {
-          d: `M ${state.reconnectingConnection.startX} ${state.reconnectingConnection.startY} C ${state.reconnectingConnection.startX + cdx} ${state.reconnectingConnection.startY}, ${currX - cdx} ${currY}, ${currX} ${currY}`,
-          fill: "none",
-          stroke: "#ef4444",
-          "stroke-width": 3.5,
-          "stroke-dasharray": "6 4",
-          "marker-end": "url(#arrow-selected)"
-        })
-        ghostLayer.appendChild(ghost)
+        svg.querySelectorAll(`[data-conn-id="${rConn.connId}"]`).forEach(el => el.classList.add("dragging-dimmed"))
+        const currentLine = svg.querySelector("#conn-path-" + rConn.connId)
+        if (currentLine) currentLine.classList.add("dragging-dimmed")
 
-        const hoverSec = sections.find(s => {
-          const w = s.secWidth || 220
-          const h = s.secHeight || 64
-          return Math.abs(currX - s.sx) < w / 2 + 15 && Math.abs(currY - s.sy) < h / 2 + 15 && s.id !== state.reconnectingConnection.fromId
-        })
-        if (hoverSec) {
-          const w = hoverSec.secWidth || 220
-          const h = hoverSec.secHeight || 64
-          const ring = svgElement("rect", {
-            x: hoverSec.sx - w / 2 - 4,
-            y: hoverSec.sy - h / 2 - 4,
-            width: w + 8,
-            height: h + 8,
-            rx: 14,
+        document.querySelectorAll(".snap-target-highlight").forEach(el => el.classList.remove("snap-target-highlight"))
+
+        if (rConn.handleType === "start") {
+          // Dragging tail: snap node on source section (fromId)
+          document.querySelectorAll(`.section-snap-node[data-section-id="${rConn.fromId}"]`).forEach(el => el.classList.add("connecting-active"))
+
+          const sourceSec = sections.find(s => s.id === rConn.fromId)
+          const snapRes = sourceSec ? findBestSnapTarget([sourceSec], currX, currY, 140) : null
+          const nearestStartNode = snapRes ? snapRes.node : null
+
+          if (nearestStartNode) {
+            const matchedCircle = document.querySelector(`.section-snap-node[data-section-id="${sourceSec.id}"][data-node-id="${nearestStartNode.id}"]`)
+            if (matchedCircle) matchedCircle.classList.add("snap-target-highlight")
+          }
+
+          const p2 = rConn.fixedPoint
+          let ghostPathD = ""
+          if (nearestStartNode) {
+            const p1 = { x: nearestStartNode.x, y: nearestStartNode.y, nx: nearestStartNode.nx, ny: nearestStartNode.ny }
+            const pathData = computeSmoothConnectionPath(p1, p2)
+            ghostPathD = pathData.d
+          } else {
+            const dx = p2.x - currX
+            const dy = p2.y - currY
+            const dist = Math.hypot(dx, dy)
+            const bend = Math.min(Math.max(dist * 0.4, 30), 120)
+            const c2x = p2.x + (p2.nx || -1) * bend
+            const c2y = p2.y + (p2.ny || 0) * bend
+            ghostPathD = `M ${currX} ${currY} Q ${c2x} ${c2y} ${p2.x} ${p2.y}`
+          }
+
+          const ghost = svgElement("path", {
+            d: ghostPathD,
             fill: "none",
-            stroke: hoverSec.id === state.reconnectingConnection.oldToId ? "#94a3b8" : "#22c55e",
-            "stroke-width": 3,
-            "stroke-dasharray": "6 3"
+            stroke: nearestStartNode ? "#22c55e" : "#3b82f6",
+            "stroke-width": 3.5,
+            "stroke-dasharray": "6 4",
+            "marker-end": "url(#arrow-flow)"
           })
-          ghostLayer.appendChild(ring)
+          ghostLayer.appendChild(ghost)
+          const ghostHandle = svgElement("circle", {
+            cx: nearestStartNode ? nearestStartNode.x : currX,
+            cy: nearestStartNode ? nearestStartNode.y : currY,
+            r: 7,
+            fill: nearestStartNode ? "#22c55e" : "#3b82f6",
+            stroke: "white",
+            "stroke-width": 2
+          })
+          ghostLayer.appendChild(ghostHandle)
+
+        } else {
+          // Dragging arrowhead (handleType === "end")
+          document.querySelectorAll(".section-snap-node").forEach(el => {
+            if (el.getAttribute("data-section-id") !== rConn.fromId) {
+              el.classList.add("connecting-active")
+            }
+          })
+
+          const candidateSections = sections.filter(s => s.id !== rConn.fromId)
+          const snapRes = findBestSnapTarget(candidateSections, currX, currY, 140)
+
+          if (snapRes) {
+            const matchedCircle = document.querySelector(`.section-snap-node[data-section-id="${snapRes.section.id}"][data-node-id="${snapRes.node.id}"]`)
+            if (matchedCircle) matchedCircle.classList.add("snap-target-highlight")
+          }
+
+          const p1 = rConn.fixedPoint
+          let ghostPathD = ""
+          if (snapRes) {
+            const p2 = { x: snapRes.node.x, y: snapRes.node.y, nx: snapRes.node.nx, ny: snapRes.node.ny }
+            const pathData = computeSmoothConnectionPath(p1, p2)
+            ghostPathD = pathData.d
+          } else {
+            const dx = currX - p1.x
+            const dy = currY - p1.y
+            const dist = Math.hypot(dx, dy)
+            const bend = Math.min(Math.max(dist * 0.4, 30), 120)
+            const c1x = p1.x + (p1.nx || 1) * bend
+            const c1y = p1.y + (p1.ny || 0) * bend
+            ghostPathD = `M ${p1.x} ${p1.y} Q ${c1x} ${c1y} ${currX} ${currY}`
+          }
+
+          const ghost = svgElement("path", {
+            d: ghostPathD,
+            fill: "none",
+            stroke: snapRes ? "#22c55e" : "#3b82f6",
+            "stroke-width": 3.5,
+            "stroke-dasharray": "6 4",
+            "marker-end": snapRes ? "url(#arrow-snap)" : "url(#arrow-flow)"
+          })
+          ghostLayer.appendChild(ghost)
+          const ghostHandle = svgElement("circle", {
+            cx: snapRes ? snapRes.node.x : currX,
+            cy: snapRes ? snapRes.node.y : currY,
+            r: 7.5,
+            fill: snapRes ? "#22c55e" : "#3b82f6",
+            stroke: "white",
+            "stroke-width": 2
+          })
+          ghostLayer.appendChild(ghostHandle)
         }
       }
       return
@@ -1639,32 +2690,40 @@ export default function renderFishbone(component) {
   }
 
   window.onmouseup = (e) => {
+    document.querySelectorAll(".connecting-active").forEach(el => el.classList.remove("connecting-active"))
+    document.querySelectorAll(".snap-target-highlight").forEach(el => el.classList.remove("snap-target-highlight"))
+    svg.querySelectorAll(".dragging-dimmed").forEach(el => el.classList.remove("dragging-dimmed"))
+
     if (state.pendingConnection) {
+      state.hasUserInteracted = true
+      saveFishboneView(storageKey, state)
       ghostLayer.replaceChildren()
       const fromId = state.pendingConnection.fromId
+      const fromNode = state.pendingConnection.fromNode || "right_1"
       state.pendingConnection = null
 
       const rect = svg.getBoundingClientRect()
       const currX = (e.clientX - rect.left - state.x) / state.scale
       const currY = (e.clientY - rect.top - state.y) / state.scale
 
-      const targetSec = sections.find(s => {
-        const w = s.secWidth || 220
-        const h = s.secHeight || 64
-        return Math.abs(currX - s.sx) < w / 2 + 10 && Math.abs(currY - s.sy) < h / 2 + 10 && s.id !== fromId
-      })
+      const candidateSections = sections.filter(s => s.id !== fromId)
+      const snapRes = findBestSnapTarget(candidateSections, currX, currY, 140)
 
-      if (targetSec) {
+      if (snapRes) {
         component.setTriggerValue("create_connection", {
           from_section_id: fromId,
-          to_section_id: targetSec.id,
-          connection_type: "subassembly"
+          to_section_id: snapRes.section.id,
+          connection_type: "subassembly",
+          from_node: fromNode,
+          to_node: snapRes.node.id
         })
       }
       return
     }
 
     if (state.reconnectingConnection) {
+      state.hasUserInteracted = true
+      saveFishboneView(storageKey, state)
       ghostLayer.replaceChildren()
       const rConn = state.reconnectingConnection
       state.reconnectingConnection = null
@@ -1674,24 +2733,61 @@ export default function renderFishbone(component) {
         const currX = (e.clientX - rect.left - state.x) / state.scale
         const currY = (e.clientY - rect.top - state.y) / state.scale
 
-        const targetSec = sections.find(s => {
-          const w = s.secWidth || 220
-          const h = s.secHeight || 64
-          return Math.abs(currX - s.sx) < w / 2 + 15 && Math.abs(currY - s.sy) < h / 2 + 15 && s.id !== rConn.fromId
-        })
+        if (rConn.handleType === "start") {
+          // Adjusting start snap node on source section
+          const sourceSec = sections.find(s => s.id === rConn.fromId)
+          if (sourceSec) {
+            const snapRes = findBestSnapTarget([sourceSec], currX, currY, 140)
+            if (snapRes && snapRes.node.id !== rConn.fromNode) {
+              component.setTriggerValue("update_connection_nodes", {
+                connection_id: rConn.connId,
+                from_section_id: rConn.fromId,
+                to_section_id: rConn.oldToId,
+                from_node: snapRes.node.id,
+                to_node: rConn.toNode
+              })
+            }
+          }
+        } else {
+          // Adjusting arrowhead snap node or moving to another section
+          const candidateSections = sections.filter(s => s.id !== rConn.fromId)
+          const snapRes = findBestSnapTarget(candidateSections, currX, currY, 140)
 
-        if (targetSec && targetSec.id !== rConn.oldToId) {
-          state.selectedConnId = null
-          component.setTriggerValue("move_connection", {
-            connection_id: rConn.connId,
-            from_section_id: rConn.fromId,
-            to_section_id: targetSec.id,
-            old_to_section_id: rConn.oldToId,
-            connection_type: rConn.connType
-          })
+          if (snapRes) {
+            const targetSec = snapRes.section
+            const toNodeId = snapRes.node.id
+
+            if (targetSec.id === rConn.oldToId) {
+              // Dropped on same section: snap node position updated!
+              if (toNodeId !== rConn.toNode) {
+                component.setTriggerValue("update_connection_nodes", {
+                  connection_id: rConn.connId,
+                  from_section_id: rConn.fromId,
+                  to_section_id: rConn.oldToId,
+                  from_node: rConn.fromNode,
+                  to_node: toNodeId
+                })
+              }
+            } else {
+              // Dropped on different section: move connection!
+              state.selectedConnId = null
+              component.setTriggerValue("move_connection", {
+                connection_id: rConn.connId,
+                from_section_id: rConn.fromId,
+                to_section_id: targetSec.id,
+                old_to_section_id: rConn.oldToId,
+                connection_type: rConn.connType,
+                from_node: rConn.fromNode,
+                to_node: toNodeId
+              })
+            }
+          }
         }
       } else {
-        openConnEditModal(rConn)
+        if (!rConn.fromHandle || state.selectedConnId !== rConn.connId) {
+          state.selectedConnId = (state.selectedConnId === rConn.connId) ? null : rConn.connId
+        }
+        renderWorld()
       }
     }
   }
@@ -1730,6 +2826,8 @@ export default function renderFishbone(component) {
 
   svg.ondrop = (e) => {
     e.preventDefault()
+    state.hasUserInteracted = true
+    saveFishboneView(storageKey, state)
     document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
     const rawData = e.dataTransfer.getData("application/json")
     if (!rawData) return
@@ -1851,6 +2949,7 @@ export default function renderFishbone(component) {
   // Viewport Pan and Zoom
   function updateTransform() {
     world.setAttribute("transform", `translate(${state.x} ${state.y}) scale(${state.scale})`)
+    saveFishboneView(storageKey, state)
   }
 
   function renderWorld() {
@@ -1905,8 +3004,8 @@ export default function renderFishbone(component) {
     state.scale = fitScale
     state.x = rect.width / 2 - midX * fitScale
     state.y = rect.height / 2 - midY * fitScale
-    updateTransform()
     state.fitted = true
+    updateTransform()
     return true
   }
 
@@ -1928,9 +3027,9 @@ export default function renderFishbone(component) {
       for (const entry of entries) {
         const { width, height } = entry.contentRect
         if (width > 80 && height > 80) {
-          if (!state.fitted || !state.hasUserInteracted) {
+          if (!state.fitted) {
             requestAnimationFrame(() => {
-              fitView()
+              if (!state.fitted) fitView()
             })
           }
         }
@@ -1942,9 +3041,9 @@ export default function renderFishbone(component) {
       const io = new IntersectionObserver((entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
-            if (!state.fitted || !state.hasUserInteracted) {
+            if (!state.fitted) {
               requestAnimationFrame(() => {
-                fitView()
+                if (!state.fitted) fitView()
               })
             }
           }
@@ -2016,7 +3115,7 @@ export default function renderFishbone(component) {
     updateTransform()
   }
   parentElement.querySelector("#fit-view").onclick = () => {
-    state.hasUserInteracted = false
+    state.hasUserInteracted = true
     fitView()
   }
   parentElement.querySelector("#full-screen").onclick = () => {
@@ -2030,7 +3129,7 @@ export default function renderFishbone(component) {
 """
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v16",
+    "paag_interactive_fishbone_builder_v26",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -2084,17 +3183,20 @@ def interactive_fishbone(
     on_auto_arrange: Callable[[], None] | None = None,
     on_create_connection: Callable[[], None] | None = None,
     on_move_connection: Callable[[], None] | None = None,
+    on_update_connection_nodes: Callable[[], None] | None = None,
     on_delete_connection: Callable[[], None] | None = None,
     on_delete_section_request: Callable[[], None] | None = None,
     on_drop_part: Callable[[], None] | None = None,
     on_drop_assembly: Callable[[], None] | None = None,
     on_remove_part: Callable[[], None] | None = None,
     on_move_part_assignment: Callable[[], None] | None = None,
+    on_replicate_part_uses: Callable[[], None] | None = None,
 ) -> Any:
     """Render the simplified interactive Fishbone builder canvas with simple blocks and direct parent/child flow."""
     kwargs = {
         "key": key,
         "data": {
+            "component_key": key,
             "sections": sections,
             "connections": connections,
             "parts": parts,
@@ -2114,6 +3216,8 @@ def interactive_fishbone(
         kwargs["on_create_connection_change"] = on_create_connection
     if on_move_connection:
         kwargs["on_move_connection_change"] = on_move_connection
+    if on_update_connection_nodes:
+        kwargs["on_update_connection_nodes_change"] = on_update_connection_nodes
     if on_delete_connection:
         kwargs["on_delete_connection_change"] = on_delete_connection
     if on_delete_section_request:
@@ -2126,5 +3230,7 @@ def interactive_fishbone(
         kwargs["on_remove_part_change"] = on_remove_part
     if on_move_part_assignment:
         kwargs["on_move_part_assignment_change"] = on_move_part_assignment
+    if on_replicate_part_uses:
+        kwargs["on_replicate_part_uses_change"] = on_replicate_part_uses
 
     return _FISHBONE_COMPONENT(**kwargs)

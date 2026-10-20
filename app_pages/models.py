@@ -45,7 +45,7 @@ from utils.table_filters import (
 
 
 project_id = st.session_state.get("project_id")
-page_title_with_scope("Model definitions", scope="project")
+page_title_with_scope("Complexity Trees", scope="project")
 st.caption("Translate each Official model number into the Common name and description the IE and lean team use during planning.")
 if not project_id:
     st.stop()

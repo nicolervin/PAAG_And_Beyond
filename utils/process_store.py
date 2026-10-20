@@ -977,10 +977,33 @@ def work_element_op_contexts(
     section_by_id = {
         str(row["id"]): row.to_dict() for _, row in walk.iterrows()
     } if not walk.empty else {}
+
+    def _norm_pid(row_or_dict) -> str:
+        val = row_or_dict.get("parent_id")
+        if val is None or pd.isna(val):
+            return ""
+        return str(val).strip()
+
+    def _is_root_assembly(row_or_dict) -> bool:
+        sec_type = str(row_or_dict.get("section_type") or "")
+        if sec_type == "Main spine":
+            return True
+        if sec_type == "Assembly" and not _norm_pid(row_or_dict):
+            return True
+        return False
+
+    def _is_child_assembly(row_or_dict) -> bool:
+        sec_type = str(row_or_dict.get("section_type") or "")
+        if sec_type == "Subassembly":
+            return True
+        if sec_type == "Assembly" and bool(_norm_pid(row_or_dict)):
+            return True
+        return False
+
     mainline_numbers = {
         str(row["id"]): position
         for position, (_, row) in enumerate(
-            walk.loc[walk["section_type"].eq("Main spine")].iterrows(), start=1
+            (r for r in walk.iterrows() if _is_root_assembly(r[1])), start=1
         )
     } if not walk.empty else {}
     support_numbers = {
@@ -991,9 +1014,9 @@ def work_element_op_contexts(
     } if not walk.empty else {}
     subassembly_children: dict[str, list[str]] = {}
     for section_id, section in section_by_id.items():
-        if str(section.get("section_type") or "") != "Subassembly":
+        if not _is_child_assembly(section):
             continue
-        parent_id = str(section.get("parent_id") or "").strip()
+        parent_id = _norm_pid(section)
         subassembly_children.setdefault(parent_id, []).append(section_id)
     for child_ids in subassembly_children.values():
         child_ids.sort(
@@ -1007,7 +1030,7 @@ def work_element_op_contexts(
         section = section_by_id.get(section_id)
         if not section:
             return None
-        if str(section.get("section_type") or "") == "Main spine":
+        if _is_root_assembly(section):
             number = mainline_numbers.get(section_id)
             return f"M{number}" if number else None
         if str(section.get("section_type") or "") == "Support Operations":
@@ -1023,14 +1046,13 @@ def work_element_op_contexts(
             current = section_by_id.get(current_id)
             if not current:
                 return None
-            section_type = str(current.get("section_type") or "")
-            if section_type == "Main spine":
+            if _is_root_assembly(current):
                 mainline_id = current_id
                 break
-            if section_type != "Subassembly":
+            if not _is_child_assembly(current):
                 return None
             reverse_path.append(current_id)
-            current_id = str(current.get("parent_id") or "").strip()
+            current_id = _norm_pid(current)
         if not mainline_id or mainline_id not in mainline_numbers:
             return None
 
@@ -1057,9 +1079,9 @@ def work_element_op_contexts(
             sec = section_by_id.get(sid)
             if not sec:
                 return []
-            if str(sec.get("section_type") or "") == "Main spine":
+            if _is_root_assembly(sec):
                 return [sid]
-            parents = subassembly_destinations.get(sid) or ([str(sec.get("parent_id"))] if sec.get("parent_id") else [])
+            parents = subassembly_destinations.get(sid) or ([_norm_pid(sec)] if _norm_pid(sec) else [])
             roots: list[str] = []
             for p in parents:
                 if p:

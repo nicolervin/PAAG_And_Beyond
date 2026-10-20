@@ -16,7 +16,7 @@ from utils.scope_ui import page_title_with_scope
 
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
-page_title_with_scope("Import/Export PITS", scope="project")
+page_title_with_scope("Import PITs", scope="project")
 if not project_id:
     st.stop()
 

@@ -86,6 +86,14 @@ ERGONOMICS_RISK_CLASSIFICATIONS = (
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
+
+def _safe_positive_float(value: object, default: float = 60.0) -> float:
+    try:
+        parsed = float(value or default)
+        return parsed if parsed > 0 else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
 def _drop_yamazumi_flags_schema(conn: sqlite3.Connection) -> None:
     """Retire legacy Yamazumi flags without disturbing work-element identities."""
     element_columns = {
@@ -1479,7 +1487,7 @@ def init_db() -> None:
                 ON part_feature_rules(project_id);
             CREATE TABLE IF NOT EXISTS assembly_sections (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
+                name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Assembly', parent_id TEXT,
                 sequence INTEGER NOT NULL DEFAULT 10, description TEXT DEFAULT '', active INTEGER DEFAULT 1,
                 grid_x INTEGER DEFAULT NULL, grid_y INTEGER DEFAULT NULL,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -2276,8 +2284,11 @@ def init_db() -> None:
                SELECT lower(hex(randomblob(16))), s.project_id, s.id, s.parent_id, 'subassembly', s.sequence, s.created_at, s.updated_at
                FROM assembly_sections s
                WHERE s.parent_id IS NOT NULL AND s.parent_id != ''
-                 AND s.section_type = 'Subassembly'
+                 AND s.section_type IN ('Assembly', 'Subassembly')
             """
+        )
+        conn.execute(
+            "UPDATE assembly_sections SET section_type = 'Assembly' WHERE section_type IN ('Main spine', 'Subassembly')"
         )
         fishbone_part_assignment_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(fishbone_part_assignments)").fetchall()
@@ -2470,7 +2481,7 @@ def init_db() -> None:
                                'Migrated from the original project plan', ?, ?, ?)""",
                     (
                         str(uuid4()), project["id"], str(project["revision"] or "A"),
-                        float(project["takt_time_s"] or 60),
+                        _safe_positive_float(project["takt_time_s"], 60.0),
                         normalize_time_unit(project["takt_time_unit"]),
                         str(project["owner"] or ""),
                         timestamp, timestamp,

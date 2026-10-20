@@ -124,7 +124,7 @@ def direct_entry_editor_rows(
             continue
         candidates.append(column)
     if not candidates:
-        return dataframe.copy()
+        return dataframe.reset_index(drop=True)
 
     sort_scope = logical_table_editor_key(editor_key)
     sort_key = f"{sort_scope}_external_sort_column"
@@ -164,7 +164,7 @@ def direct_entry_editor_rows(
     if controls_locked:
         controls.caption("Save, undo, or clear selected rows before changing the sort.")
     if not sort_column:
-        return dataframe.copy()
+        return dataframe.reset_index(drop=True)
     sort_values = dataframe[sort_column]
     if any(
         isinstance(value, (list, tuple, set, dict))
@@ -211,7 +211,7 @@ def drop_untouched_new_rows(
         column for column in identifying_columns if column in dataframe.columns
     ]
     if not identifying_columns:
-        return dataframe.copy()
+        return dataframe.reset_index(drop=True)
     if id_column in dataframe.columns:
         new_record = dataframe[id_column].apply(is_blank).astype(bool)
     else:
