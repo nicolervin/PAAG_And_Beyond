@@ -223,7 +223,7 @@ _CSS = """
 .conn-line { cursor: pointer; fill: none !important; stroke-linecap: round; transition: stroke .15s ease, stroke-width .15s ease, opacity .15s ease; pointer-events: stroke; }
 .conn-line:hover { stroke-width: 5 !important; filter: drop-shadow(0 0 5px rgba(37,99,235,0.4)); }
 .conn-line.selected { stroke: #ef4444 !important; stroke-width: 5 !important; }
-.conn-line.dragging-dimmed { opacity: 0.2 !important; }
+.conn-line.dragging-dimmed, .conn-handle-group.dragging-dimmed, .conn-hit-area.dragging-dimmed { opacity: 0.2 !important; pointer-events: none !important; }
 .conn-hit-area { cursor: grab; stroke: transparent !important; fill: none !important; stroke-width: 26px; pointer-events: stroke; }
 .conn-hit-area:active { cursor: grabbing; }
 .conn-start-handle, .conn-arrow-handle { cursor: grab; transition: r .12s ease, fill .12s ease; }
@@ -1039,9 +1039,11 @@ export default function renderFishbone(component) {
   // Layers
   const edgeLayer = svgElement("g", { id: "edge-layer" })
   const sectionLayer = svgElement("g", { id: "section-layer" })
+  const activeEdgeLayer = svgElement("g", { id: "active-edge-layer" })
   const ghostLayer = svgElement("g", { id: "ghost-layer" })
   world.appendChild(edgeLayer)
   world.appendChild(sectionLayer)
+  world.appendChild(activeEdgeLayer)
   world.appendChild(ghostLayer)
 
   // Auto-arrange sections logically
@@ -1126,7 +1128,15 @@ export default function renderFishbone(component) {
   const resolvedConns = resolveConnectionEndpoints(connections, sectionById)
   const edgeRefs = []
 
-  resolvedConns.forEach(({ conn, start, end, p1, p2 }) => {
+  const selectedResolved = resolvedConns.find(rc => rc.conn.id === state.selectedConnId) || null
+  const orderedConns = [...resolvedConns].sort((a, b) => {
+    const aSel = a.conn.id === state.selectedConnId ? 1 : 0
+    const bSel = b.conn.id === state.selectedConnId ? 1 : 0
+    return aSel - bSel
+  })
+
+  orderedConns.forEach(({ conn, start, end, p1, p2 }) => {
+    const targetEdgeLayer = (state.selectedConnId === conn.id) ? activeEdgeLayer : edgeLayer
     const isFromSupport = start.type === "Support Operations"
     const isSelected = state.selectedConnId === conn.id
 
@@ -1153,6 +1163,7 @@ export default function renderFishbone(component) {
       "stroke-width": isSelected ? 4.5 : 3,
       "stroke-linecap": "round",
       "marker-end": marker,
+      "data-conn-id": conn.id,
       class: `conn-line${isSelected ? " selected" : ""}`
     })
     if (isFromSupport) {
@@ -1164,6 +1175,7 @@ export default function renderFishbone(component) {
       fill: "none",
       stroke: "transparent",
       "stroke-width": 26,
+      "data-conn-id": conn.id,
       class: "conn-hit-area"
     })
 
@@ -1172,6 +1184,30 @@ export default function renderFishbone(component) {
       const rect = svg.getBoundingClientRect()
       const clickX = (e.clientX - rect.left - state.x) / state.scale
       const clickY = (e.clientY - rect.top - state.y) / state.scale
+      if (!isSelected && selectedResolved) {
+        const sd1 = Math.hypot(clickX - selectedResolved.p1.x, clickY - selectedResolved.p1.y)
+        const sd2 = Math.hypot(clickX - selectedResolved.p2.x, clickY - selectedResolved.p2.y)
+        if (sd1 <= 28 || sd2 <= 28) {
+          const selHandleType = (sd1 <= sd2) ? "start" : "end"
+          state.hasUserInteracted = true
+          state.reconnectingConnection = {
+            handleType: selHandleType,
+            connId: selectedResolved.conn.id,
+            fromId: selectedResolved.start.id,
+            fromName: selectedResolved.start.name,
+            oldToId: selectedResolved.end.id,
+            fromNode: selectedResolved.p1.id,
+            toNode: selectedResolved.p2.id,
+            fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
+            connType: selectedResolved.conn.connection_type || "subassembly",
+            originX: e.clientX,
+            originY: e.clientY,
+            isDrag: false,
+            fromHandle: true
+          }
+          return
+        }
+      }
       const d1 = Math.hypot(clickX - p1.x, clickY - p1.y)
       const d2 = Math.hypot(clickX - p2.x, clickY - p2.y)
       const handleType = (d1 < d2) ? "start" : "end"
@@ -1195,8 +1231,8 @@ export default function renderFishbone(component) {
       e.stopPropagation()
     }
 
-    edgeLayer.appendChild(path)
-    edgeLayer.appendChild(hitArea)
+    targetEdgeLayer.appendChild(path)
+    targetEdgeLayer.appendChild(hitArea)
 
     // Storage Buffer badge for Support Operations
     let bufGroup = null
@@ -1214,16 +1250,17 @@ export default function renderFishbone(component) {
       })
       bufTxt.textContent = "📦 Buffer / Storage"
       bufGroup.appendChild(bufTxt)
-      edgeLayer.appendChild(bufGroup)
+      targetEdgeLayer.appendChild(bufGroup)
     }
 
     // Start-point handle for adjusting where the arrow leaves the source section
     const startHandleG = svgElement("g", {
       class: "conn-handle-group",
+      "data-conn-id": conn.id,
       title: "Drag to change start snap node on this section"
     })
     const startHit = svgElement("circle", {
-      cx: p1.x, cy: p1.y, r: 18,
+      cx: p1.x, cy: p1.y, r: isSelected ? 22 : 18,
       fill: "transparent", stroke: "transparent"
     })
     const startDot = svgElement("circle", {
@@ -1247,21 +1284,30 @@ export default function renderFishbone(component) {
         fromNode: p1.id,
         toNode: p2.id,
         fixedPoint: p2,
+        fromHandle: true,
         connType: conn.connection_type || "subassembly",
         originX: e.clientX,
         originY: e.clientY,
         isDrag: false
       }
     }
-    edgeLayer.appendChild(startHandleG)
+    if (!isSelected && selectedResolved) {
+      const sharesWithSelectedStart = (selectedResolved.start.id === start.id && selectedResolved.p1.id === p1.id)
+      const sharesWithSelectedEnd = (selectedResolved.end.id === start.id && selectedResolved.p2.id === p1.id)
+      if (sharesWithSelectedStart || sharesWithSelectedEnd) {
+        startHandleG.style.pointerEvents = "none"
+      }
+    }
+    targetEdgeLayer.appendChild(startHandleG)
 
     // Arrow-end handle for dragging to a different snap node or different section
     const endHandleG = svgElement("g", {
       class: "conn-handle-group",
+      "data-conn-id": conn.id,
       title: "Drag arrowhead to snap to any node on this section, or move to another section"
     })
     const endHit = svgElement("circle", {
-      cx: p2.x, cy: p2.y, r: 20,
+      cx: p2.x, cy: p2.y, r: isSelected ? 24 : 20,
       fill: "transparent", stroke: "transparent"
     })
     const endDot = svgElement("circle", {
@@ -1285,13 +1331,21 @@ export default function renderFishbone(component) {
         fromNode: p1.id,
         toNode: p2.id,
         fixedPoint: p1,
+        fromHandle: true,
         connType: conn.connection_type || "subassembly",
         originX: e.clientX,
         originY: e.clientY,
         isDrag: false
       }
     }
-    edgeLayer.appendChild(endHandleG)
+    if (!isSelected && selectedResolved) {
+      const sharesWithSelectedStart = (selectedResolved.start.id === end.id && selectedResolved.p1.id === p2.id)
+      const sharesWithSelectedEnd = (selectedResolved.end.id === end.id && selectedResolved.p2.id === p2.id)
+      if (sharesWithSelectedStart || sharesWithSelectedEnd) {
+        endHandleG.style.pointerEvents = "none"
+      }
+    }
+    targetEdgeLayer.appendChild(endHandleG)
 
     // Selected Connection Action Button (Red X)
     let delGroup = null
@@ -1318,7 +1372,7 @@ export default function renderFishbone(component) {
           connType: conn.connection_type || "subassembly"
         })
       }
-      edgeLayer.appendChild(delGroup)
+      targetEdgeLayer.appendChild(delGroup)
     }
 
     edgeRefs.push({
@@ -1478,6 +1532,31 @@ export default function renderFishbone(component) {
       snapCircle.onmousedown = (e) => {
         e.stopPropagation()
         state.hasUserInteracted = true
+        if (selectedResolved) {
+          const isSelStart = (selectedResolved.start.id === section.id && selectedResolved.p1.id === sNode.id)
+          const isSelEnd = (selectedResolved.end.id === section.id && selectedResolved.p2.id === sNode.id)
+          if (isSelStart || isSelEnd) {
+            const selHandleType = isSelStart ? "start" : "end"
+            state.reconnectingConnection = {
+              handleType: selHandleType,
+              connId: selectedResolved.conn.id,
+              fromId: selectedResolved.start.id,
+              fromName: selectedResolved.start.name,
+              oldToId: selectedResolved.end.id,
+              fromNode: selectedResolved.p1.id,
+              toNode: selectedResolved.p2.id,
+              fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
+              connType: selectedResolved.conn.connection_type || "subassembly",
+              originX: e.clientX,
+              originY: e.clientY,
+              isDrag: false,
+              fromHandle: true
+            }
+            return
+          }
+        }
+        e.stopPropagation()
+        state.hasUserInteracted = true
         state.pendingConnection = {
           fromId: section.id,
           fromName: section.name,
@@ -1497,6 +1576,33 @@ export default function renderFishbone(component) {
       title: "Drag to connect this section to another section"
     })
     port.onmousedown = (e) => {
+      e.stopPropagation()
+      state.hasUserInteracted = true
+      if (selectedResolved) {
+        const portX = section.sx + secWidth / 2
+        const portY = section.sy - secHeight / 2 + 21
+        const isSelStart = (selectedResolved.start.id === section.id && (selectedResolved.p1.id === "right_1" || Math.hypot(selectedResolved.p1.x - portX, selectedResolved.p1.y - portY) <= 28))
+        const isSelEnd = (selectedResolved.end.id === section.id && (selectedResolved.p2.id === "right_1" || Math.hypot(selectedResolved.p2.x - portX, selectedResolved.p2.y - portY) <= 28))
+        if (isSelStart || isSelEnd) {
+          const selHandleType = isSelStart ? "start" : "end"
+          state.reconnectingConnection = {
+            handleType: selHandleType,
+            connId: selectedResolved.conn.id,
+            fromId: selectedResolved.start.id,
+            fromName: selectedResolved.start.name,
+            oldToId: selectedResolved.end.id,
+            fromNode: selectedResolved.p1.id,
+            toNode: selectedResolved.p2.id,
+            fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
+            connType: selectedResolved.conn.connection_type || "subassembly",
+            originX: e.clientX,
+            originY: e.clientY,
+            isDrag: false,
+            fromHandle: true
+          }
+          return
+        }
+      }
       e.stopPropagation()
       state.hasUserInteracted = true
       state.pendingConnection = {
@@ -1697,6 +1803,8 @@ export default function renderFishbone(component) {
           const startMouseX = e.clientX
           const startMouseY = e.clientY
           let isDragging = false
+          state.draggingPart = true
+          tooltip.hidden = true
           let ghostEl = null
 
           const onMouseMove = (moveEvt) => {
@@ -1809,6 +1917,7 @@ export default function renderFishbone(component) {
           }
 
           const onMouseUp = (upEvt) => {
+            state.draggingPart = false
             window.removeEventListener("mousemove", onMouseMove)
             window.removeEventListener("mouseup", onMouseUp)
             window.removeEventListener("keydown", onKeyDown)
@@ -1929,7 +2038,8 @@ export default function renderFishbone(component) {
 
           const onKeyDown = (keyEvt) => {
             if (keyEvt.key === "Escape") {
-              window.removeEventListener("mousemove", onMouseMove)
+              state.draggingPart = false
+            window.removeEventListener("mousemove", onMouseMove)
               window.removeEventListener("mouseup", onMouseUp)
               window.removeEventListener("keydown", onKeyDown)
               document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
@@ -1939,6 +2049,7 @@ export default function renderFishbone(component) {
                 ghostEl.remove()
                 ghostEl = null
               }
+              state.draggingPart = false
               isDragging = false
             }
           }
@@ -1950,6 +2061,7 @@ export default function renderFishbone(component) {
 
         // Hover tooltip
         card.onmouseenter = (e) => {
+          if (state.draggingPart || state.dragging) return
           if (activePart.image) {
             tooltipImage.src = activePart.image
             tooltipImage.hidden = false
@@ -1977,8 +2089,8 @@ export default function renderFishbone(component) {
           const rect = viewport.getBoundingClientRect()
           const tipWidth = tooltip.offsetWidth || 360
           const tipHeight = tooltip.offsetHeight || 150
-          tooltip.style.left = `${clamp(e.clientX - rect.left + 16, 12, Math.max(12, rect.width - tipWidth - 16))}px`
-          tooltip.style.top = `${clamp(e.clientY - rect.top + 16, 12, Math.max(12, rect.height - tipHeight - 16))}px`
+          tooltip.style.left = `${e.clientX - rect.left + 16}px`
+          tooltip.style.top = `${e.clientY - rect.top + 16}px`
         }
         card.onmouseleave = () => {
           tooltip.hidden = true
@@ -2127,6 +2239,7 @@ export default function renderFishbone(component) {
         const currY = (e.clientY - rect.top - state.y) / state.scale
         const rConn = state.reconnectingConnection
 
+        svg.querySelectorAll(`[data-conn-id="${rConn.connId}"]`).forEach(el => el.classList.add("dragging-dimmed"))
         const currentLine = svg.querySelector("#conn-path-" + rConn.connId)
         if (currentLine) currentLine.classList.add("dragging-dimmed")
 
@@ -2239,7 +2352,7 @@ export default function renderFishbone(component) {
   window.onmouseup = (e) => {
     document.querySelectorAll(".connecting-active").forEach(el => el.classList.remove("connecting-active"))
     document.querySelectorAll(".snap-target-highlight").forEach(el => el.classList.remove("snap-target-highlight"))
-    svg.querySelectorAll(".conn-line.dragging-dimmed").forEach(el => el.classList.remove("dragging-dimmed"))
+    svg.querySelectorAll(".dragging-dimmed").forEach(el => el.classList.remove("dragging-dimmed"))
 
     if (state.pendingConnection) {
       state.hasUserInteracted = true
@@ -2331,7 +2444,9 @@ export default function renderFishbone(component) {
           }
         }
       } else {
-        state.selectedConnId = (state.selectedConnId === rConn.connId) ? null : rConn.connId
+        if (!rConn.fromHandle || state.selectedConnId !== rConn.connId) {
+          state.selectedConnId = (state.selectedConnId === rConn.connId) ? null : rConn.connId
+        }
         renderWorld()
       }
     }
@@ -2674,7 +2789,7 @@ export default function renderFishbone(component) {
 """
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v20",
+    "paag_interactive_fishbone_builder_v22",
     html=_HTML,
     css=_CSS,
     js=_JS,

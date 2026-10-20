@@ -1178,13 +1178,6 @@ with fishbone_tab:
             key=f"fishbone_visual_features_{project_id}",
             help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
         )
-        if visual_controls.button(
-            "Edit parts & photos",
-            icon=":material/edit:",
-            key="fishbone_edit_parts_visual",
-            help="Open the Parts Catalog to edit part details or add more photos.",
-        ):
-            st.switch_page("app_pages/parts.py")
 
         # Effective assignments (DB minus deleted plus draft new)
         effective_assigned_part_ids = set()
