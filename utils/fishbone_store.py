@@ -561,6 +561,17 @@ def delete_assembly_sections(
                 (project_id, *affected_ids, *affected_ids),
             )
             # Delete part assignments (unassigning parts so they return to palette)
+            section_assignment_ids = [
+                str(r[0])
+                for r in conn.execute(
+                    f"SELECT id FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                ).fetchall()
+            ]
+            if section_assignment_ids:
+                _release_fishbone_assignment_references(
+                    conn, project_id, section_assignment_ids, timestamp, detach_pits_occurrences=True
+                )
             conn.execute(
                 f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
                 (project_id, *affected_ids),
@@ -633,6 +644,17 @@ def delete_assembly_sections(
                     (target_id, timestamp, project_id, *affected_ids),
                 )
             else:
+                section_assignment_ids = [
+                    str(r[0])
+                    for r in conn.execute(
+                        f"SELECT id FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
+                        (project_id, *affected_ids),
+                    ).fetchall()
+                ]
+                if section_assignment_ids:
+                    _release_fishbone_assignment_references(
+                        conn, project_id, section_assignment_ids, timestamp, detach_pits_occurrences=True
+                    )
                 conn.execute(
                     f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
                     (project_id, *affected_ids),
@@ -848,18 +870,27 @@ def add_assembly_section(
 ) -> str:
     name = name.strip()
     if not name:
-        raise ValueError("Section or subassembly name is required.")
-    if section_type not in {"Main spine", "Subassembly", "Support Operations"}:
-        raise ValueError("Choose Main spine, Subassembly, or Support Operations.")
+        raise ValueError("Section name is required.")
+    if section_type not in {"Assembly", "Support Operations", "Main spine", "Subassembly"}:
+        raise ValueError("Choose Assembly or Support Operations.")
     parent_id = parent_id or None
     if section_type == "Subassembly" and not parent_id:
         raise ValueError("A subassembly must have a parent assembly.")
     if section_type == "Main spine":
         parent_id = None
+    if section_type in {"Main spine", "Subassembly"}:
+        section_type = "Assembly"
     timestamp = now_iso()
     section_id = str(uuid4())
     try:
         with connection() as conn:
+            if section_type == "Support Operations" and parent_id:
+                parent_exists = conn.execute(
+                    "SELECT 1 FROM assembly_sections WHERE id=? AND project_id=?",
+                    (parent_id, project_id),
+                ).fetchone()
+                if not parent_exists:
+                    parent_id = None
             next_sequence = conn.execute(
                 """SELECT COALESCE(MAX(sequence), 0) + 10 FROM assembly_sections
                    WHERE project_id=? AND parent_id IS ?""",
@@ -932,20 +963,27 @@ def update_assembly_section_rows(
         raise ValueError("Framework names must be unique within the project.")
 
     parent_by_id: dict[str, str | None] = {}
+    type_by_id: dict[str, str] = {}
     for row in records:
         section_id = str(row["id"])
-        section_type = str(row.get("section_type") or "")
+        section_type = str(row.get("section_type") or "").strip()
         parent_id = row.get("parent_id")
-        parent_id = None if parent_id is None or pd.isna(parent_id) or not str(parent_id).strip() else str(parent_id)
-        if section_type not in {"Main spine", "Subassembly", "Support Operations"}:
-            raise ValueError("Each framework row must be Main spine, Subassembly, or Support Operations.")
+        parent_id = None if parent_id is None or pd.isna(parent_id) or not str(parent_id).strip() else str(parent_id).strip()
+        if section_type not in {"Assembly", "Support Operations", "Main spine", "Subassembly"}:
+            raise ValueError("Each framework row must be Assembly or Support Operations.")
         if section_type == "Main spine":
             parent_id = None
-        elif section_type == "Subassembly" and not parent_id:
-            raise ValueError(f"Subassembly {row['name']} needs a parent assembly.")
+            section_type = "Assembly"
+        elif section_type == "Subassembly":
+            if not parent_id:
+                raise ValueError(f"Subassembly {row['name']} needs a parent assembly.")
+            section_type = "Assembly"
+        elif section_type == "Support Operations" and parent_id and parent_id not in ids:
+            parent_id = None
         if parent_id == section_id or (parent_id and parent_id not in ids):
             raise ValueError(f"Choose a valid parent for {row['name']}.")
         parent_by_id[section_id] = parent_id
+        type_by_id[section_id] = section_type
 
     for section_id in ids:
         visited: set[str] = set()
@@ -965,7 +1003,7 @@ def update_assembly_section_rows(
                     """UPDATE assembly_sections SET name=?, section_type=?, parent_id=?, sequence=?,
                        description=?, active=?, updated_at=? WHERE id=? AND project_id=?""",
                     (
-                        str(row["name"]).strip(), str(row["section_type"]), parent_by_id[section_id],
+                        str(row["name"]).strip(), type_by_id[section_id], parent_by_id[section_id],
                         int(row.get("sequence") or 0), str(row.get("description") or "").strip(),
                         1 if bool(row.get("active")) else 0, timestamp, section_id, project_id,
                     ),
@@ -1304,6 +1342,118 @@ def assign_parts_to_section(
             count += 1
     return count
 
+def _release_fishbone_assignment_references(
+    conn: sqlite3.Connection,
+    project_id: str,
+    assignment_ids: list[str],
+    timestamp: str,
+    *,
+    detach_pits_occurrences: bool = False,
+) -> None:
+    """Safely repoint or clear foreign-key references before deleting fishbone_part_assignments."""
+    target_ids = [
+        str(aid).strip()
+        for aid in dict.fromkeys(assignment_ids)
+        if str(aid or "").strip()
+    ]
+    if not target_ids:
+        return
+    placeholders = ",".join("?" for _ in target_ids)
+    deleting_rows = conn.execute(
+        f"""SELECT id, part_id, section_id
+            FROM fishbone_part_assignments
+            WHERE project_id = ? AND id IN ({placeholders})""",
+        (project_id, *target_ids),
+    ).fetchall()
+    for row in deleting_rows:
+        aid = str(row["id"])
+        part_id = str(row["part_id"])
+        section_id = str(row["section_id"])
+        replacement = conn.execute(
+            f"""SELECT id, quantity
+                FROM fishbone_part_assignments
+                WHERE project_id = ? AND part_id = ? AND section_id = ?
+                  AND id NOT IN ({placeholders})
+                ORDER BY sequence, id LIMIT 1""",
+            (project_id, part_id, section_id, *target_ids),
+        ).fetchone()
+        if replacement:
+            rep_id = str(replacement["id"])
+            rep_qty = float(replacement["quantity"] or 0.0)
+            existing_rep_uses = conn.execute(
+                "SELECT COUNT(*) FROM process_part_options WHERE fishbone_assignment_id = ?",
+                (rep_id,),
+            ).fetchone()[0]
+            aid_consume_count = conn.execute(
+                """SELECT COUNT(*) FROM process_part_options
+                   WHERE fishbone_assignment_id = ? AND handling_type = 'Consume'""",
+                (aid,),
+            ).fetchone()[0]
+            if existing_rep_uses == 0 and rep_qty >= aid_consume_count:
+                conn.execute(
+                    """UPDATE process_part_options
+                       SET fishbone_assignment_id = ?, updated_at = ?
+                       WHERE fishbone_assignment_id = ?""",
+                    (rep_id, timestamp, aid),
+                )
+        conn.execute(
+            """UPDATE process_part_options
+               SET handling_type = NULL, fishbone_assignment_id = NULL, updated_at = ?
+               WHERE fishbone_assignment_id = ?""",
+            (timestamp, aid),
+        )
+        if detach_pits_occurrences:
+            occ_row = conn.execute(
+                """SELECT id FROM pits_bom_occurrences
+                   WHERE project_id = ? AND approved_assignment_id = ?""",
+                (project_id, aid),
+            ).fetchone()
+            if occ_row:
+                unclaimed_replacement = conn.execute(
+                    f"""SELECT f.id, f.section_id
+                        FROM fishbone_part_assignments f
+                        LEFT JOIN pits_bom_occurrences o
+                          ON o.project_id = f.project_id AND o.approved_assignment_id = f.id
+                        WHERE f.project_id = ? AND f.part_id = ?
+                          AND f.id NOT IN ({placeholders})
+                          AND o.id IS NULL
+                        ORDER BY CASE WHEN f.section_id = ? THEN 0 ELSE 1 END, f.sequence, f.id
+                        LIMIT 1""",
+                    (project_id, part_id, *target_ids, section_id),
+                ).fetchone()
+                if unclaimed_replacement:
+                    conn.execute(
+                        """UPDATE pits_bom_occurrences
+                           SET approved_assignment_id = ?, confirmed_section_id = ?, updated_at = ?
+                           WHERE id = ? AND project_id = ?""",
+                        (
+                            str(unclaimed_replacement["id"]),
+                            str(unclaimed_replacement["section_id"]),
+                            timestamp,
+                            str(occ_row["id"]),
+                            project_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE pits_bom_occurrences
+                           SET review_status = 'Needs review',
+                               confirmed_section_id = NULL,
+                               approved_assignment_id = NULL,
+                               reviewed_source_fingerprint = NULL,
+                               last_reviewed_import_id = NULL,
+                               source_state = CASE WHEN source_state = 'Missing' THEN 'Missing' ELSE 'New' END,
+                               updated_at = ?
+                           WHERE id = ? AND project_id = ?""",
+                        (timestamp, str(occ_row["id"]), project_id),
+                    )
+    conn.execute(
+        f"""UPDATE process_part_options
+            SET handling_type = NULL, fishbone_assignment_id = NULL, updated_at = ?
+            WHERE fishbone_assignment_id IN ({placeholders})""",
+        (timestamp, *target_ids),
+    )
+
 def delete_fishbone_part_assignments(project_id: str, assignment_ids: list[str]) -> int:
     """Delete selected fishbone uses atomically, leaving master Parts records untouched."""
     selected_ids = list(
@@ -1312,6 +1462,7 @@ def delete_fishbone_part_assignments(project_id: str, assignment_ids: list[str])
     if not selected_ids:
         return 0
     placeholders = ",".join("?" for _ in selected_ids)
+    timestamp = now_iso()
     with connection() as conn:
         found = conn.execute(
             f"""SELECT COUNT(*) FROM fishbone_part_assignments
@@ -1330,6 +1481,7 @@ def delete_fishbone_part_assignments(project_id: str, assignment_ids: list[str])
                 "One or more selected Fishbone uses are approved PITS BOM occurrences. "
                 "Detach those occurrences in Import/Export Projects before deleting the uses."
             )
+        _release_fishbone_assignment_references(conn, project_id, selected_ids, timestamp)
         cursor = conn.execute(
             f"""DELETE FROM fishbone_part_assignments
                 WHERE project_id=? AND id IN ({placeholders})""",
@@ -1409,13 +1561,6 @@ def replace_fishbone_part_assignments(
             ).fetchall()
         }
         stale_ids = existing_ids - desired_ids
-        if stale_ids:
-            stale_placeholders = ",".join("?" for _ in stale_ids)
-            conn.execute(
-                f"""DELETE FROM fishbone_part_assignments
-                    WHERE project_id=? AND id IN ({stale_placeholders})""",
-                (project_id, *stale_ids),
-            )
         conn.executemany(
             """INSERT INTO fishbone_part_assignments
                (id, project_id, part_id, section_id, step_number, sequence, quantity,
@@ -1427,6 +1572,15 @@ def replace_fishbone_part_assignments(
                  notes=excluded.notes, updated_at=excluded.updated_at""",
             records,
         )
+        if stale_ids:
+            stale_list = list(stale_ids)
+            _release_fishbone_assignment_references(conn, project_id, stale_list, timestamp)
+            stale_placeholders = ",".join("?" for _ in stale_list)
+            conn.execute(
+                f"""DELETE FROM fishbone_part_assignments
+                    WHERE project_id=? AND id IN ({stale_placeholders})""",
+                (project_id, *stale_list),
+            )
     return len(records)
 
 def save_fishbone_plan(
@@ -1591,6 +1745,38 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
             "DELETE FROM assembly_grid_feature_visibility WHERE project_id=?",
             (project_id,),
         )
+        saved_option_assignments = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT option.id, option.handling_type, option.fishbone_assignment_id
+                   FROM process_part_options option
+                   JOIN process_part_groups group_row ON group_row.id = option.group_id
+                   WHERE group_row.project_id = ? AND option.fishbone_assignment_id IS NOT NULL""",
+                (project_id,),
+            ).fetchall()
+        ]
+        saved_pits_occurrences = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT id, confirmed_section_id, approved_assignment_id
+                   FROM pits_bom_occurrences
+                   WHERE project_id = ?
+                     AND (confirmed_section_id IS NOT NULL OR approved_assignment_id IS NOT NULL)""",
+                (project_id,),
+            ).fetchall()
+        ]
+        if saved_option_assignments:
+            opt_ids = [str(r["id"]) for r in saved_option_assignments]
+            opt_placeholders = ",".join("?" for _ in opt_ids)
+            conn.execute(
+                f"UPDATE process_part_options SET fishbone_assignment_id=NULL WHERE id IN ({opt_placeholders})",
+                tuple(opt_ids),
+            )
+        if saved_pits_occurrences:
+            conn.execute(
+                "UPDATE pits_bom_occurrences SET confirmed_section_id=NULL, approved_assignment_id=NULL WHERE project_id=?",
+                (project_id,),
+            )
         conn.execute("DELETE FROM assembly_section_connections WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
@@ -1605,6 +1791,34 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
                 )
         _insert_snapshot_rows(conn, "assembly_section_connections", snapshot.get("connections", []))
         _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
+        restored_assignment_ids = {str(r.get("id")) for r in assignments if r.get("id")}
+        restored_section_ids = {str(r.get("id")) for r in sections if r.get("id")}
+        for row in saved_option_assignments:
+            aid = str(row.get("fishbone_assignment_id") or "")
+            if aid in restored_assignment_ids:
+                conn.execute(
+                    "UPDATE process_part_options SET fishbone_assignment_id=? WHERE id=?",
+                    (aid, row["id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE process_part_options SET handling_type=NULL, fishbone_assignment_id=NULL WHERE id=?",
+                    (row["id"],),
+                )
+        for row in saved_pits_occurrences:
+            sec_id = row.get("confirmed_section_id")
+            aid = row.get("approved_assignment_id")
+            conn.execute(
+                """UPDATE pits_bom_occurrences
+                   SET confirmed_section_id=?, approved_assignment_id=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    sec_id if str(sec_id or "") in restored_section_ids else None,
+                    aid if str(aid or "") in restored_assignment_ids else None,
+                    row["id"],
+                    project_id,
+                ),
+            )
         _insert_snapshot_rows(conn, "manufacturing_assembly_components", assembly_components)
         _insert_snapshot_rows(conn, "assembly_grid_categories", grid_categories)
         _insert_snapshot_rows(conn, "assembly_grid_model_mappings", grid_mappings)
@@ -1638,8 +1852,59 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
 def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) -> None:
     """Restore the last set of fishbone part uses."""
     with connection() as conn:
+        saved_option_assignments = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT option.id, option.handling_type, option.fishbone_assignment_id
+                   FROM process_part_options option
+                   JOIN process_part_groups group_row ON group_row.id = option.group_id
+                   WHERE group_row.project_id = ? AND option.fishbone_assignment_id IS NOT NULL""",
+                (project_id,),
+            ).fetchall()
+        ]
+        saved_pits_occurrences = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT id, approved_assignment_id
+                   FROM pits_bom_occurrences
+                   WHERE project_id = ? AND approved_assignment_id IS NOT NULL""",
+                (project_id,),
+            ).fetchall()
+        ]
+        if saved_option_assignments:
+            opt_ids = [str(r["id"]) for r in saved_option_assignments]
+            opt_placeholders = ",".join("?" for _ in opt_ids)
+            conn.execute(
+                f"UPDATE process_part_options SET fishbone_assignment_id=NULL WHERE id IN ({opt_placeholders})",
+                tuple(opt_ids),
+            )
+        if saved_pits_occurrences:
+            conn.execute(
+                "UPDATE pits_bom_occurrences SET approved_assignment_id=NULL WHERE project_id=?",
+                (project_id,),
+            )
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
         _insert_snapshot_rows(conn, "fishbone_part_assignments", snapshot)
+        restored_assignment_ids = {str(r.get("id")) for r in snapshot if r.get("id")}
+        for row in saved_option_assignments:
+            aid = str(row.get("fishbone_assignment_id") or "")
+            if aid in restored_assignment_ids:
+                conn.execute(
+                    "UPDATE process_part_options SET fishbone_assignment_id=? WHERE id=?",
+                    (aid, row["id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE process_part_options SET handling_type=NULL, fishbone_assignment_id=NULL WHERE id=?",
+                    (row["id"],),
+                )
+        for row in saved_pits_occurrences:
+            aid = row.get("approved_assignment_id")
+            if str(aid or "") in restored_assignment_ids:
+                conn.execute(
+                    "UPDATE pits_bom_occurrences SET approved_assignment_id=? WHERE id=? AND project_id=?",
+                    (aid, row["id"], project_id),
+                )
 
 def update_fishbone_assignment_use(
     project_id: str,
@@ -1737,7 +2002,7 @@ def save_assembly_section_connection(
                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (conn_id, project_id, from_id, to_id, conn_type, sequence, timestamp, timestamp),
             )
-        if conn_type in {"subassembly", "parallel"} and from_sec["section_type"] == "Subassembly":
+        if conn_type in {"subassembly", "parallel"} and from_sec["section_type"] in {"Assembly", "Subassembly"}:
             conn.execute(
                 "UPDATE assembly_sections SET parent_id = ?, updated_at = ? WHERE id = ? AND project_id = ?",
                 (to_id, timestamp, from_id, project_id),
@@ -1862,7 +2127,7 @@ def move_assembly_section_connection(
                 (to_id, timestamp, cid, project_id),
             )
 
-        if str(row["connection_type"]) in {"subassembly", "parallel"} and from_sec and from_sec["section_type"] == "Subassembly":
+        if str(row["connection_type"]) in {"subassembly", "parallel"} and from_sec and from_sec["section_type"] in {"Assembly", "Subassembly"}:
             conn.execute(
                 "UPDATE assembly_sections SET parent_id = ?, updated_at = ? WHERE id = ? AND project_id = ?",
                 (to_id, timestamp, from_id, project_id),
@@ -1983,50 +2248,46 @@ def save_fishbone_canvas_draft(
                 conns_saved += 1
                 if c_type in {"subassembly", "parallel"}:
                     conn.execute(
-                        "UPDATE assembly_sections SET parent_id=?, updated_at=? WHERE id=? AND project_id=? AND section_type='Subassembly'",
+                        "UPDATE assembly_sections SET parent_id=?, updated_at=? WHERE id=? AND project_id=? AND section_type IN ('Assembly', 'Subassembly')",
                         (to_id, timestamp, from_id, project_id),
                     )
-        if deleted_assignment_ids:
-            for aid in deleted_assignment_ids:
-                conn.execute(
-                    "DELETE FROM fishbone_part_assignments WHERE id = ? AND project_id = ?",
-                    (aid, project_id),
-                )
-                assignments_deleted += 1
         if updated_assignments:
             for ua in updated_assignments:
                 ua_id = str(ua.get("id") or ua.get("assignment_id") or "").strip()
                 if ua_id:
-                    step_num = int(ua.get("step_number") or 1)
-                    target_sid = str(ua.get("section_id") or "").strip()
-                    seq = ua.get("sequence")
-                    if seq is not None and target_sid:
+                    existing_row = conn.execute(
+                        "SELECT step_number, section_id, sequence, quantity, use_description FROM fishbone_part_assignments WHERE id = ? AND project_id = ?",
+                        (ua_id, project_id),
+                    ).fetchone()
+                    if not existing_row:
+                        continue
+                    step_num = int(ua.get("step_number") if ua.get("step_number") is not None else (existing_row["step_number"] or 1))
+                    target_sid = str(ua.get("section_id") or existing_row["section_id"] or "").strip()
+                    seq = int(ua.get("sequence") if ua.get("sequence") is not None else (existing_row["sequence"] or 10))
+                    qty = float(ua.get("quantity") if ua.get("quantity") is not None else (existing_row["quantity"] or 1.0))
+                    use_desc = str(ua.get("use_description") if ua.get("use_description") is not None else (existing_row["use_description"] or "")).strip()
+                    conn.execute(
+                        """UPDATE fishbone_part_assignments
+                           SET step_number = ?, section_id = ?, sequence = ?, quantity = ?, use_description = ?, updated_at = ?
+                           WHERE id = ? AND project_id = ?""",
+                        (step_num, target_sid, seq, qty, use_desc, timestamp, ua_id, project_id),
+                    )
+                    if target_sid != str(existing_row["section_id"] or ""):
                         conn.execute(
-                            """UPDATE fishbone_part_assignments
-                               SET step_number = ?, section_id = ?, sequence = ?, updated_at = ?
-                               WHERE id = ? AND project_id = ?""",
-                            (step_num, target_sid, int(seq), timestamp, ua_id, project_id),
+                            """UPDATE process_part_options
+                               SET handling_type = NULL, fishbone_assignment_id = NULL, updated_at = ?
+                               WHERE fishbone_assignment_id = ?
+                                 AND group_id IN (
+                                     SELECT id FROM process_part_groups
+                                     WHERE project_id = ? AND COALESCE(section_id, '') <> ?
+                                 )""",
+                            (timestamp, ua_id, project_id, target_sid),
                         )
-                    elif seq is not None:
                         conn.execute(
-                            """UPDATE fishbone_part_assignments
-                               SET step_number = ?, sequence = ?, updated_at = ?
-                               WHERE id = ? AND project_id = ?""",
-                            (step_num, int(seq), timestamp, ua_id, project_id),
-                        )
-                    elif target_sid:
-                        conn.execute(
-                            """UPDATE fishbone_part_assignments
-                               SET step_number = ?, section_id = ?, updated_at = ?
-                               WHERE id = ? AND project_id = ?""",
-                            (step_num, target_sid, timestamp, ua_id, project_id),
-                        )
-                    else:
-                        conn.execute(
-                            """UPDATE fishbone_part_assignments
-                               SET step_number = ?, updated_at = ?
-                               WHERE id = ? AND project_id = ?""",
-                            (step_num, timestamp, ua_id, project_id),
+                            """UPDATE pits_bom_occurrences
+                               SET confirmed_section_id = ?, updated_at = ?
+                               WHERE project_id = ? AND approved_assignment_id = ?""",
+                            (target_sid, timestamp, project_id, ua_id),
                         )
                     assignments_updated += 1
         if new_assignments:
@@ -2044,6 +2305,22 @@ def save_fishbone_canvas_draft(
                         (aid, project_id, pid, sid, int(a.get("step_number") or 1), int(a.get("sequence") or 10), qty, use_desc, timestamp),
                     )
                     assignments_saved += 1
+        if deleted_assignment_ids:
+            clean_deleted_ids = [
+                str(aid).strip()
+                for aid in dict.fromkeys(deleted_assignment_ids)
+                if str(aid or "").strip()
+            ]
+            if clean_deleted_ids:
+                _release_fishbone_assignment_references(
+                    conn, project_id, clean_deleted_ids, timestamp, detach_pits_occurrences=True
+                )
+                for aid in clean_deleted_ids:
+                    conn.execute(
+                        "DELETE FROM fishbone_part_assignments WHERE id = ? AND project_id = ?",
+                        (aid, project_id),
+                    )
+                    assignments_deleted += 1
         total_changes = positions_saved + conns_saved + conns_deleted + assignments_saved + assignments_updated + assignments_deleted
         record_audit_event(
             project_id,

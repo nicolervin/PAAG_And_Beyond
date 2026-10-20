@@ -777,7 +777,7 @@ with assign_parts_tab:
 
 with fishbone_tab:
     if sections.empty:
-        st.info("No Fishbone sections created yet. Use **➕ Add Section** above or in the canvas toolbar to create your first Main spine.")
+        st.info("No Fishbone sections created yet. Use **➕ Add Section** above or in the canvas toolbar to create your first Assembly section.")
     if True:
         visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections.copy()
         records = {str(row["id"]): row.to_dict() for _, row in visible_sections.iterrows()}
@@ -815,7 +815,8 @@ with fishbone_tab:
                 except (AttributeError, TypeError):
                     pass
                 sec_name = str(p.get("name") or "").strip()
-                sec_type = str(p.get("section_type") or "Subassembly")
+                raw_sec_type = str(p.get("section_type") or "Assembly")
+                sec_type = "Support Operations" if raw_sec_type == "Support Operations" else "Assembly"
                 parent_id = p.get("parent_id") or None
                 gx = p.get("grid_x")
                 gy = p.get("grid_y")
@@ -826,12 +827,12 @@ with fishbone_tab:
                             project_id,
                             sec_name,
                             sec_type,
-                            parent_id if sec_type in {"Subassembly", "Support Operations"} else None,
+                            parent_id,
                             "",
                             grid_x=int(gx) if gx is not None else None,
                             grid_y=int(gy) if gy is not None else None,
                         )
-                        if parent_id and sec_type in {"Subassembly", "Support Operations"}:
+                        if parent_id and sec_type in {"Assembly", "Support Operations"}:
                             save_assembly_section_connection(
                                 project_id,
                                 new_sec_id,
@@ -1100,6 +1101,138 @@ with fishbone_tab:
                         na for na in draft["new_assignments"]
                         if not (str(na.get("part_id")) == str(pid) and (sec_id is None or str(na.get("section_id")) == str(sec_id)))
                     ]
+            if p := getattr(canvas_state, "replicate_part_uses", None):
+                try:
+                    delattr(canvas_state, "replicate_part_uses")
+                except (AttributeError, TypeError):
+                    pass
+                pid = str(p.get("part_id") or "").strip()
+                pnum = str(p.get("part_number") or "Part").strip()
+                include_children = bool(p.get("include_children", False))
+                section_uses = p.get("section_uses") or []
+                if pid:
+                    desired_by_sec = {}
+                    for su in section_uses:
+                        s_id = str(su.get("section_id") or "").strip()
+                        if s_id and s_id in records:
+                            try:
+                                q_val = float(su.get("quantity") or 1.0)
+                            except (ValueError, TypeError):
+                                q_val = 1.0
+                            desired_by_sec[s_id] = {
+                                "section_id": s_id,
+                                "quantity": max(0.01, q_val),
+                                "use_description": str(su.get("use_description") or "").strip(),
+                            }
+
+                    staged_map = {
+                        str(ua.get("assignment_id")): ua
+                        for ua in draft.get("updated_assignments", [])
+                        if ua.get("assignment_id")
+                    }
+                    existing_db_by_sec: dict[str, list[str]] = {}
+                    for _, a_row in assignments.iterrows():
+                        if str(a_row["part_id"]) != pid:
+                            continue
+                        aid_str = str(a_row["id"])
+                        eff_sec = str(staged_map[aid_str].get("section_id") or a_row["section_id"]) if aid_str in staged_map else str(a_row["section_id"])
+                        existing_db_by_sec.setdefault(eff_sec, []).append(aid_str)
+
+                    handled_secs = set()
+                    for s_id, aid_list in existing_db_by_sec.items():
+                        if s_id in desired_by_sec:
+                            handled_secs.add(s_id)
+                            target_info = desired_by_sec[s_id]
+                            primary_aid = aid_list[0]
+                            draft["deleted_assignments"].discard(primary_aid)
+                            for extra_aid in aid_list[1:]:
+                                draft["deleted_assignments"].add(extra_aid)
+                            if primary_aid in staged_map:
+                                staged_map[primary_aid]["quantity"] = target_info["quantity"]
+                                staged_map[primary_aid]["use_description"] = target_info["use_description"]
+                            else:
+                                draft.setdefault("updated_assignments", []).append({
+                                    "assignment_id": primary_aid,
+                                    "section_id": s_id,
+                                    "step_number": 1,
+                                    "quantity": target_info["quantity"],
+                                    "use_description": target_info["use_description"],
+                                })
+                        else:
+                            for aid_to_del in aid_list:
+                                draft["deleted_assignments"].add(aid_to_del)
+
+                    kept_new_assignments = []
+                    for na in draft.get("new_assignments", []):
+                        if str(na.get("part_id")) != pid:
+                            kept_new_assignments.append(na)
+                            continue
+                        na_sec = str(na.get("section_id") or "")
+                        if na_sec in desired_by_sec and na_sec not in handled_secs:
+                            handled_secs.add(na_sec)
+                            na["quantity"] = desired_by_sec[na_sec]["quantity"]
+                            na["use_description"] = desired_by_sec[na_sec]["use_description"]
+                            kept_new_assignments.append(na)
+                    draft["new_assignments"] = kept_new_assignments
+
+                    newly_added_secs = []
+                    for s_id, target_info in desired_by_sec.items():
+                        if s_id not in handled_secs:
+                            draft["new_assignments"].append({
+                                "part_id": pid,
+                                "section_id": s_id,
+                                "step_number": 1,
+                                "quantity": target_info["quantity"],
+                                "use_description": target_info["use_description"],
+                            })
+                            newly_added_secs.append(s_id)
+
+                    if include_children and newly_added_secs:
+                        bom_tree_rep = pits_bom_model_tree(project_id)
+                        bom_nodes_rep = bom_tree_rep.get("nodes", []) if bom_tree_rep else []
+                        child_entries = []
+                        for bnode in bom_nodes_rep:
+                            b_pid = str(bnode.get("part_id") or bnode.get("child_part_id") or "").strip()
+                            b_pn = str(bnode.get("part_number") or "").strip().upper()
+                            if b_pid == pid or (pnum and b_pn == pnum.upper()):
+                                child_entries = bnode.get("children", [])
+                                break
+                        for ch in child_entries:
+                            c_pid = str(ch.get("part_id") or ch.get("child_part_id") or "").strip()
+                            if not c_pid:
+                                c_pn = str(ch.get("part_number") or "").strip()
+                                if c_pn and not parts.empty:
+                                    m_rows = parts.loc[parts["part_number"].astype(str).str.strip() == c_pn]
+                                    if not m_rows.empty:
+                                        c_pid = str(m_rows.iloc[0]["id"])
+                            if not c_pid:
+                                continue
+                            c_qty = float(ch.get("quantity") or ch.get("proposed_quantity") or 1.0)
+                            for target_s_id in newly_added_secs:
+                                already_in_sec = any(
+                                    str(ar["part_id"]) == c_pid
+                                    and str(ar["section_id"]) == target_s_id
+                                    and str(ar["id"]) not in draft["deleted_assignments"]
+                                    for _, ar in assignments.iterrows()
+                                ) or any(
+                                    str(na.get("part_id")) == c_pid and str(na.get("section_id")) == target_s_id
+                                    for na in draft["new_assignments"]
+                                )
+                                if not already_in_sec:
+                                    draft["new_assignments"].append({
+                                        "part_id": c_pid,
+                                        "section_id": target_s_id,
+                                        "step_number": 1,
+                                        "quantity": c_qty,
+                                        "use_description": f"Sub-component of {pnum}",
+                                    })
+
+                    sec_count = len(desired_by_sec)
+                    st.toast(
+                        f"Staged {pnum} across {sec_count} section(s). Click 'Save & Refresh' to persist.",
+                        icon=":material/content_copy:",
+                    )
+                    st.rerun()
             if p := getattr(canvas_state, "move_part_assignment", None):
                 try:
                     delattr(canvas_state, "move_part_assignment")
@@ -1349,6 +1482,8 @@ with fishbone_tab:
                 and not set(selected_visual_features) & set(feature_labels_by_part.get(part_id, []))
             ):
                 continue
+            eff_qty = float(staged["quantity"]) if staged and staged.get("quantity") is not None else float(assignment["quantity"] or 0)
+            eff_use_desc = str(staged["use_description"]) if staged and staged.get("use_description") is not None else str(assignment["use_description"] or "")
             visual_parts.append({
                 "id": aid,
                 "part_id": part_id,
@@ -1356,8 +1491,8 @@ with fishbone_tab:
                 "section_name": str(records.get(current_sec_id, {}).get("name") or assignment["section_name"]),
                 "part_number": str(assignment["part_number"] or ""),
                 "description": str(assignment["description"] or ""),
-                "use_description": str(assignment["use_description"] or ""),
-                "quantity": float(assignment["quantity"] or 0),
+                "use_description": eff_use_desc,
+                "quantity": eff_qty,
                 "models": applicability_label,
                 "image": part_thumbnail(image_path_by_part.get(part_id, "")),
                 "sequence": int(staged.get("sequence") if staged and staged.get("sequence") is not None else (assignment.get("sequence") or 10)),
@@ -1401,7 +1536,7 @@ with fishbone_tab:
             node_rows.append({
                 "id": sec_id,
                 "name": str(row["name"]),
-                "type": str(row["section_type"]),
+                "type": "Support Operations" if str(row["section_type"]) == "Support Operations" else "Assembly",
                 "order": int(row["sequence"]),
                 "parent_id": str(row["parent_id"]) if pd.notna(row.get("parent_id")) else None,
                 "grid_x": gx,
@@ -1451,7 +1586,9 @@ with fishbone_tab:
                         "to_node": tn,
                     })
             main_sec_ids = [
-                str(r["id"]) for _, r in visible_sections.iterrows() if r["section_type"] == "Main spine"
+                str(r["id"])
+                for _, r in visible_sections.iterrows()
+                if r["section_type"] in {"Assembly", "Main spine"} and not normalized_parent_id(r.get("parent_id"))
             ]
             for left_id, right_id in zip(main_sec_ids, main_sec_ids[1:]):
                 cid = f"init_{left_id}_{right_id}"
@@ -1792,17 +1929,17 @@ def _render_framework_maintenance():
         framework_editor_key, native_row_selection=True
     )
     refresh_framework = False
-    st.caption("Main-spine Fishbone sections establish product assembly order. Subassemblies attach to a parent section or subassembly. Support Operations represent fabrication or feeder cells.")
+    st.caption("Assembly sections establish the product build structure and parent-child subassembly hierarchy. Support Operations represent fabrication or feeder cells.")
 
 
     with st.container(border=True):
-        st.subheader("Add a Fishbone section or subassembly")
+        st.subheader("Add a Fishbone section")
         section_form_version_key = f"section_form_version_{project_id}"
         st.session_state.setdefault(section_form_version_key, 0)
         with st.form(f"add_assembly_section_{st.session_state[section_form_version_key]}"):
             section_row = st.columns([2, 1, 2])
-            section_name = section_row[0].text_input("Name", placeholder="Wheel Subassembly")
-            section_type = section_row[1].selectbox("Type", ["Main spine", "Subassembly", "Support Operations"])
+            section_name = section_row[0].text_input("Name", placeholder="Wheel Assembly")
+            section_type = section_row[1].selectbox("Type", ["Assembly", "Support Operations"])
             parent_id = section_row[2].selectbox(
                 "Parent assembly / Feeds into",
                 options=[None, *parent_options],
@@ -1810,7 +1947,7 @@ def _render_framework_maintenance():
                     "Product / main assembly"
                     if value is None else section_option_labels.get(value, value)
                 ),
-                help="Required for a subassembly. For Support Operations, optional downstream assembly/line it feeds into.",
+                help="Optional parent/downstream assembly this section feeds into. Leave as 'Product / main assembly' for a root assembly line or standalone support cell.",
             )
             section_description = st.text_area("Fishbone section description", placeholder="What is assembled in this section?")
             if st.form_submit_button("Add to Fishbone framework", type="primary", icon=":material/account_tree:"):
@@ -1819,7 +1956,7 @@ def _render_framework_maintenance():
                         project_id, section_name, section_type, parent_id,
                         section_description,
                     )
-                    if parent_id and section_type in {"Subassembly", "Support Operations"}:
+                    if parent_id and section_type in {"Assembly", "Support Operations"}:
                         save_assembly_section_connection(
                             project_id,
                             section_id,
@@ -1844,11 +1981,9 @@ def _render_framework_maintenance():
                                 "section_id": section_id,
                                 "section_name": section_name.strip(),
                                 "section_type": (
-                                    "main-spine"
-                                    if section_type == "Main spine"
-                                    else "support-operations"
+                                    "support-operations"
                                     if section_type == "Support Operations"
-                                    else "subassembly"
+                                    else "assembly"
                                 ),
                             },
                             "automatic_yamazumi_areas": created_areas,
@@ -1884,7 +2019,7 @@ def _render_framework_maintenance():
                     st.error(str(exc))
 
     if sections.empty:
-        st.info("Add at least one main-spine Fishbone section to begin the Fishbone framework.")
+        st.info("Add at least one Fishbone section to begin the Fishbone framework.")
     else:
         framework_walk = sections
         framework_depth = dict(zip(
@@ -1892,6 +2027,9 @@ def _render_framework_maintenance():
             framework_walk["depth"].astype(int),
         ))
         framework = framework_walk.drop(columns=["depth"])
+        framework["section_type"] = framework["section_type"].apply(
+            lambda val: "Support Operations" if str(val or "") == "Support Operations" else "Assembly"
+        )
         framework["hierarchy"] = framework.apply(
             lambda row: (
                 f"🟪  {row['name']}"
@@ -2005,7 +2143,7 @@ def _render_framework_maintenance():
                     "Fishbone section hierarchy",
                     pinned=True,
                     width="large",
-                    help="Blue rows are main-spine sections. Orange indented rows are subassemblies grouped under their parent. Purple rows are support operations.",
+                    help="Blue rows are top-level Assembly sections. Orange indented rows are child Assembly sections grouped under their parent. Purple rows are Support Operations.",
                 ),
                 "active": st.column_config.CheckboxColumn("Active", help="Inactive Fishbone sections remain in history but are hidden from new part placement."),
                 "sequence": st.column_config.NumberColumn("Order", format="%d", pinned=True, help="Managed automatically by the move actions."),
@@ -2025,7 +2163,7 @@ def _render_framework_maintenance():
                     help="Show assembly numbers built or installed in this section.",
                 ),
                 "name": st.column_config.TextColumn("Fishbone section", required=True, pinned=True, width="large"),
-                "section_type": st.column_config.SelectboxColumn("Type", options=["Main spine", "Subassembly", "Support Operations"], required=True),
+                "section_type": st.column_config.SelectboxColumn("Type", options=["Assembly", "Support Operations"], required=True),
                 "parent_assembly": st.column_config.SelectboxColumn(
                     "Parent assembly",
                     options=[
@@ -2250,7 +2388,7 @@ def _render_framework_maintenance():
             if st.session_state.pop(f"fishbone_open_assembly_{project_id}", False):
                 st.switch_page("app_pages/bom_tree.py")
 
-        st.caption("🟦 Main-spine section · 🟧 Subassembly · 🟪 Support Operations · indentation shows the parent-child relationship.")
+        st.caption("🟦 Assembly (root) · 🟧 Assembly (child / feeder) · 🟪 Support Operations · indentation shows the parent-child relationship.")
         id_by_label = {
             label: section_id for section_id, label in section_option_labels.items()
         }

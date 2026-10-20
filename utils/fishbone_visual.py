@@ -122,9 +122,9 @@ _HTML = """
               <input type="text" id="add-section-name" placeholder="e.g. Door Subassembly, Freezer Op 1" style="box-sizing:border-box; width:100%; padding:8px 10px; border:1px solid var(--st-border-color); border-radius:6px; background:var(--st-background-color); color:var(--st-text-color); font-size:.88rem; font-family:inherit;" />
             </label>
             <label class="modal-label">
-              Section category
+              Section type
               <select id="add-section-type" class="modal-select">
-                <option value="Subassembly" selected>Assembly Section</option>
+                <option value="Assembly" selected>Assembly</option>
                 <option value="Support Operations">Support Operations / Fabrication</option>
               </select>
             </label>
@@ -154,6 +154,29 @@ _HTML = """
             <button id="btn-conn-move" type="button" class="btn-modal btn-primary">Move Connection</button>
             <button id="btn-conn-delete" type="button" class="btn-modal" style="background:#fee2e2; color:#b91c1c; border-color:#fca5a5;">Delete Connection</button>
             <button id="btn-conn-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <!-- Part Replicate / Manage Section Uses Modal -->
+      <div id="part-uses-modal" class="canvas-modal" hidden>
+        <div class="modal-card part-uses-modal-card">
+          <h4 id="part-uses-title">Replicate / Manage Section Uses</h4>
+          <p id="part-uses-desc">Select all Fishbone sections where this part or assembly is used, and adjust the quantity per section:</p>
+          <div class="part-uses-quick-bar">
+            <span id="part-uses-summary-badge" class="part-uses-badge">Used in 1 section</span>
+            <div class="part-uses-quick-actions">
+              <button id="btn-part-uses-same-qty" type="button" class="btn-quick-action" title="Set every selected section to the same quantity">Same qty in each</button>
+              <button id="btn-part-uses-split-qty" type="button" class="btn-quick-action" title="Split total quantity evenly across selected sections">Split qty evenly</button>
+            </div>
+          </div>
+          <div id="part-uses-sections-list" class="part-uses-list"></div>
+          <label id="part-uses-children-wrap" class="part-uses-children-toggle" hidden>
+            <input id="part-uses-include-children" type="checkbox" checked />
+            <span id="part-uses-children-label">Also replicate sub-component parts into newly selected sections</span>
+          </label>
+          <div class="modal-buttons">
+            <button id="btn-part-uses-confirm" type="button" class="btn-modal btn-primary">Apply Section Uses</button>
+            <button id="btn-part-uses-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
           </div>
         </div>
       </div>
@@ -252,6 +275,14 @@ _CSS = """
 .part-remove-btn { cursor: pointer; opacity: 0; transition: opacity .12s ease; }
 .part-card:hover .part-remove-btn { opacity: 0.95; }
 .part-remove-btn:hover { opacity: 1; }
+.part-replicate-btn { cursor: pointer; opacity: 0; transition: opacity .12s ease; }
+.part-card:hover .part-replicate-btn { opacity: 0.95; }
+.part-replicate-btn:hover { opacity: 1; }
+.part-multiuse-badge { cursor: pointer; }
+.part-multiuse-badge rect { transition: fill .12s ease; }
+.part-multiuse-badge:hover rect { fill: #0369a1; }
+.palette-replicate-btn { margin-left: auto; padding: 2px 6px; font-size: .7rem; font-weight: 700; border: 1px solid #0284c7; border-radius: 4px; background: rgba(2, 132, 199, 0.1); color: #0284c7; cursor: pointer; flex-shrink: 0; }
+.palette-replicate-btn:hover { background: #0284c7; color: white; }
 .part-drag-ghost { pointer-events: none; }
 
 .fishbone-tooltip { position: absolute; z-index: 20; width: 360px; max-width: 90vw; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--st-primary-color); border-radius: 10px; background: var(--st-background-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .24); pointer-events: none; }
@@ -286,6 +317,26 @@ _CSS = """
 .btn-modal { padding: 9px 14px; border: 1px solid var(--st-border-color); border-radius: 6px; font-weight: 600; font-size: .86rem; cursor: pointer; text-align: center; }
 .btn-primary { background: var(--st-primary-color); color: white; border-color: var(--st-primary-color); }
 .btn-cancel { background: transparent; color: var(--st-secondary-text-color); }
+.part-uses-modal-card { max-width: 540px; }
+.part-uses-quick-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; background: var(--st-secondary-background-color); border: 1px solid var(--st-border-color); border-radius: 8px; }
+.part-uses-badge { font-size: .78rem; font-weight: 700; color: #0284c7; background: rgba(2, 132, 199, 0.12); padding: 3px 8px; border-radius: 999px; }
+.part-uses-quick-actions { display: flex; align-items: center; gap: 6px; }
+.btn-quick-action { padding: 4px 8px; font-size: .75rem; font-weight: 600; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); cursor: pointer; }
+.btn-quick-action:hover { border-color: var(--st-primary-color); color: var(--st-primary-color); }
+.part-uses-list { max-height: 290px; overflow-y: auto; border: 1px solid var(--st-border-color); border-radius: 8px; display: flex; flex-direction: column; background: var(--st-background-color); }
+.part-use-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--st-border-color); transition: background .12s ease; }
+.part-use-row:last-child { border-bottom: none; }
+.part-use-row.active-use { background: rgba(2, 132, 199, 0.06); }
+.part-use-row-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.part-use-check-label { display: flex; align-items: center; gap: 8px; font-size: .85rem; font-weight: 600; color: var(--st-text-color); cursor: pointer; flex: 1; min-width: 0; }
+.part-use-sec-type { font-size: .72rem; font-weight: 500; color: var(--st-secondary-text-color); background: var(--st-secondary-background-color); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.part-use-controls { display: flex; align-items: center; gap: 8px; padding-left: 24px; }
+.part-use-controls[hidden] { display: none !important; }
+.part-use-qty-wrap { display: flex; align-items: center; gap: 4px; font-size: .78rem; color: var(--st-secondary-text-color); font-weight: 600; }
+.part-use-qty-input { width: 68px; padding: 4px 6px; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); font-size: .82rem; font-weight: 600; }
+.part-use-note-input { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); font-size: .8rem; }
+.part-uses-children-toggle { display: flex; align-items: center; gap: 8px; font-size: .82rem; font-weight: 600; color: var(--st-text-color); padding: 8px 10px; border-radius: 8px; background: rgba(79, 70, 229, 0.08); border: 1px solid rgba(79, 70, 229, 0.25); cursor: pointer; }
+.part-uses-children-toggle[hidden] { display: none !important; }
 
 /* Start and End Arrow Handles */
 .conn-arrow-handle { cursor: grab; opacity: 0.88; transition: r .12s ease, fill .12s ease, opacity .12s ease; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.3)); }
@@ -657,6 +708,19 @@ export default function renderFishbone(component) {
   const btnConnDelete = parentElement.querySelector("#btn-conn-delete")
   const btnConnCancel = parentElement.querySelector("#btn-conn-cancel")
 
+  const partUsesModal = parentElement.querySelector("#part-uses-modal")
+  const partUsesTitle = parentElement.querySelector("#part-uses-title")
+  const partUsesDesc = parentElement.querySelector("#part-uses-desc")
+  const partUsesSummaryBadge = parentElement.querySelector("#part-uses-summary-badge")
+  const btnPartUsesSameQty = parentElement.querySelector("#btn-part-uses-same-qty")
+  const btnPartUsesSplitQty = parentElement.querySelector("#btn-part-uses-split-qty")
+  const partUsesSectionsList = parentElement.querySelector("#part-uses-sections-list")
+  const partUsesChildrenWrap = parentElement.querySelector("#part-uses-children-wrap")
+  const partUsesIncludeChildren = parentElement.querySelector("#part-uses-include-children")
+  const partUsesChildrenLabel = parentElement.querySelector("#part-uses-children-label")
+  const btnPartUsesConfirm = parentElement.querySelector("#btn-part-uses-confirm")
+  const btnPartUsesCancel = parentElement.querySelector("#btn-part-uses-cancel")
+
   if (!shell || !viewport || !svg || !world || !data) return
 
   const storageKey = (data && data.component_key) ? data.component_key : "fishbone_default"
@@ -703,7 +767,28 @@ export default function renderFishbone(component) {
   const paletteItems = data.palette_items || []
   const allSections = data.all_sections || sections
 
-  const dataSignature = `${sections.map(s => `${s.id}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}`).join("|")}::${paletteItems.length}`
+  const dataSignature = `${sections.map(s => `${s.id}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}:${p.quantity}:${p.use_description || ''}`).join("|")}::${paletteItems.length}`
+
+  // Track which sections each part_id is placed in
+  const partSectionsMap = new Map()
+  parts.forEach((p) => {
+    if (!p.part_id || !p.section_id) return
+    if (!partSectionsMap.has(p.part_id)) partSectionsMap.set(p.part_id, new Map())
+    const secMap = partSectionsMap.get(p.part_id)
+    if (secMap.has(p.section_id)) {
+      const entry = secMap.get(p.section_id)
+      entry.quantity = (Number(entry.quantity) || 0) + (Number(p.quantity) || 1)
+      if (p.use_description && !entry.use_description) entry.use_description = p.use_description
+      entry.assignment_ids.push(p.id)
+    } else {
+      secMap.set(p.section_id, {
+        quantity: Number(p.quantity) || 1,
+        use_description: p.use_description || "",
+        assignment_ids: [p.id]
+      })
+    }
+  })
+  const paletteByPartId = new Map(paletteItems.map(item => [item.part_id, item]))
   if (state.signature !== dataSignature) {
     state.signature = dataSignature
   }
@@ -729,7 +814,7 @@ export default function renderFishbone(component) {
         addSectionParent.replaceChildren()
         const noneOpt = document.createElement("option")
         noneOpt.value = ""
-        noneOpt.textContent = isSupport ? "(None - Standalone fabrication)" : "(None - Root assembly / Main spine)"
+        noneOpt.textContent = isSupport ? "(None - Standalone fabrication)" : "(None - Root / final assembly)"
         addSectionParent.appendChild(noneOpt)
         allSections.forEach(s => {
           const opt = document.createElement("option")
@@ -742,7 +827,7 @@ export default function renderFishbone(component) {
 
     addSectionBtn.onclick = () => {
       if (addSectionName) addSectionName.value = ""
-      if (addSectionType) addSectionType.value = "Subassembly"
+      if (addSectionType) addSectionType.value = "Assembly"
       updateAddSectionParentVisibility()
       addSectionModal.hidden = false
       setTimeout(() => { if (addSectionName) addSectionName.focus() }, 50)
@@ -765,14 +850,9 @@ export default function renderFishbone(component) {
           alert("Please enter a section name.")
           return
         }
-        const categoryVal = addSectionType ? addSectionType.value : "Subassembly"
-        let chosenType = categoryVal
+        const categoryVal = addSectionType ? addSectionType.value : "Assembly"
+        const chosenType = categoryVal === "Support Operations" ? "Support Operations" : "Assembly"
         let parentId = addSectionParent && addSectionParent.value ? addSectionParent.value : null
-        if (categoryVal === "Support Operations") {
-          chosenType = "Support Operations"
-        } else {
-          chosenType = parentId ? "Subassembly" : "Main spine"
-        }
         addSectionModal.hidden = true
 
         let nextX = 160
@@ -875,6 +955,205 @@ export default function renderFishbone(component) {
     }
   }
 
+  // Replicate / Manage Section Uses Modal Handling
+  function openPartUsesModal(targetPart, currentSection) {
+    if (!partUsesModal || !partUsesSectionsList || !targetPart) return
+    const partId = targetPart.part_id
+    const partNumber = targetPart.part_number || "Part"
+    const partDesc = targetPart.description || ""
+    const paletteItem = paletteByPartId.get(partId) || paletteItems.find(it => it.part_number === partNumber) || null
+    const secMap = partSectionsMap.get(partId) || new Map()
+    const defaultCatalogQty = (paletteItem && Number(paletteItem.quantity) > 0)
+      ? Number(paletteItem.quantity)
+      : (Number(targetPart.quantity) > 0 ? Number(targetPart.quantity) : 1)
+
+    if (partUsesTitle) {
+      partUsesTitle.textContent = `Replicate / Manage Uses: ${partNumber}`
+    }
+    if (partUsesDesc) {
+      partUsesDesc.textContent = partDesc
+        ? `${partDesc} — Check every Fishbone section where this item is used and set the quantity per section:`
+        : `Check every Fishbone section where this item is used and set the quantity per section:`
+    }
+
+    const sortedSections = [...allSections].sort((a, b) => {
+      const aCurr = (currentSection && a.id === currentSection.id) ? 1 : 0
+      const bCurr = (currentSection && b.id === currentSection.id) ? 1 : 0
+      if (aCurr !== bCurr) return bCurr - aCurr
+      const aPlaced = secMap.has(a.id) ? 1 : 0
+      const bPlaced = secMap.has(b.id) ? 1 : 0
+      if (aPlaced !== bPlaced) return bPlaced - aPlaced
+      return 0
+    })
+
+    partUsesSectionsList.replaceChildren()
+    const rowRecords = []
+
+    function updateSummaryBadge() {
+      const checkedRows = rowRecords.filter(r => r.checkbox.checked)
+      const count = checkedRows.length
+      const totalQty = checkedRows.reduce((acc, r) => acc + (parseFloat(r.qtyInput.value) || 0), 0)
+      const roundedTotal = Math.round(totalQty * 1000) / 1000
+      if (partUsesSummaryBadge) {
+        partUsesSummaryBadge.textContent = `Used in ${count} section${count === 1 ? "" : "s"} · Total Qty: ${roundedTotal}`
+      }
+    }
+
+    sortedSections.forEach(sec => {
+      const existingUse = secMap.get(sec.id)
+      const isChecked = Boolean(existingUse) || Boolean(currentSection && sec.id === currentSection.id)
+      const initialQty = existingUse ? existingUse.quantity : defaultCatalogQty
+      const initialNote = existingUse ? (existingUse.use_description || "") : ""
+
+      const row = document.createElement("div")
+      row.className = `part-use-row${isChecked ? " active-use" : ""}`
+
+      const header = document.createElement("div")
+      header.className = "part-use-row-header"
+
+      const checkLabel = document.createElement("label")
+      checkLabel.className = "part-use-check-label"
+
+      const checkbox = document.createElement("input")
+      checkbox.type = "checkbox"
+      checkbox.checked = isChecked
+
+      const nameSpan = document.createElement("span")
+      nameSpan.textContent = sec.name + (currentSection && sec.id === currentSection.id ? " (current)" : "")
+
+      checkLabel.appendChild(checkbox)
+      checkLabel.appendChild(nameSpan)
+      header.appendChild(checkLabel)
+
+      const typeBadge = document.createElement("span")
+      typeBadge.className = "part-use-sec-type"
+      typeBadge.textContent = (sec.type === "Main spine" || sec.type === "Subassembly") ? "Assembly" : (sec.type || "Assembly")
+      header.appendChild(typeBadge)
+
+      const controls = document.createElement("div")
+      controls.className = "part-use-controls"
+      controls.hidden = !isChecked
+
+      const qtyWrap = document.createElement("label")
+      qtyWrap.className = "part-use-qty-wrap"
+      const qtySpan = document.createElement("span")
+      qtySpan.textContent = "Qty:"
+      const qtyInput = document.createElement("input")
+      qtyInput.type = "number"
+      qtyInput.className = "part-use-qty-input"
+      qtyInput.step = "any"
+      qtyInput.min = "0.01"
+      qtyInput.value = String(initialQty)
+      qtyInput.oninput = updateSummaryBadge
+      qtyWrap.appendChild(qtySpan)
+      qtyWrap.appendChild(qtyInput)
+
+      const noteInput = document.createElement("input")
+      noteInput.type = "text"
+      noteInput.className = "part-use-note-input"
+      noteInput.placeholder = "Location / note (e.g. Front LH/RH, Rear)..."
+      noteInput.value = initialNote
+
+      controls.appendChild(qtyWrap)
+      controls.appendChild(noteInput)
+
+      checkbox.onchange = () => {
+        const on = checkbox.checked
+        controls.hidden = !on
+        row.classList.toggle("active-use", on)
+        updateSummaryBadge()
+      }
+
+      row.appendChild(header)
+      row.appendChild(controls)
+      partUsesSectionsList.appendChild(row)
+
+      rowRecords.push({
+        sectionId: sec.id,
+        sectionName: sec.name,
+        checkbox,
+        qtyInput,
+        noteInput
+      })
+    })
+
+    updateSummaryBadge()
+
+    if (btnPartUsesSameQty) {
+      btnPartUsesSameQty.onclick = () => {
+        const checkedRows = rowRecords.filter(r => r.checkbox.checked)
+        if (checkedRows.length === 0) return
+        const refQty = parseFloat(checkedRows[0].qtyInput.value) || defaultCatalogQty || 1
+        checkedRows.forEach(r => {
+          r.qtyInput.value = String(refQty)
+        })
+        updateSummaryBadge()
+      }
+    }
+
+    if (btnPartUsesSplitQty) {
+      btnPartUsesSplitQty.onclick = () => {
+        const checkedRows = rowRecords.filter(r => r.checkbox.checked)
+        if (checkedRows.length === 0) return
+        const currentSum = checkedRows.reduce((acc, r) => acc + (parseFloat(r.qtyInput.value) || 0), 0)
+        const baseTotal = defaultCatalogQty > 1 ? defaultCatalogQty : (currentSum > 0 ? currentSum : 1)
+        const splitVal = Math.round((baseTotal / checkedRows.length) * 10000) / 10000
+        checkedRows.forEach(r => {
+          r.qtyInput.value = String(splitVal)
+        })
+        updateSummaryBadge()
+      }
+    }
+
+    const hasChildren = Boolean(paletteItem && paletteItem.is_assembly && Array.isArray(paletteItem.child_parts) && paletteItem.child_parts.length > 0)
+    if (partUsesChildrenWrap) {
+      partUsesChildrenWrap.hidden = !hasChildren
+      if (hasChildren && partUsesChildrenLabel) {
+        partUsesChildrenLabel.textContent = `Also replicate ${paletteItem.child_parts.length} sub-component part(s) into newly selected sections`
+      }
+      if (partUsesIncludeChildren) {
+        partUsesIncludeChildren.checked = true
+      }
+    }
+
+    if (btnPartUsesCancel) {
+      btnPartUsesCancel.onclick = () => {
+        partUsesModal.hidden = true
+      }
+    }
+
+    if (btnPartUsesConfirm) {
+      btnPartUsesConfirm.onclick = () => {
+        const selectedUses = rowRecords
+          .filter(r => r.checkbox.checked)
+          .map(r => {
+            const q = parseFloat(r.qtyInput.value)
+            return {
+              section_id: r.sectionId,
+              quantity: (isFinite(q) && q > 0) ? q : 1,
+              use_description: (r.noteInput.value || "").trim()
+            }
+          })
+        partUsesModal.hidden = true
+        component.setTriggerValue("replicate_part_uses", {
+          part_id: partId,
+          part_number: partNumber,
+          source_section_id: currentSection ? currentSection.id : null,
+          include_children: Boolean(hasChildren && partUsesIncludeChildren && partUsesIncludeChildren.checked),
+          section_uses: selectedUses
+        })
+      }
+    }
+
+    partUsesModal.hidden = false
+  }
+
+  if (partUsesModal) {
+    partUsesModal.onclick = (e) => {
+      if (e.target === partUsesModal) partUsesModal.hidden = true
+    }
+  }
+
   // Populate Palette
   function renderPalette() {
     paletteList.replaceChildren()
@@ -931,13 +1210,25 @@ export default function renderFishbone(component) {
 
       const meta = document.createElement("div")
       meta.className = "palette-meta"
-      meta.textContent = `Qty ${item.quantity || 1}`
+      const secCount = partSectionsMap.has(item.part_id) ? partSectionsMap.get(item.part_id).size : 0
+      meta.textContent = secCount > 1 ? `Qty ${item.quantity || 1} · ${secCount} sections` : `Qty ${item.quantity || 1}`
       if (item.is_assembly) {
         const badge = document.createElement("span")
         badge.className = "palette-badge"
         badge.textContent = `Asm (${item.child_count})`
         meta.appendChild(badge)
       }
+      const repBtn = document.createElement("button")
+      repBtn.type = "button"
+      repBtn.className = "palette-replicate-btn"
+      repBtn.title = "Place or replicate across multiple sections"
+      repBtn.textContent = secCount > 0 ? `+ Uses (${secCount})` : "+ Multi-use"
+      repBtn.onclick = (e) => {
+        e.stopPropagation()
+        e.preventDefault()
+        openPartUsesModal(item, null)
+      }
+      meta.appendChild(repBtn)
       info.appendChild(meta)
 
       card.appendChild(info)
@@ -1769,6 +2060,55 @@ export default function renderFishbone(component) {
           card.appendChild(sufTxt)
         }
 
+        // Multi-section indicator badge (when placed in 2+ sections)
+        const partSecMap = partSectionsMap.get(activePart.part_id)
+        const totalPlacedSections = partSecMap ? partSecMap.size : 1
+        if (totalPlacedSections > 1) {
+          const multiBadge = svgElement("g", {
+            class: "part-multiuse-badge",
+            title: `Used in ${totalPlacedSections} sections — click to manage section uses`
+          })
+          multiBadge.appendChild(svgElement("rect", {
+            x: cardX + 3, y: cardY + 41, width: 36, height: 13, rx: 3.5,
+            fill: "#0284c7", stroke: "white", "stroke-width": 1
+          }))
+          const multiTxt = svgElement("text", {
+            x: cardX + 21, y: cardY + 50, "text-anchor": "middle",
+            fill: "white", "font-size": 7.8, "font-weight": 700
+          })
+          multiTxt.textContent = `${totalPlacedSections} uses`
+          multiBadge.appendChild(multiTxt)
+          multiBadge.onclick = (e) => {
+            e.stopPropagation()
+            openPartUsesModal(activePart, section)
+          }
+          card.appendChild(multiBadge)
+        }
+
+        // Replicate / Manage Uses (+) Button at bottom-left (where 'uses' badge lives)
+        const repCx = totalPlacedSections > 1 ? (cardX + 47.5) : (cardX + 10.5)
+        const repCy = cardY + 47.5
+        const replicateBtn = svgElement("g", {
+          class: "part-replicate-btn",
+          title: `Replicate ${activePart.part_number} to other sections or split quantity`,
+          style: "cursor: pointer;"
+        })
+        replicateBtn.appendChild(svgElement("circle", {
+          cx: repCx, cy: repCy, r: 7.5,
+          fill: "#0284c7", stroke: "white", "stroke-width": 1.5
+        }))
+        const repTxt = svgElement("text", {
+          x: repCx, y: repCy + 3.2, "text-anchor": "middle",
+          fill: "white", "font-size": 10.5, "font-weight": 700
+        })
+        repTxt.textContent = "+"
+        replicateBtn.appendChild(repTxt)
+        replicateBtn.onclick = (e) => {
+          e.stopPropagation()
+          openPartUsesModal(activePart, section)
+        }
+        card.appendChild(replicateBtn)
+
         // Remove (x) Button
         const removeBtn = svgElement("g", {
           class: "part-remove-btn",
@@ -1798,7 +2138,7 @@ export default function renderFishbone(component) {
 
         // Mouse Drag to re-order within section or move to another section & Click to cycle variants
         card.onmousedown = (e) => {
-          if (e.target.closest(".part-remove-btn")) return
+          if (e.target.closest(".part-remove-btn") || e.target.closest(".part-replicate-btn") || e.target.closest(".part-multiuse-badge")) return
           e.stopPropagation()
           const startMouseX = e.clientX
           const startMouseY = e.clientY
@@ -2789,7 +3129,7 @@ export default function renderFishbone(component) {
 """
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v22",
+    "paag_interactive_fishbone_builder_v26",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -2850,6 +3190,7 @@ def interactive_fishbone(
     on_drop_assembly: Callable[[], None] | None = None,
     on_remove_part: Callable[[], None] | None = None,
     on_move_part_assignment: Callable[[], None] | None = None,
+    on_replicate_part_uses: Callable[[], None] | None = None,
 ) -> Any:
     """Render the simplified interactive Fishbone builder canvas with simple blocks and direct parent/child flow."""
     kwargs = {
@@ -2889,5 +3230,7 @@ def interactive_fishbone(
         kwargs["on_remove_part_change"] = on_remove_part
     if on_move_part_assignment:
         kwargs["on_move_part_assignment_change"] = on_move_part_assignment
+    if on_replicate_part_uses:
+        kwargs["on_replicate_part_uses_change"] = on_replicate_part_uses
 
     return _FISHBONE_COMPONENT(**kwargs)

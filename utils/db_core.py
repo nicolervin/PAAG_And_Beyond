@@ -1487,7 +1487,7 @@ def init_db() -> None:
                 ON part_feature_rules(project_id);
             CREATE TABLE IF NOT EXISTS assembly_sections (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Main spine', parent_id TEXT,
+                name TEXT NOT NULL, section_type TEXT NOT NULL DEFAULT 'Assembly', parent_id TEXT,
                 sequence INTEGER NOT NULL DEFAULT 10, description TEXT DEFAULT '', active INTEGER DEFAULT 1,
                 grid_x INTEGER DEFAULT NULL, grid_y INTEGER DEFAULT NULL,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -2284,8 +2284,11 @@ def init_db() -> None:
                SELECT lower(hex(randomblob(16))), s.project_id, s.id, s.parent_id, 'subassembly', s.sequence, s.created_at, s.updated_at
                FROM assembly_sections s
                WHERE s.parent_id IS NOT NULL AND s.parent_id != ''
-                 AND s.section_type = 'Subassembly'
+                 AND s.section_type IN ('Assembly', 'Subassembly')
             """
+        )
+        conn.execute(
+            "UPDATE assembly_sections SET section_type = 'Assembly' WHERE section_type IN ('Main spine', 'Subassembly')"
         )
         fishbone_part_assignment_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(fishbone_part_assignments)").fetchall()

@@ -1737,9 +1737,10 @@ def group_conflict_dialog(
                 continue
             m_pns = {clean_bom_cell_text(it.get("part_number")).upper() for it in saved_m_bom}
             shares_grp = any(g in m_pns for g in conflict_groups)
+            if not shares_grp:
+                continue
             base_lbl = model_options.get(mid, str(m_row.get("model_number") or mid))
-            suffix_note = " (Shares group)" if shares_grp else " (Will add group + parts)"
-            target_model_labels[mid] = f"{base_lbl}{suffix_note}"
+            target_model_labels[mid] = f"{base_lbl} (Shares group)"
 
         candidate_part_keys = list(candidate_parts_meta.keys())
         selected_part_pns: list[str] = []
@@ -1774,14 +1775,14 @@ def group_conflict_dialog(
         if has_missing_in_current:
             sync_mode = st.radio(
                 "How should parts that exist only in the other model(s) be handled?",
-                options=["merge_both_ways", "add_new_parts", "match_current_exact"],
+                options=["match_current_exact", "merge_both_ways", "add_new_parts"],
                 format_func=lambda m: (
-                    "Add new parts to selected models AND pull missing group parts into Current BOM (Recommended — keeps group 100% identical)"
-                    if m == "merge_both_ways"
+                    "Update group in selected models to match Current BOM exactly (Recommended — removes parts not in Current BOM)"
+                    if m == "match_current_exact"
                     else (
-                        "Only add selected new parts to the other model BOMs (keep each model's existing parts)"
-                        if m == "add_new_parts"
-                        else "Overwrite group in selected models to match Current BOM exactly (removes parts not in Current BOM)"
+                        "Add new parts to selected models AND pull missing group parts into Current BOM (merges both lists)"
+                        if m == "merge_both_ways"
+                        else "Only add selected new parts to the other model BOMs (keep each model's existing parts)"
                     )
                 ),
                 key=f"conflict_sync_mode_{curr_model_id}",
