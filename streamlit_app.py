@@ -7,7 +7,14 @@ from utils.fishbone_ui import FISHBONE_LINKED_PAGES, render_fishbone_sidebar_con
 from utils.scope_ui import scenario_view_selector
 
 from utils.split_workspace import component_event, split_divider, split_navigation
-from utils.store import get_project, init_db, migrate_legacy_yamazumi_flags, projects
+from utils.store import (
+    get_last_active_workspace,
+    get_project,
+    init_db,
+    migrate_legacy_yamazumi_flags,
+    projects,
+    set_last_active_workspace,
+)
 
 
 st.set_page_config(page_title="Process at a Glance", page_icon=":material/precision_manufacturing:", layout="wide")
@@ -77,22 +84,38 @@ st.html(
 init_db()
 
 all_projects = projects()
-st.session_state.setdefault("project_id", all_projects[0]["id"] if all_projects else None)
-st.session_state.setdefault("scenario_id", None)
+valid_project_ids = {str(project["id"]) for project in all_projects}
+last_workspace = get_last_active_workspace()
+remembered_project_id = str(last_workspace.get("project_id") or "")
+remembered_scenario_id = str(last_workspace.get("scenario_id") or "") or None
+default_project_id = (
+    remembered_project_id
+    if remembered_project_id in valid_project_ids
+    else (str(all_projects[0]["id"]) if all_projects else None)
+)
+default_scenario_id = (
+    remembered_scenario_id
+    if default_project_id and default_project_id == remembered_project_id
+    else None
+)
+st.session_state.setdefault("project_id", default_project_id)
+st.session_state.setdefault(
+    "scenario_id",
+    default_scenario_id
+    if str(st.session_state.get("project_id") or "") == str(default_project_id or "")
+    else None,
+)
 
 pending_project_id = st.session_state.pop("pending_active_project_id", None)
-if pending_project_id and any(
-    str(project["id"]) == str(pending_project_id) for project in all_projects
-):
+if pending_project_id and str(pending_project_id) in valid_project_ids:
     st.session_state.project_id = str(pending_project_id)
     st.session_state.scenario_id = None
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
 
-valid_project_ids = {str(project["id"]) for project in all_projects}
-if st.session_state.get("project_id") not in valid_project_ids:
-    st.session_state.project_id = all_projects[0]["id"] if all_projects else None
-    st.session_state.scenario_id = None
+if str(st.session_state.get("project_id") or "") not in valid_project_ids:
+    st.session_state.project_id = default_project_id
+    st.session_state.scenario_id = default_scenario_id
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
 
@@ -250,11 +273,29 @@ def _on_split_ratio() -> None:
         return
     st.session_state[split_ratio_key] = max(0.25, min(0.75, ratio))
 
+
+def _on_current_editor_change(value_key: str) -> None:
+    st.session_state[value_key] = str(st.session_state.get("current_editor") or "")
+
 with st.sidebar:
     st.header("Process at a Glance")
     if all_projects:
-        project_by_name = {project["name"]: project["id"] for project in all_projects}
-        current_name = next((name for name, pid in project_by_name.items() if pid == st.session_state.project_id), all_projects[0]["name"])
+        name_counts: dict[str, int] = {}
+        for project in all_projects:
+            pname = str(project["name"])
+            name_counts[pname] = name_counts.get(pname, 0) + 1
+        project_by_name: dict[str, str] = {}
+        for project in all_projects:
+            pname = str(project["name"])
+            pid = str(project["id"])
+            label = pname if name_counts[pname] == 1 else f"{pname} ({pid[:8]})"
+            project_by_name[label] = pid
+        current_name = next(
+            (name for name, pid in project_by_name.items() if pid == str(st.session_state.project_id)),
+            next(iter(project_by_name)),
+        )
+        if st.session_state.get("global_project") not in project_by_name:
+            st.session_state.pop("global_project", None)
         selected_name = st.selectbox("Active project", list(project_by_name), index=list(project_by_name).index(current_name), key="global_project")
         selected_project_id = project_by_name[selected_name]
         if selected_project_id != st.session_state.project_id:
@@ -268,6 +309,10 @@ with st.sidebar:
             key="global_scenario",
             label="Active planning scenario",
             width="stretch",
+        )
+        set_last_active_workspace(
+            st.session_state.project_id,
+            (active_scenario or {}).get("id") or st.session_state.get("scenario_id"),
         )
         if active_scenario:
             st.caption(
@@ -301,15 +346,30 @@ with st.sidebar:
         )
         st.divider()
         editor_default_key = f"editor_defaulted_{st.session_state.project_id}"
+        editor_value_key = f"editor_value_{st.session_state.project_id}"
         if not st.session_state.get(editor_default_key):
-            st.session_state.current_editor = str((active_project or {}).get("owner") or "")
+            default_editor = str(
+                st.session_state.get("current_editor")
+                or (active_project or {}).get("owner")
+                or ""
+            )
+            st.session_state[editor_value_key] = default_editor
+            st.session_state.current_editor = default_editor
             st.session_state[editor_default_key] = True
-        st.text_input(
+        elif st.session_state.get("current_editor"):
+            st.session_state[editor_value_key] = str(st.session_state.get("current_editor") or "")
+        else:
+            st.session_state.current_editor = str(st.session_state.get(editor_value_key) or "")
+        st.session_state[editor_value_key] = st.text_input(
             "Current editor",
             key="current_editor",
             placeholder="Enter your name",
             help="This name is recorded in table history for this browser session.",
+            on_change=_on_current_editor_change,
+            args=(editor_value_key,),
         )
+    else:
+        set_last_active_workspace(None, None)
     st.caption("NPI process planning · local prototype")
 
 pending_navigation = str(

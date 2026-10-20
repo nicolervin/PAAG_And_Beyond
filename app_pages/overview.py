@@ -16,7 +16,7 @@ from utils.store import (
     audit_history, create_project, delete_project, get_planning_scenario, get_project,
     get_project_deletion_impact, next_scenario_revision_label, planning_scenarios,
     project_table, projects, record_audit_event, save_planning_scenario_rows,
-    update_project,
+    set_last_active_workspace, update_project,
 )
 
 
@@ -108,6 +108,10 @@ def new_project_dialog():
                 )
                 st.session_state.project_id = created_project_id
                 st.session_state.pending_active_project_id = created_project_id
+                st.session_state.scenario_id = None
+                st.session_state.pop("global_project", None)
+                st.session_state.pop("global_scenario", None)
+                set_last_active_workspace(created_project_id, None)
                 st.rerun()
 
 
@@ -154,12 +158,14 @@ def confirm_delete_project_dialog(target_project_id: str):
                 st.session_state.scenario_id = None
                 st.session_state.pop("global_project", None)
                 st.session_state.pop("global_scenario", None)
+                set_last_active_workspace(all_projs[0]["id"], None)
             else:
                 st.session_state.project_id = None
                 st.session_state.pending_active_project_id = None
                 st.session_state.scenario_id = None
                 st.session_state.pop("global_project", None)
                 st.session_state.pop("global_scenario", None)
+                set_last_active_workspace(None, None)
             st.toast(f"Project '{target['name']}' deleted", icon=":material/check_circle:")
             st.rerun()
         except Exception as exc:

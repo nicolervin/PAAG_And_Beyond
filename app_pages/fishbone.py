@@ -166,6 +166,31 @@ metrics[2].metric("Fishbone uses placed", len(assignments), border=True)
 metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_parts), border=True)
 
 
+master_tree_data = pits_bom_model_tree(project_id, "all")
+master_nodes = master_tree_data.get("nodes", [])
+
+master_info_by_part_id = {}
+master_info_by_pnum = {}
+for idx, node in enumerate(master_nodes):
+    pid = str(node.get("part_id") or "").strip()
+    pnum = str(node.get("part_number") or "").strip()
+    depth = node.get("depth", 1)
+    raw_qty = node.get("quantity", 1)
+    try:
+        qty = float(raw_qty) if raw_qty is not None and float(raw_qty) > 0 else 1.0
+    except (ValueError, TypeError):
+        qty = 1.0
+    info = {
+        "order": idx,
+        "level": f"L{depth}",
+        "quantity": qty,
+    }
+    if pid and pid not in master_info_by_part_id:
+        master_info_by_part_id[pid] = info
+    if pnum and pnum not in master_info_by_pnum:
+        master_info_by_pnum[pnum] = info
+
+
 assign_parts_tab, fishbone_tab, framework_tab = st.tabs(
     ["Assign Parts", "Fishbone", "Framework Set Up"],
     key=f"fishbone_main_tabs_{project_id}",
@@ -213,29 +238,6 @@ with assign_parts_tab:
                 section_names = list(dict.fromkeys(uses["section_name"].astype(str)))
                 section_summary = ", ".join(section_names)
                 placed_by_part[str(part_id)] = f"{len(uses)} use{'s' if len(uses) != 1 else ''} · {section_summary}"
-        master_tree_data = pits_bom_model_tree(project_id, "all")
-        master_nodes = master_tree_data.get("nodes", [])
-
-        master_info_by_part_id = {}
-        master_info_by_pnum = {}
-        for idx, node in enumerate(master_nodes):
-            pid = str(node.get("part_id") or "").strip()
-            pnum = str(node.get("part_number") or "").strip()
-            depth = node.get("depth", 1)
-            raw_qty = node.get("quantity", 1)
-            try:
-                qty = float(raw_qty) if raw_qty is not None and float(raw_qty) > 0 else 1.0
-            except (ValueError, TypeError):
-                qty = 1.0
-            info = {
-                "order": idx,
-                "level": f"L{depth}",
-                "quantity": qty,
-            }
-            if pid and pid not in master_info_by_part_id:
-                master_info_by_part_id[pid] = info
-            if pnum and pnum not in master_info_by_pnum:
-                master_info_by_pnum[pnum] = info
 
         part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
 

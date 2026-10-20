@@ -224,6 +224,33 @@ class PitsBomStructureImportTests(unittest.TestCase):
                 self.project_id, [row["id"]], "Approve", section_id=section_id
             )
 
+    def test_bom_row_issues_do_not_block_import(self):
+        bom_data = snapshot([occurrence("", "001", 1, row=9)])
+        bom_data["issues"] = [
+            {
+                "blocking": True,
+                "source_row": 15,
+                "issue": "Missing parent tracker number at Level 2 before this row.",
+                "child_tracker_number": "003",
+                "part_number": "P-003",
+                "description": "Orphan child",
+                "proposed_depth": 3,
+                "expected_parent_level": 2,
+                "raw_quantity_text": "1",
+            }
+        ]
+        result = store.import_pits_id_snapshot(
+            self.project_id,
+            [tracker_record("001", "P-001"), tracker_record("003", "P-003")],
+            [],
+            bom_snapshot=bom_data,
+            workbook_name="with-bom-issues.xlsm",
+            workbook_sha256="with-bom-issues",
+        )
+        self.assertEqual(result["new"], 2)
+        self.assertEqual(result["bom"]["new"], 1)
+        self.assertEqual(result["bom"]["issues"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

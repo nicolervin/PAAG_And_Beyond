@@ -278,14 +278,18 @@ def parse_yamazumi_pdf(pdf_source: bytes | io.BytesIO | str) -> dict[str, Any]:
             variants.sort(key=lambda it: it["x"])
 
             var_ranges: list[tuple[float, float, str]] = []
+            pitch_variant_by_key: dict[str, str] = {}
             if len(variants) <= 1:
-                v_name = variants[0]["text"] if variants else "Base"
+                raw_v_name = str(variants[0]["text"] if variants else "Base").strip() or "Base"
+                v_name = pitch_variant_by_key.setdefault(raw_v_name.casefold(), raw_v_name)
                 var_ranges.append((col_left, col_right, v_name))
             else:
                 for vi, v in enumerate(variants):
                     v_left = col_left if vi == 0 else (variants[vi - 1]["x"] + v["x"]) / 2
                     v_right = col_right if vi == len(variants) - 1 else (v["x"] + variants[vi + 1]["x"]) / 2
-                    var_ranges.append((v_left, v_right, v["text"]))
+                    raw_v_name = str(v["text"] or "").strip() or "Base"
+                    v_name = pitch_variant_by_key.setdefault(raw_v_name.casefold(), raw_v_name)
+                    var_ranges.append((v_left, v_right, v_name))
 
             detected_pitches.append({
                 "pitch_number": p_code,
@@ -297,9 +301,7 @@ def parse_yamazumi_pdf(pdf_source: bytes | io.BytesIO | str) -> dict[str, Any]:
                 "Pitch_status": "Active",
                 "Pitch_name": p_name,
                 "Pitch_Takt_time": takt_time,
-                "Model_variants": [
-                    variant_name for _, _, variant_name in var_ranges
-                ],
+                "Model_variants": list(pitch_variant_by_key.values()),
             })
 
             for vx_min, vx_max, v_name in var_ranges:
@@ -310,7 +312,7 @@ def parse_yamazumi_pdf(pdf_source: bytes | io.BytesIO | str) -> dict[str, Any]:
                     and t["text"] != full_pitch_txt
                     and t["text"] != p_code
                     and t["text"] != p_name
-                    and t["text"] != v_name
+                    and t["text"].strip().casefold() != v_name.casefold()
                     and not t["text"].startswith("Generated")
                     and not t["text"].startswith("Page")
                     and not (is_top and t["y"] > 675)

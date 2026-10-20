@@ -236,33 +236,59 @@ class PartFeatureInferenceTests(unittest.TestCase):
         self.assertEqual(updated, 0)
 
     def test_app_test_smoke_parts_and_models(self) -> None:
-        """Smoke test verifying pages compile and run without exceptions."""
+        """Smoke test verifying pages run without manual auto-assign buttons and Complexity Tree save auto-assigns."""
         from streamlit.testing.v1 import AppTest
 
         scenario_id = str(store.planning_scenarios(self.project_id)[0]["id"])
+        part_id = self._create_part_with_bom(
+            part_number="308D3313G001",
+            description="Fascia Elec Asm",
+            models=self.lcd_models,
+            tracker="TRK-LCD-FASCIA-AUTO",
+        )
+        # Seed a stale rule on the part first to confirm Complexity Tree Save & Refresh overwrites it
+        store.update_part_feature_rules(
+            self.project_id,
+            {part_id: [f"{self.fuel_fid}::Electric"]},
+        )
 
-        # 1. Models page smoke test & dialog verification
+        # 1. Models page smoke test & Complexity Tree Save & Refresh auto-assign verification
         at_models = AppTest.from_file(
             str(store.ROOT / "app_pages/models.py"), default_timeout=30
         )
         at_models.session_state["project_id"] = self.project_id
         at_models.session_state["scenario_id"] = scenario_id
         at_models.session_state["current_editor"] = "IE Tester"
-        at_models.session_state["models_pending_auto_assign"] = True
         at_models.run()
         self.assertFalse(at_models.exception, f"Models page raised exception: {at_models.exception}")
+        model_button_labels = [btn.label for btn in at_models.button]
+        self.assertNotIn("Auto-assign to Parts Catalog", model_button_labels)
 
-        # 2. Parts page smoke test & dialog verification
+        # Click Save & Refresh on the Complexity tree footer
+        at_models.button(key="complexity_tree_save_refresh").click()
+        at_models.run()
+        self.assertFalse(at_models.exception, f"Models page Save & Refresh raised exception: {at_models.exception}")
+        at_models.button(key=f"save_duplicate_models_anyway_{self.project_id}").click()
+        at_models.run()
+        self.assertFalse(at_models.exception, f"Models page Save anyway raised exception: {at_models.exception}")
+
+        rules_df = store.part_feature_rules(self.project_id)
+        assigned = rules_df.loc[rules_df["part_id"] == part_id, "value"].tolist()
+        self.assertEqual(assigned, ["LCD"])
+
+        # 2. Parts page smoke test & button removal verification
         at_parts = AppTest.from_file(
             str(store.ROOT / "app_pages/parts.py"), default_timeout=30
         )
         at_parts.session_state["project_id"] = self.project_id
         at_parts.session_state["scenario_id"] = scenario_id
         at_parts.session_state["current_editor"] = "IE Tester"
-        at_parts.session_state["parts_pending_auto_assign"] = True
         with patch("utils.clipboard_image.clipboard_image", return_value=None):
             at_parts.run()
         self.assertFalse(at_parts.exception, f"Parts page raised exception: {at_parts.exception}")
+        parts_button_labels = [btn.label for btn in at_parts.button]
+        self.assertNotIn("Auto-assign from Complexity Tree", parts_button_labels)
+        self.assertNotIn("Auto-assign selected", parts_button_labels)
 
     def test_preview_inferred_part_feature_rules_separates_direct_and_review(self) -> None:
         """Verify preview separates single-feature and multi-feature parts."""
@@ -384,6 +410,273 @@ class PartFeatureInferenceTests(unittest.TestCase):
         with patch("utils.clipboard_image.clipboard_image", return_value=None):
             at_parts.run()
         self.assertFalse(at_parts.exception, f"Parts page with review dialog raised exception: {at_parts.exception}")
+
+    def test_infer_excludes_superset_features_found_on_more_models(self) -> None:
+        """Broader features found on more models than tighter matching features must not be applied."""
+        # Suppose GFD56GR is a 2-model subset of LCD models: ["PFD95ESPB0DS", "PFD95GSPB0DS"]
+        gr_models = ["PFD95ESPB0DS", "PFD95GSPB0DS"]
+        other_lcd_models = ["PFD95ESPB0RS", "PFD95GSPB0RS"]
+
+        # Specific feature 1: Color · Panels = GR (only on gr_models)
+        color_panels_fid = str(uuid4())
+        store.execute(
+            """INSERT INTO complexity_features (id, project_id, category, name, allowed_values, active, updated_at)
+               VALUES (?, ?, 'Color', 'Panels', ?, 1, ?)""",
+            (color_panels_fid, self.project_id, json.dumps(["GR", "WW"]), store.now_iso()),
+        )
+        # Specific feature 2: Control Panel · Control Panel Housing = LG (only on gr_models)
+        cp_housing_fid = str(uuid4())
+        store.execute(
+            """INSERT INTO complexity_features (id, project_id, category, name, allowed_values, active, updated_at)
+               VALUES (?, ?, 'Control Panel', 'Control Panel Housing', ?, 1, ?)""",
+            (cp_housing_fid, self.project_id, json.dumps(["LG", "WW"]), store.now_iso()),
+        )
+        # Broader feature: Control Panel · UI Board = A-2 (on all 4 lcd_models: gr_models + other_lcd_models)
+        ui_board_fid = str(uuid4())
+        store.execute(
+            """INSERT INTO complexity_features (id, project_id, category, name, allowed_values, active, updated_at)
+               VALUES (?, ?, 'Control Panel', 'UI Board', ?, 1, ?)""",
+            (ui_board_fid, self.project_id, json.dumps(["A-2", "B-1"]), store.now_iso()),
+        )
+        # Broader feature: Control Panel · Knob = Pointer Knob (on all 4 lcd_models)
+        knob_fid = str(uuid4())
+        store.execute(
+            """INSERT INTO complexity_features (id, project_id, category, name, allowed_values, active, updated_at)
+               VALUES (?, ?, 'Control Panel', 'Knob', ?, 1, ?)""",
+            (knob_fid, self.project_id, json.dumps(["Pointer Knob", "Lens Knob"]), store.now_iso()),
+        )
+
+        for m in self.all_models:
+            mid = self.model_ids[m]
+            is_gr = m in gr_models
+            is_lcd = m in self.lcd_models
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, color_panels_fid, "GR" if is_gr else "WW", store.now_iso()),
+            )
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, cp_housing_fid, "LG" if is_gr else "WW", store.now_iso()),
+            )
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, ui_board_fid, "A-2" if is_lcd else "B-1", store.now_iso()),
+            )
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, knob_fid, "Pointer Knob" if is_lcd else "Lens Knob", store.now_iso()),
+            )
+
+        panel_rh_pid = self._create_part_with_bom(
+            part_number="308D3060P005",
+            description="PANEL SIDE RH",
+            models=gr_models,
+            tracker="TRK-PANEL-RH",
+        )
+
+        inferred = store.infer_part_feature_rules(self.project_id, [panel_rh_pid])
+        self.assertIn(panel_rh_pid, inferred)
+        tokens = set(inferred[panel_rh_pid])
+        # Specific features matching only gr_models are retained
+        self.assertIn(f"{color_panels_fid}::GR", tokens)
+        self.assertIn(f"{cp_housing_fid}::LG", tokens)
+        # Broader features found on more models (UI Board=A-2, Knob=Pointer Knob, Fascia=LCD) are excluded
+        self.assertNotIn(f"{ui_board_fid}::A-2", tokens)
+        self.assertNotIn(f"{knob_fid}::Pointer Knob", tokens)
+        self.assertNotIn(f"{self.fascia_fid}::LCD", tokens)
+
+    def test_feature_subsystem_persistence_and_auto_assign_filtering(self) -> None:
+        """Feature definitions can specify an optional subsystem to limit auto-assigned features."""
+        import pandas as pd
+
+        gr_models = ["PFD95ESPB0DS", "PFD95GSPB0DS"]
+
+        # Create a part in subsystem 'Structure' and a PITS record in subsystem 'Control Panel'
+        panel_rh_pid = self._create_part_with_bom(
+            part_number="308D3060P005",
+            description="PANEL SIDE RH",
+            models=gr_models,
+            tracker="TRK-PANEL-RH-SUB",
+        )
+        store.execute(
+            "UPDATE parts SET subsystem='Structure' WHERE id=? AND project_id=?",
+            (panel_rh_pid, self.project_id),
+        )
+
+        cp_housing_pid = self._create_part_with_bom(
+            part_number="308D4000P001",
+            description="HOUSING CONTROL PANEL",
+            models=gr_models,
+            tracker="TRK-CP-HOUSING-SUB",
+        )
+        ts = store.now_iso()
+        store.execute(
+            """INSERT INTO pits_records (
+                   id, project_id, pits_id, part_number, description, subsystem,
+                   source_payload, source_hash, first_seen_at, last_seen_at
+               ) VALUES (?, ?, 'TRK-CP-HOUSING-SUB', '308D4000P001', 'HOUSING CONTROL PANEL', 'Control Panel', '{}', 'hash', ?, ?)""",
+            (str(uuid4()), self.project_id, ts, ts),
+        )
+
+        # Verify project_part_subsystems discovers both 'Control Panel' and 'Structure'
+        subsystems = store.project_part_subsystems(self.project_id)
+        self.assertIn("Control Panel", subsystems)
+        self.assertIn("Structure", subsystems)
+
+        # Save two features via update_complexity_features:
+        # 1. Color · Panels (subsystem='Structure')
+        # 2. Control Panel · Control Panel Housing (subsystem='Control Panel')
+        existing_features = store.complexity_features(self.project_id)
+        color_panels_fid = str(uuid4())
+        cp_housing_fid = str(uuid4())
+        new_rows = pd.DataFrame([
+            {
+                "id": color_panels_fid,
+                "active": True,
+                "category": "Color",
+                "subsystem": "Structure",
+                "name": "Panels",
+                "allowed_choices": "GR, WW",
+                "description": "Side and top panel color",
+            },
+            {
+                "id": cp_housing_fid,
+                "active": True,
+                "category": "Control Panel",
+                "subsystem": "Control Panel",
+                "name": "Control Panel Housing",
+                "allowed_choices": "LG, WW",
+                "description": "Control panel housing color",
+            },
+        ])
+        combined = pd.concat(
+            [
+                existing_features[
+                    ["id", "active", "category", "subsystem", "name", "allowed_choices", "description"]
+                ],
+                new_rows,
+            ],
+            ignore_index=True,
+        )
+        store.update_complexity_features(self.project_id, combined)
+
+        saved_features = store.complexity_features(self.project_id).set_index("id")
+        self.assertEqual(saved_features.loc[color_panels_fid, "subsystem"], "Structure")
+        self.assertEqual(saved_features.loc[cp_housing_fid, "subsystem"], "Control Panel")
+
+        # Assign both features to the exact same gr_models
+        for m in self.all_models:
+            mid = self.model_ids[m]
+            is_gr = m in gr_models
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, color_panels_fid, "GR" if is_gr else "WW", store.now_iso()),
+            )
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, cp_housing_fid, "LG" if is_gr else "WW", store.now_iso()),
+            )
+
+        # Case 1: Both features have explicit subsystems -> each part only gets its subsystem's feature
+        inferred = store.infer_part_feature_rules(
+            self.project_id, [panel_rh_pid, cp_housing_pid]
+        )
+        self.assertEqual(inferred[panel_rh_pid], [f"{color_panels_fid}::GR"])
+        self.assertEqual(inferred[cp_housing_pid], [f"{cp_housing_fid}::LG"])
+
+        # Case 2: Even if Control Panel Housing has a blank subsystem (''), Structure part still
+        # only gets Color · Panels = GR because parts with a subsystem only accept matching subsystem features
+        store.execute(
+            "UPDATE complexity_features SET subsystem='' WHERE id=? AND project_id=?",
+            (cp_housing_fid, self.project_id),
+        )
+        inferred_blank_other = store.infer_part_feature_rules(
+            self.project_id, [panel_rh_pid]
+        )
+        self.assertEqual(inferred_blank_other[panel_rh_pid], [f"{color_panels_fid}::GR"])
+
+        # Case 3: A part in the "Drum" subsystem (Rear Drum Support) can ONLY be assigned features
+        # associated with subsystem='Drum' once "Drum" is assigned to a feature, and cannot be
+        # assigned a "Main Line" feature (subsystem='') or a feature from another subsystem.
+        rds_pid = self._create_part_with_bom(
+            part_number="308D3170G002",
+            description="REAR DRUM SUPPORT ASM",
+            models=gr_models,
+            tracker="TRK-RDS-DRUM",
+        )
+        store.execute(
+            "UPDATE parts SET subsystem='Drum' WHERE id=? AND project_id=?",
+            (rds_pid, self.project_id),
+        )
+        # Before "Drum" is assigned to any feature, "Drum" is an unassigned subsystem, so the part
+        # can be assigned matching features.
+        inferred_rds_before_drum_feat = store.infer_part_feature_rules(
+            self.project_id, [rds_pid]
+        )
+        self.assertTrue(len(inferred_rds_before_drum_feat.get(rds_pid, [])) > 0)
+
+        # Now add an RDS feature associated with subsystem='Drum' alongside the blank-subsystem feature.
+        # Because "Drum" is now assigned to a feature, Drum parts can ONLY receive Drum features.
+        rds_fid = str(uuid4())
+        store.execute(
+            """INSERT INTO complexity_features (
+                   id, project_id, category, subsystem, name, allowed_values, active, updated_at
+               ) VALUES (?, ?, 'RDS', 'Drum', 'RDS Assembly', '["Gas Coated", "Electric Coated"]', 1, ?)""",
+            (rds_fid, self.project_id, store.now_iso()),
+        )
+        for m in self.all_models:
+            mid = self.model_ids[m]
+            is_gr = m in gr_models
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, rds_fid, "Gas Coated" if is_gr else "Electric Coated", store.now_iso()),
+            )
+
+        inferred_rds_after_drum_feat = store.infer_part_feature_rules(
+            self.project_id, [rds_pid]
+        )
+        self.assertEqual(inferred_rds_after_drum_feat[rds_pid], [f"{rds_fid}::Gas Coated"])
+
+        # Even if the Drum feature has no matching model values for a Drum part, the Drum part
+        # still cannot be assigned a Main Line (blank subsystem) or Structure feature.
+        unmatched_drum_pid = self._create_part_with_bom(
+            part_number="308D3150G002",
+            description="FRONT DRUM SUPPORT ASM",
+            models=self.lcd_models[:3],
+            tracker="TRK-FDS-DRUM",
+        )
+        store.execute(
+            "UPDATE parts SET subsystem='Drum' WHERE id=? AND project_id=?",
+            (unmatched_drum_pid, self.project_id),
+        )
+        inferred_unmatched_drum = store.infer_part_feature_rules(
+            self.project_id, [unmatched_drum_pid]
+        )
+        self.assertNotIn(unmatched_drum_pid, inferred_unmatched_drum)
+
+        # Case 4: A part in a subsystem that is NOT assigned to any feature (e.g. 'Controls')
+        # can still be assigned any matching feature (such as Main Line or fuel/panel features).
+        controls_pid = self._create_part_with_bom(
+            part_number="308D3525G001",
+            description="ELECTRIC HARNESS ASM",
+            models=[m for m in self.all_models if "ESP" in m],
+            tracker="TRK-CTRL-HARNESS",
+        )
+        store.execute(
+            "UPDATE parts SET subsystem='Controls' WHERE id=? AND project_id=?",
+            (controls_pid, self.project_id),
+        )
+        inferred_controls = store.infer_part_feature_rules(
+            self.project_id, [controls_pid]
+        )
+        self.assertEqual(inferred_controls[controls_pid], [f"{self.fuel_fid}::Electric"])
 
 
 if __name__ == "__main__":

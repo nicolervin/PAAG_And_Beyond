@@ -92,5 +92,153 @@ class PlanningScenarioTableTests(unittest.TestCase):
         clone.assert_not_called()
 
 
+class WorkspacePersistenceTests(unittest.TestCase):
+    def test_set_and_get_last_active_workspace_persists_across_reads(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orig_db_path = store.DB_PATH
+            try:
+                store.DB_PATH = Path(tmp_dir) / "workspace_test.db"
+                self.assertEqual(
+                    store.get_last_active_workspace(),
+                    {"project_id": None, "scenario_id": None},
+                )
+                store.set_last_active_workspace("proj-2", "scen-2")
+                self.assertEqual(
+                    store.get_last_active_workspace(),
+                    {"project_id": "proj-2", "scenario_id": "scen-2"},
+                )
+                store.set_last_active_workspace(None, "scen-2")
+                self.assertEqual(
+                    store.get_last_active_workspace(),
+                    {"project_id": None, "scenario_id": None},
+                )
+            finally:
+                store.DB_PATH = orig_db_path
+
+    def test_app_reload_restores_last_active_project_instead_of_first_project(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from streamlit.testing.v1 import AppTest
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orig_db_path = store.DB_PATH
+            try:
+                store.DB_PATH = Path(tmp_dir) / "reload_test.db"
+                store.init_db()
+                older_id = store.create_project(
+                    "Older Project",
+                    "Prog B",
+                    "Owner",
+                    60.0,
+                    product_line="Line 2",
+                    building_location="Plant 2",
+                )
+                top_id = store.create_project(
+                    "Top Project",
+                    "Prog A",
+                    "Owner",
+                    60.0,
+                    product_line="Line 1",
+                    building_location="Plant 1",
+                )
+                # Ensure "Top Project" is first in projects() order
+                with store.connection() as conn:
+                    conn.execute(
+                        "UPDATE projects SET updated_at='2099-01-02T00:00:00Z' WHERE id=?",
+                        (top_id,),
+                    )
+                    conn.execute(
+                        "UPDATE projects SET updated_at='2099-01-01T00:00:00Z' WHERE id=?",
+                        (older_id,),
+                    )
+                self.assertEqual(store.projects()[0]["id"], top_id)
+
+                app_script = str(Path(__file__).resolve().parent.parent / "streamlit_app.py")
+
+                # User selects Older Project in first session
+                at1 = AppTest.from_file(app_script)
+                at1.run(timeout=30)
+                self.assertFalse(at1.exception)
+                at1.sidebar.selectbox(key="global_project").select("Older Project").run(timeout=30)
+                self.assertFalse(at1.exception)
+                self.assertEqual(at1.session_state["project_id"], older_id)
+
+                # Simulate browser refresh (brand new AppTest session with empty session_state)
+                at2 = AppTest.from_file(app_script)
+                at2.run(timeout=30)
+                self.assertFalse(at2.exception)
+                self.assertEqual(at2.session_state["project_id"], older_id)
+                self.assertEqual(at2.sidebar.selectbox(key="global_project").value, "Older Project")
+            finally:
+                store.DB_PATH = orig_db_path
+
+
+class NavigationTableViewTests(unittest.TestCase):
+    def test_parts_catalog_loads_saved_table_view_after_switching_from_model_tree(self) -> None:
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        from streamlit.testing.v1 import AppTest
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orig_db_path = store.DB_PATH
+            try:
+                store.DB_PATH = Path(tmp_dir) / "parts_view_nav_test.db"
+                store.init_db()
+                project_id = store.create_project(
+                    "Dryer NPI",
+                    "Prog Dryer",
+                    "Kayla Funk",
+                    60.0,
+                    product_line="Dryers",
+                    building_location="AP3",
+                )
+                saved_cols = ["part_number", "subsystem", "feature_applicability"]
+                store.set_last_active_workspace(project_id, None)
+                store.save_table_view_preference(
+                    project_id,
+                    "Kayla Funk",
+                    "parts_catalog",
+                    saved_cols,
+                    saved_cols,
+                )
+
+                app_script = str(Path(__file__).resolve().parent.parent / "streamlit_app.py")
+                at = AppTest.from_file(app_script, default_timeout=30)
+                at.run(timeout=30)
+                self.assertFalse(at.exception)
+                self.assertEqual(at.session_state["current_editor"], "Kayla Funk")
+
+                # Navigate into Model Tree first, then leave and navigate to Parts Catalog
+                at.switch_page("app_pages/bom_tree.py").run(timeout=30)
+                self.assertFalse(at.exception)
+                self.assertEqual(at.session_state["current_editor"], "Kayla Funk")
+
+                at.switch_page("app_pages/parts.py").run(timeout=30)
+                self.assertFalse(at.exception)
+                self.assertEqual(at.session_state["current_editor"], "Kayla Funk")
+
+                editor_scope = hashlib.sha256("Kayla Funk".encode("utf-8")).hexdigest()[:12]
+                view_key = f"parts_catalog_view_columns_{project_id}_{editor_scope}"
+                self.assertEqual(at.multiselect(key=view_key).value, saved_cols)
+
+                # Change draft columns without saving, leave to Model Tree, and return to Parts Catalog
+                at.multiselect(key=view_key).set_value(["part_number", "description"]).run(timeout=30)
+                self.assertEqual(at.multiselect(key=view_key).value, ["part_number", "description"])
+
+                at.switch_page("app_pages/bom_tree.py").run(timeout=30)
+                self.assertFalse(at.exception)
+
+                at.switch_page("app_pages/parts.py").run(timeout=30)
+                self.assertFalse(at.exception)
+                self.assertEqual(at.session_state["current_editor"], "Kayla Funk")
+                self.assertEqual(at.multiselect(key=view_key).value, saved_cols)
+            finally:
+                store.DB_PATH = orig_db_path
+
+
 if __name__ == "__main__":
     unittest.main()

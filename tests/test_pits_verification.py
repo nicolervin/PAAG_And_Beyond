@@ -79,21 +79,27 @@ class PitsVerificationTests(unittest.TestCase):
         self.assertEqual(wrapper2.getvalue(), sample_bytes)
         self.assertEqual(wrapper2.size, len(sample_bytes))
 
+    def test_first_pits_upload_skips_part_verification(self):
+        new_project_id = store.create_project("New PITS Project", "Fresh project", "Owner", 60.0)
+        records = [
+            make_tracker_record("ID-1", "PART-BRAND-NEW", "Brand New Part Description"),
+            make_tracker_record("ID-2", "PART-SECOND", "Second Part Description"),
+        ]
+        # First PITS upload on a new project should not require part verification
+        self.assertEqual(store.detect_pits_new_and_changed_parts(new_project_id, records), [])
+        # Even if manual/sample parts exist, if no prior PITS upload occurred, skip verification
+        self.assertEqual(store.detect_pits_new_and_changed_parts(self.project_id, records), [])
+
     def test_detect_new_and_changed_parts(self):
-        # Insert an existing part with known description
-        store.upsert_part(
+        # Seed a prior PITS upload so subsequent upload verification is active
+        store.import_pits_id_snapshot(
             self.project_id,
-            {
-                "part_number": "PART-EXISTING-SAME",
-                "description": "Catalog Same Description",
-            },
-        )
-        store.upsert_part(
-            self.project_id,
-            {
-                "part_number": "PART-EXISTING-CHANGED",
-                "description": "Catalog Old Description",
-            },
+            [
+                make_tracker_record("ID-1", "PART-EXISTING-SAME", "Catalog Same Description"),
+                make_tracker_record("ID-2", "PART-EXISTING-CHANGED", "Catalog Old Description"),
+                make_tracker_record("ID-5", "PART-REMOVED", "Catalog Removed Description"),
+            ],
+            [],
         )
 
         records = [
@@ -128,7 +134,79 @@ class PitsVerificationTests(unittest.TestCase):
         repeated_item = detected_by_part["PART-REPEATED-NEW"]
         self.assertEqual(repeated_item["change_type"], "new_part")
         self.assertEqual(sorted(repeated_item["all_pits_ids"]), ["ID-4A", "ID-4B"])
-        self.assertEqual(len(detected), 3)
+
+        self.assertIn("PART-REMOVED", detected_by_part)
+        deleted_item = detected_by_part["PART-REMOVED"]
+        self.assertEqual(deleted_item["change_type"], "deleted_part")
+        self.assertEqual(deleted_item["current_description"], "Catalog Removed Description")
+        self.assertEqual(deleted_item["all_pits_ids"], ["ID-5"])
+        self.assertEqual(len(detected), 4)
+
+    def test_reupload_same_pits_snapshot_does_not_flag_unchanged_parts(self):
+        records = [
+            make_tracker_record("ID-10", "308D3170G003", "CONSOLE ASM - FIRST DESC"),
+            make_tracker_record("ID-11", "308D3170G003", "CONSOLE ASM - SECOND DESC"),
+            make_tracker_record("732", "308d3342P001", "BRACKET LOWER"),
+        ]
+        bom_snapshot = {
+            "occurrences": [
+                {
+                    "parent_tracker_number": "ROOT",
+                    "child_tracker_number": "732",
+                    "part_number": "308D3342P001",
+                    "description": "BRACKET LOWER",
+                    "proposed_depth": 2,
+                    "proposed_quantity": 1,
+                },
+                {
+                    "parent_tracker_number": "ROOT",
+                    "child_tracker_number": "N",
+                    "part_number": "STK3D1051AL",
+                    "description": "SCREW NOT IN TRACKER",
+                    "proposed_depth": 2,
+                    "proposed_quantity": 4,
+                },
+            ]
+        }
+        store.import_pits_id_snapshot(self.project_id, records, [], bom_snapshot=bom_snapshot)
+
+        # Re-uploading the exact same snapshot must flag 0 changes
+        detected_same = store.detect_pits_new_and_changed_parts(
+            self.project_id,
+            records,
+            bom_snapshot=bom_snapshot,
+        )
+        self.assertEqual(detected_same, [])
+
+        # If one of the repeated tracker rows actually changes its description, it should be flagged
+        modified_records = [
+            make_tracker_record("ID-10", "308D3170G003", "CONSOLE ASM - UPDATED DESC"),
+            make_tracker_record("ID-11", "308D3170G003", "CONSOLE ASM - SECOND DESC"),
+            make_tracker_record("732", "308d3342P001", "BRACKET LOWER"),
+        ]
+        detected_mod = store.detect_pits_new_and_changed_parts(
+            self.project_id,
+            modified_records,
+            bom_snapshot=bom_snapshot,
+        )
+        self.assertEqual(len(detected_mod), 1)
+        self.assertEqual(detected_mod[0]["part_number"], "308D3170G003")
+        self.assertEqual(detected_mod[0]["change_type"], "changed_description")
+        self.assertEqual(detected_mod[0]["incoming_description"], "CONSOLE ASM - UPDATED DESC")
+
+        # If a part is removed in a new upload, it is flagged as deleted_part
+        records_without_732 = [
+            make_tracker_record("ID-10", "308D3170G003", "CONSOLE ASM - FIRST DESC"),
+            make_tracker_record("ID-11", "308D3170G003", "CONSOLE ASM - SECOND DESC"),
+        ]
+        detected_del = store.detect_pits_new_and_changed_parts(
+            self.project_id,
+            records_without_732,
+        )
+        self.assertEqual(len(detected_del), 1)
+        self.assertEqual(detected_del[0]["part_number"], "308d3342P001")
+        self.assertEqual(detected_del[0]["change_type"], "deleted_part")
+        self.assertEqual(detected_del[0]["current_description"], "BRACKET LOWER")
 
     def test_downstream_impacts_queries(self):
         # 1. Setup a part in Fishbone

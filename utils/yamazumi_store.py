@@ -371,24 +371,70 @@ def rename_yamazumi_variants(
 ) -> dict[str, object]:
     """Normalize saved Yamazumi labels and describe every persisted change."""
     mapping = {str(old): str(new) for old, new in label_mapping.items() if str(old) != str(new)}
-    if not mapping:
-        return {"changed_count": 0, "element_changes": [], "pitch_changes": []}
     element_changes: list[dict[str, object]] = []
     pitch_changes: list[dict[str, object]] = []
     timestamp = now_iso()
     with connection() as conn:
+        pitches = conn.execute(
+            """SELECT p.id, p.area_id, p.pitch_number, p.pitch_name, p.pitch_type,
+                      p.feeds_into_pitch_id, p.model_variants
+               FROM yamazumi_pitches p
+               JOIN yamazumi_areas a ON a.id=p.area_id
+               WHERE p.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
+        ).fetchall()
+        pitch_canonical_by_id: dict[str, dict[str, str]] = {}
+        for pitch in pitches:
+            raw_variants = json.loads(pitch["model_variants"] or "[]")
+            mapped_variants = [mapping.get(str(value), str(value)) for value in raw_variants]
+            normalized = parse_yamazumi_model_variants(mapped_variants, fallback=None)
+            pitch_canonical_by_id[str(pitch["id"])] = {
+                v.casefold(): v for v in normalized
+            }
+            if normalized != raw_variants:
+                if mapped_variants != raw_variants:
+                    _require_yamazumi_feed_target_for_pitch_write(
+                        conn, project_id, pitch
+                    )
+                conn.execute(
+                    "UPDATE yamazumi_pitches SET model_variants=?, updated_at=? WHERE id=?",
+                    (json.dumps(normalized), timestamp, pitch["id"]),
+                )
+                pitch_changes.append(
+                    {
+                        "pitch_id": str(pitch["id"]),
+                        "old_variants": raw_variants,
+                        "new_variants": normalized,
+                    }
+                )
         elements = conn.execute(
-            """SELECT e.id, e.model_variant, e.model_variants FROM yamazumi_elements e
+            """SELECT e.id, e.pitch_id, e.model_variant, e.model_variants FROM yamazumi_elements e
                JOIN yamazumi_areas a ON a.id=e.area_id
                WHERE e.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
         ).fetchall()
         for element in elements:
-            variants = parse_yamazumi_model_variants(
-                element["model_variants"], str(element["model_variant"] or "Base")
+            try:
+                raw_element_variants = json.loads(element["model_variants"] or "[]")
+                if not isinstance(raw_element_variants, list):
+                    raw_element_variants = [raw_element_variants]
+                old_variants = [str(v).strip() for v in raw_element_variants if str(v).strip()]
+            except json.JSONDecodeError:
+                old_variants = []
+            if not old_variants:
+                old_variants = [str(element["model_variant"] or "Base").strip() or "Base"]
+            pitch_id = str(element["pitch_id"] or "").strip()
+            pitch_canon = pitch_canonical_by_id.get(pitch_id, {})
+            mapped_element_variants = [
+                pitch_canon.get(
+                    mapping.get(value, value).casefold(),
+                    mapping.get(value, value),
+                )
+                for value in old_variants
+            ]
+            normalized = parse_yamazumi_model_variants(
+                mapped_element_variants, fallback="Base"
             )
-            normalized = list(dict.fromkeys(mapping.get(value, value) for value in variants))
             primary_variant = normalized[0]
-            if normalized != variants or primary_variant != str(element["model_variant"]):
+            if normalized != old_variants or primary_variant != str(element["model_variant"]):
                 conn.execute(
                     """UPDATE yamazumi_elements
                        SET model_variant=?, model_variants=?, updated_at=? WHERE id=?""",
@@ -399,32 +445,7 @@ def rename_yamazumi_variants(
                         "element_id": str(element["id"]),
                         "old_primary_variant": str(element["model_variant"] or "Base"),
                         "new_primary_variant": primary_variant,
-                        "old_variants": variants,
-                        "new_variants": normalized,
-                    }
-                )
-        pitches = conn.execute(
-            """SELECT p.id, p.area_id, p.pitch_number, p.pitch_name, p.pitch_type,
-                      p.feeds_into_pitch_id, p.model_variants
-               FROM yamazumi_pitches p
-               JOIN yamazumi_areas a ON a.id=p.area_id
-               WHERE p.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
-        ).fetchall()
-        for pitch in pitches:
-            variants = json.loads(pitch["model_variants"] or "[]")
-            normalized = list(dict.fromkeys(mapping.get(str(value), str(value)) for value in variants))
-            if normalized != variants:
-                _require_yamazumi_feed_target_for_pitch_write(
-                    conn, project_id, pitch
-                )
-                conn.execute(
-                    "UPDATE yamazumi_pitches SET model_variants=?, updated_at=? WHERE id=?",
-                    (json.dumps(normalized), timestamp, pitch["id"]),
-                )
-                pitch_changes.append(
-                    {
-                        "pitch_id": str(pitch["id"]),
-                        "old_variants": variants,
+                        "old_variants": old_variants,
                         "new_variants": normalized,
                     }
                 )
@@ -436,14 +457,21 @@ def rename_yamazumi_variants(
 
 def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None = None) -> dict[str, int]:
     """Delete Yamazumi-only areas, pitches, and work without changing Fishbone or Process Plan."""
+    timestamp = now_iso()
     with connection() as conn:
         if area_id:
             area = conn.execute(
-                "SELECT id FROM yamazumi_areas WHERE id=? AND project_id=? AND scenario_id=?",
+                "SELECT id, section_id FROM yamazumi_areas WHERE id=? AND project_id=? AND scenario_id=?",
                 (area_id, project_id, scenario_id),
             ).fetchone()
             if not area:
                 raise ValueError("That Yamazumi area no longer exists.")
+            linked_section = None
+            if area["section_id"]:
+                linked_section = conn.execute(
+                    "SELECT id, name FROM assembly_sections WHERE id=? AND project_id=? AND active=1",
+                    (area["section_id"], project_id),
+                ).fetchone()
             counts = {
                 "areas": 1,
                 "pitches": conn.execute(
@@ -461,11 +489,35 @@ def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None =
                 (project_id, area_id),
             )
             conn.execute("DELETE FROM yamazumi_areas WHERE id=? AND project_id=?", (area_id, project_id))
+            if linked_section is not None:
+                name_conflict = conn.execute(
+                    """SELECT 1 FROM yamazumi_areas
+                       WHERE project_id=? AND scenario_id=? AND name=? COLLATE NOCASE""",
+                    (project_id, scenario_id, linked_section["name"]),
+                ).fetchone()
+                if not name_conflict:
+                    conn.execute(
+                        """INSERT INTO yamazumi_areas
+                           (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                           VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+                        (area_id, project_id, scenario_id, linked_section["id"], linked_section["name"], timestamp),
+                    )
         else:
+            existing_areas = conn.execute(
+                "SELECT id, section_id, name FROM yamazumi_areas WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall()
+            area_id_by_section_id = {
+                str(row["section_id"]): str(row["id"])
+                for row in existing_areas
+                if row["section_id"]
+            }
+            area_id_by_name = {
+                str(row["name"]).casefold(): str(row["id"])
+                for row in existing_areas
+            }
             counts = {
-                "areas": conn.execute(
-                    "SELECT COUNT(*) FROM yamazumi_areas WHERE project_id=? AND scenario_id=?", (project_id, scenario_id)
-                ).fetchone()[0],
+                "areas": len(existing_areas),
                 "pitches": conn.execute(
                     """SELECT COUNT(*) FROM yamazumi_pitches p JOIN yamazumi_areas a ON a.id=p.area_id
                        WHERE p.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
@@ -487,6 +539,29 @@ def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None =
                 "DELETE FROM yamazumi_areas WHERE project_id=? AND scenario_id=?",
                 (project_id, scenario_id),
             )
+            sections = conn.execute(
+                """SELECT id, name FROM assembly_sections
+                   WHERE project_id=? AND active=1
+                   ORDER BY sequence, name""",
+                (project_id,),
+            ).fetchall()
+            used_ids: set[str] = set()
+            for section in sections:
+                sec_id = str(section["id"])
+                sec_name = str(section["name"])
+                candidate_id = (
+                    area_id_by_section_id.get(sec_id)
+                    or area_id_by_name.get(sec_name.casefold())
+                )
+                if not candidate_id or candidate_id in used_ids:
+                    candidate_id = str(uuid4())
+                used_ids.add(candidate_id)
+                conn.execute(
+                    """INSERT INTO yamazumi_areas
+                       (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                       VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+                    (candidate_id, project_id, scenario_id, sec_id, sec_name, timestamp),
+                )
     return counts
 
 def upsert_yamazumi_area(
@@ -1139,7 +1214,7 @@ def add_yamazumi_pitch(
         pitch_label=pitch_number,
     )
     timestamp = now_iso()
-    variants = list(dict.fromkeys(str(value).strip() for value in (model_variants or ["Base"]) if str(value).strip()))
+    variants = parse_yamazumi_model_variants(model_variants or ["Base"], fallback=None)
     if not variants:
         raise ValueError("Choose at least one model variant for the pitch.")
     pitch_id = str(uuid4())
@@ -1227,13 +1302,18 @@ def add_yamazumi_element(
             ).fetchone()
             if not active_pitch:
                 raise ValueError("Work can only be added to an Active pitch.")
-            pitch_variants = list(dict.fromkeys(
-                str(value).strip()
-                for value in json.loads(active_pitch["model_variants"] or "[]")
-                if str(value).strip()
-            ))
+            pitch_variants = parse_yamazumi_model_variants(
+                active_pitch["model_variants"], fallback=None
+            )
+            pitch_by_key = {v.casefold(): v for v in pitch_variants}
+            selected_variants = [
+                pitch_by_key.get(variant.casefold(), variant)
+                for variant in selected_variants
+            ]
+            primary_variant = selected_variants[0]
             missing_variants = [
-                variant for variant in selected_variants if variant not in pitch_variants
+                variant for variant in selected_variants
+                if variant.casefold() not in pitch_by_key
             ]
             if missing_variants:
                 _require_yamazumi_feed_target_for_pitch_write(
@@ -1778,12 +1858,8 @@ def update_yamazumi_pitch(project_id: str, area_id: str, pitch_id: str, values: 
         require_target=True,
         pitch_label=pitch_number,
     )
-    variants = list(
-        dict.fromkeys(
-            str(value).strip()
-            for value in (values.get("model_variants") or [])
-            if str(value).strip()
-        )
+    variants = parse_yamazumi_model_variants(
+        values.get("model_variants") or [], fallback=None
     )
     if not variants:
         raise ValueError("Choose at least one model variant for the pitch.")
@@ -2560,10 +2636,10 @@ def replace_yamazumi_pitches(project_id: str, area_id: str, edited: pd.DataFrame
                         f"Move work out of pitch {numbers[index - 1]} before changing it to {status}."
                     )
             raw_variants = row.get("model_variants") or []
-            variants = raw_variants if isinstance(raw_variants, list) else json.loads(str(raw_variants) or "[]")
-            variants = list(dict.fromkeys(str(value).strip() for value in variants if str(value).strip()))
+            variants = parse_yamazumi_model_variants(raw_variants, fallback=None)
             if not variants:
                 raise ValueError(f"Choose at least one model variant for pitch {numbers[index - 1]}.")
+            variant_keys = {v.casefold() for v in variants}
             used_variants = {
                 variant
                 for used in conn.execute(
@@ -2574,7 +2650,7 @@ def replace_yamazumi_pitches(project_id: str, area_id: str, edited: pd.DataFrame
                     used["model_variants"], used["model_variant"]
                 )
             }
-            missing_used = used_variants - set(variants)
+            missing_used = {v for v in used_variants if v.casefold() not in variant_keys}
             if missing_used:
                 raise ValueError(
                     f"Pitch {numbers[index - 1]} still contains work for: {', '.join(sorted(missing_used))}. Move or retag that work first."
@@ -2772,7 +2848,7 @@ def generate_yamazumi_pitch_range(
     if not values:
         raise ValueError("That range contains no pitch numbers for the selected numbering option.")
     timestamp = now_iso()
-    variants = list(dict.fromkeys(str(value).strip() for value in (model_variants or ["Base"]) if str(value).strip()))
+    variants = parse_yamazumi_model_variants(model_variants or ["Base"], fallback=None)
     if not variants:
         raise ValueError("Choose at least one model variant for the generated pitches.")
     with connection() as conn:
@@ -2941,9 +3017,10 @@ def move_yamazumi_element(
             destination_variants = parse_yamazumi_model_variants(
                 destination["model_variants"], fallback=None
             )
+            dest_keys = {v.casefold() for v in destination_variants}
             enabled_variants = [
                 variant for variant in element_variants
-                if variant not in destination_variants
+                if variant.casefold() not in dest_keys
             ]
             if enabled_variants:
                 _require_yamazumi_feed_target_for_pitch_write(
@@ -3064,17 +3141,21 @@ def save_yamazumi_stack_draft(
             destination_variants = parse_yamazumi_model_variants(
                 destination["model_variants"], fallback=None
             )
-            required_variants = list(dict.fromkeys(
-                variant
-                for element_id in normalized.get(stack_key, [])
-                for variant in parse_yamazumi_model_variants(
-                    elements[element_id]["model_variants"],
-                    elements[element_id]["model_variant"],
-                )
-            ))
+            dest_keys = {v.casefold() for v in destination_variants}
+            required_variants = parse_yamazumi_model_variants(
+                [
+                    variant
+                    for element_id in normalized.get(stack_key, [])
+                    for variant in parse_yamazumi_model_variants(
+                        elements[element_id]["model_variants"],
+                        elements[element_id]["model_variant"],
+                    )
+                ],
+                fallback=None,
+            )
             missing_variants = [
                 variant for variant in required_variants
-                if variant not in destination_variants
+                if variant.casefold() not in dest_keys
             ]
             if missing_variants:
                 _require_yamazumi_feed_target_for_pitch_write(
@@ -3256,7 +3337,7 @@ def import_yamazumi_rows(
             pitch_key = (area_id, pitch_number.casefold())
             if pitch_key not in pitch_ids:
                 existing_pitch = conn.execute(
-                    """SELECT id, pitch_number, pitch_type, feeds_into_pitch_id
+                    """SELECT id, pitch_number, pitch_type, feeds_into_pitch_id, model_variants
                        FROM yamazumi_pitches
                        WHERE project_id=? AND area_id=?
                          AND TRIM(pitch_number)=TRIM(?) COLLATE NOCASE""",
@@ -3286,8 +3367,17 @@ def import_yamazumi_rows(
                 status = str(row.get("Pitch_status") or "Active").strip().title()
                 if status not in {"Active", "Blocked", "Open"}:
                     status = "Active"
-                pitch_variants = parse_yamazumi_model_variants(
+                existing_variants = (
+                    parse_yamazumi_model_variants(existing_pitch["model_variants"], fallback=None)
+                    if existing_pitch
+                    else []
+                )
+                row_variants = parse_yamazumi_model_variants(
                     row.get("Model_variants", row.get("Model_variant")),
+                    fallback="Base" if not existing_variants else None,
+                )
+                pitch_variants = parse_yamazumi_model_variants(
+                    [*row_variants, *existing_variants],
                     fallback="Base",
                 )
                 conn.execute(
@@ -3296,7 +3386,8 @@ def import_yamazumi_rows(
                         sequence, model_variants, pitch_type, feeds_into_pitch_id, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pitch', NULL, ?)
                        ON CONFLICT(id) DO UPDATE SET pitch_name=excluded.pitch_name,
-                       status=excluded.status, updated_at=excluded.updated_at""",
+                       status=excluded.status, model_variants=excluded.model_variants,
+                       updated_at=excluded.updated_at""",
                     (pitch_id, project_id, area_id, pitch_number,
                      str(row.get("Pitch_name") or "").strip(), status,
                      len(pitch_ids) * 10, json.dumps(pitch_variants), timestamp),
@@ -3307,12 +3398,25 @@ def import_yamazumi_rows(
             pitch_key = (area_id, pitch_number.casefold())
             import_pitch_id = pitch_ids[pitch_key]
             import_pitch = conn.execute(
-                "SELECT status FROM yamazumi_pitches WHERE id=?", (import_pitch_id,)
+                "SELECT status, model_variants FROM yamazumi_pitches WHERE id=?",
+                (import_pitch_id,),
             ).fetchone()
             assigned_pitch_id = (
                 import_pitch_id if import_pitch and import_pitch["status"] == "Active" else None
             )
-            imported_variant = str(row.get("Model_variant") or "Base").strip().title()
+            raw_imported_variant = str(row.get("Model_variant") or "Base").strip() or "Base"
+            if raw_imported_variant.casefold() == "base":
+                raw_imported_variant = "Base"
+            raw_pitch_variants = json.loads(
+                (import_pitch["model_variants"] if import_pitch else None) or "[]"
+            )
+            selected_variants = parse_yamazumi_model_variants(
+                raw_pitch_variants, fallback=None
+            )
+            pitch_variant_by_key = {v.casefold(): v for v in selected_variants}
+            imported_variant = pitch_variant_by_key.get(
+                raw_imported_variant.casefold(), raw_imported_variant
+            )
             conn.execute(
                 """INSERT INTO yamazumi_elements
                    (id, project_id, area_id, pitch_id, model_variant, model_variants,
@@ -3329,13 +3433,9 @@ def import_yamazumi_rows(
                  str(row.get("Work_region") or "None").strip(),
                  row_position * 10, source_label, timestamp),
             )
-            current_pitch = conn.execute(
-                "SELECT model_variants FROM yamazumi_pitches WHERE id=?",
-                (import_pitch_id,),
-            ).fetchone()
-            selected_variants = json.loads(current_pitch["model_variants"] or "[]")
-            if imported_variant not in selected_variants:
+            if imported_variant.casefold() not in pitch_variant_by_key:
                 selected_variants.append(imported_variant)
+            if selected_variants != raw_pitch_variants:
                 conn.execute(
                     "UPDATE yamazumi_pitches SET model_variants=? WHERE id=?",
                     (json.dumps(selected_variants), import_pitch_id),

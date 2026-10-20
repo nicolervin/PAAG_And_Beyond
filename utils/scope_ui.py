@@ -9,6 +9,7 @@ from utils.store import (
     clone_planning_scenario,
     next_scenario_revision_label,
     planning_scenarios,
+    set_last_active_workspace,
 )
 
 
@@ -24,6 +25,7 @@ def _activate_scenario(selector_key: str) -> None:
     if not selected_id:
         return
     st.session_state["scenario_id"] = selected_id
+    set_last_active_workspace(st.session_state.get("project_id"), selected_id)
 
 
 def scenario_option_label(scenario: dict) -> str:
@@ -134,6 +136,7 @@ def save_as_scenario_dialog(
                     takt_time_unit=takt_time_unit,
                 )
                 st.session_state["scenario_id"] = new_scenario_id
+                set_last_active_workspace(project_id, new_scenario_id)
                 st.toast(
                     "Scenario created; the new branch is now active",
                     icon=":material/check_circle:",

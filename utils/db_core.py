@@ -1206,9 +1206,16 @@ def parse_yamazumi_model_variants(value, fallback: str | None = "Base") -> list[
         raw_values = []
     else:
         raw_values = [value]
-    variants = list(
-        dict.fromkeys(str(item).strip() for item in raw_values if str(item).strip())
-    )
+    variants: list[str] = []
+    seen_casefold: set[str] = set()
+    for item in raw_values:
+        cleaned = str(item).strip()
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key not in seen_casefold:
+            seen_casefold.add(key)
+            variants.append(cleaned)
     if not variants and fallback:
         return [fallback]
     return variants
@@ -1384,6 +1391,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS complexity_features (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 category TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
+                subsystem TEXT NOT NULL DEFAULT '',
                 allowed_values TEXT NOT NULL DEFAULT '[]', description TEXT DEFAULT '',
                 sequence INTEGER NOT NULL DEFAULT 10, active INTEGER DEFAULT 1,
                 updated_at TEXT NOT NULL, UNIQUE(project_id, name)
@@ -1919,6 +1927,13 @@ def init_db() -> None:
                ON parts(project_id, pits_tracker_number)
                WHERE pits_tracker_number <> ''"""
         )
+        complexity_feature_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(complexity_features)").fetchall()
+        }
+        if "subsystem" not in complexity_feature_columns:
+            conn.execute(
+                "ALTER TABLE complexity_features ADD COLUMN subsystem TEXT NOT NULL DEFAULT ''"
+            )
         process_option_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(process_part_options)").fetchall()
         }
