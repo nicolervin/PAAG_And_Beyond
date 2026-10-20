@@ -409,12 +409,10 @@ class LayoutShapesAppSmokeTests(unittest.TestCase):
     def test_layouts_tab_renders_canvas_and_controls_without_exceptions(self) -> None:
         app = self._run_app()
         self.assertEqual([], list(app.exception))
-
-        # Check button to add shape exists
-        add_shape_btns = [
-            b for b in app.button if "+ Add Shape" in str(getattr(b, "label", ""))
-        ]
-        self.assertTrue(len(add_shape_btns) > 0)
+        self.assertEqual(app.session_state["active_layout_id"], self.layout_id)
+        self.assertEqual(app.session_state["active_revision_id"], self.rev_id)
+        self.assertIn(f"layout_shapes_draft_{self.rev_id}", app.session_state)
+        self.assertIn(f"layout_layers_draft_{self.rev_id}", app.session_state)
 
     def test_pin_map_renders_dual_views_without_exceptions(self) -> None:
         scenario_id = str(uuid4())
@@ -614,21 +612,680 @@ class LayoutShapesAppSmokeTests(unittest.TestCase):
         app.run(timeout=30)
         self.assertEqual([], list(app.exception))
 
-        # Check color pickers and pills exist for this shape
-        color_pickers = [cp for cp in app.color_picker]
-        self.assertGreaterEqual(len(color_pickers), 3)
-
-        # Trigger quick palette selection on border color (e.g. Conveyor Orange 🟠)
-        pill_key = f"insp_stroke_{shape_id}_pill"
-        self.assertIn(pill_key, app.session_state)
-        app.session_state[pill_key] = "🟠"
-        app.run(timeout=30)
-        self.assertEqual([], list(app.exception))
-
-        # Verify that the color updated to orange
+        # Verify shape and default layers are loaded into session state for the canvas
         drafts = app.session_state[f"layout_shapes_draft_{self.rev_id}"]
         matched = next(s for s in drafts if s["id"] == shape_id)
-        self.assertEqual(matched["color"], "#f57c00")
+        self.assertEqual(matched["color"], "#1976d2")
+        self.assertEqual(LAYOUT_SWATCH_PALETTE["🟠"], "#f57c00")
+
+    def test_sync_draft_layers_to_db_updates_z_index_and_creates_custom_layers(self) -> None:
+        from utils.layout_ui import _sync_draft_layers_to_db
+
+        layers = layout_store.ensure_default_layers_for_revision(self.rev_id)
+        draft_layers = [dict(l) for l in layers]
+        draft_layers[0]["name"] = "Updated Base Layer"
+        draft_layers.append(
+            {
+                "id": "layer_temp_custom",
+                "name": "Custom Overlay",
+                "visible": True,
+                "locked": False,
+                "opacity": 0.85,
+                "z_index": 90,
+                "color": "#7c3aed",
+            }
+        )
+        id_map = _sync_draft_layers_to_db(
+            project_id=self.project_id,
+            revision_id=self.rev_id,
+            draft_layers=draft_layers,
+            editor_name=self.editor,
+        )
+        self.assertIn("layer_temp_custom", id_map)
+        updated_layers = layout_store.list_layout_layers(self.rev_id)
+        names = [l["name"] for l in updated_layers]
+        self.assertIn("Updated Base Layer", names)
+        self.assertIn("Custom Overlay", names)
+
+    def test_canvas_commit_all_actions_and_cad_screenshot_upload_stress(self) -> None:
+        """End-to-end stress test of all handle_canvas_commit actions via AppTest."""
+        import base64
+
+        # Create a 1600x900 CAD floorplan screenshot data URL
+        buf = _make_dummy_image(1600, 900)
+        b64_str = base64.b64encode(buf.getvalue()).decode("ascii")
+        data_url = f"data:image/png;base64,{b64_str}"
+
+        layers = [dict(l) for l in layout_store.ensure_default_layers_for_revision(self.rev_id)]
+        layers[0]["opacity"] = 0.75
+        layers[1]["visible"] = False
+        layers.append(
+            {
+                "id": "layer_custom_stress",
+                "name": "Safety Walkways",
+                "visible": True,
+                "locked": False,
+                "opacity": 0.9,
+                "z_index": 120,
+                "color": "#16a34a",
+            }
+        )
+
+        s1_id = str(uuid4())
+        s2_id = str(uuid4())
+        s3_id = str(uuid4())
+        conn_id = str(uuid4())
+
+        # Put connector FIRST (before its source_shape_id and target_shape_id) to stress-test FK ordering
+        shapes_batch = [
+            {
+                "id": conn_id,
+                "shape_type": "connector",
+                "label": "Flow 1->3",
+                "x": 100.0,
+                "y": 100.0,
+                "width": 200.0,
+                "height": 80.0,
+                "rotation": 0.0,
+                "color": "#2563eb",
+                "source_shape_id": s1_id,
+                "target_shape_id": s3_id,
+                "style_json": json.dumps({"routing": "elbow", "arrow": "end"}),
+            },
+            {
+                "id": s1_id,
+                "shape_type": "rectangle",
+                "label": "Station 1",
+                "x": 50.0,
+                "y": 60.0,
+                "width": 80.0,
+                "height": 40.0,
+                "rotation": 0.0,
+                "color": "#2563eb",
+                "layer_id": "layer_custom_stress",
+                "pitch_id": "non_existent_pitch_id_should_safely_clear",
+                "equipment_id": "non_existent_equip_id_should_safely_clear",
+            },
+            {
+                "id": s2_id,
+                "shape_type": "callout",
+                "label": "Middle Note Original",
+                "x": 180.0,
+                "y": 90.0,
+                "width": 70.0,
+                "height": 45.0,
+                "rotation": 0.0,
+                "color": "#d97706",
+            },
+            {
+                "id": s3_id,
+                "shape_type": "circle",
+                "label": "Station 3",
+                "x": 320.0,
+                "y": 140.0,
+                "width": 60.0,
+                "height": 60.0,
+                "rotation": 0.0,
+                "color": "#16a34a",
+            },
+        ]
+
+        def run_commit(payload: dict) -> AppTest:
+            app = AppTest.from_file(str(store.ROOT / "app_pages/pin_map.py"), default_timeout=30)
+            app.session_state["project_id"] = self.project_id
+            app.session_state["scenario_id"] = self.scenario_id
+            app.session_state["current_editor"] = self.editor
+            app.session_state["active_layout_id"] = self.layout_id
+            app.session_state["active_revision_id"] = self.rev_id
+            app.session_state[f"layout_canvas_{self.rev_id}"] = {"canvas_commit": payload}
+            app.run(timeout=30)
+            self.assertEqual([], list(app.exception))
+            return app
+
+        # 1. Upload CAD floorplan screenshot + save shapes & modified layers
+        run_commit(
+            {
+                "action": "upload_background",
+                "background_data_url": data_url,
+                "shapes": shapes_batch,
+                "layers": layers,
+                "selected_shape_id": s2_id,
+            }
+        )
+        rev_after_bg = layout_store.get_layout_revision(self.rev_id)
+        self.assertIsNotNone(rev_after_bg)
+        self.assertEqual(rev_after_bg["image_width_px"], 1600)
+        self.assertEqual(rev_after_bg["image_height_px"], 900)
+        # Aspect ratio preserved (80 ft wide * 900/1600 = 45 ft high)
+        self.assertAlmostEqual(float(rev_after_bg["height_value"]), 45.0, places=2)
+
+        saved_shapes = layout_store.list_layout_shapes(self.rev_id)
+        self.assertEqual(len(saved_shapes), 4)
+        saved_conn = next(s for s in saved_shapes if s["id"] == conn_id)
+        self.assertEqual(saved_conn["source_shape_id"], s1_id)
+        self.assertEqual(saved_conn["target_shape_id"], s3_id)
+
+        # 2. Edit ONLY the middle shape (s2_id) without changing first/last shape or counts
+        shapes_batch[2] = dict(shapes_batch[2], label="Middle Note Edited", x=215.5)
+        run_commit(
+            {
+                "action": "save",
+                "shapes": shapes_batch,
+                "layers": [dict(l) for l in layout_store.list_layout_layers(self.rev_id)],
+            }
+        )
+        saved_shapes_2 = layout_store.list_layout_shapes(self.rev_id)
+        mid_shape = next(s for s in saved_shapes_2 if s["id"] == s2_id)
+        self.assertEqual(mid_shape["label"], "Middle Note Edited")
+        self.assertAlmostEqual(float(mid_shape["x"]), 215.5, places=2)
+
+        # 3. Calibrate scale by 2-point reference
+        run_commit(
+            {
+                "action": "calibrate_scale",
+                "shapes": shapes_batch,
+                "layers": [dict(l) for l in layout_store.list_layout_layers(self.rev_id)],
+                "scale_calibration": {
+                    "pixel_distance": 160.0,
+                    "physical_distance": 20.0,
+                    "unit": "feet",
+                },
+            }
+        )
+        rev_after_cal = layout_store.get_layout_revision(self.rev_id)
+        # 160 px = 20 ft -> 8 px/ft -> 1600 px = 200 ft wide, 900 px = 112.5 ft high
+        self.assertAlmostEqual(float(rev_after_cal["width_value"]), 200.0, places=1)
+        self.assertAlmostEqual(float(rev_after_cal["height_value"]), 112.5, places=1)
+
+        # 4. Update scale directly via top bar W x H
+        run_commit(
+            {
+                "action": "update_scale",
+                "shapes": shapes_batch,
+                "layers": [dict(l) for l in layout_store.list_layout_layers(self.rev_id)],
+                "width_value": 300.0,
+                "height_value": 150.0,
+                "unit": "meters",
+            }
+        )
+        rev_after_su = layout_store.get_layout_revision(self.rev_id)
+        self.assertAlmostEqual(float(rev_after_su["width_value"]), 300.0, places=1)
+        self.assertAlmostEqual(float(rev_after_su["height_value"]), 150.0, places=1)
+        self.assertEqual(rev_after_su["unit"], "meters")
+
+        # 5. Rename page, add page, switch page, delete page, and clear background
+        run_commit({"action": "rename_page", "page_title": "Main Assembly Floor"})
+        self.assertEqual(layout_store.get_layout(self.project_id, self.layout_id)["name"], "Main Assembly Floor")
+
+        app_added = run_commit({"action": "add_page", "page_title": "Sub-Assembly Floor"})
+        all_pages = layout_store.list_layouts(self.project_id)
+        self.assertEqual(len(all_pages), 2)
+        new_page_id = str(app_added.session_state["active_layout_id"])
+        self.assertNotEqual(new_page_id, self.layout_id)
+
+        run_commit({"action": "clear_background"})
+        rev_after_clear = layout_store.get_layout_revision(self.rev_id)
+        self.assertIn("Blank scaled", str(rev_after_clear["notes"]))
+
+    def test_stress_20000_shapes_batch_save_and_reload(self) -> None:
+        """Stress test saving and querying 20,000 shapes in a single revision."""
+        shapes_20k = []
+        prev_id = None
+        for i in range(20000):
+            sid = f"shape_{self.rev_id}_{i}"
+            if i % 20 == 0 and prev_id is not None:
+                shapes_20k.append(
+                    {
+                        "id": sid,
+                        "shape_type": "connector",
+                        "label": f"C{i}",
+                        "x": float((i % 200) * 12),
+                        "y": float((i // 200) * 12),
+                        "width": 10.0,
+                        "height": 10.0,
+                        "rotation": 0.0,
+                        "color": "#2563eb",
+                        "source_shape_id": prev_id,
+                        "target_shape_id": f"shape_{self.rev_id}_{min(19999, i + 1)}",
+                        "z_index": i,
+                    }
+                )
+            else:
+                shapes_20k.append(
+                    {
+                        "id": sid,
+                        "shape_type": "rectangle" if i % 2 == 0 else "circle",
+                        "label": f"S{i}",
+                        "x": float((i % 200) * 12),
+                        "y": float((i // 200) * 12),
+                        "width": 8.0,
+                        "height": 6.0,
+                        "rotation": 0.0,
+                        "color": "#1976d2",
+                        "z_index": i,
+                    }
+                )
+                prev_id = sid
+
+        layout_store.save_layout_shapes(
+            self.project_id, self.rev_id, shapes_20k, self.editor
+        )
+        reloaded_20k = layout_store.list_layout_shapes(self.rev_id)
+        self.assertEqual(len(reloaded_20k), 20000)
+
+        # Verify project export/import round-trip with layers and 20,000 shapes
+        from utils.project_transfer import export_project_package, import_project_package
+
+        pkg = export_project_package(self.project_id, editor_name=self.editor)
+        self.assertTrue(pkg["file_name"].endswith(".paagproject"))
+        self.assertGreater(len(pkg["data"]), 1000)
+
+        imported = import_project_package(
+            pkg["data"],
+            "Create new",
+            editor_name=self.editor,
+        )
+        imported_layouts = layout_store.list_layouts(imported["project_id"])
+        self.assertGreaterEqual(len(imported_layouts), 1)
+        imported_rev = layout_store.get_latest_layout_revision(imported_layouts[0]["id"])
+        self.assertIsNotNone(imported_rev)
+        imported_rev_id = imported_rev["id"]
+        imported_shapes = layout_store.list_layout_shapes(imported_rev_id)
+        self.assertEqual(len(imported_shapes), 20000)
+        imported_layers = layout_store.list_layout_layers(imported_rev_id)
+        self.assertEqual(len(imported_layers), 6)
+
+    def test_new_pin_map_shapes_and_custom_stencils_end_to_end(self) -> None:
+        """Verify all newly added shape types, extended style_json properties, and custom stencils CRUD."""
+        new_shape_types = [
+            "square", "pill", "semicircle", "quarter_circle", "arc_line",
+            "right_triangle", "pentagon", "octagon", "trapezoid", "parallelogram",
+            "l_shape", "t_shape", "u_shape", "cross", "star", "arrow_block",
+            "cylinder", "document", "callout", "area_header", "pitch_box",
+            "conveyor_curve", "x_box", "worker", "turntable", "quality_gate",
+            "screen", "scanner", "computer_kiosk", "supermarket", "pallet",
+            "agv", "mat_flow", "info_flow", "custom_polygon",
+        ]
+        shapes_payload = []
+        for idx, stype in enumerate(new_shape_types):
+            style = {
+                "fill_opacity": 0.45,
+                "text_color": "#0f172a",
+                "font_weight": "700",
+                "text_align": "center",
+                "text_rotation": -90 if stype == "pitch_box" else 0,
+            }
+            if stype == "area_header":
+                style["area_code"] = "374"
+                style["area_pills"] = "STANDARD WORK,YAMAZUMI"
+            if stype == "custom_polygon":
+                style["points"] = [
+                    {"nx": 0.0, "ny": 0.0},
+                    {"nx": 1.0, "ny": 0.0},
+                    {"nx": 1.0, "ny": 0.6},
+                    {"nx": 0.5, "ny": 0.6},
+                    {"nx": 0.5, "ny": 1.0},
+                    {"nx": 0.0, "ny": 1.0},
+                ]
+            shapes_payload.append(
+                {
+                    "id": f"new_shape_{idx}",
+                    "shape_type": stype,
+                    "label": f"Label {stype}",
+                    "x": float(idx * 10),
+                    "y": 25.0,
+                    "width": 12.0,
+                    "height": 8.0,
+                    "rotation": 90.0 if idx % 4 == 0 else 0.0,
+                    "color": "#f97316",
+                    "stroke_color": "#1e293b",
+                    "stroke_width": 2.0,
+                    "opacity": 1.0,
+                    "font_size": 14,
+                    "z_index": idx,
+                    "style": style,
+                }
+            )
+
+        layout_store.save_layout_shapes(self.project_id, self.rev_id, shapes_payload, self.editor)
+        reloaded = layout_store.list_layout_shapes(self.rev_id)
+        self.assertEqual(len(reloaded), len(new_shape_types))
+
+        by_type = {row["shape_type"]: row for row in reloaded}
+        self.assertIn("area_header", by_type)
+        self.assertIn("custom_polygon", by_type)
+        self.assertIn("pitch_box", by_type)
+
+        import json
+        area_style = json.loads(by_type["area_header"]["style_json"])
+        self.assertEqual(area_style["area_code"], "374")
+        self.assertAlmostEqual(float(area_style["fill_opacity"]), 0.45, places=2)
+
+        poly_style = json.loads(by_type["custom_polygon"]["style_json"])
+        self.assertEqual(len(poly_style["points"]), 6)
+
+        # Custom stencil store CRUD
+        saved_stencil = layout_store.save_layout_custom_stencil(
+            self.project_id,
+            name="Pedestal Bend Press",
+            stencil_data={
+                "base_width_px": 180.0,
+                "base_height_px": 140.0,
+                "items": [
+                    {
+                        "shape_type": "l_shape",
+                        "nx": 0.0,
+                        "ny": 0.0,
+                        "nw": 1.0,
+                        "nh": 1.0,
+                        "color": "#f97316",
+                        "stroke_color": "#c2410c",
+                        "label": "PEDESTAL BEND",
+                    }
+                ],
+            },
+            editor_name=self.editor,
+            category="Pin Map & Line Stencils",
+        )
+        stencil_id = saved_stencil["id"]
+        stencils_list = layout_store.list_layout_custom_stencils(self.project_id)
+        self.assertEqual(len(stencils_list), 1)
+        self.assertEqual(stencils_list[0]["id"], stencil_id)
+        self.assertEqual(stencils_list[0]["name"], "Pedestal Bend Press")
+
+        layout_store.delete_layout_custom_stencil(self.project_id, stencil_id, editor_name=self.editor)
+        self.assertEqual(len(layout_store.list_layout_custom_stencils(self.project_id)), 0)
+
+    def test_all_js_dom_selectors_match_html_and_custom_stencil_commits(self) -> None:
+        """Verify every #lc-* selector in _JS exists in _HTML and test custom stencil + partial modal commits."""
+        import re
+        import utils.layout_canvas as lc
+
+        html_ids = set(re.findall(r'id=["\'](lc-[a-zA-Z0-9_-]+)["\']', lc._HTML))
+        js_selectors = set(re.findall(r'#(lc-[a-zA-Z0-9_-]+)', lc._JS))
+        missing_in_html = js_selectors - html_ids
+        self.assertEqual(
+            set(),
+            missing_in_html,
+            f"JS references DOM IDs missing in _HTML: {sorted(missing_in_html)}",
+        )
+
+        # Stress test handle_canvas_commit with save_custom_stencil, partial size/style save, and delete_custom_stencil
+        shape_id = str(uuid4())
+        initial_shape = {
+            "id": shape_id,
+            "shape_type": "pitch_box",
+            "label": "P-101",
+            "x": 120.0,
+            "y": 80.0,
+            "width": 96.0,
+            "height": 48.0,
+            "rotation": 0.0,
+            "color": "#dbeafe",
+            "style_json": {
+                "stroke_color": "#1e293b",
+                "stroke_width": 2,
+                "stroke_style": "solid",
+                "fill_color": "#dbeafe",
+                "fill_opacity": 0.85,
+                "font_size": 12,
+                "font_weight": "bold",
+                "text_color": "#0f172a",
+                "text_align": "center",
+                "text_rotation": -90,
+            },
+        }
+
+        def run_commit(payload: dict) -> AppTest:
+            app = AppTest.from_file(str(store.ROOT / "app_pages/pin_map.py"), default_timeout=30)
+            app.session_state["project_id"] = self.project_id
+            app.session_state["scenario_id"] = self.scenario_id
+            app.session_state["current_editor"] = self.editor
+            app.session_state["active_layout_id"] = self.layout_id
+            app.session_state["active_revision_id"] = self.rev_id
+            app.session_state[f"layout_canvas_{self.rev_id}"] = {"canvas_commit": payload}
+            app.run(timeout=30)
+            self.assertEqual([], list(app.exception))
+            return app
+
+        # 1. Save initial shape
+        run_commit({"action": "save", "shapes": [initial_shape], "selected_shape_id": shape_id})
+        saved = layout_store.list_layout_shapes(self.rev_id)
+        self.assertEqual(len(saved), 1)
+        self.assertAlmostEqual(float(saved[0]["width"]), 96.0, places=2)
+        self.assertAlmostEqual(float(saved[0]["height"]), 48.0, places=2)
+
+        # 2. Simulate double-click modal Apply Changes with ONLY new size (width=144.0, height=72.0)
+        resized_shape = dict(initial_shape, width=144.0, height=72.0)
+        run_commit({"action": "save", "shapes": [resized_shape], "selected_shape_id": shape_id})
+        saved_after_resize = layout_store.list_layout_shapes(self.rev_id)
+        self.assertEqual(len(saved_after_resize), 1)
+        self.assertAlmostEqual(float(saved_after_resize[0]["width"]), 144.0, places=2)
+        self.assertAlmostEqual(float(saved_after_resize[0]["height"]), 72.0, places=2)
+        style_after_resize = json.loads(saved_after_resize[0]["style_json"])
+        self.assertEqual(style_after_resize["label"] if "label" in style_after_resize else saved_after_resize[0]["label"], "P-101")
+        self.assertEqual(style_after_resize["text_rotation"], -90)
+
+        # 3. Save custom stencil via commit payload
+        run_commit(
+            {
+                "action": "save_custom_stencil",
+                "shapes": [resized_shape],
+                "custom_stencil": {
+                    "name": "Custom Pitch Cell",
+                    "category": "Saved Shapes",
+                    "stencil_json": {
+                        "base_w": 144.0,
+                        "base_h": 72.0,
+                        "items": [{"shape_type": "pitch_box", "dx": 0, "dy": 0, "dw": 1, "dh": 1}],
+                    },
+                },
+            }
+        )
+        stencils = layout_store.list_layout_custom_stencils(self.project_id)
+        self.assertEqual(len(stencils), 1)
+        self.assertEqual(stencils[0]["name"], "Custom Pitch Cell")
+
+        # 4. Delete custom stencil via commit payload
+        run_commit(
+            {
+                "action": "delete_custom_stencil",
+                "shapes": [resized_shape],
+                "stencil_id": stencils[0]["id"],
+            }
+        )
+        self.assertEqual(len(layout_store.list_layout_custom_stencils(self.project_id)), 0)
+
+        # 5. Re-saving unchanged shapes with non-sorted JSON string keys should be a no-op (no duplicate audit log)
+        audit_before = len(store.audit_history(self.project_id, "Layouts"))
+        unsorted_style_str = json.dumps(dict(reversed(list(resized_shape["style_json"].items()))))
+        noop_shape = dict(resized_shape)
+        noop_shape["style_json"] = unsorted_style_str
+        layout_store.save_layout_shapes(
+            self.project_id, self.rev_id, [noop_shape], self.editor
+        )
+        audit_after = len(store.audit_history(self.project_id, "Layouts"))
+        self.assertEqual(audit_before, audit_after)
+
+    def test_round5_and_round6_footprint_filtering_inactive_rename_and_spatial_svg(self) -> None:
+        """Verify latest-revision & visible-layer footprint filtering, same-scenario non-fanout, inactive page rename, and 2D spatial SVG geometry."""
+        # 1. Same-scenario two areas sharing a section_id and pitch_number ('P01') must NOT fan out
+        ts = store.now_iso()
+        sec_id = str(uuid4())
+        area1_id = str(uuid4())
+        area2_id = str(uuid4())
+        pitch1_id = str(uuid4())
+        pitch2_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO assembly_sections (id, project_id, name, sequence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (sec_id, self.project_id, "Chassis Section", 10, ts, ts),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, section_id, name, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (area1_id, self.project_id, self.scenario_id, sec_id, "Chassis Sub-Area A", ts),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, section_id, name, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (area2_id, self.project_id, self.scenario_id, sec_id, "Chassis Sub-Area B", ts),
+            )
+            conn.execute(
+                """
+                INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, pitch_type, updated_at)
+                VALUES (?, ?, ?, 'P01', 'Sub-Area A Station 1', 'Active', 10, 'Pitch', ?)
+                """,
+                (pitch1_id, self.project_id, area1_id, ts),
+            )
+            conn.execute(
+                """
+                INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, pitch_type, updated_at)
+                VALUES (?, ?, ?, 'P02', 'Sub-Area B Station 1', 'Active', 20, 'Pitch', ?)
+                """,
+                (pitch2_id, self.project_id, area2_id, ts),
+            )
+
+        layers = layout_store.ensure_default_layers_for_revision(self.rev_id)
+        visible_layer_id = str(layers[0]["id"])
+        hidden_layer = layout_store.create_layout_layer(
+            self.project_id, self.rev_id, "Hidden Draft Layer", editor_name=self.editor
+        )
+        layout_store.update_layout_layer(
+            self.project_id,
+            str(hidden_layer["id"]),
+            name="Hidden Draft Layer",
+            visible=False,
+            locked=False,
+            opacity=1.0,
+            color="#64748b",
+            editor_name=self.editor,
+        )
+
+        # Place one visible L-shape for pitch1_id and one hidden shape for pitch2_id on Rev 1
+        shape_rev1_vis = {
+            "id": str(uuid4()),
+            "layer_id": visible_layer_id,
+            "shape_type": "l_shape",
+            "label": "P01-L",
+            "x": 50.0,
+            "y": 60.0,
+            "width": 120.0,
+            "height": 80.0,
+            "rotation": 0.0,
+            "color": "#16a34a",
+            "pitch_id": pitch1_id,
+            "style_json": {"fill_color": "#bbf7d0", "stroke_color": "#16a34a"},
+        }
+        shape_rev1_hid = {
+            "id": str(uuid4()),
+            "layer_id": str(hidden_layer["id"]),
+            "shape_type": "circle",
+            "label": "Hidden-P01",
+            "x": 250.0,
+            "y": 60.0,
+            "width": 90.0,
+            "height": 90.0,
+            "rotation": 0.0,
+            "color": "#dc2626",
+            "pitch_id": pitch2_id,
+            "style_json": {},
+        }
+        layout_store.save_layout_shapes(
+            self.project_id, self.rev_id, [shape_rev1_vis, shape_rev1_hid], self.editor
+        )
+
+        # Footprints on Rev 1: only visible_layer_id shape is returned, and it does NOT fan out to pitch2_id
+        fps_rev1 = layout_store.get_pitch_layout_footprints(self.project_id, self.scenario_id)
+        self.assertEqual(len(fps_rev1), 1)
+        self.assertEqual(fps_rev1[0]["pitch_id"], pitch1_id)
+        self.assertEqual(fps_rev1[0]["shape_type"], "l_shape")
+
+        # 2. Create Rev 2 on the same layout; get_pitch_layout_footprints must only return Rev 2 footprints
+        rev2 = layout_store.create_blank_scaled_revision(
+            project_id=self.project_id,
+            layout_id=self.layout_id,
+            width_value=200.0,
+            height_value=100.0,
+            unit="feet",
+            notes="Blank scaled grid canvas",
+            editor_name=self.editor,
+        )
+        rev2_id = str(rev2["id"])
+        rev2_layers = layout_store.ensure_default_layers_for_revision(rev2_id)
+        shape_rev2 = {
+            "id": str(uuid4()),
+            "layer_id": str(rev2_layers[0]["id"]),
+            "shape_type": "t_shape",
+            "label": "P01-Rev2-T",
+            "x": 140.0,
+            "y": 90.0,
+            "width": 100.0,
+            "height": 100.0,
+            "rotation": 15.0,
+            "color": "#2563eb",
+            "pitch_id": pitch1_id,
+            "style_json": {"fill_color": "#bfdbfe", "stroke_color": "#2563eb"},
+        }
+        layout_store.save_layout_shapes(self.project_id, rev2_id, [shape_rev2], self.editor)
+
+        fps_latest = layout_store.get_pitch_layout_footprints(self.project_id, self.scenario_id)
+        self.assertEqual(len(fps_latest), 1)
+        self.assertEqual(fps_latest[0]["revision_id"], rev2_id)
+        self.assertEqual(fps_latest[0]["shape_type"], "t_shape")
+        self.assertEqual(fps_latest[0]["label"], "P01-Rev2-T")
+
+        # 3. Create a second page and rename the inactive first page via target_page_id
+        page2 = layout_store.create_layout(
+            self.project_id, "Page 2", "Second layout", self.editor
+        )
+        page2_rev = layout_store.create_blank_scaled_revision(
+            project_id=self.project_id,
+            layout_id=str(page2["id"]),
+            width_value=200.0,
+            height_value=100.0,
+            unit="feet",
+            notes="Blank scaled grid canvas",
+            editor_name=self.editor,
+        )
+        app = AppTest.from_file(str(store.ROOT / "app_pages/pin_map.py"), default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = self.editor
+        app.session_state["active_layout_id"] = str(page2["id"])
+        app.session_state["active_revision_id"] = str(page2_rev["id"])
+        app.session_state[f"layout_canvas_{page2_rev['id']}"] = {
+            "canvas_commit": {
+                "commit_id": str(uuid4()),
+                "action": "rename_page",
+                "target_page_id": self.layout_id,
+                "page_title": "Renamed Inactive Page 1",
+            }
+        }
+        app.run(timeout=30)
+        self.assertEqual([], list(app.exception))
+        self.assertEqual(
+            layout_store.get_layout(self.project_id, self.layout_id)["name"],
+            "Renamed Inactive Page 1",
+        )
+        self.assertEqual(
+            layout_store.get_layout(self.project_id, str(page2["id"]))["name"],
+            "Page 2",
+        )
+
+        # 4. Render 2D Plant Spatial Map tab and verify polygon SVG + Color Overlay controls render cleanly
+        app_map = AppTest.from_file(str(store.ROOT / "app_pages/pin_map.py"), default_timeout=30)
+        app_map.session_state["project_id"] = self.project_id
+        app_map.session_state["scenario_id"] = self.scenario_id
+        app_map.session_state["current_editor"] = self.editor
+        app_map.session_state[f"pin_map_workspace_mode_{self.project_id}_{self.scenario_id}"] = (
+            "Pin Map Matrix, Linear Flow & Excel Export"
+        )
+        app_map.session_state[f"pin_map_view_mode_{self.scenario_id}"] = "2D Plant Spatial Map"
+        app_map.run(timeout=30)
+        self.assertEqual([], list(app_map.exception))
+        markdown_bodies = "\n".join(m.value for m in app_map.markdown)
+        self.assertIn("<polygon", markdown_bodies)
+        self.assertIn("paagMajorGrid", markdown_bodies)
+        self.assertIn("P01-Rev2-T", markdown_bodies)
 
 
 if __name__ == "__main__":

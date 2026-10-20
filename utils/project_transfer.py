@@ -77,8 +77,10 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("conveyor_zones"),
     TransferTable("layout_plans"),
     TransferTable("layout_revisions", "layout_plans", "layout_id"),
+    TransferTable("layout_layers", "layout_revisions", "revision_id"),
     TransferTable("layout_section_pitch_standards", "layout_plans", "layout_id"),
     TransferTable("layout_shapes", "layout_revisions", "revision_id"),
+    TransferTable("layout_custom_stencils"),
     TransferTable("pfmea_assignees"),
     TransferTable("pfmea_entries"), TransferTable("pfmea_effects"),
     TransferTable("pfmea_causes"), TransferTable("pfmea_risk_rows"),
@@ -425,6 +427,12 @@ def _remapped_tables(
                     row["pitch_id"] = None
                 if "equipment_id" in valid_columns and source_row.get("equipment_id") and str(source_row["equipment_id"]) not in id_maps.get("equipment_assets", {}):
                     row["equipment_id"] = None
+                if "layer_id" in valid_columns and source_row.get("layer_id") and str(source_row["layer_id"]) not in id_maps.get("layout_layers", {}):
+                    row["layer_id"] = None
+                if "source_shape_id" in valid_columns and source_row.get("source_shape_id") and str(source_row["source_shape_id"]) not in id_maps.get("layout_shapes", {}):
+                    row["source_shape_id"] = None
+                if "target_shape_id" in valid_columns and source_row.get("target_shape_id") and str(source_row["target_shape_id"]) not in id_maps.get("layout_shapes", {}):
+                    row["target_shape_id"] = None
             if item.name == "project_transfer_events":
                 for column in ("source_project_id", "target_project_id"):
                     if column in valid_columns and str(source_row.get(column) or "") == source_project_id:
@@ -441,15 +449,36 @@ def _insert_remapped_tables(
     conn: sqlite3.Connection, tables: dict[str, list[dict]]
 ) -> None:
     for item in PROJECT_TRANSFER_TABLES:
+        deferred_shape_links: list[tuple[str | None, str | None, str]] = []
         for row in tables[item.name]:
             columns = list(row)
             if not columns:
                 continue
+            if item.name == "layout_shapes" and (
+                row.get("source_shape_id") or row.get("target_shape_id")
+            ):
+                deferred_shape_links.append(
+                    (
+                        row.get("source_shape_id"),
+                        row.get("target_shape_id"),
+                        str(row["id"]),
+                    )
+                )
+                row = {
+                    **row,
+                    "source_shape_id": None,
+                    "target_shape_id": None,
+                }
             column_sql = ", ".join(f'"{column}"' for column in columns)
             placeholders = ", ".join("?" for _ in columns)
             conn.execute(
                 f'INSERT INTO "{item.name}" ({column_sql}) VALUES ({placeholders})',
                 tuple(row[column] for column in columns),
+            )
+        if deferred_shape_links:
+            conn.executemany(
+                'UPDATE "layout_shapes" SET "source_shape_id" = ?, "target_shape_id" = ? WHERE "id" = ?',
+                deferred_shape_links,
             )
 
 
