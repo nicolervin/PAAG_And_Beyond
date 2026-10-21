@@ -825,7 +825,7 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
     }
 
     with st.container(border=True):
-        st.subheader("Import a BOM draft")
+        st.subheader("Import PITS File")
         completion_key = f"pits_import_completed_{project_id}"
         if completion_key in st.session_state:
             completed_data = st.session_state[completion_key]

@@ -207,18 +207,34 @@ def drop_untouched_new_rows(
             pass
         return str(value).strip() == ""
 
+    def series_is_blank(series: pd.Series) -> pd.Series:
+        if series.empty:
+            return pd.Series(dtype=bool, index=series.index)
+        if pd.api.types.is_string_dtype(series.dtype) or pd.api.types.is_numeric_dtype(series.dtype):
+            return (series.isna() | series.astype(str).str.strip().eq("")).astype(bool)
+        if series.dtype == object:
+            non_null = series.dropna()
+            if non_null.empty:
+                return pd.Series(True, index=series.index, dtype=bool)
+            sample = non_null.iloc[:64]
+            if not any(isinstance(v, (list, tuple, set, dict)) for v in sample):
+                return (series.isna() | series.astype(str).str.strip().eq("")).astype(bool)
+        return series.apply(is_blank).astype(bool)
+
     identifying_columns = [
         column for column in identifying_columns if column in dataframe.columns
     ]
     if not identifying_columns:
         return dataframe.reset_index(drop=True)
     if id_column in dataframe.columns:
-        new_record = dataframe[id_column].apply(is_blank).astype(bool)
+        new_record = series_is_blank(dataframe[id_column])
     else:
-        new_record = pd.Series(True, index=dataframe.index)
+        new_record = pd.Series(True, index=dataframe.index, dtype=bool)
     untouched = new_record.copy()
     for column in identifying_columns:
-        untouched = untouched & dataframe[column].apply(is_blank).astype(bool)
+        if not untouched.any():
+            break
+        untouched = untouched & series_is_blank(dataframe[column])
     return dataframe.loc[~untouched].copy()
 
 
@@ -415,3 +431,64 @@ def editable_table_footer(
         undo=undo,
         additional_action=additional_action,
     )
+
+
+def paginate_table_rows(
+    dataframe: pd.DataFrame,
+    *,
+    key: str,
+    default_page_size: int = 100,
+    page_size_options: tuple[int, ...] = (50, 100, 250, 500),
+    render_controls: bool = True,
+) -> pd.DataFrame:
+    """Slice a large table into a single page while remaining compatible with merge_filtered_edits()."""
+    total_rows = len(dataframe)
+    options = tuple(sorted({int(opt) for opt in (*page_size_options, default_page_size) if int(opt) > 0}))
+    size_key = f"{key}_page_size"
+    page_key = f"{key}_page_number"
+    current_size = int(st.session_state.get(size_key, default_page_size) or default_page_size)
+    if current_size not in options:
+        current_size = int(default_page_size)
+        st.session_state[size_key] = current_size
+
+    if total_rows <= min(options):
+        return dataframe.reset_index(drop=True)
+
+    total_pages = max(1, (total_rows + current_size - 1) // current_size)
+    current_page = int(st.session_state.get(page_key, 1) or 1)
+    if current_page < 1 or current_page > total_pages:
+        current_page = max(1, min(current_page, total_pages))
+        st.session_state[page_key] = current_page
+
+    if render_controls:
+        bar = st.container(horizontal=True, vertical_alignment="bottom")
+        selected_size = int(
+            bar.selectbox(
+                "Rows per page",
+                options=list(options),
+                key=size_key,
+                width=140,
+            )
+        )
+        total_pages = max(1, (total_rows + selected_size - 1) // selected_size)
+        if current_page > total_pages:
+            current_page = total_pages
+            st.session_state[page_key] = current_page
+        selected_page = int(
+            bar.number_input(
+                f"Page (1–{total_pages})",
+                min_value=1,
+                max_value=total_pages,
+                step=1,
+                key=page_key,
+                width=140,
+            )
+        )
+        current_size = selected_size
+        current_page = selected_page
+
+    start = (current_page - 1) * current_size
+    end = min(total_rows, start + current_size)
+    if render_controls:
+        st.caption(f"Showing rows {start + 1:,}–{end:,} of {total_rows:,} (page {current_page} of {total_pages})")
+    return dataframe.iloc[start:end].reset_index(drop=True)

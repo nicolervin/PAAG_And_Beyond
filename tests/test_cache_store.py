@@ -103,6 +103,40 @@ class StoreReadCacheAndInvalidationTests(unittest.TestCase):
                 cache_store.bump_write_epoch()
                 self.assertFalse(cache_store.is_scenario_task_completed("sync_task", "proj-1", "scen-1"))
 
+    def test_domain_scoped_write_epoch_preserves_catalog_cache_on_scenario_writes(self) -> None:
+        catalog_calls = 0
+        all_calls = 0
+
+        @cache_store.cached_store_read(scope="catalog")
+        def sample_catalog_read(project_id: str) -> dict[str, object]:
+            nonlocal catalog_calls
+            catalog_calls += 1
+            return {"project_id": project_id, "catalog_calls": catalog_calls}
+
+        @cache_store.cached_store_read
+        def sample_scenario_read(project_id: str, scenario_id: str) -> dict[str, object]:
+            nonlocal all_calls
+            all_calls += 1
+            return {"project_id": project_id, "scenario_id": scenario_id, "all_calls": all_calls}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_db = Path(tmpdir) / "test_paag.db"
+            temp_db.write_bytes(b"sqlite-placeholder")
+            with patch.object(db_core, "DB_PATH", temp_db), patch.object(store, "DB_PATH", temp_db):
+                self.assertEqual(sample_catalog_read("proj-1")["catalog_calls"], 1)
+                self.assertEqual(sample_scenario_read("proj-1", "scen-1")["all_calls"], 1)
+
+                # A scenario-only write (e.g. safety_requirements + audit_log) invalidates
+                # scenario reads while preserving the project-wide catalog cache.
+                cache_store.bump_write_epoch(modified_tables={"safety_requirements", "audit_log"})
+                self.assertEqual(sample_catalog_read("proj-1")["catalog_calls"], 1)
+                self.assertEqual(sample_scenario_read("proj-1", "scen-1")["all_calls"], 2)
+
+                # Modifying a catalog table (e.g. parts) invalidates both catalog and scenario caches.
+                cache_store.bump_write_epoch(modified_tables={"parts", "audit_log"})
+                self.assertEqual(sample_catalog_read("proj-1")["catalog_calls"], 2)
+                self.assertEqual(sample_scenario_read("proj-1", "scen-1")["all_calls"], 3)
+
 
 class MediaCacheTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -152,6 +186,27 @@ class MediaCacheTests(unittest.TestCase):
                 quality=80,
             )
             self.assertNotEqual(data_url, data_url_2)
+
+    def test_prewarm_image_cache_populates_thumbnail_and_display_tiers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img_path = Path(tmpdir) / "upload.png"
+            img = Image.new("RGB", (1400, 1000), (40, 160, 90))
+            img.save(img_path, format="PNG")
+
+            cache = cache_store.get_data_cache()
+            stats = media_cache.prewarm_image_cache(img_path)
+            self.assertEqual(stats["bytes_warmed"], 3)
+            self.assertEqual(stats["data_urls_warmed"], 2)
+
+            misses_before = cache.misses
+            hits_before = cache.hits
+            self.assertIsNotNone(media_cache.cached_image_bytes(img_path, max_dim=160))
+            self.assertIsNotNone(media_cache.cached_image_bytes(img_path, max_dim=360))
+            self.assertIsNotNone(media_cache.cached_image_bytes(img_path, max_dim=1200))
+            self.assertIsNotNone(media_cache.cached_image_data_url(img_path, max_dim=360))
+            self.assertIsNotNone(media_cache.cached_image_data_url(img_path, max_dim=1600))
+            self.assertEqual(cache.misses, misses_before)
+            self.assertEqual(cache.hits, hits_before + 5)
 
 
 if __name__ == "__main__":

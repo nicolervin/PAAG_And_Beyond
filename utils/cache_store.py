@@ -136,20 +136,96 @@ def get_data_cache() -> CompressedLRUCache:
 
 _EPOCH_LOCK = threading.RLock()
 _DB_WRITE_EPOCH = 0
+_SCOPE_WRITE_EPOCHS: dict[str, int] = {
+    "catalog": 0,
+    "scenario": 0,
+}
 _SCENARIO_MIGRATION_GUARD: set[tuple[Any, ...]] = set()
 
+# Scenario-scoped and operational tables whose modifications do not alter
+# project-wide Product Architecture, Parts Catalog, Models, or Fishbone structure.
+SCENARIO_ONLY_TABLES: frozenset[str] = frozenset(
+    {
+        "planning_scenarios",
+        "part_scenario_activity",
+        "work_elements",
+        "safety_requirements",
+        "yamazumi_areas",
+        "yamazumi_pitches",
+        "yamazumi_elements",
+        "yamazumi_work_regions",
+        "assembly_scenario_policies",
+        "work_element_material_groups",
+        "work_element_material_options",
+        "process_part_groups",
+        "process_part_options",
+        "ergonomics_reviews",
+        "ergonomics_review_hazard_selections",
+        "ergonomics_visual_media",
+        "process_visual_media",
+        "process_visual_media_tags",
+        "quality_requirement_assignments",
+        "pfmea_entries",
+        "pfmea_effects",
+        "pfmea_causes",
+        "pfmea_controls",
+        "pfmea_risk_rows",
+        "pfmea_actions",
+        "pfmea_failure_effects",
+        "pfmea_failure_causes",
+        "pfmea_prevention_controls",
+        "pfmea_detection_controls",
+        "pfmea_recommended_actions",
+        "control_plan_items",
+        "control_plan_entries",
+        "control_plan_characteristics",
+        "equipment_placements",
+        "equipment_process_links",
+        "conveyor_zones",
+        "layout_plans",
+        "layout_revisions",
+        "layout_layers",
+        "layout_shapes",
+        "layout_section_pitch_standards",
+        "layout_custom_stencils",
+        "audit_log",
+        "table_view_preferences",
+    }
+)
 
-def bump_write_epoch() -> int:
-    """Increment the global write epoch whenever a SQLite transaction commits."""
+
+def bump_write_epoch(
+    scope: str | None = None,
+    *,
+    modified_tables: set[str] | frozenset[str] | None = None,
+) -> int:
+    """Increment the global and domain-scoped write epochs whenever a SQLite transaction commits."""
     global _DB_WRITE_EPOCH
     with _EPOCH_LOCK:
         _DB_WRITE_EPOCH += 1
+        normalized_tables = {str(t).strip().lower() for t in (modified_tables or ()) if str(t).strip()}
+        if scope == "scenario" or (
+            scope is None
+            and normalized_tables
+            and normalized_tables.issubset(SCENARIO_ONLY_TABLES)
+        ):
+            _SCOPE_WRITE_EPOCHS["scenario"] = _SCOPE_WRITE_EPOCHS.get("scenario", 0) + 1
+        elif scope == "catalog":
+            _SCOPE_WRITE_EPOCHS["catalog"] = _SCOPE_WRITE_EPOCHS.get("catalog", 0) + 1
+            _SCOPE_WRITE_EPOCHS["scenario"] = _SCOPE_WRITE_EPOCHS.get("scenario", 0) + 1
+        else:
+            for key in tuple(_SCOPE_WRITE_EPOCHS):
+                _SCOPE_WRITE_EPOCHS[key] += 1
+            if scope and scope not in _SCOPE_WRITE_EPOCHS:
+                _SCOPE_WRITE_EPOCHS[scope] = 1
         return _DB_WRITE_EPOCH
 
 
-def get_write_epoch() -> int:
+def get_write_epoch(scope: str = "all") -> int:
     with _EPOCH_LOCK:
-        return _DB_WRITE_EPOCH
+        if scope == "all" or not scope:
+            return _DB_WRITE_EPOCH
+        return _SCOPE_WRITE_EPOCHS.get(scope, _DB_WRITE_EPOCH)
 
 
 def clear_all_caches() -> None:
@@ -172,7 +248,7 @@ def _file_stat_signature(path: Path) -> tuple[int, int]:
         return (0, 0)
 
 
-def current_db_state_token() -> tuple[Any, ...] | None:
+def current_db_state_token(scope: str = "all") -> tuple[Any, ...] | None:
     """Return a fast state token for the active database, or None if mocked."""
     from utils import db_core
 
@@ -183,11 +259,19 @@ def current_db_state_token() -> tuple[Any, ...] | None:
         resolved = str(db_path.resolve())
     except OSError:
         resolved = str(db_path)
+    epoch = get_write_epoch(scope)
+    if scope and scope != "all":
+        return (
+            resolved,
+            scope,
+            epoch,
+            db_core.get_runtime_revision(),
+        )
     main_sig = _file_stat_signature(db_path)
     wal_sig = _file_stat_signature(Path(f"{db_path}-wal"))
     return (
         resolved,
-        get_write_epoch(),
+        epoch,
         db_core.get_runtime_revision(),
         main_sig,
         wal_sig,
@@ -232,36 +316,46 @@ def _normalize_cache_arg(value: Any) -> Any:
     raise TypeError(f"Unsupported cache key type: {type(value)!r}")
 
 
-def cached_store_read(fn: F) -> F:
+def cached_store_read(
+    fn: F | None = None,
+    *,
+    scope: str = "all",
+) -> Any:
     """Cache read-only store function results in the compressed LRU memory pool."""
-    qualname = f"{fn.__module__}.{fn.__qualname__}"
 
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if kwargs.get("_conn") is not None:
-            return fn(*args, **kwargs)
-        state_token = current_db_state_token()
-        if state_token is None:
-            return fn(*args, **kwargs)
-        try:
-            norm_args = _normalize_cache_arg(args)
-            norm_kwargs = _normalize_cache_arg(kwargs) if kwargs else ()
-        except TypeError:
-            return fn(*args, **kwargs)
+    def _decorate(target_fn: F) -> F:
+        qualname = f"{target_fn.__module__}.{target_fn.__qualname__}"
 
-        cache_key = ("store_read", state_token, qualname, norm_args, norm_kwargs)
-        cache = get_data_cache()
-        hit, cached_val = cache.get(cache_key)
-        if hit:
-            return cached_val
-        result = fn(*args, **kwargs)
-        post_token = current_db_state_token() or state_token
-        if post_token != state_token:
-            cache_key = ("store_read", post_token, qualname, norm_args, norm_kwargs)
-        cache.set(cache_key, result)
-        return result
+        @functools.wraps(target_fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("_conn") is not None:
+                return target_fn(*args, **kwargs)
+            state_token = current_db_state_token(scope)
+            if state_token is None:
+                return target_fn(*args, **kwargs)
+            try:
+                norm_args = _normalize_cache_arg(args)
+                norm_kwargs = _normalize_cache_arg(kwargs) if kwargs else ()
+            except TypeError:
+                return target_fn(*args, **kwargs)
 
-    return wrapper  # type: ignore[return-value]
+            cache_key = ("store_read", state_token, qualname, norm_args, norm_kwargs)
+            cache = get_data_cache()
+            hit, cached_val = cache.get(cache_key)
+            if hit:
+                return cached_val
+            result = target_fn(*args, **kwargs)
+            post_token = current_db_state_token(scope) or state_token
+            if post_token != state_token:
+                cache_key = ("store_read", post_token, qualname, norm_args, norm_kwargs)
+            cache.set(cache_key, result)
+            return result
+
+        return wrapper  # type: ignore[return-value]
+
+    if fn is not None:
+        return _decorate(fn)
+    return _decorate
 
 
 def cached_computation(

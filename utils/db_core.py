@@ -1338,12 +1338,24 @@ def _db_file_identity(path: Path) -> tuple[str, int, bool]:
 def connection():
     conn = get_db_connection()
     changes_before = conn.total_changes
+    modified_tables: set[str] = set()
+
+    def _write_authorizer(action: int, arg1: str | None, arg2: str | None, dbname: str | None, source: str | None) -> int:
+        # SQLITE_INSERT = 18, SQLITE_UPDATE = 23, SQLITE_DELETE = 9
+        if action in (9, 18, 23) and arg1:
+            modified_tables.add(arg1)
+        return 0  # SQLITE_OK
+
+    try:
+        conn.set_authorizer(_write_authorizer)
+    except Exception:
+        pass
     try:
         yield conn
         had_writes = bool(conn.total_changes > changes_before)
         conn.commit()
         if had_writes:
-            bump_write_epoch()
+            bump_write_epoch(modified_tables=modified_tables)
     finally:
         conn.close()
 
@@ -2647,6 +2659,34 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_feature_values_project "
             "ON model_feature_values(project_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fishbone_part_assignments_proj_sec_part "
+            "ON fishbone_part_assignments(project_id, section_id, part_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_yamazumi_elements_proj_area_pitch_proc "
+            "ON yamazumi_elements(project_id, area_id, pitch_id, process_element_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_work_elements_proj_scen_seq "
+            "ON work_elements(project_id, scenario_id, sequence)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quality_req_assignments_proj_scen_we "
+            "ON quality_requirement_assignments(project_id, scenario_id, work_element_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ergonomics_reviews_proj_scen_we "
+            "ON ergonomics_reviews(project_id, scenario_id, work_element_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_safety_requirements_proj_scen_we "
+            "ON safety_requirements(project_id, scenario_id, work_element_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parts_proj_pn "
+            "ON parts(project_id, part_number)"
         )
         material_group_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(work_element_material_groups)").fetchall()

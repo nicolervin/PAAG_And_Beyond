@@ -1626,6 +1626,73 @@ class MassiveProjectStressTests(unittest.TestCase):
         self.assertEqual(len(store.safety_requirements(new_proj_id, new_scen_id)), 100)
         self.assertEqual(len(pfmea_store.pfmea_flat_rows(new_proj_id, new_scen_id)), 120)
 
+        # 11. Verify composite SQLite indexes, scoped catalog cache preservation across
+        #     scenario writes, and pre-warmed image upload cache hits.
+        with store.connection() as conn:
+            existing_indexes = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+        for expected_idx in (
+            "idx_fishbone_part_assignments_proj_sec_part",
+            "idx_yamazumi_elements_proj_area_pitch_proc",
+            "idx_work_elements_proj_scen_seq",
+            "idx_quality_req_assignments_proj_scen_we",
+            "idx_ergonomics_reviews_proj_scen_we",
+            "idx_safety_requirements_proj_scen_we",
+            "idx_parts_proj_pn",
+        ):
+            self.assertIn(expected_idx, existing_indexes)
+
+        # Warm catalog-scoped caches for new_proj_id
+        _ = store.project_table("parts", new_proj_id, "part_number")
+        _ = store.complexity_features(new_proj_id)
+        _ = store.complexity_tree(new_proj_id)
+
+        epoch_cat_before = cache_store.get_write_epoch("catalog")
+        epoch_scen_before = cache_store.get_write_epoch("scenario")
+
+        # Execute a scenario-scoped write (Safety review update)
+        safety_df = store.safety_requirements(new_proj_id, new_scen_id)
+        safety_df.loc[0, "requirement_description"] = "Updated mandatory PPE check"
+        store.save_safety_requirements(
+            new_proj_id,
+            new_scen_id,
+            safety_df,
+            editor_name="Safety Lead",
+        )
+
+        # Catalog epoch must remain unchanged while scenario epoch increments
+        self.assertEqual(cache_store.get_write_epoch("catalog"), epoch_cat_before)
+        self.assertGreater(cache_store.get_write_epoch("scenario"), epoch_scen_before)
+
+        cache = cache_store.get_data_cache()
+        misses_before_cat = cache.misses
+        hits_before_cat = cache.hits
+        _ = store.project_table("parts", new_proj_id, "part_number")
+        _ = store.complexity_features(new_proj_id)
+        _ = store.complexity_tree(new_proj_id)
+        self.assertEqual(cache.misses, misses_before_cat)
+        self.assertEqual(cache.hits, hits_before_cat + 3)
+
+        # Verify image upload pre-warms WebP thumbnail and data-URL cache tiers immediately
+        first_part_id = str(store.project_table("parts", new_proj_id, "part_number").iloc[0]["id"])
+        img_buf = BytesIO()
+        Image.new("RGB", (1280, 960), color=(30, 140, 210)).save(img_buf, format="PNG")
+        img_buf.name = "part_upload.png"
+        saved_img_path = store.set_part_image(first_part_id, img_buf)
+
+        misses_before_img = cache.misses
+        hits_before_img = cache.hits
+        self.assertIsNotNone(media_cache.cached_image_bytes(saved_img_path, max_dim=160))
+        self.assertIsNotNone(media_cache.cached_image_bytes(saved_img_path, max_dim=360))
+        self.assertIsNotNone(media_cache.cached_image_data_url(saved_img_path, max_dim=360))
+        self.assertIsNotNone(media_cache.cached_image_data_url(saved_img_path, max_dim=1600))
+        self.assertEqual(cache.misses, misses_before_img)
+        self.assertEqual(cache.hits, hits_before_img + 4)
+
 
 if __name__ == "__main__":
     unittest.main()

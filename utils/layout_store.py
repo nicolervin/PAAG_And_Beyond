@@ -879,6 +879,9 @@ def create_layout_revision(
                         img_w_px, img_h_px = loaded_img.size
                         target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}{suffix}"
                         target_path.write_bytes(content)
+                from utils.media_cache import prewarm_image_cache
+
+                prewarm_image_cache(target_path)
             except Exception as exc:
                 raise ValueError("The provided file is not a readable image.") from exc
 

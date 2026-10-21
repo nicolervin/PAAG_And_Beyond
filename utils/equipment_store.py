@@ -1379,6 +1379,9 @@ def set_equipment_image(
         raise
     if previous != str(target):
         store._remove_owned_upload(previous)
+    from utils.media_cache import prewarm_image_cache
+
+    prewarm_image_cache(target)
     return str(target)
 
 
@@ -2095,6 +2098,9 @@ def set_conveyor_zone_image(
         raise
     if previous and previous != str(target):
         store._remove_owned_upload(previous)
+    from utils.media_cache import prewarm_image_cache
+
+    prewarm_image_cache(target)
     return str(target)
 
 

@@ -173,3 +173,28 @@ def cached_image_data_url(
     data_url = f"data:{mime};base64,{encoded}"
     cache.set(cache_key, data_url)
     return data_url
+
+
+def prewarm_image_cache(
+    path: str | Path | None,
+    *,
+    byte_dims: tuple[int, ...] = (160, 360, 1200),
+    data_url_dims: tuple[int, ...] = (360, 1600),
+    quality: int = 82,
+) -> dict[str, int]:
+    """Pre-populate compressed WebP thumbnail and data-URL cache tiers on image upload."""
+    resolved = _resolve_media_path(path)
+    if resolved is None:
+        return {"bytes_warmed": 0, "data_urls_warmed": 0}
+    if resolved.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        return {"bytes_warmed": 0, "data_urls_warmed": 0}
+
+    bytes_warmed = 0
+    data_urls_warmed = 0
+    for dim in byte_dims:
+        if cached_image_bytes(resolved, max_dim=dim, quality=quality) is not None:
+            bytes_warmed += 1
+    for dim in data_url_dims:
+        if cached_image_data_url(resolved, max_dim=dim, quality=quality) is not None:
+            data_urls_warmed += 1
+    return {"bytes_warmed": bytes_warmed, "data_urls_warmed": data_urls_warmed}

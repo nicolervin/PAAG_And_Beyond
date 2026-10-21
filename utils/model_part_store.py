@@ -7,6 +7,7 @@ from typing import Any
 import sys as _sys
 from utils import db_core as _db_core
 from utils.cache_store import cached_store_read
+from utils.media_cache import prewarm_image_cache
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -14,21 +15,29 @@ PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
 
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
 
+
 @cached_store_read
-def project_table(
-    table: str,
+def _project_work_elements_table(
     project_id: str,
     order_by: str = "updated_at DESC",
     scenario_id: str | None = None,
 ) -> pd.DataFrame:
-    allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
-    if table not in allowed:
-        raise ValueError("Unsupported table")
-    if table == "work_elements" and scenario_id:
+    if scenario_id:
         return pd.DataFrame(query(
-            f"SELECT * FROM {table} WHERE project_id=? AND scenario_id=? ORDER BY {order_by}",
+            f"SELECT * FROM work_elements WHERE project_id=? AND scenario_id=? ORDER BY {order_by}",
             (project_id, scenario_id),
         ))
+    return pd.DataFrame(
+        query(f"SELECT * FROM work_elements WHERE project_id = ? ORDER BY {order_by}", (project_id,))
+    )
+
+
+@cached_store_read(scope="catalog")
+def _project_catalog_table(
+    table: str,
+    project_id: str,
+    order_by: str = "updated_at DESC",
+) -> pd.DataFrame:
     frame = pd.DataFrame(
         query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,))
     )
@@ -87,6 +96,20 @@ def project_table(
         existing_part_code = frame["part_code"].fillna("").astype(str) if "part_code" in frame.columns else ""
         frame["part_code"] = derived_part_code.where(derived_part_code != "", existing_part_code)
     return frame
+
+
+def project_table(
+    table: str,
+    project_id: str,
+    order_by: str = "updated_at DESC",
+    scenario_id: str | None = None,
+) -> pd.DataFrame:
+    allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
+    if table not in allowed:
+        raise ValueError("Unsupported table")
+    if table == "work_elements":
+        return _project_work_elements_table(project_id, order_by=order_by, scenario_id=scenario_id)
+    return _project_catalog_table(table, project_id, order_by=order_by)
 
 @cached_store_read
 def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]:
@@ -582,6 +605,7 @@ def set_part_image(part_id: str, uploaded_file) -> str:
     target = UPLOAD_DIR / f"{part_id}{suffix}"
     target.write_bytes(uploaded_file.getvalue())
     execute("UPDATE parts SET image_path = ?, updated_at = ? WHERE id = ?", (str(target), now_iso(), part_id))
+    prewarm_image_cache(target)
     return str(target)
 
 def set_part_image_url(part_id: str, url: str) -> str:
@@ -626,6 +650,8 @@ def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -
         "INSERT INTO part_images VALUES (?, ?, ?, ?, ?, ?)",
         (image_id, part_id, str(target), resolved_type, caption.strip(), now_iso()),
     )
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        prewarm_image_cache(target)
     return str(target)
 
 def add_part_image_url(part_id: str, url: str, image_type: str, caption: str) -> str:
@@ -652,11 +678,11 @@ def delete_part_image(image_id: str) -> None:
                 pass
     execute("DELETE FROM part_images WHERE id=?", (image_id,))
 
-@cached_store_read
+@cached_store_read(scope="catalog")
 def part_images(part_id: str) -> list[dict]:
     return query("SELECT * FROM part_images WHERE part_id = ? ORDER BY created_at", (part_id,))
 
-@cached_store_read
+@cached_store_read(scope="catalog")
 def complexity_features(project_id: str) -> pd.DataFrame:
     rows = query(
         "SELECT * FROM complexity_features WHERE project_id=? ORDER BY sequence, category, name",
@@ -674,7 +700,7 @@ def complexity_features(project_id: str) -> pd.DataFrame:
     return frame
 
 
-@cached_store_read
+@cached_store_read(scope="catalog")
 def project_part_subsystems(project_id: str) -> list[str]:
     """Return sorted distinct non-blank subsystem values across project parts, PITS records, and feature definitions."""
     rows = query(
@@ -739,7 +765,7 @@ def complexity_feature_delete_impacts(
         columns=columns,
     )
 
-@cached_store_read
+@cached_store_read(scope="catalog")
 def complexity_tree(project_id: str) -> pd.DataFrame:
     models = project_models(project_id)
     if models.empty:
@@ -832,7 +858,7 @@ def potential_duplicate_models(project_id: str, edited: pd.DataFrame) -> list[di
                 )
     return conflicts
 
-@cached_store_read
+@cached_store_read(scope="catalog")
 def part_feature_rules(project_id: str) -> pd.DataFrame:
     """Return saved part rules for catalog parts."""
     return pd.DataFrame(query(
@@ -4087,6 +4113,7 @@ def model_bom_tree_nodes(
 
 
 @cached_store_read
+@cached_store_read(scope="catalog")
 def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[str, Any]:
     """Retrieve the PITS BOM tree structure with reconciliation status against Parts Catalog and Fishbone.
 

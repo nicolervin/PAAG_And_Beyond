@@ -69,28 +69,35 @@ def filter_table(
             key=widget_key,
         )
 
-    visible = dataframe.copy()
-    if keyword.strip():
+    visible = dataframe
+    kw = keyword.strip()
+    if kw and not visible.empty:
         columns = [column for column in (search_columns or visible.columns) if column in visible.columns]
-        searchable = visible[columns].fillna("").astype(str).agg(" ".join, axis=1)
-        visible = visible[searchable.str.contains(keyword.strip(), case=False, regex=False)]
+        if columns:
+            mask = pd.Series(False, index=visible.index, dtype=bool)
+            for col in columns:
+                mask = mask | visible[col].fillna("").astype(str).str.contains(
+                    kw, case=False, regex=False, na=False
+                )
+            visible = visible.loc[mask]
     for column, values in selected.items():
         if values:
             if column in multi_value_columns:
-                visible = visible[
+                univ = universal_values.get(column, ())
+                visible = visible.loc[
                     visible[column].apply(
                         lambda cell: any(
                             matches_filter_value(
                                 cell,
                                 value,
-                                universal_values=universal_values.get(column, ()),
+                                universal_values=univ,
                             )
                             for value in values
                         )
                     )
                 ]
             else:
-                visible = visible[visible[column].isin(values)]
+                visible = visible.loc[visible[column].isin(values)]
     row_identity = (
         tuple(visible["id"].fillna("").astype(str))
         if "id" in visible.columns
@@ -102,7 +109,7 @@ def filter_table(
         for widget_key in reset_widget_keys:
             st.session_state.pop(widget_key, None)
     st.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
-    return visible.reset_index(drop=True)
+    return visible.copy().reset_index(drop=True)
 
 
 def split_filter_values(value) -> list[str]:

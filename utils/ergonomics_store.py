@@ -1399,6 +1399,10 @@ def save_ergonomics_visual_media(
             "annotated": bool(annotations_json),
         },
     )
+    if resolved_media_type == "image":
+        from utils.media_cache import prewarm_image_cache
+
+        prewarm_image_cache(target_path)
     return {
         "id": media_id,
         "file_path": str(target_path),
@@ -1501,6 +1505,9 @@ def update_ergonomics_visual_annotations(
         if composite_image_bytes:
             target = Path(file_path_str)
             target.write_bytes(composite_image_bytes)
+            from utils.media_cache import prewarm_image_cache
+
+            prewarm_image_cache(target)
 
         conn.execute(
             """UPDATE ergonomics_visual_media
