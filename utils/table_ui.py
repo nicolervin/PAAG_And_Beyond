@@ -310,10 +310,10 @@ def required_field_errors(dataframe: pd.DataFrame, required_fields: dict[str, st
     return errors
 
 
-def standard_details_column_config(*, on_click, key: str):
+def standard_details_column_config(*, on_click, key: str, pinned: bool = False):
     """Return the standard row Details action."""
     return st.column_config.ButtonColumn(
-        "Details", type="tertiary", on_click=on_click, key=key,
+        "Details", type="tertiary", on_click=on_click, key=key, pinned=pinned,
         help="Open this row's full information and editing controls.",
     )
 

@@ -12,12 +12,14 @@ _HTML = """
   <div class="annotator-toolbar">
     <div class="tool-group tools-bar">
       <button type="button" class="tool-btn active" data-tool="select" title="Select & Move (V)">👆 Select</button>
+      <button type="button" class="tool-btn" data-tool="pen" title="Freehand Pen (P)">✏️ Pen</button>
       <button type="button" class="tool-btn" data-tool="arrow" title="Arrow (A)">↗️ Arrow</button>
       <button type="button" class="tool-btn" data-tool="rect" title="Rectangle Box (R)">🔲 Box</button>
       <button type="button" class="tool-btn" data-tool="circle" title="Circle (C)">⭕ Circle</button>
       <button type="button" class="tool-btn" data-tool="text" title="Text Callout (T)">💬 Callout</button>
       <button type="button" class="tool-btn" data-tool="badge" title="Step Badge (B)">🔢 Badge</button>
-      <button type="button" class="tool-btn" data-tool="pen" title="Freehand Pen (P)">✏️ Pen</button>
+      <span class="toolbar-label" style="margin-left:4px;">Next #:</span>
+      <input type="number" id="next-badge-num" class="toolbar-num-input" value="1" min="1" max="99" />
     </div>
     <div class="tool-divider"></div>
     <div class="tool-group colors-bar">
@@ -38,8 +40,6 @@ _HTML = """
         <option value="4" selected>Med</option>
         <option value="7">Thick</option>
       </select>
-      <span class="toolbar-label" style="margin-left:4px;">Next #:</span>
-      <input type="number" id="next-badge-num" class="toolbar-num-input" value="1" min="1" max="99" />
     </div>
     <div class="tool-divider"></div>
     <div class="tool-group actions-bar">
@@ -857,7 +857,7 @@ export default function(component) {
 """
 
 _IMAGE_ANNOTATOR = st.components.v2.component(
-    "paag_image_annotator_v1",
+    "paag_image_annotator_v2",
     html=_HTML,
     css=_CSS,
     js=_JS,

@@ -13,6 +13,8 @@ PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
 
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
 
+PART_CODE_VALUES = ("NP", "NPNT", "ASM", "CP", "CP Other")
+
 def project_table(
     table: str,
     project_id: str,
@@ -72,8 +74,14 @@ def project_table(
             .map(subsystem_by_pits_id)
             .fillna("")
         )
-        existing_subsystem = frame["subsystem"].fillna("").astype(str) if "subsystem" in frame.columns else ""
-        frame["subsystem"] = derived_subsystem.where(derived_subsystem != "", existing_subsystem)
+        existing_subsystem = (
+            frame["subsystem"].fillna("").astype(str)
+            if "subsystem" in frame.columns
+            else pd.Series("", index=frame.index)
+        )
+        frame["subsystem"] = existing_subsystem.where(
+            existing_subsystem.str.strip() != "", derived_subsystem
+        )
 
         derived_part_code = (
             frame["pits_tracker_number"]
@@ -82,8 +90,14 @@ def project_table(
             .map(part_code_by_pits_id)
             .fillna("")
         )
-        existing_part_code = frame["part_code"].fillna("").astype(str) if "part_code" in frame.columns else ""
-        frame["part_code"] = derived_part_code.where(derived_part_code != "", existing_part_code)
+        existing_part_code = (
+            frame["part_code"].fillna("").astype(str)
+            if "part_code" in frame.columns
+            else pd.Series("", index=frame.index)
+        )
+        frame["part_code"] = existing_part_code.where(
+            existing_part_code.str.strip() != "", derived_part_code
+        )
     return frame
 
 def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]:
@@ -140,21 +154,36 @@ def update_part_scenario_activity(
             }
             if valid_ids != set(selected_ids):
                 raise ValueError("One or more parts no longer belong to this project.")
+        existing_activity = {
+            str(row[0]): bool(row[1])
+            for row in conn.execute(
+                "SELECT part_id, active FROM part_scenario_activity WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
         for part_id in selected_ids:
+            new_active = normalized_activity[part_id]
+            active_changed = bool(existing_activity.get(part_id, True)) != new_active
             conn.execute(
                 """INSERT INTO part_scenario_activity
                    (project_id, scenario_id, part_id, active, updated_at)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(scenario_id, part_id) DO UPDATE SET
-                     active=excluded.active, updated_at=excluded.updated_at""",
+                     active=excluded.active,
+                     updated_at=CASE WHEN part_scenario_activity.active != excluded.active THEN excluded.updated_at ELSE part_scenario_activity.updated_at END""",
                 (
                     project_id,
                     scenario_id,
                     part_id,
-                    1 if normalized_activity[part_id] else 0,
+                    1 if new_active else 0,
                     timestamp,
                 ),
             )
+            if active_changed:
+                conn.execute(
+                    "UPDATE parts SET updated_at=? WHERE id=? AND project_id=?",
+                    (timestamp, part_id, project_id),
+                )
     return timestamp
 
 def normalize_model_applicability(value) -> str:
@@ -386,6 +415,44 @@ def update_part_rows(
             ).fetchall()
         }
         existing_ids = set(existing_parts)
+        pits_lookup: dict[str, dict[str, str]] = {}
+        for p_row in conn.execute(
+            """SELECT pits_id, subsystem,
+                      COALESCE(
+                          NULLIF(TRIM(json_extract(source_payload, '$.part_code')), ''),
+                          NULLIF(TRIM(json_extract(source_payload, '$.partspartcode')), ''),
+                          ''
+                      ) AS part_code
+               FROM pits_records
+               WHERE project_id=? AND trim(coalesce(pits_id, '')) != ''""",
+            (project_id,),
+        ).fetchall():
+            pid = clean_text(p_row["pits_id"])
+            if pid:
+                pits_lookup[pid] = {
+                    "subsystem": clean_text(p_row["subsystem"]),
+                    "part_code": clean_text(p_row["part_code"]),
+                }
+        existing_activity: dict[str, bool] = {}
+        if scenario_id:
+            for act_row in conn.execute(
+                "SELECT part_id, active FROM part_scenario_activity WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall():
+                existing_activity[str(act_row["part_id"])] = bool(act_row["active"])
+        normalized_activity: dict[str, bool] | None = None
+        if scenario_id and activity_by_part is not None:
+            normalized_activity = {
+                str(part_id): bool(active)
+                for part_id, active in activity_by_part.items()
+            }
+            saved_ids = set(edited["id"].fillna("").astype(str))
+            if set(normalized_activity) != saved_ids:
+                raise ValueError("Part activity must be supplied for every saved row.")
+        assembly_applicability = {
+            str(r["part_id"]): str(r["model_applicability"] or "")
+            for _, r in assembly_catalog_part_applicability(project_id).iterrows()
+        }
         tracker_owner = {
             str(existing["pits_tracker_number"] or "").strip(): part_id
             for part_id, existing in existing_parts.items()
@@ -463,6 +530,106 @@ def update_part_rows(
                 or str(raw_weight).strip() == ""
                 else float(raw_weight)
             )
+            row_updated_at = timestamp
+            if part_id in existing_ids and previous is not None:
+                prev_qty_raw = previous.get("quantity")
+                prev_qty = (
+                    None
+                    if prev_qty_raw is None or pd.isna(prev_qty_raw)
+                    else float(prev_qty_raw)
+                )
+                prev_w_raw = previous.get("weight_lb")
+                prev_w = (
+                    None
+                    if prev_w_raw is None
+                    or pd.isna(prev_w_raw)
+                    or str(prev_w_raw).strip() == ""
+                    else float(prev_w_raw)
+                )
+                prev_tracker = clean_text(previous.get("pits_tracker_number"))
+                pits_fallback = pits_lookup.get(prev_tracker, {}) if prev_tracker else {}
+                prev_subsystem = (
+                    clean_text(previous.get("subsystem"))
+                    or pits_fallback.get("subsystem", "")
+                )
+                prev_part_code = (
+                    clean_text(previous.get("part_code"))
+                    or pits_fallback.get("part_code", "")
+                )
+                prev_applicability = normalize_model_applicability(
+                    assembly_applicability.get(
+                        part_id, previous.get("model_applicability")
+                    )
+                )
+                prev_dm_raw = clean_text(previous.get("design_maturity"))
+                prev_rev_raw = clean_text(previous.get("revision"))
+                raw_dm = (
+                    clean_text(row.get("design_maturity"))
+                    if "design_maturity" in edited.columns
+                    else prev_dm_raw
+                )
+                raw_rev = (
+                    clean_text(row.get("revision"))
+                    if "revision" in edited.columns
+                    else prev_rev_raw
+                )
+                dm_or_rev_changed = not (
+                    raw_dm == prev_dm_raw
+                    and (raw_rev == prev_rev_raw or raw_rev == prev_dm_raw)
+                )
+                if not dm_or_rev_changed:
+                    revision = prev_rev_raw or "0"
+                    design_maturity = prev_dm_raw
+                active_changed = (
+                    bool(normalized_activity[part_id])
+                    != bool(existing_activity.get(part_id, True))
+                    if normalized_activity is not None and part_id in normalized_activity
+                    else False
+                )
+                row_changed = (
+                    part_number != clean_text(previous.get("part_number"))
+                    or clean_text(row.get("description"))
+                    != clean_text(previous.get("description"))
+                    or quantity != prev_qty
+                    or weight_lb != prev_w
+                    or dm_or_rev_changed
+                    or subsystem != prev_subsystem
+                    or applicability != prev_applicability
+                    or clean_text(row.get("notes")) != clean_text(previous.get("notes"))
+                    or catalog_fields["technology_engineer"]
+                    != clean_text(previous.get("technology_engineer"))
+                    or catalog_fields["design_engineer"]
+                    != clean_text(previous.get("design_engineer"))
+                    or catalog_fields["pits_tracker_number"] != prev_tracker
+                    or catalog_fields["source_code"]
+                    != clean_text(previous.get("source_code"))
+                    or catalog_fields["official_windchill_part_name"]
+                    != clean_text(previous.get("official_windchill_part_name"))
+                    or catalog_fields["factory_nickname"]
+                    != clean_text(previous.get("factory_nickname"))
+                    or catalog_fields["make_buy"]
+                    != clean_text(previous.get("make_buy"))
+                    or catalog_fields["ppm"] != clean_text(previous.get("ppm"))
+                    or catalog_fields["buyer_gcl"]
+                    != clean_text(previous.get("buyer_gcl"))
+                    or catalog_fields["pmqe_aqe"]
+                    != clean_text(previous.get("pmqe_aqe"))
+                    or catalog_fields["ame_tooling_engineer"]
+                    != clean_text(previous.get("ame_tooling_engineer"))
+                    or catalog_fields["part_code"] != prev_part_code
+                    or active_changed
+                )
+                row_updated_at = (
+                    timestamp
+                    if row_changed
+                    else (clean_text(previous.get("updated_at")) or timestamp)
+                )
+                prev_source = clean_text(previous.get("source")) or "Manual"
+                row_source = (
+                    "Manual"
+                    if row_changed and prev_source in {"", "Manual", "Manual BOM"}
+                    else prev_source
+                )
             values = (
                 part_number, clean_text(row.get("description")), quantity, weight_lb,
                 revision, design_maturity, subsystem, applicability,
@@ -477,17 +644,17 @@ def update_part_rows(
                 catalog_fields["pmqe_aqe"],
                 catalog_fields["ame_tooling_engineer"],
                 catalog_fields["part_code"],
-                timestamp,
+                row_updated_at,
             )
             if part_id in existing_ids:
                 conn.execute(
                     """UPDATE parts SET part_number=?, description=?, quantity=?, weight_lb=?, revision=?,
-                       design_maturity=?, subsystem=?,
+                       design_maturity=?, subsystem=?, source=?,
                        model_applicability=?, notes=?, technology_engineer=?, design_engineer=?,
                        pits_tracker_number=?, source_code=?, official_windchill_part_name=?,
                        factory_nickname=?, make_buy=?, ppm=?, buyer_gcl=?, pmqe_aqe=?,
                        ame_tooling_engineer=?, part_code=?, updated_at=? WHERE id=? AND project_id=?""",
-                    (*values, part_id, project_id),
+                    (*values[:7], row_source, *values[7:], part_id, project_id),
                 )
             else:
                 conn.execute(
@@ -503,22 +670,28 @@ def update_part_rows(
                      values[4], values[5], values[6],
                      clean_text(row.get("source")) or "Manual", *values[7:]),
                 )
-        if scenario_id and activity_by_part is not None:
-            normalized_activity = {
-                str(part_id): bool(active)
-                for part_id, active in activity_by_part.items()
-            }
-            saved_ids = set(edited["id"].fillna("").astype(str))
-            if set(normalized_activity) != saved_ids:
-                raise ValueError("Part activity must be supplied for every saved row.")
+        if scenario_id and normalized_activity is not None:
             for part_id, active in normalized_activity.items():
+                act_changed = (
+                    part_id not in existing_ids
+                    or bool(existing_activity.get(part_id, True)) != bool(active)
+                )
+                act_updated_at = (
+                    timestamp
+                    if act_changed
+                    else (
+                        clean_text(existing_parts[part_id].get("updated_at"))
+                        or timestamp
+                    )
+                )
                 conn.execute(
                     """INSERT INTO part_scenario_activity
                        (project_id, scenario_id, part_id, active, updated_at)
                        VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(scenario_id, part_id) DO UPDATE SET
-                         active=excluded.active, updated_at=excluded.updated_at""",
-                    (project_id, scenario_id, part_id, 1 if active else 0, timestamp),
+                         active=excluded.active,
+                         updated_at=CASE WHEN part_scenario_activity.active != excluded.active THEN excluded.updated_at ELSE part_scenario_activity.updated_at END""",
+                    (project_id, scenario_id, part_id, 1 if active else 0, act_updated_at),
                 )
     return len(edited)
 
@@ -544,11 +717,23 @@ def part_delete_impact(project_id: str, part_ids: list[str]) -> dict:
             "linked_assemblies": [],
         }
 
+def _unlink_part_upload_path(raw_path: str) -> None:
+    cleaned = str(raw_path or "").strip()
+    if not cleaned or cleaned.startswith(("http://", "https://")):
+        return
+    p = Path(cleaned)
+    try:
+        if p.exists() and p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def delete_project_part(project_id: str, part_id: str) -> str:
     """Delete one catalog part and its cascading fishbone uses and image records."""
     with connection() as conn:
         part = conn.execute(
-            "SELECT part_number, image_path FROM parts WHERE id=? AND project_id=?",
+            "SELECT part_number, image_path, original_image_path FROM parts WHERE id=? AND project_id=?",
             (part_id, project_id),
         ).fetchone()
         if not part:
@@ -557,53 +742,227 @@ def delete_project_part(project_id: str, part_id: str) -> str:
             "DELETE FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id=?",
             (project_id, part_id),
         )
-        supplemental_paths = [row[0] for row in conn.execute(
-            "SELECT image_path FROM part_images WHERE part_id=?", (part_id,)
-        ).fetchall()]
+        supplemental_paths = [
+            p
+            for row in conn.execute(
+                "SELECT image_path, original_image_path FROM part_images WHERE part_id=?", (part_id,)
+            ).fetchall()
+            for p in (row[0], row[1])
+            if p
+        ]
         conn.execute("DELETE FROM parts WHERE id=? AND project_id=?", (part_id, project_id))
-    for raw_path in [part["image_path"], *supplemental_paths]:
-        if raw_path:
-            path = Path(raw_path)
-            try:
-                if path.exists() and path.is_file() and UPLOAD_DIR.resolve() in path.resolve().parents:
-                    path.unlink()
-            except OSError:
-                pass
+    for raw_path in dict.fromkeys([part["image_path"], part["original_image_path"], *supplemental_paths]):
+        _unlink_part_upload_path(raw_path)
     return str(part["part_number"])
 
-def set_part_image(part_id: str, uploaded_file) -> str:
+
+def _archive_previous_primary_part_image(
+    conn: sqlite3.Connection,
+    part_id: str,
+    timestamp: str,
+    *,
+    new_url: str = "",
+) -> bool:
+    """Move an existing primary part image to part_images (Additional views) before replacing it."""
+    row = conn.execute(
+        "SELECT image_path, original_image_path, annotations_json, image_caption FROM parts WHERE id=?",
+        (part_id,),
+    ).fetchone()
+    if not row:
+        return False
+    old_img = str(row["image_path"] or "").strip()
+    if not old_img:
+        return False
+    if new_url and old_img == new_url:
+        return False
+    old_orig = str(row["original_image_path"] or "").strip()
+    old_annotations = str(row["annotations_json"] or "").strip()
+    old_caption = str(row["image_caption"] or "").strip()
+    archive_id = str(uuid4())
+    if old_img.startswith(("http://", "https://")):
+        conn.execute(
+            """INSERT INTO part_images
+               (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+               VALUES (?, ?, ?, '', '', 'Previous primary image', ?, ?, ?)""",
+            (archive_id, part_id, old_img, old_caption, timestamp, timestamp),
+        )
+        return True
+    old_img_path = Path(old_img)
+    if old_img_path.exists() and old_img_path.is_file():
+        old_suffix = old_img_path.suffix.lower() or ".png"
+        arch_target = UPLOAD_DIR / f"{part_id}_{archive_id}{old_suffix}"
+        arch_target.write_bytes(old_img_path.read_bytes())
+        old_orig_path = Path(old_orig) if old_orig else None
+        if old_orig_path and old_orig_path.exists() and old_orig_path.is_file():
+            old_orig_suffix = old_orig_path.suffix.lower() or old_suffix
+            arch_orig_target = UPLOAD_DIR / f"{part_id}_{archive_id}_orig{old_orig_suffix}"
+            arch_orig_target.write_bytes(old_orig_path.read_bytes())
+            arch_orig_str = str(arch_orig_target)
+        else:
+            arch_orig_str = str(arch_target)
+        conn.execute(
+            """INSERT INTO part_images
+               (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'Previous primary image', ?, ?, ?)""",
+            (
+                archive_id,
+                part_id,
+                str(arch_target),
+                arch_orig_str,
+                old_annotations,
+                old_caption,
+                timestamp,
+                timestamp,
+            ),
+        )
+        for old_p in dict.fromkeys([old_img, old_orig]):
+            if old_p:
+                _unlink_part_upload_path(old_p)
+        return True
+    for old_p in dict.fromkeys([old_img, old_orig]):
+        if old_p:
+            _unlink_part_upload_path(old_p)
+    return False
+
+
+def set_part_image(
+    part_id: str,
+    uploaded_file,
+    *,
+    original_file_bytes: bytes | None = None,
+    original_filename: str = "",
+    annotations_json: str = "",
+    caption: str = "",
+) -> str:
     suffix = Path(uploaded_file.name).suffix.lower()
     if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
         raise ValueError("Use PNG, JPG, JPEG, or WEBP images.")
-    target = UPLOAD_DIR / f"{part_id}{suffix}"
-    target.write_bytes(uploaded_file.getvalue())
-    execute("UPDATE parts SET image_path = ?, updated_at = ? WHERE id = ?", (str(target), now_iso(), part_id))
+    timestamp = now_iso()
+    with connection() as conn:
+        _archive_previous_primary_part_image(conn, part_id, timestamp)
+        target = UPLOAD_DIR / f"{part_id}{suffix}"
+        target.write_bytes(uploaded_file.getvalue())
+        if original_file_bytes is not None:
+            orig_suffix = Path(original_filename or uploaded_file.name).suffix.lower() or suffix
+            if orig_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                orig_suffix = suffix
+            orig_target = UPLOAD_DIR / f"{part_id}_orig{orig_suffix}"
+            orig_target.write_bytes(original_file_bytes)
+            orig_path_str = str(orig_target)
+        else:
+            orig_path_str = str(target)
+        conn.execute(
+            """UPDATE parts
+               SET image_path = ?, original_image_path = ?, annotations_json = ?, image_caption = ?, updated_at = ?
+               WHERE id = ?""",
+            (
+                str(target),
+                orig_path_str,
+                str(annotations_json or "").strip(),
+                str(caption or "").strip(),
+                timestamp,
+                part_id,
+            ),
+        )
     return str(target)
 
-def set_part_image_url(part_id: str, url: str) -> str:
+
+def set_part_image_url(part_id: str, url: str, *, caption: str = "") -> str:
     clean_url = str(url or "").strip()
     if not clean_url.startswith(("http://", "https://")):
         raise ValueError("Web link URL must start with http:// or https://")
-    execute("UPDATE parts SET image_path = ?, updated_at = ? WHERE id = ?", (clean_url, now_iso(), part_id))
+    timestamp = now_iso()
+    with connection() as conn:
+        _archive_previous_primary_part_image(conn, part_id, timestamp, new_url=clean_url)
+        conn.execute(
+            """UPDATE parts
+               SET image_path = ?, original_image_path = '', annotations_json = '', image_caption = ?, updated_at = ?
+               WHERE id = ?""",
+            (clean_url, str(caption or "").strip(), timestamp, part_id),
+        )
     return clean_url
 
+
 def clear_part_image(part_id: str) -> None:
-    rows = query("SELECT image_path FROM parts WHERE id=?", (part_id,))
-    if rows and rows[0]["image_path"]:
-        raw_path = str(rows[0]["image_path"])
-        if not raw_path.startswith(("http://", "https://")):
-            p = Path(raw_path)
-            try:
-                if p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
-    execute("UPDATE parts SET image_path = '', updated_at = ? WHERE id = ?", (now_iso(), part_id))
+    rows = query("SELECT image_path, original_image_path FROM parts WHERE id=?", (part_id,))
+    if rows:
+        for old_p in dict.fromkeys([str(rows[0]["image_path"] or ""), str(rows[0].get("original_image_path") or "")]):
+            _unlink_part_upload_path(old_p)
+    execute(
+        "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
+        (now_iso(), part_id),
+    )
+
+
+def update_part_primary_image_annotations(
+    project_id: str,
+    part_id: str,
+    annotations_json: str,
+    composite_image_bytes: bytes | None = None,
+    current_editor: str = "Collaborator",
+) -> str:
+    """Update annotations vector JSON and composite display image for a part's primary image."""
+    normalized_part_id = str(part_id or "").strip()
+    if not normalized_part_id:
+        raise ValueError("Choose a part to annotate.")
+    timestamp = now_iso()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, part_number, image_path, original_image_path FROM parts WHERE id=? AND project_id=?",
+            (normalized_part_id, project_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Part not found in this project.")
+        file_path_str = str(row["image_path"] or "").strip()
+        if not file_path_str or file_path_str.startswith(("http://", "https://")):
+            raise ValueError("Part does not have a local image that can be annotated.")
+        orig_path_str = str(row["original_image_path"] or "").strip() or file_path_str
+        part_number = str(row["part_number"] or "").strip()
+
+        if not row["original_image_path"] or orig_path_str == file_path_str:
+            curr_path = Path(file_path_str)
+            if curr_path.exists() and curr_path.is_file():
+                suffix = curr_path.suffix or ".png"
+                new_orig_target = UPLOAD_DIR / f"{normalized_part_id}_orig{suffix}"
+                new_orig_target.write_bytes(curr_path.read_bytes())
+                orig_path_str = str(new_orig_target)
+
+        if composite_image_bytes:
+            target = Path(file_path_str)
+            target.write_bytes(composite_image_bytes)
+
+        conn.execute(
+            """UPDATE parts
+               SET original_image_path=?, annotations_json=?, updated_at=?
+               WHERE id=? AND project_id=?""",
+            (orig_path_str, str(annotations_json or "").strip(), timestamp, normalized_part_id, project_id),
+        )
+
+    record_audit_event(
+        project_id,
+        "Parts",
+        "Annotate primary part image",
+        1,
+        editor_name=str(current_editor or "").strip(),
+        details={"part_id": normalized_part_id, "part_number": part_number},
+    )
+    return file_path_str
+
 
 MAX_CAD_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_CAD_FILE_SIZE_MB = 50
 
-def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -> str:
+
+def add_part_image(
+    part_id: str,
+    uploaded_file,
+    image_type: str,
+    caption: str,
+    *,
+    original_file_bytes: bytes | None = None,
+    original_filename: str = "",
+    annotations_json: str = "",
+) -> str:
     suffix = Path(uploaded_file.name).suffix.lower()
     allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".step", ".stp"}
     if suffix not in allowed_suffixes:
@@ -618,35 +977,215 @@ def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -
     target = UPLOAD_DIR / f"{part_id}_{image_id}{suffix}"
     target.write_bytes(file_bytes)
     resolved_type = image_type or ("3D CAD Model (STEP)" if suffix in {".step", ".stp"} else "Other")
+    timestamp = now_iso()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        if original_file_bytes is not None:
+            orig_suffix = Path(original_filename or uploaded_file.name).suffix.lower() or suffix
+            if orig_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                orig_suffix = suffix
+            orig_target = UPLOAD_DIR / f"{part_id}_{image_id}_orig{orig_suffix}"
+            orig_target.write_bytes(original_file_bytes)
+            orig_path_str = str(orig_target)
+        else:
+            orig_path_str = str(target)
+    else:
+        orig_path_str = ""
     execute(
-        "INSERT INTO part_images VALUES (?, ?, ?, ?, ?, ?)",
-        (image_id, part_id, str(target), resolved_type, caption.strip(), now_iso()),
+        """INSERT INTO part_images
+           (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            image_id,
+            part_id,
+            str(target),
+            orig_path_str,
+            str(annotations_json or "").strip() if suffix in {".png", ".jpg", ".jpeg", ".webp"} else "",
+            resolved_type,
+            caption.strip(),
+            timestamp,
+            timestamp,
+        ),
     )
     return str(target)
+
 
 def add_part_image_url(part_id: str, url: str, image_type: str, caption: str) -> str:
     clean_url = str(url or "").strip()
     if not clean_url.startswith(("http://", "https://")):
         raise ValueError("Web link URL must start with http:// or https://")
     image_id = str(uuid4())
+    timestamp = now_iso()
     execute(
-        "INSERT INTO part_images VALUES (?, ?, ?, ?, ?, ?)",
-        (image_id, part_id, clean_url, image_type, caption.strip(), now_iso()),
+        """INSERT INTO part_images
+           (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+           VALUES (?, ?, ?, '', '', ?, ?, ?, ?)""",
+        (image_id, part_id, clean_url, image_type, caption.strip(), timestamp, timestamp),
     )
     return image_id
 
+
+def update_part_supplemental_image_annotations(
+    project_id: str,
+    image_id: str,
+    annotations_json: str,
+    composite_image_bytes: bytes | None = None,
+    current_editor: str = "Collaborator",
+) -> str:
+    """Update annotations vector JSON and composite display image for a supplemental part view."""
+    normalized_image_id = str(image_id or "").strip()
+    if not normalized_image_id:
+        raise ValueError("Choose a supplemental part image to annotate.")
+    timestamp = now_iso()
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT pi.id, pi.part_id, pi.image_path, pi.original_image_path, pi.caption, p.part_number
+               FROM part_images pi
+               JOIN parts p ON p.id = pi.part_id
+               WHERE pi.id=? AND p.project_id=?""",
+            (normalized_image_id, project_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Supplemental part view not found in this project.")
+        file_path_str = str(row["image_path"] or "").strip()
+        if not file_path_str or file_path_str.startswith(("http://", "https://")) or Path(file_path_str).suffix.lower() in {".step", ".stp"}:
+            raise ValueError("This supplemental view is not a local raster image that can be annotated.")
+        orig_path_str = str(row["original_image_path"] or "").strip() or file_path_str
+        part_id = str(row["part_id"])
+        part_number = str(row["part_number"] or "").strip()
+        caption = str(row["caption"] or "").strip()
+
+        if not row["original_image_path"] or orig_path_str == file_path_str:
+            curr_path = Path(file_path_str)
+            if curr_path.exists() and curr_path.is_file():
+                suffix = curr_path.suffix or ".png"
+                new_orig_target = UPLOAD_DIR / f"{part_id}_{normalized_image_id}_orig{suffix}"
+                new_orig_target.write_bytes(curr_path.read_bytes())
+                orig_path_str = str(new_orig_target)
+
+        if composite_image_bytes:
+            target = Path(file_path_str)
+            target.write_bytes(composite_image_bytes)
+
+        conn.execute(
+            """UPDATE part_images
+               SET original_image_path=?, annotations_json=?, updated_at=?
+               WHERE id=?""",
+            (orig_path_str, str(annotations_json or "").strip(), timestamp, normalized_image_id),
+        )
+
+    record_audit_event(
+        project_id,
+        "Parts",
+        "Annotate supplemental part image",
+        1,
+        editor_name=str(current_editor or "").strip(),
+        details={
+            "part_id": part_id,
+            "part_number": part_number,
+            "image_id": normalized_image_id,
+            "caption": caption,
+        },
+    )
+    return file_path_str
+
+
 def delete_part_image(image_id: str) -> None:
-    rows = query("SELECT image_path FROM part_images WHERE id=?", (image_id,))
-    if rows and rows[0]["image_path"]:
-        raw_path = str(rows[0]["image_path"])
-        if not raw_path.startswith(("http://", "https://")):
-            p = Path(raw_path)
-            try:
-                if p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
+    rows = query("SELECT image_path, original_image_path FROM part_images WHERE id=?", (image_id,))
+    if rows:
+        for old_p in dict.fromkeys([str(rows[0]["image_path"] or ""), str(rows[0].get("original_image_path") or "")]):
+            _unlink_part_upload_path(old_p)
     execute("DELETE FROM part_images WHERE id=?", (image_id,))
+
+
+def promote_part_image_to_primary(part_id: str, image_id: str) -> dict:
+    """Promote an Additional view image (or web link) to Primary Image, moving any existing Primary Image to Additional views."""
+    normalized_part_id = str(part_id or "").strip()
+    normalized_image_id = str(image_id or "").strip()
+    if not normalized_part_id or not normalized_image_id:
+        raise ValueError("Choose an additional view to make primary.")
+    timestamp = now_iso()
+    to_unlink: list[str] = []
+    with connection() as conn:
+        supp = conn.execute(
+            """SELECT id, part_id, image_path, original_image_path, annotations_json, image_type, caption
+               FROM part_images
+               WHERE id=? AND part_id=?""",
+            (normalized_image_id, normalized_part_id),
+        ).fetchone()
+        if not supp:
+            raise ValueError("Additional view not found for this part.")
+        supp_img = str(supp["image_path"] or "").strip()
+        supp_orig = str(supp["original_image_path"] or "").strip()
+        supp_annotations = str(supp["annotations_json"] or "").strip()
+        supp_caption = str(supp["caption"] or "").strip()
+        is_url = supp_img.startswith(("http://", "https://"))
+        if not is_url:
+            supp_path = Path(supp_img) if supp_img else None
+            if not supp_path or not supp_path.exists() or not supp_path.is_file():
+                raise ValueError("Additional view image file no longer exists on disk.")
+            suffix = supp_path.suffix.lower()
+            if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                raise ValueError("Only raster images (PNG, JPG, JPEG, WEBP) or web links can be set as the primary image.")
+            img_bytes = supp_path.read_bytes()
+            supp_orig_path = Path(supp_orig) if supp_orig else None
+            if supp_orig_path and supp_orig_path.exists() and supp_orig_path.is_file():
+                orig_suffix = supp_orig_path.suffix.lower() or suffix
+                if orig_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    orig_suffix = suffix
+                orig_bytes: bytes | None = supp_orig_path.read_bytes()
+            else:
+                orig_suffix = suffix
+                orig_bytes = None
+
+        archived_previous = _archive_previous_primary_part_image(
+            conn, normalized_part_id, timestamp, new_url=supp_img if is_url else ""
+        )
+
+        if is_url:
+            conn.execute(
+                """UPDATE parts
+                   SET image_path = ?, original_image_path = '', annotations_json = '', image_caption = ?, updated_at = ?
+                   WHERE id = ?""",
+                (supp_img, supp_caption, timestamp, normalized_part_id),
+            )
+            final_primary_path = supp_img
+        else:
+            target = UPLOAD_DIR / f"{normalized_part_id}{suffix}"
+            target.write_bytes(img_bytes)
+            if orig_bytes is not None:
+                orig_target = UPLOAD_DIR / f"{normalized_part_id}_orig{orig_suffix}"
+                orig_target.write_bytes(orig_bytes)
+                orig_path_str = str(orig_target)
+            else:
+                orig_path_str = str(target)
+            conn.execute(
+                """UPDATE parts
+                   SET image_path = ?, original_image_path = ?, annotations_json = ?, image_caption = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    str(target),
+                    orig_path_str,
+                    supp_annotations,
+                    supp_caption,
+                    timestamp,
+                    normalized_part_id,
+                ),
+            )
+            final_primary_path = str(target)
+            for p in dict.fromkeys([supp_img, supp_orig]):
+                if p and p not in {str(target), orig_path_str}:
+                    to_unlink.append(p)
+
+        conn.execute("DELETE FROM part_images WHERE id=?", (normalized_image_id,))
+
+    for raw_p in to_unlink:
+        _unlink_part_upload_path(raw_p)
+
+    return {
+        "had_previous_primary": archived_previous,
+        "image_path": final_primary_path,
+        "caption": supp_caption,
+    }
 
 def part_images(part_id: str) -> list[dict]:
     return query("SELECT * FROM part_images WHERE part_id = ? ORDER BY created_at", (part_id,))
@@ -850,10 +1389,22 @@ def update_part_feature_rules(
         if _conn is not None
         else query(sql, params)
     )
-    valid_parts = {
-        str(row["id"])
-        for row in read_rows("SELECT id FROM parts WHERE project_id=?", (project_id,))
+    part_rows = read_rows(
+        "SELECT id, model_applicability FROM parts WHERE project_id=?", (project_id,)
+    )
+    valid_parts = {str(row["id"]) for row in part_rows}
+    existing_applicability = {
+        str(row["id"]): normalize_model_applicability(row.get("model_applicability"))
+        for row in part_rows
     }
+    existing_rules: dict[str, set[tuple[str, str]]] = {}
+    for rule_row in read_rows(
+        "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+        (project_id,),
+    ):
+        existing_rules.setdefault(str(rule_row["part_id"]), set()).add(
+            (str(rule_row["feature_id"]), str(rule_row["value"]))
+        )
     timestamp = now_iso()
     updated = 0
     context = nullcontext(_conn) if _conn is not None else connection()
@@ -864,12 +1415,15 @@ def update_part_feature_rules(
             tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
             if not tokens:
                 continue  # Preserve legacy model-number applicability until the user tags it.
+            prev_rules = existing_rules.get(part_id, set())
+            prev_app = existing_applicability.get(part_id, "")
             if "All models" in tokens:
-                conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
-                conn.execute(
-                    "UPDATE parts SET model_applicability='All', updated_at=? WHERE id=? AND project_id=?",
-                    (timestamp, part_id, project_id),
-                )
+                if prev_rules or prev_app != "All":
+                    conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
+                    conn.execute(
+                        "UPDATE parts SET model_applicability='All', updated_at=? WHERE id=? AND project_id=?",
+                        (timestamp, part_id, project_id),
+                    )
                 updated += 1
                 continue
             selected_by_feature: dict[str, set[str]] = {}
@@ -889,19 +1443,26 @@ def update_part_feature_rules(
             if matches.empty:
                 raise ValueError("A feature rule matches no official models. Update the Complexity tree or the part rule.")
             model_numbers = matches["official_model_number"].dropna().astype(str).tolist()
-            conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
-            conn.executemany(
-                """INSERT INTO part_feature_rules
-                   (project_id, part_id, feature_id, value, updated_at) VALUES (?, ?, ?, ?, ?)""",
-                [
-                    (project_id, part_id, feature_id, value, timestamp)
-                    for feature_id, values in selected_by_feature.items() for value in sorted(values)
-                ],
-            )
-            conn.execute(
-                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
-                (normalize_model_applicability(model_numbers), timestamp, part_id, project_id),
-            )
+            new_rules = {
+                (feature_id, value)
+                for feature_id, values in selected_by_feature.items()
+                for value in values
+            }
+            new_app = normalize_model_applicability(model_numbers)
+            if new_rules != prev_rules or new_app != prev_app:
+                conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
+                conn.executemany(
+                    """INSERT INTO part_feature_rules
+                       (project_id, part_id, feature_id, value, updated_at) VALUES (?, ?, ?, ?, ?)""",
+                    [
+                        (project_id, part_id, feature_id, value, timestamp)
+                        for feature_id, values in selected_by_feature.items() for value in sorted(values)
+                    ],
+                )
+                conn.execute(
+                    "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                    (new_app, timestamp, part_id, project_id),
+                )
             updated += 1
     return updated
 
@@ -1090,8 +1651,9 @@ def infer_part_feature_rules(
         part_num = str(p.get("part_number") or "")
         tracker = str(p.get("pits_tracker_number") or "").strip()
         p_subsystem = (
-            subsystem_by_pits_id.get(tracker)
-            or str(p.get("subsystem") or "").strip()
+            str(p.get("subsystem") or "").strip()
+            or subsystem_by_pits_id.get(tracker)
+            or ""
         )
         p_sub_key = p_subsystem.casefold()
         part_has_assigned_subsystem = bool(p_sub_key) and (
@@ -5378,8 +5940,8 @@ def save_manual_model_bom(
                 if pn not in part_lookup:
                     new_pid = str(uuid4())
                     conn.execute(
-                        """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        """INSERT INTO parts (id, project_id, part_number, description, source, pits_tracker_number, updated_at)
+                           VALUES (?, ?, ?, ?, 'Manual BOM', ?, ?)""",
                         (new_pid, project_id, pn, desc_val, pits_id, now_ts),
                     )
                     part_lookup[pn] = new_pid
@@ -5391,8 +5953,9 @@ def save_manual_model_bom(
                     if desc_val:
                         conn.execute(
                             """UPDATE parts SET description = ?, pits_tracker_number = '', updated_at = ?
-                               WHERE project_id = ? AND part_number = ?""",
-                            (desc_val, now_ts, project_id, pn),
+                               WHERE project_id = ? AND part_number = ?
+                                 AND (COALESCE(description, '') <> ? OR COALESCE(pits_tracker_number, '') <> '')""",
+                            (desc_val, now_ts, project_id, pn, desc_val),
                         )
                         part_desc_lookup[pn.upper()] = desc_val
                     else:
@@ -7230,12 +7793,13 @@ def clear_model_boms(
 
 
 __domain_exports__ = [
-    'pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES',
+    'pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES', 'PART_CODE_VALUES',
     'project_table', 'part_scenario_activity', 'active_part_ids',
     'update_part_scenario_activity', 'normalize_model_applicability',
     '_clean_optional_text', '_validated_part_catalog_fields', 'upsert_part',
     'update_part_rows', 'part_delete_impact', 'delete_project_part',
-    'set_part_image', 'set_part_image_url', 'clear_part_image', 'add_part_image', 'add_part_image_url', 'delete_part_image', 'part_images',
+    'set_part_image', 'set_part_image_url', 'clear_part_image', 'update_part_primary_image_annotations',
+    'add_part_image', 'add_part_image_url', 'update_part_supplemental_image_annotations', 'delete_part_image', 'promote_part_image_to_primary', 'part_images',
     'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'complexity_features',
     'project_part_subsystems',
     'complexity_feature_delete_impacts', 'complexity_tree',

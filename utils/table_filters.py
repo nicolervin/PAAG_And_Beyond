@@ -20,6 +20,7 @@ def filter_table(
     reset_widget_keys: Iterable[str] = (),
     multi_value_columns: Iterable[str] = (),
     universal_values: dict[str, Iterable[str]] | None = None,
+    keyword_container=None,
 ) -> pd.DataFrame:
     """Render consistent keyword/dropdown controls and return the visible rows."""
     if dataframe.empty:
@@ -29,7 +30,8 @@ def filter_table(
     universal_values = universal_values or {}
     valid_dropdowns = [column for column in dropdown_columns if column in dataframe.columns]
     controls = st.container(horizontal=True, vertical_alignment="bottom")
-    keyword = controls.text_input(
+    keyword_host = keyword_container if keyword_container is not None else controls
+    keyword = keyword_host.text_input(
         "Filter by keyword",
         key=f"{key}_keyword",
         placeholder="Search this table",

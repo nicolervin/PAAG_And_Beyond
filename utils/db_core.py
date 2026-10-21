@@ -1352,7 +1352,7 @@ def init_db() -> None:
                 revision TEXT DEFAULT '0',
                 design_maturity TEXT NOT NULL DEFAULT '',
                 subsystem TEXT NOT NULL DEFAULT '',
-                source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '',
+                source TEXT DEFAULT 'Manual', image_path TEXT DEFAULT '', original_image_path TEXT NOT NULL DEFAULT '', annotations_json TEXT NOT NULL DEFAULT '', image_caption TEXT NOT NULL DEFAULT '',
                 model_applicability TEXT DEFAULT 'All', notes TEXT DEFAULT '', weight_lb REAL,
                 technology_engineer TEXT NOT NULL DEFAULT '',
                 design_engineer TEXT NOT NULL DEFAULT '',
@@ -1438,7 +1438,7 @@ def init_db() -> None:
             );
             CREATE TABLE IF NOT EXISTS part_images (
                 id TEXT PRIMARY KEY, part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
-                image_path TEXT NOT NULL, image_type TEXT DEFAULT 'Supplemental', caption TEXT DEFAULT '',
+                image_path TEXT NOT NULL, original_image_path TEXT NOT NULL DEFAULT '', annotations_json TEXT NOT NULL DEFAULT '', image_type TEXT DEFAULT 'Supplemental', caption TEXT DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_part_images_part
@@ -1968,12 +1968,29 @@ def init_db() -> None:
             "part_code",
             "subsystem",
             "design_maturity",
+            "original_image_path",
+            "annotations_json",
+            "image_caption",
         ):
             if column not in part_columns:
                 conn.execute(
                     f"ALTER TABLE parts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
                 part_columns.add(column)
+        part_image_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(part_images)").fetchall()
+        }
+        for column in (
+            "original_image_path",
+            "annotations_json",
+            "updated_at",
+        ):
+            if column not in part_image_columns:
+                conn.execute(
+                    f"ALTER TABLE part_images ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+                part_image_columns.add(column)
         conn.execute(
             """UPDATE parts SET design_engineer = technology_engineer
                WHERE (design_engineer IS NULL OR design_engineer = '')
@@ -2450,7 +2467,7 @@ def init_db() -> None:
             )
             sample_steps = [
                 (10, "ST-010", "Load housing", "Place housing in locating fixture", 18.0, "PN-100100", "", "", "Confirm seated on all locators", "Two-hand lift review", "Main line / Zone 1", 37.4, 0, 0),
-                (20, "ST-010", "Install bracket", "Locate bracket and hand-start four fasteners", 24.0, "PN-100220", "Nutrunner", "32 N·m ± 3", "Torque trace required", "Keep work below shoulder", "Main line / Zone 1", 37.4, 3.94, 0),
+                (20, "ST-010", "Install bracket", "Locate bracket and hand-start four fasteners", 24.0, "PN-100220", "Nutrunner", "32 N�m � 3", "Torque trace required", "Keep work below shoulder", "Main line / Zone 1", 37.4, 3.94, 0),
                 (30, "ST-010", "Verify assembly", "Visual and torque-complete confirmation", 8.0, "HW-M8-025", "Scanner", "", "All four results pass", "", "Main line / Zone 1", 37.4, 3.94, 0),
             ]
             for row in sample_steps:
@@ -2683,6 +2700,45 @@ def init_db() -> None:
                     str(uuid4()), project_id, len(changes),
                     json.dumps({"assembly_parts": changes}, ensure_ascii=False), timestamp,
                 ),
+            )
+
+        manual_bom_projects = [
+            str(r[0])
+            for r in conn.execute(
+                """SELECT DISTINCT p.project_id
+                   FROM parts p
+                   JOIN pits_bom_occurrences o
+                     ON o.project_id = p.project_id AND o.child_part_id = p.id
+                   WHERE p.source = 'Manual'
+                     AND o.raw_levels_json LIKE '%"source": "manual"%'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM audit_log a
+                         WHERE a.project_id = p.project_id
+                           AND a.table_name = 'Parts'
+                           AND a.action = 'Manual BOM source backfill'
+                     )"""
+            ).fetchall()
+        ]
+        for mb_pid in manual_bom_projects:
+            cur = conn.execute(
+                """UPDATE parts
+                   SET source = 'Manual BOM'
+                   WHERE project_id = ?
+                     AND source = 'Manual'
+                     AND id IN (
+                         SELECT child_part_id
+                         FROM pits_bom_occurrences
+                         WHERE project_id = ?
+                           AND child_part_id IS NOT NULL
+                           AND raw_levels_json LIKE '%"source": "manual"%'
+                     )""",
+                (mb_pid, mb_pid),
+            )
+            conn.execute(
+                """INSERT INTO audit_log
+                   (id, project_id, table_name, action, row_count, editor_name, details, created_at)
+                   VALUES (?, ?, 'Parts', 'Manual BOM source backfill', ?, 'Schema upgrade', '{}', ?)""",
+                (str(uuid4()), mb_pid, int(cur.rowcount or 0), timestamp),
             )
 
 def query(sql: str, params: tuple = ()) -> list[dict]:

@@ -1,3 +1,4 @@
+import base64
 from copy import deepcopy
 import hashlib
 import json
@@ -8,7 +9,9 @@ import pandas as pd
 import streamlit as st
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
+from utils.image_annotator import decode_data_url, image_annotator
 from utils.store import (
+    PART_CODE_VALUES,
     PART_MAKE_BUY_VALUES,
     PART_SOURCE_CODES,
     add_part_image,
@@ -28,13 +31,16 @@ from utils.store import (
     part_scenario_activity,
     project_models,
     project_table,
+    promote_part_image_to_primary,
     record_audit_event,
     save_table_view_preference,
     set_part_image,
     set_part_image_url,
     table_view_preference,
     update_part_feature_rules,
+    update_part_primary_image_annotations,
     update_part_rows,
+    update_part_supplemental_image_annotations,
 )
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
@@ -77,8 +83,11 @@ def _hash_filtered_export(dataframe: pd.DataFrame) -> str:
 
 
 PARTS_VIEW_KEY = "parts_catalog"
-DEFAULT_PARTS_COLUMN_ORDER = [
+LEGACY_PARTS_COLUMN_ORDER_PREFIX = [
     "view_details", "active", "photo_status", "part_number", "description",
+]
+DEFAULT_PARTS_COLUMN_ORDER = [
+    "view_details", "part_number", "description", "active", "photo_status",
     "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
     "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
     "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
@@ -147,7 +156,12 @@ saved_parts_column_order = [
 ]
 if not saved_parts_column_order:
     saved_parts_column_order = DEFAULT_PARTS_COLUMN_ORDER.copy()
-current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}"
+elif saved_parts_column_order[:5] == LEGACY_PARTS_COLUMN_ORDER_PREFIX:
+    saved_parts_column_order = [
+        "view_details", "part_number", "description", "active", "photo_status",
+        *saved_parts_column_order[5:],
+    ]
+current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v2"
 if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state["_parts_page_mounted_token"] = current_mount_token
     st.session_state[parts_view_draft_key] = saved_parts_column_order.copy()
@@ -257,14 +271,14 @@ def readable_feature_applicability(part_id: str, legacy_value) -> str:
 
 editable_table_heading("All parts")
 st.caption(
-    "Edit catalog fields directly, then save. Select View details on a row to open its "
+    "Edit catalog fields directly, then save. Select View on a row to open its "
     "photos, full information, and completed-subassembly mini-BOM below."
 )
 
 with st.expander(
     "Saved table view — hide and move columns here",
     icon=":material/view_column:",
-    expanded=True,
+    expanded=False,
 ):
     st.info(
         "Use these controls for any layout you want to keep. Hiding or dragging a "
@@ -414,7 +428,7 @@ parts_for_editing["source_code"] = parts_for_editing["source_code"].apply(
     else str(value).strip()
 ).astype("string")
 parts_for_editing["view_details"] = pd.Series(
-    [":material/visibility: View details"] * len(parts_for_editing),
+    [":material/visibility: View"] * len(parts_for_editing),
     index=parts_for_editing.index,
     dtype="string",
 )
@@ -495,7 +509,7 @@ def _build_draft_added_part_row(raw_row: dict[str, object]) -> dict[str, object]
         "active": is_active,
         "feature_applicability": feature_list,
         "applicability_status": "; ".join(feature_list),
-        "view_details": ":material/visibility: View details",
+        "view_details": ":material/visibility: View",
         "photo_status": "❌ Missing",
         "updated_display": "",
     }
@@ -612,7 +626,11 @@ if qp_part_id or qp_part_number:
     except Exception:
         pass
 
-with st.expander("Filter columns", icon=":material/filter_list:", expanded=True):
+filter_expander = st.expander("Filter columns", icon=":material/filter_list:", expanded=False)
+sort_controls_slot = st.container()
+keyword_filter_slot = st.container()
+
+with filter_expander:
     pre_filter_added_rows = deepcopy(
         (st.session_state.get(parts_editor_key, {}) or {}).get("added_rows", [])
     )
@@ -653,10 +671,12 @@ with st.expander("Filter columns", icon=":material/filter_list:", expanded=True)
         },
         reset_widget_keys=[parts_editor_key],
         multi_value_columns=["feature_applicability"],
+        keyword_container=keyword_filter_slot,
     )
     if parts_editor_key not in st.session_state and pre_filter_added_rows:
         if harvest_added_rows_into_draft(pre_filter_added_rows):
             st.rerun()
+    parts_action_slot = st.empty()
     clear_filter_actions = st.container(horizontal=True, horizontal_alignment="right")
     if clear_filter_actions.button(
         "Clear filters",
@@ -684,25 +704,26 @@ candidate_sort_columns = [
     "source_code", "make_buy", "feature_applicability",
     "applicability_status", "notes", "source", "updated_at",
 ]
-parts_editor_rows = direct_entry_editor_rows(
-    parts_for_editing,
-    editor_key=parts_editor_key,
-    sort_columns=[
-        col for col in candidate_sort_columns if col in parts_column_order
-    ],
-    labels={
-        "photo_status": "Photo status", "part_number": "Part number",
-        "description": "Part name", "weight_lb": "Weight (lb)",
-        "subsystem": "Subsystem", "design_maturity": "Design Maturity",
-        "factory_nickname": "Factory Nickname",
-        "design_engineer": "Design Engineer", "ppm": "PPM",
-        "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
-        "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
-        "feature_applicability": "Feature",
-        "applicability_status": "Applicability status", "updated_at": "Updated",
-    },
-    additional_unsaved_changes=has_parts_draft,
-)
+with sort_controls_slot:
+    parts_editor_rows = direct_entry_editor_rows(
+        parts_for_editing,
+        editor_key=parts_editor_key,
+        sort_columns=[
+            col for col in candidate_sort_columns if col in parts_column_order
+        ],
+        labels={
+            "photo_status": "Photo status", "part_number": "Part number",
+            "description": "Part name", "weight_lb": "Weight (lb)",
+            "subsystem": "Subsystem", "design_maturity": "Design Maturity",
+            "factory_nickname": "Factory Nickname",
+            "design_engineer": "Design Engineer", "ppm": "PPM",
+            "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
+            "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
+            "feature_applicability": "Feature",
+            "applicability_status": "Applicability status", "updated_at": "Updated",
+        },
+        additional_unsaved_changes=has_parts_draft,
+    )
 # Let the mounted editor retain ordinary cell changes without replacing its
 # data source on every edit rerun. Reapply the stable-ID draft only after
 # another control has remounted the editor, such as a filter or view change.
@@ -738,7 +759,13 @@ def open_part_details() -> None:
         st.session_state["parts_scroll_to_details"] = True
 
 
-parts_action_slot = st.empty()
+part_code_options = ["", *PART_CODE_VALUES]
+if "part_code" in parts_editor_display_rows.columns:
+    for val in parts_editor_display_rows["part_code"].dropna().astype(str):
+        cleaned_code = val.strip()
+        if cleaned_code and cleaned_code not in part_code_options:
+            part_code_options.append(cleaned_code)
+
 edited_parts = st.data_editor(
     parts_editor_display_rows,
     key=parts_editor_key,
@@ -747,7 +774,7 @@ edited_parts = st.data_editor(
     height=430,
     disabled=[
         col for col in [
-            "id", "subsystem", "part_code", "model_applicability", "photo_status",
+            "id", "model_applicability", "photo_status",
             "applicability_status", "source", "image_path", "updated_at",
             "updated_display", "assembly_id", "assembly_number",
         ]
@@ -760,7 +787,9 @@ edited_parts = st.data_editor(
         "technology_engineer": None,
         "assembly_id": None,
         "assembly_number": None,
-        "view_details": standard_details_column_config(on_click=open_part_details, key="parts_view_details"),
+        "view_details": standard_details_column_config(
+            on_click=open_part_details, key="parts_view_details", pinned=True
+        ),
         "active": st.column_config.CheckboxColumn(
             "Active",
             default=True,
@@ -774,8 +803,8 @@ edited_parts = st.data_editor(
             default="",
             help="A green check means a primary CAD image is attached; a red X means it is missing.",
         ),
-        "part_number": st.column_config.TextColumn("Part number", required=True),
-        "description": st.column_config.TextColumn("Part Name", width="large"),
+        "part_number": st.column_config.TextColumn("Part number", required=True, pinned=True),
+        "description": st.column_config.TextColumn("Part Name", width="large", pinned=True),
         "weight_lb": st.column_config.NumberColumn(
             "Weight (lb)",
             min_value=0.0,
@@ -786,7 +815,8 @@ edited_parts = st.data_editor(
         "subsystem": st.column_config.TextColumn(
             "Subsystem",
             width="medium",
-            help="Read-only subsystem identifier from column F of the imported PITS Tracker row matched by PITS ID.",
+            default="",
+            help="Subsystem identifier (manual entry or imported from column F of the PITS Tracker).",
         ),
         "design_maturity": st.column_config.TextColumn(
             "Design Maturity",
@@ -818,10 +848,12 @@ edited_parts = st.data_editor(
             "AME / Tooling Engineer",
             help="Advanced Manufacturing Engineer / Tooling Engineer from PITS Tracker column M.",
         ),
-        "part_code": st.column_config.TextColumn(
+        "part_code": st.column_config.SelectboxColumn(
             "Part Code",
+            options=part_code_options,
+            default="",
             help=(
-                "Part Code from PITS Tracker column N.\n\n"
+                "Part Code (manual selection or from PITS Tracker column N).\n\n"
                 "- NP = New Part, New Tool\n"
                 "- NPNT = New Part, No Tooling\n"
                 "- ASM = Assembly\n"
@@ -888,10 +920,6 @@ if parts_actions.undo:
         icon=":material/undo:",
     )
     st.rerun()
-st.caption(
-    "Type or paste new parts directly into the blank entry row, then save. Use View details to manage its Primary CAD image "
-    "and additional views."
-)
 
 export_columns = [
     "active", "part_number", "description", "subsystem", "design_maturity", "factory_nickname",
@@ -1260,20 +1288,201 @@ if st.session_state.pop("parts_scroll_to_details", False):
         </script>""",
         unsafe_allow_javascript=True,
     )
+
+
+def _mime_for_part_image_suffix(suffix: str) -> str:
+    ext = str(suffix or "").lower().lstrip(".")
+    return {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+        "gif": "image/gif",
+    }.get(ext, "image/png")
+
+
+def _has_part_image_annotations(annotations_json: object) -> bool:
+    raw = str(annotations_json or "").strip()
+    return bool(raw and raw != "[]")
+
+
+def _composite_upload_filename(filename: str, has_annotations: bool) -> str:
+    base_name = Path(str(filename or "part_image.png")).name
+    if not has_annotations:
+        return base_name
+    stem = Path(base_name).stem or "part_image"
+    return f"{stem}.png"
+
+
+@st.dialog("Annotate Primary Part Image", width="large")
+def annotate_part_primary_image_dialog(part_row: dict, active_project_id: str) -> None:
+    orig_path_str = (
+        str(part_row.get("original_image_path") or "").strip()
+        or str(part_row.get("image_path") or "").strip()
+    )
+    img_path = Path(orig_path_str) if orig_path_str else None
+    if not img_path or not img_path.exists():
+        fallback_str = str(part_row.get("image_path") or "").strip()
+        img_path = Path(fallback_str) if fallback_str else None
+    if not img_path or not img_path.exists():
+        st.error("Image file not found on disk.")
+        return
+
+    raw_bytes = img_path.read_bytes()
+    mime = _mime_for_part_image_suffix(img_path.suffix)
+    b64_str = base64.b64encode(raw_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64_str}"
+
+    st.caption(
+        f"**Part:** `{part_row.get('part_number', '')}` — Draw arrows, callouts, shapes, or text. "
+        "Click **💾 Apply & Save Markup** in the toolbar when finished."
+    )
+    annotator_res = image_annotator(
+        image_data_url=data_url,
+        annotations_json=str(part_row.get("annotations_json") or ""),
+        key=f"annotator_part_prim_{part_row['id']}",
+    )
+    if annotator_res is not None:
+        save_payload = getattr(annotator_res, "save", None)
+        cancel_payload = getattr(annotator_res, "cancel", None)
+        if isinstance(save_payload, dict):
+            new_annotations = str(save_payload.get("annotations_json") or "")
+            new_data_url = str(
+                save_payload.get("data_url")
+                or save_payload.get("composite_data_url")
+                or ""
+            )
+            composite_bytes = decode_data_url(new_data_url) if new_data_url else None
+            try:
+                update_part_primary_image_annotations(
+                    project_id=active_project_id,
+                    part_id=str(part_row["id"]),
+                    annotations_json=new_annotations,
+                    composite_image_bytes=composite_bytes,
+                    current_editor=st.session_state.get("current_editor", "Collaborator"),
+                )
+                st.toast("Annotations saved!", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as err:
+                st.error(str(err))
+        elif cancel_payload:
+            st.rerun()
+
+
+@st.dialog("Annotate Additional Part View", width="large")
+def annotate_part_supplemental_image_dialog(supplemental: dict, active_project_id: str) -> None:
+    orig_path_str = (
+        str(supplemental.get("original_image_path") or "").strip()
+        or str(supplemental.get("image_path") or "").strip()
+    )
+    img_path = Path(orig_path_str) if orig_path_str else None
+    if not img_path or not img_path.exists():
+        fallback_str = str(supplemental.get("image_path") or "").strip()
+        img_path = Path(fallback_str) if fallback_str else None
+    if not img_path or not img_path.exists():
+        st.error("Image file not found on disk.")
+        return
+
+    raw_bytes = img_path.read_bytes()
+    mime = _mime_for_part_image_suffix(img_path.suffix)
+    b64_str = base64.b64encode(raw_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64_str}"
+
+    view_label = supplemental.get("caption") or supplemental.get("image_type") or "Additional View"
+    st.caption(
+        f"**View:** {view_label} — Draw arrows, callouts, shapes, or text. "
+        "Click **💾 Apply & Save Markup** in the toolbar when finished."
+    )
+    annotator_res = image_annotator(
+        image_data_url=data_url,
+        annotations_json=str(supplemental.get("annotations_json") or ""),
+        key=f"annotator_part_supp_{supplemental['id']}",
+    )
+    if annotator_res is not None:
+        save_payload = getattr(annotator_res, "save", None)
+        cancel_payload = getattr(annotator_res, "cancel", None)
+        if isinstance(save_payload, dict):
+            new_annotations = str(save_payload.get("annotations_json") or "")
+            new_data_url = str(
+                save_payload.get("data_url")
+                or save_payload.get("composite_data_url")
+                or ""
+            )
+            composite_bytes = decode_data_url(new_data_url) if new_data_url else None
+            try:
+                update_part_supplemental_image_annotations(
+                    project_id=active_project_id,
+                    image_id=str(supplemental["id"]),
+                    annotations_json=new_annotations,
+                    composite_image_bytes=composite_bytes,
+                    current_editor=st.session_state.get("current_editor", "Collaborator"),
+                )
+                st.toast("Annotations saved!", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as err:
+                st.error(str(err))
+        elif cancel_payload:
+            st.rerun()
+
+
+@st.dialog("Annotate Staged Part Image", width="large")
+def annotate_staged_part_image_dialog(staged_state_key: str) -> None:
+    staged = st.session_state.get(staged_state_key)
+    if not isinstance(staged, dict) or not staged.get("original_bytes"):
+        st.error("No staged image found.")
+        return
+
+    raw_bytes = staged["original_bytes"]
+    mime = staged.get("mime_type", "image/png")
+    b64_str = base64.b64encode(raw_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64_str}"
+
+    st.caption(
+        "Draw arrows, callouts, shapes, or text on the staged part image. "
+        "Click **💾 Apply & Save Markup** in the toolbar when finished."
+    )
+    annotator_res = image_annotator(
+        image_data_url=data_url,
+        annotations_json=str(staged.get("annotations_json") or ""),
+        key=f"annotator_{staged_state_key}",
+    )
+    if annotator_res is not None:
+        save_payload = getattr(annotator_res, "save", None)
+        cancel_payload = getattr(annotator_res, "cancel", None)
+        if isinstance(save_payload, dict):
+            new_annotations = str(save_payload.get("annotations_json") or "")
+            new_data_url = str(
+                save_payload.get("data_url")
+                or save_payload.get("composite_data_url")
+                or ""
+            )
+            composite_bytes = decode_data_url(new_data_url) if new_data_url else raw_bytes
+            staged["composite_bytes"] = composite_bytes or raw_bytes
+            staged["annotations_json"] = new_annotations
+            st.session_state[staged_state_key] = staged
+            st.toast("Markup applied to staged image!", icon=":material/check_circle:")
+            st.rerun()
+        elif cancel_payload:
+            st.rerun()
+
+
 image_col, details_col = st.columns([2, 3])
 with image_col.container(border=True):
-    st.subheader("Primary CAD image")
+    st.subheader("Primary Image")
     raw_img = str(part.get("image_path") or "").strip()
+    prim_caption = str(part.get("image_caption") or "").strip()
+    prim_display_caption = f"{part['part_number']} — {prim_caption}" if prim_caption else str(part["part_number"])
     is_url = raw_img.startswith(("http://", "https://"))
     if is_url:
         lower_url = raw_img.lower()
         if any(lower_url.endswith(ext) or (ext + "?") in lower_url for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
-            st.image(raw_img, caption=part["part_number"])
+            st.image(raw_img, caption=prim_display_caption)
+        if prim_caption:
+            st.caption(f"**Caption / Notes:** {prim_caption}")
         c_link1, c_link2 = st.columns([3, 1])
         with c_link1:
             st.link_button("Open CAD / Web Link", raw_img, icon=":material/open_in_new:")
         with c_link2:
-            if st.button("Remove", icon=":material/delete:", key=f"del_prim_url_{part['id']}", help="Remove this CAD web link"):
+            if st.button("Remove", icon=":material/delete:", key=f"destructive_del_prim_url_{part['id']}", help="Remove this CAD web link"):
                 clear_part_image(part["id"])
                 record_audit_event(
                     project_id,
@@ -1287,43 +1496,192 @@ with image_col.container(border=True):
     elif raw_img:
         image_path = Path(raw_img)
         if image_path.exists():
-            st.image(str(image_path), caption=part["part_number"])
-            if st.button("Remove image", icon=":material/delete:", key=f"del_prim_img_{part['id']}"):
-                clear_part_image(part["id"])
-                record_audit_event(
-                    project_id,
-                    "Parts",
-                    "Remove CAD image",
-                    1,
-                    st.session_state.get("current_editor", ""),
-                    {"part_id": str(part["id"]), "part_number": str(part["part_number"])},
-                )
-                st.rerun()
+            st.image(str(image_path), caption=prim_display_caption)
+            if prim_caption:
+                st.caption(f"**Caption / Notes:** {prim_caption}")
+            if _has_part_image_annotations(part.get("annotations_json")):
+                st.caption(":material/draw: **Annotated** (editable vector shapes)")
+            c_prim_act1, c_prim_act2 = st.columns(2)
+            with c_prim_act1:
+                if st.button(
+                    "Annotate",
+                    icon=":material/draw:",
+                    key=f"btn_ann_prim_img_{part['id']}",
+                    width="stretch",
+                    help="Draw arrows, callouts, shapes, or text on this part image",
+                ):
+                    annotate_part_primary_image_dialog(dict(part), project_id)
+            with c_prim_act2:
+                if st.button(
+                    "Remove image",
+                    icon=":material/delete:",
+                    key=f"destructive_del_prim_img_{part['id']}",
+                    width="stretch",
+                ):
+                    clear_part_image(part["id"])
+                    record_audit_event(
+                        project_id,
+                        "Parts",
+                        "Remove CAD image",
+                        1,
+                        st.session_state.get("current_editor", ""),
+                        {"part_id": str(part["id"]), "part_number": str(part["part_number"])},
+                    )
+                    st.rerun()
         else:
             st.caption("No image attached.")
     else:
         st.caption("No image or web link attached.")
 
-    tab_upload, tab_url, tab_paste = st.tabs(["Upload File", "Web Link / URL", "Paste Screenshot"])
+    if st.session_state.pop(f"_clear_prim_caption_{part['id']}", False):
+        st.session_state.pop(f"prim_upload_caption_{part['id']}", None)
 
-    with tab_upload:
-        uploaded = st.file_uploader("Attach screenshot or rendered view", type=["png", "jpg", "jpeg", "webp"], key=f"image_{part['id']}")
-        if uploaded and st.button("Save image", type="primary", icon=":material/upload:", key=f"btn_save_img_{part['id']}"):
-            set_part_image(part["id"], uploaded)
-            record_audit_event(
-                project_id,
-                "Parts",
-                "Save image",
-                1,
-                st.session_state.get("current_editor", ""),
-                {
-                    "part_id": str(part["id"]),
-                    "part_number": str(part["part_number"]),
-                    "primary_cad_image_replaced_via": "upload",
-                },
-            )
-            st.toast("Image attached", icon=":material/check_circle:")
-            st.rerun()
+    tab_upload_clip, tab_url = st.tabs(["Upload / Clipboard", "Web Link / URL"])
+
+    with tab_upload_clip:
+        staged_prim_key = f"staged_prim_upload_{part['id']}"
+        last_prim_paste_hash_key = f"last_prim_paste_hash_{part['id']}"
+        last_prim_upload_hash_key = f"last_prim_upload_hash_{part['id']}"
+        discarded_prim_up_key = f"_discarded_prim_up_{part['id']}"
+
+        uploaded = st.file_uploader(
+            "Upload photo or rendered view",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"image_{part['id']}",
+            help="Photos: max 10 MB (PNG, JPG, WEBP)",
+        )
+        st.caption("Photos: max **10 MB** (PNG, JPG, WEBP)")
+
+        st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+        primary_clipboard_key = f"clipboard_primary_{part['id']}"
+        pasted = clipboard_image(key=primary_clipboard_key)
+
+        prim_upload_caption = st.text_input(
+            "Caption / Notes (optional)",
+            placeholder="Optional photo notes, revision, or callout summary...",
+            key=f"prim_upload_caption_{part['id']}",
+        )
+
+        pasted_payload = getattr(pasted, "image", None)
+        if pasted_payload:
+            try:
+                primary_image = decode_clipboard_image(pasted_payload)
+                raw_paste_bytes = primary_image["bytes"]
+                paste_hash = hashlib.sha256(raw_paste_bytes).hexdigest()[:16]
+                if st.session_state.get(last_prim_paste_hash_key) != paste_hash:
+                    st.session_state[last_prim_paste_hash_key] = paste_hash
+                    paste_name = primary_image.get("name") or "clipboard.png"
+                    st.session_state[staged_prim_key] = {
+                        "source": "clipboard",
+                        "source_hash": paste_hash,
+                        "original_bytes": raw_paste_bytes,
+                        "composite_bytes": raw_paste_bytes,
+                        "mime_type": _mime_for_part_image_suffix(Path(paste_name).suffix),
+                        "filename": paste_name,
+                        "annotations_json": "",
+                    }
+            except (OSError, ValueError) as exc:
+                st.error(str(exc))
+
+        if uploaded is not None:
+            raw_up_bytes = uploaded.getvalue()
+            up_hash = hashlib.sha256(raw_up_bytes).hexdigest()[:16]
+            existing_staged_prim = st.session_state.get(staged_prim_key)
+            if st.session_state.get(last_prim_upload_hash_key) != up_hash or (
+                not isinstance(existing_staged_prim, dict)
+                and st.session_state.get(discarded_prim_up_key) != up_hash
+            ):
+                st.session_state[last_prim_upload_hash_key] = up_hash
+                st.session_state.pop(discarded_prim_up_key, None)
+                st.session_state[staged_prim_key] = {
+                    "source": "upload",
+                    "source_hash": up_hash,
+                    "original_bytes": raw_up_bytes,
+                    "composite_bytes": raw_up_bytes,
+                    "mime_type": _mime_for_part_image_suffix(Path(uploaded.name or "image.png").suffix),
+                    "filename": uploaded.name or "part_image.png",
+                    "annotations_json": "",
+                }
+        else:
+            st.session_state.pop(last_prim_upload_hash_key, None)
+            st.session_state.pop(discarded_prim_up_key, None)
+            existing_staged_prim = st.session_state.get(staged_prim_key)
+            if isinstance(existing_staged_prim, dict) and existing_staged_prim.get("source") == "upload":
+                st.session_state.pop(staged_prim_key, None)
+
+        staged_prim = st.session_state.get(staged_prim_key)
+        if isinstance(staged_prim, dict) and staged_prim.get("composite_bytes"):
+            with st.container(border=True):
+                st_c1, st_c2 = st.columns([2, 3])
+                with st_c1:
+                    st.image(staged_prim["composite_bytes"], width="stretch")
+                with st_c2:
+                    has_staged_markup = _has_part_image_annotations(staged_prim.get("annotations_json"))
+                    if has_staged_markup:
+                        st.caption(":material/check_circle: **Markup applied** (editable vector shapes)")
+                    else:
+                        st.caption("Ready to save — click **Annotate / Add Shapes** to add callouts before saving.")
+                    if st.button(
+                        "Annotate / Add Shapes",
+                        icon=":material/draw:",
+                        key=f"btn_ann_staged_prim_up_{part['id']}",
+                        width="stretch",
+                    ):
+                        annotate_staged_part_image_dialog(staged_prim_key)
+                    if st.button(
+                        "Discard",
+                        icon=":material/close:",
+                        key=f"destructive_discard_staged_prim_{part['id']}",
+                        width="stretch",
+                    ):
+                        if staged_prim.get("source") == "upload":
+                            st.session_state[discarded_prim_up_key] = staged_prim.get("source_hash")
+                        st.session_state.pop(staged_prim_key, None)
+                        st.rerun()
+
+        if st.button("Save Primary Image", type="primary", icon=":material/add_photo_alternate:", key=f"btn_save_img_{part['id']}"):
+            if not isinstance(staged_prim, dict) or not staged_prim.get("composite_bytes"):
+                st.error("Please upload an image file or paste a screenshot from your clipboard first.")
+            else:
+                had_previous = bool(raw_img)
+                is_clipboard = staged_prim.get("source") == "clipboard"
+                has_staged_markup = _has_part_image_annotations(staged_prim.get("annotations_json"))
+                comp_filename = _composite_upload_filename(staged_prim["filename"], has_staged_markup)
+                comp_file = as_uploaded_file({"name": comp_filename, "bytes": staged_prim["composite_bytes"]})
+                set_part_image(
+                    part["id"],
+                    comp_file,
+                    original_file_bytes=staged_prim["original_bytes"],
+                    original_filename=staged_prim["filename"],
+                    annotations_json=str(staged_prim.get("annotations_json") or ""),
+                    caption=prim_upload_caption,
+                )
+                if staged_prim.get("source") == "upload":
+                    st.session_state[discarded_prim_up_key] = staged_prim.get("source_hash")
+                st.session_state.pop(staged_prim_key, None)
+                st.session_state[f"_clear_prim_caption_{part['id']}"] = True
+                record_audit_event(
+                    project_id,
+                    "Parts",
+                    "Paste Primary CAD image" if is_clipboard else "Save image",
+                    1,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "part_id": str(part["id"]),
+                        "part_number": str(part["part_number"]),
+                        "primary_cad_image_replaced_via": "clipboard" if is_clipboard else "upload",
+                        "annotated": bool(has_staged_markup),
+                        "caption": str(prim_upload_caption or "").strip(),
+                        "archived_previous_primary": had_previous,
+                    },
+                )
+                st.toast(
+                    "Primary Image saved (previous Primary Image moved to Additional views)"
+                    if had_previous
+                    else "Primary Image saved",
+                    icon=":material/check_circle:",
+                )
+                st.rerun()
 
     with tab_url:
         cad_url = st.text_input(
@@ -1333,11 +1691,18 @@ with image_col.container(border=True):
             key=f"url_cad_{part['id']}",
             help="Enter a web URL for this part's 3D CAD model, Windchill drawing, or online specification.",
         )
+        prim_url_caption = st.text_input(
+            "Caption / Notes (optional)",
+            value=prim_caption if is_url else "",
+            placeholder="Optional photo notes, revision, or callout summary...",
+            key=f"prim_url_caption_{part['id']}",
+        )
         if st.button("Save CAD Link", type="primary", icon=":material/link:", key=f"btn_save_cad_url_{part['id']}"):
             if not cad_url or not cad_url.strip().startswith(("http://", "https://")):
                 st.error("Please enter a valid URL starting with http:// or https://")
             else:
-                set_part_image_url(part["id"], cad_url.strip())
+                had_previous = bool(raw_img and raw_img != cad_url.strip())
+                set_part_image_url(part["id"], cad_url.strip(), caption=prim_url_caption)
                 record_audit_event(
                     project_id,
                     "Parts",
@@ -1348,40 +1713,17 @@ with image_col.container(border=True):
                         "part_id": str(part["id"]),
                         "part_number": str(part["part_number"]),
                         "url": cad_url.strip(),
+                        "caption": str(prim_url_caption or "").strip(),
+                        "archived_previous_primary": had_previous,
                     },
                 )
-                st.toast("CAD web link attached", icon=":material/check_circle:")
-                st.rerun()
-
-    with tab_paste:
-        st.caption(
-            "Press Win+Shift+S, select a region, and paste it here. "
-            "It saves immediately as the Primary CAD image."
-        )
-        primary_clipboard_key = f"clipboard_primary_{part['id']}"
-        primary_pending_key = f"pending_primary_{part['id']}"
-        st.session_state.pop(primary_pending_key, None)
-        pasted = clipboard_image(key=primary_clipboard_key)
-        pasted_payload = getattr(pasted, "image", None)
-        if pasted_payload:
-            try:
-                primary_image = decode_clipboard_image(pasted_payload)
-                set_part_image(part["id"], as_uploaded_file(primary_image))
-                record_audit_event(
-                    project_id,
-                    "Parts",
-                    "Paste Primary CAD image",
-                    1,
-                    st.session_state.get("current_editor", ""),
-                    {"part_id": str(part["id"])},
-                )
                 st.toast(
-                    "Screenshot saved as the Primary CAD image",
+                    "CAD web link attached (previous Primary Image moved to Additional views)"
+                    if had_previous
+                    else "CAD web link attached",
                     icon=":material/check_circle:",
                 )
                 st.rerun()
-            except (OSError, ValueError) as exc:
-                st.error(str(exc))
 
     st.subheader("Additional views")
     images = part_images(part["id"])
@@ -1389,37 +1731,92 @@ with image_col.container(border=True):
         supp_raw = str(supplemental.get("image_path") or "").strip()
         supp_caption = supplemental.get("caption") or supplemental.get("image_type") or "Additional View"
         supp_id = supplemental.get("id")
+        is_supp_url = supp_raw.startswith(("http://", "https://"))
+        supp_path_obj = Path(supp_raw) if (supp_raw and not is_supp_url) else None
+        is_supp_raster = bool(
+            supp_path_obj
+            and supp_path_obj.exists()
+            and supp_path_obj.suffix.lower() not in {".step", ".stp"}
+        )
         with st.container(border=True):
-            s_c1, s_c2 = st.columns([4, 1])
+            s_c1, s_c2 = st.columns([5, 2])
             with s_c1:
-                if supp_raw.startswith(("http://", "https://")):
+                if is_supp_url:
                     lower_supp = supp_raw.lower()
                     if any(lower_supp.endswith(ext) or (ext + "?") in lower_supp for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
                         st.image(supp_raw, caption=supp_caption)
                     st.link_button(f":material/open_in_new: {supp_caption}", supp_raw)
                     st.caption(f"Type: `{supplemental.get('image_type')}` | URL: {supp_raw}")
                 else:
-                    supplemental_path = Path(supp_raw)
-                    if supplemental_path.exists():
-                        supp_suffix = supplemental_path.suffix.lower()
+                    if supp_path_obj and supp_path_obj.exists():
+                        supp_suffix = supp_path_obj.suffix.lower()
                         if supp_suffix in {".step", ".stp"}:
-                            size_mb = supplemental_path.stat().st_size / (1024 * 1024)
-                            st.markdown(f":material/view_in_ar: **3D CAD Model (STEP)** — `{supplemental_path.name}` ({size_mb:.1f} MB)")
+                            size_mb = supp_path_obj.stat().st_size / (1024 * 1024)
+                            st.markdown(f":material/view_in_ar: **3D CAD Model (STEP)** — `{supp_path_obj.name}` ({size_mb:.1f} MB)")
                             if supp_caption and supp_caption != "3D CAD Model (STEP)":
                                 st.caption(supp_caption)
                             st.download_button(
                                 "Download STEP file",
-                                data=supplemental_path.read_bytes(),
-                                file_name=f"{part['part_number']}_{supplemental_path.name}",
+                                data=supp_path_obj.read_bytes(),
+                                file_name=f"{part['part_number']}_{supp_path_obj.name}",
                                 mime="application/step",
                                 icon=":material/download:",
                                 key=f"dl_supp_{supp_id}",
                             )
                         else:
-                            st.image(str(supplemental_path), caption=supp_caption)
-                    st.caption(f"Type: `{supplemental.get('image_type')}`")
+                            st.image(str(supp_path_obj), caption=supp_caption)
+                    if _has_part_image_annotations(supplemental.get("annotations_json")):
+                        st.caption(f"Type: `{supplemental.get('image_type')}` | :material/draw: **Annotated**")
+                    else:
+                        st.caption(f"Type: `{supplemental.get('image_type')}`")
             with s_c2:
-                if st.button("Delete", icon=":material/delete:", key=f"del_supp_{supp_id}"):
+                if is_supp_raster or is_supp_url:
+                    if st.button(
+                        "Make primary",
+                        icon=":material/star:",
+                        key=f"make_prim_supp_{supp_id}",
+                        width="stretch",
+                        help="Set this view as the Primary Image (any current Primary Image moves to Additional views)",
+                    ):
+                        try:
+                            res = promote_part_image_to_primary(part["id"], str(supp_id))
+                            record_audit_event(
+                                project_id,
+                                "Parts",
+                                "Promote view to primary image",
+                                1,
+                                st.session_state.get("current_editor", ""),
+                                {
+                                    "part_id": str(part["id"]),
+                                    "part_number": str(part["part_number"]),
+                                    "promoted_image_id": str(supp_id),
+                                    "archived_previous_primary": bool(res.get("had_previous_primary")),
+                                },
+                            )
+                            st.toast(
+                                "Switched to Primary Image (previous Primary Image moved to Additional views)"
+                                if res.get("had_previous_primary")
+                                else "Set as Primary Image",
+                                icon=":material/check_circle:",
+                            )
+                            st.rerun()
+                        except ValueError as ve:
+                            st.error(str(ve))
+                if is_supp_raster:
+                    if st.button(
+                        "Annotate",
+                        icon=":material/draw:",
+                        key=f"ann_supp_{supp_id}",
+                        width="stretch",
+                        help="Draw arrows, callouts, shapes, or text on this view",
+                    ):
+                        annotate_part_supplemental_image_dialog(dict(supplemental), project_id)
+                if st.button(
+                    "Delete",
+                    icon=":material/delete:",
+                    key=f"destructive_del_supp_{supp_id}",
+                    width="stretch",
+                ):
                     delete_part_image(supp_id)
                     record_audit_event(
                         project_id,
@@ -1437,16 +1834,14 @@ with image_col.container(border=True):
                     st.rerun()
 
     with st.expander("Add an exploded view, 3D CAD model, drawing, or web link", icon=":material/add_photo_alternate:"):
-        source_mode = st.radio(
-            "Source",
-            ["Upload file (Image or 3D STEP)", "Web link / URL"],
-            horizontal=True,
-            key=f"supp_source_mode_{part['id']}",
-        )
+        if st.session_state.pop(f"_clear_supp_caption_{part['id']}", False):
+            st.session_state.pop(f"supp_caption_{part['id']}", None)
+
         view_types = [
             "3D CAD Model (STEP)",
             "Exploded assembly",
             "Alternate CAD view",
+            "Previous primary image",
             "CAD / Drawing Link",
             "SharePoint Document",
             "Prototype photo",
@@ -1454,9 +1849,16 @@ with image_col.container(border=True):
             "Other",
         ]
         image_type = st.selectbox("View type", view_types, key=f"supp_type_{part['id']}")
-        caption = st.text_input("Caption / Notes", key=f"supp_caption_{part['id']}")
+        caption = st.text_input("Caption / Notes (optional)", key=f"supp_caption_{part['id']}")
 
-        if source_mode == "Upload file (Image or 3D STEP)":
+        supp_tab_upload_clip, supp_tab_url = st.tabs(["Upload / Clipboard", "Web Link / URL"])
+
+        with supp_tab_upload_clip:
+            staged_supp_upload_key = f"staged_supp_upload_{part['id']}"
+            last_supp_paste_hash_key = f"last_supp_paste_hash_{part['id']}"
+            last_supp_upload_hash_key = f"last_supp_upload_hash_{part['id']}"
+            discarded_supp_up_key = f"_discarded_supp_up_{part['id']}"
+
             extra = st.file_uploader(
                 "Upload image file or 3D CAD STEP file",
                 type=["png", "jpg", "jpeg", "webp", "step", "stp"],
@@ -1464,33 +1866,148 @@ with image_col.container(border=True):
                 help="Images: max 10 MB (PNG, JPG, WEBP) • 3D CAD: max 50 MB (STEP, STP)",
             )
             st.caption("Images: max **10 MB** (PNG, JPG, WEBP) • 3D CAD: max **50 MB** (STEP, STP)")
-            if st.button("Add file view", icon=":material/upload:", type="primary", key=f"btn_add_supp_file_{part['id']}"):
-                if not extra:
-                    st.error("Choose a file first.")
+
+            st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+            supp_clipboard_key = f"clipboard_supp_{part['id']}"
+            supp_pasted = clipboard_image(key=supp_clipboard_key)
+            supp_pasted_payload = getattr(supp_pasted, "image", None)
+            if supp_pasted_payload:
+                try:
+                    supp_clip_img = decode_clipboard_image(supp_pasted_payload)
+                    raw_sp_bytes = supp_clip_img["bytes"]
+                    sp_hash = hashlib.sha256(raw_sp_bytes).hexdigest()[:16]
+                    if st.session_state.get(last_supp_paste_hash_key) != sp_hash:
+                        st.session_state[last_supp_paste_hash_key] = sp_hash
+                        sp_name = supp_clip_img.get("name") or "clipboard_view.png"
+                        st.session_state[staged_supp_upload_key] = {
+                            "source": "clipboard",
+                            "source_hash": sp_hash,
+                            "original_bytes": raw_sp_bytes,
+                            "composite_bytes": raw_sp_bytes,
+                            "mime_type": _mime_for_part_image_suffix(Path(sp_name).suffix),
+                            "filename": sp_name,
+                            "annotations_json": "",
+                        }
+                except (OSError, ValueError) as exc:
+                    st.error(str(exc))
+
+            is_extra_step = bool(extra is not None and (extra.name or "").lower().endswith((".step", ".stp")))
+            if extra is not None and not is_extra_step:
+                raw_supp_bytes = extra.getvalue()
+                supp_hash = hashlib.sha256(raw_supp_bytes).hexdigest()[:16]
+                existing_staged_supp = st.session_state.get(staged_supp_upload_key)
+                if st.session_state.get(last_supp_upload_hash_key) != supp_hash or (
+                    not isinstance(existing_staged_supp, dict)
+                    and st.session_state.get(discarded_supp_up_key) != supp_hash
+                ):
+                    st.session_state[last_supp_upload_hash_key] = supp_hash
+                    st.session_state.pop(discarded_supp_up_key, None)
+                    st.session_state[staged_supp_upload_key] = {
+                        "source": "upload",
+                        "source_hash": supp_hash,
+                        "original_bytes": raw_supp_bytes,
+                        "composite_bytes": raw_supp_bytes,
+                        "mime_type": _mime_for_part_image_suffix(Path(extra.name or "image.png").suffix),
+                        "filename": extra.name or "view.png",
+                        "annotations_json": "",
+                    }
+            else:
+                st.session_state.pop(last_supp_upload_hash_key, None)
+                st.session_state.pop(discarded_supp_up_key, None)
+                existing_staged_supp = st.session_state.get(staged_supp_upload_key)
+                if isinstance(existing_staged_supp, dict) and existing_staged_supp.get("source") == "upload":
+                    st.session_state.pop(staged_supp_upload_key, None)
+
+            staged_supp_up = st.session_state.get(staged_supp_upload_key)
+            if isinstance(staged_supp_up, dict) and staged_supp_up.get("composite_bytes"):
+                with st.container(border=True):
+                    su_c1, su_c2 = st.columns([2, 3])
+                    with su_c1:
+                        st.image(staged_supp_up["composite_bytes"], width="stretch")
+                    with su_c2:
+                        has_supp_markup = _has_part_image_annotations(staged_supp_up.get("annotations_json"))
+                        if has_supp_markup:
+                            st.caption(":material/check_circle: **Markup applied** (editable vector shapes)")
+                        else:
+                            st.caption("Ready to add — click **Annotate / Add Shapes** to add callouts before saving.")
+                        if st.button(
+                            "Annotate / Add Shapes",
+                            icon=":material/draw:",
+                            key=f"btn_ann_staged_supp_up_{part['id']}",
+                            width="stretch",
+                        ):
+                            annotate_staged_part_image_dialog(staged_supp_upload_key)
+                        if st.button(
+                            "Discard",
+                            icon=":material/close:",
+                            key=f"destructive_discard_staged_supp_up_{part['id']}",
+                            width="stretch",
+                        ):
+                            if staged_supp_up.get("source") == "upload":
+                                st.session_state[discarded_supp_up_key] = staged_supp_up.get("source_hash")
+                            st.session_state.pop(staged_supp_upload_key, None)
+                            st.rerun()
+
+            if st.button("Add view", icon=":material/add_photo_alternate:", type="primary", key=f"btn_add_supp_file_{part['id']}"):
+                has_staged_supp = isinstance(staged_supp_up, dict) and bool(staged_supp_up.get("composite_bytes"))
+                if not has_staged_supp and not (extra is not None and is_extra_step):
+                    st.error("Please upload a file or paste a screenshot from your clipboard first.")
                 else:
                     try:
                         resolved_type = image_type
-                        if extra.name.lower().endswith((".step", ".stp")) and image_type == "Exploded assembly":
-                            resolved_type = "3D CAD Model (STEP)"
-                        add_part_image(part["id"], extra, resolved_type, caption)
+                        if has_staged_supp:
+                            is_supp_clip = staged_supp_up.get("source") == "clipboard"
+                            if is_supp_clip and image_type == "3D CAD Model (STEP)":
+                                resolved_type = "Alternate CAD view"
+                            has_supp_markup = _has_part_image_annotations(staged_supp_up.get("annotations_json"))
+                            comp_filename = _composite_upload_filename(staged_supp_up["filename"], has_supp_markup)
+                            comp_file = as_uploaded_file({"name": comp_filename, "bytes": staged_supp_up["composite_bytes"]})
+                            add_part_image(
+                                part["id"],
+                                comp_file,
+                                resolved_type,
+                                caption,
+                                original_file_bytes=staged_supp_up["original_bytes"],
+                                original_filename=staged_supp_up["filename"],
+                                annotations_json=str(staged_supp_up.get("annotations_json") or ""),
+                            )
+                            if staged_supp_up.get("source") == "upload":
+                                st.session_state[discarded_supp_up_key] = staged_supp_up.get("source_hash")
+                            st.session_state.pop(staged_supp_upload_key, None)
+                            audit_meta = {
+                                "part_id": str(part["id"]),
+                                "part_number": str(part["part_number"]),
+                                "supplemental_view_type_added": resolved_type,
+                                "source": "clipboard" if is_supp_clip else "upload",
+                                "filename": staged_supp_up["filename"],
+                                "annotated": bool(has_supp_markup),
+                            }
+                        else:
+                            if is_extra_step and image_type == "Exploded assembly":
+                                resolved_type = "3D CAD Model (STEP)"
+                            add_part_image(part["id"], extra, resolved_type, caption)
+                            audit_meta = {
+                                "part_id": str(part["id"]),
+                                "part_number": str(part["part_number"]),
+                                "supplemental_view_type_added": resolved_type,
+                                "source": "upload",
+                                "filename": extra.name,
+                            }
+                        st.session_state[f"_clear_supp_caption_{part['id']}"] = True
                         record_audit_event(
                             project_id,
                             "Parts",
                             "Add view",
                             1,
                             st.session_state.get("current_editor", ""),
-                            {
-                                "part_id": str(part["id"]),
-                                "part_number": str(part["part_number"]),
-                                "supplemental_view_type_added": resolved_type,
-                                "filename": extra.name,
-                            },
+                            audit_meta,
                         )
                         st.toast("Additional view added", icon=":material/check_circle:")
                         st.rerun()
                     except ValueError as ve:
                         st.error(str(ve))
-        else:
+
+        with supp_tab_url:
             extra_url = st.text_input(
                 "Web link URL (SharePoint, Windchill drawing, CAD viewer link)",
                 placeholder="https://...",
@@ -1501,6 +2018,7 @@ with image_col.container(border=True):
                     st.error("Please enter a valid URL starting with http:// or https://")
                 else:
                     add_part_image_url(part["id"], extra_url.strip(), image_type, caption)
+                    st.session_state[f"_clear_supp_caption_{part['id']}"] = True
                     record_audit_event(
                         project_id,
                         "Parts",

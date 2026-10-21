@@ -359,6 +359,33 @@ class EditableTableFooterTests(unittest.TestCase):
         self.assertTrue(empty_filtered.empty)
         self.assertIsInstance(empty_filtered.index, pd.RangeIndex)
 
+    def test_filter_table_renders_keyword_in_custom_container(self) -> None:
+        df = pd.DataFrame(
+            {
+                "id": ["id-1", "id-2"],
+                "part_number": ["P-100", "P-200"],
+                "description": ["Alpha", "Beta"],
+            }
+        )
+        controls = Mock()
+        keyword_slot = Mock()
+        keyword_slot.text_input.return_value = "P-200"
+        session_state: dict[str, object] = {}
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_filters.st, "container", return_value=controls),
+            patch.object(table_filters.st, "caption"),
+        ):
+            filtered = table_filters.filter_table(
+                df,
+                key="test_filter_slot",
+                search_columns=["part_number", "description"],
+                keyword_container=keyword_slot,
+            )
+        controls.text_input.assert_not_called()
+        keyword_slot.text_input.assert_called_once()
+        self.assertEqual(filtered["part_number"].tolist(), ["P-200"])
+
 
 if __name__ == "__main__":
     unittest.main()

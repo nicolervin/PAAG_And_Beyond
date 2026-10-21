@@ -704,6 +704,221 @@ class PartsCatalogFieldTests(unittest.TestCase):
             saved_row_2.iloc[0]["description"], "Added Before Clearing Filter"
         )
 
+    def test_manual_subsystem_and_part_code_override_pits_and_pinned_column_order(self) -> None:
+        self.assertEqual(
+            store.PART_CODE_VALUES,
+            ("NP", "NPNT", "ASM", "CP", "CP Other"),
+        )
+        tracker_record = {
+            "pits_id": "0777",
+            "part_number": "PITS-SUB-001",
+            "description": "Subsystem Override Part",
+            "quantity": 1,
+            "revision": "A",
+            "source_code": "1",
+            "part_code": "CP",
+            "used_bom": "Yes",
+            "status": "Active",
+            "subsystem": "Imported Subsystem",
+            "design_maturity": "Proto",
+            "comments": "",
+            "workstation": "WS-1",
+            "source_row": 5,
+            "source_payload": {"part_code": "CP"},
+        }
+        store.import_pits_id_snapshot(
+            self.project_id,
+            [tracker_record],
+            models=[],
+            editor_name="Tester",
+            scenario_id=self.scenario_id,
+        )
+        table_before = store.project_table("parts", self.project_id, "part_number")
+        row_before = table_before.loc[table_before["part_number"].eq("PITS-SUB-001")].iloc[0]
+        self.assertEqual(row_before["subsystem"], "Imported Subsystem")
+        self.assertEqual(row_before["part_code"], "CP")
+
+        edited = table_before.copy()
+        target_mask = edited["part_number"].eq("PITS-SUB-001")
+        edited.loc[target_mask, "subsystem"] = "Manual Subsystem"
+        edited.loc[target_mask, "part_code"] = "NP"
+        store.update_part_rows(self.project_id, edited)
+
+        table_after = store.project_table("parts", self.project_id, "part_number")
+        row_after = table_after.loc[table_after["part_number"].eq("PITS-SUB-001")].iloc[0]
+        self.assertEqual(row_after["subsystem"], "Manual Subsystem")
+        self.assertEqual(row_after["part_code"], "NP")
+
+        page_source = (store.ROOT / "app_pages" / "parts.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '"view_details", "part_number", "description", "active", "photo_status",',
+            page_source,
+        )
+        self.assertIn('on_click=open_part_details, key="parts_view_details", pinned=True', page_source)
+        self.assertIn('st.column_config.TextColumn("Part number", required=True, pinned=True)', page_source)
+        self.assertIn('st.column_config.TextColumn("Part Name", width="large", pinned=True)', page_source)
+        self.assertIn('"part_code": st.column_config.SelectboxColumn(', page_source)
+        self.assertIn('[":material/visibility: View"]', page_source)
+        self.assertIn(
+            'st.expander("Filter columns", icon=":material/filter_list:", expanded=False)',
+            page_source,
+        )
+        self.assertNotIn(
+            "Type or paste new parts directly into the blank entry row, then save.",
+            page_source,
+        )
+
+    def test_updated_at_only_changes_for_edited_line_items(self) -> None:
+        table_before = store.project_table(
+            "parts", self.project_id, "part_number", scenario_id=self.scenario_id
+        ).reset_index(drop=True)
+        self.assertGreaterEqual(len(table_before), 2)
+        edited_id = str(table_before.loc[0, "id"])
+        untouched_id = str(table_before.loc[1, "id"])
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE parts SET updated_at=? WHERE id=?",
+                ("2025-01-01T00:00:00+00:00", edited_id),
+            )
+            conn.execute(
+                "UPDATE parts SET updated_at=? WHERE id=?",
+                ("2025-01-02T00:00:00+00:00", untouched_id),
+            )
+
+        table_seeded = store.project_table(
+            "parts", self.project_id, "part_number", scenario_id=self.scenario_id
+        ).reset_index(drop=True)
+        parts_to_save = table_seeded.copy()
+        parts_to_save["revision"] = parts_to_save["design_maturity"]
+        parts_to_save.loc[parts_to_save["id"].eq(edited_id), "description"] = "Edited Single Row Name"
+        activity_by_part = {
+            str(row["id"]): bool(row.get("active", True))
+            for _, row in parts_to_save.iterrows()
+        }
+        store.update_part_rows(
+            self.project_id,
+            parts_to_save,
+            scenario_id=self.scenario_id,
+            activity_by_part=activity_by_part,
+        )
+        store.update_part_feature_rules(
+            self.project_id,
+            {str(row["id"]): ["All models"] for _, row in parts_to_save.iterrows()},
+        )
+
+        table_after = store.project_table(
+            "parts", self.project_id, "part_number", scenario_id=self.scenario_id
+        )
+        edited_after = table_after.loc[table_after["id"].eq(edited_id)].iloc[0]
+        untouched_after = table_after.loc[table_after["id"].eq(untouched_id)].iloc[0]
+        self.assertNotEqual(edited_after["updated_at"], "2025-01-01T00:00:00+00:00")
+        self.assertEqual(untouched_after["updated_at"], "2025-01-02T00:00:00+00:00")
+
+    def test_manual_bom_source_differentiated_from_direct_parts_catalog_edits(self) -> None:
+        model_id = str(uuid4())
+        store.execute(
+            """INSERT INTO project_models (id, project_id, model_number, description, active, source_payload, updated_at)
+               VALUES (?, ?, 'TEST-MDL-1', 'Test Model', 1, '{}', ?)""",
+            (model_id, self.project_id, store.now_iso()),
+        )
+        store.save_manual_model_bom(
+            self.project_id,
+            model_id,
+            [
+                {
+                    "part_number": "MBOM-NEW-001",
+                    "description": "Created from Manual BOM",
+                    "level": 1,
+                    "quantity": 1,
+                },
+                {
+                    "part_number": "MBOM-NEW-002",
+                    "description": "Stays Manual BOM",
+                    "level": 2,
+                    "quantity": 2,
+                },
+            ],
+            auto_add_parts=True,
+            editor="Tester",
+        )
+        catalog = store.project_table(
+            "parts", self.project_id, "part_number", scenario_id=self.scenario_id
+        )
+        p1 = catalog.loc[catalog["part_number"].eq("MBOM-NEW-001")].iloc[0]
+        p2 = catalog.loc[catalog["part_number"].eq("MBOM-NEW-002")].iloc[0]
+        self.assertEqual(p1["source"], "Manual BOM")
+        self.assertEqual(p2["source"], "Manual BOM")
+
+        edited = catalog.copy()
+        edited["revision"] = edited["design_maturity"]
+        edited.loc[edited["part_number"].eq("MBOM-NEW-001"), "notes"] = "Edited in catalog"
+        store.update_part_rows(
+            self.project_id,
+            edited,
+            scenario_id=self.scenario_id,
+            activity_by_part={
+                str(row["id"]): bool(row.get("active", True))
+                for _, row in edited.iterrows()
+            },
+        )
+        catalog_after = store.project_table(
+            "parts", self.project_id, "part_number", scenario_id=self.scenario_id
+        )
+        p1_after = catalog_after.loc[catalog_after["part_number"].eq("MBOM-NEW-001")].iloc[0]
+        p2_after = catalog_after.loc[catalog_after["part_number"].eq("MBOM-NEW-002")].iloc[0]
+        self.assertEqual(p1_after["source"], "Manual")
+        self.assertEqual(p2_after["source"], "Manual BOM")
+
+    def test_promote_additional_view_to_primary_swaps_existing_primary(self) -> None:
+        from utils.clipboard_image import as_uploaded_file
+
+        part_id = str(self.edited_parts().iloc[0]["id"])
+        img1 = as_uploaded_file({"name": "first.png", "bytes": b"PNG_DATA_1"})
+        img2 = as_uploaded_file({"name": "second.png", "bytes": b"PNG_DATA_2"})
+        try:
+            store.set_part_image(
+                part_id,
+                img1,
+                original_file_bytes=b"ORIG_DATA_1",
+                original_filename="first.png",
+                annotations_json='[{"type":"arrow"}]',
+                caption="First Primary Caption",
+            )
+            store.set_part_image(
+                part_id,
+                img2,
+                original_file_bytes=b"ORIG_DATA_2",
+                original_filename="second.png",
+                annotations_json="",
+                caption="Second Primary Caption",
+            )
+            supp_before = store.part_images(part_id)
+            self.assertEqual(len(supp_before), 1)
+            archived_id = str(supp_before[0]["id"])
+            self.assertEqual(supp_before[0]["caption"], "First Primary Caption")
+
+            res = store.promote_part_image_to_primary(part_id, archived_id)
+            self.assertTrue(res["had_previous_primary"])
+
+            primary_row = store.query(
+                "SELECT image_path, original_image_path, annotations_json, image_caption FROM parts WHERE id=?",
+                (part_id,),
+            )[0]
+            self.assertEqual(primary_row["image_caption"], "First Primary Caption")
+            self.assertEqual(primary_row["annotations_json"], '[{"type":"arrow"}]')
+            self.assertEqual(Path(primary_row["image_path"]).read_bytes(), b"PNG_DATA_1")
+            self.assertEqual(Path(primary_row["original_image_path"]).read_bytes(), b"ORIG_DATA_1")
+
+            supp_after = store.part_images(part_id)
+            self.assertEqual(len(supp_after), 1)
+            self.assertNotEqual(str(supp_after[0]["id"]), archived_id)
+            self.assertEqual(supp_after[0]["caption"], "Second Primary Caption")
+            self.assertEqual(Path(supp_after[0]["image_path"]).read_bytes(), b"PNG_DATA_2")
+        finally:
+            store.clear_part_image(part_id)
+            for s in store.part_images(part_id):
+                store.delete_part_image(str(s["id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

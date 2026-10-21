@@ -49,7 +49,7 @@ from utils.table_filters import (
 
 project_id = st.session_state.get("project_id")
 page_title_with_scope("Complexity Trees", scope="project")
-st.caption("Translate each Official model number into the Common name and description the IE and lean team use during planning.")
+st.caption("Translate each Model number into the Model name and description the IE and lean team use during planning.")
 if not project_id:
     st.stop()
 model_editor_key = apply_pending_table_editor_reset("model_definitions_editor_v2")
@@ -76,7 +76,7 @@ has_unsaved_changes = table_has_unsaved_changes(
     model_editor_key, native_row_selection=True
 )
 editable_table_heading("Model information")
-st.caption("Official model number stays tied to the official source. Edit the Common name and turn off models that should not appear in the Parts Catalog.")
+st.caption("Model number stays tied to the official source. Edit the Model name and turn off models that should not appear in the Parts Catalog.")
 st.caption("Type or paste new model rows directly into the blank entry row, then save.")
 definition_columns = [
     "id", "model_number", "display_name", "eau", "description", "active", "notes",
@@ -101,7 +101,7 @@ models_editor_rows = direct_entry_editor_rows(
     visible_models,
     editor_key=model_editor_key,
     sort_columns=["active", "display_name", "model_number", "eau", "description"],
-    labels={"display_name": "Common name", "model_number": "Official model number", "eau": "EAU"},
+    labels={"display_name": "Model name", "model_number": "Model number", "eau": "EAU"},
 )
 edited_models = st.data_editor(
     models_editor_rows,
@@ -120,8 +120,16 @@ edited_models = st.data_editor(
             default=True,
             help="Active models appear as choices in the Parts Catalog.",
         ),
-        "display_name": st.column_config.TextColumn("Common name", width="medium"),
-        "model_number": st.column_config.TextColumn("Official model number", required=True),
+        "display_name": st.column_config.TextColumn(
+            "Model name",
+            width="medium",
+            help="Friendly name used by the team to recognize this model during planning (for example, High End Stainless).",
+        ),
+        "model_number": st.column_config.TextColumn(
+            "Model number",
+            required=True,
+            help="Unique model identifier from the product lineup or BOM (for example, GFE28GYNFS).",
+        ),
         "eau": st.column_config.NumberColumn(
             "EAU",
             min_value=0,
@@ -129,7 +137,11 @@ edited_models = st.data_editor(
             format="%.1f",
             help="Estimated annual usage for this model.",
         ),
-        "description": st.column_config.TextColumn("Description", width="large"),
+        "description": st.column_config.TextColumn(
+            "Description",
+            width="large",
+            help="Optional summary of the model's key configuration or market details.",
+        ),
         "notes": None,
         "updated_at": None,
     },
@@ -293,7 +305,7 @@ editable_table_heading("Feature definitions")
 
 st.caption(
     "Define the manufacturing characteristics that matter to this project. "
-    "Enter allowed choices as a comma-separated list; for example, Dispenser, Non-dispenser."
+    "Group each **Feature** (product attribute) under a **Category** and optional Parts Catalog **Subsystem**, then list its **Allowed choices** (options) separated by commas — for example, Dispenser, Non-dispenser. Hover over any column header for details."
 )
 feature_columns = ["id", "active", "category", "subsystem", "name", "allowed_choices", "description"]
 if features.empty:
@@ -341,23 +353,36 @@ edited_features = st.data_editor(
     column_order=["active", "category", "subsystem", "name", "allowed_choices", "description"],
     column_config={
         "id": None,
-        "active": st.column_config.CheckboxColumn("Active", default=True),
+        "active": st.column_config.CheckboxColumn(
+            "Active",
+            default=True,
+            help="When checked, this feature appears in the Complexity tree and is used to determine part applicability across models.",
+        ),
         "category": st.column_config.TextColumn(
-            "Category", required=True, help="A team-defined grouping such as Door, Controls, or Installation."
+            "Category",
+            required=True,
+            help="High-level functional area or product grouping (for example, Door, Controls, or Refrigeration) used to organize related features in the Complexity tree and visual.",
         ),
         "subsystem": st.column_config.SelectboxColumn(
             "Subsystem",
             options=subsystem_options,
             required=False,
-            help="Optional Parts Catalog subsystem filter to limit which parts can receive this feature during auto-assign.",
+            help="Optional Parts Catalog subsystem link. When set, auto-assigning part applicability from the Complexity tree only matches parts that belong to this subsystem.",
         ),
         "name": st.column_config.TextColumn(
-            "Feature", required=True, help="A manufacturing-relevant characteristic."
+            "Feature",
+            required=True,
+            help="Specific product attribute or variation that differs between models and affects which parts or assembly steps are needed (for example, Ice Maker, Handle Style, or Cord Type).",
         ),
         "allowed_choices": st.column_config.TextColumn(
-            "Allowed choices", required=True, help="Separate choices with commas."
+            "Allowed choices",
+            required=True,
+            help="Comma-separated list of possible options a model can have for this feature (for example, Dispenser, Non-dispenser). Each active model is assigned one of these options in the Complexity tree below.",
         ),
-        "description": st.column_config.TextColumn("Description"),
+        "description": st.column_config.TextColumn(
+            "Description",
+            help="Optional notes explaining this feature or when each option applies.",
+        ),
     },
 )
 feature_actions = editable_table_footer(
@@ -646,9 +671,16 @@ else:
     tree_config = {
         "id": None,
         "model_id": None,
-        "common_name": st.column_config.TextColumn("Common name", width="medium"),
+        "common_name": st.column_config.TextColumn(
+            "Model name",
+            width="medium",
+            help="Friendly name defined for this model in Model information above.",
+        ),
         "official_model_number": st.column_config.TextColumn(
-            "Official model number", width="medium", pinned=True
+            "Model number",
+            width="medium",
+            pinned=True,
+            help="Unique model identifier from Model information above.",
         ),
     }
     for _, feature in active_features.iterrows():
@@ -658,7 +690,8 @@ else:
             f"{feature['category']} · {feature['name']}",
             options=choices,
             width="medium",
-            help=str(feature.get("description") or ""),
+            help=str(feature.get("description") or "").strip()
+            or "Select which option from Allowed choices applies to each model for this feature.",
         )
     for spacer_column in spacer_columns:
         tree_config[spacer_column] = st.column_config.TextColumn(
@@ -787,10 +820,10 @@ else:
             "These active models match on every feature that has a value assigned on both models."
         )
         for conflict in conflicts:
-            left_name = conflict.get("left_common_name") or "No common name"
-            left_number = conflict.get("left_official_model_number") or "No official model number"
-            right_name = conflict.get("right_common_name") or "No common name"
-            right_number = conflict.get("right_official_model_number") or "No official model number"
+            left_name = conflict.get("left_common_name") or "No model name"
+            left_number = conflict.get("left_official_model_number") or "No model number"
+            right_name = conflict.get("right_common_name") or "No model name"
+            right_number = conflict.get("right_official_model_number") or "No model number"
             st.write(
                 f"{left_name} ({left_number}) and {right_name} ({right_number}) "
                 f"— {int(conflict.get('mutual_feature_count', 0))} mutually assigned feature(s) match."
@@ -881,9 +914,14 @@ else:
         placeholder="Select one or more categories",
         key=visual_category_key,
     )
+    visual_model_label_key = f"complexity_tree_visual_model_label_{project_id}"
+    if st.session_state.get(visual_model_label_key) == "Common name":
+        st.session_state[visual_model_label_key] = "Model name"
+    elif st.session_state.get(visual_model_label_key) == "Official model number":
+        st.session_state[visual_model_label_key] = "Model number"
     visual_model_label = st.selectbox(
         "Model label",
-        ["", "Common name", "Official model number"],
+        ["", "Model name", "Model number"],
         index=0,
         format_func=lambda value: value or "Select a model label",
         key=f"complexity_tree_visual_model_label_{project_id}",
@@ -992,13 +1030,13 @@ else:
         for group in visual_model_groups:
             labels = (
                 group["model_names"]
-                if visual_model_label == "Common name"
+                if visual_model_label == "Model name"
                 else group["model_numbers"]
             )
-            if visual_model_label == "Common name":
+            if visual_model_label == "Model name":
                 labels = list(dict.fromkeys(labels))
             model_labels = "<br>".join(
-                escape(str(label or "Common name not defined")) for label in labels
+                escape(str(label or "Model name not defined")) for label in labels
             )
             visual_html.append(
                 '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
@@ -1120,13 +1158,13 @@ else:
         for group in visual_model_groups:
             labels = (
                 group["model_names"]
-                if visual_model_label == "Common name"
+                if visual_model_label == "Model name"
                 else group["model_numbers"]
             )
-            if visual_model_label == "Common name":
+            if visual_model_label == "Model name":
                 labels = list(dict.fromkeys(labels))
             model_labels = "<br>".join(
-                escape(str(label or "Common name not defined")) for label in labels
+                escape(str(label or "Model name not defined")) for label in labels
             )
             visual_html.append(
                 '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
