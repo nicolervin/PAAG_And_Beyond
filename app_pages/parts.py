@@ -86,12 +86,19 @@ PARTS_VIEW_KEY = "parts_catalog"
 LEGACY_PARTS_COLUMN_ORDER_PREFIX = [
     "view_details", "active", "photo_status", "part_number", "description",
 ]
-DEFAULT_PARTS_COLUMN_ORDER = [
+PREVIOUS_DEFAULT_PARTS_COLUMN_ORDER = [
     "view_details", "part_number", "description", "active", "photo_status",
     "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
     "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
     "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
     "applicability_status", "notes", "source", "updated_display",
+]
+DEFAULT_PARTS_COLUMN_ORDER = [
+    "view_details", "part_number", "description", "active", "photo_status",
+    "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
+    "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
+    "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
+    "applicability_status", "notes", "source", "created_display", "updated_display",
 ]
 PARTS_COLUMN_LABELS = {
     "view_details": "Details", "active": "Active", "photo_status": "Photo status",
@@ -103,7 +110,7 @@ PARTS_COLUMN_LABELS = {
     "pits_tracker_number": "PITS ID", "source_code": "Source Code",
     "make_buy": "Make vs Buy", "feature_applicability": "Feature",
     "applicability_status": "Applicability status", "notes": "Notes",
-    "source": "Source", "updated_display": "Updated",
+    "source": "Source", "created_display": "Created", "updated_display": "Updated",
 }
 
 
@@ -161,6 +168,8 @@ elif saved_parts_column_order[:5] == LEGACY_PARTS_COLUMN_ORDER_PREFIX:
         "view_details", "part_number", "description", "active", "photo_status",
         *saved_parts_column_order[5:],
     ]
+if saved_parts_column_order == PREVIOUS_DEFAULT_PARTS_COLUMN_ORDER:
+    saved_parts_column_order = DEFAULT_PARTS_COLUMN_ORDER.copy()
 current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v2"
 if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state["_parts_page_mounted_token"] = current_mount_token
@@ -195,7 +204,7 @@ else:
     elif normalized_view_draft != current_view_draft:
         st.session_state[parts_view_draft_key] = normalized_view_draft
 
-parts = project_table("parts", project_id, "part_number")
+parts = project_table("parts", project_id, "created_at ASC, rowid ASC")
 models = project_models(project_id)
 features = complexity_features(project_id)
 active_features = features.loc[features["active"].fillna(1).astype(bool)].copy() if not features.empty else features
@@ -375,7 +384,7 @@ editable_columns = [
     "design_engineer", "technology_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
     "ame_tooling_engineer", "part_code", "pits_tracker_number", "source_code", "make_buy",
     "quantity", "revision", "model_applicability", "notes", "source", "image_path",
-    "updated_at", "assembly_id", "assembly_number",
+    "created_at", "updated_at", "assembly_id", "assembly_number",
 ]
 parts_for_editing = parts.reindex(columns=editable_columns).copy()
 parts_for_editing["subsystem"] = parts_for_editing["subsystem"].fillna("").astype("string")
@@ -392,7 +401,7 @@ for col in (
     "id", "part_number", "description", "ppm", "buyer_gcl", "pmqe_aqe",
     "ame_tooling_engineer", "part_code", "pits_tracker_number", "make_buy",
     "revision", "model_applicability", "notes", "source", "image_path",
-    "updated_at", "assembly_id", "assembly_number",
+    "created_at", "updated_at", "assembly_id", "assembly_number",
 ):
     parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
 linked_assembly_by_part = {
@@ -435,13 +444,17 @@ parts_for_editing["view_details"] = pd.Series(
 parts_for_editing["photo_status"] = parts_for_editing["image_path"].apply(
     lambda value: "✅ Added" if str(value or "").strip() else "❌ Missing"
 )
+created_values = pd.to_datetime(parts_for_editing["created_at"], errors="coerce", utc=True)
+parts_for_editing["created_display"] = created_values.dt.strftime(
+    "%b %d, %Y %H:%M"
+).fillna("")
 updated_values = pd.to_datetime(parts_for_editing["updated_at"], errors="coerce", utc=True)
 parts_for_editing["updated_display"] = updated_values.dt.strftime(
     "%b %d, %Y %H:%M"
 ).fillna("")
 
 
-for col in ("applicability_status", "photo_status", "updated_display"):
+for col in ("applicability_status", "photo_status", "created_display", "updated_display"):
     parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
 
 
@@ -503,6 +516,7 @@ def _build_draft_added_part_row(raw_row: dict[str, object]) -> dict[str, object]
         "notes": "" if _is_blank_cell(raw_row.get("notes")) else str(raw_row.get("notes")).strip(),
         "source": "Manual",
         "image_path": "",
+        "created_at": "",
         "updated_at": "",
         "assembly_id": "",
         "assembly_number": "",
@@ -511,6 +525,7 @@ def _build_draft_added_part_row(raw_row: dict[str, object]) -> dict[str, object]
         "applicability_status": "; ".join(feature_list),
         "view_details": ":material/visibility: View",
         "photo_status": "❌ Missing",
+        "created_display": "",
         "updated_display": "",
     }
 
@@ -613,7 +628,7 @@ if qp_part_id or qp_part_number:
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
-            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "updated_at",
+            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "created_at", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.session_state["parts_scroll_to_details"] = True
@@ -690,7 +705,7 @@ with filter_expander:
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
-            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "updated_at",
+            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "created_at", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.rerun()
@@ -702,14 +717,21 @@ candidate_sort_columns = [
     "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
     "pmqe_aqe", "ame_tooling_engineer", "part_code", "pits_tracker_number",
     "source_code", "make_buy", "feature_applicability",
-    "applicability_status", "notes", "source", "updated_at",
+    "applicability_status", "notes", "source", "created_at", "updated_at",
 ]
+sort_column_display_map = {
+    "created_at": "created_display",
+    "updated_at": "updated_display",
+}
 with sort_controls_slot:
     parts_editor_rows = direct_entry_editor_rows(
         parts_for_editing,
         editor_key=parts_editor_key,
         sort_columns=[
-            col for col in candidate_sort_columns if col in parts_column_order
+            col
+            for col in candidate_sort_columns
+            if sort_column_display_map.get(col, col) in parts_column_order
+            or col == "created_at"
         ],
         labels={
             "photo_status": "Photo status", "part_number": "Part number",
@@ -720,9 +742,11 @@ with sort_controls_slot:
             "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
             "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
             "feature_applicability": "Feature",
-            "applicability_status": "Applicability status", "updated_at": "Updated",
+            "applicability_status": "Applicability status",
+            "created_at": "Created", "updated_at": "Updated",
         },
         additional_unsaved_changes=has_parts_draft,
+        default_sort_column="created_at",
     )
 # Let the mounted editor retain ordinary cell changes without replacing its
 # data source on every edit rerun. Reapply the stable-ID draft only after
@@ -775,7 +799,8 @@ edited_parts = st.data_editor(
     disabled=[
         col for col in [
             "id", "model_applicability", "photo_status",
-            "applicability_status", "source", "image_path", "updated_at",
+            "applicability_status", "source", "image_path", "created_at",
+            "created_display", "updated_at",
             "updated_display", "assembly_id", "assembly_number",
         ]
         if col in visible_editor_columns
@@ -897,6 +922,12 @@ edited_parts = st.data_editor(
         "applicability_status": None,
         "notes": st.column_config.TextColumn("Notes", width="large"),
         "source": st.column_config.TextColumn("Source", default=""),
+        "created_at": None,
+        "created_display": st.column_config.TextColumn(
+            "Created",
+            default="",
+            help="Timestamp when this part record was first created in the catalog.",
+        ),
         "updated_at": None,
         "updated_display": st.column_config.TextColumn("Updated", default=""),
     },
@@ -926,7 +957,7 @@ export_columns = [
     "design_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
     "ame_tooling_engineer", "part_code", "pits_tracker_number",
     "source_code", "make_buy", "feature_applicability",
-    "photo_status", "notes", "source", "updated_at",
+    "photo_status", "notes", "source", "created_at", "updated_at",
 ]
 export_dataframe = parts_for_editing.reindex(columns=export_columns)
 export_hash = _hash_filtered_export(export_dataframe)
@@ -1008,7 +1039,12 @@ def confirm_bulk_part_delete() -> None:
         st.error(str(exc))
         return
     st.warning(
-        f"This will permanently delete {len(pending_ids)} part(s), their photos, and their fishbone uses."
+        f"This will permanently delete {len(pending_ids)} part(s), their photos, and their Fishbone uses."
+    )
+    st.caption(
+        f"Downstream effects: Removes {impact.get('fishbone_uses', 0)} Fishbone placement(s) and unlinks these parts from "
+        f"{impact.get('process_uses', 0)} Process at a Glance part requirement(s). "
+        "Yamazumi pitches and Process at a Glance steps themselves will not be deleted."
     )
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_bulk_part_delete"):
@@ -1108,7 +1144,12 @@ if save_part_table:
         if missing_rule.any():
             raise ValueError("Every part needs All models or at least one feature choice.")
         parts_to_save = edited_parts.drop(
-            columns=["view_details", "active", "photo_status", "feature_applicability", "applicability_status", "updated_display", "assembly_id", "assembly_number"]
+            columns=[
+                "view_details", "active", "photo_status", "feature_applicability",
+                "applicability_status", "created_display", "updated_display",
+                "assembly_id", "assembly_number",
+            ],
+            errors="ignore",
         ).copy()
         new_row_mask = (
             parts_to_save["id"].isna()
@@ -1333,7 +1374,7 @@ def annotate_part_primary_image_dialog(part_row: dict, active_project_id: str) -
     data_url = f"data:{mime};base64,{b64_str}"
 
     st.caption(
-        f"**Part:** `{part_row.get('part_number', '')}` — Draw arrows, callouts, shapes, or text. "
+        f"**Part:** `{part_row.get('part_number', '')}` — Crop, rotate in 90° increments, or draw arrows, callouts, shapes, and text. "
         "Click **💾 Apply & Save Markup** in the toolbar when finished."
     )
     annotator_res = image_annotator(
@@ -1389,7 +1430,7 @@ def annotate_part_supplemental_image_dialog(supplemental: dict, active_project_i
 
     view_label = supplemental.get("caption") or supplemental.get("image_type") or "Additional View"
     st.caption(
-        f"**View:** {view_label} — Draw arrows, callouts, shapes, or text. "
+        f"**View:** {view_label} — Crop, rotate in 90° increments, or draw arrows, callouts, shapes, and text. "
         "Click **💾 Apply & Save Markup** in the toolbar when finished."
     )
     annotator_res = image_annotator(
@@ -1437,7 +1478,7 @@ def annotate_staged_part_image_dialog(staged_state_key: str) -> None:
     data_url = f"data:{mime};base64,{b64_str}"
 
     st.caption(
-        "Draw arrows, callouts, shapes, or text on the staged part image. "
+        "Crop, rotate in 90° increments, or draw arrows, callouts, shapes, and text on the staged part image. "
         "Click **💾 Apply & Save Markup** in the toolbar when finished."
     )
     annotator_res = image_annotator(
@@ -1482,16 +1523,8 @@ with image_col.container(border=True):
         with c_link1:
             st.link_button("Open CAD / Web Link", raw_img, icon=":material/open_in_new:")
         with c_link2:
-            if st.button("Remove", icon=":material/delete:", key=f"destructive_del_prim_url_{part['id']}", help="Remove this CAD web link"):
-                clear_part_image(part["id"])
-                record_audit_event(
-                    project_id,
-                    "Parts",
-                    "Remove CAD image link",
-                    1,
-                    st.session_state.get("current_editor", ""),
-                    {"part_id": str(part["id"]), "part_number": str(part["part_number"])},
-                )
+            if st.button("Delete", icon=":material/delete:", key=f"destructive_del_prim_url_{part['id']}", help="Delete this CAD web link"):
+                st.session_state[f"parts_pending_del_prim_url_{part['id']}"] = True
                 st.rerun()
     elif raw_img:
         image_path = Path(raw_img)
@@ -1508,25 +1541,17 @@ with image_col.container(border=True):
                     icon=":material/draw:",
                     key=f"btn_ann_prim_img_{part['id']}",
                     width="stretch",
-                    help="Draw arrows, callouts, shapes, or text on this part image",
+                    help="Crop, rotate 90°, or draw arrows, callouts, shapes, and text on this part image",
                 ):
                     annotate_part_primary_image_dialog(dict(part), project_id)
             with c_prim_act2:
                 if st.button(
-                    "Remove image",
+                    "Remove Image",
                     icon=":material/delete:",
                     key=f"destructive_del_prim_img_{part['id']}",
                     width="stretch",
                 ):
-                    clear_part_image(part["id"])
-                    record_audit_event(
-                        project_id,
-                        "Parts",
-                        "Remove CAD image",
-                        1,
-                        st.session_state.get("current_editor", ""),
-                        {"part_id": str(part["id"]), "part_number": str(part["part_number"])},
-                    )
+                    st.session_state[f"parts_pending_del_prim_img_{part['id']}"] = True
                     st.rerun()
         else:
             st.caption("No image attached.")
@@ -1629,14 +1654,12 @@ with image_col.container(border=True):
                     ):
                         annotate_staged_part_image_dialog(staged_prim_key)
                     if st.button(
-                        "Discard",
-                        icon=":material/close:",
+                        "Delete",
+                        icon=":material/delete:",
                         key=f"destructive_discard_staged_prim_{part['id']}",
                         width="stretch",
                     ):
-                        if staged_prim.get("source") == "upload":
-                            st.session_state[discarded_prim_up_key] = staged_prim.get("source_hash")
-                        st.session_state.pop(staged_prim_key, None)
+                        st.session_state[f"parts_pending_discard_staged_prim_{part['id']}"] = True
                         st.rerun()
 
         if st.button("Save Primary Image", type="primary", icon=":material/add_photo_alternate:", key=f"btn_save_img_{part['id']}"):
@@ -1725,6 +1748,200 @@ with image_col.container(border=True):
                 )
                 st.rerun()
 
+    @st.dialog("Delete Primary CAD / Web Link?", dismissible=False)
+    def _confirm_del_prim_url_dialog() -> None:
+        st.warning(f"Delete the primary CAD / web link from part **{part['part_number']}**?")
+        st.caption(
+            "Downstream effects: This removes the primary web link from this part across the Parts Catalog, Fishbone, and Process at a Glance. "
+            "The part record, its BOM and Fishbone uses, Process pairings, and any Additional views remain intact."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_del_prim_url_{part['id']}"):
+            st.session_state.pop(f"parts_pending_del_prim_url_{part['id']}", None)
+            st.rerun()
+        if actions.button(
+            "Delete",
+            type="primary",
+            icon=":material/delete:",
+            key=f"destructive_confirm_del_prim_url_{part['id']}",
+        ):
+            clear_part_image(part["id"])
+            record_audit_event(
+                project_id,
+                "Parts",
+                "Remove CAD image link",
+                1,
+                st.session_state.get("current_editor", ""),
+                {"part_id": str(part["id"]), "part_number": str(part["part_number"])},
+            )
+            st.session_state.pop(f"parts_pending_del_prim_url_{part['id']}", None)
+            st.rerun()
+
+    @st.dialog("Remove Primary Part Image?", dismissible=False)
+    def _confirm_del_prim_img_dialog() -> None:
+        st.markdown(f"Choose how to remove the primary image from part **{part['part_number']}**:")
+        remove_mode = st.radio(
+            "Removal action",
+            options=["move", "delete"],
+            format_func=lambda opt: (
+                "Remove as the primary image and move to Additional views"
+                if opt == "move"
+                else "Permanently delete the image"
+            ),
+            key=f"prim_img_remove_mode_{part['id']}",
+            label_visibility="collapsed",
+        )
+        if remove_mode == "move":
+            st.info(
+                f"Move the current primary image for **{part['part_number']}** to **Additional views** and clear the Primary Image slot?"
+            )
+            st.caption(
+                "Downstream effects: This removes the image as the primary thumbnail across the Parts Catalog, Fishbone, and Process at a Glance, "
+                "while preserving the image file, its editable annotations, and its caption in this part's Additional views."
+            )
+        else:
+            st.warning(f"Permanently delete the primary image from part **{part['part_number']}**?")
+            st.caption(
+                "Downstream effects: This permanently deletes the primary image file and its annotations from this part across the Parts Catalog, Fishbone, and Process at a Glance. "
+                "The part record, its BOM and Fishbone uses, Process pairings, and any Additional views remain intact."
+            )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_del_prim_img_{part['id']}"):
+            st.session_state.pop(f"parts_pending_del_prim_img_{part['id']}", None)
+            st.session_state.pop(f"prim_img_remove_mode_{part['id']}", None)
+            st.rerun()
+        confirm_label = "Remove & Move to Additional Views" if remove_mode == "move" else "Permanently Delete Image"
+        confirm_icon = ":material/collections:" if remove_mode == "move" else ":material/delete:"
+        if actions.button(
+            confirm_label,
+            type="primary",
+            icon=confirm_icon,
+            key=f"destructive_confirm_del_prim_img_{part['id']}",
+        ):
+            move_to_additional = remove_mode == "move"
+            archived = clear_part_image(part["id"], move_to_additional_views=move_to_additional)
+            record_audit_event(
+                project_id,
+                "Parts",
+                "Move primary image to additional views" if move_to_additional else "Remove CAD image",
+                1,
+                st.session_state.get("current_editor", ""),
+                {
+                    "part_id": str(part["id"]),
+                    "part_number": str(part["part_number"]),
+                    "moved_to_additional_views": bool(archived),
+                },
+            )
+            st.session_state.pop(f"parts_pending_del_prim_img_{part['id']}", None)
+            st.session_state.pop(f"prim_img_remove_mode_{part['id']}", None)
+            st.toast(
+                "Primary Image removed and moved to Additional views"
+                if archived
+                else "Primary Image permanently deleted",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+    @st.dialog("Delete Staged Primary Image?", dismissible=False)
+    def _confirm_discard_staged_prim_dialog() -> None:
+        st.warning(f"Delete the unsaved staged image for part **{part['part_number']}**?")
+        st.caption(
+            "Downstream effects: This removes the unsaved upload or clipboard capture and any unsaved markup/crop/rotation before saving. "
+            "The part's currently saved Primary Image and Additional views will not be changed."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_discard_staged_prim_{part['id']}"):
+            st.session_state.pop(f"parts_pending_discard_staged_prim_{part['id']}", None)
+            st.rerun()
+        if actions.button(
+            "Delete",
+            type="primary",
+            icon=":material/delete:",
+            key=f"destructive_confirm_discard_staged_prim_{part['id']}",
+        ):
+            cur_staged = st.session_state.get(staged_prim_key)
+            if isinstance(cur_staged, dict) and cur_staged.get("source") == "upload":
+                st.session_state[discarded_prim_up_key] = cur_staged.get("source_hash")
+            st.session_state.pop(staged_prim_key, None)
+            st.session_state.pop(f"parts_pending_discard_staged_prim_{part['id']}", None)
+            st.rerun()
+
+    @st.dialog("Delete Additional View?", dismissible=False)
+    def _confirm_del_supp_dialog() -> None:
+        pending_supp = st.session_state.get(f"parts_pending_del_supp_{part['id']}") or {}
+        target_supp_id = str(pending_supp.get("id") or "")
+        target_supp_caption = str(pending_supp.get("caption") or "Additional View")
+        st.warning(
+            f"Permanently delete the additional view **{target_supp_caption}** from part **{part['part_number']}**?"
+        )
+        st.caption(
+            "Downstream effects: This permanently deletes this additional view file/link and any annotations on it. "
+            "The part record, its Primary Image, and its BOM, Fishbone, and Process at a Glance uses remain intact."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_del_supp_{target_supp_id}"):
+            st.session_state.pop(f"parts_pending_del_supp_{part['id']}", None)
+            st.rerun()
+        if actions.button(
+            "Delete",
+            type="primary",
+            icon=":material/delete:",
+            key=f"destructive_confirm_del_supp_{target_supp_id}",
+        ):
+            if target_supp_id:
+                delete_part_image(target_supp_id)
+                record_audit_event(
+                    project_id,
+                    "Parts",
+                    "Delete view",
+                    1,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "part_id": str(part["id"]),
+                        "part_number": str(part["part_number"]),
+                        "image_id": target_supp_id,
+                    },
+                )
+                st.toast("View deleted", icon=":material/check_circle:")
+            st.session_state.pop(f"parts_pending_del_supp_{part['id']}", None)
+            st.rerun()
+
+    @st.dialog("Delete Staged Additional View?", dismissible=False)
+    def _confirm_discard_staged_supp_dialog() -> None:
+        st.warning(f"Delete the unsaved staged additional view for part **{part['part_number']}**?")
+        st.caption(
+            "Downstream effects: This removes the unsaved upload or clipboard capture and any unsaved markup/crop/rotation before adding the view. "
+            "The part's saved Primary Image and existing Additional views will not be changed."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_discard_staged_supp_{part['id']}"):
+            st.session_state.pop(f"parts_pending_discard_staged_supp_{part['id']}", None)
+            st.rerun()
+        if actions.button(
+            "Delete",
+            type="primary",
+            icon=":material/delete:",
+            key=f"destructive_confirm_discard_staged_supp_{part['id']}",
+        ):
+            s_key = f"staged_supp_upload_{part['id']}"
+            d_key = f"_discarded_supp_up_{part['id']}"
+            cur_staged = st.session_state.get(s_key)
+            if isinstance(cur_staged, dict) and cur_staged.get("source") == "upload":
+                st.session_state[d_key] = cur_staged.get("source_hash")
+            st.session_state.pop(s_key, None)
+            st.session_state.pop(f"parts_pending_discard_staged_supp_{part['id']}", None)
+            st.rerun()
+
+    if st.session_state.get(f"parts_pending_del_prim_url_{part['id']}"):
+        _confirm_del_prim_url_dialog()
+    elif st.session_state.get(f"parts_pending_del_prim_img_{part['id']}"):
+        _confirm_del_prim_img_dialog()
+    elif st.session_state.get(f"parts_pending_discard_staged_prim_{part['id']}"):
+        _confirm_discard_staged_prim_dialog()
+    elif st.session_state.get(f"parts_pending_del_supp_{part['id']}"):
+        _confirm_del_supp_dialog()
+    elif st.session_state.get(f"parts_pending_discard_staged_supp_{part['id']}"):
+        _confirm_discard_staged_supp_dialog()
+
     st.subheader("Additional views")
     images = part_images(part["id"])
     for supplemental in images:
@@ -1808,7 +2025,7 @@ with image_col.container(border=True):
                         icon=":material/draw:",
                         key=f"ann_supp_{supp_id}",
                         width="stretch",
-                        help="Draw arrows, callouts, shapes, or text on this view",
+                        help="Crop, rotate 90°, or draw arrows, callouts, shapes, and text on this view",
                     ):
                         annotate_part_supplemental_image_dialog(dict(supplemental), project_id)
                 if st.button(
@@ -1817,20 +2034,10 @@ with image_col.container(border=True):
                     key=f"destructive_del_supp_{supp_id}",
                     width="stretch",
                 ):
-                    delete_part_image(supp_id)
-                    record_audit_event(
-                        project_id,
-                        "Parts",
-                        "Delete view",
-                        1,
-                        st.session_state.get("current_editor", ""),
-                        {
-                            "part_id": str(part["id"]),
-                            "part_number": str(part["part_number"]),
-                            "image_id": str(supp_id),
-                        },
-                    )
-                    st.toast("View removed", icon=":material/check_circle:")
+                    st.session_state[f"parts_pending_del_supp_{part['id']}"] = {
+                        "id": str(supp_id),
+                        "caption": str(supp_caption),
+                    }
                     st.rerun()
 
     with st.expander("Add an exploded view, 3D CAD model, drawing, or web link", icon=":material/add_photo_alternate:"):
@@ -1938,14 +2145,12 @@ with image_col.container(border=True):
                         ):
                             annotate_staged_part_image_dialog(staged_supp_upload_key)
                         if st.button(
-                            "Discard",
-                            icon=":material/close:",
+                            "Delete",
+                            icon=":material/delete:",
                             key=f"destructive_discard_staged_supp_up_{part['id']}",
                             width="stretch",
                         ):
-                            if staged_supp_up.get("source") == "upload":
-                                st.session_state[discarded_supp_up_key] = staged_supp_up.get("source_hash")
-                            st.session_state.pop(staged_supp_upload_key, None)
+                            st.session_state[f"parts_pending_discard_staged_supp_{part['id']}"] = True
                             st.rerun()
 
             if st.button("Add view", icon=":material/add_photo_alternate:", type="primary", key=f"btn_add_supp_file_{part['id']}"):

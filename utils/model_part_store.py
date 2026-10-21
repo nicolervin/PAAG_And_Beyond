@@ -325,8 +325,8 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
            design_maturity, subsystem, source, image_path, model_applicability, notes,
            technology_engineer, design_engineer, pits_tracker_number, source_code,
            official_windchill_part_name, factory_nickname, make_buy, ppm, buyer_gcl,
-           pmqe_aqe, ame_tooling_engineer, part_code, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           pmqe_aqe, ame_tooling_engineer, part_code, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, part_number) DO UPDATE SET description=excluded.description,
            quantity=excluded.quantity, revision=excluded.revision, design_maturity=excluded.design_maturity,
            subsystem=CASE WHEN excluded.subsystem<>'' THEN excluded.subsystem ELSE parts.subsystem END,
@@ -354,6 +354,7 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
            pmqe_aqe=CASE WHEN excluded.pmqe_aqe<>'' THEN excluded.pmqe_aqe ELSE parts.pmqe_aqe END,
            ame_tooling_engineer=CASE WHEN excluded.ame_tooling_engineer<>'' THEN excluded.ame_tooling_engineer ELSE parts.ame_tooling_engineer END,
            part_code=CASE WHEN excluded.part_code<>'' THEN excluded.part_code ELSE parts.part_code END,
+           created_at=CASE WHEN TRIM(COALESCE(parts.created_at, ''))<>'' THEN parts.created_at ELSE excluded.created_at END,
            updated_at=excluded.updated_at""",
         (part_id, project_id, values["part_number"].strip(), values.get("description", "").strip(),
          quantity, catalog_fields["revision"] or "0", catalog_fields["design_maturity"],
@@ -363,7 +364,7 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
          catalog_fields["design_engineer"], catalog_fields["pits_tracker_number"], catalog_fields["source_code"],
          catalog_fields["official_windchill_part_name"], catalog_fields["factory_nickname"], catalog_fields["make_buy"],
          catalog_fields["ppm"], catalog_fields["buyer_gcl"], catalog_fields["pmqe_aqe"],
-         catalog_fields["ame_tooling_engineer"], catalog_fields["part_code"], timestamp),
+         catalog_fields["ame_tooling_engineer"], catalog_fields["part_code"], timestamp, timestamp),
     )
     rows = query("SELECT id FROM parts WHERE project_id = ? AND part_number = ?", (project_id, values["part_number"].strip()))
     return rows[0]["id"]
@@ -653,8 +654,10 @@ def update_part_rows(
                        model_applicability=?, notes=?, technology_engineer=?, design_engineer=?,
                        pits_tracker_number=?, source_code=?, official_windchill_part_name=?,
                        factory_nickname=?, make_buy=?, ppm=?, buyer_gcl=?, pmqe_aqe=?,
-                       ame_tooling_engineer=?, part_code=?, updated_at=? WHERE id=? AND project_id=?""",
-                    (*values[:7], row_source, *values[7:], part_id, project_id),
+                       ame_tooling_engineer=?, part_code=?,
+                       created_at=CASE WHEN TRIM(COALESCE(created_at, ''))<>'' THEN created_at ELSE ? END,
+                       updated_at=? WHERE id=? AND project_id=?""",
+                    (*values[:7], row_source, *values[7:], row_updated_at, part_id, project_id),
                 )
             else:
                 conn.execute(
@@ -664,11 +667,11 @@ def update_part_rows(
                         image_path, model_applicability, notes, technology_engineer, design_engineer,
                         pits_tracker_number, source_code, official_windchill_part_name,
                         factory_nickname, make_buy, ppm, buyer_gcl, pmqe_aqe, ame_tooling_engineer,
-                        part_code, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        part_code, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (part_id, project_id, values[0], values[1], values[2], values[3],
                      values[4], values[5], values[6],
-                     clean_text(row.get("source")) or "Manual", *values[7:]),
+                     clean_text(row.get("source")) or "Manual", *values[7:], row_updated_at),
                 )
         if scenario_id and normalized_activity is not None:
             for part_id, active in normalized_activity.items():
@@ -883,15 +886,23 @@ def set_part_image_url(part_id: str, url: str, *, caption: str = "") -> str:
     return clean_url
 
 
-def clear_part_image(part_id: str) -> None:
-    rows = query("SELECT image_path, original_image_path FROM parts WHERE id=?", (part_id,))
-    if rows:
-        for old_p in dict.fromkeys([str(rows[0]["image_path"] or ""), str(rows[0].get("original_image_path") or "")]):
-            _unlink_part_upload_path(old_p)
-    execute(
-        "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
-        (now_iso(), part_id),
-    )
+def clear_part_image(part_id: str, *, move_to_additional_views: bool = False) -> bool:
+    timestamp = now_iso()
+    archived = False
+    with connection() as conn:
+        if move_to_additional_views:
+            archived = _archive_previous_primary_part_image(conn, part_id, timestamp)
+        else:
+            row = conn.execute("SELECT image_path, original_image_path FROM parts WHERE id=?", (part_id,)).fetchone()
+            if row:
+                for old_p in dict.fromkeys([str(row["image_path"] or ""), str(row["original_image_path"] or "")]):
+                    if old_p:
+                        _unlink_part_upload_path(old_p)
+        conn.execute(
+            "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
+            (timestamp, part_id),
+        )
+    return archived
 
 
 def update_part_primary_image_annotations(
@@ -3956,6 +3967,7 @@ def import_pits_id_snapshot(
                            ) THEN parts.model_applicability
                            ELSE excluded.model_applicability
                        END,
+                       created_at=CASE WHEN TRIM(COALESCE(parts.created_at, ''))<>'' THEN parts.created_at ELSE excluded.created_at END,
                        updated_at=CASE WHEN parts.source='PITS snapshot' THEN excluded.updated_at ELSE parts.updated_at END"""
                 if catalog_pits_id:
                     conn.execute(
@@ -3970,8 +3982,8 @@ def import_pits_id_snapshot(
                             design_maturity, subsystem, source,
                             image_path, model_applicability, notes, pits_tracker_number,
                             source_code, design_engineer, technology_engineer, ppm, buyer_gcl,
-                            pmqe_aqe, ame_tooling_engineer, part_code, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            pmqe_aqe, ame_tooling_engineer, part_code, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            {update_clause}""",
                         (
                             str(uuid4()), project_id, part_number, description,
@@ -3980,7 +3992,7 @@ def import_pits_id_snapshot(
                             "PITS snapshot", "All", notes, catalog_pits_id,
                             str(record.get("source_code") or "").strip(),
                             catalog_technology_engineer, catalog_technology_engineer, ppm, buyer_gcl, pmqe_aqe,
-                            ame_tooling_engineer, part_code, timestamp,
+                            ame_tooling_engineer, part_code, timestamp, timestamp,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
@@ -5940,9 +5952,9 @@ def save_manual_model_bom(
                 if pn not in part_lookup:
                     new_pid = str(uuid4())
                     conn.execute(
-                        """INSERT INTO parts (id, project_id, part_number, description, source, pits_tracker_number, updated_at)
-                           VALUES (?, ?, ?, ?, 'Manual BOM', ?, ?)""",
-                        (new_pid, project_id, pn, desc_val, pits_id, now_ts),
+                        """INSERT INTO parts (id, project_id, part_number, description, source, pits_tracker_number, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, 'Manual BOM', ?, ?, ?)""",
+                        (new_pid, project_id, pn, desc_val, pits_id, now_ts, now_ts),
                     )
                     part_lookup[pn] = new_pid
                     part_desc_lookup[pn.upper()] = desc_val

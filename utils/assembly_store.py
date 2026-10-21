@@ -160,9 +160,9 @@ def _ensure_assembly_catalog_part(
         conn.execute(
             """INSERT INTO parts
                (id, project_id, part_number, description, quantity, revision, source,
-                image_path, model_applicability, notes, updated_at)
-               VALUES (?, ?, ?, ?, 1, '0', 'Assembly grid', '', '', '', ?)""",
-            (part_id, project_id, assembly_number, assembly_name, timestamp),
+                image_path, model_applicability, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 1, '0', 'Assembly grid', '', '', '', ?, ?)""",
+            (part_id, project_id, assembly_number, assembly_name, timestamp, timestamp),
         )
         action = "created part"
     conn.execute(

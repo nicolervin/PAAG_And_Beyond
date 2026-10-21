@@ -1541,7 +1541,7 @@ def render_requirements_repository_tab(
                     type="primary",
                     icon=":material/link_off:",
                     disabled=has_unsaved_edits,
-                    key=f"quality_requirement_request_bulk_unlink_{project_id}",
+                    key=f"destructive_quality_requirement_request_bulk_unlink_{project_id}",
                 ):
                     items = []
                     for s_idx, s_row in selected_links.iterrows():

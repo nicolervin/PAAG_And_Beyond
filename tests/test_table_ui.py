@@ -74,6 +74,35 @@ class DirectEntryEditorRowsTests(unittest.TestCase):
         self.assertTrue(controls.selectbox.call_args.kwargs["disabled"])
         self.assertTrue(controls.toggle.call_args.kwargs["disabled"])
 
+    def test_default_sort_column_initializes_session_state_and_sorts_blank_strings_last(self) -> None:
+        df = pd.DataFrame({
+            "id": pd.Series(["row-1", "row-2", "row-draft"], dtype="string"),
+            "name": pd.Series(["Zulu", "Alpha", "Draft"], dtype="string"),
+            "created_at": pd.Series(
+                ["2026-10-21T12:00:00+00:00", "2026-10-21T10:00:00+00:00", ""],
+                dtype="string",
+            ),
+        })
+        controls = Mock()
+        controls.selectbox.side_effect = lambda *_args, **kwargs: self.session_state[kwargs["key"]]
+        controls.toggle.side_effect = lambda *_args, **kwargs: self.session_state[kwargs["key"]]
+        with (
+            patch.object(table_ui.st, "session_state", self.session_state),
+            patch.object(table_ui.st, "container", return_value=controls),
+        ):
+            rows = table_ui.direct_entry_editor_rows(
+                df,
+                editor_key="parts_editor",
+                sort_columns=["name", "created_at"],
+                default_sort_column="created_at",
+            )
+
+        self.assertEqual(
+            self.session_state["parts_editor_external_sort_column"],
+            "created_at",
+        )
+        self.assertEqual(rows["id"].tolist(), ["row-2", "row-1", "row-draft"])
+
 
 class DecimalNumberHelpersTests(unittest.TestCase):
     def test_clean_number_hides_unnecessary_trailing_zeroes(self) -> None:

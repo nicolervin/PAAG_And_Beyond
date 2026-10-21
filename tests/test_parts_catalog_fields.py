@@ -163,10 +163,12 @@ class PartsCatalogFieldTests(unittest.TestCase):
                 store.init_db()
                 migrated = store.query(
                     """SELECT description, technology_engineer, pits_tracker_number,
-                              source_code, official_windchill_part_name, make_buy
+                              source_code, official_windchill_part_name, make_buy,
+                              created_at, updated_at
                        FROM parts WHERE id='legacy-part'"""
                 )[0]
             self.assertEqual(migrated["description"], "Preserve me")
+            self.assertEqual(migrated["created_at"], "2026-09-17T00:00:00+00:00")
             self.assertEqual(
                 {
                     migrated["technology_engineer"], migrated["pits_tracker_number"],
@@ -918,6 +920,40 @@ class PartsCatalogFieldTests(unittest.TestCase):
             store.clear_part_image(part_id)
             for s in store.part_images(part_id):
                 store.delete_part_image(str(s["id"]))
+
+    def test_newly_added_part_gets_created_at_and_sorts_to_bottom_after_save(self) -> None:
+        initial = store.project_table(
+            "parts", self.project_id, "created_at ASC, rowid ASC"
+        ).copy()
+        first_part_id = str(initial.iloc[0]["id"])
+        first_created_at = str(initial.iloc[0]["created_at"])
+        self.assertTrue(bool(first_created_at.strip()))
+
+        new_part_id = str(uuid4())
+        new_row = initial.iloc[[0]].copy()
+        new_row["id"] = new_part_id
+        new_row["part_number"] = "000-NEWEST-PART"
+        new_row["description"] = "Manually added part"
+        new_row["pits_tracker_number"] = ""
+        new_row["created_at"] = ""
+        new_row["updated_at"] = ""
+        combined = initial._append(new_row, ignore_index=True) if hasattr(initial, "_append") else initial.reindex(range(len(initial) + 1))
+        if not hasattr(initial, "_append"):
+            combined.iloc[-1] = new_row.iloc[0]
+
+        store.update_part_rows(self.project_id, combined)
+
+        reloaded = store.project_table(
+            "parts", self.project_id, "created_at ASC, rowid ASC"
+        )
+        self.assertEqual(str(reloaded.iloc[-1]["id"]), new_part_id)
+        self.assertEqual(str(reloaded.iloc[-1]["part_number"]), "000-NEWEST-PART")
+        self.assertTrue(bool(str(reloaded.iloc[-1]["created_at"]).strip()))
+        self.assertGreaterEqual(
+            str(reloaded.iloc[-1]["created_at"]), first_created_at
+        )
+        first_reloaded = reloaded.loc[reloaded["id"].astype(str).eq(first_part_id)].iloc[0]
+        self.assertEqual(str(first_reloaded["created_at"]), first_created_at)
 
 
 if __name__ == "__main__":

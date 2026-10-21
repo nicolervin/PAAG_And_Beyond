@@ -1368,6 +1368,7 @@ def init_db() -> None:
                 pmqe_aqe TEXT NOT NULL DEFAULT '',
                 ame_tooling_engineer TEXT NOT NULL DEFAULT '',
                 part_code TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
             );
@@ -1971,12 +1972,17 @@ def init_db() -> None:
             "original_image_path",
             "annotations_json",
             "image_caption",
+            "created_at",
         ):
             if column not in part_columns:
                 conn.execute(
                     f"ALTER TABLE parts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
                 part_columns.add(column)
+        conn.execute(
+            """UPDATE parts SET created_at = updated_at
+               WHERE created_at IS NULL OR TRIM(created_at) = ''"""
+        )
         part_image_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(part_images)").fetchall()
@@ -2451,9 +2457,9 @@ def init_db() -> None:
                 conn.execute(
                     """INSERT INTO parts
                        (id, project_id, part_number, description, quantity, revision,
-                        source, image_path, model_applicability, notes, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, 'Sample', '', 'All', '', ?)""",
-                    (str(uuid4()), project_id, pn, desc, qty, rev, timestamp),
+                        source, image_path, model_applicability, notes, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'Sample', '', 'All', '', ?, ?)""",
+                    (str(uuid4()), project_id, pn, desc, qty, rev, timestamp, timestamp),
                 )
             sample_scenario_id = str(uuid4())
             conn.execute(
@@ -2655,11 +2661,11 @@ def init_db() -> None:
                 conn.execute(
                     """INSERT INTO parts
                        (id, project_id, part_number, description, quantity, revision, source,
-                        image_path, model_applicability, notes, updated_at)
-                       VALUES (?, ?, ?, ?, 1, '0', 'Assembly grid', '', '', '', ?)""",
+                        image_path, model_applicability, notes, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 1, '0', 'Assembly grid', '', '', '', ?, ?)""",
                     (
                         part_id, assembly["project_id"], assembly["assembly_number"],
-                        assembly["name"], timestamp,
+                        assembly["name"], timestamp, timestamp,
                     ),
                 )
             conn.execute(

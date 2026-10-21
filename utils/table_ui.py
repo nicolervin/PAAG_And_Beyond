@@ -108,6 +108,8 @@ def direct_entry_editor_rows(
     sort_columns: Iterable[str] | None = None,
     labels: dict[str, str] | None = None,
     additional_unsaved_changes: bool = False,
+    default_sort_column: str = "",
+    default_sort_descending: bool = False,
 ) -> pd.DataFrame:
     """Sort saved rows before a direct-entry, multi-row-paste editor renders.
 
@@ -131,9 +133,11 @@ def direct_entry_editor_rows(
     direction_key = f"{sort_scope}_external_sort_direction"
     valid_options = ["", *candidates]
     if st.session_state.get(sort_key) not in valid_options:
-        st.session_state[sort_key] = ""
+        st.session_state[sort_key] = (
+            default_sort_column if default_sort_column in valid_options else ""
+        )
     if not isinstance(st.session_state.get(direction_key), bool):
-        st.session_state[direction_key] = False
+        st.session_state[direction_key] = bool(default_sort_descending)
     editor_state = st.session_state.get(editor_key, {}) or {}
     controls_locked = bool(
         editor_state.get("edited_rows")
@@ -174,6 +178,17 @@ def direct_entry_editor_rows(
             lambda value: " | ".join(str(item) for item in value)
             if isinstance(value, (list, tuple, set))
             else ("" if value is None else str(value))
+        )
+        comparable = comparable.mask(comparable.astype(str).str.strip().eq(""), pd.NA)
+        positions = comparable.sort_values(
+            ascending=not bool(descending), na_position="last", kind="stable"
+        ).index
+        return dataframe.loc[positions].reset_index(drop=True)
+    if pd.api.types.is_string_dtype(sort_values.dtype) or sort_values.dtype == object:
+        comparable = sort_values.map(
+            lambda value: pd.NA
+            if value is None or (isinstance(value, str) and not value.strip()) or pd.isna(value)
+            else str(value)
         )
         positions = comparable.sort_values(
             ascending=not bool(descending), na_position="last", kind="stable"

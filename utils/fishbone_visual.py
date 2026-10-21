@@ -18,6 +18,7 @@ _HTML = """
       <button id="add-section-btn" type="button" title="Add new section block" class="btn-tool" style="background:#2563eb; color:white; border-color:#2563eb; font-weight:700;">➕ Add Section</button>
       <button id="toggle-palette" type="button" title="Toggle parts palette" class="btn-tool">📦 Parts palette</button>
       <button id="auto-arrange" type="button" title="Auto-arrange sections" class="btn-tool">⚡ Auto-arrange</button>
+      <button id="clear-fishbone-btn" type="button" title="Clear parts and/or delete sections from Fishbone" class="btn-tool" style="background:#dc2626; color:white; border-color:#dc2626; font-weight:700;">🗑️ Clear</button>
       <button id="zoom-out" type="button" title="Zoom out">−</button>
       <button id="zoom-in" type="button" title="Zoom in">+</button>
       <button id="fit-view" type="button" title="Fit the entire fishbone">Fit</button>
@@ -670,6 +671,7 @@ export default function renderFishbone(component) {
   const paletteUnplacedOnly = parentElement.querySelector("#palette-unplaced-only")
   const togglePaletteBtn = parentElement.querySelector("#toggle-palette")
   const autoArrangeBtn = parentElement.querySelector("#auto-arrange")
+  const clearFishboneBtn = parentElement.querySelector("#clear-fishbone-btn")
 
   const assemblyModal = parentElement.querySelector("#assembly-drop-modal")
   const assemblyDropDesc = parentElement.querySelector("#assembly-drop-desc")
@@ -797,6 +799,11 @@ export default function renderFishbone(component) {
   // Palette toggle
   togglePaletteBtn.onclick = () => {
     palette.classList.toggle("collapsed")
+  }
+  if (clearFishboneBtn) {
+    clearFishboneBtn.onclick = () => {
+      component.setTriggerValue("clear_fishbone_request", { timestamp: Date.now() })
+    }
   }
 
   // Add Section Modal Handling
@@ -3129,7 +3136,7 @@ export default function renderFishbone(component) {
 """
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v26",
+    "paag_interactive_fishbone_builder_v27",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -3186,6 +3193,7 @@ def interactive_fishbone(
     on_update_connection_nodes: Callable[[], None] | None = None,
     on_delete_connection: Callable[[], None] | None = None,
     on_delete_section_request: Callable[[], None] | None = None,
+    on_clear_fishbone_request: Callable[[], None] | None = None,
     on_drop_part: Callable[[], None] | None = None,
     on_drop_assembly: Callable[[], None] | None = None,
     on_remove_part: Callable[[], None] | None = None,
@@ -3222,6 +3230,8 @@ def interactive_fishbone(
         kwargs["on_delete_connection_change"] = on_delete_connection
     if on_delete_section_request:
         kwargs["on_delete_section_request_change"] = on_delete_section_request
+    if on_clear_fishbone_request:
+        kwargs["on_clear_fishbone_request_change"] = on_clear_fishbone_request
     if on_drop_part:
         kwargs["on_drop_part_change"] = on_drop_part
     if on_drop_assembly:

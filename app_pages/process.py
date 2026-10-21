@@ -961,8 +961,8 @@ def annotate_visual_media_dialog(
 ) -> None:
     st.markdown(f"#### Annotate Visual Aid: {caption or 'Visual Aid'}")
     st.caption(
-        "Add directional arrows, callout text boxes, focus boxes/circles, step number badges (1, 2, 3), "
-        "or freehand pen markup. Click **💾 Apply & Save Markup** when finished."
+        "Crop, rotate in 90° increments, or add directional arrows, callout text boxes, focus boxes/circles, "
+        "step number badges (1, 2, 3), and freehand pen markup. Click **💾 Apply & Save Markup** when finished."
     )
 
     source_path = None
@@ -1028,7 +1028,7 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
 
     st.markdown("#### Annotate Staged Visual Aid")
     st.caption(
-        "Add arrows, callouts, shapes, and badges to this image before adding it to the PAAG slide. "
+        "Crop, rotate in 90° increments, or add arrows, callouts, shapes, and badges to this image before adding it to the PAAG slide. "
         "Click **💾 Apply & Save Markup** to apply your changes."
     )
 
@@ -1061,12 +1061,40 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
         st.rerun()
 
 
+@st.dialog("Delete Staged Visual Aid?", dismissible=False)
+def discard_staged_media_dialog(pitch_id: str) -> None:
+    st.warning("Delete this staged visual aid before saving?")
+    st.caption(
+        "Downstream effects: This discards the unsaved image upload or clipboard capture and any unsaved markup, crop, or rotation. "
+        "Already-saved visual aids on this pitch and the PAAG slide remain unchanged."
+    )
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key=f"cancel_discard_staged_{pitch_id}"):
+        st.rerun()
+    if actions.button(
+        "Delete",
+        type="primary",
+        icon=":material/delete:",
+        key=f"destructive_confirm_discard_staged_{pitch_id}",
+    ):
+        st.session_state.pop(f"staged_media_{pitch_id}", None)
+        st.rerun()
 
+
+
+
+_paag_tab_options = ["Process plan", "Process Flow Diagram", "PAAG slides"]
+_qp_paag_tab = str(st.query_params.get("paag_tab", "") or "").strip()
+if _qp_paag_tab in _paag_tab_options:
+    st.session_state["paag_tab"] = _qp_paag_tab
+    try:
+        del st.query_params["paag_tab"]
+    except Exception:
+        pass
 
 tab_plan, tab_flow, tab_slides = st.tabs(
-    ["Process plan", "Process Flow Diagram", "PAAG slides"],
+    _paag_tab_options,
     key="paag_tab",
-    bind="query-params",
 )
 
 with tab_plan:
@@ -3243,7 +3271,7 @@ with tab_plan:
                 request_table_editor_reset(pairing_editor_key)
             st.rerun()
         if actions.button(
-            "Remove Part requirements",
+            "Unlink Part requirements",
             type="primary",
             icon=":material/link_off:",
             key=f"destructive_confirm_pairing_bulk_remove_{scenario_id}",
@@ -3668,39 +3696,17 @@ with tab_plan:
 
                 if active_group:
                     if st.button(
-                        "Remove this Part requirement from line",
+                        "Unlink this Part requirement from line",
                         icon=":material/link_off:",
-                        type="tertiary",
-                        key=f"edit_line_remove_req_{scenario_id}_{target_id}_{editing_group_id}",
+                        key=f"destructive_edit_line_remove_req_{scenario_id}_{target_id}_{editing_group_id}",
                     ):
-                        removed = delete_process_part_groups(
-                            project_id, scenario_id, [editing_group_id]
-                        )
-                        record_audit_event(
-                            project_id,
-                            "Process part pairings",
-                            "Remove pairing",
-                            removed,
-                            st.session_state.get("current_editor", ""),
-                            {
-                                "scenario_id": scenario_id,
-                                "work_element_id": target_id,
-                                "work_element": line_work_element,
-                                "requirement": str(active_group.get("name") or ""),
-                            },
-                        )
-                        request_table_editor_reset(process_editor_key)
-                        request_table_editor_reset(
-                            f"process_part_source_{scenario_id}_{edit_sec_id}"
-                        )
-                        request_table_editor_reset(
-                            f"process_part_source_consumed_{scenario_id}_{edit_sec_id}"
-                        )
-                        st.session_state.pop(edit_line_dialog_key, None)
-                        st.toast(
-                            "Part requirement removed from line.",
-                            icon=":material/check_circle:",
-                        )
+                        st.session_state[f"process_pending_unlink_line_req_{scenario_id}"] = {
+                            "group_id": str(editing_group_id),
+                            "target_id": str(target_id),
+                            "work_element": str(line_work_element),
+                            "requirement": str(active_group.get("name") or ""),
+                            "edit_sec_id": str(edit_sec_id),
+                        }
                         st.rerun()
 
         st.divider()
@@ -4067,7 +4073,66 @@ with tab_plan:
             except ValueError as exc:
                 st.error(str(exc))
 
-    if st.session_state.get(edit_line_dialog_key):
+    pending_unlink_line_req_key = f"process_pending_unlink_line_req_{scenario_id}"
+
+    @st.dialog("Unlink Part requirement from line?", dismissible=False)
+    def confirm_unlink_line_req_dialog() -> None:
+        info = st.session_state.get(pending_unlink_line_req_key) or {}
+        req_name = str(info.get("requirement") or "this Part requirement")
+        we_name = str(info.get("work_element") or "this Process step")
+        st.warning(f"Unlink **{req_name}** from **{we_name}**?")
+        st.caption(
+            "Downstream effects: This removes the Part requirement pairing from this Process step in the active scenario. "
+            "The Process step itself, Fishbone part placements, and Parts Catalog records remain intact, and the Fishbone parts return to Available Parts for pairing."
+        )
+        actions = st.container(horizontal=True)
+        if actions.button("Cancel", key=f"cancel_unlink_line_req_{scenario_id}"):
+            st.session_state.pop(pending_unlink_line_req_key, None)
+            st.rerun()
+        if actions.button(
+            "Unlink",
+            type="primary",
+            icon=":material/link_off:",
+            key=f"destructive_confirm_unlink_line_req_{scenario_id}",
+        ):
+            grp_id = str(info.get("group_id") or "")
+            tgt_id = str(info.get("target_id") or "")
+            sec_id = str(info.get("edit_sec_id") or "")
+            if grp_id:
+                removed = delete_process_part_groups(
+                    project_id, scenario_id, [grp_id]
+                )
+                record_audit_event(
+                    project_id,
+                    "Process part pairings",
+                    "Remove pairing",
+                    removed,
+                    st.session_state.get("current_editor", ""),
+                    {
+                        "scenario_id": scenario_id,
+                        "work_element_id": tgt_id,
+                        "work_element": we_name,
+                        "requirement": req_name,
+                    },
+                )
+                request_table_editor_reset(process_editor_key)
+                request_table_editor_reset(
+                    f"process_part_source_{scenario_id}_{sec_id}"
+                )
+                request_table_editor_reset(
+                    f"process_part_source_consumed_{scenario_id}_{sec_id}"
+                )
+            st.session_state.pop(pending_unlink_line_req_key, None)
+            st.session_state.pop(edit_line_dialog_key, None)
+            st.toast(
+                "Part requirement removed from line.",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+
+    if st.session_state.get(pending_unlink_line_req_key):
+        confirm_unlink_line_req_dialog()
+    elif st.session_state.get(edit_line_dialog_key):
         edit_process_line_dialog()
 
 
@@ -4582,17 +4647,16 @@ with tab_slides:
                                 with sp2:
                                     has_ann = bool(current_staged.get("annotations_json"))
                                     if has_ann:
-                                        st.success("Markup annotations applied", icon=":material/draw:")
+                                        st.success("Markup / crop / rotation applied", icon=":material/draw:")
                                     else:
-                                        st.caption("No annotations added yet. Click below to add arrows, focus boxes, callouts, or step numbers.")
+                                        st.caption("No annotations added yet. Click below to crop, rotate 90°, or add arrows, focus boxes, callouts, or step numbers.")
                                     b_col1, b_col2 = st.columns([1.5, 1])
                                     with b_col1:
                                         if st.button("Annotate / Add Shapes", icon=":material/draw:", key=f"btn_ann_staged_{selected_pitch_id}", type="secondary"):
                                             annotate_staged_media_dialog(selected_pitch_id)
                                     with b_col2:
-                                        if st.button("Discard Image", icon=":material/close:", key=f"btn_discard_staged_{selected_pitch_id}"):
-                                            st.session_state.pop(staged_key, None)
-                                            st.rerun()
+                                        if st.button("Delete", icon=":material/delete:", key=f"destructive_discard_staged_{selected_pitch_id}"):
+                                            discard_staged_media_dialog(selected_pitch_id)
 
                         submit_add = st.button("Add Visual Aid", icon=":material/add_photo_alternate:", type="primary", key=f"btn_add_visual_{selected_pitch_id}")
                         if submit_add:
@@ -4798,7 +4862,7 @@ with tab_slides:
                                         st.caption("Tagged Steps: *General pitch visual (all steps)*")
                             with g_col3:
                                 if media_item.get("media_type") == "image" and not str(media_item.get("file_path", "")).startswith(("http://", "https://")):
-                                    if st.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Add or edit arrows, text callouts, shapes, and badges"):
+                                    if st.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges"):
                                         annotate_visual_media_dialog(
                                             media_id=media_item["id"],
                                             file_path=media_item.get("file_path", ""),

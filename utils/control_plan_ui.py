@@ -742,11 +742,11 @@ def _confirm_delete_control_method(
             st.rerun()
     with c2:
         if st.button(
-            "Confirm Remove",
+            "Delete",
             type="primary",
             icon=":material/delete:",
-            key=f"dlg_confirm_del_cm_{method_id}",
-            use_container_width=True,
+            key=f"destructive_dlg_confirm_del_cm_{method_id}",
+            width="stretch",
         ):
             with get_db_connection() as conn:
                 try:
@@ -998,7 +998,7 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
                 with del_col2:
                     st.write("")
                     st.write("")
-                    if st.button("Remove Control Method", icon=":material/delete:", key=f"btn_delete_control_method_{project_id}"):
+                    if st.button("Delete Control Method", icon=":material/delete:", key=f"destructive_btn_delete_control_method_{project_id}"):
                         if to_delete_id:
                             target_row = catalog_methods[catalog_methods["id"] == to_delete_id].iloc[0]
                             _confirm_delete_control_method(

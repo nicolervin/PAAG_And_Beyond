@@ -507,7 +507,7 @@ def _render_equipment_table(
             request_table_editor_reset(editor_key)
             st.rerun()
         if actions.button(
-            "Remove from Functional Review",
+            "Unlink from Functional Review",
             type="primary",
             icon=":material/link_off:",
             key=f"destructive_confirm_equipment_detach_{project_id}_{functional_area}_{suffix}",
@@ -621,7 +621,7 @@ def _render_equipment_detail(
             "Delete primary image",
             icon=":material/delete:",
             disabled=not image_path.is_file(),
-            key=f"request_equipment_image_delete_{project_id}_{selected_id}",
+            key=f"destructive_request_equipment_image_delete_{project_id}_{selected_id}",
         ):
             st.session_state[delete_image_key] = True
 
@@ -849,6 +849,43 @@ def _render_mismatch_review(
             current_ids = {_text(value) for value in group["current_pitch_id"]}
             if "" not in current_ids and len(current_ids) == 1:
                 movable[str(equipment_id)] = _text(group.iloc[0]["name"])
+        pending_unlink_key = f"equipment_mismatch_pending_unlink_{project_id}_{scenario_id}_{functional_area}"
+
+        @st.dialog("Unlink moved Process operations?", dismissible=False)
+        def confirm_unlink_moved_ops() -> None:
+            target_eq_id = _text(st.session_state.get(pending_unlink_key))
+            is_all = target_eq_id == "__ALL__"
+            target_label = "all mismatched equipment assets" if is_all else movable.get(target_eq_id, "this equipment asset")
+            st.warning(
+                f"Unlink moved Process operations from **{target_label}** so the equipment remains anchored at its saved Station / Pitch?"
+            )
+            st.caption(
+                "Downstream effects: This removes the equipment-to-operation link for steps that were rebalanced to a different Pitch in the active scenario. "
+                "The equipment asset itself and the Process steps are preserved, and the moved steps will flag as missing equipment at their new pitch."
+            )
+            actions = st.container(horizontal=True)
+            if actions.button("Cancel", key=f"cancel_eq_mismatch_unlink_{target_eq_id}"):
+                st.session_state.pop(pending_unlink_key, None)
+                st.rerun()
+            if actions.button(
+                "Unlink",
+                type="primary",
+                icon=":material/link_off:",
+                key=f"destructive_confirm_eq_mismatch_unlink_{target_eq_id}",
+            ):
+                try:
+                    res = unlink_moved_equipment_links(
+                        project_id, scenario_id, None if is_all else target_eq_id, _editor_name()
+                    )
+                    st.session_state.pop(pending_unlink_key, None)
+                    st.toast(
+                        f"Unlinked {res['row_count']} moved operation(s). Equipment remains anchored at Station / Pitch.",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
         if not movable:
             st.info(
                 "The linked Process Functions are split across Pitches or include an unassigned step. "
@@ -857,20 +894,12 @@ def _render_mismatch_review(
             if st.button(
                 "Unlink all moved operations (keep equipment anchored)",
                 icon=":material/link_off:",
-                key=f"equipment_mismatch_unlink_all_{project_id}_{scenario_id}_{functional_area}",
+                key=f"destructive_equipment_mismatch_unlink_all_{project_id}_{scenario_id}_{functional_area}",
                 help="Unlink operations that were rebalanced away, keeping equipment anchored at its saved pitch.",
             ):
-                try:
-                    res = unlink_moved_equipment_links(
-                        project_id, scenario_id, None, _editor_name()
-                    )
-                    st.toast(
-                        f"Unlinked {res['row_count']} moved operation(s). Equipment remains anchored at Pitch.",
-                        icon=":material/check_circle:",
-                    )
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
+                st.session_state[pending_unlink_key] = "__ALL__"
+            if st.session_state.get(pending_unlink_key):
+                confirm_unlink_moved_ops()
             return
         selected_id = st.selectbox(
             "Equipment eligible for reconciliation",
@@ -891,20 +920,13 @@ def _render_mismatch_review(
         if col_act2.button(
             "Unlink moved steps (keep equipment anchored)",
             icon=":material/link_off:",
-            key=f"equipment_mismatch_unlink_{project_id}_{scenario_id}_{functional_area}",
+            key=f"destructive_equipment_mismatch_unlink_{project_id}_{scenario_id}_{functional_area}",
             help="Keep equipment anchored at its current pitch and unlink the moved step(s). The moved steps will flag as missing equipment at their new pitch.",
         ):
-            try:
-                res = unlink_moved_equipment_links(
-                    project_id, scenario_id, str(selected_id), _editor_name()
-                )
-                st.toast(
-                    f"Unlinked {res['row_count']} moved operation(s). Equipment remains anchored at Station / Pitch.",
-                    icon=":material/check_circle:",
-                )
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+            st.session_state[pending_unlink_key] = str(selected_id)
+
+        if st.session_state.get(pending_unlink_key):
+            confirm_unlink_moved_ops()
 
         @st.dialog("Move equipment to current Pitch?", dismissible=False)
         def confirm_move() -> None:
@@ -1533,12 +1555,9 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
                 if is_editing and st.button(
                     "Delete visual",
                     icon=":material/delete:",
-                    key=f"delete_zone_img_{current_zone.get('id')}",
+                    key=f"destructive_delete_zone_img_{current_zone.get('id')}",
                 ):
-                    delete_conveyor_zone_image(
-                        project_id, scenario_id, str(current_zone["id"]), _editor_name()
-                    )
-                    st.toast("Deleted orientation visual", icon=":material/check_circle:")
+                    st.session_state[f"zone_img_pending_del_{project_id}_{scenario_id}"] = str(current_zone["id"])
                     st.rerun()
             else:
                 st.caption("No orientation diagram attached.")
@@ -1639,16 +1658,76 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
         if is_editing and btn_c2.button(
             "Delete Conveyor Zone",
             icon=":material/delete:",
-            key=f"del_zone_btn_{project_id}_{scenario_id}",
+            key=f"destructive_del_zone_btn_{project_id}_{scenario_id}",
         ):
-            try:
-                res = delete_conveyor_zones(
-                    project_id, scenario_id, [str(current_zone["id"])], _editor_name()
-                )
-                st.toast(f"Deleted {res['row_count']} Conveyor Zone(s)", icon=":material/delete:")
+            st.session_state[f"zone_pending_del_{project_id}_{scenario_id}"] = {
+                "id": str(current_zone["id"]),
+                "name": str(current_zone.get("name") or zone_name),
+            }
+            st.rerun()
+
+        zone_img_del_key = f"zone_img_pending_del_{project_id}_{scenario_id}"
+        zone_del_key = f"zone_pending_del_{project_id}_{scenario_id}"
+
+        @st.dialog("Delete Orientation Visual?", dismissible=False)
+        def confirm_delete_zone_img() -> None:
+            zid = _text(st.session_state.get(zone_img_del_key))
+            st.warning("Delete the saved orientation diagram / photo for this Conveyor Zone?")
+            st.caption(
+                "Downstream effects: This permanently deletes the orientation visual file from this Conveyor Zone. "
+                "The Conveyor Zone record, its sizing parameters, and assigned workstation pitches remain intact."
+            )
+            actions = st.container(horizontal=True)
+            if actions.button("Cancel", key=f"cancel_del_zone_img_{zid}"):
+                st.session_state.pop(zone_img_del_key, None)
                 st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+            if actions.button(
+                "Delete",
+                type="primary",
+                icon=":material/delete:",
+                key=f"destructive_confirm_del_zone_img_{zid}",
+            ):
+                delete_conveyor_zone_image(
+                    project_id, scenario_id, zid, _editor_name()
+                )
+                st.session_state.pop(zone_img_del_key, None)
+                st.toast("Deleted orientation visual", icon=":material/check_circle:")
+                st.rerun()
+
+        @st.dialog("Delete Conveyor Zone?", dismissible=False)
+        def confirm_delete_zone() -> None:
+            zinfo = st.session_state.get(zone_del_key) or {}
+            zid = _text(zinfo.get("id"))
+            zname = _text(zinfo.get("name")) or "this Conveyor Zone"
+            st.warning(f"Delete Conveyor Zone **{zname}**?")
+            st.caption(
+                "Downstream effects: This deletes the Conveyor Zone and its orientation diagram in the active scenario, and unassigns any workstation pitches currently assigned to this zone. "
+                "The Yamazumi pitches, work elements, and Ergonomics reviews themselves are preserved."
+            )
+            actions = st.container(horizontal=True)
+            if actions.button("Cancel", key=f"cancel_del_zone_{zid}"):
+                st.session_state.pop(zone_del_key, None)
+                st.rerun()
+            if actions.button(
+                "Delete",
+                type="primary",
+                icon=":material/delete:",
+                key=f"destructive_confirm_del_zone_{zid}",
+            ):
+                try:
+                    res = delete_conveyor_zones(
+                        project_id, scenario_id, [zid], _editor_name()
+                    )
+                    st.session_state.pop(zone_del_key, None)
+                    st.toast(f"Deleted {res['row_count']} Conveyor Zone(s)", icon=":material/delete:")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        if st.session_state.get(zone_img_del_key):
+            confirm_delete_zone_img()
+        elif st.session_state.get(zone_del_key):
+            confirm_delete_zone()
 
     # Expander for Workstation & Conveyor Pitch Assignments
     with st.expander("Workstation & Conveyor Pitch Assignments (Ergonomics)", icon=":material/height:", expanded=False):

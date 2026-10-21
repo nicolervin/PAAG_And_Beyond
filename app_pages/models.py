@@ -914,38 +914,96 @@ else:
         placeholder="Select one or more categories",
         key=visual_category_key,
     )
+    visual_model_label_options = ["Model name", "Model number"]
     visual_model_label_key = f"complexity_tree_visual_model_label_{project_id}"
-    if st.session_state.get(visual_model_label_key) == "Common name":
-        st.session_state[visual_model_label_key] = "Model name"
-    elif st.session_state.get(visual_model_label_key) == "Official model number":
-        st.session_state[visual_model_label_key] = "Model number"
-    visual_model_label = st.selectbox(
+
+    def _normalize_visual_model_label(value: object) -> str:
+        text = str(value or "").strip()
+        if text == "Common name":
+            return "Model name"
+        if text == "Official model number":
+            return "Model number"
+        return text
+
+    existing_visual_model_label = st.session_state.get(visual_model_label_key)
+    if isinstance(existing_visual_model_label, str):
+        normalized_model_label = _normalize_visual_model_label(existing_visual_model_label)
+        st.session_state[visual_model_label_key] = (
+            [normalized_model_label]
+            if normalized_model_label in visual_model_label_options
+            else []
+        )
+    elif isinstance(existing_visual_model_label, list):
+        valid_model_labels = list(
+            dict.fromkeys(
+                _normalize_visual_model_label(item)
+                for item in existing_visual_model_label
+                if _normalize_visual_model_label(item) in visual_model_label_options
+            )
+        )
+        if valid_model_labels != existing_visual_model_label:
+            st.session_state[visual_model_label_key] = valid_model_labels
+    visual_model_labels = st.multiselect(
         "Model label",
-        ["", "Model name", "Model number"],
-        index=0,
-        format_func=lambda value: value or "Select a model label",
-        key=f"complexity_tree_visual_model_label_{project_id}",
-        help="Choose which model identifier appears in the visual headers.",
+        visual_model_label_options,
+        placeholder="Select one or more model labels",
+        key=visual_model_label_key,
+        help="Choose which model identifiers appear in the visual headers.",
     )
-    visual_feature_display = st.selectbox(
+    visual_feature_display_options = ["Feature", "Part number"]
+    visual_feature_display_key = f"complexity_tree_visual_feature_display_{project_id}"
+    if visual_feature_display_key not in st.session_state:
+        st.session_state[visual_feature_display_key] = ["Feature"]
+    else:
+        existing_visual_feature_display = st.session_state.get(visual_feature_display_key)
+        if isinstance(existing_visual_feature_display, str):
+            cleaned_feature_display = existing_visual_feature_display.strip()
+            st.session_state[visual_feature_display_key] = (
+                [cleaned_feature_display]
+                if cleaned_feature_display in visual_feature_display_options
+                else []
+            )
+        elif isinstance(existing_visual_feature_display, list):
+            valid_feature_displays = list(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in existing_visual_feature_display
+                    if str(item).strip() in visual_feature_display_options
+                )
+            )
+            if valid_feature_displays != existing_visual_feature_display:
+                st.session_state[visual_feature_display_key] = valid_feature_displays
+    visual_feature_displays = st.multiselect(
         "Feature",
-        ["Feature", "Part number"],
-        index=0,
-        key=f"complexity_tree_visual_feature_display_{project_id}",
-        help="Choose whether the visual displays feature values from the complexity tree or assigned part numbers from the Parts Catalog.",
+        visual_feature_display_options,
+        placeholder="Select one or more feature displays",
+        key=visual_feature_display_key,
+        help="Choose whether the visual displays feature values from the complexity tree, assigned part numbers from the Parts Catalog, or both.",
     )
     selected_categories = [
         str(category).strip()
         for category in (visual_categories or [])
         if str(category).strip()
     ]
-    if not selected_categories or not visual_model_label:
-        if not selected_categories and not visual_model_label:
+    selected_model_labels = [
+        str(label).strip()
+        for label in (visual_model_labels or [])
+        if str(label).strip() in visual_model_label_options
+    ]
+    selected_feature_displays = [
+        str(display).strip()
+        for display in (visual_feature_displays or [])
+        if str(display).strip() in visual_feature_display_options
+    ]
+    if not selected_categories or not selected_model_labels or not selected_feature_displays:
+        if not selected_categories and not selected_model_labels:
             st.info("Select at least one category and a model label to generate the complexity tree visual.")
         elif not selected_categories:
             st.info("Select at least one category to generate the complexity tree visual.")
-        else:
+        elif not selected_model_labels:
             st.info("Select a model label to generate the complexity tree visual.")
+        else:
+            st.info("Select at least one feature display option to generate the complexity tree visual.")
         visual_features = None
     else:
         category_order = {cat: idx for idx, cat in enumerate(selected_categories)}
@@ -1018,29 +1076,48 @@ else:
         grid_template = (
             f"minmax(130px, 1.2fr) repeat({grid_columns}, minmax(90px, 1fr))"
         )
+
+        def _build_group_model_label_lines(
+            group: dict[str, object],
+            selected_labels: list[str],
+        ) -> list[str]:
+            if selected_labels == ["Model name"]:
+                return [
+                    escape(str(label or "Model name not defined"))
+                    for label in dict.fromkeys(group["model_names"])
+                ]
+            if selected_labels == ["Model number"]:
+                return [escape(str(label)) for label in group["model_numbers"]]
+            lines: list[str] = []
+            for model_name, model_number in zip(
+                group["model_names"],
+                group["model_numbers"],
+            ):
+                for label_type in selected_labels:
+                    if label_type == "Model name":
+                        lines.append(escape(str(model_name or "Model name not defined")))
+                    elif label_type == "Model number":
+                        lines.append(escape(str(model_number)))
+            return lines
+
+        group_label_lines = [
+            _build_group_model_label_lines(group, selected_model_labels)
+            for group in visual_model_groups
+        ]
         model_header_height = max(
             42,
-            max(len(group["model_numbers"]) for group in visual_model_groups) * 22 + 12,
+            max(len(lines) for lines in group_label_lines) * 22 + 12,
         )
         visual_html = [
             f'<div style="display:grid;grid-template-columns:{grid_template};'
             'gap:10px 8px;align-items:center;">',
             '<div style="font-weight:700;">Model</div>',
         ]
-        for group in visual_model_groups:
-            labels = (
-                group["model_names"]
-                if visual_model_label == "Model name"
-                else group["model_numbers"]
-            )
-            if visual_model_label == "Model name":
-                labels = list(dict.fromkeys(labels))
-            model_labels = "<br>".join(
-                escape(str(label or "Model name not defined")) for label in labels
-            )
+        for lines in group_label_lines:
+            model_labels = "<br>".join(lines)
             visual_html.append(
                 '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
-                f'border:2px solid #000;border-radius:4px;padding:6px;height:{model_header_height}px;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;min-height:{model_header_height}px;height:100%;'
                 'box-sizing:border-box;display:flex;align-items:center;'
                 'justify-content:center;text-align:center;">'
                 f"{model_labels}</div>"
@@ -1053,7 +1130,7 @@ else:
         )
 
         part_numbers_by_feature_value: dict[tuple[str, str], list[str]] = {}
-        if visual_feature_display == "Part number":
+        if "Part number" in selected_feature_displays:
             catalog_parts = project_table("parts", project_id)
             rules = part_feature_rules(project_id)
             if not catalog_parts.empty and not rules.empty:
@@ -1122,7 +1199,7 @@ else:
                 if not selected_value:
                     text_color = "#64748b"
                     label = escape("Not assigned")
-                elif visual_feature_display == "Part number":
+                elif selected_feature_displays == ["Part number"]:
                     matching_parts = part_numbers_by_feature_value.get(
                         (feature_id, selected_value),
                         [],
@@ -1132,8 +1209,25 @@ else:
                     else:
                         text_color = "#64748b"
                         label = escape("No parts assigned")
-                else:
+                elif selected_feature_displays == ["Feature"]:
                     label = escape(selected_value)
+                else:
+                    matching_parts = part_numbers_by_feature_value.get(
+                        (feature_id, selected_value),
+                        [],
+                    )
+                    parts_html = (
+                        f'<span style="font-weight:400;">{"<br>".join(escape(pn) for pn in matching_parts)}</span>'
+                        if matching_parts
+                        else f'<span style="font-weight:400;opacity:0.8;">{escape("No parts assigned")}</span>'
+                    )
+                    segments = [
+                        escape(selected_value)
+                        if display_mode == "Feature"
+                        else parts_html
+                        for display_mode in selected_feature_displays
+                    ]
+                    label = "<br>".join(segments)
                 visual_html.append(
                     f'<div style="grid-column:span {end - start};background:{background};'
                     'border-radius:8px;padding:10px 12px;text-align:center;display:flex;'
@@ -1155,20 +1249,11 @@ else:
             for _ in visual_model_groups
         )
         visual_html.append('<div style="font-weight:700;">Model</div>')
-        for group in visual_model_groups:
-            labels = (
-                group["model_names"]
-                if visual_model_label == "Model name"
-                else group["model_numbers"]
-            )
-            if visual_model_label == "Model name":
-                labels = list(dict.fromkeys(labels))
-            model_labels = "<br>".join(
-                escape(str(label or "Model name not defined")) for label in labels
-            )
+        for lines in group_label_lines:
+            model_labels = "<br>".join(lines)
             visual_html.append(
                 '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
-                f'border:2px solid #000;border-radius:4px;padding:6px;height:{model_header_height}px;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;min-height:{model_header_height}px;height:100%;'
                 'box-sizing:border-box;display:flex;align-items:center;'
                 'justify-content:center;text-align:center;">'
                 f"{model_labels}</div>"
