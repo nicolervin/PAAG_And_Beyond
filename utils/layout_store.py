@@ -13,11 +13,7 @@ from uuid import uuid4
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from utils.cache_store import (
-    cached_store_read,
-    is_scenario_task_completed,
-    mark_scenario_task_completed,
-)
+from utils.cache_store import cached_store_read
 
 SUPPORTED_LAYOUT_EXTENSIONS: tuple[str, ...] = (
     ".png",

@@ -11,7 +11,11 @@ import pandas as pd
 import streamlit as st
 from openpyxl.styles import Alignment
 
-from utils.cache_store import is_scenario_task_completed, mark_scenario_task_completed
+from utils.cache_store import (
+    cached_computation,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
 from utils.control_plan_store import control_plan_pfmea_delete_impact
 
 from utils.pfmea_store import (
@@ -2116,6 +2120,7 @@ def _stable_recalculated_draft(base_rows: pd.DataFrame, edited_rows: pd.DataFram
     return _recalculate_flat_rpn(base)
 
 
+@cached_computation(scope="pfmea_export")
 def _pfmea_export_bytes(dataframe: pd.DataFrame) -> bytes:
     """Export PFMEA text with saved line breaks visible in Excel."""
     output = BytesIO()
@@ -4110,23 +4115,23 @@ def _render_flat_pfmea_table(
                         st.success(f"Reactivated '{reactivate_choice}'.")
                         st.rerun()
 
-        export_rows, export_rows_final = _prepare_export_frames()
+        from utils.excel_io import export_pfmea_to_company_template
+        _, exp_rows_final = _prepare_export_frames()
         table_actions.download_button(
             "Export filtered rows",
-            data=_pfmea_export_bytes(export_rows_final),
+            data=_pfmea_export_bytes(exp_rows_final),
             file_name="pfmea_filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             icon=":material/download:",
             key=f"pfmea_flat_export_{project_id}_{scenario_id}",
             help="Export PFMEA table to Excel with combined Responsibility & Target Completion Date column.",
         )
-        from utils.excel_io import export_pfmea_to_company_template
         table_actions.download_button(
             "Export Company Template (FRM-GEA-QYS-033)",
-            data=export_pfmea_to_company_template(
+            data=lambda: export_pfmea_to_company_template(
                 project_id=project_id,
                 scenario_id=scenario_id,
-                rows=export_rows,
+                rows=_prepare_export_frames()[0],
                 control_labels=control_labels,
             ),
             file_name=f"PFMEA_FRM-GEA-QYS-033_{project_id[:8]}.xlsx",
@@ -4137,7 +4142,7 @@ def _render_flat_pfmea_table(
         )
         table_actions.download_button(
             "Export filtered rows (.csv)",
-            data=export_rows_final.to_csv(index=False).encode("utf-8"),
+            data=lambda: _prepare_export_frames()[1].to_csv(index=False).encode("utf-8"),
             file_name="pfmea_filtered.csv",
             mime="text/csv",
             icon=":material/article:",

@@ -1066,8 +1066,11 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
 
 
 
+_paag_tabs = ["Process plan", "Process Flow Diagram", "PAAG slides"]
+_qp_paag_tab = str(st.query_params.get("paag_tab") or "").strip()
 tab_plan, tab_flow, tab_slides = st.tabs(
-    ["Process plan", "Process Flow Diagram", "PAAG slides"]
+    _paag_tabs,
+    default=_qp_paag_tab if _qp_paag_tab in _paag_tabs else None,
 )
 
 with tab_plan:

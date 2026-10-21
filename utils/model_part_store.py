@@ -4112,7 +4112,6 @@ def model_bom_tree_nodes(
         return nodes
 
 
-@cached_store_read
 @cached_store_read(scope="catalog")
 def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[str, Any]:
     """Retrieve the PITS BOM tree structure with reconciliation status against Parts Catalog and Fishbone.

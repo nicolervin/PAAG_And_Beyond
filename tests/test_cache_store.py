@@ -208,6 +208,18 @@ class MediaCacheTests(unittest.TestCase):
             self.assertEqual(cache.misses, misses_before)
             self.assertEqual(cache.hits, hits_before + 5)
 
+    def test_drop_untouched_new_rows_handles_empty_list_beyond_row_64(self) -> None:
+        from utils.table_ui import drop_untouched_new_rows
+
+        rows = [
+            {"id": f"id-{i}", "name": f"Part {i}", "tags": None}
+            for i in range(70)
+        ]
+        rows.append({"id": "", "name": "", "tags": []})
+        df = pd.DataFrame(rows)
+        cleaned = drop_untouched_new_rows(df, identifying_columns=["name", "tags"])
+        self.assertEqual(len(cleaned), 70)
+
 
 if __name__ == "__main__":
     unittest.main()

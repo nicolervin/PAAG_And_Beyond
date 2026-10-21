@@ -291,7 +291,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertTrue(any(title.value == "Import/Export Projects" for title in app.title))
         self.assertNotIn("Part-data exchange", [tab.label for tab in app.tabs])
         self.assertFalse(
-            any(header.value == "Import a BOM draft" for header in app.subheader)
+            any(header.value in {"Import a BOM draft", "Import PITS File"} for header in app.subheader)
         )
         self.assertTrue(
             any(
@@ -304,7 +304,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app = self.run_page("app_pages/pits_exchange.py")
         self.assertTrue(any(title.value in {"Import/Export PITS", "Import PITs"} for title in app.title))
         self.assertTrue(
-            any(header.value == "Import a BOM draft" for header in app.subheader)
+            any(header.value in {"Import a BOM draft", "Import PITS File"} for header in app.subheader)
         )
         self.assertNotIn("Whole-project transfer", [tab.label for tab in app.tabs])
 

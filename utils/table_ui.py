@@ -210,16 +210,16 @@ def drop_untouched_new_rows(
     def series_is_blank(series: pd.Series) -> pd.Series:
         if series.empty:
             return pd.Series(dtype=bool, index=series.index)
-        if pd.api.types.is_string_dtype(series.dtype) or pd.api.types.is_numeric_dtype(series.dtype):
-            return (series.isna() | series.astype(str).str.strip().eq("")).astype(bool)
         if series.dtype == object:
             non_null = series.dropna()
             if non_null.empty:
                 return pd.Series(True, index=series.index, dtype=bool)
-            sample = non_null.iloc[:64]
-            if not any(isinstance(v, (list, tuple, set, dict)) for v in sample):
+            if not any(isinstance(v, (list, tuple, set, dict)) for v in non_null.tolist()):
                 return (series.isna() | series.astype(str).str.strip().eq("")).astype(bool)
-        return series.apply(is_blank).astype(bool)
+            return pd.Series([is_blank(v) for v in series.tolist()], index=series.index, dtype=bool)
+        if pd.api.types.is_string_dtype(series.dtype) or pd.api.types.is_numeric_dtype(series.dtype):
+            return (series.isna() | series.astype(str).str.strip().eq("")).astype(bool)
+        return pd.Series([is_blank(v) for v in series.tolist()], index=series.index, dtype=bool)
 
     identifying_columns = [
         column for column in identifying_columns if column in dataframe.columns
