@@ -52,8 +52,6 @@ def cross_functional_traceability_matrix(
 ) -> dict[str, Any]:
     """Calculate and return full cross-functional traceability matrix and KPI summary."""
     with store.connection() as conn:
-        init_equipment_schema(conn)
-
         # 1. Fetch work elements for this scenario
         work_rows = conn.execute(
             """SELECT id, station, operation, description, sequence

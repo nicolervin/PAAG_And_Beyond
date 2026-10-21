@@ -265,29 +265,38 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -> None:
-    timestamp = _store_module().now_iso()
-    existing_types = {
-        str(row["label"]).strip().casefold()
+    existing_by_key = {
+        str(row["label"]).strip().casefold(): str(row["id"])
         for row in conn.execute(
-            "SELECT label FROM equipment_types WHERE project_id=?", (project_id,)
+            "SELECT id, label FROM equipment_types WHERE project_id=?", (project_id,)
         ).fetchall()
     }
+    existing_links = {
+        (str(row["equipment_type_id"]), str(row["functional_area"]))
+        for row in conn.execute(
+            "SELECT equipment_type_id, functional_area FROM equipment_type_function_links WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+    }
+    timestamp: str | None = None
     for label, tier, functional_areas in DEFAULT_EQUIPMENT_TYPES:
-        if label.strip().casefold() in existing_types:
-            type_row = conn.execute(
-                "SELECT id FROM equipment_types WHERE project_id=? AND LOWER(TRIM(label))=?",
-                (project_id, label.strip().casefold()),
-            ).fetchone()
-            if type_row:
-                existing_type_id = str(type_row["id"])
-                for functional_area in functional_areas:
+        key = label.strip().casefold()
+        existing_type_id = existing_by_key.get(key)
+        if existing_type_id is not None:
+            for functional_area in functional_areas:
+                if (existing_type_id, functional_area) not in existing_links:
+                    if timestamp is None:
+                        timestamp = _store_module().now_iso()
                     conn.execute(
                         """INSERT OR IGNORE INTO equipment_type_function_links
                            (id, project_id, equipment_type_id, functional_area, created_at, updated_at)
                            VALUES (?, ?, ?, ?, ?, ?)""",
                         (str(uuid4()), project_id, existing_type_id, functional_area, timestamp, timestamp),
                     )
+                    existing_links.add((existing_type_id, functional_area))
             continue
+        if timestamp is None:
+            timestamp = _store_module().now_iso()
         type_id = str(uuid4())
         conn.execute(
             """INSERT INTO equipment_types
@@ -295,6 +304,7 @@ def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -
                VALUES (?, ?, ?, ?, ?, ?)""",
             (type_id, project_id, label, tier, timestamp, timestamp),
         )
+        existing_by_key[key] = type_id
         for functional_area in functional_areas:
             conn.execute(
                 """INSERT INTO equipment_type_function_links
@@ -302,7 +312,7 @@ def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (str(uuid4()), project_id, type_id, functional_area, timestamp, timestamp),
             )
-        existing_types.add(label.strip().casefold())
+            existing_links.add((type_id, functional_area))
 
 
 @cached_store_read
@@ -1409,6 +1419,14 @@ def clone_equipment_scenario(
     timestamp: str,
 ) -> None:
     """Clone scenario placements while reusing project-wide equipment assets."""
+    links_by_placement: dict[str, list[sqlite3.Row]] = {}
+    for link in conn.execute(
+        """SELECT * FROM equipment_process_links
+           WHERE project_id=? AND scenario_id=? ORDER BY created_at, id""",
+        (project_id, source_scenario_id),
+    ).fetchall():
+        links_by_placement.setdefault(str(link["placement_id"]), []).append(link)
+
     for source in conn.execute(
         """SELECT * FROM equipment_placements
            WHERE project_id=? AND scenario_id=? ORDER BY created_at, id""",
@@ -1426,10 +1444,7 @@ def clone_equipment_scenario(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (new_placement_id, project_id, target_scenario_id, source["equipment_id"], new_pitch_id, timestamp, timestamp),
         )
-        for link in conn.execute(
-            "SELECT * FROM equipment_process_links WHERE placement_id=? ORDER BY created_at, id",
-            (old_placement_id,),
-        ).fetchall():
+        for link in links_by_placement.get(old_placement_id, []):
             new_work_id = process_id_map.get(str(link["work_element_id"]))
             if not new_work_id:
                 raise ValueError("An Equipment Process Function could not be remapped while cloning the scenario.")
@@ -1472,19 +1487,31 @@ def clone_equipment_scenario(
         )
 
     # Remap conveyor_zone_id and copy platform/pit dimensions on cloned pitches
-    for old_pid, new_pid in pitch_id_map.items():
-        old_pitch = conn.execute(
-            "SELECT conveyor_zone_id, platform_height_in, pit_depth_in FROM yamazumi_pitches WHERE id=?",
-            (old_pid,),
-        ).fetchone()
-        if old_pitch:
-            old_zid = _text(old_pitch["conveyor_zone_id"])
-            new_zid = zone_id_map.get(old_zid) if old_zid else None
-            conn.execute(
+    if pitch_id_map:
+        old_pids = list(pitch_id_map.keys())
+        placeholders = ",".join("?" for _ in old_pids)
+        old_pitches = {
+            str(r["id"]): r
+            for r in conn.execute(
+                f"SELECT id, conveyor_zone_id, platform_height_in, pit_depth_in FROM yamazumi_pitches WHERE id IN ({placeholders})",
+                tuple(old_pids),
+            ).fetchall()
+        }
+        pitch_updates = []
+        for old_pid, new_pid in pitch_id_map.items():
+            old_pitch = old_pitches.get(old_pid)
+            if old_pitch:
+                old_zid = _text(old_pitch["conveyor_zone_id"])
+                new_zid = zone_id_map.get(old_zid) if old_zid else None
+                pitch_updates.append(
+                    (new_zid, old_pitch["platform_height_in"] or 0.0, old_pitch["pit_depth_in"] or 0.0, new_pid)
+                )
+        if pitch_updates:
+            conn.executemany(
                 """UPDATE yamazumi_pitches
                    SET conveyor_zone_id=?, platform_height_in=?, pit_depth_in=?
                    WHERE id=?""",
-                (new_zid, old_pitch["platform_height_in"] or 0.0, old_pitch["pit_depth_in"] or 0.0, new_pid),
+                pitch_updates,
             )
 
 
@@ -1494,7 +1521,7 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
     store = _store_module()
     with store.connection() as conn:
         if not is_scenario_task_completed("init_equipment_schema_for_matrix", project_id, ""):
-            init_equipment_schema(conn)
+            _ensure_default_equipment_types(conn, project_id)
             mark_scenario_task_completed("init_equipment_schema_for_matrix", project_id, "")
 
         work_rows = conn.execute(
@@ -1536,14 +1563,20 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
         for r in placed_rows:
             placed_by_work.setdefault(str(r["work_element_id"]), []).append(dict(r))
 
-        torque_linked_req_ids = {
-            str(r[0])
-            for r in conn.execute(
-                """SELECT quality_requirement_id FROM equipment_torque_requirement_links
-                   WHERE project_id=?""",
-                (project_id,),
-            ).fetchall()
-        }
+        torque_assets_by_req_id: dict[str, list[str]] = {}
+        for tr in conn.execute(
+            """SELECT link.quality_requirement_id, asset.name
+               FROM equipment_torque_requirement_links link
+               JOIN equipment_assets asset ON asset.id = link.equipment_id
+               WHERE link.project_id=?""",
+            (project_id,),
+        ).fetchall():
+            req_key = str(tr["quality_requirement_id"])
+            aname = _text(tr["name"])
+            if aname:
+                bucket = torque_assets_by_req_id.setdefault(req_key, [])
+                if aname not in bucket:
+                    bucket.append(aname)
 
         assignments = conn.execute(
             """SELECT a.id AS assignment_id, a.work_element_id, a.quality_requirement_id,
@@ -1596,16 +1629,9 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
                 if _text(eq.get("equipment_type")).casefold() == expected_type.casefold()
                 or (expected_type == "Torque tool" and "torque" in _text(eq.get("equipment_type")).casefold())
             ]
-            if req_id in torque_linked_req_ids and expected_type == "Torque tool":
-                t_rows = conn.execute(
-                    """SELECT asset.name FROM equipment_torque_requirement_links link
-                       JOIN equipment_assets asset ON asset.id=link.equipment_id
-                       WHERE link.project_id=? AND link.quality_requirement_id=?""",
-                    (project_id, req_id),
-                ).fetchall()
-                for tr in t_rows:
-                    aname = _text(tr[0])
-                    if aname and aname not in matching_assets:
+            if expected_type == "Torque tool":
+                for aname in torque_assets_by_req_id.get(req_id, ()):
+                    if aname not in matching_assets:
                         matching_assets.append(aname)
 
             is_satisfied = len(matching_assets) > 0

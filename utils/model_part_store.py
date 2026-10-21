@@ -852,7 +852,10 @@ def update_part_feature_rules(
 ) -> int:
     """Save feature rules and resolve them to official model numbers for downstream use."""
     features = complexity_features(project_id)
-    feature_by_id = {str(row["id"]): row for _, row in features.iterrows()}
+    allowed_by_feature = {
+        str(row["id"]): set(json.loads(row["allowed_values"] or "[]"))
+        for _, row in features.iterrows()
+    }
     tree = complexity_tree(project_id)
     read_rows = (
         lambda sql, params=(): [dict(row) for row in _conn.execute(sql, params).fetchall()]
@@ -864,55 +867,72 @@ def update_part_feature_rules(
         for row in read_rows("SELECT id FROM parts WHERE project_id=?", (project_id,))
     }
     timestamp = now_iso()
-    updated = 0
-    context = nullcontext(_conn) if _conn is not None else connection()
-    with context as conn:
-        for part_id, raw_tokens in selections_by_part.items():
-            if part_id not in valid_parts:
-                continue
-            tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
-            if not tokens:
-                continue  # Preserve legacy model-number applicability until the user tags it.
-            if "All models" in tokens:
-                conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
-                conn.execute(
-                    "UPDATE parts SET model_applicability='All', updated_at=? WHERE id=? AND project_id=?",
-                    (timestamp, part_id, project_id),
-                )
-                updated += 1
-                continue
-            selected_by_feature: dict[str, set[str]] = {}
-            for token in tokens:
-                if "::" not in token:
-                    raise ValueError("Choose All models or values defined in Feature definitions.")
-                feature_id, value = token.split("::", 1)
-                feature = feature_by_id.get(feature_id)
-                allowed = json.loads(feature["allowed_values"] or "[]") if feature is not None else []
-                if value not in allowed:
-                    raise ValueError("A selected feature choice is no longer defined.")
-                selected_by_feature.setdefault(feature_id, set()).add(value)
+    resolved_applicability_cache: dict[tuple[tuple[str, tuple[str, ...]], ...], str] = {}
+    delete_params: list[tuple[str, str]] = []
+    insert_rows: list[tuple[str, str, str, str, str]] = []
+    update_rows: list[tuple[str, str, str, str]] = []
 
-            matches = tree.copy()
-            for feature_id, selected_values in selected_by_feature.items():
+    for part_id, raw_tokens in selections_by_part.items():
+        if part_id not in valid_parts:
+            continue
+        tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
+        if not tokens:
+            continue  # Preserve legacy model-number applicability until the user tags it.
+        if "All models" in tokens:
+            delete_params.append((project_id, part_id))
+            update_rows.append(("All", timestamp, part_id, project_id))
+            continue
+        selected_by_feature: dict[str, set[str]] = {}
+        for token in tokens:
+            if "::" not in token:
+                raise ValueError("Choose All models or values defined in Feature definitions.")
+            feature_id, value = token.split("::", 1)
+            allowed = allowed_by_feature.get(feature_id)
+            if allowed is None or value not in allowed:
+                raise ValueError("A selected feature choice is no longer defined.")
+            selected_by_feature.setdefault(feature_id, set()).add(value)
+
+        rule_key = tuple(
+            (feature_id, tuple(sorted(values)))
+            for feature_id, values in sorted(selected_by_feature.items())
+        )
+        normalized_models = resolved_applicability_cache.get(rule_key)
+        if normalized_models is None:
+            matches = tree
+            for feature_id, selected_values in rule_key:
                 matches = matches[matches[feature_id].isin(selected_values)]
             if matches.empty:
                 raise ValueError("A feature rule matches no official models. Update the Complexity tree or the part rule.")
             model_numbers = matches["official_model_number"].dropna().astype(str).tolist()
-            conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
+            normalized_models = normalize_model_applicability(model_numbers)
+            resolved_applicability_cache[rule_key] = normalized_models
+
+        delete_params.append((project_id, part_id))
+        for feature_id, values in rule_key:
+            for value in values:
+                insert_rows.append((project_id, part_id, feature_id, value, timestamp))
+        update_rows.append((normalized_models, timestamp, part_id, project_id))
+
+    if not update_rows:
+        return 0
+
+    context = nullcontext(_conn) if _conn is not None else connection()
+    with context as conn:
+        conn.executemany(
+            "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
+            delete_params,
+        )
+        if insert_rows:
             conn.executemany(
                 """INSERT INTO part_feature_rules
                    (project_id, part_id, feature_id, value, updated_at) VALUES (?, ?, ?, ?, ?)""",
-                [
-                    (project_id, part_id, feature_id, value, timestamp)
-                    for feature_id, values in selected_by_feature.items() for value in sorted(values)
-                ],
+                insert_rows,
             )
-            conn.execute(
-                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
-                (normalize_model_applicability(model_numbers), timestamp, part_id, project_id),
-            )
-            updated += 1
-    return updated
+        conn.executemany(
+            "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+            update_rows,
+        )
+    return len(update_rows)
 
 _INFERENCE_SUBWORDS = (
     "back", "plate", "wire", "harness", "light", "panel", "board", "switch",

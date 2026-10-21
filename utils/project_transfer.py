@@ -48,7 +48,8 @@ PROJECT_TRANSFER_TABLES = (
         "pits_bom_occurrence_revisions", "pits_bom_occurrences", "occurrence_id"
     ),
     TransferTable("pits_bom_occurrence_concerns"),
-    TransferTable("audit_log"), TransferTable("yamazumi_areas"),
+    TransferTable("audit_log"), TransferTable("conveyor_zones"),
+    TransferTable("yamazumi_areas"),
     TransferTable("yamazumi_pitches"), TransferTable("yamazumi_elements"),
     TransferTable("yamazumi_work_regions"),
     TransferTable("manufacturing_assemblies"),
@@ -75,7 +76,6 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("equipment_assets"), TransferTable("equipment_function_links"),
     TransferTable("equipment_placements"), TransferTable("equipment_process_links"),
     TransferTable("equipment_torque_requirement_links"),
-    TransferTable("conveyor_zones"),
     TransferTable("layout_plans"),
     TransferTable("layout_revisions", "layout_plans", "layout_id"),
     TransferTable("layout_layers", "layout_revisions", "revision_id"),
@@ -161,11 +161,17 @@ def _registered_rows(
             if not parent_values:
                 rows = []
             else:
-                placeholders = ",".join("?" for _ in parent_values)
-                rows = conn.execute(
-                    f'SELECT * FROM "{item.name}" WHERE "{item.foreign_key}" IN ({placeholders})',
-                    tuple(parent_values),
-                ).fetchall()
+                parent_list = list(parent_values)
+                rows = []
+                for idx in range(0, len(parent_list), 900):
+                    chunk = parent_list[idx : idx + 900]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows.extend(
+                        conn.execute(
+                            f'SELECT * FROM "{item.name}" WHERE "{item.foreign_key}" IN ({placeholders})',
+                            tuple(chunk),
+                        ).fetchall()
+                    )
         tables[item.name] = [dict(row) for row in rows]
     if not tables["projects"]:
         raise ValueError("The current project no longer exists.")
@@ -451,8 +457,9 @@ def _insert_remapped_tables(
 ) -> None:
     for item in PROJECT_TRANSFER_TABLES:
         deferred_shape_links: list[tuple[str | None, str | None, str]] = []
+        batches_by_columns: dict[tuple[str, ...], list[tuple]] = {}
         for row in tables[item.name]:
-            columns = list(row)
+            columns = tuple(row)
             if not columns:
                 continue
             if item.name == "layout_shapes" and (
@@ -470,12 +477,17 @@ def _insert_remapped_tables(
                     "source_shape_id": None,
                     "target_shape_id": None,
                 }
+            batches_by_columns.setdefault(columns, []).append(
+                tuple(row[column] for column in columns)
+            )
+        for columns, batch in batches_by_columns.items():
             column_sql = ", ".join(f'"{column}"' for column in columns)
             placeholders = ", ".join("?" for _ in columns)
-            conn.execute(
+            conn.executemany(
                 f'INSERT INTO "{item.name}" ({column_sql}) VALUES ({placeholders})',
-                tuple(row[column] for column in columns),
+                batch,
             )
+            conn.execute("PRAGMA defer_foreign_keys=ON")
         if deferred_shape_links:
             conn.executemany(
                 'UPDATE "layout_shapes" SET "source_shape_id" = ?, "target_shape_id" = ? WHERE "id" = ?',

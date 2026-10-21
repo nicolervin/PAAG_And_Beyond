@@ -993,6 +993,27 @@ def _clone_ergonomics_reviews(
             (project_id, new_scenario_id, work_element_id),
         )
 
+    selections_by_review: dict[str, list[sqlite3.Row]] = {}
+    for selection in conn.execute(
+        """SELECT ergonomics_review_id, hazard_option_id, sequence
+           FROM ergonomics_review_hazard_selections
+           WHERE project_id=? AND scenario_id=?
+           ORDER BY sequence, id""",
+        (project_id, source_scenario_id),
+    ).fetchall():
+        selections_by_review.setdefault(
+            str(selection["ergonomics_review_id"]), []
+        ).append(selection)
+
+    media_by_review: dict[str, list[sqlite3.Row]] = {}
+    for media in conn.execute(
+        """SELECT * FROM ergonomics_visual_media
+           WHERE project_id=? AND scenario_id=?
+           ORDER BY sequence, id""",
+        (project_id, source_scenario_id),
+    ).fetchall():
+        media_by_review.setdefault(str(media["review_id"]), []).append(media)
+
     for source_review in source_reviews:
         source_review_id = str(source_review["id"])
         source_work_element_id = source_review["work_element_id"]
@@ -1030,13 +1051,7 @@ def _clone_ergonomics_reviews(
                 timestamp,
             ),
         )
-        for selection in conn.execute(
-            """SELECT hazard_option_id, sequence
-               FROM ergonomics_review_hazard_selections
-               WHERE project_id=? AND scenario_id=? AND ergonomics_review_id=?
-               ORDER BY sequence, id""",
-            (project_id, source_scenario_id, source_review_id),
-        ).fetchall():
+        for selection in selections_by_review.get(source_review_id, []):
             conn.execute(
                 """INSERT INTO ergonomics_review_hazard_selections
                    (id, project_id, scenario_id, ergonomics_review_id,
@@ -1053,12 +1068,7 @@ def _clone_ergonomics_reviews(
                     timestamp,
                 ),
             )
-        for media in conn.execute(
-            """SELECT * FROM ergonomics_visual_media
-               WHERE project_id=? AND scenario_id=? AND review_id=?
-               ORDER BY sequence, id""",
-            (project_id, source_scenario_id, source_review_id),
-        ).fetchall():
+        for media in media_by_review.get(source_review_id, []):
             conn.execute(
                 """INSERT INTO ergonomics_visual_media
                    (id, project_id, scenario_id, review_id,
@@ -1330,7 +1340,7 @@ def connection():
     changes_before = conn.total_changes
     try:
         yield conn
-        had_writes = bool(conn.in_transaction or conn.total_changes > changes_before)
+        had_writes = bool(conn.total_changes > changes_before)
         conn.commit()
         if had_writes:
             bump_write_epoch()

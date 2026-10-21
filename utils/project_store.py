@@ -441,11 +441,21 @@ def clone_planning_scenario(
                 )
 
             process_part_option_id_map: dict[str, str] = {}
-            for source_group in conn.execute(
+            source_part_groups = conn.execute(
                 """SELECT * FROM process_part_groups
                    WHERE project_id=? AND scenario_id=? ORDER BY name""",
                 (project_id, source_scenario_id),
-            ).fetchall():
+            ).fetchall()
+            options_by_group: dict[str, list[sqlite3.Row]] = {}
+            if source_part_groups:
+                group_ids = [str(g["id"]) for g in source_part_groups]
+                placeholders = ",".join("?" for _ in group_ids)
+                for source_option in conn.execute(
+                    f"SELECT * FROM process_part_options WHERE group_id IN ({placeholders})",
+                    tuple(group_ids),
+                ).fetchall():
+                    options_by_group.setdefault(str(source_option["group_id"]), []).append(source_option)
+            for source_group in source_part_groups:
                 group = dict(source_group)
                 old_group_id = str(group["id"])
                 new_work_element_id = process_id_map.get(str(group["work_element_id"]))
@@ -463,9 +473,7 @@ def clone_planning_scenario(
                     f"INSERT INTO process_part_groups ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
                     tuple(group[column] for column in columns),
                 )
-                for source_option in conn.execute(
-                    "SELECT * FROM process_part_options WHERE group_id=?", (old_group_id,)
-                ).fetchall():
+                for source_option in options_by_group.get(old_group_id, []):
                     option = dict(source_option)
                     old_option_id = str(option["id"])
                     new_option_id = str(uuid4())
@@ -566,11 +574,30 @@ def clone_planning_scenario(
             pitch_id_map: dict[str, str] = {}
             pending_pitch_feeds: list[tuple[str, str, str | None]] = []
             yamazumi_element_id_map: dict[str, str] = {}
-            for old_area_id, new_area_id in area_id_map.items():
-                for source_row in conn.execute(
-                    "SELECT * FROM yamazumi_pitches WHERE project_id=? AND area_id=? ORDER BY sequence",
-                    (project_id, old_area_id),
+            pitches_by_area: dict[str, list[sqlite3.Row]] = {}
+            regions_by_area: dict[str, list[sqlite3.Row]] = {}
+            elements_by_area: dict[str, list[sqlite3.Row]] = {}
+            if area_id_map:
+                old_area_ids = list(area_id_map.keys())
+                area_placeholders = ",".join("?" for _ in old_area_ids)
+                for r in conn.execute(
+                    f"SELECT * FROM yamazumi_pitches WHERE project_id=? AND area_id IN ({area_placeholders}) ORDER BY sequence",
+                    (project_id, *old_area_ids),
                 ).fetchall():
+                    pitches_by_area.setdefault(str(r["area_id"]), []).append(r)
+                for r in conn.execute(
+                    f"SELECT * FROM yamazumi_work_regions WHERE project_id=? AND area_id IN ({area_placeholders}) ORDER BY sequence",
+                    (project_id, *old_area_ids),
+                ).fetchall():
+                    regions_by_area.setdefault(str(r["area_id"]), []).append(r)
+                for r in conn.execute(
+                    f"SELECT * FROM yamazumi_elements WHERE project_id=? AND area_id IN ({area_placeholders}) ORDER BY sequence",
+                    (project_id, *old_area_ids),
+                ).fetchall():
+                    elements_by_area.setdefault(str(r["area_id"]), []).append(r)
+
+            for old_area_id, new_area_id in area_id_map.items():
+                for source_row in pitches_by_area.get(old_area_id, []):
                     row = dict(source_row)
                     old_id, new_id = str(row["id"]), str(uuid4())
                     pitch_id_map[old_id] = new_id
@@ -589,10 +616,7 @@ def clone_planning_scenario(
                         f"INSERT INTO yamazumi_pitches ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
                         tuple(row[column] for column in columns),
                     )
-                for source_row in conn.execute(
-                    "SELECT * FROM yamazumi_work_regions WHERE project_id=? AND area_id=? ORDER BY sequence",
-                    (project_id, old_area_id),
-                ).fetchall():
+                for source_row in regions_by_area.get(old_area_id, []):
                     row = dict(source_row)
                     row.update(id=str(uuid4()), area_id=new_area_id, updated_at=timestamp)
                     columns = list(row)
@@ -600,10 +624,7 @@ def clone_planning_scenario(
                         f"INSERT INTO yamazumi_work_regions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
                         tuple(row[column] for column in columns),
                     )
-                for source_row in conn.execute(
-                    "SELECT * FROM yamazumi_elements WHERE project_id=? AND area_id=? ORDER BY sequence",
-                    (project_id, old_area_id),
-                ).fetchall():
+                for source_row in elements_by_area.get(old_area_id, []):
                     row = dict(source_row)
                     old_element_id = str(row["id"])
                     new_element_id = str(uuid4())
@@ -656,11 +677,21 @@ def clone_planning_scenario(
                 timestamp,
             )
 
-            for source_group in conn.execute(
+            source_mat_groups = conn.execute(
                 """SELECT * FROM work_element_material_groups
                    WHERE project_id=? AND scenario_id=? ORDER BY name""",
                 (project_id, source_scenario_id),
-            ).fetchall():
+            ).fetchall()
+            mat_options_by_group: dict[str, list[sqlite3.Row]] = {}
+            if source_mat_groups:
+                mat_group_ids = [str(g["id"]) for g in source_mat_groups]
+                mat_placeholders = ",".join("?" for _ in mat_group_ids)
+                for source_option in conn.execute(
+                    f"SELECT * FROM work_element_material_options WHERE group_id IN ({mat_placeholders})",
+                    tuple(mat_group_ids),
+                ).fetchall():
+                    mat_options_by_group.setdefault(str(source_option["group_id"]), []).append(source_option)
+            for source_group in source_mat_groups:
                 group = dict(source_group)
                 old_group_id = str(group["id"])
                 new_element_id = yamazumi_element_id_map.get(str(group["yamazumi_element_id"]))
@@ -678,10 +709,7 @@ def clone_planning_scenario(
                     f"INSERT INTO work_element_material_groups ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
                     tuple(group[column] for column in columns),
                 )
-                for source_option in conn.execute(
-                    "SELECT * FROM work_element_material_options WHERE group_id=?",
-                    (old_group_id,),
-                ).fetchall():
+                for source_option in mat_options_by_group.get(old_group_id, []):
                     option = dict(source_option)
                     option.update(id=str(uuid4()), group_id=new_group_id, updated_at=timestamp)
                     option_columns = list(option)

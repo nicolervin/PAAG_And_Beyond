@@ -255,6 +255,9 @@ def cached_store_read(fn: F) -> F:
         if hit:
             return cached_val
         result = fn(*args, **kwargs)
+        post_token = current_db_state_token() or state_token
+        if post_token != state_token:
+            cache_key = ("store_read", post_token, qualname, norm_args, norm_kwargs)
         cache.set(cache_key, result)
         return result
 

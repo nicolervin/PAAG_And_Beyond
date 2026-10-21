@@ -974,6 +974,15 @@ def _live_projection_conn(
                 suffix
             )
     equipment_by_work = _equipment_by_work_element(conn, project_id, scenario_id)
+    torque_by_req_id: dict[str, str] = {}
+    for t_row in conn.execute(
+        """SELECT quality_requirement_id, tool_type, tool_orientation, screw_bit_type
+           FROM quality_requirement_torque_details
+           WHERE project_id=?""",
+        (project_id,),
+    ).fetchall():
+        vals = [_text(t_row[name]) for name in ("tool_type", "tool_orientation", "screw_bit_type")]
+        torque_by_req_id[str(t_row["quality_requirement_id"])] = " — ".join(v for v in vals if v)
     result: list[dict] = []
     first_by_work: set[str] = set()
     for entry in entries:
@@ -1014,7 +1023,7 @@ def _live_projection_conn(
                 continue
             torque = ""
             if source and _text(source.get("requirement_type")).casefold() == "torque":
-                torque = _torque_text(conn, project_id, quality_id)
+                torque = torque_by_req_id.get(quality_id, "")
             eq_list = equipment_by_work.get(work_id, [])
             eq_summary = ",".join(sorted(str(eq["equipment_id"]) for eq in eq_list))
             fingerprint = _source_fingerprint(entry, source, torque, eq_summary)

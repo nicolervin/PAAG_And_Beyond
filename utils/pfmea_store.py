@@ -1027,18 +1027,18 @@ def pfmea_entries(project_id: str, scenario_id: str, work_element_id: str | None
                 GROUP BY e.id ORDER BY e.process_sequence_snapshot, e.created_at""",
             tuple(params),
         ).fetchall()
+        work_by_id = {
+            str(r["id"]): dict(r)
+            for r in conn.execute(
+                "SELECT * FROM work_elements WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
         result = []
         for raw in rows:
             row = dict(raw)
             work_id = str(row.get("work_element_id") or "").strip()
-            if work_id:
-                work_row = conn.execute(
-                    "SELECT * FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
-                    (work_id, project_id, scenario_id),
-                ).fetchone()
-                work = dict(work_row) if work_row else None
-            else:
-                work = None
+            work = work_by_id.get(work_id) if work_id else None
             row["is_unlinked"] = work is None
             row["upstream_changes"] = bool(work is None or _process_hash(work) != row.get("process_source_hash"))
             result.append(row)
@@ -1327,10 +1327,20 @@ def _pfmea_flat_rows_conn(
     for action in actions:
         actions_by_entry.setdefault(str(action["pfmea_entry_id"]), []).append(action)
 
+    work_by_id = {
+        str(r["id"]): dict(r)
+        for r in conn.execute(
+            "SELECT * FROM work_elements WHERE project_id=? AND scenario_id=?",
+            (project_id, scenario_id),
+        ).fetchall()
+    }
     result: list[dict] = []
     for entry in entries:
         entry_id = str(entry["id"])
-        work = _work_element(conn, project_id, scenario_id, str(entry["work_element_id"]))
+        work_id = str(entry["work_element_id"])
+        work = work_by_id.get(work_id)
+        if work is None:
+            work = _work_element(conn, project_id, scenario_id, work_id)
         upstream_changes = _process_hash(work) != entry["process_source_hash"]
         entry_effects = effects_by_entry.get(entry_id) or [None]
         entry_causes = causes_by_entry.get(entry_id) or [None]
@@ -2597,8 +2607,14 @@ def clone_pfmea_scenario(conn: sqlite3.Connection, project_id: str,
                      tuple(row[column] for column in columns))
         cloned += 1
     for table, mapping in (("pfmea_effects", effect_map), ("pfmea_causes", cause_map)):
+        rows_by_entry: dict[str, list[sqlite3.Row]] = {}
+        for raw in conn.execute(
+            f"SELECT * FROM {table} WHERE project_id=? AND scenario_id=?",
+            (project_id, source_scenario_id),
+        ).fetchall():
+            rows_by_entry.setdefault(str(raw["pfmea_entry_id"]), []).append(raw)
         for old_entry_id, new_entry_id in entry_map.items():
-            for raw in conn.execute(f"SELECT * FROM {table} WHERE pfmea_entry_id=?", (old_entry_id,)).fetchall():
+            for raw in rows_by_entry.get(old_entry_id, []):
                 row = dict(raw)
                 old_id, new_id = str(row["id"]), str(uuid4())
                 mapping[old_id] = new_id
