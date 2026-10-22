@@ -102,7 +102,13 @@ def filter_table(
     if st.session_state.get(signature_key) != row_identity:
         st.session_state[signature_key] = row_identity
         for widget_key in reset_widget_keys:
-            st.session_state.pop(widget_key, None)
+            prior_widget_state = st.session_state.pop(widget_key, None)
+            if isinstance(prior_widget_state, dict) and (
+                prior_widget_state.get("added_rows")
+                or prior_widget_state.get("edited_rows")
+                or prior_widget_state.get("deleted_rows")
+            ):
+                request_table_editor_reset(widget_key)
     st.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
     return visible.reset_index(drop=True)
 
@@ -179,6 +185,28 @@ def capture_id_keyed_editor_draft(
             if column in prior_changes and prior_changes[column] == value:
                 continue
             draft.setdefault(stable_id, {})[column] = deepcopy(value)
+    for position_key, prior_changes in prior_state.items():
+        if not prior_changes:
+            continue
+        try:
+            position = int(position_key)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= position < len(previous_editor_rows)):
+            continue
+        stable_id = previous_editor_rows.iloc[position].get(id_column)
+        if stable_id is None or pd.isna(stable_id) or not str(stable_id).strip():
+            continue
+        stable_id = str(stable_id).strip()
+        current_changes = current_state.get(position_key, {}) or {}
+        row_draft = draft.get(stable_id)
+        if not row_draft:
+            continue
+        for column in prior_changes:
+            if column not in current_changes and column in row_draft:
+                row_draft.pop(column, None)
+        if not row_draft:
+            draft.pop(stable_id, None)
     return draft, current_state
 
 
@@ -209,6 +237,9 @@ def apply_id_keyed_editor_draft(
 
 def has_unsaved_table_changes(key: str) -> bool:
     """Return whether a data editor currently contains pending cell or row changes."""
+    logical_key = logical_table_editor_key(key)
+    if st.session_state.get(f"_reset_table_editor_{logical_key}"):
+        return False
     state = st.session_state.get(key, {}) or {}
     return bool(state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"))
 
@@ -238,6 +269,13 @@ def apply_pending_table_editor_reset(key: str) -> str:
     if st.session_state.pop(f"_reset_table_editor_{logical_key}", False):
         previous_key = f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
         st.session_state.pop(previous_key, None)
+        suffixed_keys = [
+            existing_key
+            for existing_key in list(st.session_state.keys())
+            if str(existing_key).startswith(f"{previous_key}_")
+        ]
+        for suffixed_key in suffixed_keys:
+            st.session_state.pop(suffixed_key, None)
         generation += 1
         st.session_state[generation_key] = generation
     return f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"

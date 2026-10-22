@@ -82,6 +82,7 @@ from utils.table_ui import (
     editable_table_footer,
     editable_table_heading,
     format_clean_number,
+    guarded_tabs,
     native_selected_rows,
     required_field_errors,
     selectable_dataframe,
@@ -1092,7 +1093,7 @@ if _qp_paag_tab in _paag_tab_options:
     except Exception:
         pass
 
-tab_plan, tab_flow, tab_slides = st.tabs(
+tab_plan, tab_flow, tab_slides = guarded_tabs(
     _paag_tab_options,
     key="paag_tab",
 )

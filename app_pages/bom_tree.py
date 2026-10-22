@@ -50,7 +50,7 @@ from utils.table_filters import (
     has_unsaved_table_changes,
     request_table_editor_reset,
 )
-from utils.table_ui import format_clean_number
+from utils.table_ui import format_clean_number, guarded_tabs, register_unsaved_source
 
 page_title_with_scope("BOM", scope="project")
 st.caption(
@@ -187,10 +187,13 @@ def on_cad_tree_select() -> None:
 
 
 # Top tabs: View vs Author
-tab_view, tab_author = st.tabs([
-    "🌲 View BOM",
-    "✏️ Build / Author BOM from Scratch",
-])
+tab_view, tab_author = guarded_tabs(
+    [
+        "🌲 View BOM",
+        "✏️ Build / Author BOM from Scratch",
+    ],
+    key=f"bom_main_tabs_{project_id}",
+)
 
 # ==============================================================================
 # TAB 1: VIEW MODEL TREE
@@ -2069,6 +2072,11 @@ with tab_author:
             # Determine whether there are unsaved changes
             draft_mod_key = f"_draft_modified_{selected_model_id}"
             is_unsaved = has_unsaved_table_changes(bom_editor_key) or bool(st.session_state.get(draft_mod_key))
+            trigger_bom_save, trigger_bom_discard = register_unsaved_source(
+                f"bom_grid_{selected_model_id}",
+                editor_key=bom_editor_key,
+                additional_unsaved=bool(st.session_state.get(draft_mod_key)),
+            )
 
             # Current draft
             current_draft = st.session_state.get(draft_key, [])
@@ -2095,13 +2103,14 @@ with tab_author:
                     if is_unsaved:
                         st.markdown(":orange[:material/warning: **Unsaved changes**]")
                 with act_cols[1]:
-                    if st.button(
+                    undo_bom_clicked = st.button(
                         "Undo",
                         icon=":material/undo:",
                         key=f"undo_bom_grid_{selected_model_id}",
                         help="Discard unsaved edits and reload from the last saved BOM",
                         disabled=not is_unsaved,
-                    ):
+                    )
+                    if undo_bom_clicked or trigger_bom_discard:
                         saved_bom = get_manual_model_bom(project_id, selected_model_id)
                         if saved_bom:
                             for it in saved_bom:
@@ -2121,12 +2130,15 @@ with tab_author:
                         st.toast("Discarded unsaved changes.", icon=":material/undo:")
                         st.rerun()
                 with act_cols[2]:
-                    save_clicked = st.button(
-                        "Save BOM Structure",
-                        icon=":material/save:",
-                        type="primary",
-                        key=f"save_bom_grid_{selected_model_id}",
-                        width="stretch",
+                    save_clicked = bool(
+                        st.button(
+                            "Save BOM Structure",
+                            icon=":material/save:",
+                            type="primary",
+                            key=f"save_bom_grid_{selected_model_id}",
+                            width="stretch",
+                        )
+                        or trigger_bom_save
                     )
 
             # ── Action Bar (Row 2): Template, Import/Paste, Copy, Predict ──

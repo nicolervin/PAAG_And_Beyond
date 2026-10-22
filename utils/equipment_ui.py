@@ -70,6 +70,7 @@ from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
+    guarded_tabs,
     native_selected_rows,
     required_field_errors,
     selectable_dataframe,
@@ -1263,10 +1264,9 @@ def render_functional_equipment_tab(
     )
     applicable = equipment_types(project_id, functional_area)
     labels = ["All equipment", *applicable["label"].astype(str).tolist()]
-    tabs = st.tabs(
+    tabs = guarded_tabs(
         labels,
         key=f"equipment_type_tabs_{project_id}_{functional_area}",
-        on_change="rerun",
     )
     selected_type_id: str | None = None
     selected_type_label = "All equipment"
@@ -1887,7 +1887,10 @@ def render_equipment_overview(
         ":material/fact_check: Needs vs. Placements Audit",
         ":material/category: Equipment Types",
     ]
-    tab1, tab2, tab3, tab4 = st.tabs(tab_labels)
+    tab1, tab2, tab3, tab4 = guarded_tabs(
+        tab_labels,
+        key=f"equipment_main_tabs_{project_id}",
+    )
 
     with tab1:
         editable_table_heading("Equipment Catalog & Placements")

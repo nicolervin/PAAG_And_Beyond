@@ -52,7 +52,9 @@ from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
     decimal_values_equal,
     editable_table_footer,
+    guarded_tabs,
     native_selected_rows,
+    register_unsaved_source,
     stage_native_delete_confirmation,
     selectable_dataframe,
     table_has_unsaved_changes,
@@ -194,7 +196,7 @@ for idx, node in enumerate(master_nodes):
         master_info_by_pnum[pnum] = info
 
 
-fishbone_tab, assign_parts_tab = st.tabs(
+fishbone_tab, assign_parts_tab = guarded_tabs(
     ["Interactive Fishbone", "Parts Placement Table"],
     key=f"fishbone_main_tabs_{project_id}",
 )
@@ -203,6 +205,10 @@ with assign_parts_tab:
     place_parts_title, place_parts_undo = st.columns([5, 0.7], vertical_alignment="center")
     place_parts_title.subheader("Place Parts into Fishbone")
     placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
+    trigger_pool_save, trigger_pool_discard = register_unsaved_source(
+        f"fishbone_pool_{project_id}_{scenario_id}",
+        editor_key=pool_editor_key,
+    )
     undo_placement = place_parts_undo.button(
         "Undo",
         icon=":material/undo:",
@@ -214,8 +220,8 @@ with assign_parts_tab:
         ),
         key="undo_part_placement",
     )
-    if undo_placement:
-        if placement_has_unsaved:
+    if undo_placement or trigger_pool_discard:
+        if placement_has_unsaved or trigger_pool_discard:
             request_table_editor_reset(pool_editor_key)
             st.toast("Discarded the unsaved placement table edits", icon=":material/undo:")
         else:
@@ -409,13 +415,14 @@ with assign_parts_tab:
             help="Describe this occurrence so repeated uses of the same part are easy to distinguish.",
             key=use_description_key,
         )
-        if placement_row.button(
+        place_btn = placement_row.button(
             "Place selected parts",
             type="primary",
             icon=":material/arrow_downward:",
             disabled=not (selected_unplaced_ids or selected_additional_use_ids),
             help="Places first-time parts and staged additional uses with the correct behavior automatically.",
-        ):
+        )
+        if place_btn or (trigger_pool_save and (selected_unplaced_ids or selected_additional_use_ids)):
             try:
                 st.session_state[assignment_undo_key] = current_assignment_undo
                 count = 0

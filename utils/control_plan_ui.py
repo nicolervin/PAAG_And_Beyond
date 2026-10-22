@@ -41,6 +41,7 @@ from utils.table_ui import (
     dataframe_to_excel,
     editable_table_footer,
     editable_table_heading,
+    guarded_tabs,
     native_selected_rows,
     selectable_dataframe,
     stage_native_delete_confirmation,
@@ -1317,7 +1318,10 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
             icon=":material/check_circle:",
         )
     _render_classification_legend()
-    characteristics_tab, flow_tab = st.tabs(["Characteristics table", "Process flow map"])
+    characteristics_tab, flow_tab = guarded_tabs(
+        ["Characteristics table", "Process flow map"],
+        key=f"control_plan_subtabs_{project_id}_{scenario_id}",
+    )
     with characteristics_tab:
         _render_control_plan_characteristics(project_id, scenario_id)
     with flow_tab:

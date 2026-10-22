@@ -12,6 +12,13 @@ from utils.split_workspace import (
     split_divider,
     split_navigation,
 )
+from utils.table_ui import (
+    begin_unsaved_tracking,
+    clear_unsaved_tracking_state,
+    finalize_unsaved_tracking,
+    has_active_unsaved_changes,
+    request_unsaved_page_navigation,
+)
 from utils.store import (
     get_last_active_workspace,
     get_project,
@@ -312,6 +319,15 @@ def _handle_split_navigation_from(nav_key: str) -> None:
     target = str(event.get("url_path") or "")
     if target not in page_by_url_path:
         return
+    if target == active_page_key:
+        return
+    if has_active_unsaved_changes():
+        target_page = page_by_url_path[target]
+        request_unsaved_page_navigation(
+            target,
+            label=str(getattr(target_page, "title", "") or target),
+        )
+        return
     if target == str(st.session_state.get(split_secondary_key) or ""):
         st.session_state.pop(split_secondary_key, None)
     st.session_state["split_workspace_pending_navigation"] = target
@@ -382,6 +398,7 @@ with st.sidebar:
         selected_name = st.selectbox("Active project", list(project_by_name), index=list(project_by_name).index(current_name), key="global_project")
         selected_project_id = project_by_name[selected_name]
         if selected_project_id != st.session_state.project_id:
+            clear_unsaved_tracking_state()
             st.session_state.project_id = selected_project_id
             st.session_state.scenario_id = None
             st.session_state.pop("global_scenario", None)
@@ -475,7 +492,15 @@ pending_navigation = str(
     st.session_state.pop("split_workspace_pending_navigation", "") or ""
 )
 if pending_navigation and pending_navigation in page_by_url_path:
-    st.switch_page(page_by_url_path[pending_navigation])
+    if has_active_unsaved_changes():
+        target_page = page_by_url_path[pending_navigation]
+        request_unsaved_page_navigation(
+            pending_navigation,
+            label=str(getattr(target_page, "title", "") or pending_navigation),
+        )
+    else:
+        clear_unsaved_tracking_state()
+        st.switch_page(page_by_url_path[pending_navigation])
 
 if st.session_state.get("project_id"):
     try:
@@ -500,8 +525,10 @@ def _run_workspace_page(app_page, *, enable: bool = False) -> None:
 if active_page_key != "parts" and secondary_url_path != "parts":
     st.session_state.pop("_parts_page_mounted_token", None)
 
+begin_unsaved_tracking(page_by_url_path, split_secondary_key=split_secondary_key)
+
 if secondary_page is None:
-    navigation.run()
+    _run_workspace_page(navigation)
 else:
     # Relax container horizontal margins so split panes autofill the available monitor space
     st.html(
@@ -645,3 +672,5 @@ else:
 
         with st.container(key="split_bottom_pane"):
             _run_workspace_page(secondary_page, enable=True)
+
+finalize_unsaved_tracking(page_by_url_path, split_secondary_key=split_secondary_key)

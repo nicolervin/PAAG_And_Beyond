@@ -117,7 +117,7 @@ PARTS_COLUMN_LABELS = {
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 parts_base_editor_key = apply_pending_table_editor_reset(
-    f"parts_catalog_editor_v7_{scenario_id}"
+    f"parts_catalog_editor_v9_{scenario_id}"
 )
 parts_editor_key = parts_base_editor_key
 parts_draft_key = f"parts_catalog_draft_{project_id}_{scenario_id}"
@@ -170,7 +170,7 @@ elif saved_parts_column_order[:5] == LEGACY_PARTS_COLUMN_ORDER_PREFIX:
     ]
 if saved_parts_column_order == PREVIOUS_DEFAULT_PARTS_COLUMN_ORDER:
     saved_parts_column_order = DEFAULT_PARTS_COLUMN_ORDER.copy()
-current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v2"
+current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v4"
 if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state["_parts_page_mounted_token"] = current_mount_token
     st.session_state[parts_view_draft_key] = saved_parts_column_order.copy()
@@ -184,7 +184,7 @@ if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state.pop(parts_editor_baseline_draft_key, None)
     request_table_editor_reset(parts_base_editor_key)
     parts_base_editor_key = apply_pending_table_editor_reset(
-        f"parts_catalog_editor_v7_{scenario_id}"
+        f"parts_catalog_editor_v9_{scenario_id}"
     )
     parts_editor_key = parts_base_editor_key
 pending_view_reset = st.session_state.pop(parts_view_pending_key, None)
@@ -540,6 +540,21 @@ def harvest_added_rows_into_draft(added_rows: list[dict[str, object]] | None) ->
             continue
         draft_row = _build_draft_added_part_row(raw_row)
         if draft_row is not None:
+            candidate_pnum = str(draft_row.get("part_number") or "").strip().casefold()
+            if candidate_pnum:
+                saved_pnums = (
+                    set(parts["part_number"].fillna("").astype(str).str.strip().str.casefold())
+                    if not parts.empty and "part_number" in parts.columns
+                    else set()
+                )
+                draft_pnums = {
+                    str(item.get("part_number") or "").strip().casefold()
+                    for item in existing_draft_rows
+                    if isinstance(item, dict)
+                }
+                if candidate_pnum in saved_pnums or candidate_pnum in draft_pnums:
+                    draft_row = None
+        if draft_row is not None:
             existing_draft_rows.append(draft_row)
             harvested_any = True
     if harvested_any:
@@ -565,7 +580,7 @@ def merge_parts_editor_draft(source: pd.DataFrame) -> pd.DataFrame:
         st.session_state.get(parts_draft_state_key, {}),
     )
     st.session_state[parts_draft_values_key] = draft_by_id
-    st.session_state[parts_draft_state_key] = captured_state
+    st.session_state[parts_draft_state_key] = {} if last_editor_key != parts_editor_key else captured_state
     return apply_id_keyed_editor_draft(source, draft_by_id)
 
 
@@ -591,6 +606,43 @@ if draft_added_records:
     )
 parts_saved_for_editing = parts_for_editing.copy()
 parts_full_for_editing = merge_parts_editor_draft(parts_saved_for_editing)
+if draft_added_records and not parts_full_for_editing.empty:
+    saved_pnums_lower = (
+        set(parts["part_number"].fillna("").astype(str).str.strip().str.casefold())
+        if not parts.empty and "part_number" in parts.columns
+        else set()
+    )
+    stale_draft_ids: set[str] = set()
+    for _, draft_check_row in parts_full_for_editing.loc[
+        parts_full_for_editing["id"].astype(str).str.startswith("__draft_new__")
+    ].iterrows():
+        did = str(draft_check_row["id"])
+        dpnum = str(draft_check_row.get("part_number") or "").strip().casefold()
+        ddesc = str(draft_check_row.get("description") or "").strip()
+        if (not dpnum and not ddesc) or (dpnum and dpnum in saved_pnums_lower):
+            stale_draft_ids.add(did)
+    if stale_draft_ids:
+        st.session_state[parts_draft_added_key] = [
+            item
+            for item in draft_added_records
+            if str(item.get("id") or "") not in stale_draft_ids
+        ]
+        current_draft_vals = dict(st.session_state.get(parts_draft_values_key, {}) or {})
+        for did in stale_draft_ids:
+            current_draft_vals.pop(did, None)
+        st.session_state[parts_draft_values_key] = current_draft_vals
+        parts_saved_for_editing = parts_saved_for_editing.loc[
+            ~parts_saved_for_editing["id"].astype(str).isin(stale_draft_ids)
+        ].reset_index(drop=True)
+        parts_full_for_editing = parts_full_for_editing.loc[
+            ~parts_full_for_editing["id"].astype(str).isin(stale_draft_ids)
+        ].reset_index(drop=True)
+        request_table_editor_reset(parts_editor_key)
+        parts_base_editor_key = apply_pending_table_editor_reset(
+            f"parts_catalog_editor_v9_{scenario_id}"
+        )
+        parts_editor_key = f"{parts_base_editor_key}_{parts_view_layout_token}"
+        st.session_state[parts_draft_last_editor_key] = parts_editor_key
 has_parts_draft = bool(st.session_state.get(parts_draft_values_key, {})) or bool(
     st.session_state.get(parts_draft_added_key, [])
 )
@@ -646,6 +698,12 @@ sort_controls_slot = st.container()
 keyword_filter_slot = st.container()
 
 with filter_expander:
+    pre_filter_editor_state = deepcopy(st.session_state.get(parts_editor_key, {}) or {})
+    pre_filter_had_dirty_state = bool(
+        pre_filter_editor_state.get("added_rows")
+        or pre_filter_editor_state.get("edited_rows")
+        or pre_filter_editor_state.get("deleted_rows")
+    )
     pre_filter_added_rows = deepcopy(
         (st.session_state.get(parts_editor_key, {}) or {}).get("added_rows", [])
     )
@@ -688,8 +746,25 @@ with filter_expander:
         multi_value_columns=["feature_applicability"],
         keyword_container=keyword_filter_slot,
     )
-    if parts_editor_key not in st.session_state and pre_filter_added_rows:
-        if harvest_added_rows_into_draft(pre_filter_added_rows):
+    if parts_editor_key not in st.session_state:
+        st.session_state.pop(parts_draft_state_key, None)
+        harvested_pre_filter_rows = (
+            harvest_added_rows_into_draft(pre_filter_added_rows)
+            if pre_filter_added_rows
+            else False
+        )
+        if harvested_pre_filter_rows:
+            request_table_editor_reset(parts_editor_key)
+            st.rerun()
+        elif pre_filter_had_dirty_state:
+            request_table_editor_reset(parts_editor_key)
+            parts_base_editor_key = apply_pending_table_editor_reset(
+                f"parts_catalog_editor_v9_{scenario_id}"
+            )
+            parts_editor_key = f"{parts_base_editor_key}_{parts_view_layout_token}"
+            st.session_state[parts_draft_last_editor_key] = parts_editor_key
+    if False:
+        if harvest_added_rows_into_draft(pre_filter_added_rows) or True:
             st.rerun()
     parts_action_slot = st.empty()
     clear_filter_actions = st.container(horizontal=True, horizontal_alignment="right")
@@ -698,8 +773,9 @@ with filter_expander:
         icon=":material/filter_alt_off:",
         key="clear_part_catalog_filters",
     ):
-        if harvest_added_rows_into_draft(pre_filter_added_rows):
+        if harvest_added_rows_into_draft(pre_filter_added_rows) or True:
             st.session_state.pop(parts_editor_key, None)
+            request_table_editor_reset(parts_editor_key)
         st.session_state.pop("part_catalog_filters_keyword", None)
         for filter_column in [
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
@@ -757,6 +833,7 @@ if not (
     or current_editor_state.get("added_rows")
     or current_editor_state.get("deleted_rows")
 ):
+    st.session_state[parts_draft_state_key] = {}
     st.session_state[parts_editor_baseline_draft_key] = deepcopy(
         st.session_state.get(parts_draft_values_key, {})
     )
@@ -971,6 +1048,26 @@ st.download_button(
 
 selected_saved_parts = native_selected_rows(parts_editor_display_rows, editor_key=parts_editor_key)
 if not selected_saved_parts.empty:
+    selected_draft_ids = set(
+        selected_saved_parts.loc[
+            selected_saved_parts["id"].astype(str).str.startswith("__draft_new__"),
+            "id",
+        ].astype(str)
+    )
+    if selected_draft_ids:
+        st.session_state[parts_draft_added_key] = [
+            item
+            for item in list(st.session_state.get(parts_draft_added_key, []))
+            if str(item.get("id") or "") not in selected_draft_ids
+        ]
+        current_draft_vals = dict(st.session_state.get(parts_draft_values_key, {}) or {})
+        for did in selected_draft_ids:
+            current_draft_vals.pop(did, None)
+        st.session_state[parts_draft_values_key] = current_draft_vals
+        request_table_editor_reset(parts_editor_key)
+        if len(selected_draft_ids) == len(selected_saved_parts):
+            st.rerun()
+if not selected_saved_parts.empty:
     selected_saved_parts = selected_saved_parts.loc[
         ~selected_saved_parts["id"].astype(str).str.startswith("__draft_new__")
     ].copy()
@@ -1014,6 +1111,7 @@ if apply_bulk_applicability:
                 st.session_state.get("current_editor", ""),
                 {"feature_applicability": bulk_applicability},
             )
+            clear_parts_editor_draft()
             request_table_editor_reset(parts_editor_key)
             st.toast(f"Updated feature applicability for {len(selected_saved_parts)} parts", icon=":material/check_circle:")
             st.rerun()
@@ -1071,6 +1169,7 @@ def confirm_bulk_part_delete() -> None:
         st.session_state.pop("parts_pending_bulk_delete", None)
         request_table_editor_reset(parts_editor_key)
         st.toast(f"Deleted {len(deleted_labels)} selected parts and their fishbone uses", icon=":material/delete:")
+        clear_parts_editor_draft()
         st.rerun()
 
 

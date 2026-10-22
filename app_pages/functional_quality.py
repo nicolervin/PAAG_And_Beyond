@@ -36,7 +36,7 @@ from utils.quality_store import (
 from utils.requirements_ui import render_requirements_repository_tab
 from utils.scope_ui import page_title_with_scope
 from utils.store import audit_history, planning_scenarios
-from utils.table_ui import selectable_dataframe
+from utils.table_ui import guarded_tabs, selectable_dataframe
 from utils.traceability_ui import render_traceability_matrix_tab
 
 
@@ -820,10 +820,9 @@ if unlinked_count > 0:
         "Control Plan",
         "Equipment",
     ]
-    tabs = st.tabs(
+    tabs = guarded_tabs(
         tab_list,
         key=f"quality_page_tabs_{project_id}",
-        on_change="rerun",
     )
     unlinked_review_tab = tabs[0]
     traceability_tab = tabs[1]
@@ -839,10 +838,9 @@ else:
         "Control Plan",
         "Equipment",
     ]
-    tabs = st.tabs(
+    tabs = guarded_tabs(
         tab_list,
         key=f"quality_page_tabs_{project_id}",
-        on_change="rerun",
     )
     unlinked_review_tab = None
     traceability_tab = tabs[0]
