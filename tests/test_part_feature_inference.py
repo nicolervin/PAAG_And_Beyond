@@ -752,6 +752,121 @@ class PartFeatureInferenceTests(unittest.TestCase):
         self.assertEqual(inferred_controls[controls_pid], [f"{self.fuel_fid}::Electric"])
 
 
+    def test_cross_feature_subject_nouns_and_category_exclusion_and_final_asm(self) -> None:
+        """Verify category exclusion, subject-noun false-positive prevention, sibling-value conflict, and final asm exclusion."""
+        proj_id = store.create_project("Model Car Inference Test", "Model Car", "Tester", 60.0)
+        pid = str(proj_id)
+        models = ["MC100", "MC110", "MC200"]
+        m_ids = {}
+        for idx, m in enumerate(models, start=1):
+            mid = str(uuid4())
+            m_ids[m] = mid
+            store.execute(
+                """INSERT INTO project_models (id, project_id, model_number, display_name, active, source_payload, updated_at)
+                   VALUES (?, ?, ?, ?, 1, '{}', ?)""",
+                (mid, pid, m, f"Car {m}", store.now_iso()),
+            )
+
+        roof_opt_fid = str(uuid4())
+        roof_col_fid = str(uuid4())
+        wheel_col_fid = str(uuid4())
+        wheel_fin_fid = str(uuid4())
+        features = [
+            (roof_opt_fid, "Body", "Roof option", ["Coupe", "Convertible"]),
+            (roof_col_fid, "Body", "Roof Color", ["Teal", "Smoke", "N/A"]),
+            (wheel_col_fid, "Wheels", "Wheel Color", ["Teal", "Black"]),
+            (wheel_fin_fid, "Wheels", "Wheel Finish", ["Chrome", "Black"]),
+        ]
+        for fid, cat, name, allowed in features:
+            store.execute(
+                """INSERT INTO complexity_features (id, project_id, category, name, allowed_values, active, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)""",
+                (fid, pid, cat, name, json.dumps(allowed), store.now_iso()),
+            )
+
+        tree_vals = {
+            "MC100": {
+                roof_opt_fid: "Coupe",
+                roof_col_fid: "Teal",
+                wheel_col_fid: "Teal",
+                wheel_fin_fid: "Chrome",
+            },
+            "MC110": {
+                roof_opt_fid: "Coupe",
+                roof_col_fid: "Smoke",
+                wheel_col_fid: "Black",
+                wheel_fin_fid: "Black",
+            },
+            "MC200": {
+                roof_opt_fid: "Convertible",
+                roof_col_fid: "N/A",
+                wheel_col_fid: "Black",
+                wheel_fin_fid: "Chrome",
+            },
+        }
+        for m, fvals in tree_vals.items():
+            for fid, val in fvals.items():
+                store.execute(
+                    """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (pid, m_ids[m], fid, val, store.now_iso()),
+                )
+
+        def add_part(pn: str, desc: str, usages: list[str]) -> str:
+            part_id = str(uuid4())
+            ts = store.now_iso()
+            store.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, model_applicability, pits_tracker_number, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (part_id, pid, pn, desc, ", ".join(usages), pn, ts),
+            )
+            store.execute(
+                """INSERT INTO pits_bom_occurrences (
+                    id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                    proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                    source_fingerprint, raw_levels_json, first_seen_import_id, last_seen_import_id,
+                    first_seen_at, last_seen_at, updated_at
+                ) VALUES (?, ?, '', ?, ?, 1, 1.0, '1', 1, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()),
+                    pid,
+                    pn,
+                    part_id,
+                    f"fp_{part_id}",
+                    json.dumps({"model_usages": {u: 1.0 for u in usages}}),
+                    self.import_id,
+                    self.import_id,
+                    ts,
+                    ts,
+                    ts,
+                ),
+            )
+            return part_id
+
+        # 1. "Black ABS Roof" on MC110 must match Roof option=Coupe / Roof Color=Smoke, NOT Wheel Color=Black / Wheel Finish=Black
+        black_roof_id = add_part("999D8503P002", "Black ABS Roof", ["MC110"])
+        # 2. "teal tire" on MC100 must match Wheel Color=Teal, NOT Roof Color=Teal
+        teal_tire_id = add_part("999D8505P001", "teal tire", ["MC100"])
+        # 3. "Wheel asm (black and chrome)" on MC200 must match Wheel Color=Black & Wheel Finish=Chrome, NOT Wheel Finish=Black
+        wheel_bc_id = add_part("999D8505G002", "Wheel asm (black and chrome)", ["MC200"])
+        # 4. "Urban Black Coupe final asm" on MC110 must be excluded from feature auto-assignment
+        final_asm_id = add_part("999D8842G002", "Urban Black Coupe final asm", ["MC110"])
+
+        inferred = store.infer_part_feature_rules(
+            pid, [black_roof_id, teal_tire_id, wheel_bc_id, final_asm_id]
+        )
+        self.assertEqual(
+            inferred[black_roof_id],
+            [f"{roof_col_fid}::Smoke"],
+        )
+        self.assertEqual(inferred[teal_tire_id], [f"{wheel_col_fid}::Teal"])
+        self.assertEqual(
+            set(inferred[wheel_bc_id]),
+            {f"{wheel_col_fid}::Black", f"{wheel_fin_fid}::Chrome"},
+        )
+        self.assertNotIn(final_asm_id, inferred)
+
+
 if __name__ == "__main__":
     unittest.main()
 

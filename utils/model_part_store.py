@@ -1495,6 +1495,42 @@ def _tokenize_part_text(text: str) -> set[str]:
     return tokens
 
 
+_GENERIC_FEATURE_ATTR_WORDS = frozenset({
+    "color", "colour", "finish", "option", "options", "type", "style",
+    "package", "pkg", "choice", "material", "size", "level", "grade",
+    "version", "variant", "series", "mode", "config", "configuration",
+})
+
+_FEATURE_NOUN_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"wheel", "tire", "rim", "hub", "insert"}),
+)
+
+
+def _norm_noun_token(word: str) -> str:
+    w = word.lower().strip()
+    if len(w) > 4 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _extract_feature_subject_nouns(feature_name: str) -> set[str]:
+    raw_tokens = _tokenize_part_text(feature_name)
+    nouns = {
+        _norm_noun_token(t)
+        for t in raw_tokens
+        if t not in _GENERIC_FEATURE_ATTR_WORDS
+        and _norm_noun_token(t) not in _GENERIC_FEATURE_ATTR_WORDS
+        and len(t) >= 3
+    }
+    expanded = set(nouns)
+    for group in _FEATURE_NOUN_SYNONYM_GROUPS:
+        if nouns & group:
+            expanded.update(group)
+    return expanded
+
+
 def infer_part_feature_rules(
     project_id: str,
     part_ids: list[str] | None = None,
@@ -1560,7 +1596,10 @@ def infer_part_feature_rules(
     if not configured_tree_models:
         return {}
 
-    sql_parts = "SELECT id, part_number, description, subsystem, model_applicability, pits_tracker_number FROM parts WHERE project_id=?"
+    sql_parts = (
+        "SELECT id, part_number, description, factory_nickname, official_windchill_part_name, "
+        "subsystem, model_applicability, pits_tracker_number FROM parts WHERE project_id=?"
+    )
     params_parts: list[Any] = [project_id]
     if part_ids is not None:
         if not part_ids:
@@ -1641,6 +1680,29 @@ def infer_part_feature_rules(
         for row in active_features_by_id.values()
         if str(row.get("subsystem") or "").strip()
     }
+    feature_nouns_by_id: dict[str, set[str]] = {}
+    feature_vocab_by_id: dict[str, set[str]] = {}
+    feature_allowed_tokens_by_id: dict[str, dict[str, set[str]]] = {}
+    all_val_tokens_by_token: dict[str, set[str]] = {}
+    for fid, feat in active_features_by_id.items():
+        fname = str(feat.get("name") or "")
+        nouns = _extract_feature_subject_nouns(fname)
+        feature_nouns_by_id[fid] = nouns
+        vocab = set(_tokenize_part_text(fname)) | set(nouns)
+        val_tok_map: dict[str, set[str]] = {}
+        try:
+            for av in json.loads(feat.get("allowed_values") or "[]"):
+                av_str = str(av)
+                av_toks = _tokenize_part_text(av_str)
+                val_tok_map[av_str] = av_toks
+                vocab.update(av_toks)
+                for t in av_toks:
+                    all_val_tokens_by_token.setdefault(t, set()).add(fid)
+        except Exception:
+            pass
+        feature_allowed_tokens_by_id[fid] = val_tok_map
+        feature_vocab_by_id[fid] = vocab
+
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
         pid = str(p["id"])
@@ -1671,6 +1733,15 @@ def infer_part_feature_rules(
             p_sub_key in configured_feature_subsystems
         )
         p_tokens = _tokenize_part_text(desc) | _tokenize_part_text(part_num)
+        p_norm_tokens = {_norm_noun_token(t) for t in p_tokens} | p_tokens
+        matched_noun_fids = {
+            fid
+            for fid, nouns in feature_nouns_by_id.items()
+            if nouns and (p_norm_tokens & nouns)
+        }
+        explained_by_matched_nouns: set[str] = set()
+        for m_fid in matched_noun_fids:
+            explained_by_matched_nouns.update(feature_vocab_by_id.get(m_fid, set()))
 
         candidates: list[dict[str, Any]] = []
         for (fid, val), c_models in feature_choice_models.items():
@@ -1705,8 +1776,41 @@ def infer_part_feature_rules(
 
             f_name = str(feat.get("name") or "")
             f_cat = str(feat.get("category") or "")
-            f_tokens = _tokenize_part_text(f_name) | _tokenize_part_text(f_cat) | _tokenize_part_text(val)
-            overlap = len(p_tokens & f_tokens)
+            name_tokens = _tokenize_part_text(f_name)
+            val_tokens = _tokenize_part_text(val)
+            # If the part text explicitly contains a token belonging to a different allowed value
+            # of this same feature (and that token is unique to this feature), skip this option.
+            val_tok_map = feature_allowed_tokens_by_id.get(fid, {})
+            contradicted_by_sibling_val = False
+            for other_val, other_toks in val_tok_map.items():
+                if other_val == val:
+                    continue
+                for t in (other_toks - val_tokens) & p_tokens:
+                    if all_val_tokens_by_token.get(t) == {fid}:
+                        contradicted_by_sibling_val = True
+                        break
+                if contradicted_by_sibling_val:
+                    break
+            if contradicted_by_sibling_val:
+                continue
+
+            # Exclude generic category words from keyword scoring so only feature name and option value score
+            f_tokens = name_tokens | val_tokens
+            matched_tokens = p_tokens & f_tokens
+
+            # Prevent cross-feature false positives when the part explicitly names a specific feature's
+            # subject noun (e.g., "Roof" vs "Wheel") and this candidate feature's noun is absent.
+            if (
+                matched_noun_fids
+                and fid not in matched_noun_fids
+                and not subsystem_match
+            ):
+                unexplained = matched_tokens - explained_by_matched_nouns
+                if feature_nouns_by_id.get(fid) or not unexplained:
+                    continue
+
+            overlap = len(matched_tokens)
+            val_overlap = len(p_tokens & val_tokens)
 
             exact_match = 1.0 if p_models == c_eval_models else 0.0
             coverage = len(p_models) / len(c_eval_models) if c_eval_models else 0.0
@@ -1724,6 +1828,7 @@ def infer_part_feature_rules(
                 "feature_id": fid,
                 "value": val,
                 "overlap": overlap,
+                "val_overlap": val_overlap,
                 "subsystem_match": subsystem_match,
                 "exact_match": exact_match,
                 "category": f_cat,
@@ -1734,6 +1839,15 @@ def infer_part_feature_rules(
 
         if not candidates:
             continue
+
+        # When any candidate has a positive keyword or subsystem signal, discard zero-signal
+        # candidates first so an unrelated coincidence of model sets cannot eliminate matched features.
+        if any(c["overlap"] > 0 or c["subsystem_match"] > 0 for c in candidates):
+            candidates = [
+                c
+                for c in candidates
+                if c["overlap"] > 0 or c["subsystem_match"] > 0
+            ]
 
         # Exclude any candidate whose model set is a strict superset of another candidate's
         # model set (i.e., found on more models than the tighter matching feature choices).
@@ -1767,9 +1881,16 @@ def infer_part_feature_rules(
 
         # If there is no keyword overlap or subsystem match:
         # Check if variance across models has been established yet.
-        # If fewer than 2 models have BOMs built, default to "All models"
-        # until multiple model BOMs exist and differ (Answer 3).
-        if top["overlap"] == 0 and top["subsystem_match"] == 0 and len(models_with_bom) < 2:
+        # If fewer than 2 models have BOMs built, or if some tree models lack BOMs and
+        # this part is present on all models that have BOMs so far, default to "All models".
+        if top["overlap"] == 0 and top["subsystem_match"] == 0 and (
+            len(models_with_bom) < 2
+            or (
+                bool(all_bom_tree_models)
+                and all_bom_tree_models < configured_tree_models
+                and p_models >= all_bom_tree_models
+            )
+        ):
             inferred[pid] = ["All models"]
             continue
 
@@ -1780,14 +1901,25 @@ def infer_part_feature_rules(
         features_seen.add(top["feature_id"])
 
         if top["overlap"] > 0 or top["subsystem_match"] > 0:
+            running_models = set(top["eval_models"])
             for other in candidates[1:]:
                 if other["feature_id"] in features_seen:
                     continue
                 if other["overlap"] > 0 or other["subsystem_match"] > 0:
-                    combined_models = top["eval_models"] & other["eval_models"]
-                    if p_models <= combined_models:
+                    combined_models = running_models & other["eval_models"]
+                    if p_models <= combined_models and (
+                        combined_models < running_models
+                        or (
+                            (other["overlap"] > 0 or top["overlap"] == 0)
+                            and (
+                                other["eval_models"] == top["eval_models"]
+                                or other.get("val_overlap", 0) > 0
+                            )
+                        )
+                    ):
                         chosen_tokens.append(f"{other['feature_id']}::{other['value']}")
                         features_seen.add(other["feature_id"])
+                        running_models = combined_models
         else:
             # When multiple models have BOMs and no keyword matched,
             # tag all distinguishing features of the model (Answer 2)
@@ -1874,6 +2006,16 @@ def preview_inferred_part_feature_rules(
             (project_id,),
         )
     }
+    part_rows = read_rows(
+        "SELECT id, part_number, description, factory_nickname, official_windchill_part_name, model_applicability FROM parts WHERE project_id=?",
+        (project_id,),
+    )
+    top_level_pns = _identify_top_level_assembly_pns(project_id, part_rows, _conn=_conn)
+    top_level_part_ids = {
+        str(row["id"])
+        for row in part_rows
+        if str(row.get("part_number") or "").strip().upper() in top_level_pns
+    }
     evaluated_existing_ids = (
         existing_rules & {str(pid) for pid in part_ids}
         if part_ids is not None
@@ -1882,7 +2024,7 @@ def preview_inferred_part_feature_rules(
     stale_rule_part_ids = (
         sorted(evaluated_existing_ids - linked_assemblies - set(inferred.keys()))
         if overwrite_existing
-        else []
+        else sorted((evaluated_existing_ids & top_level_part_ids) - linked_assemblies)
     )
 
     if not inferred:
@@ -1899,15 +2041,8 @@ def preview_inferred_part_feature_rules(
 
     existing_applicability = {
         str(row["id"]): str(row["model_applicability"] or "").strip()
-        for row in read_rows(
-            "SELECT id, model_applicability FROM parts WHERE project_id=?",
-            (project_id,),
-        )
+        for row in part_rows
     }
-    part_rows = read_rows(
-        "SELECT id, part_number, description, model_applicability FROM parts WHERE project_id=?",
-        (project_id,),
-    )
     part_info = {str(row["id"]): row for row in part_rows}
 
     bom_rows = read_rows(
@@ -2012,12 +2147,70 @@ def apply_inferred_part_feature_rules(
     context = nullcontext(_conn) if _conn is not None else connection()
     with context as conn:
         updated = update_part_feature_rules(project_id, to_apply, _conn=conn) if to_apply else 0
-        for stale_part_id in stale_rule_part_ids:
-            conn.execute(
-                "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
-                (project_id, stale_part_id),
-            )
-            updated += 1
+        if stale_rule_part_ids:
+            active_models = {
+                str(r["model_number"]).strip()
+                for r in conn.execute(
+                    "SELECT model_number, active FROM project_models WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+                if bool(r["active"]) and str(r["model_number"] or "").strip()
+            }
+            part_id_by_tracker_or_pn: dict[str, str] = {}
+            for pr in conn.execute(
+                "SELECT id, part_number, pits_tracker_number FROM parts WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                pid_str = str(pr["id"])
+                pn_str = str(pr["part_number"] or "").strip().upper()
+                trk_str = str(pr["pits_tracker_number"] or "").strip()
+                if pn_str:
+                    part_id_by_tracker_or_pn[pn_str] = pid_str
+                if trk_str:
+                    part_id_by_tracker_or_pn[trk_str] = pid_str
+                    part_id_by_tracker_or_pn[trk_str.upper()] = pid_str
+            bom_models_by_part_id: dict[str, set[str]] = {}
+            for b in conn.execute(
+                "SELECT child_part_id, child_tracker_number, raw_levels_json FROM pits_bom_occurrences WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                cid = str(b["child_part_id"] or "").strip()
+                if not cid:
+                    trk = str(b["child_tracker_number"] or "").strip()
+                    cid = part_id_by_tracker_or_pn.get(trk) or part_id_by_tracker_or_pn.get(trk.upper()) or ""
+                if not cid:
+                    continue
+                try:
+                    levels = json.loads(b["raw_levels_json"] or "{}")
+                    usages = levels.get("model_usages") or {}
+                    if isinstance(usages, dict):
+                        mods = {
+                            str(m).strip()
+                            for m in usages
+                            if str(m).strip() and (not active_models or str(m).strip() in active_models)
+                        }
+                        if mods:
+                            bom_models_by_part_id.setdefault(cid, set()).update(mods)
+                except Exception:
+                    pass
+            ts = now_iso()
+            for stale_part_id in stale_rule_part_ids:
+                conn.execute(
+                    "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
+                    (project_id, stale_part_id),
+                )
+                bom_mods = bom_models_by_part_id.get(stale_part_id)
+                if bom_mods:
+                    restored_app = (
+                        "All"
+                        if active_models and bom_mods >= active_models
+                        else normalize_model_applicability(sorted(bom_mods))
+                    )
+                    conn.execute(
+                        "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                        (restored_app, ts, stale_part_id, project_id),
+                    )
+                updated += 1
         if updated > 0:
             record_audit_event(
                 project_id,
@@ -6209,7 +6402,7 @@ def save_manual_model_bom(
         try:
             features_inferred = apply_inferred_part_feature_rules(
                 project_id,
-                overwrite_existing=False,
+                overwrite_existing=True,
                 editor_name=editor,
                 _conn=conn,
             )
@@ -7263,8 +7456,12 @@ def _identify_top_level_assembly_pns(
         re.IGNORECASE,
     )
     for r in cat_rows:
-        pn = str((r.get("part_number") if isinstance(r, dict) else r["part_number"]) or "").strip()
-        desc = str((r.get("description") if isinstance(r, dict) else r["description"]) or "").strip()
+        get_val = (lambda k: r.get(k)) if isinstance(r, dict) else (lambda k: r[k] if k in r.keys() else "")
+        pn = str(get_val("part_number") or "").strip()
+        desc = " ".join(
+            str(get_val(field) or "").strip()
+            for field in ("description", "factory_nickname", "official_windchill_part_name")
+        ).strip()
         pn_u = pn.upper()
         if not pn_u or pn_u in subassembly_pns:
             continue

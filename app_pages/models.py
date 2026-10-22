@@ -1129,16 +1129,27 @@ else:
             for _ in visual_model_groups
         )
 
-        part_numbers_by_feature_value: dict[tuple[str, str], list[str]] = {}
+        part_rules_by_feature_value: dict[tuple[str, str], list[tuple[str, set[str] | None]]] = {}
         if "Part number" in selected_feature_displays:
             catalog_parts = project_table("parts", project_id)
             rules = part_feature_rules(project_id)
             if not catalog_parts.empty and not rules.empty:
-                part_number_by_id = {
-                    str(row["id"]).strip(): str(row["part_number"] or "").strip()
-                    for _, row in catalog_parts.iterrows()
-                    if str(row["id"]).strip() and str(row["part_number"] or "").strip()
-                }
+                part_number_by_id: dict[str, str] = {}
+                part_models_by_id: dict[str, set[str] | None] = {}
+                for _, row in catalog_parts.iterrows():
+                    pid = str(row["id"]).strip()
+                    pn = str(row["part_number"] or "").strip()
+                    if not pid or not pn:
+                        continue
+                    part_number_by_id[pid] = pn
+                    raw_app = row.get("model_applicability")
+                    app_str = "" if pd.isna(raw_app) else str(raw_app or "").strip()
+                    if not app_str or app_str.lower() == "all":
+                        part_models_by_id[pid] = None
+                    else:
+                        mods = {m.strip() for m in app_str.split(",") if m.strip()}
+                        part_models_by_id[pid] = mods if mods else None
+                seen_in_bucket: dict[tuple[str, str], set[str]] = {}
                 for _, rule in rules.iterrows():
                     part_id = str(rule.get("part_id") or "").strip()
                     rule_feature_id = str(rule.get("feature_id") or "").strip()
@@ -1146,14 +1157,15 @@ else:
                     part_number = part_number_by_id.get(part_id, "")
                     if not part_number or not rule_feature_id or not rule_value:
                         continue
-                    bucket = part_numbers_by_feature_value.setdefault(
-                        (rule_feature_id, rule_value),
-                        [],
-                    )
-                    if part_number not in bucket:
-                        bucket.append(part_number)
-                for key, bucket in part_numbers_by_feature_value.items():
-                    part_numbers_by_feature_value[key] = sorted(bucket)
+                    key = (rule_feature_id, rule_value)
+                    seen_pns = seen_in_bucket.setdefault(key, set())
+                    if part_number not in seen_pns:
+                        seen_pns.add(part_number)
+                        part_rules_by_feature_value.setdefault(key, []).append(
+                            (part_number, part_models_by_id.get(part_id))
+                        )
+                for key, bucket in part_rules_by_feature_value.items():
+                    part_rules_by_feature_value[key] = sorted(bucket, key=lambda item: item[0])
 
         row_hues = [220, 145, 35, 295, 5, 180, 75, 255, 330, 110]
         feature_count = len(visual_features)
@@ -1182,15 +1194,35 @@ else:
                 f"{escape(feature_row_label)}</div>"
             )
             values: list[str] = []
+            group_parts_by_col: list[list[str]] = []
             for group in visual_model_groups:
                 model_id = group["model_ids"][0]
                 value = visual_tree.at[model_id, feature_id]
                 selected_value = "" if pd.isna(value) else str(value).strip()
                 values.append(selected_value)
+                if "Part number" in selected_feature_displays and selected_value:
+                    group_models = {str(m).strip() for m in group.get("model_numbers", []) if str(m).strip()}
+                    matching_for_group = [
+                        pn
+                        for pn, app_models in part_rules_by_feature_value.get(
+                            (feature_id, selected_value), []
+                        )
+                        if app_models is None or bool(group_models & app_models)
+                    ]
+                    group_parts_by_col.append(matching_for_group)
+                else:
+                    group_parts_by_col.append([])
             start = 0
             while start < len(values):
                 end = start + 1
-                while end < len(values) and values[end] == values[start]:
+                while (
+                    end < len(values)
+                    and values[end] == values[start]
+                    and (
+                        "Part number" not in selected_feature_displays
+                        or group_parts_by_col[end] == group_parts_by_col[start]
+                    )
+                ):
                     end += 1
                 selected_value = values[start]
                 background = color_by_choice.get(selected_value, "#f1f5f9")
@@ -1200,10 +1232,7 @@ else:
                     text_color = "#64748b"
                     label = escape("Not assigned")
                 elif selected_feature_displays == ["Part number"]:
-                    matching_parts = part_numbers_by_feature_value.get(
-                        (feature_id, selected_value),
-                        [],
-                    )
+                    matching_parts = group_parts_by_col[start]
                     if matching_parts:
                         label = "<br>".join(escape(pn) for pn in matching_parts)
                     else:
@@ -1212,10 +1241,7 @@ else:
                 elif selected_feature_displays == ["Feature"]:
                     label = escape(selected_value)
                 else:
-                    matching_parts = part_numbers_by_feature_value.get(
-                        (feature_id, selected_value),
-                        [],
-                    )
+                    matching_parts = group_parts_by_col[start]
                     parts_html = (
                         f'<span style="font-weight:400;">{"<br>".join(escape(pn) for pn in matching_parts)}</span>'
                         if matching_parts
