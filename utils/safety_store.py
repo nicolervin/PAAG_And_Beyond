@@ -305,6 +305,7 @@ def safety_requirement_delete_impact(
         "work_element_count": int(row["work_element_count"] or 0),
     }
 
+@cached_store_read(scope="scenario")
 def safety_requirement_history(
     project_id: str, scenario_id: str, limit: int = 50
 ) -> pd.DataFrame:

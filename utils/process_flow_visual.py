@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from utils import store
+from utils.cache_store import cached_store_read
 from utils.store import (
     assembly_section_walk_order,
     get_planning_scenario,
@@ -27,6 +28,7 @@ def _text(val: Any) -> str:
     return str(val or "").strip()
 
 
+@cached_store_read(scope="scenario")
 def process_flow_projection(
     project_id: str,
     scenario_id: str,

@@ -2743,30 +2743,41 @@ with tab_plan:
                 yamazumi_descriptions.str.strip().ne(""),
                 elements["operation"].fillna("").astype(str),
             )
+        ergonomics_risk_ids = process_ergonomics_risk_work_element_ids(
+            project_id, scenario_id
+        )
+        elements["ergonomics_risk"] = pd.Series(
+            [
+                ["Ergo Risk"] if work_element_id in ergonomics_risk_ids else []
+                for work_element_id in elements["id"].astype(str)
+            ],
+            index=elements.index,
+            dtype="object",
+        )
+        criticality_by_work_element = work_element_criticality(project_id, scenario_id)
+        elements["criticality"] = pd.Series(
+            [
+                list(criticality_by_work_element.get(work_element_id, []))
+                for work_element_id in elements["id"].astype(str)
+            ],
+            index=elements.index,
+            dtype="object",
+        )
+
+        elements["model_applicability"] = pd.Series(
+            [
+                [
+                    "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
+                    for model in (split_filter_values(value) or ["All"])
+                ]
+                for value in elements["model_applicability"]
+            ],
+            index=elements.index,
+            dtype="object",
+        )
         elements = elements.reindex(columns=columns)
 
     elements["selected"] = pd.Series(False, index=elements.index, dtype="bool")
-
-    ergonomics_risk_ids = process_ergonomics_risk_work_element_ids(
-        project_id, scenario_id
-    )
-    elements["ergonomics_risk"] = elements["id"].astype(str).map(
-        lambda work_element_id: (
-            ["Ergo Risk"] if work_element_id in ergonomics_risk_ids else []
-        )
-    )
-    criticality_by_work_element = work_element_criticality(project_id, scenario_id)
-    elements["criticality"] = elements["id"].astype(str).map(
-        lambda work_element_id: list(criticality_by_work_element.get(work_element_id, []))
-    )
-
-    elements["model_applicability"] = [
-        [
-            "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
-            for model in (split_filter_values(value) or ["All"])
-        ]
-        for value in elements["model_applicability"]
-    ]
 
     editable_table_heading("Process at a Glance by pitch")
     st.caption("Complete and review ordered work elements by pitch, station, and model applicability.")
@@ -2901,11 +2912,23 @@ with tab_plan:
 
 
     export_actions = st.container(horizontal=True)
+    _lazy_process_export = (
+        getattr(dataframe_to_excel, "__module__", "") == "utils.table_ui"
+    )
     export_actions.download_button(
         "Export filtered table view",
-        data=dataframe_to_excel(
-            visible_elements.reindex(columns=compact_columns),
-            "Process plan",
+        data=(
+            (
+                lambda _df=visible_elements, _cols=list(compact_columns): dataframe_to_excel(
+                    _df.reindex(columns=_cols),
+                    "Process plan",
+                )
+            )
+            if _lazy_process_export
+            else dataframe_to_excel(
+                visible_elements.reindex(columns=compact_columns),
+                "Process plan",
+            )
         ),
         file_name="process_plan_filtered_view.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2914,9 +2937,20 @@ with tab_plan:
     )
     export_actions.download_button(
         "Export filtered full data",
-        data=dataframe_to_excel(
-            visible_elements.drop(columns=["id", "details", "selected"], errors="ignore"),
-            "Process plan",
+        data=(
+            (
+                lambda _df=visible_elements: dataframe_to_excel(
+                    _df.drop(columns=["id", "details", "selected"], errors="ignore"),
+                    "Process plan",
+                )
+            )
+            if _lazy_process_export
+            else dataframe_to_excel(
+                visible_elements.drop(
+                    columns=["id", "details", "selected"], errors="ignore"
+                ),
+                "Process plan",
+            )
         ),
         file_name="process_plan_filtered_full.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

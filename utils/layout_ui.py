@@ -1546,7 +1546,7 @@ def render_layouts_tab(
         active_rev_id = str(revisions[0]["id"])
         st.session_state["active_revision_id"] = active_rev_id
 
-    active_rev = get_layout_revision(active_rev_id) or rev_by_id[active_rev_id]
+    active_rev = rev_by_id[active_rev_id]
     rev_id = str(active_rev["id"])
     st.session_state["layout_plan_selector"] = active_layout_id
     st.session_state["layout_revision_selector"] = rev_id
@@ -1560,9 +1560,8 @@ def render_layouts_tab(
     last_commit_sig_key = f"layout_last_commit_sig_{rev_id}"
     canvas_key = f"layout_canvas_{rev_id}"
 
-    ensure_default_layers_for_revision(rev_id)
-    persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
     persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
+    persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
 
     def handle_select_shape() -> None:
         state = st.session_state.get(canvas_key)
@@ -1833,7 +1832,7 @@ def render_layouts_tab(
         if active_rev_id not in rev_by_id:
             active_rev_id = str(revisions[0]["id"])
             st.session_state["active_revision_id"] = active_rev_id
-        active_rev = get_layout_revision(active_rev_id) or rev_by_id[active_rev_id]
+        active_rev = rev_by_id[active_rev_id]
         rev_id = str(active_rev["id"])
         st.session_state["layout_plan_selector"] = active_layout_id
         st.session_state["layout_revision_selector"] = rev_id
@@ -1843,9 +1842,8 @@ def render_layouts_tab(
         selected_shape_id_key = f"layout_selected_shape_{rev_id}"
         canvas_key = f"layout_canvas_{rev_id}"
 
-        ensure_default_layers_for_revision(rev_id)
-        persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
         persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
+        persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
 
     w_in = float(active_rev.get("scale_width_in") or 2400.0)
     h_in = float(active_rev.get("scale_height_in") or 1200.0)

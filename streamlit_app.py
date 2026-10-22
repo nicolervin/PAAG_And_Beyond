@@ -92,26 +92,30 @@ ensure_db_initialized()
 
 all_projects = projects()
 valid_project_ids = {str(project["id"]) for project in all_projects}
-last_workspace = get_last_active_workspace()
-remembered_project_id = str(last_workspace.get("project_id") or "")
-remembered_scenario_id = str(last_workspace.get("scenario_id") or "") or None
-default_project_id = (
-    remembered_project_id
-    if remembered_project_id in valid_project_ids
-    else (str(all_projects[0]["id"]) if all_projects else None)
-)
-default_scenario_id = (
-    remembered_scenario_id
-    if default_project_id and default_project_id == remembered_project_id
-    else None
-)
-st.session_state.setdefault("project_id", default_project_id)
-st.session_state.setdefault(
-    "scenario_id",
-    default_scenario_id
-    if str(st.session_state.get("project_id") or "") == str(default_project_id or "")
-    else None,
-)
+if (
+    "project_id" not in st.session_state
+    or str(st.session_state.get("project_id") or "") not in valid_project_ids
+):
+    last_workspace = get_last_active_workspace()
+    remembered_project_id = str(last_workspace.get("project_id") or "")
+    remembered_scenario_id = str(last_workspace.get("scenario_id") or "") or None
+    default_project_id = (
+        remembered_project_id
+        if remembered_project_id in valid_project_ids
+        else (str(all_projects[0]["id"]) if all_projects else None)
+    )
+    default_scenario_id = (
+        remembered_scenario_id
+        if default_project_id and default_project_id == remembered_project_id
+        else None
+    )
+    st.session_state["project_id"] = default_project_id
+    st.session_state.setdefault(
+        "scenario_id",
+        default_scenario_id
+        if str(st.session_state.get("project_id") or "") == str(default_project_id or "")
+        else None,
+    )
 
 pending_project_id = st.session_state.pop("pending_active_project_id", None)
 if pending_project_id and str(pending_project_id) in valid_project_ids:
@@ -231,6 +235,12 @@ active_page_key = _workspace_page_key(navigation)
 prev_url_path = st.session_state.get("current_url_path")
 st.session_state["current_url_path"] = active_page_key
 
+pending_navigation = str(
+    st.session_state.pop("split_workspace_pending_navigation", "") or ""
+)
+if pending_navigation and pending_navigation in page_by_url_path and pending_navigation != active_page_key:
+    st.switch_page(page_by_url_path[pending_navigation])
+
 qp_page = st.query_params.get("page")
 if (
     qp_page
@@ -241,7 +251,8 @@ if (
     st.switch_page(page_by_url_path[qp_page])
 
 if active_page_key and active_page_key != "__default__":
-    st.query_params["page"] = active_page_key
+    if st.query_params.get("page") != active_page_key:
+        st.query_params["page"] = active_page_key
 elif "page" in st.query_params:
     try:
         del st.query_params["page"]
@@ -249,9 +260,13 @@ elif "page" in st.query_params:
         pass
 
 if st.session_state.get("project_id"):
-    st.query_params["project_id"] = str(st.session_state["project_id"])
+    qp_proj = str(st.session_state["project_id"])
+    if st.query_params.get("project_id") != qp_proj:
+        st.query_params["project_id"] = qp_proj
 if st.session_state.get("scenario_id"):
-    st.query_params["scenario_id"] = str(st.session_state["scenario_id"])
+    qp_scen = str(st.session_state["scenario_id"])
+    if st.query_params.get("scenario_id") != qp_scen:
+        st.query_params["scenario_id"] = qp_scen
 
 split_secondary_key = "split_workspace_secondary_url_path"
 split_ratio_key = "split_workspace_ratio"
@@ -359,10 +374,19 @@ with st.sidebar:
             label="Active planning scenario",
             width="stretch",
         )
-        set_last_active_workspace(
-            st.session_state.project_id,
-            (active_scenario or {}).get("id") or st.session_state.get("scenario_id"),
+        resolved_scenario_id = (
+            (active_scenario or {}).get("id") or st.session_state.get("scenario_id")
         )
+        workspace_pair = (
+            str(st.session_state.project_id or ""),
+            str(resolved_scenario_id or ""),
+        )
+        if st.session_state.get("_last_persisted_workspace") != workspace_pair:
+            set_last_active_workspace(
+                st.session_state.project_id,
+                resolved_scenario_id,
+            )
+            st.session_state["_last_persisted_workspace"] = workspace_pair
         if active_scenario:
             st.caption(
                 f"{active_scenario['status']} · "

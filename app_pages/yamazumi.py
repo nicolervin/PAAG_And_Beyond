@@ -2690,11 +2690,23 @@ else:
             ),
         }
         stage_native_delete_confirmation(pitch_editor_key)
+_lazy_yamazumi_export = (
+    getattr(dataframe_to_excel, "__module__", "") == "utils.table_ui"
+)
 st.download_button(
     "Export filtered pitches",
-    data=dataframe_to_excel(
-        visible_pitches.drop(columns=["id", "updated_at"], errors="ignore"),
-        "Pitch addresses",
+    data=(
+        (
+            lambda _df=visible_pitches: dataframe_to_excel(
+                _df.drop(columns=["id", "updated_at"], errors="ignore"),
+                "Pitch addresses",
+            )
+        )
+        if _lazy_yamazumi_export
+        else dataframe_to_excel(
+            visible_pitches.drop(columns=["id", "updated_at"], errors="ignore"),
+            "Pitch addresses",
+        )
     ),
     file_name=(
         "yamazumi_pitch_addresses_multiple_areas_filtered.xlsx"
@@ -3082,14 +3094,28 @@ else:
         stage_native_delete_confirmation(element_editor_key)
 st.download_button(
     "Export filtered work elements",
-    data=dataframe_to_excel(
-        visible_elements.rename(
-            columns={"time_s": time_column_label}
-        ).drop(
-            columns=["id", "pitch_id", "process_element_id", "updated_at"],
-            errors="ignore",
-        ),
-        "Yamazumi work elements",
+    data=(
+        (
+            lambda _df=visible_elements, _label=time_column_label: dataframe_to_excel(
+                _df.rename(
+                    columns={"time_s": _label}
+                ).drop(
+                    columns=["id", "pitch_id", "process_element_id", "updated_at"],
+                    errors="ignore",
+                ),
+                "Yamazumi work elements",
+            )
+        )
+        if _lazy_yamazumi_export
+        else dataframe_to_excel(
+            visible_elements.rename(
+                columns={"time_s": time_column_label}
+            ).drop(
+                columns=["id", "pitch_id", "process_element_id", "updated_at"],
+                errors="ignore",
+            ),
+            "Yamazumi work elements",
+        )
     ),
     file_name=(
         "yamazumi_work_elements_multiple_areas_filtered.xlsx"
