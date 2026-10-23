@@ -746,7 +746,7 @@ else:
             project_id,
             overwrite_existing=True,
             editor_name=editor_name,
-            skip_multi_feature=True,
+            skip_multi_feature=False,
         )
         preview = preview_inferred_part_feature_rules(
             project_id,

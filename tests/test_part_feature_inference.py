@@ -717,8 +717,9 @@ class PartFeatureInferenceTests(unittest.TestCase):
         )
         self.assertEqual(inferred_rds_after_drum_feat[rds_pid], [f"{rds_fid}::Gas Coated"])
 
-        # Even if the Drum feature has no matching model values for a Drum part, the Drum part
-        # still cannot be assigned a Main Line (blank subsystem) or Structure feature.
+        # When the Drum feature has no matching model values for a Drum part (e.g. a Drum part
+        # driven by a Main Line feature), it falls back to Main Line (blank subsystem) features
+        # while still blocking features from other subsystems like Structure.
         unmatched_drum_pid = self._create_part_with_bom(
             part_number="308D3150G002",
             description="FRONT DRUM SUPPORT ASM",
@@ -732,7 +733,7 @@ class PartFeatureInferenceTests(unittest.TestCase):
         inferred_unmatched_drum = store.infer_part_feature_rules(
             self.project_id, [unmatched_drum_pid]
         )
-        self.assertNotIn(unmatched_drum_pid, inferred_unmatched_drum)
+        self.assertEqual(inferred_unmatched_drum[unmatched_drum_pid], [f"{self.fascia_fid}::LCD"])
 
         # Case 4: A part in a subsystem that is NOT assigned to any feature (e.g. 'Controls')
         # can still be assigned any matching feature (such as Main Line or fuel/panel features).
@@ -750,6 +751,124 @@ class PartFeatureInferenceTests(unittest.TestCase):
             self.project_id, [controls_pid]
         )
         self.assertEqual(inferred_controls[controls_pid], [f"{self.fuel_fid}::Electric"])
+
+    def test_multi_item_level1_bom_not_excluded_as_top_level_assemblies(self):
+        """Verify Level 1 parts and subassemblies in a multi-item Level 1 BOM are not falsely excluded."""
+        # Create two Level-1 parts on the same models (so each model has >1 Level-1 row) plus a Level-2 child
+        sub_pid = self._create_part_with_bom(
+            part_number="308D3270G001",
+            description="SUB BASE ASM GAS",
+            models=self.gas_models,
+            tracker="TRK-L1-SUB-GAS",
+        )
+        other_l1_pid = self._create_part_with_bom(
+            part_number="308D3180G001",
+            description="DRUM ASM ALZ",
+            models=self.all_models,
+            tracker="TRK-L1-DRUM",
+        )
+        # Add a Level-2 child under TRK-L1-SUB-GAS so l2_plus_pns is non-empty
+        child_pid = str(uuid4())
+        store.execute(
+            """INSERT INTO parts (
+                   id, project_id, part_number, description, pits_tracker_number,
+                   model_applicability, updated_at
+               ) VALUES (?, ?, '312D1390P001', 'VALVE GAS', 'TRK-L2-VALVE', ?, ?)""",
+            (child_pid, self.project_id, ", ".join(self.gas_models), store.now_iso()),
+        )
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                   id, project_id, import_run_id, source_row, proposed_depth,
+                   parent_tracker_number, child_tracker_number, child_part_id,
+                   raw_levels_json, disposition, created_at, updated_at
+               ) VALUES (?, ?, 'run-1', 2, 2, 'TRK-L1-SUB-GAS', 'TRK-L2-VALVE', ?, ?, 'Active', ?, ?)""",
+            (
+                str(uuid4()),
+                self.project_id,
+                child_pid,
+                json.dumps({"model_usages": {m: 1 for m in self.gas_models}}),
+                store.now_iso(),
+                store.now_iso(),
+            ),
+        )
+
+        inferred = store.infer_part_feature_rules(
+            self.project_id, [sub_pid, other_l1_pid, child_pid]
+        )
+        self.assertEqual(inferred[sub_pid], [f"{self.fuel_fid}::Gas"])
+        self.assertEqual(inferred[other_l1_pid], ["All models"])
+        self.assertEqual(inferred[child_pid], [f"{self.fuel_fid}::Gas"])
+
+    def test_empty_bom_usages_falls_back_to_part_model_applicability(self):
+        """Verify a part with empty BOM model_usages falls back to parts.model_applicability."""
+        part_id = str(uuid4())
+        store.execute(
+            """INSERT INTO parts (
+                   id, project_id, part_number, description, pits_tracker_number,
+                   model_applicability, updated_at
+               ) VALUES (?, ?, 'STK3D30SPRS', 'LP CONVERSION KIT', 'TRK-EMPTY-BOM', ?, ?)""",
+            (part_id, self.project_id, ", ".join(self.gas_models), store.now_iso()),
+        )
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                   id, project_id, import_run_id, source_row, proposed_depth,
+                   parent_tracker_number, child_tracker_number, child_part_id,
+                   raw_levels_json, disposition, created_at, updated_at
+               ) VALUES (?, ?, 'run-1', 1, 1, '', 'TRK-EMPTY-BOM', ?, ?, 'Active', ?, ?)""",
+            (
+                str(uuid4()),
+                self.project_id,
+                part_id,
+                json.dumps({"model_usages": {}}),
+                store.now_iso(),
+                store.now_iso(),
+            ),
+        )
+        inferred = store.infer_part_feature_rules(self.project_id, [part_id])
+        self.assertEqual(inferred[part_id], [f"{self.fuel_fid}::Gas"])
+
+    def test_multi_value_feature_matching_within_single_feature(self):
+        """Verify parts spanning multiple choices of a 3+ choice feature receive all matching choices."""
+        series_fid = str(uuid4())
+        store.execute(
+            """INSERT INTO complexity_features (
+                   id, project_id, category, subsystem, name, allowed_values, active, updated_at
+               ) VALUES (?, ?, 'UI', 'UI', 'LH Fascia', '["55 Series", "66 Series", "86 Series", "96 Series"]', 1, ?)""",
+            (series_fid, self.project_id, store.now_iso()),
+        )
+        for m in self.all_models:
+            mid = self.model_ids[m]
+            if "55" in m:
+                val = "55 Series"
+            elif "65" in m:
+                val = "66 Series"
+            elif "85" in m:
+                val = "86 Series"
+            else:
+                val = "96 Series"
+            store.execute(
+                """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self.project_id, mid, series_fid, val, store.now_iso()),
+            )
+
+        # Part used across 66 Series and 86 Series (all 65 and 85 models = 6 models)
+        shared_models = [m for m in self.all_models if "65" in m or "85" in m]
+        fascia_pid = self._create_part_with_bom(
+            part_number="308D3363P001",
+            description="Left Fascia Asm",
+            models=shared_models,
+            tracker="TRK-LH-FASCIA-SHARED",
+        )
+        store.execute(
+            "UPDATE parts SET subsystem='UI' WHERE id=? AND project_id=?",
+            (fascia_pid, self.project_id),
+        )
+        inferred = store.infer_part_feature_rules(self.project_id, [fascia_pid])
+        self.assertEqual(
+            inferred[fascia_pid],
+            [f"{series_fid}::66 Series", f"{series_fid}::86 Series"],
+        )
 
 
 if __name__ == "__main__":
