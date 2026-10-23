@@ -144,11 +144,17 @@ _NAV_CSS = """
 _NAV_JS = """
 export default function(component) {
   const { parentElement, data, setTriggerValue } = component
-  if (!window.__paagEmptyMultiSelectObserver && typeof document !== 'undefined' && document.body) {
+  if (window.__paagEmptyMultiSelectObserver) {
+    try {
+      window.__paagEmptyMultiSelectObserver.disconnect()
+    } catch (e) {}
+    delete window.__paagEmptyMultiSelectObserver
+  }
+  if (!window.__paagEmptyMultiSelectObserverV2 && typeof document !== 'undefined' && document.body) {
     const closeEmptyMultiSelectDropdowns = () => {
       const dropdowns = document.querySelectorAll('[data-testid="stMultiSelectDropdown"]')
       for (const dropdown of dropdowns) {
-        if (dropdown.querySelector('[role="option"]')) continue
+        if (!dropdown.querySelector('[role="listbox"][data-empty="true"]')) continue
         const openInputs = document.querySelectorAll(
           '[data-testid="stMultiSelect"] input[role="combobox"][aria-expanded="true"], [data-testid="stMultiSelect"] [data-open="true"] input[role="combobox"]'
         )
@@ -174,7 +180,7 @@ export default function(component) {
       closeEmptyMultiSelectDropdowns()
     })
     observer.observe(document.body, { childList: true, subtree: true })
-    window.__paagEmptyMultiSelectObserver = observer
+    window.__paagEmptyMultiSelectObserverV2 = observer
     closeEmptyMultiSelectDropdowns()
   }
   const root = parentElement.querySelector('.split-nav-root')
@@ -347,7 +353,7 @@ export default function(component) {
 """
 
 _SPLIT_NAVIGATION = st.components.v2.component(
-    "paag_split_navigation_v4",
+    "paag_split_navigation_v5",
     html=_NAV_HTML,
     css=_NAV_CSS,
     js=_NAV_JS,
