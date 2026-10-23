@@ -4,6 +4,7 @@ from streamlit.runtime.scriptrunner import StopException
 
 from utils.time_units import format_seconds
 from utils.fishbone_ui import FISHBONE_LINKED_PAGES, render_fishbone_sidebar_context
+from utils.gcp_auth import detect_authenticated_user_email
 from utils.scope_ui import scenario_view_selector
 
 from utils.split_workspace import (
@@ -495,6 +496,7 @@ with st.sidebar:
         if not st.session_state.get(editor_default_key):
             default_editor = str(
                 st.session_state.get("current_editor")
+                or detect_authenticated_user_email()
                 or (active_project or {}).get("owner")
                 or ""
             )

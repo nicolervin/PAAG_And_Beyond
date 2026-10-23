@@ -62,11 +62,12 @@ from utils.yamazumi_naming import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-DATA_DIR = ROOT / "data"
+from utils.gcp_storage import bootstrap_from_gcs_if_needed, rebase_upload_path_str, resolve_upload_path, schedule_gcs_sync
+DATA_DIR = Path(os.environ.get("PAAG_DATA_DIR") or (ROOT / "data"))
 
-UPLOAD_DIR = DATA_DIR / "uploads"
+UPLOAD_DIR = Path(os.environ.get("PAAG_UPLOAD_DIR") or (DATA_DIR / "uploads"))
 
-DB_PATH = DATA_DIR / "paag.db"
+DB_PATH = Path(os.environ.get("PAAG_DB_PATH") or (DATA_DIR / "paag.db"))
 
 HANDLING_TYPES = ("Handle", "Consume")
 
@@ -1356,6 +1357,8 @@ def connection():
         conn.commit()
         if had_writes:
             bump_write_epoch(modified_tables=modified_tables)
+            if is_cacheable_runtime():
+                schedule_gcs_sync(Path(DB_PATH), Path(UPLOAD_DIR))
     finally:
         conn.close()
 
@@ -1368,7 +1371,79 @@ def ensure_db_initialized() -> None:
     ident = _db_file_identity(Path(DB_PATH))
     if ident[2] and ident in _INITIALIZED_DB_SIGNATURES:
         return
+    bootstrap_from_gcs_if_needed(Path(DB_PATH), Path(UPLOAD_DIR))
+    ident = _db_file_identity(Path(DB_PATH))
+    if ident[2] and ident in _INITIALIZED_DB_SIGNATURES:
+        return
     init_db()
+
+
+_UPLOAD_PATH_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("parts", ("photo_path", "image_path", "original_image_path")),
+    ("part_images", ("image_path", "original_image_path", "file_path")),
+    ("manufacturing_assemblies", ("photo_path", "image_path")),
+    ("manufacturing_assembly_images", ("image_path", "file_path")),
+    ("equipment_types", ("photo_path", "image_path")),
+    ("equipment_assets", ("photo_path", "image_path")),
+    ("conveyor_zones", ("orientation_image_path",)),
+    ("process_visual_media", ("file_path", "original_file_path", "image_path", "original_image_path")),
+    ("ergonomics_visual_media", ("file_path", "original_file_path", "image_path", "original_image_path")),
+    ("layout_revisions", ("background_image_path", "cad_file_path", "file_path")),
+)
+
+
+def _rebase_cross_platform_upload_paths(conn: sqlite3.Connection) -> int:
+    """Rebase upload file paths authored on another OS/container when the file exists in UPLOAD_DIR."""
+    upload_dir = Path(UPLOAD_DIR)
+    if not upload_dir.exists():
+        return 0
+    updated_count = 0
+    existing_tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    for table_name, columns in _UPLOAD_PATH_COLUMNS:
+        if table_name not in existing_tables:
+            continue
+        table_cols = {
+            str(row[1])
+            for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        }
+        active_cols = [c for c in columns if c in table_cols]
+        if not active_cols or "id" not in table_cols:
+            continue
+        col_select = ", ".join(f'"{c}"' for c in active_cols)
+        non_empty_where = " OR ".join(f'TRIM(COALESCE("{c}", \'\')) <> \'\'' for c in active_cols)
+        rows = conn.execute(
+            f'SELECT "id", {col_select} FROM "{table_name}" WHERE {non_empty_where}'
+        ).fetchall()
+        for row in rows:
+            row_id = row[0]
+            updates: dict[str, str] = {}
+            for idx, col in enumerate(active_cols, start=1):
+                raw_val = str(row[idx] or "").strip()
+                if not raw_val or raw_val.startswith(("http://", "https://", "data:")):
+                    continue
+                try:
+                    if Path(raw_val).exists():
+                        continue
+                except OSError:
+                    pass
+                rebased = rebase_upload_path_str(raw_val, upload_dir)
+                if rebased != raw_val:
+                    try:
+                        if Path(rebased).exists():
+                            updates[col] = rebased
+                    except OSError:
+                        pass
+            if updates:
+                set_clause = ", ".join(f'"{col}" = ?' for col in updates)
+                conn.execute(
+                    f'UPDATE "{table_name}" SET {set_clause} WHERE "id" = ?',
+                    (*updates.values(), row_id),
+                )
+                updated_count += 1
+    return updated_count
 
 
 def init_db() -> None:
@@ -2837,6 +2912,7 @@ def init_db() -> None:
                    VALUES (?, ?, 'Parts', 'Manual BOM source backfill', ?, 'Schema upgrade', '{}', ?)""",
                 (str(uuid4()), mb_pid, int(cur.rowcount or 0), timestamp),
             )
+        _rebase_cross_platform_upload_paths(conn)
 
     if is_cacheable_runtime():
         ident = _db_file_identity(Path(DB_PATH))
@@ -2934,7 +3010,8 @@ def get_db_connection() -> sqlite3.Connection:
     """Return a configured SQLite connection owned by the caller."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    timeout_s = _safe_positive_float(os.environ.get("PAAG_SQLITE_TIMEOUT_S"), 30.0)
+    conn = sqlite3.connect(DB_PATH, timeout=timeout_s)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     ident = _db_file_identity(Path(DB_PATH))
@@ -2945,7 +3022,9 @@ def get_db_connection() -> sqlite3.Connection:
             _WAL_CONFIGURED_DB_SIGNATURES.add(wal_key)
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA cache_size = -32000")
+    conn.execute("PRAGMA wal_autocheckpoint = 1000")
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout_s * 1000)}")
     return conn
 
 
@@ -3052,4 +3131,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']

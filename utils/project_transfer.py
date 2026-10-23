@@ -188,6 +188,10 @@ def _upload_manifest(tables: dict[str, list[dict]]) -> list[dict]:
                     continue
                 path = Path(str(value)).resolve()
                 if not path.is_file() or upload_root not in path.parents:
+                    rebased = store.resolve_upload_path(str(value), upload_root)
+                    if rebased is not None:
+                        path = rebased.resolve()
+                if not path.is_file() or upload_root not in path.parents:
                     continue
                 relative = path.relative_to(upload_root).as_posix()
                 content = path.read_bytes()

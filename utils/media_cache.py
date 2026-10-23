@@ -9,6 +9,8 @@ from typing import Optional
 from PIL import Image, ImageOps
 
 from utils.cache_store import get_data_cache
+import utils.db_core as _db_core
+from utils.gcp_storage import resolve_upload_path
 
 
 def _resolve_media_path(path: str | Path | None) -> Optional[Path]:
@@ -17,6 +19,9 @@ def _resolve_media_path(path: str | Path | None) -> Optional[Path]:
     try:
         candidate = Path(path)
         if not candidate.exists() or not candidate.is_file():
+            rebased = resolve_upload_path(path, _db_core.UPLOAD_DIR)
+            if rebased is not None:
+                return rebased.resolve()
             return None
         return candidate.resolve()
     except OSError:
