@@ -91,7 +91,7 @@ st.html(
     div[class*="st-key-equipment_torque_details_editor"] button[aria-label="Delete row(s)"] {
         display: inline-flex !important;
     }
-    div[data-testid="stMultiSelectDropdown"]:not(:has([role="option"])) {
+    div[data-testid="stMultiSelectDropdown"]:has([role="listbox"][data-empty="true"]) {
         display: none !important;
     }
     </style>
