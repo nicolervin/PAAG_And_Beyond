@@ -78,9 +78,48 @@ assignment_editor_key = apply_pending_table_editor_reset(assignment_editor_key)
 pool_editor_key = apply_pending_table_editor_reset(pool_editor_key)
 
 scenario_active_part_ids = active_part_ids(project_id, scenario_id)
-parts = project_table("parts", project_id, "part_number")
-if not parts.empty:
-    parts = parts.loc[parts["id"].astype(str).isin(scenario_active_part_ids)].copy()
+all_catalog_parts = project_table("parts", project_id, "part_number")
+if not all_catalog_parts.empty:
+    active_catalog_parts = all_catalog_parts.loc[
+        all_catalog_parts["id"].astype(str).isin(scenario_active_part_ids)
+    ].copy()
+    is_source_code_8 = (
+        active_catalog_parts["source_code"].fillna("").astype(str).str.strip() == "8"
+        if "source_code" in active_catalog_parts.columns
+        else pd.Series(False, index=active_catalog_parts.index)
+    )
+    parts = active_catalog_parts.loc[~is_source_code_8].copy()
+else:
+    active_catalog_parts = all_catalog_parts.copy()
+    parts = all_catalog_parts.copy()
+
+source_code_8_part_ids: set[str] = set()
+source_code_8_part_numbers: set[str] = set()
+if not all_catalog_parts.empty and "source_code" in all_catalog_parts.columns:
+    sc8_rows = all_catalog_parts.loc[
+        all_catalog_parts["source_code"].fillna("").astype(str).str.strip() == "8"
+    ]
+    source_code_8_part_ids = set(sc8_rows["id"].astype(str))
+    source_code_8_part_numbers = {
+        str(pn).strip().upper()
+        for pn in sc8_rows["part_number"].tolist()
+        if str(pn or "").strip()
+    }
+placeable_part_ids = set(parts["id"].astype(str)) if not parts.empty else set()
+
+
+def _is_source_code_8_node(node_dict: dict) -> bool:
+    if str(node_dict.get("source_code") or "").strip() == "8":
+        return True
+    n_pid = str(node_dict.get("part_id") or node_dict.get("child_part_id") or "").strip()
+    if n_pid and n_pid in source_code_8_part_ids:
+        return True
+    n_pn = str(node_dict.get("part_number") or "").strip().upper()
+    if n_pn and n_pn in source_code_8_part_numbers:
+        return True
+    return False
+
+
 sections = assembly_section_walk_order(project_id)
 all_assignments = fishbone_part_assignments(project_id)
 if all_assignments.empty:
@@ -163,7 +202,13 @@ def audit_bool(value) -> bool:
 metrics = st.columns(4)
 metrics[0].metric("Parts available", len(parts), border=True)
 metrics[1].metric("Fishbone sections", len(sections), border=True)
-placed_catalog_parts = assignments["part_id"].nunique() if not assignments.empty else 0
+placed_catalog_parts = (
+    assignments.loc[
+        assignments["part_id"].astype(str).isin(placeable_part_ids), "part_id"
+    ].nunique()
+    if not assignments.empty
+    else 0
+)
 metrics[2].metric("Fishbone uses placed", len(assignments), border=True)
 metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_parts), border=True)
 
@@ -1051,6 +1096,8 @@ with fishbone_tab:
                         child_nodes = matched_node.get("children", []) if matched_node else []
                         seen_child_pids = set()
                         for c in child_nodes:
+                            if _is_source_code_8_node(c):
+                                continue
                             c_pid = str(c.get("part_id") or c.get("child_part_id") or "").strip()
                             if not c_pid or c_pid in seen_child_pids:
                                 continue
@@ -1200,6 +1247,8 @@ with fishbone_tab:
                                 child_entries = bnode.get("children", [])
                                 break
                         for ch in child_entries:
+                            if _is_source_code_8_node(ch):
+                                continue
                             c_pid = str(ch.get("part_id") or ch.get("child_part_id") or "").strip()
                             if not c_pid:
                                 c_pn = str(ch.get("part_number") or "").strip()
@@ -1297,8 +1346,8 @@ with fishbone_tab:
                         st.rerun()
 
         image_path_by_part = (
-            parts.set_index(parts["id"].astype(str))["image_path"].to_dict()
-            if not parts.empty and "image_path" in parts.columns
+            all_catalog_parts.set_index(all_catalog_parts["id"].astype(str))["image_path"].to_dict()
+            if not all_catalog_parts.empty and "image_path" in all_catalog_parts.columns
             else {}
         )
         visual_feature_options = sorted(
@@ -1358,7 +1407,9 @@ with fishbone_tab:
         for node in bom_nodes:
             np_id = str(node.get("part_id") or node.get("child_part_id") or "").strip()
             np_pn = str(node.get("part_number") or "").strip().upper()
-            children = node.get("children", [])
+            children = [
+                c for c in node.get("children", []) if not _is_source_code_8_node(c)
+            ]
             if children:
                 ch_map = {}
                 for c in children:
@@ -1421,14 +1472,23 @@ with fishbone_tab:
             })
 
         for node in bom_nodes:
+            if _is_source_code_8_node(node):
+                continue
             np_id = str(node.get("part_id") or node.get("child_part_id") or "")
             np_pn = str(node.get("part_number") or "").strip()
-            if not np_id or np_id in seen_pids or (np_pn and np_pn in seen_pns):
+            if (
+                not np_id
+                or np_id not in placeable_part_ids
+                or np_id in seen_pids
+                or (np_pn and np_pn in seen_pns)
+            ):
                 continue
             seen_pids.add(np_id)
             if np_pn:
                 seen_pns.add(np_pn)
-            ch_list = node.get("children", [])
+            ch_list = [
+                c for c in node.get("children", []) if not _is_source_code_8_node(c)
+            ]
             is_asm = len(ch_list) > 0
             n_desc = str(node.get("description") or node.get("part_name") or "").strip() or part_desc_lookup.get(np_id) or part_desc_lookup.get(np_pn.upper()) or ""
             palette_items.append({
