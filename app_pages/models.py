@@ -5,12 +5,15 @@ import pandas as pd
 import streamlit as st
 
 from utils.store import (
+    _identify_top_level_assembly_pns,
     apply_inferred_part_feature_rules,
     audit_history,
     complexity_feature_delete_impacts,
     complexity_features,
     complexity_planning_snapshot,
     complexity_tree,
+    complexity_visual_part_rules,
+    deduplicate_visual_box_parts,
     delete_project_models,
     model_planning_snapshot,
     part_feature_rules,
@@ -49,7 +52,7 @@ from utils.table_filters import (
 
 project_id = st.session_state.get("project_id")
 page_title_with_scope("Complexity Trees", scope="project")
-st.caption("Translate each Official model number into the Common name and description the IE and lean team use during planning.")
+st.caption("Translate each Model number into the Model name and description the IE and lean team use during planning.")
 if not project_id:
     st.stop()
 model_editor_key = apply_pending_table_editor_reset("model_definitions_editor_v2")
@@ -76,7 +79,7 @@ has_unsaved_changes = table_has_unsaved_changes(
     model_editor_key, native_row_selection=True
 )
 editable_table_heading("Model information")
-st.caption("Official model number stays tied to the official source. Edit the Common name and turn off models that should not appear in the Parts Catalog.")
+st.caption("Model number stays tied to the official source. Edit the Model name and turn off models that should not appear in the Parts Catalog.")
 st.caption("Type or paste new model rows directly into the blank entry row, then save.")
 definition_columns = [
     "id", "model_number", "display_name", "eau", "description", "active", "notes",
@@ -101,7 +104,7 @@ models_editor_rows = direct_entry_editor_rows(
     visible_models,
     editor_key=model_editor_key,
     sort_columns=["active", "display_name", "model_number", "eau", "description"],
-    labels={"display_name": "Common name", "model_number": "Official model number", "eau": "EAU"},
+    labels={"display_name": "Model name", "model_number": "Model number", "eau": "EAU"},
 )
 edited_models = st.data_editor(
     models_editor_rows,
@@ -120,8 +123,16 @@ edited_models = st.data_editor(
             default=True,
             help="Active models appear as choices in the Parts Catalog.",
         ),
-        "display_name": st.column_config.TextColumn("Common name", width="medium"),
-        "model_number": st.column_config.TextColumn("Official model number", required=True),
+        "display_name": st.column_config.TextColumn(
+            "Model name",
+            width="medium",
+            help="Friendly name used by the team to recognize this model during planning (for example, High End Stainless).",
+        ),
+        "model_number": st.column_config.TextColumn(
+            "Model number",
+            required=True,
+            help="Unique model identifier from the product lineup or BOM (for example, GFE28GYNFS).",
+        ),
         "eau": st.column_config.NumberColumn(
             "EAU",
             min_value=0,
@@ -129,7 +140,11 @@ edited_models = st.data_editor(
             format="%.1f",
             help="Estimated annual usage for this model.",
         ),
-        "description": st.column_config.TextColumn("Description", width="large"),
+        "description": st.column_config.TextColumn(
+            "Description",
+            width="large",
+            help="Optional summary of the model's key configuration or market details.",
+        ),
         "notes": None,
         "updated_at": None,
     },
@@ -274,7 +289,16 @@ if save_requested:
         )
         st.session_state[model_undo_key] = current_model_snapshot
         request_table_editor_reset(model_editor_key)
-        st.toast(f"Saved {count} model definitions", icon=":material/check_circle:")
+        model_save_details: list[str] = []
+        if added_model_rows:
+            model_save_details.append(f"{added_model_rows} added")
+        if edited_model_rows:
+            model_save_details.append(f"{edited_model_rows} updated")
+        st.toast(
+            f"Saved {count} model definition(s)"
+            + (f" ({', '.join(model_save_details)})" if model_save_details else ""),
+            icon=":material/check_circle:",
+        )
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
@@ -293,7 +317,7 @@ editable_table_heading("Feature definitions")
 
 st.caption(
     "Define the manufacturing characteristics that matter to this project. "
-    "Enter allowed choices as a comma-separated list; for example, Dispenser, Non-dispenser."
+    "Group each **Feature** (product attribute) under a **Category** and optional Parts Catalog **Subsystem**, then list its **Allowed choices** (options) separated by commas — for example, Dispenser, Non-dispenser. Hover over any column header for details."
 )
 feature_columns = ["id", "active", "category", "subsystem", "name", "allowed_choices", "description"]
 if features.empty:
@@ -341,23 +365,36 @@ edited_features = st.data_editor(
     column_order=["active", "category", "subsystem", "name", "allowed_choices", "description"],
     column_config={
         "id": None,
-        "active": st.column_config.CheckboxColumn("Active", default=True),
+        "active": st.column_config.CheckboxColumn(
+            "Active",
+            default=True,
+            help="When checked, this feature appears in the Complexity tree and is used to determine part applicability across models.",
+        ),
         "category": st.column_config.TextColumn(
-            "Category", required=True, help="A team-defined grouping such as Door, Controls, or Installation."
+            "Category",
+            required=True,
+            help="High-level functional area or product grouping (for example, Door, Controls, or Refrigeration) used to organize related features in the Complexity tree and visual.",
         ),
         "subsystem": st.column_config.SelectboxColumn(
             "Subsystem",
             options=subsystem_options,
             required=False,
-            help="Optional Parts Catalog subsystem filter to limit which parts can receive this feature during auto-assign.",
+            help="Optional Parts Catalog subsystem link. When set, auto-assigning part applicability from the Complexity tree only matches parts that belong to this subsystem.",
         ),
         "name": st.column_config.TextColumn(
-            "Feature", required=True, help="A manufacturing-relevant characteristic."
+            "Feature",
+            required=True,
+            help="Unique product attribute or variation within this project that differs between models and affects which parts or assembly steps are needed (for example, Door Color, Wheel Color, Ice Maker, or Handle Style).",
         ),
         "allowed_choices": st.column_config.TextColumn(
-            "Allowed choices", required=True, help="Separate choices with commas."
+            "Allowed choices",
+            required=True,
+            help="Comma-separated list of possible options a model can have for this feature (for example, Dispenser, Non-dispenser). Each active model is assigned one of these options in the Complexity tree below.",
         ),
-        "description": st.column_config.TextColumn("Description"),
+        "description": st.column_config.TextColumn(
+            "Description",
+            help="Optional notes explaining this feature or when each option applies.",
+        ),
     },
 )
 feature_actions = editable_table_footer(
@@ -600,7 +637,11 @@ if feature_actions.save_and_refresh:
         )
         request_table_editor_reset(tree_editor_key)
         request_table_editor_reset(feature_editor_key)
-        st.toast(f"Saved {count} feature definitions", icon=":material/check_circle:")
+        st.toast(
+            f"Saved {count} feature definition(s)"
+            + (f" ({len(changed_features)} modified)" if changed_features else ""),
+            icon=":material/check_circle:",
+        )
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
@@ -648,9 +689,16 @@ else:
     tree_config = {
         "id": None,
         "model_id": None,
-        "common_name": st.column_config.TextColumn("Common name", width="medium"),
+        "common_name": st.column_config.TextColumn(
+            "Model name",
+            width="medium",
+            help="Friendly name defined for this model in Model information above.",
+        ),
         "official_model_number": st.column_config.TextColumn(
-            "Official model number", width="medium", pinned=True
+            "Model number",
+            width="medium",
+            pinned=True,
+            help="Unique model identifier from Model information above.",
         ),
     }
     for _, feature in active_features.iterrows():
@@ -660,7 +708,8 @@ else:
             f"{feature['category']} · {feature['name']}",
             options=choices,
             width="medium",
-            help=str(feature.get("description") or ""),
+            help=str(feature.get("description") or "").strip()
+            or "Select which option from Allowed choices applies to each model for this feature.",
         )
     for spacer_column in spacer_columns:
         tree_config[spacer_column] = st.column_config.TextColumn(
@@ -764,13 +813,14 @@ else:
         )
         st.session_state.pop(tree_pending_save_key, None)
         request_table_editor_reset(tree_editor_key)
+        tree_save_msg = f"Saved {count} model feature selection(s)"
+        if changed_assignment_count:
+            tree_save_msg += f" ({changed_assignment_count} changed)"
         if auto_assigned_count > 0:
-            st.toast(
-                f"Saved {count} model feature selections. Auto-assigned {auto_assigned_count} parts in Parts Catalog.",
-                icon=":material/check_circle:",
+            tree_save_msg += (
+                f" · auto-assigned {auto_assigned_count} part(s) in Parts Catalog"
             )
-        else:
-            st.toast(f"Saved {count} model feature selections", icon=":material/check_circle:")
+        st.toast(tree_save_msg, icon=":material/check_circle:")
         st.rerun()
 
     def dismiss_duplicate_model_warning() -> None:
@@ -789,10 +839,10 @@ else:
             "These active models match on every feature that has a value assigned on both models."
         )
         for conflict in conflicts:
-            left_name = conflict.get("left_common_name") or "No common name"
-            left_number = conflict.get("left_official_model_number") or "No official model number"
-            right_name = conflict.get("right_common_name") or "No common name"
-            right_number = conflict.get("right_official_model_number") or "No official model number"
+            left_name = conflict.get("left_common_name") or "No model name"
+            left_number = conflict.get("left_official_model_number") or "No model number"
+            right_name = conflict.get("right_common_name") or "No model name"
+            right_number = conflict.get("right_official_model_number") or "No model number"
             st.write(
                 f"{left_name} ({left_number}) and {right_name} ({right_number}) "
                 f"— {int(conflict.get('mutual_feature_count', 0))} mutually assigned feature(s) match."
@@ -883,33 +933,96 @@ else:
         placeholder="Select one or more categories",
         key=visual_category_key,
     )
-    visual_model_label = st.selectbox(
+    visual_model_label_options = ["Model name", "Model number"]
+    visual_model_label_key = f"complexity_tree_visual_model_label_{project_id}"
+
+    def _normalize_visual_model_label(value: object) -> str:
+        text = str(value or "").strip()
+        if text == "Common name":
+            return "Model name"
+        if text == "Official model number":
+            return "Model number"
+        return text
+
+    existing_visual_model_label = st.session_state.get(visual_model_label_key)
+    if isinstance(existing_visual_model_label, str):
+        normalized_model_label = _normalize_visual_model_label(existing_visual_model_label)
+        st.session_state[visual_model_label_key] = (
+            [normalized_model_label]
+            if normalized_model_label in visual_model_label_options
+            else []
+        )
+    elif isinstance(existing_visual_model_label, list):
+        valid_model_labels = list(
+            dict.fromkeys(
+                _normalize_visual_model_label(item)
+                for item in existing_visual_model_label
+                if _normalize_visual_model_label(item) in visual_model_label_options
+            )
+        )
+        if valid_model_labels != existing_visual_model_label:
+            st.session_state[visual_model_label_key] = valid_model_labels
+    visual_model_labels = st.multiselect(
         "Model label",
-        ["", "Common name", "Official model number"],
-        index=0,
-        format_func=lambda value: value or "Select a model label",
-        key=f"complexity_tree_visual_model_label_{project_id}",
-        help="Choose which model identifier appears in the visual headers.",
+        visual_model_label_options,
+        placeholder="Select one or more model labels",
+        key=visual_model_label_key,
+        help="Choose which model identifiers appear in the visual headers.",
     )
-    visual_feature_display = st.selectbox(
+    visual_feature_display_options = ["Feature", "Part number", "Part name"]
+    visual_feature_display_key = f"complexity_tree_visual_feature_display_{project_id}"
+    if visual_feature_display_key not in st.session_state:
+        st.session_state[visual_feature_display_key] = ["Feature"]
+    else:
+        existing_visual_feature_display = st.session_state.get(visual_feature_display_key)
+        if isinstance(existing_visual_feature_display, str):
+            cleaned_feature_display = existing_visual_feature_display.strip()
+            st.session_state[visual_feature_display_key] = (
+                [cleaned_feature_display]
+                if cleaned_feature_display in visual_feature_display_options
+                else []
+            )
+        elif isinstance(existing_visual_feature_display, list):
+            valid_feature_displays = list(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in existing_visual_feature_display
+                    if str(item).strip() in visual_feature_display_options
+                )
+            )
+            if valid_feature_displays != existing_visual_feature_display:
+                st.session_state[visual_feature_display_key] = valid_feature_displays
+    visual_feature_displays = st.multiselect(
         "Feature",
-        ["Feature", "Part number"],
-        index=0,
-        key=f"complexity_tree_visual_feature_display_{project_id}",
-        help="Choose whether the visual displays feature values from the complexity tree or assigned part numbers from the Parts Catalog.",
+        visual_feature_display_options,
+        placeholder="Select one or more feature displays",
+        key=visual_feature_display_key,
+        help="Choose whether the visual displays feature values from the complexity tree, assigned part numbers or part names from the Parts Catalog, or any combination.",
     )
     selected_categories = [
         str(category).strip()
         for category in (visual_categories or [])
         if str(category).strip()
     ]
-    if not selected_categories or not visual_model_label:
-        if not selected_categories and not visual_model_label:
+    selected_model_labels = [
+        str(label).strip()
+        for label in (visual_model_labels or [])
+        if str(label).strip() in visual_model_label_options
+    ]
+    selected_feature_displays = [
+        str(display).strip()
+        for display in (visual_feature_displays or [])
+        if str(display).strip() in visual_feature_display_options
+    ]
+    if not selected_categories or not selected_model_labels or not selected_feature_displays:
+        if not selected_categories and not selected_model_labels:
             st.info("Select at least one category and a model label to generate the complexity tree visual.")
         elif not selected_categories:
             st.info("Select at least one category to generate the complexity tree visual.")
-        else:
+        elif not selected_model_labels:
             st.info("Select a model label to generate the complexity tree visual.")
+        else:
+            st.info("Select at least one feature display option to generate the complexity tree visual.")
         visual_features = None
     else:
         category_order = {cat: idx for idx, cat in enumerate(selected_categories)}
@@ -982,29 +1095,48 @@ else:
         grid_template = (
             f"minmax(130px, 1.2fr) repeat({grid_columns}, minmax(90px, 1fr))"
         )
+
+        def _build_group_model_label_lines(
+            group: dict[str, object],
+            selected_labels: list[str],
+        ) -> list[str]:
+            if selected_labels == ["Model name"]:
+                return [
+                    escape(str(label or "Model name not defined"))
+                    for label in dict.fromkeys(group["model_names"])
+                ]
+            if selected_labels == ["Model number"]:
+                return [escape(str(label)) for label in group["model_numbers"]]
+            lines: list[str] = []
+            for model_name, model_number in zip(
+                group["model_names"],
+                group["model_numbers"],
+            ):
+                for label_type in selected_labels:
+                    if label_type == "Model name":
+                        lines.append(escape(str(model_name or "Model name not defined")))
+                    elif label_type == "Model number":
+                        lines.append(escape(str(model_number)))
+            return lines
+
+        group_label_lines = [
+            _build_group_model_label_lines(group, selected_model_labels)
+            for group in visual_model_groups
+        ]
         model_header_height = max(
             42,
-            max(len(group["model_numbers"]) for group in visual_model_groups) * 22 + 12,
+            max(len(lines) for lines in group_label_lines) * 22 + 12,
         )
         visual_html = [
             f'<div style="display:grid;grid-template-columns:{grid_template};'
             'gap:10px 8px;align-items:center;">',
             '<div style="font-weight:700;">Model</div>',
         ]
-        for group in visual_model_groups:
-            labels = (
-                group["model_names"]
-                if visual_model_label == "Common name"
-                else group["model_numbers"]
-            )
-            if visual_model_label == "Common name":
-                labels = list(dict.fromkeys(labels))
-            model_labels = "<br>".join(
-                escape(str(label or "Common name not defined")) for label in labels
-            )
+        for lines in group_label_lines:
+            model_labels = "<br>".join(lines)
             visual_html.append(
                 '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
-                f'border:2px solid #000;border-radius:4px;padding:6px;height:{model_header_height}px;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;min-height:{model_header_height}px;height:100%;'
                 'box-sizing:border-box;display:flex;align-items:center;'
                 'justify-content:center;text-align:center;">'
                 f"{model_labels}</div>"
@@ -1016,33 +1148,53 @@ else:
             for _ in visual_model_groups
         )
 
-        part_numbers_by_feature_value: dict[tuple[str, str], list[str]] = {}
-        if visual_feature_display == "Part number":
-            catalog_parts = project_table("parts", project_id)
-            rules = part_feature_rules(project_id)
-            if not catalog_parts.empty and not rules.empty:
-                part_number_by_id = {
-                    str(pid).strip(): str(pnum or "").strip()
-                    for pid, pnum in zip(catalog_parts["id"], catalog_parts["part_number"])
-                    if str(pid).strip() and str(pnum or "").strip()
-                }
-                for raw_pid, raw_fid, raw_val in zip(
-                    rules["part_id"], rules["feature_id"], rules["value"]
-                ):
-                    part_id = str(raw_pid or "").strip()
-                    rule_feature_id = str(raw_fid or "").strip()
-                    rule_value = str(raw_val or "").strip()
-                    part_number = part_number_by_id.get(part_id, "")
-                    if not part_number or not rule_feature_id or not rule_value:
-                        continue
-                    bucket = part_numbers_by_feature_value.setdefault(
-                        (rule_feature_id, rule_value),
-                        [],
+        show_part_displays = any(
+            mode in selected_feature_displays for mode in ("Part number", "Part name")
+        )
+        part_rules_by_feature_value: dict[tuple[str, str], list[tuple[str, set[str] | None]]] = {}
+        bom_descendants_by_pn: dict[str, set[str]] = {}
+        part_name_by_pn: dict[str, str] = {}
+        if show_part_displays:
+            part_rules_by_feature_value, bom_descendants_by_pn = complexity_visual_part_rules(
+                project_id
+            )
+            if "Part name" in selected_feature_displays:
+                parts_df = project_table("parts", project_id)
+                if not parts_df.empty:
+                    for raw_pn, raw_desc in zip(
+                        parts_df["part_number"], parts_df["description"]
+                    ):
+                        pn_key = str(raw_pn or "").strip().upper()
+                        p_name = str(raw_desc or "").strip()
+                        if pn_key and (
+                            pn_key not in part_name_by_pn
+                            or (p_name and not part_name_by_pn[pn_key])
+                        ):
+                            part_name_by_pn[pn_key] = p_name
+
+        def _build_box_part_lines(
+            matching_parts: list[str],
+            part_modes: list[str],
+        ) -> list[str]:
+            if part_modes == ["Part number"]:
+                return [escape(pn) for pn in matching_parts]
+            if part_modes == ["Part name"]:
+                return [
+                    escape(label)
+                    for label in dict.fromkeys(
+                        part_name_by_pn.get(pn.upper(), "") or "Part name not defined"
+                        for pn in matching_parts
                     )
-                    if part_number not in bucket:
-                        bucket.append(part_number)
-                for key, bucket in part_numbers_by_feature_value.items():
-                    part_numbers_by_feature_value[key] = sorted(bucket)
+                ]
+            lines: list[str] = []
+            for pn in matching_parts:
+                part_name = part_name_by_pn.get(pn.upper(), "") or "Part name not defined"
+                for mode in part_modes:
+                    if mode == "Part number":
+                        lines.append(escape(pn))
+                    elif mode == "Part name":
+                        lines.append(escape(part_name))
+            return lines
 
         row_hues = [220, 145, 35, 295, 5, 180, 75, 255, 330, 110]
         feature_count = len(visual_features)
@@ -1071,15 +1223,38 @@ else:
                 f"{escape(feature_row_label)}</div>"
             )
             values: list[str] = []
+            group_parts_by_col: list[list[str]] = []
             for group in visual_model_groups:
                 model_id = group["model_ids"][0]
                 value = visual_tree.at[model_id, feature_id]
                 selected_value = "" if pd.isna(value) else str(value).strip()
                 values.append(selected_value)
+                if show_part_displays and selected_value:
+                    group_models = {str(m).strip() for m in group.get("model_numbers", []) if str(m).strip()}
+                    raw_matching = [
+                        pn
+                        for pn, app_models in part_rules_by_feature_value.get(
+                            (feature_id, selected_value), []
+                        )
+                        if app_models is None or bool(group_models & app_models)
+                    ]
+                    matching_for_group = deduplicate_visual_box_parts(
+                        raw_matching, bom_descendants_by_pn
+                    )
+                    group_parts_by_col.append(matching_for_group)
+                else:
+                    group_parts_by_col.append([])
             start = 0
             while start < len(values):
                 end = start + 1
-                while end < len(values) and values[end] == values[start]:
+                while (
+                    end < len(values)
+                    and values[end] == values[start]
+                    and (
+                        not show_part_displays
+                        or group_parts_by_col[end] == group_parts_by_col[start]
+                    )
+                ):
                     end += 1
                 selected_value = values[start]
                 background = color_by_choice.get(selected_value, "#f1f5f9")
@@ -1088,18 +1263,51 @@ else:
                 if not selected_value:
                     text_color = "#64748b"
                     label = escape("Not assigned")
-                elif visual_feature_display == "Part number":
-                    matching_parts = part_numbers_by_feature_value.get(
-                        (feature_id, selected_value),
-                        [],
-                    )
+                elif selected_feature_displays == ["Feature"]:
+                    label = escape(selected_value)
+                elif "Feature" not in selected_feature_displays:
+                    matching_parts = group_parts_by_col[start]
                     if matching_parts:
-                        label = "<br>".join(escape(pn) for pn in matching_parts)
+                        label = "<br>".join(
+                            _build_box_part_lines(matching_parts, selected_feature_displays)
+                        )
                     else:
                         text_color = "#64748b"
                         label = escape("No parts assigned")
                 else:
-                    label = escape(selected_value)
+                    matching_parts = group_parts_by_col[start]
+                    part_modes = [
+                        mode
+                        for mode in selected_feature_displays
+                        if mode in ("Part number", "Part name")
+                    ]
+                    feature_between_part_modes = (
+                        len(part_modes) == 2
+                        and selected_feature_displays.index("Feature") == 1
+                    )
+                    segments: list[str] = []
+                    emitted_combined_parts = False
+                    for display_mode in selected_feature_displays:
+                        if display_mode == "Feature":
+                            segments.append(escape(selected_value))
+                        elif not matching_parts:
+                            if not emitted_combined_parts:
+                                segments.append(
+                                    f'<span style="font-weight:400;opacity:0.8;">{escape("No parts assigned")}</span>'
+                                )
+                                emitted_combined_parts = True
+                        elif feature_between_part_modes:
+                            mode_lines = _build_box_part_lines(matching_parts, [display_mode])
+                            segments.append(
+                                f'<span style="font-weight:400;">{"<br>".join(mode_lines)}</span>'
+                            )
+                        elif not emitted_combined_parts:
+                            combined_lines = _build_box_part_lines(matching_parts, part_modes)
+                            segments.append(
+                                f'<span style="font-weight:400;">{"<br>".join(combined_lines)}</span>'
+                            )
+                            emitted_combined_parts = True
+                    label = "<br>".join(segments)
                 visual_html.append(
                     f'<div style="grid-column:span {end - start};background:{background};'
                     'border-radius:8px;padding:10px 12px;text-align:center;display:flex;'
@@ -1121,20 +1329,11 @@ else:
             for _ in visual_model_groups
         )
         visual_html.append('<div style="font-weight:700;">Model</div>')
-        for group in visual_model_groups:
-            labels = (
-                group["model_names"]
-                if visual_model_label == "Common name"
-                else group["model_numbers"]
-            )
-            if visual_model_label == "Common name":
-                labels = list(dict.fromkeys(labels))
-            model_labels = "<br>".join(
-                escape(str(label or "Common name not defined")) for label in labels
-            )
+        for lines in group_label_lines:
+            model_labels = "<br>".join(lines)
             visual_html.append(
                 '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;'
-                f'border:2px solid #000;border-radius:4px;padding:6px;height:{model_header_height}px;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;min-height:{model_header_height}px;height:100%;'
                 'box-sizing:border-box;display:flex;align-items:center;'
                 'justify-content:center;text-align:center;">'
                 f"{model_labels}</div>"

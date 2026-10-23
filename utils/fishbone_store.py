@@ -1149,8 +1149,8 @@ def create_part_and_assign_to_section(
             conn.execute(
                 """INSERT INTO parts
                    (id, project_id, part_number, description, quantity, revision, source,
-                    image_path, model_applicability, notes, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'Manual', '', ?, ?, ?)""",
+                    image_path, model_applicability, notes, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'Manual', '', ?, ?, ?, ?)""",
                 (
                     part_id,
                     project_id,
@@ -1160,6 +1160,7 @@ def create_part_and_assign_to_section(
                     revision,
                     normalize_model_applicability(values.get("model_applicability", "All")),
                     catalog_notes,
+                    timestamp,
                     timestamp,
                 ),
             )
@@ -2355,7 +2356,249 @@ def save_fishbone_canvas_draft(
         "assignments_deleted": assignments_deleted,
     }
 
-__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft']
+
+def clear_interactive_fishbone(
+    project_id: str,
+    mode: str,
+    section_ids: list[str] | None = None,
+    editor_name: str = "",
+) -> dict:
+    """Clear placed parts and/or delete sections from the Interactive Fishbone canvas."""
+    clean_mode = str(mode or "").strip().lower()
+    if clean_mode not in {"clear_parts", "delete_sections", "delete_empty_sections", "both"}:
+        raise ValueError(
+            "Invalid clear mode. Expected 'clear_parts', 'delete_sections', 'delete_empty_sections', or 'both'."
+        )
+    timestamp = now_iso()
+    parts_cleared = 0
+    sections_deleted = 0
+    connections_deleted = 0
+    yamazumi_areas_deleted = 0
+    process_groups_deleted = 0
+    deleted_section_ids: list[str] = []
+    deleted_section_names: list[str] = []
+
+    with connection() as conn:
+        if clean_mode == "clear_parts":
+            if section_ids is not None:
+                clean_sec_ids = [
+                    str(s).strip() for s in dict.fromkeys(section_ids) if str(s or "").strip()
+                ]
+                if clean_sec_ids:
+                    sec_placeholders = ", ".join("?" for _ in clean_sec_ids)
+                    assignment_ids = [
+                        str(r[0])
+                        for r in conn.execute(
+                            f"SELECT id FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({sec_placeholders})",
+                            (project_id, *clean_sec_ids),
+                        ).fetchall()
+                    ]
+                else:
+                    assignment_ids = []
+            else:
+                assignment_ids = [
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT id FROM fishbone_part_assignments WHERE project_id=?",
+                        (project_id,),
+                    ).fetchall()
+                ]
+            if assignment_ids:
+                _release_fishbone_assignment_references(
+                    conn, project_id, assignment_ids, timestamp, detach_pits_occurrences=True
+                )
+                aid_placeholders = ", ".join("?" for _ in assignment_ids)
+                conn.execute(
+                    f"""DELETE FROM manufacturing_assembly_components
+                        WHERE project_id = ? AND fishbone_assignment_id IN ({aid_placeholders})""",
+                    (project_id, *assignment_ids),
+                )
+                parts_cleared = conn.execute(
+                    f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND id IN ({aid_placeholders})",
+                    (project_id, *assignment_ids),
+                ).rowcount
+        else:
+            all_sec_rows = conn.execute(
+                "SELECT id, name, parent_id FROM assembly_sections WHERE project_id=? ORDER BY sequence, name",
+                (project_id,),
+            ).fetchall()
+            if clean_mode == "both" or (clean_mode == "delete_sections" and section_ids is None):
+                affected_rows = list(all_sec_rows)
+            elif clean_mode == "delete_empty_sections":
+                sec_with_parts = {
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT DISTINCT section_id FROM fishbone_part_assignments WHERE project_id=?",
+                        (project_id,),
+                    ).fetchall()
+                }
+                parent_by_id = {str(r["id"]): str(r["parent_id"] or "") for r in all_sec_rows}
+                protected_ids = set(sec_with_parts)
+                for sid in list(sec_with_parts):
+                    curr = parent_by_id.get(sid, "")
+                    visited = set()
+                    while curr and curr not in visited:
+                        visited.add(curr)
+                        protected_ids.add(curr)
+                        curr = parent_by_id.get(curr, "")
+                affected_rows = [r for r in all_sec_rows if str(r["id"]) not in protected_ids]
+            else:
+                clean_sec_ids = [
+                    str(s).strip() for s in dict.fromkeys(section_ids or []) if str(s or "").strip()
+                ]
+                if clean_sec_ids:
+                    affected_rows = _assembly_section_delete_rows(conn, project_id, clean_sec_ids)
+                else:
+                    affected_rows = []
+
+            affected_ids = [str(r["id"]) for r in affected_rows]
+            deleted_section_ids = affected_ids
+            deleted_section_names = [str(r["name"]) for r in affected_rows]
+
+            if clean_mode == "both":
+                all_assignment_ids = [
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT id FROM fishbone_part_assignments WHERE project_id=?",
+                        (project_id,),
+                    ).fetchall()
+                ]
+            elif affected_ids:
+                sec_placeholders = ", ".join("?" for _ in affected_ids)
+                all_assignment_ids = [
+                    str(r[0])
+                    for r in conn.execute(
+                        f"SELECT id FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({sec_placeholders})",
+                        (project_id, *affected_ids),
+                    ).fetchall()
+                ]
+            else:
+                all_assignment_ids = []
+
+            if all_assignment_ids:
+                _release_fishbone_assignment_references(
+                    conn, project_id, all_assignment_ids, timestamp, detach_pits_occurrences=True
+                )
+                aid_placeholders = ", ".join("?" for _ in all_assignment_ids)
+                conn.execute(
+                    f"""DELETE FROM manufacturing_assembly_components
+                        WHERE project_id = ? AND fishbone_assignment_id IN ({aid_placeholders})""",
+                    (project_id, *all_assignment_ids),
+                )
+                parts_cleared = conn.execute(
+                    f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND id IN ({aid_placeholders})",
+                    (project_id, *all_assignment_ids),
+                ).rowcount
+
+            if affected_ids:
+                placeholders = ", ".join("?" for _ in affected_ids)
+                conn.execute(
+                    f"""UPDATE pits_bom_occurrences
+                        SET review_status = CASE WHEN review_status = 'Approved' THEN 'Needs review' ELSE review_status END,
+                            confirmed_section_id = NULL,
+                            approved_assignment_id = NULL,
+                            reviewed_source_fingerprint = CASE WHEN review_status = 'Approved' THEN NULL ELSE reviewed_source_fingerprint END,
+                            last_reviewed_import_id = CASE WHEN review_status = 'Approved' THEN NULL ELSE last_reviewed_import_id END,
+                            source_state = CASE WHEN source_state = 'Missing' THEN 'Missing' ELSE 'New' END,
+                            updated_at = ?
+                        WHERE project_id = ? AND confirmed_section_id IN ({placeholders})""",
+                    (timestamp, project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"""DELETE FROM yamazumi_work_regions WHERE area_id IN (
+                        SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
+                    )""",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"""DELETE FROM yamazumi_elements WHERE area_id IN (
+                        SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
+                    )""",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"""DELETE FROM yamazumi_pitches WHERE area_id IN (
+                        SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
+                    )""",
+                    (project_id, *affected_ids),
+                )
+                yamazumi_areas_deleted = conn.execute(
+                    f"DELETE FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                ).rowcount
+                process_groups_deleted = conn.execute(
+                    f"DELETE FROM process_part_groups WHERE project_id=? AND section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                ).rowcount
+                conn.execute(
+                    f"""DELETE FROM assembly_grid_model_mappings
+                        WHERE project_id=? AND category_id IN (
+                            SELECT id FROM assembly_grid_categories
+                            WHERE project_id=? AND (section_id IN ({placeholders}) OR installed_section_id IN ({placeholders}))
+                        )""",
+                    (project_id, project_id, *affected_ids, *affected_ids),
+                )
+                conn.execute(
+                    f"DELETE FROM assembly_grid_feature_visibility WHERE project_id=? AND section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"""DELETE FROM assembly_grid_categories
+                        WHERE project_id=? AND (section_id IN ({placeholders}) OR installed_section_id IN ({placeholders}))""",
+                    (project_id, *affected_ids, *affected_ids),
+                )
+                conn.execute(
+                    f"UPDATE manufacturing_assemblies SET built_section_id=NULL WHERE project_id=? AND built_section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"UPDATE manufacturing_assemblies SET installed_section_id=NULL WHERE project_id=? AND installed_section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                connections_deleted = conn.execute(
+                    f"""DELETE FROM assembly_section_connections
+                        WHERE project_id=? AND (from_section_id IN ({placeholders}) OR to_section_id IN ({placeholders}))""",
+                    (project_id, *affected_ids, *affected_ids),
+                ).rowcount
+                conn.execute(
+                    f"UPDATE assembly_sections SET parent_id=NULL WHERE project_id=? AND parent_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                sections_deleted = conn.execute(
+                    f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                ).rowcount
+
+        record_audit_event(
+            project_id,
+            "Fishbone framework",
+            "Clear interactive fishbone",
+            parts_cleared + sections_deleted,
+            str(editor_name or "").strip(),
+            {
+                "mode": clean_mode,
+                "parts_cleared": parts_cleared,
+                "sections_deleted": sections_deleted,
+                "deleted_section_names": deleted_section_names,
+                "connections_deleted": connections_deleted,
+                "yamazumi_areas_deleted": yamazumi_areas_deleted,
+                "process_groups_deleted": process_groups_deleted,
+            },
+            _conn=conn,
+        )
+
+    return {
+        "mode": clean_mode,
+        "parts_cleared": parts_cleared,
+        "sections_deleted": sections_deleted,
+        "deleted_section_ids": deleted_section_ids,
+        "deleted_section_names": deleted_section_names,
+        "connections_deleted": connections_deleted,
+        "yamazumi_areas_deleted": yamazumi_areas_deleted,
+        "process_groups_deleted": process_groups_deleted,
+    }
+
+__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft', 'clear_interactive_fishbone']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

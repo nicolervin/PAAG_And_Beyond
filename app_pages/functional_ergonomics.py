@@ -46,6 +46,12 @@ from utils.store import (
 )
 from utils.table_filters import (
     apply_pending_table_editor_reset,
+    can_redo_last_table_edit,
+    can_undo_last_table_edit,
+    last_table_undo_redo_message,
+    has_unsaved_table_changes,
+    redo_last_table_edit,
+    undo_last_table_edit,
     filter_table,
     merge_filtered_edits,
     request_table_editor_reset,
@@ -56,6 +62,7 @@ from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
+    guarded_tabs,
     native_selected_rows,
     selectable_dataframe,
     stage_native_delete_confirmation,
@@ -120,10 +127,9 @@ if not project_id or not scenario:
     st.info("Select an active planning scenario to manage Ergonomics reviews.")
     st.stop()
 
-review_tab, equipment_tab = st.tabs(
+review_tab, equipment_tab = guarded_tabs(
     ["Review", "Equipment"],
     key=f"ergonomics_page_tabs_{project_id}",
-    on_change="rerun",
 )
 if equipment_tab.open:
     with equipment_tab:
@@ -277,7 +283,7 @@ if unlinked_count > 0:
     if top_actions.button(
         f"Delete unlinked reviews ({unlinked_count})",
         icon=":material/delete_sweep:",
-        key=f"delete_unlinked_btn_{scenario_id}",
+        key=f"destructive_delete_unlinked_btn_{scenario_id}",
     ):
         st.session_state[f"show_delete_unlinked_dialog_{scenario_id}"] = True
 
@@ -595,7 +601,15 @@ def _save_rows(
     )
     st.session_state.pop(pending_merge_key, None)
     request_table_editor_reset(editor_key)
-    st.toast("Ergonomics reviews saved", icon=":material/check_circle:")
+    _ergo_parts: list[str] = []
+    if result.get("created_ids"):
+        _ergo_parts.append(f"{len(result['created_ids'])} created")
+    if result.get("updated_ids"):
+        _ergo_parts.append(f"{len(result['updated_ids'])} updated")
+    if result.get("discarded_ids"):
+        _ergo_parts.append(f"{len(result['discarded_ids'])} merged/discarded")
+    _ergo_detail = f" ({', '.join(_ergo_parts)})" if _ergo_parts else ""
+    st.toast(f"Saved {int(result['row_count'])} Ergonomics review(s){_ergo_detail}", icon=":material/check_circle:")
     st.rerun()
 
 
@@ -739,7 +753,7 @@ def _delete_unlinked_dialog() -> None:
         f"Delete selected ({len(selected_to_delete)})",
         type="primary",
         icon=":material/delete_sweep:",
-        key=f"confirm_del_unlinked_{scenario_id}",
+        key=f"destructive_confirm_del_unlinked_{scenario_id}",
         disabled=len(selected_to_delete) == 0,
     ):
         try:
@@ -791,7 +805,7 @@ def _manage_hazards_dialog() -> None:
             st.toast("Standard hazard tags created", icon=":material/check_circle:")
             st.rerun()
     else:
-        tags_editor_key = f"hazard_options_editor_{project_id}"
+        tags_editor_key = apply_pending_table_editor_reset(f"hazard_options_editor_{project_id}")
         edited_tags = st.data_editor(
             cur_hazards[["id", "label", "active", "selection_count"]],
             key=tags_editor_key,
@@ -805,10 +819,46 @@ def _manage_hazards_dialog() -> None:
             width="stretch",
         )
 
+        edit_c1, edit_c2, edit_c3 = st.columns(3)
+        if edit_c1.button(
+            "Undo last edit",
+            icon=":material/undo:",
+            disabled=not can_undo_last_table_edit(tags_editor_key),
+            help="Revert the most recent cell edit while keeping earlier unsaved changes.",
+            key=f"undo_last_hazard_tags_{project_id}",
+            width="stretch",
+        ):
+            if undo_last_table_edit(tags_editor_key):
+                st.toast(last_table_undo_redo_message(tags_editor_key, default="Reverted the last cell edit."), icon=":material/undo:")
+                st.rerun()
+        if edit_c2.button(
+            "Redo last edit",
+            icon=":material/redo:",
+            disabled=not can_redo_last_table_edit(tags_editor_key),
+            help="Reapply the most recently undone cell edit.",
+            key=f"redo_last_hazard_tags_{project_id}",
+            width="stretch",
+        ):
+            if redo_last_table_edit(tags_editor_key):
+                st.toast(last_table_undo_redo_message(tags_editor_key, default="Reapplied the last undone cell edit."), icon=":material/redo:")
+                st.rerun()
+        if edit_c3.button(
+            "Discard all edits",
+            icon=":material/restart_alt:",
+            disabled=not has_unsaved_table_changes(tags_editor_key),
+            help="Discard all unsaved changes in this table and restore the last saved values.",
+            key=f"discard_hazard_tags_{project_id}",
+            width="stretch",
+        ):
+            request_table_editor_reset(tags_editor_key)
+            st.toast("Discarded unsaved hazard tag edits.", icon=":material/restart_alt:")
+            st.rerun()
+
         btn_c1, btn_c2 = st.columns(2)
         if btn_c1.button("Save changes", type="primary", icon=":material/save:", key=f"save_hazard_tags_{project_id}", width="stretch"):
             try:
                 save_ergonomic_hazard_option_rows(project_id, edited_tags)
+                request_table_editor_reset(tags_editor_key)
                 st.toast("Hazard tags updated", icon=":material/check_circle:")
                 st.session_state.pop(f"show_manage_hazards_dialog_{project_id}", None)
                 st.rerun()
@@ -1220,12 +1270,19 @@ def annotate_existing_ergo_media_dialog(
             st.rerun()
         return
 
-    st.markdown("#### Annotate Visual Aid")
-    st.caption("Draw arrows, boxes, callout circles, and risk flags non-destructively over this image.")
+    st.markdown(f"#### Annotate Visual Aid: {media_item.get('caption') or 'Visual Aid'}")
+    st.caption(
+        "Crop, rotate in 90° increments, or add directional arrows, callout text boxes, focus boxes/circles, "
+        "step number badges (1, 2, 3), and freehand pen markup non-destructively. "
+        "Click **💾 Apply & Save Markup** when finished."
+    )
 
     raw_bytes = source_path.read_bytes()
     suffix = source_path.suffix.lower()
-    mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
+    if raw_bytes.startswith(b"\x89PNG"):
+        mime = "image/png"
+    else:
+        mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
     b64 = base64.b64encode(raw_bytes).decode("ascii")
     data_url = f"data:{mime};base64,{b64}"
 
@@ -1255,13 +1312,61 @@ def annotate_existing_ergo_media_dialog(
         except Exception as exc:
             st.error(str(exc))
 
-    st.caption("Tip: Select shapes to move, recolor, or delete them. Click 'Apply & Save Markup' inside the canvas to apply changes.")
+    st.caption("Tip: Select existing shapes to move, recolor, or delete them, or use Crop and Rotate 90° in the toolbar. Click 'Apply & Save Markup' inside the canvas to apply changes.")
     if st.button("Close without saving", key=f"btn_close_ergo_annotator_{media_id}"):
         st.session_state.pop(f"ergo_annotate_active_{scenario_id}", None)
         st.rerun()
 
 
-@st.dialog("Delete Visual Aid", width="medium")
+@st.dialog("Annotate Staged Ergonomics Visual Aid", width="large")
+def annotate_staged_ergo_media_dialog(review_id: str, scenario_id: str) -> None:
+    staged_key = f"ergo_staged_media_{review_id}"
+    staged = st.session_state.get(staged_key)
+    if not staged or not staged.get("original_bytes"):
+        st.info("No staged image found to annotate.")
+        if st.button("Close"):
+            st.session_state.pop(f"ergo_annotate_staged_active_{scenario_id}", None)
+            st.rerun()
+        return
+
+    st.markdown("#### Annotate Staged Visual Aid")
+    st.caption(
+        "Crop, rotate in 90° increments, or add arrows, callouts, shapes, and badges to this image "
+        "before attaching it to the Ergonomics review slide. Click **💾 Apply & Save Markup** to apply your changes."
+    )
+
+    raw_bytes = staged["original_bytes"]
+    mime = staged.get("mime_type", "image/png")
+    b64 = base64.b64encode(raw_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64}"
+
+    annotator_res = image_annotator(
+        image_data_url=data_url,
+        annotations_json=staged.get("annotations_json", ""),
+        key=f"annotator_staged_ergo_{review_id}",
+    )
+
+    save_payload = getattr(annotator_res, "save", None)
+    if save_payload:
+        try:
+            new_annotations = save_payload.get("annotations_json", "")
+            new_data_url = save_payload.get("data_url", "")
+            composite_bytes = decode_data_url(new_data_url) if new_data_url else raw_bytes
+            staged["composite_bytes"] = composite_bytes
+            staged["annotations_json"] = new_annotations
+            st.session_state[staged_key] = staged
+            st.session_state.pop(f"ergo_annotate_staged_active_{scenario_id}", None)
+            st.toast("Markup applied to staged image!", icon=":material/check_circle:")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    if st.button("Close without saving", key=f"btn_close_staged_ergo_{review_id}"):
+        st.session_state.pop(f"ergo_annotate_staged_active_{scenario_id}", None)
+        st.rerun()
+
+
+@st.dialog("Delete Visual Aid", width="medium", dismissible=False)
 def confirm_delete_ergo_media_dialog(
     project_id: str,
     scenario_id: str,
@@ -1269,13 +1374,17 @@ def confirm_delete_ergo_media_dialog(
     caption: str,
 ) -> None:
     st.warning(f"Are you sure you want to permanently delete this visual aid ({caption or 'Untitled'})?")
+    st.caption(
+        "Downstream effects: This permanently deletes the visual aid file from this Ergonomics review and removes it from Ergonomics slide presentation and print views. "
+        "The Ergonomics review record itself and its linked Process step / Pitch remain intact."
+    )
     d_c1, d_c2 = st.columns(2)
     with d_c1:
         if st.button("Cancel", key=f"cancel_del_media_{media_id}", width="stretch"):
             st.session_state.pop(f"ergo_del_media_target_{scenario_id}", None)
             st.rerun()
     with d_c2:
-        if st.button("Delete Permanently", type="primary", icon=":material/delete:", key=f"confirm_del_media_{media_id}", width="stretch"):
+        if st.button("Delete Permanently", type="primary", icon=":material/delete:", key=f"destructive_confirm_del_media_{media_id}", width="stretch"):
             try:
                 delete_ergonomics_visual_media(
                     project_id=project_id,
@@ -1426,6 +1535,9 @@ else:
             media_id=target_item["id"],
             media_item=target_item,
         )
+    elif st.session_state.get(f"ergo_annotate_staged_active_{scenario_id}"):
+        staged_rid = str(st.session_state[f"ergo_annotate_staged_active_{scenario_id}"] or curr_rid)
+        annotate_staged_ergo_media_dialog(review_id=staged_rid, scenario_id=scenario_id)
     elif st.session_state.get(f"ergo_del_media_target_{scenario_id}"):
         del_target = st.session_state[f"ergo_del_media_target_{scenario_id}"]
         confirm_delete_ergo_media_dialog(
@@ -1434,6 +1546,40 @@ else:
             media_id=del_target["id"],
             caption=del_target.get("caption", ""),
         )
+    elif st.session_state.get(f"ergo_pending_discard_staged_{scenario_id}"):
+        discard_rid = str(st.session_state[f"ergo_pending_discard_staged_{scenario_id}"] or curr_rid)
+
+        @st.dialog("Delete Staged Visual Aid?", width="medium", dismissible=False)
+        def confirm_discard_staged_ergo_media() -> None:
+            st.warning("Delete this staged visual aid before attaching?")
+            st.caption(
+                "Downstream effects: This discards the unsaved image upload or clipboard capture and any unsaved markup, crop, or rotation. "
+                "The Ergonomics review and its already-attached visual aids remain unchanged."
+            )
+            d_c1, d_c2 = st.columns(2)
+            with d_c1:
+                if st.button("Cancel", key=f"cancel_discard_staged_ergo_{discard_rid}", width="stretch"):
+                    st.session_state.pop(f"ergo_pending_discard_staged_{scenario_id}", None)
+                    st.rerun()
+            with d_c2:
+                if st.button(
+                    "Delete",
+                    type="primary",
+                    icon=":material/delete:",
+                    key=f"destructive_confirm_discard_staged_ergo_{discard_rid}",
+                    width="stretch",
+                ):
+                    st_key = f"ergo_staged_media_{discard_rid}"
+                    disc_up_key = f"_discarded_ergo_up_{discard_rid}"
+                    st.toast("Discarded staged visual aid", icon=":material/delete:")
+                    cur_st = st.session_state.get(st_key)
+                    if isinstance(cur_st, dict) and cur_st.get("source") == "upload":
+                        st.session_state[disc_up_key] = cur_st.get("hash")
+                    st.session_state.pop(st_key, None)
+                    st.session_state.pop(f"ergo_pending_discard_staged_{scenario_id}", None)
+                    st.rerun()
+
+        confirm_discard_staged_ergo_media()
 
     nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6 = st.columns(
         [0.9, 3.2, 0.9, 1.4, 1.1, 1.1],
@@ -1510,7 +1656,10 @@ else:
         icon=":material/photo_library:",
     ):
         st.markdown("##### Add Visual Aid")
-        st.caption("Upload photos, annotated work element screenshots, or short video clips to display on this Ergonomics review slide.")
+        st.caption(
+            "Upload photos, paste screenshots, or attach short video clips to display on this Ergonomics review slide. "
+            "Images can be cropped, rotated in 90° increments, and annotated with arrows, callouts, boxes, circles, and step badges before or after attaching."
+        )
 
         up_c1, up_c2 = st.columns([1.5, 1])
         with up_c1:
@@ -1519,7 +1668,7 @@ else:
                 type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
                 key=f"ergo_file_upload_{curr_rid}",
             )
-            st.caption("Or paste screenshot from clipboard:")
+            st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
             pasted = clipboard_image(key=f"ergo_paste_{curr_rid}")
 
         with up_c2:
@@ -1536,38 +1685,144 @@ else:
                 key=f"ergo_new_seq_{curr_rid}",
             )
 
-            file_to_save: bytes | None = None
-            file_name_to_save: str = ""
+        staged_ergo_key = f"ergo_staged_media_{curr_rid}"
+        last_ergo_paste_hash_key = f"last_ergo_paste_hash_{curr_rid}"
+        last_ergo_upload_hash_key = f"last_ergo_upload_hash_{curr_rid}"
+        discarded_ergo_up_key = f"_discarded_ergo_up_{curr_rid}"
+        current_staged = st.session_state.get(staged_ergo_key)
 
-            pasted_payload = getattr(pasted, "image", None)
-            if pasted_payload:
-                try:
-                    decoded = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
-                    file_to_save = decoded["bytes"]
-                    file_name_to_save = decoded["name"]
-                except Exception as pe:
-                    st.error(str(pe))
-            elif uploaded_file is not None:
-                file_to_save = uploaded_file.getvalue()
-                file_name_to_save = uploaded_file.name
+        pasted_payload = getattr(pasted, "image", None)
+        if pasted_payload:
+            try:
+                decoded = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
+                clip_bytes = decoded["bytes"]
+                clip_hash = hashlib.sha256(clip_bytes).hexdigest()
+                if st.session_state.get(last_ergo_paste_hash_key) != clip_hash:
+                    st.session_state[last_ergo_paste_hash_key] = clip_hash
+                    st.session_state[staged_ergo_key] = {
+                        "source": "clipboard",
+                        "hash": clip_hash,
+                        "filename": decoded["name"],
+                        "original_bytes": clip_bytes,
+                        "composite_bytes": clip_bytes,
+                        "mime_type": decoded.get("mime_type", "image/png"),
+                        "annotations_json": "",
+                    }
+                    current_staged = st.session_state[staged_ergo_key]
+            except Exception as pe:
+                st.error(str(pe))
 
-            if st.button("Attach Visual Aid", type="primary", icon=":material/add_photo_alternate:", disabled=(file_to_save is None), key=f"btn_attach_media_{curr_rid}"):
-                if file_to_save:
-                    try:
-                        save_ergonomics_visual_media(
-                            project_id=project_id,
-                            scenario_id=scenario_id,
-                            review_id=curr_rid,
-                            filename=file_name_to_save,
-                            file_bytes=file_to_save,
-                            caption=new_caption,
-                            sequence=int(new_seq),
-                            current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+        is_uploaded_video = False
+        if uploaded_file is not None:
+            up_suffix = Path(uploaded_file.name).suffix.lower()
+            if up_suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+                up_bytes = uploaded_file.getvalue()
+                up_hash = hashlib.sha256(up_bytes).hexdigest()
+                if st.session_state.get(last_ergo_upload_hash_key) != up_hash or (
+                    not isinstance(current_staged, dict)
+                    and st.session_state.get(discarded_ergo_up_key) != up_hash
+                ):
+                    st.session_state[last_ergo_upload_hash_key] = up_hash
+                    st.session_state.pop(discarded_ergo_up_key, None)
+                    up_mime = "image/png" if up_suffix == ".png" else "image/webp" if up_suffix == ".webp" else "image/jpeg"
+                    st.session_state[staged_ergo_key] = {
+                        "source": "upload",
+                        "hash": up_hash,
+                        "filename": uploaded_file.name,
+                        "original_bytes": up_bytes,
+                        "composite_bytes": up_bytes,
+                        "mime_type": up_mime,
+                        "annotations_json": "",
+                    }
+                    current_staged = st.session_state[staged_ergo_key]
+            elif up_suffix in {".mp4", ".mov", ".webm"}:
+                is_uploaded_video = True
+        else:
+            st.session_state.pop(last_ergo_upload_hash_key, None)
+            st.session_state.pop(discarded_ergo_up_key, None)
+            if isinstance(current_staged, dict) and current_staged.get("source") == "upload":
+                st.session_state.pop(staged_ergo_key, None)
+                current_staged = None
+
+        if isinstance(current_staged, dict) and current_staged.get("composite_bytes"):
+            with st.container(border=True):
+                st.markdown(f"**Image Ready:** `{current_staged.get('filename')}`")
+                sp1, sp2 = st.columns([1, 2.5])
+                with sp1:
+                    st.image(current_staged["composite_bytes"], width=150)
+                with sp2:
+                    raw_ann_str = str(current_staged.get("annotations_json") or "").strip()
+                    has_ann = bool(raw_ann_str and raw_ann_str != "[]")
+                    if has_ann:
+                        st.success("Markup / crop / rotation applied", icon=":material/draw:")
+                    else:
+                        st.caption(
+                            "No annotations added yet. Click below to crop, rotate 90°, or add arrows, focus boxes, callouts, or step numbers."
                         )
-                        st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
-                        st.rerun()
-                    except Exception as save_err:
-                        st.error(str(save_err))
+                    b_col1, b_col2 = st.columns([1.5, 1])
+                    with b_col1:
+                        if st.button(
+                            "Annotate / Add Shapes",
+                            icon=":material/draw:",
+                            key=f"btn_ann_staged_ergo_{curr_rid}",
+                            type="secondary",
+                        ):
+                            st.session_state[f"ergo_annotate_staged_active_{scenario_id}"] = curr_rid
+                            st.rerun()
+                    with b_col2:
+                        if st.button(
+                            "Delete",
+                            icon=":material/delete:",
+                            key=f"destructive_btn_discard_staged_ergo_{curr_rid}",
+                        ):
+                            st.session_state[f"ergo_pending_discard_staged_{scenario_id}"] = curr_rid
+                            st.rerun()
+
+        has_ready_media = (isinstance(current_staged, dict) and bool(current_staged.get("composite_bytes"))) or is_uploaded_video
+        if st.button(
+            "Attach Visual Aid",
+            type="primary",
+            icon=":material/add_photo_alternate:",
+            disabled=not has_ready_media,
+            key=f"btn_attach_media_{curr_rid}",
+        ):
+            if isinstance(current_staged, dict) and current_staged.get("composite_bytes"):
+                try:
+                    save_ergonomics_visual_media(
+                        project_id=project_id,
+                        scenario_id=scenario_id,
+                        review_id=curr_rid,
+                        filename=current_staged["filename"],
+                        file_bytes=current_staged["composite_bytes"],
+                        original_file_bytes=current_staged["original_bytes"],
+                        annotations_json=current_staged.get("annotations_json", ""),
+                        caption=new_caption,
+                        sequence=int(new_seq),
+                        current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+                    )
+                    if current_staged.get("source") == "upload":
+                        st.session_state[discarded_ergo_up_key] = current_staged.get("hash")
+                    st.session_state.pop(staged_ergo_key, None)
+                    st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
+                    st.rerun()
+                except Exception as save_err:
+                    st.error(str(save_err))
+            elif uploaded_file is not None and is_uploaded_video:
+                try:
+                    save_ergonomics_visual_media(
+                        project_id=project_id,
+                        scenario_id=scenario_id,
+                        review_id=curr_rid,
+                        filename=uploaded_file.name,
+                        file_bytes=uploaded_file.getvalue(),
+                        caption=new_caption,
+                        sequence=int(new_seq),
+                        current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+                    )
+                    st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
+                    st.rerun()
+                except Exception as save_err:
+                    st.error(str(save_err))
 
         if attached_media:
             st.markdown("##### Attached Visual Aids")
@@ -1585,6 +1840,9 @@ else:
                     with m_c2:
                         card_cap = st.text_input("Caption", value=media_item.get("caption", ""), key=f"cap_edit_{m_id}")
                         card_seq = st.number_input("Sequence", value=int(media_item.get("sequence", 10)), step=5, key=f"seq_edit_{m_id}")
+                        raw_item_ann = str(media_item.get("annotations_json") or "").strip()
+                        if raw_item_ann and raw_item_ann != "[]":
+                            st.caption("Markup: :material/draw: **Annotated** (editable shapes, crop & rotation)")
                         btn_row = st.columns([1.2, 1.4, 1])
                         with btn_row[0]:
                             if st.button("Save", key=f"btn_save_media_{m_id}", width="stretch"):
@@ -1603,11 +1861,17 @@ else:
                                     st.error(str(ue))
                         with btn_row[1]:
                             if m_type == "image":
-                                if st.button("Annotate", icon=":material/draw:", key=f"btn_annot_media_{m_id}", width="stretch"):
+                                if st.button(
+                                    "Annotate",
+                                    icon=":material/draw:",
+                                    key=f"btn_annot_media_{m_id}",
+                                    width="stretch",
+                                    help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges",
+                                ):
                                     st.session_state[f"ergo_annotate_active_{scenario_id}"] = media_item
                                     st.rerun()
                         with btn_row[2]:
-                            if st.button("Delete", icon=":material/delete:", key=f"btn_del_media_{m_id}", width="stretch"):
+                            if st.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{m_id}", width="stretch"):
                                 st.session_state[f"ergo_del_media_target_{scenario_id}"] = media_item
                                 st.rerun()
 

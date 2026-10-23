@@ -10,6 +10,7 @@ from utils.store import (
     record_audit_event,
     set_process_part_option_handling_type,
 )
+from utils.table_ui import guarded_tabs, register_unsaved_source
 
 project_id = str(st.session_state.get("project_id") or "")
 scenario_id = str(st.session_state.get("scenario_id") or "")
@@ -31,10 +32,9 @@ page_title_with_scope(
 if not project_id:
     st.stop()
 
-review_tab, equipment_tab = st.tabs(
+review_tab, equipment_tab = guarded_tabs(
     ["Review", "Equipment"],
     key=f"materials_page_tabs_{project_id}",
-    on_change="rerun",
 )
 if equipment_tab.open:
     with equipment_tab:
@@ -169,14 +169,23 @@ if scenario_id:
                 with c_save:
                     save_val = None if new_ht == "(Unclassified)" else new_ht
                     is_changed = save_val != current_ht
-                    if st.button(
+                    trigger_mat_save, trigger_mat_discard = register_unsaved_source(
+                        f"mat_handling_{opt_id}",
+                        additional_unsaved=is_changed,
+                    )
+                    if trigger_mat_discard:
+                        st.toast(f"Discarded unsaved handling change for {p_num}", icon=":material/undo:")
+                        st.session_state.pop(f"mat_page_ht_{opt_id}", None)
+                        st.rerun()
+                    mat_save_btn = st.button(
                         "Update",
                         type="primary" if is_changed else "secondary",
                         icon=":material/save:",
                         key=f"mat_page_save_{opt_id}",
                         disabled=not is_changed or (save_val is not None and not selected_placement_id and not placements),
                         width="stretch",
-                    ):
+                    )
+                    if mat_save_btn or (trigger_mat_save and is_changed):
                         try:
                             editor = st.session_state.get("current_editor", "")
                             set_process_part_option_handling_type(

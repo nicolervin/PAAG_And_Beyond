@@ -42,6 +42,7 @@ from utils.table_ui import (
     dataframe_to_excel,
     editable_table_footer,
     editable_table_heading,
+    guarded_tabs,
     native_selected_rows,
     selectable_dataframe,
     stage_native_delete_confirmation,
@@ -480,7 +481,15 @@ def _persist_control_plan_draft(pending: dict) -> None:
         st.session_state.pop(f"{draft_key}_op_id_renumber_count", None)
     if editor_key:
         request_table_editor_reset(editor_key)
-    st.toast("Saved Control Plan working draft", icon=":material/check_circle:")
+    _cp_renum_suffix = (
+        f" · renumbered {renumbered_operation_count} operation(s)"
+        if renumbered_operation_count
+        else ""
+    )
+    st.toast(
+        f"Saved {result.get('row_count', 0)} Control Plan item(s){_cp_renum_suffix}",
+        icon=":material/check_circle:",
+    )
     st.rerun()
 
 
@@ -740,11 +749,11 @@ def _confirm_delete_control_method(
             st.rerun()
     with c2:
         if st.button(
-            "Confirm Remove",
+            "Delete",
             type="primary",
             icon=":material/delete:",
-            key=f"dlg_confirm_del_cm_{method_id}",
-            use_container_width=True,
+            key=f"destructive_dlg_confirm_del_cm_{method_id}",
+            width="stretch",
         ):
             with get_db_connection() as conn:
                 try:
@@ -996,7 +1005,7 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
                 with del_col2:
                     st.write("")
                     st.write("")
-                    if st.button("Remove Control Method", icon=":material/delete:", key=f"btn_delete_control_method_{project_id}"):
+                    if st.button("Delete Control Method", icon=":material/delete:", key=f"destructive_btn_delete_control_method_{project_id}"):
                         if to_delete_id:
                             target_row = catalog_methods[catalog_methods["id"] == to_delete_id].iloc[0]
                             _confirm_delete_control_method(
@@ -1322,7 +1331,10 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
             icon=":material/check_circle:",
         )
     _render_classification_legend()
-    characteristics_tab, flow_tab = st.tabs(["Characteristics table", "Process flow map"])
+    characteristics_tab, flow_tab = guarded_tabs(
+        ["Characteristics table", "Process flow map"],
+        key=f"control_plan_subtabs_{project_id}_{scenario_id}",
+    )
     with characteristics_tab:
         _render_control_plan_characteristics(project_id, scenario_id)
     with flow_tab:

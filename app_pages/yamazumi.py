@@ -431,13 +431,11 @@ with st.expander("Import Yamazumi file (Excel or PDF)", icon=":material/upload_f
                 if replace_elements
                 else f"yamazumi_import_apply_{yamazumi_import_widget_scope}"
             )
-            if st.button(
-                action_btn_text,
-                type="primary",
-                icon=":material/upload:",
-                key=import_button_key,
-                disabled=chosen_section_id is None,
-            ):
+            pending_replace_import_key = (
+                f"yamazumi_pending_replace_import_{yamazumi_import_widget_scope}"
+            )
+
+            def _execute_yamazumi_import() -> None:
                 try:
                     area_count, pitch_count, element_count = import_yamazumi_rows(
                         project_id,
@@ -467,6 +465,7 @@ with st.expander("Import Yamazumi file (Excel or PDF)", icon=":material/upload_f
                         },
                     )
                     toast_prefix = "Replaced and imported" if replace_elements else "Imported"
+                    st.session_state.pop(pending_replace_import_key, None)
                     st.session_state[yamazumi_import_generation_key] = (
                         yamazumi_import_generation + 1
                     )
@@ -477,6 +476,44 @@ with st.expander("Import Yamazumi file (Excel or PDF)", icon=":material/upload_f
                     st.rerun()
                 except (ValueError, TypeError) as exc:
                     st.error(str(exc))
+
+            if st.button(
+                action_btn_text,
+                type="primary",
+                icon=":material/upload:",
+                key=import_button_key,
+                disabled=chosen_section_id is None,
+            ):
+                if replace_elements:
+                    st.session_state[pending_replace_import_key] = True
+                else:
+                    _execute_yamazumi_import()
+
+            @st.dialog("Replace existing Yamazumi section data?", dismissible=False)
+            def _confirm_yamazumi_replace_import() -> None:
+                target_subline_name = str(section_name_by_id.get(chosen_section_id, "selected section"))
+                st.warning(
+                    f"This will permanently delete the existing pitches and work elements in **{target_subline_name}** "
+                    f"for this scenario and replace them with **{parsed_pitch_count}** pitch(es) and **{len(parsed_df)}** work element(s)."
+                )
+                st.caption(
+                    "Downstream effects: Fishbone sections, other Yamazumi sections, and existing Process at a Glance steps "
+                    "will not be deleted. Any Process steps previously linked to replaced work elements will be unlinked and flagged for reconciliation."
+                )
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_yamazumi_import_replace_{yamazumi_import_widget_scope}"):
+                    st.session_state.pop(pending_replace_import_key, None)
+                    st.rerun()
+                if actions.button(
+                    "Delete & Replace",
+                    type="primary",
+                    icon=":material/delete:",
+                    key=f"destructive_confirm_yamazumi_import_replace_{yamazumi_import_widget_scope}",
+                ):
+                    _execute_yamazumi_import()
+
+            if replace_elements and st.session_state.get(pending_replace_import_key):
+                _confirm_yamazumi_replace_import()
         elif parsed_df is not None and parsed_df.empty:
             st.warning("No work elements or pitches were found in the uploaded file.")
 
@@ -675,7 +712,11 @@ if save_settings:
         )
         if result["time_unit_changed"]:
             request_table_editor_reset(element_editor_key)
-        st.toast("Saved Yamazumi settings", icon=":material/check_circle:")
+        st.toast(
+            f"Saved Yamazumi settings for {area['name']}"
+            + (f" (time unit: {TIME_UNITS[selected_time_unit].label})" if result["time_unit_changed"] else ""),
+            icon=":material/check_circle:",
+        )
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
@@ -688,7 +729,7 @@ if request_clear_all:
     st.session_state["yamazumi_reset_scope"] = "all"
 
 
-@st.dialog("Clear Yamazumi data?")
+@st.dialog("Clear Yamazumi data?", dismissible=False)
 def confirm_yamazumi_reset() -> None:
     scope = st.session_state.get("yamazumi_reset_scope")
     if scope == "all":
@@ -699,21 +740,18 @@ def confirm_yamazumi_reset() -> None:
         st.warning(
             f"This will permanently remove the Yamazumi area **{area['name']}**, including all of its pitches, work elements, takt time, and pending IE review items."
         )
-    st.caption("Fishbone sections, their linked Yamazumi areas, and existing Process at a Glance records will not be deleted or changed.")
-    confirmation = st.text_input(
-        "Type CLEAR to confirm",
-        key="yamazumi_reset_confirmation",
-        placeholder="CLEAR",
+    st.caption(
+        "Downstream effects: Fishbone sections, their linked Yamazumi areas, and existing Process at a Glance records will not be deleted or changed. "
+        "Any Process steps in this scenario linked to cleared Yamazumi elements will be unlinked and flagged for reconciliation."
     )
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_yamazumi_reset"):
         st.session_state.pop("yamazumi_reset_scope", None)
         st.rerun()
     if actions.button(
-        "Clear Yamazumi data",
+        "Delete",
         type="primary",
-        icon=":material/delete_forever:",
-        disabled=confirmation.strip() != "CLEAR",
+        icon=":material/delete:",
         key="destructive_confirm_yamazumi_reset",
     ):
         counts = clear_yamazumi_data(
@@ -1211,6 +1249,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         confirm_region_delete()
 
     if region_actions.undo:
+        st.toast("Discarded the unsaved work-region edits", icon=":material/undo:")
         request_table_editor_reset(region_editor_key)
         st.rerun()
 
@@ -1619,7 +1658,7 @@ def edit_pitch_dialog() -> None:
     delete_pitch_request = actions.button(
         "Delete pitch…",
         icon=":material/delete:",
-        key=f"request_delete_pitch_from_board_{pitch_id}",
+        key=f"destructive_request_delete_pitch_from_board_{pitch_id}",
         disabled=has_board_draft,
         help=(
             "Save or undo the unsaved board arrangement before deleting this pitch."
@@ -1817,7 +1856,12 @@ def move_pitch_dialog() -> None:
             st.toast(
                 f"Moved {result['pitch_count']} pitch(es) and "
                 f"{result['element_count']} work element(s) to "
-                f"{result['target_area_name']}",
+                f"{result['target_area_name']}"
+                + (
+                    f" · flagged {result.get('flagged_process_count', 0)} PAAG step(s) for review"
+                    if result.get("flagged_process_count")
+                    else ""
+                ),
                 icon=":material/drive_file_move:",
             )
             st.rerun()
@@ -2348,7 +2392,17 @@ if board_actions.save_and_refresh:
             request_table_editor_reset(pitch_editor_key)
         request_table_editor_reset(element_editor_key)
         st.toast(
-            f"Saved {len(result['affected_stacks'])} Yamazumi stack(s)",
+            f"Saved {len(result['affected_stacks'])} Yamazumi stack(s)"
+            + (
+                f" ({len(result['changed_element_ids'])} work element(s) updated)"
+                if result.get("changed_element_ids")
+                else ""
+            )
+            + (
+                f" · enabled {len(result['enabled_variants'])} variant(s)"
+                if result.get("enabled_variants")
+                else ""
+            ),
             icon=":material/check_circle:",
         )
         st.rerun()
@@ -2645,6 +2699,7 @@ else:
         st.session_state[move_pitch_dialog_key] = True
         st.rerun()
     if pitch_actions.undo:
+        st.toast("Discarded the unsaved pitch-address edits", icon=":material/undo:")
         request_table_editor_reset(pitch_editor_key)
         st.rerun()
     request_pitch_delete = not selected_pitches.empty
@@ -2773,6 +2828,13 @@ if not pitch_combined_view and pitch_actions.save_and_refresh:
             count,
             st.session_state.get("current_editor", ""),
             {"area_id": area_id, "feed_relationship_changes": feed_changes},
+        )
+        st.toast(
+            f"Saved {count} pitch address(es) in {area['name']}"
+            + (f" ({len(feed_changes)} feed link(s) updated)" if feed_changes else ""),
+            icon=":material/check_circle:",
+        )
+        (
         )
         request_table_editor_reset(pitch_editor_key)
         st.rerun()
@@ -3025,6 +3087,7 @@ else:
         native_row_selection=True,
     )
     if element_actions.undo:
+        st.toast("Discarded the unsaved work-element edits", icon=":material/undo:")
         request_table_editor_reset(element_editor_key)
         st.rerun()
     selected_elements = native_selected_rows(
@@ -3153,6 +3216,10 @@ if not element_combined_view and element_actions.save_and_refresh:
         to_save = element_times_to_seconds(to_save)
         count = replace_yamazumi_elements(project_id, area_id, to_save)
         record_audit_event(project_id, "Yamazumi elements", "Save & Refresh", count, st.session_state.get("current_editor", ""))
+        st.toast(
+            f"Saved {count} Yamazumi work element(s) in {area['name']}",
+            icon=":material/check_circle:",
+        )
         active_board_draft = st.session_state.get(board_draft_key)
         if isinstance(active_board_draft, dict):
             valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
@@ -3880,6 +3947,7 @@ with st.expander("Copy to another area", icon=":material/content_copy:"):
     ):
         st.session_state.pop(copy_pending_key, None)
         st.session_state[copy_generation_key] = copy_generation + 1
+        st.toast("Reset copy selection", icon=":material/undo:")
         st.rerun()
     if copy_actions.button(
         "Review copy",

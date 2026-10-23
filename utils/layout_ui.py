@@ -1094,7 +1094,7 @@ def _import_shapes_dialog(
                 st.error(str(exc))
 
 
-@st.dialog("Confirm delete layout", width="medium")
+@st.dialog("Confirm delete layout", width="medium", dismissible=False)
 def _delete_layout_dialog(
     project_id: str, layout: dict[str, Any], editor_name: str
 ) -> None:
@@ -1106,12 +1106,15 @@ def _delete_layout_dialog(
     s_count = impact.get("shape_count", impact.get("shapes_count", 0))
     img_count = impact.get("image_count", impact.get("images_count", 0))
     st.error(
-        f"**Deletion Impact:**\n"
+        f"**Downstream Impact:**\n"
         f"- **{rev_count}** revision(s) will be deleted\n"
-        f"- **{s_count}** annotation shape(s) will be deleted\n"
-        f"- **{img_count}** uploaded drawing image(s) will be permanently purged"
+        f"- **{s_count}** Pin Map shape(s) will be deleted\n"
+        f"- **{img_count}** uploaded floorplan / CAD file(s) will be permanently purged"
     )
-    st.caption("This action is immediate and cannot be undone.")
+    st.caption(
+        "Yamazumi pitches, work elements, Process at a Glance steps, and Equipment Catalog records linked to shapes are preserved. "
+        "This action is immediate and cannot be undone."
+    )
 
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -1144,7 +1147,7 @@ def _delete_layout_dialog(
                 st.error(str(exc))
 
 
-@st.dialog("Confirm delete revision", width="medium")
+@st.dialog("Confirm delete revision", width="medium", dismissible=False)
 def _delete_revision_dialog(
     project_id: str,
     layout_name: str,
@@ -1163,8 +1166,9 @@ def _delete_revision_dialog(
         f"Delete **Revision {rev_num}** of **{layout_name}**?"
     )
     st.warning(
-        f"This revision has **{s_count}** shape annotation(s). "
-        f"Deleting it will remove this revision and delete its uploaded drawing file."
+        f"Downstream effects: This revision has **{s_count}** Pin Map shape annotation(s). "
+        f"Deleting it permanently removes this revision, its shapes, and its uploaded floorplan / CAD file. "
+        f"Other revisions of this layout, Yamazumi pitches, and Equipment Catalog records remain intact."
     )
 
     col1, col2 = st.columns([1, 1])
@@ -1261,10 +1265,46 @@ def _attach_cad_dialog(
                 st.error(str(exc))
 
     with col_detach:
-        if (has_file or cad_url) and st.button("Detach CAD", width="stretch", key=f"btn_detach_cad_{revision['id']}"):
+        if (has_file or cad_url) and st.button("Detach CAD", width="stretch", key=f"destructive_btn_detach_cad_{revision['id']}"):
             if not editor_name.strip():
                 st.error("Please enter Current editor attribution.")
                 return
+            st.session_state["_open_pin_map_dialog"] = "confirm_detach_cad"
+            st.rerun()
+
+    with col_cancel:
+        if st.button("Close", width="stretch", key=f"btn_close_cad_{revision['id']}"):
+            st.rerun()
+
+
+@st.dialog("Detach CAD Source?", width="medium", dismissible=False)
+def _confirm_detach_cad_dialog(
+    project_id: str,
+    layout_name: str,
+    revision: dict[str, Any],
+    editor_name: str,
+) -> None:
+    rev_num = revision.get("revision_number", 1)
+    cad_name = str(revision.get("cad_file_name") or "").strip()
+    cad_url = str(revision.get("cad_web_url") or "").strip()
+    st.warning(f"Detach the AutoCAD source from **{layout_name} — Rev {rev_num}**?")
+    st.caption(
+        f"Downstream effects: This removes the attached AutoCAD drawing file (`{cad_name or 'None'}`) and CAD web link (`{cad_url or 'None'}`) from this revision. "
+        "The rendered floorplan image and all placed Pin Map shapes, workstation pitches, and equipment placements remain intact."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Cancel", width="stretch", key=f"cancel_detach_cad_{revision['id']}"):
+            st.session_state["_open_pin_map_dialog"] = "attach_cad"
+            st.rerun()
+    with c2:
+        if st.button(
+            "Detach CAD",
+            type="primary",
+            icon=":material/link_off:",
+            width="stretch",
+            key=f"destructive_confirm_detach_cad_{revision['id']}",
+        ):
             try:
                 remove_layout_revision_cad(
                     project_id=project_id,
@@ -1275,10 +1315,6 @@ def _attach_cad_dialog(
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
-
-    with col_cancel:
-        if st.button("Close", width="stretch", key=f"btn_close_cad_{revision['id']}"):
-            st.rerun()
 
 
 @st.dialog("Section Workstation Pitch Standards", width="large")
@@ -1953,7 +1989,7 @@ def render_layouts_tab(
                 if st.button(
                     "Delete rev",
                     icon=":material/delete:",
-                    key=f"btn_bar_del_rev_{rev_id}",
+                    key=f"destructive_btn_bar_del_rev_{rev_id}",
                     disabled=len(revisions) <= 1,
                     width="stretch",
                 ):
@@ -1981,6 +2017,13 @@ def render_layouts_tab(
         )
     elif pending_dlg == "attach_cad":
         _attach_cad_dialog(
+            project_id,
+            str(current_layout["name"]),
+            active_rev,
+            effective_editor,
+        )
+    elif pending_dlg == "confirm_detach_cad":
+        _confirm_detach_cad_dialog(
             project_id,
             str(current_layout["name"]),
             active_rev,

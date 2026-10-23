@@ -336,7 +336,7 @@ _HTML = """
             </div>
             <div style="border-top:1px solid #e2e8f0; padding-top:8px; display:flex; gap:6px;">
               <button id="lc-btn-upload-bg" class="lc-top-btn" style="flex:1;">🖼 Upload Floorplan</button>
-              <button id="lc-btn-clear-bg" class="lc-top-btn" style="flex:1;">Clear Image</button>
+              <button id="lc-btn-clear-bg" class="lc-top-btn" style="flex:1; background:#c62828; color:#ffffff; border-color:#c62828;">Clear Image</button>
             </div>
           </div>
         </div>
@@ -6064,7 +6064,7 @@ export default function(component) {
 
   onClick("#lc-btn-upload-bg", () => bgFileInput?.click())
   onClick("#lc-btn-clear-bg", () => {
-    if (!window.confirm("Clear the background floorplan image and revert to a blank grid?")) return
+    if (!window.confirm("Clear the background floorplan image and revert to a blank grid?\n\nDownstream effects: Removes the background drawing image from this layout revision and switches the canvas to a scaled blank grid. All placed Pin Map shapes, workstation pitches, equipment placements, and layers are preserved.")) return
     st.bgImage = null
     st.bgImageUrl = ""
     st.isBlankCanvas = true
@@ -6314,7 +6314,7 @@ export default function(component) {
 """
 
 _LAYOUT_CANVAS = st.components.v2.component(
-    "paag_layout_canvas_v17",
+    "paag_layout_canvas_v18",
     html=_HTML,
     css=_CSS,
     js=_JS,

@@ -12,6 +12,13 @@ from utils.split_workspace import (
     split_divider,
     split_navigation,
 )
+from utils.table_ui import (
+    begin_unsaved_tracking,
+    clear_unsaved_tracking_state,
+    finalize_unsaved_tracking,
+    has_active_unsaved_changes,
+    request_unsaved_page_navigation,
+)
 from utils.store import (
     ensure_db_initialized,
     get_last_active_workspace,
@@ -84,6 +91,9 @@ st.html(
     div[class*="st-key-equipment_overview_editor"] button[aria-label="Delete row(s)"],
     div[class*="st-key-equipment_torque_details_editor"] button[aria-label="Delete row(s)"] {
         display: inline-flex !important;
+    }
+    div[data-testid="stMultiSelectDropdown"]:has([role="listbox"][data-empty="true"]) {
+        display: none !important;
     }
     </style>
     """
@@ -158,15 +168,14 @@ project_exchange_page = st.Page(
 
 pages = {
     "Project": [
-        project_exchange_page,
         st.Page("app_pages/overview.py", title="Overview", icon=":material/dashboard:"),
         st.Page("app_pages/concerns.py", title="Questions and concerns", icon=":material/forum:"),
     ],
     "Product structure": [
         st.Page("app_pages/pits_exchange.py", title="Import PITs", icon=":material/sync_alt:"),
         st.Page("app_pages/models.py", title="Complexity Trees", icon=":material/view_in_ar:"),
-        st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
         st.Page("app_pages/bom_tree.py", title="BOM", icon=":material/account_tree:"),
+        st.Page("app_pages/parts.py", title="Parts Catalog", icon=":material/category:"),
         st.Page("app_pages/fishbone.py", title="Fishbone", icon=":material/device_hub:"),
     ],
     "Process planning": [
@@ -214,12 +223,18 @@ unlisted_pages = [
     st.Page("app_pages/functional_materials.py", title="Materials", url_path="Materials"),
     st.Page("app_pages/functional_safety.py", title="Safety", url_path="Safety"),
 ]
-navigation = st.navigation({**registered_pages, "_unlisted": unlisted_pages}, position="hidden")
+navigation = st.navigation(
+    {"_top": [project_exchange_page], **registered_pages, "_unlisted": unlisted_pages},
+    position="hidden",
+)
 
 all_registered_pages = [
-    app_page
-    for section_pages in registered_pages.values()
-    for app_page in section_pages
+    project_exchange_page,
+    *[
+        app_page
+        for section_pages in registered_pages.values()
+        for app_page in section_pages
+    ],
 ]
 all_registered_pages.extend(unlisted_pages)
 
@@ -270,6 +285,7 @@ if st.session_state.get("scenario_id"):
 
 split_secondary_key = "split_workspace_secondary_url_path"
 split_ratio_key = "split_workspace_ratio"
+top_split_navigation_key = "split_workspace_top_navigation"
 split_navigation_key = "split_workspace_navigation"
 split_divider_key = "split_workspace_divider"
 split_orientation_key = "split_workspace_orientation"
@@ -288,6 +304,19 @@ def _material_icon_name(icon: str) -> str:
     return "description"
 
 
+top_navigation_sections = [
+    {
+        "name": "",
+        "pages": [
+            {
+                "title": project_exchange_page.title,
+                "url_path": _workspace_page_key(project_exchange_page),
+                "icon": _material_icon_name(project_exchange_page.icon),
+            }
+        ],
+    }
+]
+
 navigation_sections = [
     {
         "name": section,
@@ -304,18 +333,27 @@ navigation_sections = [
 ]
 
 
-def _on_split_navigation() -> None:
-    event = component_event(split_navigation_key, "navigate")
+def _handle_split_navigation_from(nav_key: str) -> None:
+    event = component_event(nav_key, "navigate")
     target = str(event.get("url_path") or "")
     if target not in page_by_url_path:
+        return
+    if target == active_page_key:
+        return
+    if has_active_unsaved_changes():
+        target_page = page_by_url_path[target]
+        request_unsaved_page_navigation(
+            target,
+            label=str(getattr(target_page, "title", "") or target),
+        )
         return
     if target == str(st.session_state.get(split_secondary_key) or ""):
         st.session_state.pop(split_secondary_key, None)
     st.session_state["split_workspace_pending_navigation"] = target
 
 
-def _on_split_open() -> None:
-    event = component_event(split_navigation_key, "split")
+def _handle_split_open_from(nav_key: str) -> None:
+    event = component_event(nav_key, "split")
     target = str(event.get("url_path") or "")
     if target not in page_by_url_path:
         return
@@ -323,6 +361,22 @@ def _on_split_open() -> None:
         st.toast("Choose a different page for the second pane", icon=":material/info:")
         return
     st.session_state[split_secondary_key] = target
+
+
+def _on_top_split_navigation() -> None:
+    _handle_split_navigation_from(top_split_navigation_key)
+
+
+def _on_top_split_open() -> None:
+    _handle_split_open_from(top_split_navigation_key)
+
+
+def _on_split_navigation() -> None:
+    _handle_split_navigation_from(split_navigation_key)
+
+
+def _on_split_open() -> None:
+    _handle_split_open_from(split_navigation_key)
 
 
 def _on_split_close() -> None:
@@ -363,9 +417,11 @@ with st.sidebar:
         selected_name = st.selectbox("Active project", list(project_by_name), index=list(project_by_name).index(current_name), key="global_project")
         selected_project_id = project_by_name[selected_name]
         if selected_project_id != st.session_state.project_id:
+            clear_unsaved_tracking_state()
             st.session_state.project_id = selected_project_id
             st.session_state.scenario_id = None
             st.session_state.pop("global_scenario", None)
+            st.toast(f"Switched active project to '{selected_name}'", icon=":material/folder_open:")
         active_project = get_project(st.session_state.project_id)
         active_scenario = scenario_view_selector(
             st,
@@ -392,6 +448,20 @@ with st.sidebar:
                 f"{active_scenario['status']} · "
                 f"{format_seconds(active_scenario['takt_time_s'], active_scenario['takt_time_unit'])} takt"
             )
+        split_navigation(
+            top_navigation_sections,
+            active_url_path=active_page_key,
+            secondary_url_path=secondary_url_path,
+            secondary_title=secondary_page.title if secondary_page else "",
+            project_id=str(st.session_state.get("project_id") or ""),
+            scenario_id=str(st.session_state.get("scenario_id") or ""),
+            show_help=False,
+            show_drop_zone=False,
+            key=top_split_navigation_key,
+            on_navigate_change=_on_top_split_navigation,
+            on_split_change=_on_top_split_open,
+            on_close_split_change=_on_split_close,
+        )
         fishbone_context_title = navigation.title
         if (
             fishbone_context_title not in FISHBONE_LINKED_PAGES
@@ -451,7 +521,15 @@ pending_navigation = str(
     st.session_state.pop("split_workspace_pending_navigation", "") or ""
 )
 if pending_navigation and pending_navigation in page_by_url_path:
-    st.switch_page(page_by_url_path[pending_navigation])
+    if has_active_unsaved_changes():
+        target_page = page_by_url_path[pending_navigation]
+        request_unsaved_page_navigation(
+            pending_navigation,
+            label=str(getattr(target_page, "title", "") or pending_navigation),
+        )
+    else:
+        clear_unsaved_tracking_state()
+        st.switch_page(page_by_url_path[pending_navigation])
 
 if st.session_state.get("project_id"):
     try:
@@ -476,8 +554,10 @@ def _run_workspace_page(app_page, *, enable: bool = False) -> None:
 if active_page_key != "parts" and secondary_url_path != "parts":
     st.session_state.pop("_parts_page_mounted_token", None)
 
+begin_unsaved_tracking(page_by_url_path, split_secondary_key=split_secondary_key)
+
 if secondary_page is None:
-    navigation.run()
+    _run_workspace_page(navigation)
 else:
     # Relax container horizontal margins so split panes autofill the available monitor space
     st.html(
@@ -621,3 +701,5 @@ else:
 
         with st.container(key="split_bottom_pane"):
             _run_workspace_page(secondary_page, enable=True)
+
+finalize_unsaved_tracking(page_by_url_path, split_secondary_key=split_secondary_key)

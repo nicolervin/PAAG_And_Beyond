@@ -12,6 +12,7 @@ from utils.store import (
     assembly_section_walk_order,
     assign_parts_to_section,
     audit_history,
+    clear_interactive_fishbone,
     delete_assembly_section_connection,
     delete_assembly_sections,
     delete_fishbone_part_assignment,
@@ -40,18 +41,25 @@ from utils.store import (
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
+    can_redo_last_table_edit,
+    can_undo_last_table_edit,
     filter_table,
     has_unsaved_table_changes,
+    last_table_undo_redo_message,
     matches_filter_value,
     merge_filtered_edits,
+    redo_last_table_edit,
     request_table_editor_reset,
     split_filter_values,
+    undo_last_table_edit,
 )
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
     decimal_values_equal,
     editable_table_footer,
+    guarded_tabs,
     native_selected_rows,
+    register_unsaved_source,
     stage_native_delete_confirmation,
     selectable_dataframe,
     table_has_unsaved_changes,
@@ -246,28 +254,68 @@ for idx, node in enumerate(master_nodes):
         master_info_by_pnum[pnum] = info
 
 
-fishbone_tab, assign_parts_tab = st.tabs(
+fishbone_tab, assign_parts_tab = guarded_tabs(
     ["Interactive Fishbone", "Parts Placement Table"],
     key=f"fishbone_main_tabs_{project_id}",
 )
 
 with assign_parts_tab:
-    place_parts_title, place_parts_undo = st.columns([5, 0.7], vertical_alignment="center")
+    place_parts_title, place_parts_undo_last, place_parts_redo_last, place_parts_undo = st.columns(
+        [3.0, 1.1, 1.1, 1.25], vertical_alignment="center"
+    )
     place_parts_title.subheader("Place Parts into Fishbone")
     placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
-    undo_placement = place_parts_undo.button(
-        "Undo",
+    trigger_pool_save, trigger_pool_discard = register_unsaved_source(
+        f"fishbone_pool_{project_id}_{scenario_id}",
+        editor_key=pool_editor_key,
+    )
+    undo_last_placement = place_parts_undo_last.button(
+        "Undo last edit",
         icon=":material/undo:",
+        disabled=not can_undo_last_table_edit(pool_editor_key, ignored_columns=()),
+        help="Revert the most recent cell or selection edit in the placement table.",
+        key="undo_last_part_placement_edit",
+    )
+    if undo_last_placement:
+        if undo_last_table_edit(pool_editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    pool_editor_key,
+                    default="Reverted the last placement table edit",
+                ),
+                icon=":material/undo:",
+            )
+            st.rerun()
+    redo_last_placement = place_parts_redo_last.button(
+        "Redo last edit",
+        icon=":material/redo:",
+        disabled=not can_redo_last_table_edit(pool_editor_key, ignored_columns=()),
+        help="Reapply the most recently undone cell or selection edit in the placement table.",
+        key="redo_last_part_placement_edit",
+    )
+    if redo_last_placement:
+        if redo_last_table_edit(pool_editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    pool_editor_key,
+                    default="Reapplied the last undone placement table edit",
+                ),
+                icon=":material/redo:",
+            )
+            st.rerun()
+    undo_placement = place_parts_undo.button(
+        "Discard all edits",
+        icon=":material/restart_alt:",
         disabled=assignment_undo_key not in st.session_state and not placement_has_unsaved,
         help=(
-            "Discard the current unsaved selections or quantities."
+            "Discard all current unsaved selections or quantities."
             if placement_has_unsaved
             else "Undo the last part placement or additional-use staging."
         ),
         key="undo_part_placement",
     )
-    if undo_placement:
-        if placement_has_unsaved:
+    if undo_placement or trigger_pool_discard:
+        if placement_has_unsaved or trigger_pool_discard:
             request_table_editor_reset(pool_editor_key)
             st.toast("Discarded the unsaved placement table edits", icon=":material/undo:")
         else:
@@ -461,13 +509,14 @@ with assign_parts_tab:
             help="Describe this occurrence so repeated uses of the same part are easy to distinguish.",
             key=use_description_key,
         )
-        if placement_row.button(
+        place_btn = placement_row.button(
             "Place selected parts",
             type="primary",
             icon=":material/arrow_downward:",
             disabled=not (selected_unplaced_ids or selected_additional_use_ids),
             help="Places first-time parts and staged additional uses with the correct behavior automatically.",
-        ):
+        )
+        if place_btn or (trigger_pool_save and (selected_unplaced_ids or selected_additional_use_ids)):
             try:
                 st.session_state[assignment_undo_key] = current_assignment_undo
                 count = 0
@@ -518,7 +567,16 @@ with assign_parts_tab:
                 pending_use_ids.difference_update(selected_additional_use_ids)
                 st.session_state[pending_use_key] = sorted(pending_use_ids)
                 request_table_editor_reset(pool_editor_key)
-                st.toast(f"Placed {count} part uses in {section_name_by_id[target_section_id]}", icon=":material/check_circle:")
+                place_breakdown: list[str] = []
+                if selected_unplaced_ids:
+                    place_breakdown.append(f"{len(selected_unplaced_ids)} first-time")
+                if selected_additional_use_ids:
+                    place_breakdown.append(f"{len(selected_additional_use_ids)} additional")
+                st.toast(
+                    f"Placed {count} part use(s) in {section_name_by_id[target_section_id]}"
+                    + (f" ({', '.join(place_breakdown)})" if place_breakdown else ""),
+                    icon=":material/check_circle:",
+                )
                 st.session_state[clear_use_description_key] = True
                 st.rerun()
             except ValueError as exc:
@@ -758,7 +816,15 @@ with assign_parts_tab:
                     )
                     st.session_state.pop(pending_key, None)
                     request_table_editor_reset(assignment_editor_key)
-                    st.toast(f"Deleted {count} selected Fishbone uses", icon=":material/delete:")
+                    st.toast(
+                        f"Deleted {count} Fishbone part use(s)"
+                        + (
+                            f" · removed {len(assembly_impact)} assembly component row(s)"
+                            if not assembly_impact.empty
+                            else ""
+                        ),
+                        icon=":material/delete:",
+                    )
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
@@ -827,7 +893,16 @@ with assign_parts_tab:
                 )
                 st.session_state[assignment_undo_key] = current_assignment_undo
                 request_table_editor_reset(assignment_editor_key)
-                st.toast(f"Saved {count} fishbone part assignments", icon=":material/check_circle:")
+                assign_save_details: list[str] = []
+                if added_assignment_ids:
+                    assign_save_details.append(f"{len(added_assignment_ids)} added")
+                if edited_assignment_ids:
+                    assign_save_details.append(f"{len(edited_assignment_ids)} updated")
+                st.toast(
+                    f"Saved {count} Fishbone part assignment(s)"
+                    + (f" ({', '.join(assign_save_details)})" if assign_save_details else ""),
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
@@ -923,7 +998,15 @@ with fishbone_tab:
                             },
                         )
                         request_table_editor_reset(framework_editor_key)
-                        st.toast(f"Created {sec_type} '{sec_name}'", icon=":material/check_circle:")
+                        st.toast(
+                            f"Created {sec_type} '{sec_name}'"
+                            + (
+                                f" · auto-created {len(created_areas)} Yamazumi area(s)"
+                                if created_areas
+                                else ""
+                            ),
+                            icon=":material/check_circle:",
+                        )
                         st.rerun()
                     except ValueError as exc:
                         st.error(str(exc))
@@ -1058,6 +1141,12 @@ with fishbone_tab:
                     st.session_state[f"pending_interactive_delete_section_{project_id}"] = str(sid)
                 try:
                     delattr(canvas_state, "delete_section_request")
+                except (AttributeError, TypeError):
+                    pass
+            if getattr(canvas_state, "clear_fishbone_request", None):
+                st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
+                try:
+                    delattr(canvas_state, "clear_fishbone_request")
                 except (AttributeError, TypeError):
                     pass
             if p := getattr(canvas_state, "drop_part", None):
@@ -1961,6 +2050,204 @@ with fishbone_tab:
                 except ValueError as exc:
                     st.error(str(exc))
 
+        @st.dialog("Clear Interactive Fishbone?", width="large", dismissible=False)
+        def confirm_interactive_fishbone_clear() -> None:
+            clear_dialog_key = f"pending_interactive_clear_fishbone_{project_id}"
+            if not st.session_state.get(clear_dialog_key):
+                return
+
+            all_sec_ids = visible_sections["id"].astype(str).tolist() if not visible_sections.empty else []
+            sec_labels = {
+                str(r["id"]): f"{r['name']} ({r['section_type']})"
+                for _, r in visible_sections.iterrows()
+            } if not visible_sections.empty else {}
+
+            placed_sec_ids: set[str] = set()
+            if not assignments.empty:
+                placed_sec_ids.update(
+                    str(a["section_id"])
+                    for _, a in assignments.iterrows()
+                    if str(a["id"]) not in draft.get("deleted_assignments", set())
+                )
+            for na in draft.get("new_assignments", []):
+                if na.get("section_id"):
+                    placed_sec_ids.add(str(na["section_id"]))
+
+            empty_sec_ids = [sid for sid in all_sec_ids if sid not in placed_sec_ids]
+            total_placed_parts = len(visual_parts)
+            total_sections = len(all_sec_ids)
+            total_connections = len(conn_rows)
+
+            overall_impact = None
+            if all_sec_ids:
+                try:
+                    overall_impact = assembly_section_delete_impact(project_id, all_sec_ids)
+                except ValueError:
+                    overall_impact = None
+
+            st.markdown("#### Choose how to clear the Interactive Fishbone")
+            st.caption(
+                "Catalog parts are never deleted from the Parts Catalog — clearing parts only unassigns their Fishbone placements so they return to the Parts Palette."
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"- 📦 **{total_placed_parts}** placed part assignment(s) on canvas")
+                st.markdown(f"- 🟦 **{total_sections}** Fishbone section(s) ({len(empty_sec_ids)} empty)")
+                st.markdown(f"- 🔗 **{total_connections}** flow connection line(s)")
+            with col2:
+                yam_cnt = int(overall_impact.get("yamazumi_area_count", 0)) if overall_impact else 0
+                proc_cnt = int(overall_impact.get("process_link_count", 0)) if overall_impact else 0
+                asm_cnt = int(overall_impact.get("assembly_reference_count", 0)) if overall_impact else 0
+                st.markdown(f"- 📊 **{yam_cnt}** linked Yamazumi area(s)")
+                st.markdown(f"- 📋 **{proc_cnt}** Process at a Glance part requirement(s)")
+                st.markdown(f"- ⚙️ **{asm_cnt}** Assembly reference(s)")
+
+            st.divider()
+            clear_options = ["clear_parts", "delete_sections", "both"]
+            clear_labels = {
+                "clear_parts": "Clear parts back to Parts Palette only (keeps all sections, connections & Yamazumi areas)",
+                "delete_sections": "Delete Fishbone sections (choose empty sections or specific/all sections)",
+                "both": "Do both — Clear all parts back to Parts Palette and delete all Fishbone sections",
+            }
+            chosen_action = st.radio(
+                "Clear action",
+                options=clear_options,
+                format_func=lambda x: clear_labels.get(x, x),
+                index=0,
+                key=f"radio_clear_fishbone_mode_{project_id}",
+            )
+
+            selected_sec_ids: list[str] = []
+            effective_mode = chosen_action
+            if chosen_action == "clear_parts":
+                st.warning(
+                    f"⚠️ **Downstream effect:** All **{total_placed_parts}** placed part assignment(s) (including unsaved canvas placements) will be unassigned and returned to the **Parts Palette**. "
+                    "Any Process at a Glance part consumption links or approved PITS BOM occurrences tied to those placements will be detached (`Needs review`). "
+                    "All Fishbone sections, flow connections, and Yamazumi areas will remain intact."
+                )
+            elif chosen_action == "delete_sections":
+                sec_scope = st.radio(
+                    "Which sections should be deleted?",
+                    options=["empty_only", "selected_sections"],
+                    format_func=lambda v: (
+                        f"Delete empty sections only ({len(empty_sec_ids)} section(s) with no placed parts)"
+                        if v == "empty_only"
+                        else f"Delete selected / all sections (returns any parts in deleted sections to Parts Palette)"
+                    ),
+                    index=0 if empty_sec_ids else 1,
+                    key=f"radio_clear_fishbone_sec_scope_{project_id}",
+                )
+                if sec_scope == "empty_only":
+                    effective_mode = "delete_empty_sections"
+                    selected_sec_ids = empty_sec_ids
+                    if empty_sec_ids:
+                        empty_names = ", ".join(sec_labels.get(sid, sid) for sid in empty_sec_ids[:8])
+                        if len(empty_sec_ids) > 8:
+                            empty_names += f", +{len(empty_sec_ids) - 8} more"
+                        st.warning(
+                            f"⚠️ **Downstream effect:** Deletes **{len(empty_sec_ids)}** empty Fishbone section(s) ({empty_names}), "
+                            "along with their flow connections and linked Yamazumi areas. Sections that currently have placed parts will be preserved."
+                        )
+                    else:
+                        st.info("There are currently no empty Fishbone sections on the canvas.")
+                else:
+                    effective_mode = "delete_sections"
+                    selected_sec_ids = st.multiselect(
+                        "Sections to delete",
+                        options=all_sec_ids,
+                        default=all_sec_ids,
+                        format_func=lambda sid: sec_labels.get(sid, sid),
+                        key=f"multiselect_clear_fishbone_secs_{project_id}",
+                    )
+                    st.warning(
+                        f"⚠️ **Downstream effect:** Permanently deletes **{len(selected_sec_ids)}** selected Fishbone section(s) (and any child subassembly sections), "
+                        "their flow connections, linked Yamazumi areas, pitches, work elements, and Process at a Glance section links. "
+                        "Any parts placed in those sections will be unassigned and returned to the **Parts Palette**."
+                    )
+            else:
+                effective_mode = "both"
+                st.warning(
+                    f"⚠️ **Downstream effect:** Resets the entire Interactive Fishbone canvas. "
+                    f"All **{total_placed_parts}** placed part assignment(s) will be unassigned and returned to the **Parts Palette**, "
+                    f"and all **{total_sections}** Fishbone section(s), **{total_connections}** flow connection(s), "
+                    f"and **{int(overall_impact.get('yamazumi_area_count', 0)) if overall_impact else 0}** linked Yamazumi area(s) (with their pitches, work elements, and process links) will be permanently deleted."
+                )
+
+            can_submit = True
+            if chosen_action == "clear_parts" and total_placed_parts == 0 and not draft.get("new_assignments"):
+                can_submit = False
+            elif chosen_action == "delete_sections" and not selected_sec_ids:
+                can_submit = False
+            elif chosen_action == "both" and total_placed_parts == 0 and total_sections == 0:
+                can_submit = False
+
+            btn_label_map = {
+                "clear_parts": "Delete Part Placements (Return to Palette)",
+                "delete_sections": "Delete Selected Sections",
+                "both": "Delete All Parts & Sections",
+            }
+            actions = st.container(horizontal=True)
+            if actions.button("Cancel", key=f"cancel_clear_fishbone_{project_id}"):
+                st.session_state.pop(clear_dialog_key, None)
+                st.rerun()
+            if actions.button(
+                btn_label_map.get(chosen_action, "Delete"),
+                type="primary",
+                icon=":material/delete:",
+                disabled=not can_submit,
+                key=f"destructive_confirm_clear_fishbone_{project_id}",
+            ):
+                try:
+                    st.session_state[framework_undo_key] = current_plan_snapshot
+                    st.session_state[assignment_undo_key] = current_assignment_undo
+                    result = clear_interactive_fishbone(
+                        project_id=project_id,
+                        mode=effective_mode,
+                        section_ids=selected_sec_ids if effective_mode == "delete_sections" else None,
+                        editor_name=st.session_state.get("current_editor", ""),
+                    )
+                    draft_obj = st.session_state.get(canvas_draft_key, {})
+                    if effective_mode == "clear_parts":
+                        if draft_obj:
+                            draft_obj["new_assignments"] = []
+                            draft_obj["updated_assignments"] = []
+                            draft_obj["deleted_assignments"] = set()
+                    elif effective_mode == "both":
+                        st.session_state.pop(canvas_draft_key, None)
+                    else:
+                        deleted_set = set(result.get("deleted_section_ids", []))
+                        if draft_obj and deleted_set:
+                            draft_obj["positions"] = {
+                                k: v for k, v in draft_obj.get("positions", {}).items()
+                                if k not in deleted_set
+                            }
+                            draft_obj["connections"] = [
+                                c for c in draft_obj.get("connections", [])
+                                if c.get("from_section_id") not in deleted_set
+                                and c.get("to_section_id") not in deleted_set
+                            ]
+                            draft_obj["new_assignments"] = [
+                                a for a in draft_obj.get("new_assignments", [])
+                                if a.get("section_id") not in deleted_set
+                            ]
+                            draft_obj["updated_assignments"] = [
+                                a for a in draft_obj.get("updated_assignments", [])
+                                if a.get("section_id") not in deleted_set
+                            ]
+
+                    st.session_state.pop(clear_dialog_key, None)
+                    request_table_editor_reset(pool_editor_key)
+                    request_table_editor_reset(assignment_editor_key)
+                    request_table_editor_reset(framework_editor_key)
+                    st.toast(
+                        f"Cleared {result['parts_cleared']} part placement(s) and deleted {result['sections_deleted']} section(s)",
+                        icon=":material/delete:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
         canvas_output = interactive_fishbone(
             sections=node_rows,
             connections=conn_rows,
@@ -1978,10 +2265,21 @@ with fishbone_tab:
                     except (AttributeError, TypeError):
                         pass
                     st.rerun()
+            if getattr(canvas_output, "clear_fishbone_request", None):
+                st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
+                try:
+                    delattr(canvas_output, "clear_fishbone_request")
+                except (AttributeError, TypeError):
+                    pass
+                st.rerun()
 
         interactive_delete_key = f"pending_interactive_delete_section_{project_id}"
         if st.session_state.get(interactive_delete_key):
             confirm_interactive_section_delete()
+
+        interactive_clear_key = f"pending_interactive_clear_fishbone_{project_id}"
+        if st.session_state.get(interactive_clear_key):
+            confirm_interactive_fishbone_clear()
 
         has_canvas_draft = bool(
             draft["positions"]
@@ -2040,7 +2338,24 @@ with fishbone_tab:
                 request_table_editor_reset(pool_editor_key)
                 request_table_editor_reset(assignment_editor_key)
                 request_table_editor_reset(framework_editor_key)
-                st.toast("Saved all Fishbone canvas changes", icon=":material/check_circle:")
+                canvas_save_parts: list[str] = []
+                if draft.get("positions"):
+                    canvas_save_parts.append(f"{len(draft['positions'])} node position(s)")
+                if draft.get("connections") or draft.get("deleted_connections"):
+                    conn_changes = len(draft.get("connections") or []) + len(draft.get("deleted_connections") or [])
+                    canvas_save_parts.append(f"{conn_changes} connection change(s)")
+                part_changes = (
+                    len(draft.get("new_assignments") or [])
+                    + len(draft.get("updated_assignments") or {})
+                    + len(draft.get("deleted_assignments") or [])
+                )
+                if part_changes:
+                    canvas_save_parts.append(f"{part_changes} part placement change(s)")
+                st.toast(
+                    "Saved Fishbone canvas changes"
+                    + (f" ({', '.join(canvas_save_parts)})" if canvas_save_parts else ""),
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
@@ -2481,7 +2796,12 @@ def _render_framework_maintenance():
                     st.session_state.pop(framework_delete_key, None)
                     request_table_editor_reset("assembly_framework_editor")
                     st.toast(
-                        f"Deleted {deleted['affected_section_count']} Fishbone sections",
+                        f"Deleted {deleted['affected_section_count']} Fishbone section(s)"
+                        + (
+                            f" · re-pointed {deleted.get('repointed_yamazumi_area_count', 0)} Yamazumi area(s)"
+                            if deleted.get("repointed_yamazumi_area_count")
+                            else ""
+                        ),
                         icon=":material/delete:",
                     )
                     st.rerun()
@@ -2605,7 +2925,11 @@ def _render_framework_maintenance():
                 )
                 st.session_state[framework_undo_key] = current_plan_snapshot
                 request_table_editor_reset(framework_editor_key)
-                st.toast(f"Saved {count} Fishbone sections", icon=":material/check_circle:")
+                st.toast(
+                    f"Saved {count} Fishbone section(s)"
+                    + (f" ({len(framework_changes)} modified)" if framework_changes else ""),
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))

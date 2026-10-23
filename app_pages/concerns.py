@@ -94,6 +94,7 @@ footer_actions = editable_table_footer(
 )
 if footer_actions.undo:
     request_table_editor_reset(editor_key)
+    st.toast("Discarded the unsaved Questions and concerns edits", icon=":material/undo:")
     st.rerun()
 
 
@@ -252,7 +253,10 @@ def confirm_concern_delete() -> None:
             )
         st.session_state.pop(pending_delete_key, None)
         request_table_editor_reset(editor_key)
-        st.toast(f"Deleted {len(pending)} concern(s)", icon=":material/delete:")
+        del_concern_msg = f"Deleted {len(pending)} concern(s)"
+        if other_edits:
+            del_concern_msg += f" · saved {len(other_edits)} other edit(s)"
+        st.toast(del_concern_msg, icon=":material/delete:")
         st.rerun()
 
 
@@ -276,7 +280,11 @@ if footer_actions.save_and_refresh:
             {"concerns": changed_concerns},
         )
         request_table_editor_reset(editor_key)
-        st.toast("Questions and concerns saved", icon=":material/check_circle:")
+        st.toast(
+            f"Saved {len(combined_concerns)} item(s) in Questions and concerns"
+            + (f" ({len(changed_concerns)} modified)" if changed_concerns else ""),
+            icon=":material/check_circle:",
+        )
         st.rerun()
 
 

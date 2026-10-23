@@ -14,6 +14,7 @@ globals().update({name: value for name, value in vars(_db_core).items() if not n
 PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
 
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
+PART_CODE_VALUES = ("NP", "NPNT", "ASM", "CP", "CP Other")
 
 
 @cached_store_read
@@ -83,8 +84,14 @@ def _project_catalog_table(
             .map(subsystem_by_pits_id)
             .fillna("")
         )
-        existing_subsystem = frame["subsystem"].fillna("").astype(str) if "subsystem" in frame.columns else ""
-        frame["subsystem"] = derived_subsystem.where(derived_subsystem != "", existing_subsystem)
+        existing_subsystem = (
+            frame["subsystem"].fillna("").astype(str)
+            if "subsystem" in frame.columns
+            else pd.Series("", index=frame.index)
+        )
+        frame["subsystem"] = existing_subsystem.where(
+            existing_subsystem.str.strip() != "", derived_subsystem
+        )
 
         derived_part_code = (
             frame["pits_tracker_number"]
@@ -93,8 +100,14 @@ def _project_catalog_table(
             .map(part_code_by_pits_id)
             .fillna("")
         )
-        existing_part_code = frame["part_code"].fillna("").astype(str) if "part_code" in frame.columns else ""
-        frame["part_code"] = derived_part_code.where(derived_part_code != "", existing_part_code)
+        existing_part_code = (
+            frame["part_code"].fillna("").astype(str)
+            if "part_code" in frame.columns
+            else pd.Series("", index=frame.index)
+        )
+        frame["part_code"] = existing_part_code.where(
+            existing_part_code.str.strip() != "", derived_part_code
+        )
     return frame
 
 
@@ -167,21 +180,36 @@ def update_part_scenario_activity(
             }
             if valid_ids != set(selected_ids):
                 raise ValueError("One or more parts no longer belong to this project.")
+        existing_activity = {
+            str(row[0]): bool(row[1])
+            for row in conn.execute(
+                "SELECT part_id, active FROM part_scenario_activity WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
         for part_id in selected_ids:
+            new_active = normalized_activity[part_id]
+            active_changed = bool(existing_activity.get(part_id, True)) != new_active
             conn.execute(
                 """INSERT INTO part_scenario_activity
                    (project_id, scenario_id, part_id, active, updated_at)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(scenario_id, part_id) DO UPDATE SET
-                     active=excluded.active, updated_at=excluded.updated_at""",
+                     active=excluded.active,
+                     updated_at=CASE WHEN part_scenario_activity.active != excluded.active THEN excluded.updated_at ELSE part_scenario_activity.updated_at END""",
                 (
                     project_id,
                     scenario_id,
                     part_id,
-                    1 if normalized_activity[part_id] else 0,
+                    1 if new_active else 0,
                     timestamp,
                 ),
             )
+            if active_changed:
+                conn.execute(
+                    "UPDATE parts SET updated_at=? WHERE id=? AND project_id=?",
+                    (timestamp, part_id, project_id),
+                )
     return timestamp
 
 def normalize_model_applicability(value) -> str:
@@ -323,8 +351,8 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
            design_maturity, subsystem, source, image_path, model_applicability, notes,
            technology_engineer, design_engineer, pits_tracker_number, source_code,
            official_windchill_part_name, factory_nickname, make_buy, ppm, buyer_gcl,
-           pmqe_aqe, ame_tooling_engineer, part_code, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           pmqe_aqe, ame_tooling_engineer, part_code, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, part_number) DO UPDATE SET description=excluded.description,
            quantity=excluded.quantity, revision=excluded.revision, design_maturity=excluded.design_maturity,
            subsystem=CASE WHEN excluded.subsystem<>'' THEN excluded.subsystem ELSE parts.subsystem END,
@@ -352,6 +380,7 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
            pmqe_aqe=CASE WHEN excluded.pmqe_aqe<>'' THEN excluded.pmqe_aqe ELSE parts.pmqe_aqe END,
            ame_tooling_engineer=CASE WHEN excluded.ame_tooling_engineer<>'' THEN excluded.ame_tooling_engineer ELSE parts.ame_tooling_engineer END,
            part_code=CASE WHEN excluded.part_code<>'' THEN excluded.part_code ELSE parts.part_code END,
+           created_at=CASE WHEN TRIM(COALESCE(parts.created_at, ''))<>'' THEN parts.created_at ELSE excluded.created_at END,
            updated_at=excluded.updated_at""",
         (part_id, project_id, values["part_number"].strip(), values.get("description", "").strip(),
          quantity, catalog_fields["revision"] or "0", catalog_fields["design_maturity"],
@@ -361,7 +390,7 @@ def upsert_part(project_id: str, values: dict, part_id: str | None = None) -> st
          catalog_fields["design_engineer"], catalog_fields["pits_tracker_number"], catalog_fields["source_code"],
          catalog_fields["official_windchill_part_name"], catalog_fields["factory_nickname"], catalog_fields["make_buy"],
          catalog_fields["ppm"], catalog_fields["buyer_gcl"], catalog_fields["pmqe_aqe"],
-         catalog_fields["ame_tooling_engineer"], catalog_fields["part_code"], timestamp),
+         catalog_fields["ame_tooling_engineer"], catalog_fields["part_code"], timestamp, timestamp),
     )
     rows = query("SELECT id FROM parts WHERE project_id = ? AND part_number = ?", (project_id, values["part_number"].strip()))
     return rows[0]["id"]
@@ -413,6 +442,44 @@ def update_part_rows(
             ).fetchall()
         }
         existing_ids = set(existing_parts)
+        pits_lookup: dict[str, dict[str, str]] = {}
+        for p_row in conn.execute(
+            """SELECT pits_id, subsystem,
+                      COALESCE(
+                          NULLIF(TRIM(json_extract(source_payload, '$.part_code')), ''),
+                          NULLIF(TRIM(json_extract(source_payload, '$.partspartcode')), ''),
+                          ''
+                      ) AS part_code
+               FROM pits_records
+               WHERE project_id=? AND trim(coalesce(pits_id, '')) != ''""",
+            (project_id,),
+        ).fetchall():
+            pid = clean_text(p_row["pits_id"])
+            if pid:
+                pits_lookup[pid] = {
+                    "subsystem": clean_text(p_row["subsystem"]),
+                    "part_code": clean_text(p_row["part_code"]),
+                }
+        existing_activity: dict[str, bool] = {}
+        if scenario_id:
+            for act_row in conn.execute(
+                "SELECT part_id, active FROM part_scenario_activity WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall():
+                existing_activity[str(act_row["part_id"])] = bool(act_row["active"])
+        normalized_activity: dict[str, bool] | None = None
+        if scenario_id and activity_by_part is not None:
+            normalized_activity = {
+                str(part_id): bool(active)
+                for part_id, active in activity_by_part.items()
+            }
+            saved_ids = set(edited["id"].fillna("").astype(str))
+            if set(normalized_activity) != saved_ids:
+                raise ValueError("Part activity must be supplied for every saved row.")
+        assembly_applicability = {
+            str(r["part_id"]): str(r["model_applicability"] or "")
+            for _, r in assembly_catalog_part_applicability(project_id).iterrows()
+        }
         tracker_owner = {
             str(existing["pits_tracker_number"] or "").strip(): part_id
             for part_id, existing in existing_parts.items()
@@ -490,6 +557,106 @@ def update_part_rows(
                 or str(raw_weight).strip() == ""
                 else float(raw_weight)
             )
+            row_updated_at = timestamp
+            if part_id in existing_ids and previous is not None:
+                prev_qty_raw = previous.get("quantity")
+                prev_qty = (
+                    None
+                    if prev_qty_raw is None or pd.isna(prev_qty_raw)
+                    else float(prev_qty_raw)
+                )
+                prev_w_raw = previous.get("weight_lb")
+                prev_w = (
+                    None
+                    if prev_w_raw is None
+                    or pd.isna(prev_w_raw)
+                    or str(prev_w_raw).strip() == ""
+                    else float(prev_w_raw)
+                )
+                prev_tracker = clean_text(previous.get("pits_tracker_number"))
+                pits_fallback = pits_lookup.get(prev_tracker, {}) if prev_tracker else {}
+                prev_subsystem = (
+                    clean_text(previous.get("subsystem"))
+                    or pits_fallback.get("subsystem", "")
+                )
+                prev_part_code = (
+                    clean_text(previous.get("part_code"))
+                    or pits_fallback.get("part_code", "")
+                )
+                prev_applicability = normalize_model_applicability(
+                    assembly_applicability.get(
+                        part_id, previous.get("model_applicability")
+                    )
+                )
+                prev_dm_raw = clean_text(previous.get("design_maturity"))
+                prev_rev_raw = clean_text(previous.get("revision"))
+                raw_dm = (
+                    clean_text(row.get("design_maturity"))
+                    if "design_maturity" in edited.columns
+                    else prev_dm_raw
+                )
+                raw_rev = (
+                    clean_text(row.get("revision"))
+                    if "revision" in edited.columns
+                    else prev_rev_raw
+                )
+                dm_or_rev_changed = not (
+                    raw_dm == prev_dm_raw
+                    and (raw_rev == prev_rev_raw or raw_rev == prev_dm_raw)
+                )
+                if not dm_or_rev_changed:
+                    revision = prev_rev_raw or "0"
+                    design_maturity = prev_dm_raw
+                active_changed = (
+                    bool(normalized_activity[part_id])
+                    != bool(existing_activity.get(part_id, True))
+                    if normalized_activity is not None and part_id in normalized_activity
+                    else False
+                )
+                row_changed = (
+                    part_number != clean_text(previous.get("part_number"))
+                    or clean_text(row.get("description"))
+                    != clean_text(previous.get("description"))
+                    or quantity != prev_qty
+                    or weight_lb != prev_w
+                    or dm_or_rev_changed
+                    or subsystem != prev_subsystem
+                    or applicability != prev_applicability
+                    or clean_text(row.get("notes")) != clean_text(previous.get("notes"))
+                    or catalog_fields["technology_engineer"]
+                    != clean_text(previous.get("technology_engineer"))
+                    or catalog_fields["design_engineer"]
+                    != clean_text(previous.get("design_engineer"))
+                    or catalog_fields["pits_tracker_number"] != prev_tracker
+                    or catalog_fields["source_code"]
+                    != clean_text(previous.get("source_code"))
+                    or catalog_fields["official_windchill_part_name"]
+                    != clean_text(previous.get("official_windchill_part_name"))
+                    or catalog_fields["factory_nickname"]
+                    != clean_text(previous.get("factory_nickname"))
+                    or catalog_fields["make_buy"]
+                    != clean_text(previous.get("make_buy"))
+                    or catalog_fields["ppm"] != clean_text(previous.get("ppm"))
+                    or catalog_fields["buyer_gcl"]
+                    != clean_text(previous.get("buyer_gcl"))
+                    or catalog_fields["pmqe_aqe"]
+                    != clean_text(previous.get("pmqe_aqe"))
+                    or catalog_fields["ame_tooling_engineer"]
+                    != clean_text(previous.get("ame_tooling_engineer"))
+                    or catalog_fields["part_code"] != prev_part_code
+                    or active_changed
+                )
+                row_updated_at = (
+                    timestamp
+                    if row_changed
+                    else (clean_text(previous.get("updated_at")) or timestamp)
+                )
+                prev_source = clean_text(previous.get("source")) or "Manual"
+                row_source = (
+                    "Manual"
+                    if row_changed and prev_source in {"", "Manual", "Manual BOM"}
+                    else prev_source
+                )
             values = (
                 part_number, clean_text(row.get("description")), quantity, weight_lb,
                 revision, design_maturity, subsystem, applicability,
@@ -504,17 +671,19 @@ def update_part_rows(
                 catalog_fields["pmqe_aqe"],
                 catalog_fields["ame_tooling_engineer"],
                 catalog_fields["part_code"],
-                timestamp,
+                row_updated_at,
             )
             if part_id in existing_ids:
                 conn.execute(
                     """UPDATE parts SET part_number=?, description=?, quantity=?, weight_lb=?, revision=?,
-                       design_maturity=?, subsystem=?,
+                       design_maturity=?, subsystem=?, source=?,
                        model_applicability=?, notes=?, technology_engineer=?, design_engineer=?,
                        pits_tracker_number=?, source_code=?, official_windchill_part_name=?,
                        factory_nickname=?, make_buy=?, ppm=?, buyer_gcl=?, pmqe_aqe=?,
-                       ame_tooling_engineer=?, part_code=?, updated_at=? WHERE id=? AND project_id=?""",
-                    (*values, part_id, project_id),
+                       ame_tooling_engineer=?, part_code=?,
+                       created_at=CASE WHEN TRIM(COALESCE(created_at, ''))<>'' THEN created_at ELSE ? END,
+                       updated_at=? WHERE id=? AND project_id=?""",
+                    (*values[:7], row_source, *values[7:], row_updated_at, part_id, project_id),
                 )
             else:
                 conn.execute(
@@ -524,28 +693,34 @@ def update_part_rows(
                         image_path, model_applicability, notes, technology_engineer, design_engineer,
                         pits_tracker_number, source_code, official_windchill_part_name,
                         factory_nickname, make_buy, ppm, buyer_gcl, pmqe_aqe, ame_tooling_engineer,
-                        part_code, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        part_code, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (part_id, project_id, values[0], values[1], values[2], values[3],
                      values[4], values[5], values[6],
-                     clean_text(row.get("source")) or "Manual", *values[7:]),
+                     clean_text(row.get("source")) or "Manual", *values[7:], row_updated_at),
                 )
-        if scenario_id and activity_by_part is not None:
-            normalized_activity = {
-                str(part_id): bool(active)
-                for part_id, active in activity_by_part.items()
-            }
-            saved_ids = set(edited["id"].fillna("").astype(str))
-            if set(normalized_activity) != saved_ids:
-                raise ValueError("Part activity must be supplied for every saved row.")
+        if scenario_id and normalized_activity is not None:
             for part_id, active in normalized_activity.items():
+                act_changed = (
+                    part_id not in existing_ids
+                    or bool(existing_activity.get(part_id, True)) != bool(active)
+                )
+                act_updated_at = (
+                    timestamp
+                    if act_changed
+                    else (
+                        clean_text(existing_parts[part_id].get("updated_at"))
+                        or timestamp
+                    )
+                )
                 conn.execute(
                     """INSERT INTO part_scenario_activity
                        (project_id, scenario_id, part_id, active, updated_at)
                        VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(scenario_id, part_id) DO UPDATE SET
-                         active=excluded.active, updated_at=excluded.updated_at""",
-                    (project_id, scenario_id, part_id, 1 if active else 0, timestamp),
+                         active=excluded.active,
+                         updated_at=CASE WHEN part_scenario_activity.active != excluded.active THEN excluded.updated_at ELSE part_scenario_activity.updated_at END""",
+                    (project_id, scenario_id, part_id, 1 if active else 0, act_updated_at),
                 )
     return len(edited)
 
@@ -571,11 +746,23 @@ def part_delete_impact(project_id: str, part_ids: list[str]) -> dict:
             "linked_assemblies": [],
         }
 
+def _unlink_part_upload_path(raw_path: str) -> None:
+    cleaned = str(raw_path or "").strip()
+    if not cleaned or cleaned.startswith(("http://", "https://")):
+        return
+    p = Path(cleaned)
+    try:
+        if p.exists() and p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def delete_project_part(project_id: str, part_id: str) -> str:
     """Delete one catalog part and its cascading fishbone uses and image records."""
     with connection() as conn:
         part = conn.execute(
-            "SELECT part_number, image_path FROM parts WHERE id=? AND project_id=?",
+            "SELECT part_number, image_path, original_image_path FROM parts WHERE id=? AND project_id=?",
             (part_id, project_id),
         ).fetchone()
         if not part:
@@ -584,54 +771,236 @@ def delete_project_part(project_id: str, part_id: str) -> str:
             "DELETE FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id=?",
             (project_id, part_id),
         )
-        supplemental_paths = [row[0] for row in conn.execute(
-            "SELECT image_path FROM part_images WHERE part_id=?", (part_id,)
-        ).fetchall()]
+        supplemental_paths = [
+            p
+            for row in conn.execute(
+                "SELECT image_path, original_image_path FROM part_images WHERE part_id=?", (part_id,)
+            ).fetchall()
+            for p in (row[0], row[1])
+            if p
+        ]
         conn.execute("DELETE FROM parts WHERE id=? AND project_id=?", (part_id, project_id))
-    for raw_path in [part["image_path"], *supplemental_paths]:
-        if raw_path:
-            path = Path(raw_path)
-            try:
-                if path.exists() and path.is_file() and UPLOAD_DIR.resolve() in path.resolve().parents:
-                    path.unlink()
-            except OSError:
-                pass
+    for raw_path in dict.fromkeys([part["image_path"], part["original_image_path"], *supplemental_paths]):
+        _unlink_part_upload_path(raw_path)
     return str(part["part_number"])
 
-def set_part_image(part_id: str, uploaded_file) -> str:
+
+def _archive_previous_primary_part_image(
+    conn: sqlite3.Connection,
+    part_id: str,
+    timestamp: str,
+    *,
+    new_url: str = "",
+) -> bool:
+    """Move an existing primary part image to part_images (Additional views) before replacing it."""
+    row = conn.execute(
+        "SELECT image_path, original_image_path, annotations_json, image_caption FROM parts WHERE id=?",
+        (part_id,),
+    ).fetchone()
+    if not row:
+        return False
+    old_img = str(row["image_path"] or "").strip()
+    if not old_img:
+        return False
+    if new_url and old_img == new_url:
+        return False
+    old_orig = str(row["original_image_path"] or "").strip()
+    old_annotations = str(row["annotations_json"] or "").strip()
+    old_caption = str(row["image_caption"] or "").strip()
+    archive_id = str(uuid4())
+    if old_img.startswith(("http://", "https://")):
+        conn.execute(
+            """INSERT INTO part_images
+               (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+               VALUES (?, ?, ?, '', '', 'Previous primary image', ?, ?, ?)""",
+            (archive_id, part_id, old_img, old_caption, timestamp, timestamp),
+        )
+        return True
+    old_img_path = Path(old_img)
+    if old_img_path.exists() and old_img_path.is_file():
+        old_suffix = old_img_path.suffix.lower() or ".png"
+        arch_target = UPLOAD_DIR / f"{part_id}_{archive_id}{old_suffix}"
+        arch_target.write_bytes(old_img_path.read_bytes())
+        old_orig_path = Path(old_orig) if old_orig else None
+        if old_orig_path and old_orig_path.exists() and old_orig_path.is_file():
+            old_orig_suffix = old_orig_path.suffix.lower() or old_suffix
+            arch_orig_target = UPLOAD_DIR / f"{part_id}_{archive_id}_orig{old_orig_suffix}"
+            arch_orig_target.write_bytes(old_orig_path.read_bytes())
+            arch_orig_str = str(arch_orig_target)
+        else:
+            arch_orig_str = str(arch_target)
+        conn.execute(
+            """INSERT INTO part_images
+               (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'Previous primary image', ?, ?, ?)""",
+            (
+                archive_id,
+                part_id,
+                str(arch_target),
+                arch_orig_str,
+                old_annotations,
+                old_caption,
+                timestamp,
+                timestamp,
+            ),
+        )
+        for old_p in dict.fromkeys([old_img, old_orig]):
+            if old_p:
+                _unlink_part_upload_path(old_p)
+        return True
+    for old_p in dict.fromkeys([old_img, old_orig]):
+        if old_p:
+            _unlink_part_upload_path(old_p)
+    return False
+
+
+def set_part_image(
+    part_id: str,
+    uploaded_file,
+    *,
+    original_file_bytes: bytes | None = None,
+    original_filename: str = "",
+    annotations_json: str = "",
+    caption: str = "",
+) -> str:
     suffix = Path(uploaded_file.name).suffix.lower()
     if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
         raise ValueError("Use PNG, JPG, JPEG, or WEBP images.")
-    target = UPLOAD_DIR / f"{part_id}{suffix}"
-    target.write_bytes(uploaded_file.getvalue())
-    execute("UPDATE parts SET image_path = ?, updated_at = ? WHERE id = ?", (str(target), now_iso(), part_id))
+    timestamp = now_iso()
+    with connection() as conn:
+        _archive_previous_primary_part_image(conn, part_id, timestamp)
+        target = UPLOAD_DIR / f"{part_id}{suffix}"
+        target.write_bytes(uploaded_file.getvalue())
+        if original_file_bytes is not None:
+            orig_suffix = Path(original_filename or uploaded_file.name).suffix.lower() or suffix
+            if orig_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                orig_suffix = suffix
+            orig_target = UPLOAD_DIR / f"{part_id}_orig{orig_suffix}"
+            orig_target.write_bytes(original_file_bytes)
+            orig_path_str = str(orig_target)
+        else:
+            orig_path_str = str(target)
+        conn.execute(
+            """UPDATE parts
+               SET image_path = ?, original_image_path = ?, annotations_json = ?, image_caption = ?, updated_at = ?
+               WHERE id = ?""",
+            (
+                str(target),
+                orig_path_str,
+                str(annotations_json or "").strip(),
+                str(caption or "").strip(),
+                timestamp,
+                part_id,
+            ),
+        )
     prewarm_image_cache(target)
     return str(target)
 
-def set_part_image_url(part_id: str, url: str) -> str:
+
+def set_part_image_url(part_id: str, url: str, *, caption: str = "") -> str:
     clean_url = str(url or "").strip()
     if not clean_url.startswith(("http://", "https://")):
         raise ValueError("Web link URL must start with http:// or https://")
-    execute("UPDATE parts SET image_path = ?, updated_at = ? WHERE id = ?", (clean_url, now_iso(), part_id))
+    timestamp = now_iso()
+    with connection() as conn:
+        _archive_previous_primary_part_image(conn, part_id, timestamp, new_url=clean_url)
+        conn.execute(
+            """UPDATE parts
+               SET image_path = ?, original_image_path = '', annotations_json = '', image_caption = ?, updated_at = ?
+               WHERE id = ?""",
+            (clean_url, str(caption or "").strip(), timestamp, part_id),
+        )
     return clean_url
 
-def clear_part_image(part_id: str) -> None:
-    rows = query("SELECT image_path FROM parts WHERE id=?", (part_id,))
-    if rows and rows[0]["image_path"]:
-        raw_path = str(rows[0]["image_path"])
-        if not raw_path.startswith(("http://", "https://")):
-            p = Path(raw_path)
-            try:
-                if p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
-    execute("UPDATE parts SET image_path = '', updated_at = ? WHERE id = ?", (now_iso(), part_id))
+
+def clear_part_image(part_id: str, *, move_to_additional_views: bool = False) -> bool:
+    timestamp = now_iso()
+    archived = False
+    with connection() as conn:
+        if move_to_additional_views:
+            archived = _archive_previous_primary_part_image(conn, part_id, timestamp)
+        else:
+            row = conn.execute("SELECT image_path, original_image_path FROM parts WHERE id=?", (part_id,)).fetchone()
+            if row:
+                for old_p in dict.fromkeys([str(row["image_path"] or ""), str(row["original_image_path"] or "")]):
+                    if old_p:
+                        _unlink_part_upload_path(old_p)
+        conn.execute(
+            "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
+            (timestamp, part_id),
+        )
+    return archived
+
+
+def update_part_primary_image_annotations(
+    project_id: str,
+    part_id: str,
+    annotations_json: str,
+    composite_image_bytes: bytes | None = None,
+    current_editor: str = "Collaborator",
+) -> str:
+    """Update annotations vector JSON and composite display image for a part's primary image."""
+    normalized_part_id = str(part_id or "").strip()
+    if not normalized_part_id:
+        raise ValueError("Choose a part to annotate.")
+    timestamp = now_iso()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, part_number, image_path, original_image_path FROM parts WHERE id=? AND project_id=?",
+            (normalized_part_id, project_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Part not found in this project.")
+        file_path_str = str(row["image_path"] or "").strip()
+        if not file_path_str or file_path_str.startswith(("http://", "https://")):
+            raise ValueError("Part does not have a local image that can be annotated.")
+        orig_path_str = str(row["original_image_path"] or "").strip() or file_path_str
+        part_number = str(row["part_number"] or "").strip()
+
+        if not row["original_image_path"] or orig_path_str == file_path_str:
+            curr_path = Path(file_path_str)
+            if curr_path.exists() and curr_path.is_file():
+                suffix = curr_path.suffix or ".png"
+                new_orig_target = UPLOAD_DIR / f"{normalized_part_id}_orig{suffix}"
+                new_orig_target.write_bytes(curr_path.read_bytes())
+                orig_path_str = str(new_orig_target)
+
+        if composite_image_bytes:
+            target = Path(file_path_str)
+            target.write_bytes(composite_image_bytes)
+
+        conn.execute(
+            """UPDATE parts
+               SET original_image_path=?, annotations_json=?, updated_at=?
+               WHERE id=? AND project_id=?""",
+            (orig_path_str, str(annotations_json or "").strip(), timestamp, normalized_part_id, project_id),
+        )
+
+    record_audit_event(
+        project_id,
+        "Parts",
+        "Annotate primary part image",
+        1,
+        editor_name=str(current_editor or "").strip(),
+        details={"part_id": normalized_part_id, "part_number": part_number},
+    )
+    return file_path_str
+
 
 MAX_CAD_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_CAD_FILE_SIZE_MB = 50
 
-def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -> str:
+
+def add_part_image(
+    part_id: str,
+    uploaded_file,
+    image_type: str,
+    caption: str,
+    *,
+    original_file_bytes: bytes | None = None,
+    original_filename: str = "",
+    annotations_json: str = "",
+) -> str:
     suffix = Path(uploaded_file.name).suffix.lower()
     allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".step", ".stp"}
     if suffix not in allowed_suffixes:
@@ -646,37 +1015,218 @@ def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -
     target = UPLOAD_DIR / f"{part_id}_{image_id}{suffix}"
     target.write_bytes(file_bytes)
     resolved_type = image_type or ("3D CAD Model (STEP)" if suffix in {".step", ".stp"} else "Other")
+    timestamp = now_iso()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        if original_file_bytes is not None:
+            orig_suffix = Path(original_filename or uploaded_file.name).suffix.lower() or suffix
+            if orig_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                orig_suffix = suffix
+            orig_target = UPLOAD_DIR / f"{part_id}_{image_id}_orig{orig_suffix}"
+            orig_target.write_bytes(original_file_bytes)
+            orig_path_str = str(orig_target)
+        else:
+            orig_path_str = str(target)
+    else:
+        orig_path_str = ""
     execute(
-        "INSERT INTO part_images VALUES (?, ?, ?, ?, ?, ?)",
-        (image_id, part_id, str(target), resolved_type, caption.strip(), now_iso()),
+        """INSERT INTO part_images
+           (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            image_id,
+            part_id,
+            str(target),
+            orig_path_str,
+            str(annotations_json or "").strip() if suffix in {".png", ".jpg", ".jpeg", ".webp"} else "",
+            resolved_type,
+            caption.strip(),
+            timestamp,
+            timestamp,
+        ),
     )
     if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
         prewarm_image_cache(target)
     return str(target)
+
 
 def add_part_image_url(part_id: str, url: str, image_type: str, caption: str) -> str:
     clean_url = str(url or "").strip()
     if not clean_url.startswith(("http://", "https://")):
         raise ValueError("Web link URL must start with http:// or https://")
     image_id = str(uuid4())
+    timestamp = now_iso()
     execute(
-        "INSERT INTO part_images VALUES (?, ?, ?, ?, ?, ?)",
-        (image_id, part_id, clean_url, image_type, caption.strip(), now_iso()),
+        """INSERT INTO part_images
+           (id, part_id, image_path, original_image_path, annotations_json, image_type, caption, created_at, updated_at)
+           VALUES (?, ?, ?, '', '', ?, ?, ?, ?)""",
+        (image_id, part_id, clean_url, image_type, caption.strip(), timestamp, timestamp),
     )
     return image_id
 
+
+def update_part_supplemental_image_annotations(
+    project_id: str,
+    image_id: str,
+    annotations_json: str,
+    composite_image_bytes: bytes | None = None,
+    current_editor: str = "Collaborator",
+) -> str:
+    """Update annotations vector JSON and composite display image for a supplemental part view."""
+    normalized_image_id = str(image_id or "").strip()
+    if not normalized_image_id:
+        raise ValueError("Choose a supplemental part image to annotate.")
+    timestamp = now_iso()
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT pi.id, pi.part_id, pi.image_path, pi.original_image_path, pi.caption, p.part_number
+               FROM part_images pi
+               JOIN parts p ON p.id = pi.part_id
+               WHERE pi.id=? AND p.project_id=?""",
+            (normalized_image_id, project_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Supplemental part view not found in this project.")
+        file_path_str = str(row["image_path"] or "").strip()
+        if not file_path_str or file_path_str.startswith(("http://", "https://")) or Path(file_path_str).suffix.lower() in {".step", ".stp"}:
+            raise ValueError("This supplemental view is not a local raster image that can be annotated.")
+        orig_path_str = str(row["original_image_path"] or "").strip() or file_path_str
+        part_id = str(row["part_id"])
+        part_number = str(row["part_number"] or "").strip()
+        caption = str(row["caption"] or "").strip()
+
+        if not row["original_image_path"] or orig_path_str == file_path_str:
+            curr_path = Path(file_path_str)
+            if curr_path.exists() and curr_path.is_file():
+                suffix = curr_path.suffix or ".png"
+                new_orig_target = UPLOAD_DIR / f"{part_id}_{normalized_image_id}_orig{suffix}"
+                new_orig_target.write_bytes(curr_path.read_bytes())
+                orig_path_str = str(new_orig_target)
+
+        if composite_image_bytes:
+            target = Path(file_path_str)
+            target.write_bytes(composite_image_bytes)
+
+        conn.execute(
+            """UPDATE part_images
+               SET original_image_path=?, annotations_json=?, updated_at=?
+               WHERE id=?""",
+            (orig_path_str, str(annotations_json or "").strip(), timestamp, normalized_image_id),
+        )
+
+    record_audit_event(
+        project_id,
+        "Parts",
+        "Annotate supplemental part image",
+        1,
+        editor_name=str(current_editor or "").strip(),
+        details={
+            "part_id": part_id,
+            "part_number": part_number,
+            "image_id": normalized_image_id,
+            "caption": caption,
+        },
+    )
+    return file_path_str
+
+
 def delete_part_image(image_id: str) -> None:
-    rows = query("SELECT image_path FROM part_images WHERE id=?", (image_id,))
-    if rows and rows[0]["image_path"]:
-        raw_path = str(rows[0]["image_path"])
-        if not raw_path.startswith(("http://", "https://")):
-            p = Path(raw_path)
-            try:
-                if p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
+    rows = query("SELECT image_path, original_image_path FROM part_images WHERE id=?", (image_id,))
+    if rows:
+        for old_p in dict.fromkeys([str(rows[0]["image_path"] or ""), str(rows[0].get("original_image_path") or "")]):
+            _unlink_part_upload_path(old_p)
     execute("DELETE FROM part_images WHERE id=?", (image_id,))
+
+
+def promote_part_image_to_primary(part_id: str, image_id: str) -> dict:
+    """Promote an Additional view image (or web link) to Primary Image, moving any existing Primary Image to Additional views."""
+    normalized_part_id = str(part_id or "").strip()
+    normalized_image_id = str(image_id or "").strip()
+    if not normalized_part_id or not normalized_image_id:
+        raise ValueError("Choose an additional view to make primary.")
+    timestamp = now_iso()
+    to_unlink: list[str] = []
+    with connection() as conn:
+        supp = conn.execute(
+            """SELECT id, part_id, image_path, original_image_path, annotations_json, image_type, caption
+               FROM part_images
+               WHERE id=? AND part_id=?""",
+            (normalized_image_id, normalized_part_id),
+        ).fetchone()
+        if not supp:
+            raise ValueError("Additional view not found for this part.")
+        supp_img = str(supp["image_path"] or "").strip()
+        supp_orig = str(supp["original_image_path"] or "").strip()
+        supp_annotations = str(supp["annotations_json"] or "").strip()
+        supp_caption = str(supp["caption"] or "").strip()
+        is_url = supp_img.startswith(("http://", "https://"))
+        if not is_url:
+            supp_path = Path(supp_img) if supp_img else None
+            if not supp_path or not supp_path.exists() or not supp_path.is_file():
+                raise ValueError("Additional view image file no longer exists on disk.")
+            suffix = supp_path.suffix.lower()
+            if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                raise ValueError("Only raster images (PNG, JPG, JPEG, WEBP) or web links can be set as the primary image.")
+            img_bytes = supp_path.read_bytes()
+            supp_orig_path = Path(supp_orig) if supp_orig else None
+            if supp_orig_path and supp_orig_path.exists() and supp_orig_path.is_file():
+                orig_suffix = supp_orig_path.suffix.lower() or suffix
+                if orig_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    orig_suffix = suffix
+                orig_bytes: bytes | None = supp_orig_path.read_bytes()
+            else:
+                orig_suffix = suffix
+                orig_bytes = None
+
+        archived_previous = _archive_previous_primary_part_image(
+            conn, normalized_part_id, timestamp, new_url=supp_img if is_url else ""
+        )
+
+        if is_url:
+            conn.execute(
+                """UPDATE parts
+                   SET image_path = ?, original_image_path = '', annotations_json = '', image_caption = ?, updated_at = ?
+                   WHERE id = ?""",
+                (supp_img, supp_caption, timestamp, normalized_part_id),
+            )
+            final_primary_path = supp_img
+        else:
+            target = UPLOAD_DIR / f"{normalized_part_id}{suffix}"
+            target.write_bytes(img_bytes)
+            if orig_bytes is not None:
+                orig_target = UPLOAD_DIR / f"{normalized_part_id}_orig{orig_suffix}"
+                orig_target.write_bytes(orig_bytes)
+                orig_path_str = str(orig_target)
+            else:
+                orig_path_str = str(target)
+            conn.execute(
+                """UPDATE parts
+                   SET image_path = ?, original_image_path = ?, annotations_json = ?, image_caption = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    str(target),
+                    orig_path_str,
+                    supp_annotations,
+                    supp_caption,
+                    timestamp,
+                    normalized_part_id,
+                ),
+            )
+            final_primary_path = str(target)
+            for p in dict.fromkeys([supp_img, supp_orig]):
+                if p and p not in {str(target), orig_path_str}:
+                    to_unlink.append(p)
+
+        conn.execute("DELETE FROM part_images WHERE id=?", (normalized_image_id,))
+
+    for raw_p in to_unlink:
+        _unlink_part_upload_path(raw_p)
+
+    return {
+        "had_previous_primary": archived_previous,
+        "image_path": final_primary_path,
+        "caption": supp_caption,
+    }
+
 
 @cached_store_read(scope="catalog")
 def part_images(part_id: str) -> list[dict]:
@@ -888,15 +1438,28 @@ def update_part_feature_rules(
         if _conn is not None
         else query(sql, params)
     )
-    valid_parts = {
-        str(row["id"])
-        for row in read_rows("SELECT id FROM parts WHERE project_id=?", (project_id,))
+    part_rows = read_rows(
+        "SELECT id, model_applicability FROM parts WHERE project_id=?", (project_id,)
+    )
+    valid_parts = {str(row["id"]) for row in part_rows}
+    existing_applicability = {
+        str(row["id"]): normalize_model_applicability(row.get("model_applicability"))
+        for row in part_rows
     }
+    existing_rules: dict[str, set[tuple[str, str]]] = {}
+    for rule_row in read_rows(
+        "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+        (project_id,),
+    ):
+        existing_rules.setdefault(str(rule_row["part_id"]), set()).add(
+            (str(rule_row["feature_id"]), str(rule_row["value"]))
+        )
     timestamp = now_iso()
     resolved_applicability_cache: dict[tuple[tuple[str, tuple[str, ...]], ...], str] = {}
     delete_params: list[tuple[str, str]] = []
     insert_rows: list[tuple[str, str, str, str, str]] = []
     update_rows: list[tuple[str, str, str, str]] = []
+    updated = 0
 
     for part_id, raw_tokens in selections_by_part.items():
         if part_id not in valid_parts:
@@ -904,9 +1467,13 @@ def update_part_feature_rules(
         tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
         if not tokens:
             continue  # Preserve legacy model-number applicability until the user tags it.
+        prev_rules = existing_rules.get(part_id, set())
+        prev_app = existing_applicability.get(part_id, "")
         if "All models" in tokens:
-            delete_params.append((project_id, part_id))
-            update_rows.append(("All", timestamp, part_id, project_id))
+            if prev_rules or prev_app != "All":
+                delete_params.append((project_id, part_id))
+                update_rows.append(("All", timestamp, part_id, project_id))
+            updated += 1
             continue
         selected_by_feature: dict[str, set[str]] = {}
         for token in tokens:
@@ -933,32 +1500,37 @@ def update_part_feature_rules(
             normalized_models = normalize_model_applicability(model_numbers)
             resolved_applicability_cache[rule_key] = normalized_models
 
-        delete_params.append((project_id, part_id))
-        for feature_id, values in rule_key:
-            for value in values:
-                insert_rows.append((project_id, part_id, feature_id, value, timestamp))
-        update_rows.append((normalized_models, timestamp, part_id, project_id))
+        new_rules = {
+            (feature_id, value)
+            for feature_id, values in rule_key
+            for value in values
+        }
+        if new_rules != prev_rules or normalized_models != prev_app:
+            delete_params.append((project_id, part_id))
+            for feature_id, values in rule_key:
+                for value in values:
+                    insert_rows.append((project_id, part_id, feature_id, value, timestamp))
+            update_rows.append((normalized_models, timestamp, part_id, project_id))
+        updated += 1
 
-    if not update_rows:
-        return 0
-
-    context = nullcontext(_conn) if _conn is not None else connection()
-    with context as conn:
-        conn.executemany(
-            "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
-            delete_params,
-        )
-        if insert_rows:
+    if update_rows:
+        context = nullcontext(_conn) if _conn is not None else connection()
+        with context as conn:
             conn.executemany(
-                """INSERT INTO part_feature_rules
-                   (project_id, part_id, feature_id, value, updated_at) VALUES (?, ?, ?, ?, ?)""",
-                insert_rows,
+                "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
+                delete_params,
             )
-        conn.executemany(
-            "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
-            update_rows,
-        )
-    return len(update_rows)
+            if insert_rows:
+                conn.executemany(
+                    """INSERT INTO part_feature_rules
+                       (project_id, part_id, feature_id, value, updated_at) VALUES (?, ?, ?, ?, ?)""",
+                    insert_rows,
+                )
+            conn.executemany(
+                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                update_rows,
+            )
+    return updated
 
 _INFERENCE_SUBWORDS = (
     "back", "plate", "wire", "harness", "light", "panel", "board", "switch",
@@ -982,6 +1554,42 @@ def _tokenize_part_text(text: str) -> set[str]:
     return tokens
 
 
+_GENERIC_FEATURE_ATTR_WORDS = frozenset({
+    "color", "colour", "finish", "option", "options", "type", "style",
+    "package", "pkg", "choice", "material", "size", "level", "grade",
+    "version", "variant", "series", "mode", "config", "configuration",
+})
+
+_FEATURE_NOUN_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"wheel", "tire", "rim", "hub", "insert"}),
+)
+
+
+def _norm_noun_token(word: str) -> str:
+    w = word.lower().strip()
+    if len(w) > 4 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _extract_feature_subject_nouns(feature_name: str) -> set[str]:
+    raw_tokens = _tokenize_part_text(feature_name)
+    nouns = {
+        _norm_noun_token(t)
+        for t in raw_tokens
+        if t not in _GENERIC_FEATURE_ATTR_WORDS
+        and _norm_noun_token(t) not in _GENERIC_FEATURE_ATTR_WORDS
+        and len(t) >= 3
+    }
+    expanded = set(nouns)
+    for group in _FEATURE_NOUN_SYNONYM_GROUPS:
+        if nouns & group:
+            expanded.update(group)
+    return expanded
+
+
 def infer_part_feature_rules(
     project_id: str,
     part_ids: list[str] | None = None,
@@ -1001,7 +1609,7 @@ def infer_part_feature_rules(
     )
 
     model_rows = read_rows(
-        "SELECT id, model_number, active FROM project_models WHERE project_id=?",
+        "SELECT id, model_number, display_name, active FROM project_models WHERE project_id=?",
         (project_id,),
     )
     if not model_rows:
@@ -1047,7 +1655,10 @@ def infer_part_feature_rules(
     if not configured_tree_models:
         return {}
 
-    sql_parts = "SELECT id, part_number, description, subsystem, model_applicability, pits_tracker_number FROM parts WHERE project_id=?"
+    sql_parts = (
+        "SELECT id, part_number, description, factory_nickname, official_windchill_part_name, "
+        "subsystem, model_applicability, pits_tracker_number FROM parts WHERE project_id=?"
+    )
     params_parts: list[Any] = [project_id]
     if part_ids is not None:
         if not part_ids:
@@ -1133,42 +1744,129 @@ def infer_part_feature_rules(
         if str(row.get("subsystem") or "").strip()
     }
     precomputed_features: dict[str, dict[str, Any]] = {}
+    feature_nouns_by_id: dict[str, set[str]] = {}
+    feature_vocab_by_id: dict[str, set[str]] = {}
+    feature_allowed_tokens_by_id: dict[str, dict[str, set[str]]] = {}
+    all_val_tokens_by_token: dict[str, set[str]] = {}
     for fid, feat in active_features_by_id.items():
         f_subsystem = str(feat.get("subsystem") or "").strip()
         f_sub_key = f_subsystem.casefold()
         f_name = str(feat.get("name") or "")
         f_cat = str(feat.get("category") or "")
-        base_tokens = _tokenize_part_text(f_name) | _tokenize_part_text(f_cat)
-        raw_allowed = json.loads(feat.get("allowed_values") or "[]")
+        name_tokens = _tokenize_part_text(f_name)
+        base_tokens = name_tokens | _tokenize_part_text(f_cat)
+        nouns = _extract_feature_subject_nouns(f_name)
+        if not nouns:
+            fallback_src = f_subsystem or f_cat.strip()
+            nouns = _extract_feature_subject_nouns(fallback_src)
+        feature_nouns_by_id[fid] = nouns
+        vocab = set(name_tokens) | set(nouns)
+        val_tok_map: dict[str, set[str]] = {}
+        try:
+            raw_allowed = json.loads(feat.get("allowed_values") or "[]")
+        except Exception:
+            raw_allowed = []
         clean_allowed = [
             str(v).strip()
             for v in raw_allowed
             if str(v or "").strip() and str(v).strip().upper() not in ("N/A", "NONE")
         ]
-        val_tokens_by_val: dict[str, set[str]] = {}
-        for v in raw_allowed:
-            if isinstance(v, str):
-                val_tokens_by_val[v] = base_tokens | _tokenize_part_text(v)
+        for av in raw_allowed:
+            av_str = str(av)
+            av_toks = _tokenize_part_text(av_str)
+            val_tok_map[av_str] = av_toks
+            vocab.update(av_toks)
+            for t in av_toks:
+                all_val_tokens_by_token.setdefault(t, set()).add(fid)
         for v in clean_allowed:
-            if v not in val_tokens_by_val:
-                val_tokens_by_val[v] = base_tokens | _tokenize_part_text(v)
+            if v not in val_tok_map:
+                val_tok_map[v] = _tokenize_part_text(v)
+        feature_allowed_tokens_by_id[fid] = val_tok_map
+        feature_vocab_by_id[fid] = vocab
         precomputed_features[fid] = {
             "f_subsystem": f_subsystem,
             "f_sub_key": f_sub_key,
             "f_name": f_name,
             "f_cat": f_cat,
+            "name_tokens": name_tokens,
             "base_tokens": base_tokens,
             "raw_allowed": raw_allowed,
             "clean_allowed": clean_allowed,
-            "val_tokens_by_val": val_tokens_by_val,
+            "val_tokens_by_val": val_tok_map,
         }
+
+    ordered_active_feature_ids = [
+        str(row["id"])
+        for row in sorted(
+            active_features_by_id.values(),
+            key=lambda r: (
+                str(r.get("category") or "").strip().lower(),
+                str(r.get("name") or "").strip().lower(),
+            ),
+        )
+    ]
 
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
         pid = str(p["id"])
-        if str(p.get("part_number") or "").strip().upper() in top_level_pns:
-            continue
         raw_models = part_models.get(pid, set())
+        if str(p.get("part_number") or "").strip().upper() in top_level_pns:
+            top_models = raw_models & configured_tree_models
+            if not top_models or top_models >= configured_tree_models:
+                p_text = " ".join(
+                    str(p.get(k) or "").strip()
+                    for k in ("description", "factory_nickname", "official_windchill_part_name")
+                )
+                p_toks = _tokenize_part_text(p_text)
+                matched_models_with_toks: list[tuple[str, set[str]]] = []
+                for m_row in model_rows:
+                    if not bool(m_row.get("active", 1)):
+                        continue
+                    m_num = str(m_row.get("model_number") or "").strip()
+                    if not m_num or m_num not in configured_tree_models:
+                        continue
+                    m_name = str(m_row.get("display_name") or "").strip()
+                    name_toks = _tokenize_part_text(m_name) if m_name else set()
+                    if m_num.lower() in p_text.lower():
+                        matched_models_with_toks.append((m_num, name_toks | _tokenize_part_text(m_num)))
+                    elif name_toks and name_toks <= p_toks:
+                        matched_models_with_toks.append((m_num, name_toks))
+                if matched_models_with_toks:
+                    filtered_matches = [
+                        m_num
+                        for m_num, toks in matched_models_with_toks
+                        if not any(toks < other_toks for _, other_toks in matched_models_with_toks)
+                    ]
+                    if filtered_matches:
+                        top_models = set(filtered_matches)
+            if top_models and top_models < configured_tree_models:
+                top_tokens: list[str] = []
+                for fid in ordered_active_feature_ids:
+                    feat = active_features_by_id[fid]
+                    try:
+                        allowed = json.loads(feat.get("allowed_values") or "[]")
+                    except Exception:
+                        allowed = []
+                    for av in allowed:
+                        val_str = str(av).strip()
+                        if not val_str or val_str.upper() in ("N/A", "NONE"):
+                            continue
+                        c_models = feature_choice_models.get((fid, val_str), set())
+                        if c_models and top_models <= c_models:
+                            if not any(
+                                str(other_av).strip() != val_str
+                                and bool(top_models & feature_choice_models.get((fid, str(other_av).strip()), set()))
+                                for other_av in allowed
+                            ):
+                                top_tokens.append(f"{fid}::{val_str}")
+                                break
+                if top_tokens:
+                    inferred[pid] = top_tokens
+                    continue
+            if top_models >= configured_tree_models or str(p.get("model_applicability") or "").strip().lower() in ("all", ""):
+                inferred[pid] = ["All models"]
+            continue
+
         part_eval_tree_models = (
             eval_tree_models
             if (raw_models & eval_tree_models)
@@ -1189,14 +1887,24 @@ def infer_part_feature_rules(
         part_num = str(p.get("part_number") or "")
         tracker = str(p.get("pits_tracker_number") or "").strip()
         p_subsystem = (
-            subsystem_by_pits_id.get(tracker)
-            or str(p.get("subsystem") or "").strip()
+            str(p.get("subsystem") or "").strip()
+            or subsystem_by_pits_id.get(tracker)
+            or ""
         )
         p_sub_key = p_subsystem.casefold()
         part_has_assigned_subsystem = bool(p_sub_key) and (
             p_sub_key in configured_feature_subsystems
         )
         p_tokens = _tokenize_part_text(desc) | _tokenize_part_text(part_num)
+        p_norm_tokens = {_norm_noun_token(t) for t in p_tokens} | p_tokens
+        matched_noun_fids = {
+            fid
+            for fid, nouns in feature_nouns_by_id.items()
+            if nouns and (p_norm_tokens & nouns)
+        }
+        explained_by_matched_nouns: set[str] = set()
+        for m_fid in matched_noun_fids:
+            explained_by_matched_nouns.update(feature_vocab_by_id.get(m_fid, set()))
 
         def _collect_single_value_candidates(subsystem_mode: str) -> list[dict[str, Any]]:
             found: list[dict[str, Any]] = []
@@ -1241,10 +1949,43 @@ def infer_part_feature_rules(
 
                 f_name = f_meta["f_name"]
                 f_cat = f_meta["f_cat"]
-                f_tokens = f_meta["val_tokens_by_val"].get(val)
-                if f_tokens is None:
-                    f_tokens = f_meta["base_tokens"] | _tokenize_part_text(val)
-                overlap = len(p_tokens & f_tokens)
+                name_tokens = f_meta["name_tokens"]
+                val_tokens = f_meta["val_tokens_by_val"].get(val)
+                if val_tokens is None:
+                    val_tokens = _tokenize_part_text(val)
+                # If the part text explicitly contains a token belonging to a different allowed value
+                # of this same feature (and that token is unique to this feature), skip this option.
+                val_tok_map = feature_allowed_tokens_by_id.get(fid, {})
+                contradicted_by_sibling_val = False
+                for other_val, other_toks in val_tok_map.items():
+                    if other_val == val:
+                        continue
+                    for t in (other_toks - val_tokens) & p_tokens:
+                        if all_val_tokens_by_token.get(t) == {fid}:
+                            contradicted_by_sibling_val = True
+                            break
+                    if contradicted_by_sibling_val:
+                        break
+                if contradicted_by_sibling_val:
+                    continue
+
+                # Exclude generic category words from keyword scoring so only feature name and option value score
+                f_tokens = name_tokens | val_tokens
+                matched_tokens = p_tokens & f_tokens
+
+                # Prevent cross-feature false positives when the part explicitly names a specific feature's
+                # subject noun (e.g., "Roof" vs "Wheel") and this candidate feature's noun is absent.
+                if (
+                    matched_noun_fids
+                    and fid not in matched_noun_fids
+                    and not subsystem_match
+                ):
+                    unexplained = matched_tokens - explained_by_matched_nouns
+                    if feature_nouns_by_id.get(fid) or not unexplained:
+                        continue
+
+                overlap = len(matched_tokens)
+                val_overlap = len(p_tokens & val_tokens)
 
                 exact_match = 1.0 if p_models == c_eval_models else 0.0
                 coverage = len(p_models) / len(c_eval_models) if c_eval_models else 0.0
@@ -1263,6 +2004,7 @@ def infer_part_feature_rules(
                     "value": val,
                     "values": [val],
                     "overlap": overlap,
+                    "val_overlap": val_overlap,
                     "subsystem_match": subsystem_match,
                     "exact_match": exact_match,
                     "category": f_cat,
@@ -1311,10 +2053,12 @@ def infer_part_feature_rules(
                 )
                 f_name = f_meta["f_name"]
                 f_cat = f_meta["f_cat"]
-                f_tokens = set(f_meta["base_tokens"])
+                val_tokens_union: set[str] = set()
                 for mv in matched_vals:
-                    f_tokens |= f_meta["val_tokens_by_val"].get(mv, _tokenize_part_text(mv))
+                    val_tokens_union |= f_meta["val_tokens_by_val"].get(mv, _tokenize_part_text(mv))
+                f_tokens = set(f_meta["name_tokens"]) | val_tokens_union
                 overlap = len(p_tokens & f_tokens)
+                val_overlap = len(p_tokens & val_tokens_union)
 
                 if subsystem_match == 0 and overlap == 0 and p_models != union_eval_models:
                     continue
@@ -1336,6 +2080,7 @@ def infer_part_feature_rules(
                     "value": matched_vals[0],
                     "values": matched_vals,
                     "overlap": overlap,
+                    "val_overlap": val_overlap,
                     "subsystem_match": subsystem_match,
                     "exact_match": exact_match,
                     "category": f_cat,
@@ -1361,16 +2106,33 @@ def infer_part_feature_rules(
         if not candidates:
             continue
 
+        # When any candidate has a positive keyword or subsystem signal, discard zero-signal
+        # candidates first so an unrelated coincidence of model sets cannot eliminate matched features.
+        if any(c["overlap"] > 0 or c["subsystem_match"] > 0 for c in candidates):
+            candidates = [
+                c
+                for c in candidates
+                if c["overlap"] > 0 or c["subsystem_match"] > 0
+            ]
+
         # Exclude any candidate whose model set is a strict superset of another candidate's
-        # model set (i.e., found on more models than the tighter matching feature choices).
+        # model set (i.e., found on more models than the tighter matching feature choices),
+        # unless the candidate has an explicit option-value keyword match in the part text
+        # and at least as strong a subsystem match.
         candidates = [
             c
             for c in candidates
             if not any(
-                other["eval_models"] < c["eval_models"]
-                or (
-                    other["eval_models"] == c["eval_models"]
-                    and other["raw_models"] < c["raw_models"]
+                (
+                    other["eval_models"] < c["eval_models"]
+                    or (
+                        other["eval_models"] == c["eval_models"]
+                        and other["raw_models"] < c["raw_models"]
+                    )
+                )
+                and not (
+                    c.get("val_overlap", 0) > 0
+                    and c["subsystem_match"] >= other["subsystem_match"]
                 )
                 for other in candidates
             )
@@ -1393,9 +2155,16 @@ def infer_part_feature_rules(
 
         # If there is no keyword overlap or subsystem match:
         # Check if variance across models has been established yet.
-        # If fewer than 2 models have BOMs built, default to "All models"
-        # until multiple model BOMs exist and differ (Answer 3).
-        if top["overlap"] == 0 and top["subsystem_match"] == 0 and len(models_with_bom) < 2:
+        # If fewer than 2 models have BOMs built, or if some tree models lack BOMs and
+        # this part is present on all models that have BOMs so far, default to "All models".
+        if top["overlap"] == 0 and top["subsystem_match"] == 0 and (
+            len(models_with_bom) < 2
+            or (
+                bool(all_bom_tree_models)
+                and all_bom_tree_models < configured_tree_models
+                and p_models >= all_bom_tree_models
+            )
+        ):
             inferred[pid] = ["All models"]
             continue
 
@@ -1411,16 +2180,27 @@ def infer_part_feature_rules(
         features_seen.add(top["feature_id"])
 
         if top["overlap"] > 0 or top["subsystem_match"] > 0:
+            running_models = set(top["eval_models"])
             for other in candidates[1:]:
                 if other["feature_id"] in features_seen:
                     continue
                 if len(other.get("values") or [other["value"]]) > 1:
                     continue
                 if other["overlap"] > 0 or other["subsystem_match"] > 0:
-                    combined_models = top["eval_models"] & other["eval_models"]
-                    if p_models <= combined_models:
+                    combined_models = running_models & other["eval_models"]
+                    if p_models <= combined_models and (
+                        combined_models < running_models
+                        or (
+                            (other["overlap"] > 0 or top["overlap"] == 0)
+                            and (
+                                other["eval_models"] == top["eval_models"]
+                                or other.get("val_overlap", 0) > 0
+                            )
+                        )
+                    ):
                         chosen_tokens.append(f"{other['feature_id']}::{other['value']}")
                         features_seen.add(other["feature_id"])
+                        running_models = combined_models
         else:
             # When multiple models have BOMs and no keyword matched,
             # tag all distinguishing features of the model (Answer 2)
@@ -1495,19 +2275,31 @@ def preview_inferred_part_feature_rules(
             feature_token_by_label[label] = token
     feature_options = list(feature_token_by_label.keys())
 
-    existing_rules = {
-        str(row["part_id"])
-        for row in read_rows(
-            "SELECT DISTINCT part_id FROM part_feature_rules WHERE project_id=?",
-            (project_id,),
+    existing_rule_tokens_by_part: dict[str, set[str]] = {}
+    for row in read_rows(
+        "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+        (project_id,),
+    ):
+        existing_rule_tokens_by_part.setdefault(str(row["part_id"]), set()).add(
+            f"{row['feature_id']}::{str(row.get('value') or '').strip()}"
         )
-    }
+    existing_rules = set(existing_rule_tokens_by_part.keys())
     linked_assemblies = {
         str(row["catalog_part_id"])
         for row in read_rows(
             "SELECT catalog_part_id FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id IS NOT NULL",
             (project_id,),
         )
+    }
+    part_rows = read_rows(
+        "SELECT id, part_number, description, factory_nickname, official_windchill_part_name, model_applicability FROM parts WHERE project_id=?",
+        (project_id,),
+    )
+    top_level_pns = _identify_top_level_assembly_pns(project_id, part_rows, _conn=_conn)
+    top_level_part_ids = {
+        str(row["id"])
+        for row in part_rows
+        if str(row.get("part_number") or "").strip().upper() in top_level_pns
     }
     evaluated_existing_ids = (
         existing_rules & {str(pid) for pid in part_ids}
@@ -1534,15 +2326,8 @@ def preview_inferred_part_feature_rules(
 
     existing_applicability = {
         str(row["id"]): str(row["model_applicability"] or "").strip()
-        for row in read_rows(
-            "SELECT id, model_applicability FROM parts WHERE project_id=?",
-            (project_id,),
-        )
+        for row in part_rows
     }
-    part_rows = read_rows(
-        "SELECT id, part_number, description, model_applicability FROM parts WHERE project_id=?",
-        (project_id,),
-    )
     part_info = {str(row["id"]): row for row in part_rows}
 
     bom_rows = read_rows(
@@ -1569,9 +2354,11 @@ def preview_inferred_part_feature_rules(
     skipped_assembly_count = 0
 
     for part_id, tokens in inferred.items():
+        is_top_level_asm = part_id in top_level_part_ids
         if not overwrite_existing and part_id in existing_rules:
-            skipped_existing_count += 1
-            continue
+            if not is_top_level_asm or existing_rule_tokens_by_part.get(part_id) == set(tokens):
+                skipped_existing_count += 1
+                continue
         if (
             not overwrite_existing
             and tokens == ["All models"]
@@ -1580,7 +2367,7 @@ def preview_inferred_part_feature_rules(
             skipped_existing_count += 1
             continue
 
-        if len(tokens) > 1:
+        if len(tokens) > 1 and not is_top_level_asm:
             p = part_info.get(part_id, {})
             models_set = part_models_map.get(part_id)
             if not models_set:
@@ -1647,12 +2434,70 @@ def apply_inferred_part_feature_rules(
     context = nullcontext(_conn) if _conn is not None else connection()
     with context as conn:
         updated = update_part_feature_rules(project_id, to_apply, _conn=conn) if to_apply else 0
-        for stale_part_id in stale_rule_part_ids:
-            conn.execute(
-                "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
-                (project_id, stale_part_id),
-            )
-            updated += 1
+        if stale_rule_part_ids:
+            active_models = {
+                str(r["model_number"]).strip()
+                for r in conn.execute(
+                    "SELECT model_number, active FROM project_models WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+                if bool(r["active"]) and str(r["model_number"] or "").strip()
+            }
+            part_id_by_tracker_or_pn: dict[str, str] = {}
+            for pr in conn.execute(
+                "SELECT id, part_number, pits_tracker_number FROM parts WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                pid_str = str(pr["id"])
+                pn_str = str(pr["part_number"] or "").strip().upper()
+                trk_str = str(pr["pits_tracker_number"] or "").strip()
+                if pn_str:
+                    part_id_by_tracker_or_pn[pn_str] = pid_str
+                if trk_str:
+                    part_id_by_tracker_or_pn[trk_str] = pid_str
+                    part_id_by_tracker_or_pn[trk_str.upper()] = pid_str
+            bom_models_by_part_id: dict[str, set[str]] = {}
+            for b in conn.execute(
+                "SELECT child_part_id, child_tracker_number, raw_levels_json FROM pits_bom_occurrences WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                cid = str(b["child_part_id"] or "").strip()
+                if not cid:
+                    trk = str(b["child_tracker_number"] or "").strip()
+                    cid = part_id_by_tracker_or_pn.get(trk) or part_id_by_tracker_or_pn.get(trk.upper()) or ""
+                if not cid:
+                    continue
+                try:
+                    levels = json.loads(b["raw_levels_json"] or "{}")
+                    usages = levels.get("model_usages") or {}
+                    if isinstance(usages, dict):
+                        mods = {
+                            str(m).strip()
+                            for m in usages
+                            if str(m).strip() and (not active_models or str(m).strip() in active_models)
+                        }
+                        if mods:
+                            bom_models_by_part_id.setdefault(cid, set()).update(mods)
+                except Exception:
+                    pass
+            ts = now_iso()
+            for stale_part_id in stale_rule_part_ids:
+                conn.execute(
+                    "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
+                    (project_id, stale_part_id),
+                )
+                bom_mods = bom_models_by_part_id.get(stale_part_id)
+                if bom_mods:
+                    restored_app = (
+                        "All"
+                        if active_models and bom_mods >= active_models
+                        else normalize_model_applicability(sorted(bom_mods))
+                    )
+                    conn.execute(
+                        "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                        (restored_app, ts, stale_part_id, project_id),
+                    )
+                updated += 1
         if updated > 0:
             record_audit_event(
                 project_id,
@@ -1731,8 +2576,19 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
             "active": 1 if bool(row.get("active")) else 0,
             "sequence": (index + 1) * 10,
         })
-    if len({name.casefold() for name in names}) != len(names):
-        raise ValueError("Feature names must be unique within this project.")
+    seen_names: set[str] = set()
+    dup_names: list[str] = []
+    for n in names:
+        key = n.casefold()
+        if key in seen_names and n not in dup_names:
+            dup_names.append(n)
+        seen_names.add(key)
+    if dup_names:
+        dup_list = ", ".join(f"'{d}'" for d in dup_names)
+        raise ValueError(
+            f"Feature names must be unique within this project (duplicate: {dup_list} — "
+            "include the component or subject in each feature name, such as 'Door Color' and 'Wheel Color')."
+        )
 
     timestamp = now_iso()
     with connection() as conn:
@@ -3782,6 +4638,7 @@ def import_pits_id_snapshot(
                            ) THEN parts.model_applicability
                            ELSE excluded.model_applicability
                        END,
+                       created_at=CASE WHEN TRIM(COALESCE(parts.created_at, ''))<>'' THEN parts.created_at ELSE excluded.created_at END,
                        updated_at=CASE WHEN parts.source='PITS snapshot' THEN excluded.updated_at ELSE parts.updated_at END"""
                 if catalog_pits_id:
                     conn.execute(
@@ -3796,8 +4653,8 @@ def import_pits_id_snapshot(
                             design_maturity, subsystem, source,
                             image_path, model_applicability, notes, pits_tracker_number,
                             source_code, design_engineer, technology_engineer, ppm, buyer_gcl,
-                            pmqe_aqe, ame_tooling_engineer, part_code, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            pmqe_aqe, ame_tooling_engineer, part_code, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            {update_clause}""",
                         (
                             str(uuid4()), project_id, part_number, description,
@@ -3806,7 +4663,7 @@ def import_pits_id_snapshot(
                             "PITS snapshot", "All", notes, catalog_pits_id,
                             str(record.get("source_code") or "").strip(),
                             catalog_technology_engineer, catalog_technology_engineer, ppm, buyer_gcl, pmqe_aqe,
-                            ame_tooling_engineer, part_code, timestamp,
+                            ame_tooling_engineer, part_code, timestamp, timestamp,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
@@ -5863,9 +6720,9 @@ def save_manual_model_bom(
                 if pn not in part_lookup:
                     new_pid = str(uuid4())
                     conn.execute(
-                        """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (new_pid, project_id, pn, desc_val, pits_id, now_ts),
+                        """INSERT INTO parts (id, project_id, part_number, description, source, pits_tracker_number, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, 'Manual BOM', ?, ?, ?)""",
+                        (new_pid, project_id, pn, desc_val, pits_id, now_ts, now_ts),
                     )
                     part_lookup[pn] = new_pid
                     part_desc_lookup[pn.upper()] = desc_val
@@ -5876,8 +6733,9 @@ def save_manual_model_bom(
                     if desc_val:
                         conn.execute(
                             """UPDATE parts SET description = ?, pits_tracker_number = '', updated_at = ?
-                               WHERE project_id = ? AND part_number = ?""",
-                            (desc_val, now_ts, project_id, pn),
+                               WHERE project_id = ? AND part_number = ?
+                                 AND (COALESCE(description, '') <> ? OR COALESCE(pits_tracker_number, '') <> '')""",
+                            (desc_val, now_ts, project_id, pn, desc_val),
                         )
                         part_desc_lookup[pn.upper()] = desc_val
                     else:
@@ -6124,7 +6982,7 @@ def save_manual_model_bom(
         try:
             features_inferred = apply_inferred_part_feature_rules(
                 project_id,
-                overwrite_existing=False,
+                overwrite_existing=True,
                 editor_name=editor,
                 _conn=conn,
             )
@@ -6169,16 +7027,13 @@ def sync_builder_inputs_to_items(items: list[dict[str, Any]], model_id: str) -> 
 def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: str) -> list[dict[str, Any]]:
     """Capture live un-saved cell edits, additions, and deletions from Streamlit Session State."""
     import streamlit as st
-    from utils.table_filters import _EDITOR_INSTANCE_MARKER
+    from utils.table_filters import get_effective_table_editor_state
 
     base_items = [dict(it) for it in st.session_state.get(d_key, [])]
     if not base_items:
         base_items = [{"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}]
 
-
-    generation = int(st.session_state.get(f"_table_editor_generation_{ed_logical_key}", 0) or 0)
-    ed_key = f"{ed_logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
-    ed_state = st.session_state.get(ed_key)
+    ed_state = get_effective_table_editor_state(ed_logical_key)
     if not isinstance(ed_state, dict):
         return base_items
 
@@ -7207,8 +8062,12 @@ def _identify_top_level_assembly_pns(
         re.IGNORECASE,
     )
     for r in cat_rows:
-        pn = str((r.get("part_number") if isinstance(r, dict) else r["part_number"]) or "").strip()
-        desc = str((r.get("description") if isinstance(r, dict) else r["description"]) or "").strip()
+        get_val = (lambda k: r.get(k)) if isinstance(r, dict) else (lambda k: r[k] if k in r.keys() else "")
+        pn = str(get_val("part_number") or "").strip()
+        desc = " ".join(
+            str(get_val(field) or "").strip()
+            for field in ("description", "factory_nickname", "official_windchill_part_name")
+        ).strip()
         pn_u = pn.upper()
         if not pn_u or pn_u in subassembly_pns:
             continue
@@ -7230,6 +8089,201 @@ def _identify_top_level_assembly_pns(
                 top_level_pns.add(pn_u)
 
     return top_level_pns
+
+
+def deduplicate_visual_box_parts(
+    part_numbers: list[str],
+    bom_descendants_by_pn: dict[str, set[str]] | None = None,
+) -> list[str]:
+    """Ensure only one specific part or group number per item appears in a Complexity tree visual box.
+
+    1. Deduplicates identical part/group numbers (case-insensitively).
+    2. Suppresses BOM parent/ancestor assembly numbers when one or more of their BOM descendant
+       parts are also present in the same visual box.
+    3. Suppresses 'G' group numbers when a 'P' piece part sharing the same base drawing root is
+       present in the same visual box.
+    """
+    unique_pns: list[str] = []
+    seen_upper: set[str] = set()
+    for raw_pn in part_numbers:
+        pn = str(raw_pn or "").strip()
+        pn_u = pn.upper()
+        if pn_u and pn_u not in seen_upper:
+            seen_upper.add(pn_u)
+            unique_pns.append(pn)
+
+    if len(unique_pns) <= 1:
+        return unique_pns
+
+    desc_map = bom_descendants_by_pn or {}
+    upper_in_box = {pn.upper() for pn in unique_pns}
+    after_bom: list[str] = []
+    for pn in unique_pns:
+        pn_u = pn.upper()
+        descendants = desc_map.get(pn_u, set())
+        has_strict_descendant_in_box = any(
+            other_u != pn_u
+            and other_u in upper_in_box
+            and pn_u not in desc_map.get(other_u, set())
+            for other_u in descendants
+        )
+        if not has_strict_descendant_in_box:
+            after_bom.append(pn)
+
+    if len(after_bom) <= 1:
+        return after_bom
+
+    piece_part_roots = {
+        _extract_part_root(pn)
+        for pn in after_bom
+        if _part_type(pn) == "P" and len(_extract_part_root(pn)) >= 4
+    }
+    if not piece_part_roots:
+        return after_bom
+
+    return [
+        pn
+        for pn in after_bom
+        if not (_part_type(pn) == "G" and _extract_part_root(pn) in piece_part_roots)
+    ]
+
+
+def complexity_visual_part_rules(
+    project_id: str,
+    *,
+    _conn: sqlite3.Connection | None = None,
+) -> tuple[dict[tuple[str, str], list[tuple[str, set[str] | None]]], dict[str, set[str]]]:
+    """Return filtered part rules per (feature_id, value) and BOM descendant lookup for Complexity tree visual."""
+    read_rows = (
+        lambda sql, params=(): [dict(row) for row in _conn.execute(sql, params).fetchall()]
+        if _conn is not None
+        else query(sql, params)
+    )
+    part_rows = read_rows(
+        """SELECT id, part_number, description, factory_nickname, official_windchill_part_name,
+                  subsystem, model_applicability, pits_tracker_number
+           FROM parts WHERE project_id=?""",
+        (project_id,),
+    )
+    rule_rows = read_rows(
+        "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+        (project_id,),
+    )
+    if not part_rows or not rule_rows:
+        return {}, {}
+
+    top_level_pns = _identify_top_level_assembly_pns(project_id, part_rows, _conn=_conn)
+
+    feature_rows = read_rows(
+        "SELECT id, subsystem FROM complexity_features WHERE project_id=?",
+        (project_id,),
+    )
+    feature_subsystem_by_id = {
+        str(row["id"]).strip(): str(row.get("subsystem") or "").strip().casefold()
+        for row in feature_rows
+        if str(row.get("id") or "").strip()
+    }
+
+    pits_sub_rows = read_rows(
+        """SELECT pits_id, subsystem
+           FROM pits_records
+           WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''""",
+        (project_id,),
+    )
+    subsystem_by_pits_id = {
+        str(row["pits_id"]).strip(): str(row["subsystem"]).strip()
+        for row in pits_sub_rows
+        if str(row.get("pits_id") or "").strip() and str(row.get("subsystem") or "").strip()
+    }
+
+    part_number_by_id: dict[str, str] = {}
+    part_models_by_id: dict[str, set[str] | None] = {}
+    part_subsystem_by_id: dict[str, str] = {}
+    tracker_to_pn_upper: dict[str, str] = {}
+    id_to_pn_upper: dict[str, str] = {}
+
+    for row in part_rows:
+        pid = str(row.get("id") or "").strip()
+        pn = str(row.get("part_number") or "").strip()
+        if not pid or not pn:
+            continue
+        pn_u = pn.upper()
+        id_to_pn_upper[pid] = pn_u
+        tracker_to_pn_upper[pn_u] = pn_u
+        trk = str(row.get("pits_tracker_number") or "").strip()
+        if trk:
+            tracker_to_pn_upper[trk.upper()] = pn_u
+        if pn_u in top_level_pns:
+            continue
+        part_number_by_id[pid] = pn
+        p_sub = str(row.get("subsystem") or "").strip()
+        if not p_sub and trk:
+            p_sub = subsystem_by_pits_id.get(trk, "")
+        part_subsystem_by_id[pid] = p_sub.casefold()
+        raw_app = row.get("model_applicability")
+        app_str = "" if raw_app is None else str(raw_app or "").strip()
+        if not app_str or app_str.lower() == "all":
+            part_models_by_id[pid] = None
+        else:
+            mods = {m.strip() for m in app_str.split(",") if m.strip()}
+            part_models_by_id[pid] = mods if mods else None
+
+    part_rules_by_feature_value: dict[tuple[str, str], list[tuple[str, set[str] | None]]] = {}
+    seen_in_bucket: dict[tuple[str, str], set[str]] = {}
+    for rule in rule_rows:
+        part_id = str(rule.get("part_id") or "").strip()
+        rule_feature_id = str(rule.get("feature_id") or "").strip()
+        rule_value = str(rule.get("value") or "").strip()
+        part_number = part_number_by_id.get(part_id, "")
+        if not part_number or not rule_feature_id or not rule_value:
+            continue
+        f_sub = feature_subsystem_by_id.get(rule_feature_id, "")
+        p_sub = part_subsystem_by_id.get(part_id, "")
+        if f_sub and p_sub and f_sub != p_sub:
+            continue
+        key = (rule_feature_id, rule_value)
+        seen_pns = seen_in_bucket.setdefault(key, set())
+        pn_u = part_number.upper()
+        if pn_u not in seen_pns:
+            seen_pns.add(pn_u)
+            part_rules_by_feature_value.setdefault(key, []).append(
+                (part_number, part_models_by_id.get(part_id))
+            )
+
+    for key, bucket in part_rules_by_feature_value.items():
+        part_rules_by_feature_value[key] = sorted(bucket, key=lambda item: item[0])
+
+    occ_rows = read_rows(
+        """SELECT parent_tracker_number, child_tracker_number, child_part_id
+           FROM pits_bom_occurrences WHERE project_id=?""",
+        (project_id,),
+    )
+    children_by_parent_pn: dict[str, set[str]] = {}
+    for occ in occ_rows:
+        parent_raw = re.sub(r"#\d+$", "", str(occ.get("parent_tracker_number") or "").strip()).upper()
+        child_raw = re.sub(r"#\d+$", "", str(occ.get("child_tracker_number") or "").strip()).upper()
+        child_id = str(occ.get("child_part_id") or "").strip()
+        parent_pn = tracker_to_pn_upper.get(parent_raw, parent_raw)
+        child_pn = id_to_pn_upper.get(child_id) or tracker_to_pn_upper.get(child_raw, child_raw)
+        if parent_pn and child_pn and parent_pn != child_pn:
+            children_by_parent_pn.setdefault(parent_pn, set()).add(child_pn)
+
+    bom_descendants_by_pn: dict[str, set[str]] = {}
+    for start_pn in children_by_parent_pn:
+        visited: set[str] = set()
+        stack = list(children_by_parent_pn.get(start_pn, ()))
+        while stack:
+            curr = stack.pop()
+            if curr == start_pn or curr in visited:
+                continue
+            visited.add(curr)
+            for nxt in children_by_parent_pn.get(curr, ()):
+                if nxt not in visited:
+                    stack.append(nxt)
+        if visited:
+            bom_descendants_by_pn[start_pn] = visited
+
+    return part_rules_by_feature_value, bom_descendants_by_pn
 
 
 def predict_model_bom_from_features(
@@ -7753,12 +8807,13 @@ def clear_model_boms(
 
 
 __domain_exports__ = [
-    'pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES',
+    'pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES', 'PART_CODE_VALUES',
     'project_table', 'part_scenario_activity', 'active_part_ids',
     'update_part_scenario_activity', 'normalize_model_applicability',
     '_clean_optional_text', '_validated_part_catalog_fields', 'upsert_part',
     'update_part_rows', 'part_delete_impact', 'delete_project_part',
-    'set_part_image', 'set_part_image_url', 'clear_part_image', 'add_part_image', 'add_part_image_url', 'delete_part_image', 'part_images',
+    'set_part_image', 'set_part_image_url', 'clear_part_image', 'update_part_primary_image_annotations',
+    'add_part_image', 'add_part_image_url', 'update_part_supplemental_image_annotations', 'delete_part_image', 'promote_part_image_to_primary', 'part_images',
     'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'complexity_features',
     'project_part_subsystems',
     'complexity_feature_delete_impacts', 'complexity_tree',
@@ -7783,7 +8838,8 @@ __domain_exports__ = [
     'sync_builder_inputs_to_items', 'get_live_bom_editor_items',
     'move_bom_rows_up', 'move_bom_rows_down', 'delete_bom_rows',
     'check_group_number_conflicts', 'sync_group_parts_to_models',
-    'predict_model_bom_from_features', 'clear_model_boms'
+    '_identify_top_level_assembly_pns', 'deduplicate_visual_box_parts',
+    'complexity_visual_part_rules', 'predict_model_bom_from_features', 'clear_model_boms'
 ]
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
