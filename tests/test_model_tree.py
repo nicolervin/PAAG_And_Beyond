@@ -391,6 +391,111 @@ class ModelTreeTests(unittest.TestCase):
         at.run()
         self.assertEqual(at.exception, [])
 
+    def test_unused_bom_parts_excluded_from_bom_catalog_active_and_fishbone(self) -> None:
+        import json
+
+        model_id = store.add_project_model(self.project_id, "HPC0305DW-1", "Valid Model", "tester")
+        ts = store.now_iso()
+
+        used_part_id = str(uuid4())
+        unused_part_id = str(uuid4())
+        store.execute(
+            """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, weight_lb, make_buy, model_applicability, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (used_part_id, self.project_id, "USED-PART-001", "Used part", "63", 1.0, "Buy", "HPC0305DW-1", ts),
+        )
+        store.execute(
+            """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, weight_lb, make_buy, model_applicability, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (unused_part_id, self.project_id, "308D1387P001", "Unused screw", "64", 0.1, "Buy", "", ts),
+        )
+        store.execute(
+            """INSERT INTO part_scenario_activity (project_id, scenario_id, part_id, active, updated_at)
+               VALUES (?, ?, ?, 1, ?), (?, ?, ?, 1, ?)""",
+            (self.project_id, self.scenario_id, used_part_id, ts, self.project_id, self.scenario_id, unused_part_id, ts),
+        )
+
+        import_id = str(uuid4())
+        store.execute(
+            """INSERT INTO pits_bom_imports (
+                id, project_id, import_sequence, workbook_name, workbook_sha256,
+                bom_sheet_name, source_row_count, occurrence_count, issue_count,
+                imported_by, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (import_id, self.project_id, 101, "nexus.xlsx", "sha_nexus", "BOM", 3, 3, 0, "tester", ts),
+        )
+
+        # L1 root for active model
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                raw_levels_json, source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()), self.project_id, "", "1", 1, 1.0, "1", 1,
+                json.dumps({"Level 1": 1, "model_usages": {"HPC0305DW-1": 1.0}}),
+                "fp_root", import_id, import_id, ts, ts, ts, "Needs review",
+            ),
+        )
+        # L2 used part
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                raw_levels_json, source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()), self.project_id, "1", "63", used_part_id, 2, 1.0, "1", 2,
+                json.dumps({"Level 2": 1, "model_usages": {"HPC0305DW-1": 1.0}}),
+                "fp_used", import_id, import_id, ts, ts, ts, "Needs review",
+            ),
+        )
+        # L3 unused part (no model_usages key in raw_levels_json, mimicking PITS BOM row with 0/blank across all valid models)
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                raw_levels_json, source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()), self.project_id, "63", "64", unused_part_id, 3, 4.0, "4", 3,
+                json.dumps({"Level 3": 4}),
+                "fp_unused", import_id, import_id, ts, ts, ts, "Needs review",
+            ),
+        )
+
+        with store.connection() as conn:
+            store._sync_bom_part_scenario_activity(conn, self.project_id, ts)
+
+        # 1. Verify Master BOM and Model BOM exclude 308D1387P001
+        master_tree = store.pits_bom_model_tree(self.project_id, "all")
+        master_pns = {n["part_number"] for n in master_tree["nodes"]}
+        self.assertIn("USED-PART-001", master_pns)
+        self.assertNotIn("308D1387P001", master_pns)
+
+        model_tree = store.pits_bom_model_tree(self.project_id, model_id)
+        model_pns = {n["part_number"] for n in model_tree["nodes"]}
+        self.assertIn("USED-PART-001", model_pns)
+        self.assertNotIn("308D1387P001", model_pns)
+
+        manual_bom = store.get_manual_model_bom(self.project_id, model_id)
+        manual_pns = {r["part_number"] for r in manual_bom}
+        self.assertIn("USED-PART-001", manual_pns)
+        self.assertNotIn("308D1387P001", manual_pns)
+
+        # 2. Verify Parts Catalog active column is unchecked and active_part_ids excludes 308D1387P001
+        active_ids = store.active_part_ids(self.project_id, self.scenario_id)
+        self.assertIn(used_part_id, active_ids)
+        self.assertNotIn(unused_part_id, active_ids)
+
+        activity_map = store.part_scenario_activity(self.project_id, self.scenario_id)
+        self.assertTrue(activity_map.get(used_part_id, False))
+        self.assertFalse(activity_map.get(unused_part_id, True))
+
 
 if __name__ == "__main__":
     unittest.main()

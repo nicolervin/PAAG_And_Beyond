@@ -975,6 +975,10 @@ def _tokenize_part_text(text: str) -> set[str]:
             for sub in _INFERENCE_SUBWORDS:
                 if sub in w and sub != w:
                     tokens.add(sub)
+    if "left" in tokens or "lh" in tokens:
+        tokens.update(("left", "lh"))
+    if "right" in tokens or "rh" in tokens:
+        tokens.update(("right", "rh"))
     return tokens
 
 
@@ -1093,17 +1097,21 @@ def infer_part_feature_rules(
                 row_models = {str(m).strip() for m in usages if str(m).strip()}
                 all_bom_models.update(row_models)
                 models_with_bom.update(row_models & active_models)
-                if p:
+                if p and row_models:
                     part_models.setdefault(str(p["id"]), set()).update(row_models)
         except Exception:
             pass
 
     for p in part_rows:
         pid = str(p["id"])
-        if pid not in part_models:
+        if not (part_models.get(pid, set()) & configured_tree_models):
             app_text = str(p.get("model_applicability") or "").strip()
-            if app_text and app_text.lower() != "all":
-                mods = {m.strip() for m in app_text.split(",") if m.strip() and m.strip() in active_models}
+            if app_text and app_text.lower() not in ("all", "all models"):
+                mods = {
+                    m.strip()
+                    for m in app_text.split(",")
+                    if m.strip() and m.strip() in active_models
+                }
                 if mods:
                     part_models[pid] = mods
                     models_with_bom.update(mods)
@@ -1124,46 +1132,36 @@ def infer_part_feature_rules(
         for row in active_features_by_id.values()
         if str(row.get("subsystem") or "").strip()
     }
-    precomputed_choices: list[dict[str, Any]] = []
-    for (fid, val), c_models in feature_choice_models.items():
-        if not c_models:
-            continue
-        if val.strip().upper() in ("N/A", "NONE"):
-            continue
-        c_eval_models = c_models & eval_tree_models
-        if not c_eval_models:
-            continue
-        feat = active_features_by_id[fid]
+    precomputed_features: dict[str, dict[str, Any]] = {}
+    for fid, feat in active_features_by_id.items():
         f_subsystem = str(feat.get("subsystem") or "").strip()
         f_sub_key = f_subsystem.casefold()
-        allowed = json.loads(feat.get("allowed_values") or "[]")
-        other_eval_models_union: set[str] = set()
-        for other_val in allowed:
-            if other_val != val:
-                other_eval_models_union |= (
-                    feature_choice_models.get((fid, other_val), set()) & eval_tree_models
-                )
         f_name = str(feat.get("name") or "")
         f_cat = str(feat.get("category") or "")
-        f_tokens = (
-            _tokenize_part_text(f_name)
-            | _tokenize_part_text(f_cat)
-            | _tokenize_part_text(val)
-        )
-        precomputed_choices.append(
-            {
-                "fid": fid,
-                "val": val,
-                "c_models": c_models,
-                "c_eval_models": c_eval_models,
-                "f_subsystem": f_subsystem,
-                "f_sub_key": f_sub_key,
-                "other_eval_models_union": other_eval_models_union,
-                "f_name": f_name,
-                "f_cat": f_cat,
-                "f_tokens": f_tokens,
-            }
-        )
+        base_tokens = _tokenize_part_text(f_name) | _tokenize_part_text(f_cat)
+        raw_allowed = json.loads(feat.get("allowed_values") or "[]")
+        clean_allowed = [
+            str(v).strip()
+            for v in raw_allowed
+            if str(v or "").strip() and str(v).strip().upper() not in ("N/A", "NONE")
+        ]
+        val_tokens_by_val: dict[str, set[str]] = {}
+        for v in raw_allowed:
+            if isinstance(v, str):
+                val_tokens_by_val[v] = base_tokens | _tokenize_part_text(v)
+        for v in clean_allowed:
+            if v not in val_tokens_by_val:
+                val_tokens_by_val[v] = base_tokens | _tokenize_part_text(v)
+        precomputed_features[fid] = {
+            "f_subsystem": f_subsystem,
+            "f_sub_key": f_sub_key,
+            "f_name": f_name,
+            "f_cat": f_cat,
+            "base_tokens": base_tokens,
+            "raw_allowed": raw_allowed,
+            "clean_allowed": clean_allowed,
+            "val_tokens_by_val": val_tokens_by_val,
+        }
 
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
@@ -1171,14 +1169,19 @@ def infer_part_feature_rules(
         if str(p.get("part_number") or "").strip().upper() in top_level_pns:
             continue
         raw_models = part_models.get(pid, set())
-        p_models = raw_models & eval_tree_models
+        part_eval_tree_models = (
+            eval_tree_models
+            if (raw_models & eval_tree_models)
+            else configured_tree_models
+        )
+        p_models = raw_models & part_eval_tree_models
 
         if not p_models:
-            if str(p.get("model_applicability") or "").strip().lower() == "all":
+            if str(p.get("model_applicability") or "").strip().lower() in ("all", "all models"):
                 inferred[pid] = ["All models"]
             continue
 
-        if p_models >= eval_tree_models or len(raw_models) >= len(configured_tree_models):
+        if p_models >= part_eval_tree_models or len(raw_models) >= len(configured_tree_models):
             inferred[pid] = ["All models"]
             continue
 
@@ -1195,49 +1198,165 @@ def infer_part_feature_rules(
         )
         p_tokens = _tokenize_part_text(desc) | _tokenize_part_text(part_num)
 
-        candidates: list[dict[str, Any]] = []
-        for choice in precomputed_choices:
-            c_eval_models = choice["c_eval_models"]
-            if not (p_models <= c_eval_models):
-                continue
+        def _collect_single_value_candidates(subsystem_mode: str) -> list[dict[str, Any]]:
+            found: list[dict[str, Any]] = []
+            for (fid, val), c_models in feature_choice_models.items():
+                if not c_models:
+                    continue
+                if val.strip().upper() in ("N/A", "NONE"):
+                    continue
+                c_eval_models = c_models & part_eval_tree_models
+                if not c_eval_models or not (p_models <= c_eval_models):
+                    continue
 
-            f_sub_key = choice["f_sub_key"]
-            if part_has_assigned_subsystem and f_sub_key != p_sub_key:
-                continue
-            subsystem_match = (
-                1
-                if (f_sub_key and p_sub_key and f_sub_key == p_sub_key)
-                else 0
-            )
+                f_meta = precomputed_features[fid]
+                f_subsystem = f_meta["f_subsystem"]
+                f_sub_key = f_meta["f_sub_key"]
+                if subsystem_mode == "strict":
+                    if f_sub_key != p_sub_key:
+                        continue
+                elif subsystem_mode == "main_line":
+                    if f_sub_key != "":
+                        continue
 
-            if p_models & choice["other_eval_models_union"]:
-                continue
+                subsystem_match = (
+                    1
+                    if (f_subsystem and p_sub_key and f_sub_key == p_sub_key)
+                    else 0
+                )
 
-            overlap = len(p_tokens & choice["f_tokens"])
+                allowed = f_meta["raw_allowed"]
+                conflicts = False
+                for other_val in allowed:
+                    if other_val != val:
+                        other_models = (
+                            feature_choice_models.get((fid, other_val), set())
+                            & part_eval_tree_models
+                        )
+                        if p_models & other_models:
+                            conflicts = True
+                            break
+                if conflicts:
+                    continue
 
-            exact_match = 1.0 if p_models == c_eval_models else 0.0
-            coverage = len(p_models) / len(c_eval_models) if c_eval_models else 0.0
-            specificity = 1.0 / len(c_eval_models) if c_eval_models else 0.0
+                f_name = f_meta["f_name"]
+                f_cat = f_meta["f_cat"]
+                f_tokens = f_meta["val_tokens_by_val"].get(val)
+                if f_tokens is None:
+                    f_tokens = f_meta["base_tokens"] | _tokenize_part_text(val)
+                overlap = len(p_tokens & f_tokens)
 
-            score = (
-                (subsystem_match * 200.0)
-                + (overlap * 100.0)
-                + (exact_match * 50.0)
-                + (coverage * 20.0)
-                + specificity
-            )
-            candidates.append({
-                "score": score,
-                "feature_id": choice["fid"],
-                "value": choice["val"],
-                "overlap": overlap,
-                "subsystem_match": subsystem_match,
-                "exact_match": exact_match,
-                "category": choice["f_cat"],
-                "name": choice["f_name"],
-                "eval_models": c_eval_models,
-                "raw_models": choice["c_models"],
-            })
+                exact_match = 1.0 if p_models == c_eval_models else 0.0
+                coverage = len(p_models) / len(c_eval_models) if c_eval_models else 0.0
+                specificity = 1.0 / len(c_eval_models) if c_eval_models else 0.0
+
+                score = (
+                    (subsystem_match * 200.0)
+                    + (overlap * 100.0)
+                    + (exact_match * 50.0)
+                    + (coverage * 20.0)
+                    + specificity
+                )
+                found.append({
+                    "score": score,
+                    "feature_id": fid,
+                    "value": val,
+                    "values": [val],
+                    "overlap": overlap,
+                    "subsystem_match": subsystem_match,
+                    "exact_match": exact_match,
+                    "category": f_cat,
+                    "name": f_name,
+                    "eval_models": c_eval_models,
+                    "raw_models": c_models,
+                })
+            return found
+
+        def _collect_multi_value_candidates(subsystem_mode: str) -> list[dict[str, Any]]:
+            found: list[dict[str, Any]] = []
+            for fid, f_meta in precomputed_features.items():
+                f_subsystem = f_meta["f_subsystem"]
+                f_sub_key = f_subsystem.casefold()
+                if subsystem_mode == "strict":
+                    if f_sub_key != p_sub_key:
+                        continue
+                elif subsystem_mode == "main_line":
+                    if f_sub_key != "":
+                        continue
+
+                allowed = f_meta["clean_allowed"]
+                if len(allowed) < 2:
+                    continue
+
+                matched_vals: list[str] = []
+                union_eval_models: set[str] = set()
+                union_raw_models: set[str] = set()
+                for val in allowed:
+                    c_models = feature_choice_models.get((fid, val), set())
+                    c_eval = c_models & part_eval_tree_models
+                    if c_eval and (p_models & c_eval):
+                        matched_vals.append(val)
+                        union_eval_models.update(c_eval)
+                        union_raw_models.update(c_models)
+
+                if len(matched_vals) < 2 or not (p_models <= union_eval_models):
+                    continue
+                if union_eval_models >= part_eval_tree_models or len(matched_vals) >= len(allowed):
+                    continue
+
+                subsystem_match = (
+                    1
+                    if (f_subsystem and p_sub_key and f_sub_key == p_sub_key)
+                    else 0
+                )
+                f_name = f_meta["f_name"]
+                f_cat = f_meta["f_cat"]
+                f_tokens = set(f_meta["base_tokens"])
+                for mv in matched_vals:
+                    f_tokens |= f_meta["val_tokens_by_val"].get(mv, _tokenize_part_text(mv))
+                overlap = len(p_tokens & f_tokens)
+
+                if subsystem_match == 0 and overlap == 0 and p_models != union_eval_models:
+                    continue
+
+                exact_match = 1.0 if p_models == union_eval_models else 0.0
+                coverage = len(p_models) / len(union_eval_models) if union_eval_models else 0.0
+                specificity = 1.0 / len(union_eval_models) if union_eval_models else 0.0
+
+                score = (
+                    (subsystem_match * 200.0)
+                    + (overlap * 100.0)
+                    + (exact_match * 50.0)
+                    + (coverage * 20.0)
+                    + specificity
+                )
+                found.append({
+                    "score": score,
+                    "feature_id": fid,
+                    "value": matched_vals[0],
+                    "values": matched_vals,
+                    "overlap": overlap,
+                    "subsystem_match": subsystem_match,
+                    "exact_match": exact_match,
+                    "category": f_cat,
+                    "name": f_name,
+                    "eval_models": union_eval_models,
+                    "raw_models": union_raw_models,
+                })
+            return found
+
+        if part_has_assigned_subsystem:
+            candidates = _collect_single_value_candidates("strict")
+            if not candidates:
+                candidates = _collect_multi_value_candidates("strict")
+            if not candidates:
+                candidates = _collect_single_value_candidates("main_line")
+            if not candidates:
+                candidates = _collect_multi_value_candidates("main_line")
+        else:
+            candidates = _collect_single_value_candidates("any")
+            if not candidates:
+                candidates = _collect_multi_value_candidates("any")
 
         if not candidates:
             continue
@@ -1280,6 +1399,11 @@ def infer_part_feature_rules(
             inferred[pid] = ["All models"]
             continue
 
+        top_values = top.get("values") or [top["value"]]
+        if len(top_values) > 1:
+            inferred[pid] = [f"{top['feature_id']}::{v}" for v in top_values]
+            continue
+
         features_seen: set[str] = set()
         chosen_tokens: list[str] = []
 
@@ -1289,6 +1413,8 @@ def infer_part_feature_rules(
         if top["overlap"] > 0 or top["subsystem_match"] > 0:
             for other in candidates[1:]:
                 if other["feature_id"] in features_seen:
+                    continue
+                if len(other.get("values") or [other["value"]]) > 1:
                     continue
                 if other["overlap"] > 0 or other["subsystem_match"] > 0:
                     combined_models = top["eval_models"] & other["eval_models"]
@@ -1300,6 +1426,8 @@ def infer_part_feature_rules(
             # tag all distinguishing features of the model (Answer 2)
             for other in candidates[1:]:
                 if other["feature_id"] in features_seen:
+                    continue
+                if len(other.get("values") or [other["value"]]) > 1:
                     continue
                 if other.get("exact_match", 0) > 0.99:
                     chosen_tokens.append(f"{other['feature_id']}::{other['value']}")
@@ -1794,6 +1922,173 @@ def restore_model_planning_snapshot(project_id: str, snapshot: dict) -> None:
                     f"UPDATE {table} SET {value_column}=?, updated_at=? WHERE id=? AND project_id=?",
                     (row.get(value_column), row.get("updated_at"), row.get("id"), project_id),
                 )
+        _sync_bom_part_scenario_activity(conn, project_id, now_iso())
+
+
+def _sync_bom_part_scenario_activity(
+    conn: sqlite3.Connection,
+    project_id: str,
+    timestamp: str | None = None,
+    candidate_part_ids: set[str] | None = None,
+) -> int:
+    """Sync part_scenario_activity.active for BOM-managed parts based on positive usage on active models."""
+    ts = timestamp or now_iso()
+    active_model_rows = conn.execute(
+        "SELECT model_number FROM project_models WHERE project_id = ? AND COALESCE(active, 1) = 1",
+        (project_id,),
+    ).fetchall()
+    active_clean_models = {
+        re.sub(r"[^A-Za-z0-9]", "", str(r["model_number"] or "")).upper()
+        for r in active_model_rows
+        if str(r["model_number"] or "").strip()
+    }
+    if not active_clean_models:
+        return 0
+
+    occ_rows = conn.execute(
+        """SELECT o.child_part_id, o.child_tracker_number, o.raw_levels_json,
+                  p.part_number
+           FROM pits_bom_occurrences o
+           LEFT JOIN parts p ON p.id = o.child_part_id
+           WHERE o.project_id = ? AND COALESCE(o.source_state, 'Current') <> 'Missing'""",
+        (project_id,),
+    ).fetchall()
+
+    has_any_model_usages = False
+    active_bom_part_ids: set[str] = set()
+    active_bom_part_numbers: set[str] = set()
+    active_bom_trackers: set[str] = set()
+    all_bom_part_ids: set[str] = set(candidate_part_ids or set())
+    all_bom_part_numbers: set[str] = set()
+    all_bom_trackers: set[str] = set()
+
+    for r in occ_rows:
+        pid = str(r["child_part_id"] or "").strip()
+        pn = re.sub(r"#\d+$", "", str(r["part_number"] or "").strip()).strip().upper()
+        trk = re.sub(r"#\d+$", "", str(r["child_tracker_number"] or "").strip()).strip().upper()
+
+        data: dict[str, Any] = {}
+        usages: dict[str, float] = {}
+        raw_str = r["raw_levels_json"]
+        if raw_str:
+            try:
+                loaded = json.loads(raw_str)
+                if isinstance(loaded, dict):
+                    data = loaded
+                    u = data.get("model_usages")
+                    if isinstance(u, dict):
+                        usages = {str(k): float(v) for k, v in u.items() if v is not None}
+            except Exception:
+                data = {}
+
+        if "model_usages" in data or usages:
+            has_any_model_usages = True
+
+        if not pn and isinstance(data, dict):
+            pn = re.sub(r"#\d+$", "", str(data.get("part_number") or "").strip()).strip().upper()
+
+        if pid:
+            all_bom_part_ids.add(pid)
+        if pn:
+            all_bom_part_numbers.add(pn)
+        if trk:
+            all_bom_trackers.add(trk)
+
+        used_on_active_model = False
+        for mk, q in usages.items():
+            try:
+                if float(q) > 0 and re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() in active_clean_models:
+                    used_on_active_model = True
+                    break
+            except (TypeError, ValueError):
+                pass
+
+        if used_on_active_model:
+            if pid:
+                active_bom_part_ids.add(pid)
+            if pn:
+                active_bom_part_numbers.add(pn)
+            if trk:
+                active_bom_trackers.add(trk)
+
+    if not has_any_model_usages and not candidate_part_ids:
+        return 0
+
+    pits_zero_eau_trackers: set[str] = set()
+    pits_zero_eau_pns: set[str] = set()
+    for pr_row in conn.execute(
+        "SELECT pits_id, part_number, used_bom, source_payload FROM pits_records WHERE project_id = ?",
+        (project_id,),
+    ).fetchall():
+        p_trk = str(pr_row["pits_id"] or "").strip().upper()
+        p_pn = str(pr_row["part_number"] or "").strip().upper()
+        used_bom_flag = str(pr_row["used_bom"] or "").strip().upper()
+        is_unused_pits = used_bom_flag in ("N", "NO", "0", "FALSE")
+        if not is_unused_pits and pr_row["source_payload"]:
+            try:
+                payload = json.loads(pr_row["source_payload"])
+                if isinstance(payload, dict):
+                    first_model = str(payload.get("1stmodeltousepart") or "").strip().lower()
+                    eau_val = payload.get("eau")
+                    if first_model == "no model":
+                        is_unused_pits = True
+                    elif eau_val is not None and str(eau_val).strip() != "":
+                        try:
+                            if float(eau_val) <= 0:
+                                is_unused_pits = True
+                        except (TypeError, ValueError):
+                            pass
+            except Exception:
+                pass
+        if is_unused_pits:
+            if p_trk:
+                pits_zero_eau_trackers.add(p_trk)
+            if p_pn:
+                pits_zero_eau_pns.add(p_pn)
+
+    part_rows = conn.execute(
+        "SELECT id, part_number, pits_tracker_number FROM parts WHERE project_id = ?",
+        (project_id,),
+    ).fetchall()
+    scenario_ids = [
+        str(r["id"])
+        for r in conn.execute("SELECT id FROM planning_scenarios WHERE project_id = ?", (project_id,)).fetchall()
+    ]
+    if not scenario_ids:
+        return 0
+
+    updated = 0
+    for pr in part_rows:
+        pid = str(pr["id"])
+        pn = re.sub(r"#\d+$", "", str(pr["part_number"] or "").strip()).strip().upper()
+        trk = re.sub(r"#\d+$", "", str(pr["pits_tracker_number"] or "").strip()).strip().upper()
+
+        is_in_active_bom = (
+            pid in active_bom_part_ids
+            or (pn and pn in active_bom_part_numbers)
+            or (trk and trk in active_bom_trackers)
+        )
+        is_in_any_bom = (
+            pid in all_bom_part_ids
+            or (pn and pn in all_bom_part_numbers)
+            or (trk and trk in all_bom_trackers)
+            or (trk and trk in pits_zero_eau_trackers)
+            or (pn and pn in pits_zero_eau_pns)
+        )
+        if not is_in_any_bom and not is_in_active_bom:
+            continue
+
+        desired_active = 1 if is_in_active_bom else 0
+        for sid in scenario_ids:
+            conn.execute(
+                """INSERT INTO part_scenario_activity (project_id, scenario_id, part_id, active, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(scenario_id, part_id) DO UPDATE SET
+                   active=excluded.active, updated_at=excluded.updated_at""",
+                (project_id, sid, pid, desired_active, ts),
+            )
+            updated += 1
+    return updated
 
 def delete_project_models(project_id: str, model_ids: list[str]) -> list[str]:
     """Delete selected unreferenced models only after validating the complete selection."""
@@ -1851,7 +2146,9 @@ def delete_project_models(project_id: str, model_ids: list[str]) -> list[str]:
             f"DELETE FROM project_models WHERE project_id=? AND id IN ({placeholders})",
             (project_id, *selected_ids),
         )
-        _sync_assembly_catalog_part_applicability(conn, project_id, now_iso())
+        ts = now_iso()
+        _sync_assembly_catalog_part_applicability(conn, project_id, ts)
+        _sync_bom_part_scenario_activity(conn, project_id, ts)
         return labels
 
 def delete_project_model(project_id: str, model_id: str) -> str:
@@ -1862,25 +2159,29 @@ def add_project_model(project_id: str, model_number: str, display_name: str, des
     model_number = model_number.strip()
     if not model_number:
         raise ValueError("Model number is required.")
-    existing = query(
-        "SELECT id FROM project_models WHERE project_id = ? AND model_number = ?",
-        (project_id, model_number),
-    )
     timestamp = now_iso()
-    if existing:
-        execute(
-            "UPDATE project_models SET display_name=?, description=?, active=1, updated_at=? WHERE id=?",
-            (display_name.strip(), description.strip(), timestamp, existing[0]["id"]),
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM project_models WHERE project_id = ? AND model_number = ?",
+            (project_id, model_number),
+        ).fetchall()
+        if existing:
+            model_id = str(existing[0]["id"])
+            conn.execute(
+                "UPDATE project_models SET display_name=?, description=?, active=1, updated_at=? WHERE id=?",
+                (display_name.strip(), description.strip(), timestamp, model_id),
+            )
+            _sync_bom_part_scenario_activity(conn, project_id, timestamp)
+            return model_id
+        model_id = str(uuid4())
+        conn.execute(
+            """INSERT INTO project_models
+               (id, project_id, model_number, source_payload, updated_at, display_name, description, active)
+               VALUES (?, ?, ?, '{}', ?, ?, ?, 1)""",
+            (model_id, project_id, model_number, timestamp, display_name.strip(), description.strip()),
         )
-        return existing[0]["id"]
-    model_id = str(uuid4())
-    execute(
-        """INSERT INTO project_models
-           (id, project_id, model_number, source_payload, updated_at, display_name, description, active)
-           VALUES (?, ?, ?, '{}', ?, ?, ?, 1)""",
-        (model_id, project_id, model_number, timestamp, display_name.strip(), description.strip()),
-    )
-    return model_id
+        _sync_bom_part_scenario_activity(conn, project_id, timestamp)
+        return model_id
 
 def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
     required = {"id", "model_number", "display_name", "eau", "description", "active", "notes"}
@@ -2001,6 +2302,7 @@ def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
                             (json.dumps(updated), timestamp, node["id"]),
                         )
             _sync_assembly_catalog_part_applicability(conn, project_id, timestamp)
+            _sync_bom_part_scenario_activity(conn, project_id, timestamp)
         except sqlite3.IntegrityError as exc:
             raise ValueError("Official model numbers must be unique.") from exc
     return len(edited)
@@ -2382,6 +2684,7 @@ def _import_pits_bom_snapshot(
     summary["issues"] = issue_count
     conn.execute("UPDATE pits_bom_imports SET issue_count=? WHERE id=?", (issue_count, import_id))
     _refresh_pits_assignment_sync_status(conn, project_id)
+    _sync_bom_part_scenario_activity(conn, project_id, timestamp)
     record_audit_event(
         project_id, "PITS BOM structure", "Import PITS BOM structure",
         len(occurrences), editor_name,
@@ -3632,6 +3935,7 @@ def import_pits_id_snapshot(
                 editor_name=editor_name,
                 timestamp=timestamp,
             )
+        _sync_bom_part_scenario_activity(conn, project_id, timestamp)
     return summary
 
 
@@ -4182,6 +4486,16 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
         has_any_model_usages = False
         all_model_keys: set[str] = set()
 
+        active_model_rows = conn.execute(
+            "SELECT model_number FROM project_models WHERE project_id=? AND COALESCE(active, 1)=1",
+            (project_id,),
+        ).fetchall()
+        active_clean_models = {
+            re.sub(r"[^A-Za-z0-9]", "", str(r["model_number"] or "")).upper()
+            for r in active_model_rows
+            if str(r["model_number"] or "").strip()
+        }
+
         for r in occ_rows:
             usages: dict[str, float] = {}
             data: dict[str, Any] = {}
@@ -4194,7 +4508,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                             usages = {str(k): float(v) for k, v in u.items() if v is not None}
                 except Exception:
                     data = {}
-            if usages:
+            if usages or (isinstance(data, dict) and "model_usages" in data):
                 has_any_model_usages = True
                 all_model_keys.update(usages.keys())
             parsed_rows.append({"r": r, "usages": usages, "data": data})
@@ -4214,18 +4528,10 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
         if target_model and has_any_model_usages:
             clean_target = re.sub(r"[^A-Za-z0-9]", "", target_model).upper()
             matched_model_key = None
-            # 1. Exact match has priority
             for mk in all_model_keys:
                 if mk == target_model or re.sub(r"[^A-Za-z0-9]", "", mk).upper() == clean_target:
                     matched_model_key = mk
                     break
-            # 2. Fuzzy/prefix match only as fallback
-            if not matched_model_key:
-                for mk in all_model_keys:
-                    clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk).upper()
-                    if (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
-                        matched_model_key = mk
-                        break
 
             qualifying_nodes: list[dict[str, Any]] = []
             qualifying_trackers: set[str] = set()
@@ -4246,12 +4552,6 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                         if re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target:
                             model_qty = q
                             break
-                    if model_qty is None:
-                        for mk, q in usages.items():
-                            clean_mk = re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper()
-                            if (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
-                                model_qty = q
-                                break
 
                 # If this row is not used on this model, skip it
                 if model_qty is None or float(model_qty) <= 0:
@@ -4397,12 +4697,30 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
 
         for pr in parsed_rows:
             r = pr["r"]
+            usages = pr["usages"]
+            pr_data = pr.get("data") or {}
+
+            active_model_qty = None
+            if has_any_model_usages:
+                if usages:
+                    if active_clean_models:
+                        for mk, q in usages.items():
+                            if q is not None and float(q) > 0 and re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() in active_clean_models:
+                                active_model_qty = float(q)
+                                break
+                    else:
+                        for mk, q in usages.items():
+                            if q is not None and float(q) > 0:
+                                active_model_qty = float(q)
+                                break
+                if active_model_qty is None or active_model_qty <= 0:
+                    continue
+
             pid = str(r["child_part_id"]) if r["child_part_id"] else None
             in_catalog = pid is not None
             fb_info = fb_by_part.get(pid, []) if pid else []
             in_fishbone = len(fb_info) > 0
 
-            pr_data = pr.get("data") or {}
             p_num = r["part_number"] or pr_data.get("part_number") or (
                 f"Uncataloged (Tracker #{r['child_tracker_number']})" if r["child_tracker_number"] else "—"
             )
@@ -4415,6 +4733,11 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 if parent_fallback:
                     raw_pt = str(parent_fallback.get("child_tracker") or "").strip()
 
+            resolved_qty = (
+                round(active_model_qty, 5)
+                if active_model_qty is not None
+                else (r["proposed_quantity"] if r["proposed_quantity"] is not None else (r["raw_quantity_text"] or 1))
+            )
             node: dict[str, Any] = {
                 "id": str(r["id"]),
                 "part_id": pid,
@@ -4424,8 +4747,8 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                 "child_tracker": str(r["child_tracker_number"] or "").strip(),
                 "part_number": p_num,
                 "description": p_desc,
-                "quantity": r["proposed_quantity"] if r["proposed_quantity"] is not None else (r["raw_quantity_text"] or 1),
-                "raw_quantity_text": str(r["raw_quantity_text"] or ""),
+                "quantity": resolved_qty,
+                "raw_quantity_text": str(resolved_qty if active_model_qty is not None else (r["raw_quantity_text"] or "")),
                 "in_catalog": in_catalog,
                 "in_fishbone": in_fishbone,
                 "fishbone_sections": [x["section"] for x in fb_info],
@@ -4520,20 +4843,35 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
         }
 
 
-def _occurrence_has_active_usages(raw_levels_str: str | None) -> bool:
-    """Return True if a pits_bom_occurrences row has at least one active model usage (or no model_usages dict)."""
+def _occurrence_has_active_usages(
+    raw_levels_str: str | None,
+    active_clean_models: set[str] | None = None,
+    has_any_model_usages: bool = False,
+) -> bool:
+    """Return True if a pits_bom_occurrences row has at least one active model usage (or no model_usages dict when legacy)."""
     if not raw_levels_str:
-        return True
+        return not has_any_model_usages
     try:
         data = json.loads(raw_levels_str)
-        if isinstance(data, dict) and "model_usages" in data:
-            u = data.get("model_usages")
-            if isinstance(u, dict):
-                return any(v is not None and float(v) > 0 for v in u.values())
-            return False
+        if isinstance(data, dict):
+            if "model_usages" in data:
+                u = data.get("model_usages")
+                if isinstance(u, dict):
+                    if active_clean_models:
+                        return any(
+                            v is not None
+                            and float(v) > 0
+                            and re.sub(r"[^A-Za-z0-9]", "", str(k)).upper() in active_clean_models
+                            for k, v in u.items()
+                        )
+                    return any(v is not None and float(v) > 0 for v in u.values())
+                return False
+            if has_any_model_usages:
+                return False
     except Exception:
-        pass
-    return True
+        if has_any_model_usages:
+            return False
+    return not has_any_model_usages
 
 
 @cached_store_read
@@ -4598,7 +4936,26 @@ def pits_assembly_mini_bom(
             ),
         ).fetchall()
 
-        active_occ_rows = [r for r in occ_rows if _occurrence_has_active_usages(r["raw_levels_json"])]
+        active_model_rows = conn.execute(
+            "SELECT model_number FROM project_models WHERE project_id = ? AND COALESCE(active, 1) = 1",
+            (project_id,),
+        ).fetchall()
+        active_clean_models = {
+            re.sub(r"[^A-Za-z0-9]", "", str(r["model_number"] or "")).upper()
+            for r in active_model_rows
+            if str(r["model_number"] or "").strip()
+        }
+        has_any_model_usages = bool(
+            conn.execute(
+                "SELECT 1 FROM pits_bom_occurrences WHERE project_id = ? AND raw_levels_json LIKE '%\"model_usages\"%' LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        )
+
+        active_occ_rows = [
+            r for r in occ_rows
+            if _occurrence_has_active_usages(r["raw_levels_json"], active_clean_models, has_any_model_usages)
+        ]
         if not active_occ_rows:
             active_occ_rows = list(occ_rows)
 
@@ -4661,7 +5018,7 @@ def pits_assembly_mini_bom(
 
             seen_under_parent: set[str] = set()
             for r in child_rows:
-                if not _occurrence_has_active_usages(r["raw_levels_json"]):
+                if not _occurrence_has_active_usages(r["raw_levels_json"], active_clean_models, has_any_model_usages):
                     continue
 
                 raw_pn = str(r["part_number"] or "").strip()
@@ -4750,6 +5107,26 @@ def sort_bom_hierarchy(
     children_by_parent: dict[str, list[dict[str, Any]]] = {}
     parents_by_ct: dict[str, list[dict[str, Any]]] = {}
     roots: list[dict[str, Any]] = []
+
+    # Resolve parent_tracker for items whose recorded parent_tracker is absent in this filtered set
+    # (e.g., when multiple sibling Level 1 model rows preceded shared Level 2+ rows in PITS BOM)
+    outline_stack: dict[int, str] = {}
+    for it in sorted(items_copy, key=_sort_key):
+        lvl = int(it.get("level", 1) or 1)
+        ct_self = str(it.get("child_tracker") or it.get("part_number") or "").strip()
+        pt = str(it.get("parent_tracker") or "").strip()
+        if lvl > 1 and (not pt or pt.upper() not in all_child_trackers):
+            fallback_pt = outline_stack.get(lvl - 1, "")
+            if not fallback_pt:
+                for p_lvl in range(lvl - 1, 0, -1):
+                    if p_lvl in outline_stack:
+                        fallback_pt = outline_stack[p_lvl]
+                        break
+            if fallback_pt:
+                it["parent_tracker"] = fallback_pt
+        if ct_self:
+            outline_stack[lvl] = ct_self
+            outline_stack = {k: v for k, v in outline_stack.items() if k <= lvl}
 
     for it in items_copy:
         ct_self = str(it.get("child_tracker") or it.get("part_number") or "").strip().upper()
@@ -4887,7 +5264,8 @@ def get_manual_model_bom(
             (project_id,),
         ).fetchall()
 
-        results: list[dict[str, Any]] = []
+        parsed_occ_rows: list[tuple[sqlite3.Row, dict[str, float], str, dict[str, Any]]] = []
+        has_any_model_usages = False
         for r in occ_rows:
             usages: dict[str, float] = {}
             group_num = ""
@@ -4903,7 +5281,12 @@ def get_manual_model_bom(
                         group_num = str(data.get("group_number") or "")
                 except Exception:
                     data = {}
+            if usages or (isinstance(data, dict) and "model_usages" in data):
+                has_any_model_usages = True
+            parsed_occ_rows.append((r, usages, group_num, data))
 
+        results: list[dict[str, Any]] = []
+        for r, usages, group_num, data in parsed_occ_rows:
             # Match model usage
             model_qty = None
             if usages:
@@ -4915,17 +5298,11 @@ def get_manual_model_bom(
                         if re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target:
                             model_qty = q
                             break
-                    if model_qty is None:
-                        for mk, q in usages.items():
-                            clean_mk = re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper()
-                            if (len(clean_target) >= 6 and clean_target[:6] in clean_mk) or (len(clean_mk) >= 6 and clean_mk[:6] in clean_target):
-                                model_qty = q
-                                break
-            elif data and "model_usages" in data:
-                # model_usages was explicitly configured on this occurrence, but this model is not used on it!
+            elif (data and "model_usages" in data) or has_any_model_usages:
+                # model_usages is used in this project's BOM, and this model is not used on this occurrence
                 model_qty = None
             else:
-                # Occurrences with no explicit model_usages (legacy or master occurrences)
+                # Occurrences with no explicit model_usages across a legacy project
                 model_qty = r["proposed_quantity"] if r["proposed_quantity"] is not None else 1.0
 
             if model_qty is None or float(model_qty) <= 0:
@@ -5008,6 +5385,22 @@ def get_known_subassembly_structure(
         if part_row:
             part_id = str(part_row["id"] if isinstance(part_row, (sqlite3.Row, dict)) else part_row[0])
 
+        active_model_rows = conn.execute(
+            "SELECT model_number FROM project_models WHERE project_id = ? AND COALESCE(active, 1) = 1",
+            (project_id,),
+        ).fetchall()
+        active_clean_models = {
+            re.sub(r"[^A-Za-z0-9]", "", str(r["model_number"] or "")).upper()
+            for r in active_model_rows
+            if str(r["model_number"] or "").strip()
+        }
+        has_any_model_usages = bool(
+            conn.execute(
+                "SELECT 1 FROM pits_bom_occurrences WHERE project_id = ? AND raw_levels_json LIKE '%\"model_usages\"%' LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        )
+
         results: list[dict[str, Any]] = []
 
         def _dfs(parent_trk: str, parent_pid: str | None, rel_lvl: int, ancestors: set[str]) -> None:
@@ -5030,7 +5423,7 @@ def get_known_subassembly_structure(
 
             seen_under_parent: set[str] = set()
             for cr in child_rows:
-                if not _occurrence_has_active_usages(cr["raw_levels_json"]):
+                if not _occurrence_has_active_usages(cr["raw_levels_json"], active_clean_models, has_any_model_usages):
                     continue
                 raw_c_pn = str(cr["part_number"] or cr["child_tracker_number"] or "").strip()
                 c_pn = re.sub(r"#\d+$", "", raw_c_pn).strip()
@@ -5611,7 +6004,6 @@ def save_manual_model_bom(
                     k_u for k_u in usages
                     if str(k_u) == clean_model_key
                     or re.sub(r"[^A-Za-z0-9]", "", str(k_u)).upper() == clean_target
-                    or (len(clean_target) >= 6 and (clean_target[:6] in str(k_u).upper() or str(k_u).upper()[:6] in clean_target))
                 ]
                 for kp in keys_to_purge:
                     del usages[kp]
@@ -5681,6 +6073,11 @@ def save_manual_model_bom(
                 existing_by_key[k] = {"id": occ_id, "raw_levels_json": json.dumps(data, ensure_ascii=False)}
 
         # 5. Clean up any previous usages of this model that were removed
+        candidate_pids = {
+            str(r["child_part_id"])
+            for r in existing_occ_rows
+            if r["child_part_id"]
+        }
         for k, existing in existing_by_key.items():
             if k not in new_keys_used and "raw_levels_json" in existing:
                 try:
@@ -5692,7 +6089,6 @@ def save_manual_model_bom(
                                 mk for mk in usages
                                 if str(mk) == clean_model_key
                                 or re.sub(r"[^A-Za-z0-9]", "", str(mk)).upper() == clean_target
-                                or (len(clean_target) >= 6 and (clean_target[:6] in str(mk).upper() or str(mk).upper()[:6] in clean_target))
                             ]
                             if keys_to_purge:
                                 for kp in keys_to_purge:
@@ -5710,6 +6106,8 @@ def save_manual_model_bom(
                                     )
                 except Exception:
                     pass
+
+        _sync_bom_part_scenario_activity(conn, project_id, now_ts, candidate_part_ids=candidate_pids)
 
         # 6. Audit event
         record_audit_event(
@@ -6745,26 +7143,42 @@ def _identify_top_level_assembly_pns(
         else query(sql, params)
     )
     occ_rows = read_rows(
-        """SELECT o.proposed_depth, o.parent_tracker_number, o.child_tracker_number, p.part_number
+        """SELECT o.proposed_depth, o.parent_tracker_number, o.child_tracker_number,
+                  o.raw_levels_json, p.part_number, p.description
            FROM pits_bom_occurrences o
            LEFT JOIN parts p ON p.id = o.child_part_id
            WHERE o.project_id=?""",
         (project_id,),
     )
-    l1_candidate_pns: set[str] = set()
+    l1_rows: list[tuple[str, str, set[str]]] = []
+    l1_count_by_model: dict[str, int] = {}
     l2_plus_pns: set[str] = set()
+    parents_of_l2_plus: set[str] = set()
     parents_of_l3_plus: set[str] = set()
     for r in occ_rows:
         depth = int(r.get("proposed_depth") or 1)
         p_trk = re.sub(r"#\d+$", "", str(r.get("parent_tracker_number") or "").strip()).upper()
         c_trk = re.sub(r"#\d+$", "", str(r.get("child_tracker_number") or "").strip()).upper()
         p_num = str(r.get("part_number") or "").strip().upper()
+        row_models: set[str] = set()
+        try:
+            levels = json.loads(r.get("raw_levels_json") or "{}")
+            usages = levels.get("model_usages") or {}
+            if isinstance(usages, dict):
+                row_models = {
+                    str(m).strip()
+                    for m, qty in usages.items()
+                    if str(m).strip() and (qty is None or float(qty or 0) > 0)
+                }
+        except Exception:
+            pass
         if depth <= 1 or not p_trk:
-            if c_trk:
-                l1_candidate_pns.add(c_trk)
-            if p_num:
-                l1_candidate_pns.add(p_num)
+            l1_rows.append((c_trk, p_num, row_models))
+            for m in row_models:
+                l1_count_by_model[m] = l1_count_by_model.get(m, 0) + 1
         else:
+            if p_trk:
+                parents_of_l2_plus.add(p_trk)
             if c_trk:
                 l2_plus_pns.add(c_trk)
             if p_num:
@@ -6772,11 +7186,24 @@ def _identify_top_level_assembly_pns(
             if depth >= 3 and p_trk:
                 parents_of_l3_plus.add(p_trk)
     if l2_plus_pns:
-        top_level_pns.update(l1_candidate_pns)
+        total_l1_rows = len(l1_rows)
+        for c_trk, p_num, row_models in l1_rows:
+            is_parent_of_l2 = bool(
+                (c_trk and c_trk in parents_of_l2_plus)
+                or (p_num and p_num in parents_of_l2_plus)
+            )
+            is_single_root = total_l1_rows == 1 or any(
+                l1_count_by_model.get(m, 0) == 1 for m in row_models
+            )
+            if is_parent_of_l2 and is_single_root:
+                if c_trk:
+                    top_level_pns.add(c_trk)
+                if p_num:
+                    top_level_pns.add(p_num)
     subassembly_pns = l2_plus_pns & parents_of_l3_plus
 
     final_asm_pattern = re.compile(
-        r"\b(?:final\s*(?:asm|assembly|assy)|top[\s-]*level\s*(?:asm|assembly|assy))\b",
+        r"\b(?:aasm|final\s*(?:asm|assembly|assy)|top[\s-]*level\s*(?:asm|assembly|assy))\b",
         re.IGNORECASE,
     )
     for r in cat_rows:
@@ -7218,9 +7645,15 @@ def clear_model_boms(
         clearing_all_models = len(cleared_mids) == len(all_models)
 
         occ_rows = conn.execute(
-            "SELECT id, raw_levels_json, proposed_quantity, approved_assignment_id, confirmed_section_id FROM pits_bom_occurrences WHERE project_id=?",
+            "SELECT id, child_part_id, raw_levels_json, proposed_quantity, approved_assignment_id, confirmed_section_id FROM pits_bom_occurrences WHERE project_id=?",
             (project_id,),
         ).fetchall()
+
+        candidate_pids = {
+            str(r["child_part_id"])
+            for r in occ_rows
+            if r["child_part_id"]
+        }
 
         now_ts = now_iso()
         removed_count = 0
@@ -7267,15 +7700,7 @@ def clear_model_boms(
             for mk in list(usages.keys()):
                 mk_str = str(mk).strip()
                 clean_mk = re.sub(r"[^A-Za-z0-9]", "", mk_str).upper()
-                matched = False
                 if mk_str in cleared_mnums or clean_mk in cleared_clean_targets:
-                    matched = True
-                else:
-                    for ct in cleared_clean_targets:
-                        if len(ct) >= 6 and (ct[:6] in clean_mk or (len(clean_mk) >= 6 and clean_mk[:6] in ct)):
-                            matched = True
-                            break
-                if matched:
                     keys_to_purge.append(mk)
 
             if not keys_to_purge:
@@ -7297,6 +7722,8 @@ def clear_model_boms(
                     (json.dumps(data, ensure_ascii=False), now_ts, occ_id),
                 )
             removed_count += 1
+
+        _sync_bom_part_scenario_activity(conn, project_id, now_ts, candidate_part_ids=candidate_pids)
 
         action_desc = (
             f"Cleared all model BOMs ({', '.join(cleared_mnums)})"
