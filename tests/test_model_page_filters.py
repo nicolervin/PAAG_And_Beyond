@@ -185,6 +185,22 @@ class ModelPageFiltersTests(unittest.TestCase):
         self.assertIn("PN-DISP-01<br>PN-DISP-02", markdown_texts)
         self.assertIn("No parts assigned", markdown_texts)
 
+        # Also verify selecting multiple model labels and multiple feature displays together
+        app.session_state[f"complexity_tree_visual_model_label_{self.project_id}"] = [
+            "Model name",
+            "Model number",
+        ]
+        app.session_state[f"complexity_tree_visual_feature_display_{self.project_id}"] = [
+            "Feature",
+            "Part number",
+        ]
+        app.run()
+        self.assertFalse(app.exception)
+        combined_markdown = "\n".join(md.value for md in app.markdown)
+        self.assertIn("Model 1<br>MOD-1", combined_markdown)
+        self.assertIn("Model 2<br>MOD-2", combined_markdown)
+        self.assertIn("Yes<br><span style=\"font-weight:400;\">PN-DISP-01<br>PN-DISP-02</span>", combined_markdown)
+
 
 if __name__ == "__main__":
     unittest.main()

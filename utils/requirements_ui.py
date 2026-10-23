@@ -212,7 +212,12 @@ def render_quality_requirement_type_catalog(
         request_table_editor_reset(repository_editor_key)
         st.toast(
             (
-                "Saved Quality requirement Types"
+                f"Saved {changed_count} Quality requirement Type change(s)"
+                + (
+                    f" · renamed {len(affected_requirements)} requirement(s)"
+                    if affected_requirements
+                    else ""
+                )
                 if changed_count or affected_requirements
                 else "Quality requirement Types are already up to date"
             ),
@@ -1541,7 +1546,7 @@ def render_requirements_repository_tab(
                     type="primary",
                     icon=":material/link_off:",
                     disabled=has_unsaved_edits,
-                    key=f"quality_requirement_request_bulk_unlink_{project_id}",
+                    key=f"destructive_quality_requirement_request_bulk_unlink_{project_id}",
                 ):
                     items = []
                     for s_idx, s_row in selected_links.iterrows():

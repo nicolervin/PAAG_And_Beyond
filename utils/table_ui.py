@@ -5,16 +5,32 @@ import hashlib
 import math
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Iterable, NoReturn
+from typing import Iterable, NoReturn, Sequence
 
 import pandas as pd
 import streamlit as st
 
-from utils.table_filters import logical_table_editor_key, request_table_editor_reset
+from utils.table_filters import (
+    can_redo_last_table_edit,
+    can_undo_last_table_edit,
+    get_effective_table_editor_state,
+    last_table_undo_redo_message,
+    logical_table_editor_key,
+    redo_last_table_edit,
+    request_table_editor_reset,
+    undo_last_table_edit,
+)
 
 
 DEFAULT_SELECTION_COLUMN = "selected"
 DECIMAL_COMPARISON_PLACES = 9
+
+_UNSAVED_SOURCES_KEY = "_active_unsaved_sources"
+_PENDING_UNSAVED_NAV_KEY = "_pending_unsaved_nav"
+_UNSAVED_NAV_ACTION_KEY = "_unsaved_nav_action"
+_UNSAVED_NAV_EXECUTING_KEY = "_executing_unsaved_nav_action"
+_UNSAVED_NAV_AFTER_ACTION_KEY = "_unsaved_nav_after_action"
+_UNSAVED_NAV_TRIGGERED_KEY = "_unsaved_nav_triggered_sources"
 
 
 def _rounded_decimal(value, *, decimal_places: int = DECIMAL_COMPARISON_PLACES) -> float | None:
@@ -108,6 +124,8 @@ def direct_entry_editor_rows(
     sort_columns: Iterable[str] | None = None,
     labels: dict[str, str] | None = None,
     additional_unsaved_changes: bool = False,
+    default_sort_column: str = "",
+    default_sort_descending: bool = False,
 ) -> pd.DataFrame:
     """Sort saved rows before a direct-entry, multi-row-paste editor renders.
 
@@ -131,10 +149,12 @@ def direct_entry_editor_rows(
     direction_key = f"{sort_scope}_external_sort_direction"
     valid_options = ["", *candidates]
     if st.session_state.get(sort_key) not in valid_options:
-        st.session_state[sort_key] = ""
+        st.session_state[sort_key] = (
+            default_sort_column if default_sort_column in valid_options else ""
+        )
     if not isinstance(st.session_state.get(direction_key), bool):
-        st.session_state[direction_key] = False
-    editor_state = st.session_state.get(editor_key, {}) or {}
+        st.session_state[direction_key] = bool(default_sort_descending)
+    editor_state = get_effective_table_editor_state(editor_key)
     controls_locked = bool(
         editor_state.get("edited_rows")
         or editor_state.get("added_rows")
@@ -175,6 +195,17 @@ def direct_entry_editor_rows(
             if isinstance(value, (list, tuple, set))
             else ("" if value is None else str(value))
         )
+        comparable = comparable.mask(comparable.astype(str).str.strip().eq(""), pd.NA)
+        positions = comparable.sort_values(
+            ascending=not bool(descending), na_position="last", kind="stable"
+        ).index
+        return dataframe.loc[positions].reset_index(drop=True)
+    if pd.api.types.is_string_dtype(sort_values.dtype) or sort_values.dtype == object:
+        comparable = sort_values.map(
+            lambda value: pd.NA
+            if value is None or (isinstance(value, str) and not value.strip()) or pd.isna(value)
+            else str(value)
+        )
         positions = comparable.sort_values(
             ascending=not bool(descending), na_position="last", kind="stable"
         ).index
@@ -213,7 +244,7 @@ def drop_untouched_new_rows(
     if not identifying_columns:
         return dataframe.reset_index(drop=True)
     if id_column in dataframe.columns:
-        new_record = dataframe[id_column].apply(is_blank).astype(bool)
+        new_record = dataframe[id_column].apply(lambda value: is_blank(value) or str(value).strip().startswith("__draft_new__")).astype(bool)
     else:
         new_record = pd.Series(True, index=dataframe.index)
     untouched = new_record.copy()
@@ -238,7 +269,12 @@ def table_has_unsaved_changes(
     native_row_selection: bool = False,
 ) -> bool:
     """Detect persisted data edits while ignoring action-only table columns."""
-    state = st.session_state.get(editor_key, {}) or {}
+    logical_key = logical_table_editor_key(editor_key)
+    if st.session_state.get(f"_reset_table_editor_{logical_key}") and not st.session_state.get(
+        f"_pending_undo_last_edit_{logical_key}"
+    ):
+        return False
+    state = get_effective_table_editor_state(editor_key)
     if state.get("added_rows") or (state.get("deleted_rows") and not native_row_selection):
         return True
     ignored = set(ignored_columns)
@@ -257,7 +293,7 @@ def native_selected_rows(
     """Return rows chosen with the data editor's native corner/row selectors."""
     if id_column not in source_dataframe:
         return source_dataframe.iloc[0:0].copy()
-    state = st.session_state.get(editor_key, {}) or {}
+    state = get_effective_table_editor_state(editor_key)
     positions = [
         int(position) for position in state.get("deleted_rows", [])
         if 0 <= int(position) < len(source_dataframe)
@@ -310,10 +346,10 @@ def required_field_errors(dataframe: pd.DataFrame, required_fields: dict[str, st
     return errors
 
 
-def standard_details_column_config(*, on_click, key: str):
+def standard_details_column_config(*, on_click, key: str, pinned: bool = False):
     """Return the standard row Details action."""
     return st.column_config.ButtonColumn(
-        "Details", type="tertiary", on_click=on_click, key=key,
+        "Details", type="tertiary", on_click=on_click, key=key, pinned=pinned,
         help="Open this row's full information and editing controls.",
     )
 
@@ -362,6 +398,102 @@ def editable_table_heading(title: str) -> None:
     st.subheader(title)
 
 
+def _source_item_has_unsaved(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("additional_unsaved"):
+        return True
+    editor_key = str(item.get("editor_key") or "")
+    if editor_key and table_has_unsaved_changes(
+        editor_key,
+        native_row_selection=bool(item.get("native_row_selection", False)),
+    ):
+        return True
+    return False
+
+
+def has_active_unsaved_changes() -> bool:
+    """Return True if any active editor or draft on the current view has unsaved changes."""
+    sources = st.session_state.get(_UNSAVED_SOURCES_KEY) or []
+    return any(_source_item_has_unsaved(item) for item in sources)
+
+
+def _has_untried_unsaved_sources() -> bool:
+    triggered = set(st.session_state.get(_UNSAVED_NAV_TRIGGERED_KEY) or [])
+    sources = st.session_state.get(_UNSAVED_SOURCES_KEY) or []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("source_id") or "") in triggered:
+            continue
+        if _source_item_has_unsaved(item):
+            return True
+    return False
+
+
+def clear_unsaved_tracking_state() -> None:
+    """Clear transient unsaved-change tracking state when switching contexts."""
+    st.session_state.pop(_UNSAVED_SOURCES_KEY, None)
+    st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_ACTION_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+
+
+def request_unsaved_page_navigation(target_url_path: str, *, label: str = "") -> None:
+    """Intercept a main-tab page switch and queue the Unsaved Changes dialog."""
+    st.session_state[_PENDING_UNSAVED_NAV_KEY] = {
+        "kind": "page",
+        "target": str(target_url_path),
+        "label": str(label or target_url_path),
+    }
+
+
+def register_unsaved_source(
+    source_id: str,
+    *,
+    editor_key: str | None = None,
+    native_row_selection: bool = False,
+    additional_unsaved: bool = False,
+) -> tuple[bool, bool]:
+    """Register an editable view source and return (trigger_save, trigger_discard)."""
+    unsaved = (
+        (
+            bool(editor_key)
+            and table_has_unsaved_changes(
+                editor_key, native_row_selection=native_row_selection
+            )
+        )
+        or bool(additional_unsaved)
+    )
+    sources = list(st.session_state.get(_UNSAVED_SOURCES_KEY) or [])
+    sources = [
+        item
+        for item in sources
+        if isinstance(item, dict) and item.get("source_id") != source_id
+    ]
+    sources.append(
+        {
+            "source_id": str(source_id),
+            "editor_key": str(editor_key or ""),
+            "native_row_selection": bool(native_row_selection),
+            "additional_unsaved": bool(additional_unsaved),
+        }
+    )
+    st.session_state[_UNSAVED_SOURCES_KEY] = sources
+    executing_action = st.session_state.get(_UNSAVED_NAV_EXECUTING_KEY)
+    triggered = list(st.session_state.get(_UNSAVED_NAV_TRIGGERED_KEY) or [])
+    trigger_save = False
+    trigger_discard = False
+    if unsaved and executing_action in ("save", "discard") and source_id not in triggered:
+        triggered.append(str(source_id))
+        st.session_state[_UNSAVED_NAV_TRIGGERED_KEY] = triggered
+        trigger_save = executing_action == "save"
+        trigger_discard = executing_action == "discard"
+    return trigger_save, trigger_discard
+
+
 def editable_table_footer(
     *,
     editor_key: str,
@@ -382,6 +514,12 @@ def editable_table_footer(
         )
         or additional_unsaved_changes
     )
+    trigger_save, trigger_discard = register_unsaved_source(
+        key_prefix,
+        editor_key=editor_key,
+        native_row_selection=native_row_selection,
+        additional_unsaved=additional_unsaved_changes,
+    )
     footer = st.container(
         horizontal=True,
         vertical_alignment="center",
@@ -398,10 +536,53 @@ def editable_table_footer(
             help=additional_action_help,
             key=additional_action_key or f"{key_prefix}_additional_action",
         )
-    undo = footer.button(
-        "Undo",
+    can_undo_last = can_undo_last_table_edit(
+        editor_key,
+        native_row_selection=native_row_selection,
+    )
+    undo_last = footer.button(
+        "Undo last edit",
         icon=":material/undo:",
+        disabled=not can_undo_last,
+        help="Revert the most recent cell edit while keeping earlier unsaved changes.",
+        key=f"{key_prefix}_undo_last_edit",
+    )
+    if undo_last:
+        if undo_last_table_edit(editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    editor_key,
+                    default="Reverted the last cell edit.",
+                ),
+                icon=":material/undo:",
+            )
+            st.rerun()
+    can_redo_last = can_redo_last_table_edit(
+        editor_key,
+        native_row_selection=native_row_selection,
+    )
+    redo_last = footer.button(
+        "Redo last edit",
+        icon=":material/redo:",
+        disabled=not can_redo_last,
+        help="Reapply the most recently undone cell edit.",
+        key=f"{key_prefix}_redo_last_edit",
+    )
+    if redo_last:
+        if redo_last_table_edit(editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    editor_key,
+                    default="Reapplied the last undone cell edit.",
+                ),
+                icon=":material/redo:",
+            )
+            st.rerun()
+    undo = footer.button(
+        "Discard all edits",
+        icon=":material/restart_alt:",
         disabled=not (unsaved or undo_available),
+        help="Discard all unsaved changes in this table and restore the last saved values.",
         key=f"{key_prefix}_undo",
     )
     save_and_refresh = footer.button(
@@ -411,7 +592,223 @@ def editable_table_footer(
         key=f"{key_prefix}_save_refresh",
     )
     return TableHeaderActions(
-        save_and_refresh=save_and_refresh,
-        undo=undo,
+        save_and_refresh=bool(save_and_refresh or trigger_save),
+        undo=bool(undo or trigger_discard),
         additional_action=additional_action,
     )
+
+
+def _on_guarded_tab_change(tab_key: str) -> None:
+    committed_key = f"_committed_tab_{tab_key}"
+    gen_key = f"_guarded_tab_gen_{tab_key}"
+    gen = int(st.session_state.get(gen_key, 0) or 0)
+    widget_key = f"{tab_key}__tab_gen_{gen}"
+    new_val = str(st.session_state.get(widget_key) or "")
+    prev_tab = str(st.session_state.get(committed_key) or "")
+    if not new_val or new_val == prev_tab:
+        return
+    if has_active_unsaved_changes():
+        st.session_state[committed_key] = prev_tab
+        st.session_state[tab_key] = prev_tab
+        st.session_state[gen_key] = gen + 1
+        st.session_state[_PENDING_UNSAVED_NAV_KEY] = {
+            "kind": "subtab",
+            "tab_key": tab_key,
+            "target": new_val,
+            "label": new_val,
+        }
+    else:
+        st.session_state[committed_key] = new_val
+        st.session_state[tab_key] = new_val
+
+
+def guarded_tabs(
+    tabs: Sequence[str],
+    *,
+    key: str,
+    default: str | None = None,
+):
+    """Render st.tabs that intercept tab switches when unsaved changes exist."""
+    tab_list = [str(tab) for tab in tabs]
+    committed_key = f"_committed_tab_{key}"
+    gen_key = f"_guarded_tab_gen_{key}"
+    gen = int(st.session_state.get(gen_key, 0) or 0)
+    fallback_tab = (
+        default
+        if (default and default in tab_list)
+        else (tab_list[0] if tab_list else "")
+    )
+
+    external_val = st.session_state.get(key)
+    committed_tab = st.session_state.get(committed_key)
+    if (
+        isinstance(external_val, str)
+        and external_val in tab_list
+        and external_val != committed_tab
+    ):
+        committed_tab = external_val
+        st.session_state[committed_key] = committed_tab
+        gen += 1
+        st.session_state[gen_key] = gen
+    elif not isinstance(committed_tab, str) or committed_tab not in tab_list:
+        committed_tab = fallback_tab
+        st.session_state[committed_key] = committed_tab
+        st.session_state[key] = committed_tab
+    else:
+        st.session_state[key] = committed_tab
+
+    widget_key = f"{key}__tab_gen_{gen}"
+    return st.tabs(
+        tab_list,
+        key=widget_key,
+        default=committed_tab if committed_tab in tab_list else None,
+        on_change=_on_guarded_tab_change,
+        args=(key,),
+    )
+
+
+def _has_blocking_save_dialog_state() -> bool:
+    for state_key, state_val in st.session_state.items():
+        if str(state_key).startswith("_pending_group_conflict_") and state_val:
+            return True
+    return False
+
+
+def _complete_pending_unsaved_nav(
+    page_by_url_path: dict[str, object],
+    *,
+    split_secondary_key: str | None = None,
+) -> None:
+    pending = st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_ACTION_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+    st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+    if not isinstance(pending, dict):
+        return
+    kind = str(pending.get("kind") or "")
+    target = str(pending.get("target") or "")
+    if kind == "page" and target in page_by_url_path:
+        if split_secondary_key and target == str(
+            st.session_state.get(split_secondary_key) or ""
+        ):
+            st.session_state.pop(split_secondary_key, None)
+        clear_unsaved_tracking_state()
+        st.switch_page(page_by_url_path[target])
+    elif kind == "subtab":
+        tab_key = str(pending.get("tab_key") or "")
+        if tab_key and target:
+            st.session_state[f"_committed_tab_{tab_key}"] = target
+            st.session_state[tab_key] = target
+            gen_key = f"_guarded_tab_gen_{tab_key}"
+            st.session_state[gen_key] = int(st.session_state.get(gen_key, 0) or 0) + 1
+            st.session_state.pop(_UNSAVED_SOURCES_KEY, None)
+
+
+def begin_unsaved_tracking(
+    page_by_url_path: dict[str, object],
+    *,
+    split_secondary_key: str | None = None,
+) -> None:
+    """Prepare unsaved-change tracking before rendering the active workspace page."""
+    action = st.session_state.pop(_UNSAVED_NAV_ACTION_KEY, None)
+    if action in ("save", "discard"):
+        st.session_state[_UNSAVED_NAV_EXECUTING_KEY] = action
+        st.session_state[_UNSAVED_NAV_AFTER_ACTION_KEY] = action
+    else:
+        after_action = st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+        if after_action in ("save", "discard"):
+            if _has_blocking_save_dialog_state():
+                st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
+                st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
+                st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+            elif _has_untried_unsaved_sources():
+                st.session_state[_UNSAVED_NAV_EXECUTING_KEY] = after_action
+                st.session_state[_UNSAVED_NAV_AFTER_ACTION_KEY] = after_action
+            else:
+                _complete_pending_unsaved_nav(
+                    page_by_url_path,
+                    split_secondary_key=split_secondary_key,
+                )
+    st.session_state[_UNSAVED_SOURCES_KEY] = []
+
+
+@st.dialog("Unsaved Changes", dismissible=False)
+def _unsaved_changes_navigation_dialog(pending: dict[str, object]) -> None:
+    target_label = str(
+        pending.get("label") or pending.get("target") or "the selected view"
+    )
+    nav_kind = "sub-tab" if pending.get("kind") == "subtab" else "tab"
+    st.warning(
+        f"You have unsaved changes on this page. What would you like to do before leaving for the **{target_label}** {nav_kind}?",
+        icon=":material/warning:",
+    )
+    c_save, c_discard, c_return = st.columns(3, gap="small")
+    with c_save:
+        if st.button(
+            "Save & Refresh",
+            type="primary",
+            icon=":material/save:",
+            key="unsaved_nav_save_refresh",
+            width="stretch",
+        ):
+            st.session_state[_UNSAVED_NAV_ACTION_KEY] = "save"
+            st.session_state[_UNSAVED_NAV_TRIGGERED_KEY] = []
+            st.rerun()
+    with c_discard:
+        if st.button(
+            "Discard changes",
+            icon=":material/delete:",
+            key="destructive_unsaved_nav_discard",
+            width="stretch",
+        ):
+            st.session_state[_UNSAVED_NAV_ACTION_KEY] = "discard"
+            st.session_state[_UNSAVED_NAV_TRIGGERED_KEY] = []
+            st.rerun()
+    with c_return:
+        if st.button(
+            "Return to page",
+            icon=":material/arrow_back:",
+            key="unsaved_nav_return",
+            width="stretch",
+        ):
+            st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
+            st.session_state.pop(_UNSAVED_NAV_ACTION_KEY, None)
+            st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
+            st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+            st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+            st.rerun()
+
+
+def finalize_unsaved_tracking(
+    page_by_url_path: dict[str, object],
+    *,
+    split_secondary_key: str | None = None,
+) -> None:
+    """Complete or prompt for any pending navigation after the page finishes rendering."""
+    executing_action = st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
+    pending = st.session_state.get(_PENDING_UNSAVED_NAV_KEY)
+    if not isinstance(pending, dict):
+        st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+        st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+        return
+    if executing_action:
+        st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+        st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+        if not has_active_unsaved_changes() and not _has_blocking_save_dialog_state():
+            _complete_pending_unsaved_nav(
+                page_by_url_path,
+                split_secondary_key=split_secondary_key,
+            )
+            st.rerun()
+        else:
+            st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
+        return
+    if has_active_unsaved_changes():
+        _unsaved_changes_navigation_dialog(pending)
+    else:
+        _complete_pending_unsaved_nav(
+            page_by_url_path,
+            split_secondary_key=split_secondary_key,
+        )
+        st.rerun()

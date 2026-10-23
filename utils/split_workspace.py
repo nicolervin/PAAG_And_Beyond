@@ -144,14 +144,49 @@ _NAV_CSS = """
 _NAV_JS = """
 export default function(component) {
   const { parentElement, data, setTriggerValue } = component
+  if (!window.__paagEmptyMultiSelectObserver && typeof document !== 'undefined' && document.body) {
+    const closeEmptyMultiSelectDropdowns = () => {
+      const dropdowns = document.querySelectorAll('[data-testid="stMultiSelectDropdown"]')
+      for (const dropdown of dropdowns) {
+        if (dropdown.querySelector('[role="option"]')) continue
+        const openInputs = document.querySelectorAll(
+          '[data-testid="stMultiSelect"] input[role="combobox"][aria-expanded="true"], [data-testid="stMultiSelect"] [data-open="true"] input[role="combobox"]'
+        )
+        for (const input of openInputs) {
+          if ((input.value || '').trim() !== '') continue
+          input.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+              cancelable: true,
+            })
+          )
+          if (document.activeElement === input || input.getAttribute('aria-expanded') === 'true') {
+            input.blur()
+          }
+        }
+      }
+    }
+    const observer = new MutationObserver(() => {
+      closeEmptyMultiSelectDropdowns()
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    window.__paagEmptyMultiSelectObserver = observer
+    closeEmptyMultiSelectDropdowns()
+  }
   const root = parentElement.querySelector('.split-nav-root')
   if (!root) return
   root.innerHTML = ''
 
-  const help = document.createElement('div')
-  help.className = 'split-nav-help'
-  help.textContent = 'Click to open. Use ⧉ to pop out to a new window. Drag to split view.'
-  root.appendChild(help)
+  if (data.show_help !== false) {
+    const help = document.createElement('div')
+    help.className = 'split-nav-help'
+    help.textContent = 'Click to open. Use ⧉ to pop out to a new window. Drag to split view.'
+    root.appendChild(help)
+  }
 
   const makePageUrl = (urlPath) => {
     try {
@@ -188,10 +223,12 @@ export default function(component) {
   let draggedPath = ''
   let suppressClick = false
   for (const section of (data.sections || [])) {
-    const heading = document.createElement('div')
-    heading.className = 'split-nav-section'
-    heading.textContent = section.name
-    root.appendChild(heading)
+    if (section.name) {
+      const heading = document.createElement('div')
+      heading.className = 'split-nav-section'
+      heading.textContent = section.name
+      root.appendChild(heading)
+    }
 
     for (const page of (section.pages || [])) {
       const item = document.createElement('div')
@@ -256,59 +293,61 @@ export default function(component) {
     }
   }
 
-  const drop = document.createElement('div')
-  drop.className = 'split-nav-drop'
-  drop.innerHTML = '<span class="split-nav-icon">splitscreen</span><span>Drop a page here to open split view</span>'
-  drop.ondragover = (event) => {
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'copy'
-    drop.classList.add('over')
-  }
-  drop.ondragleave = () => drop.classList.remove('over')
-  drop.ondrop = (event) => {
-    event.preventDefault()
-    drop.classList.remove('over')
-    const urlPath = event.dataTransfer.getData('text/plain') || draggedPath
-    if (urlPath) setTriggerValue('split', {url_path: urlPath, nonce: Date.now()})
-  }
-  root.appendChild(drop)
+  if (data.show_drop_zone !== false) {
+    const drop = document.createElement('div')
+    drop.className = 'split-nav-drop'
+    drop.innerHTML = '<span class="split-nav-icon">splitscreen</span><span>Drop a page here to open split view</span>'
+    drop.ondragover = (event) => {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+      drop.classList.add('over')
+    }
+    drop.ondragleave = () => drop.classList.remove('over')
+    drop.ondrop = (event) => {
+      event.preventDefault()
+      drop.classList.remove('over')
+      const urlPath = event.dataTransfer.getData('text/plain') || draggedPath
+      if (urlPath) setTriggerValue('split', {url_path: urlPath, nonce: Date.now()})
+    }
+    root.appendChild(drop)
 
-  if (data.secondary_title) {
-    const open = document.createElement('div')
-    open.className = 'split-nav-open'
-    open.innerHTML = '<span class="split-nav-icon">splitscreen</span>'
-    const label = document.createElement('span')
-    label.textContent = `Split: ${data.secondary_title}`
-    open.appendChild(label)
+    if (data.secondary_title) {
+      const open = document.createElement('div')
+      open.className = 'split-nav-open'
+      open.innerHTML = '<span class="split-nav-icon">splitscreen</span>'
+      const label = document.createElement('span')
+      label.textContent = `Split: ${data.secondary_title}`
+      open.appendChild(label)
 
-    const popoutSecondary = document.createElement('a')
-    popoutSecondary.className = 'split-nav-popout'
-    popoutSecondary.title = `Pop out ${data.secondary_title} to separate window`
-    popoutSecondary.setAttribute('aria-label', `Pop out ${data.secondary_title} to separate window`)
-    popoutSecondary.target = '_blank'
-    popoutSecondary.rel = 'noopener noreferrer'
-    popoutSecondary.href = makePageUrl(data.secondary_url_path)
-    popoutSecondary.onclick = (e) => e.stopPropagation()
-    const popSecIcon = document.createElement('span')
-    popSecIcon.className = 'split-nav-popout-icon'
-    popSecIcon.textContent = 'open_in_new'
-    popoutSecondary.appendChild(popSecIcon)
-    open.appendChild(popoutSecondary)
+      const popoutSecondary = document.createElement('a')
+      popoutSecondary.className = 'split-nav-popout'
+      popoutSecondary.title = `Pop out ${data.secondary_title} to separate window`
+      popoutSecondary.setAttribute('aria-label', `Pop out ${data.secondary_title} to separate window`)
+      popoutSecondary.target = '_blank'
+      popoutSecondary.rel = 'noopener noreferrer'
+      popoutSecondary.href = makePageUrl(data.secondary_url_path)
+      popoutSecondary.onclick = (e) => e.stopPropagation()
+      const popSecIcon = document.createElement('span')
+      popSecIcon.className = 'split-nav-popout-icon'
+      popSecIcon.textContent = 'open_in_new'
+      popoutSecondary.appendChild(popSecIcon)
+      open.appendChild(popoutSecondary)
 
-    const close = document.createElement('button')
-    close.className = 'split-nav-close'
-    close.title = 'Close split view'
-    close.setAttribute('aria-label', 'Close split view')
-    close.textContent = '×'
-    close.onclick = () => setTriggerValue('close_split', {nonce: Date.now()})
-    open.appendChild(close)
-    root.appendChild(open)
+      const close = document.createElement('button')
+      close.className = 'split-nav-close'
+      close.title = 'Close split view'
+      close.setAttribute('aria-label', 'Close split view')
+      close.textContent = '×'
+      close.onclick = () => setTriggerValue('close_split', {nonce: Date.now()})
+      open.appendChild(close)
+      root.appendChild(open)
+    }
   }
 }
 """
 
 _SPLIT_NAVIGATION = st.components.v2.component(
-    "paag_split_navigation_v2",
+    "paag_split_navigation_v4",
     html=_NAV_HTML,
     css=_NAV_CSS,
     js=_NAV_JS,
@@ -469,13 +508,16 @@ def split_navigation(
     secondary_title: str,
     project_id: str = "",
     scenario_id: str = "",
+    show_help: bool = True,
+    show_drop_zone: bool = True,
     key: str,
     on_navigate_change: Callable[[], None],
     on_split_change: Callable[[], None],
     on_close_split_change: Callable[[], None],
 ) -> None:
     if _is_app_test():
-        st.caption("Split-view navigation is available in the browser.")
+        if show_drop_zone:
+            st.caption("Split-view navigation is available in the browser.")
         return
     _SPLIT_NAVIGATION(
         key=key,
@@ -486,6 +528,8 @@ def split_navigation(
             "secondary_title": secondary_title,
             "project_id": str(project_id or ""),
             "scenario_id": str(scenario_id or ""),
+            "show_help": bool(show_help),
+            "show_drop_zone": bool(show_drop_zone),
         },
         on_navigate_change=on_navigate_change,
         on_split_change=on_split_change,

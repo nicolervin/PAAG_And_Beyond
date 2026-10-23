@@ -74,6 +74,35 @@ class DirectEntryEditorRowsTests(unittest.TestCase):
         self.assertTrue(controls.selectbox.call_args.kwargs["disabled"])
         self.assertTrue(controls.toggle.call_args.kwargs["disabled"])
 
+    def test_default_sort_column_initializes_session_state_and_sorts_blank_strings_last(self) -> None:
+        df = pd.DataFrame({
+            "id": pd.Series(["row-1", "row-2", "row-draft"], dtype="string"),
+            "name": pd.Series(["Zulu", "Alpha", "Draft"], dtype="string"),
+            "created_at": pd.Series(
+                ["2026-10-21T12:00:00+00:00", "2026-10-21T10:00:00+00:00", ""],
+                dtype="string",
+            ),
+        })
+        controls = Mock()
+        controls.selectbox.side_effect = lambda *_args, **kwargs: self.session_state[kwargs["key"]]
+        controls.toggle.side_effect = lambda *_args, **kwargs: self.session_state[kwargs["key"]]
+        with (
+            patch.object(table_ui.st, "session_state", self.session_state),
+            patch.object(table_ui.st, "container", return_value=controls),
+        ):
+            rows = table_ui.direct_entry_editor_rows(
+                df,
+                editor_key="parts_editor",
+                sort_columns=["name", "created_at"],
+                default_sort_column="created_at",
+            )
+
+        self.assertEqual(
+            self.session_state["parts_editor_external_sort_column"],
+            "created_at",
+        )
+        self.assertEqual(rows["id"].tolist(), ["row-2", "row-1", "row-draft"])
+
 
 class DecimalNumberHelpersTests(unittest.TestCase):
     def test_clean_number_hides_unnecessary_trailing_zeroes(self) -> None:
@@ -212,6 +241,103 @@ class TableEditorResetTests(unittest.TestCase):
 
         self.assertEqual(first_key, second_key)
 
+    def test_undo_last_table_edit_steps_back_one_edit_and_preserves_prior_edits(self) -> None:
+        session_state: dict[str, object] = {}
+        base_df = pd.DataFrame(
+            {
+                "id": ["row-1", "row-2"],
+                "name": ["Alpha", "Bravo"],
+                "qty": [1.0, 2.0],
+            }
+        )
+        with patch.object(table_filters.st, "session_state", session_state):
+            key0 = table_filters.apply_pending_table_editor_reset("example_editor")
+            self.assertFalse(table_filters.can_undo_last_table_edit(key0))
+
+            # First edit: change row 0 name
+            session_state[key0] = {"edited_rows": {0: {"name": "Alpha Edited"}}, "added_rows": [], "deleted_rows": []}
+            self.assertTrue(table_filters.can_undo_last_table_edit(key0))
+
+            # Second edit: fat-finger row 1 qty
+            session_state[key0] = {
+                "edited_rows": {0: {"name": "Alpha Edited"}, 1: {"qty": 999.0}},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+            self.assertTrue(table_filters.can_undo_last_table_edit(key0))
+
+            # Click "Undo last edit": should step back to only row 0 edited
+            self.assertTrue(table_filters.undo_last_table_edit(key0))
+            self.assertIn("Qty", table_filters.last_table_undo_redo_message(key0))
+            key1 = table_filters.apply_pending_table_editor_reset(key0)
+            self.assertEqual(key1, "example_editor__editor_instance_1")
+            self.assertTrue(table_filters.was_table_editor_undo_reset(key1))
+            effective = table_filters.get_effective_table_editor_state(key1)
+            self.assertEqual(effective["edited_rows"], {0: {"name": "Alpha Edited"}})
+            self.assertTrue(table_filters.has_unsaved_table_changes(key1))
+
+            # Verify wrapped st.data_editor receives seeded DataFrame and exposes combined state
+            captured_input_dfs: list[pd.DataFrame] = []
+
+            def fake_orig_editor(df: pd.DataFrame, *_args, **kwargs):
+                captured_input_dfs.append(df.copy())
+                k = kwargs.get("key")
+                if k and k not in session_state:
+                    session_state[k] = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
+                return df.copy()
+
+            with patch.object(table_filters, "_ORIG_DATA_EDITOR", side_effect=fake_orig_editor):
+                returned_df = table_filters._wrap_data_editor(base_df, key=key1)
+
+            self.assertEqual(captured_input_dfs[0]["name"].tolist(), ["Alpha Edited", "Bravo"])
+            self.assertEqual(captured_input_dfs[0]["qty"].tolist(), [1.0, 2.0])
+            self.assertEqual(returned_df["name"].tolist(), ["Alpha Edited", "Bravo"])
+            self.assertEqual(session_state[key1]["edited_rows"], {0: {"name": "Alpha Edited"}})
+            self.assertFalse(table_filters.was_table_editor_undo_reset(key1))
+            self.assertTrue(table_filters.can_undo_last_table_edit(key1))
+
+            # Click "Undo last edit" a second time: should step back to clean state
+            self.assertTrue(table_filters.can_redo_last_table_edit(key1))
+            self.assertTrue(table_filters.undo_last_table_edit(key1))
+            key2 = table_filters.apply_pending_table_editor_reset(key1)
+            self.assertEqual(key2, "example_editor__editor_instance_2")
+            self.assertFalse(table_filters.has_unsaved_table_changes(key2))
+            self.assertFalse(table_filters.can_undo_last_table_edit(key2))
+            self.assertTrue(table_filters.can_redo_last_table_edit(key2))
+
+            # Click "Redo last edit": should restore first edit (row 0 name)
+            self.assertTrue(table_filters.redo_last_table_edit(key2))
+            self.assertIn("Alpha Edited", table_filters.last_table_undo_redo_message(key2))
+            key3 = table_filters.apply_pending_table_editor_reset(key2)
+            self.assertEqual(key3, "example_editor__editor_instance_3")
+            self.assertEqual(
+                table_filters.get_effective_table_editor_state(key3)["edited_rows"],
+                {0: {"name": "Alpha Edited"}},
+            )
+            self.assertTrue(table_filters.can_undo_last_table_edit(key3))
+            self.assertTrue(table_filters.can_redo_last_table_edit(key3))
+
+            # Click "Redo last edit" again: should restore second edit (row 0 name + row 1 qty)
+            self.assertTrue(table_filters.redo_last_table_edit(key3))
+            key4 = table_filters.apply_pending_table_editor_reset(key3)
+            self.assertEqual(key4, "example_editor__editor_instance_4")
+            self.assertEqual(
+                table_filters.get_effective_table_editor_state(key4)["edited_rows"],
+                {0: {"name": "Alpha Edited"}, 1: {"qty": 999.0}},
+            )
+            self.assertFalse(table_filters.can_redo_last_table_edit(key4))
+
+            # Undo once, then make a brand-new edit: redo stack should clear
+            self.assertTrue(table_filters.undo_last_table_edit(key4))
+            key5 = table_filters.apply_pending_table_editor_reset(key4)
+            self.assertTrue(table_filters.can_redo_last_table_edit(key5))
+            session_state[key5] = {
+                "edited_rows": {1: {"name": "Bravo Edited"}},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+            self.assertFalse(table_filters.can_redo_last_table_edit(key5))
+
 
 class StableIdEditorDraftTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -272,7 +398,7 @@ class StableIdEditorDraftTests(unittest.TestCase):
 class EditableTableFooterTests(unittest.TestCase):
     def test_footer_is_right_aligned_and_uses_standard_save_action(self) -> None:
         footer = Mock()
-        footer.button.side_effect = [False, True]
+        footer.button.side_effect = [False, False, False, True]
         editor_state = {"edited_rows": {0: {"name": "Changed"}}}
 
         with (
@@ -293,7 +419,15 @@ class EditableTableFooterTests(unittest.TestCase):
         footer.markdown.assert_called_once_with(
             ":orange[:material/warning: **Unsaved changes**]"
         )
-        save_call = footer.button.call_args_list[1]
+        undo_last_call = footer.button.call_args_list[0]
+        self.assertEqual(undo_last_call.args[0], "Undo last edit")
+        self.assertFalse(undo_last_call.kwargs["disabled"])
+        redo_last_call = footer.button.call_args_list[1]
+        self.assertEqual(redo_last_call.args[0], "Redo last edit")
+        self.assertTrue(redo_last_call.kwargs["disabled"])
+        discard_call = footer.button.call_args_list[2]
+        self.assertEqual(discard_call.args[0], "Discard all edits")
+        save_call = footer.button.call_args_list[3]
         self.assertEqual(save_call.args[0], "Save & Refresh")
         self.assertEqual(save_call.kwargs["type"], "primary")
         self.assertEqual(save_call.kwargs["icon"], ":material/save:")
@@ -301,7 +435,7 @@ class EditableTableFooterTests(unittest.TestCase):
 
     def test_footer_can_render_one_additional_action_before_undo(self) -> None:
         footer = Mock()
-        footer.button.side_effect = [True, False, False]
+        footer.button.side_effect = [True, False, False, False, False]
 
         with (
             patch.object(table_ui.st, "session_state", {"example_editor": {}}),
@@ -358,6 +492,33 @@ class EditableTableFooterTests(unittest.TestCase):
             )
         self.assertTrue(empty_filtered.empty)
         self.assertIsInstance(empty_filtered.index, pd.RangeIndex)
+
+    def test_filter_table_renders_keyword_in_custom_container(self) -> None:
+        df = pd.DataFrame(
+            {
+                "id": ["id-1", "id-2"],
+                "part_number": ["P-100", "P-200"],
+                "description": ["Alpha", "Beta"],
+            }
+        )
+        controls = Mock()
+        keyword_slot = Mock()
+        keyword_slot.text_input.return_value = "P-200"
+        session_state: dict[str, object] = {}
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_filters.st, "container", return_value=controls),
+            patch.object(table_filters.st, "caption"),
+        ):
+            filtered = table_filters.filter_table(
+                df,
+                key="test_filter_slot",
+                search_columns=["part_number", "description"],
+                keyword_container=keyword_slot,
+            )
+        controls.text_input.assert_not_called()
+        keyword_slot.text_input.assert_called_once()
+        self.assertEqual(filtered["part_number"].tolist(), ["P-200"])
 
 
 if __name__ == "__main__":

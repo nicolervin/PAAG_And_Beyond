@@ -36,7 +36,7 @@ from utils.quality_store import (
 from utils.requirements_ui import render_requirements_repository_tab
 from utils.scope_ui import page_title_with_scope
 from utils.store import audit_history, planning_scenarios
-from utils.table_ui import selectable_dataframe
+from utils.table_ui import guarded_tabs, selectable_dataframe
 from utils.traceability_ui import render_traceability_matrix_tab
 
 
@@ -273,10 +273,11 @@ def render_unlinked_review_tab(
     act_col1, act_col2 = st.columns([3, 1], vertical_alignment="center")
     with act_col2:
         if st.button(
-            "🗑️ Purge All Unlinked Records",
-            key=f"purge_all_unlinked_btn_{project_id}",
+            "Delete All Unlinked Records",
+            icon=":material/delete:",
+            key=f"destructive_purge_all_unlinked_btn_{project_id}",
             help="Permanently delete all unlinked records in this scenario",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state[pending_purge_key] = unlinked_data["items"]
             st.rerun()
@@ -334,8 +335,8 @@ def render_unlinked_review_tab(
                 st.rerun()
 
             if b_col3.button(
-                "Purge Operation",
-                key=f"purge_op_btn_{project_id}_{idx}",
+                "Delete Operation",
+                key=f"destructive_purge_op_btn_{project_id}_{idx}",
                 icon=":material/delete:",
                 help=f"Permanently delete all {len(items)} unlinked records for this operation",
             ):
@@ -405,8 +406,8 @@ def render_unlinked_review_tab(
                         st.error(str(exc))
 
                 if i_col_del.button(
-                    "Purge",
-                    key=f"del_item_{project_id}_{item['id']}",
+                    "Delete",
+                    key=f"destructive_del_item_{project_id}_{item['id']}",
                     icon=":material/delete:",
                 ):
                     st.session_state[pending_purge_key] = [item]
@@ -819,10 +820,9 @@ if unlinked_count > 0:
         "Control Plan",
         "Equipment",
     ]
-    tabs = st.tabs(
+    tabs = guarded_tabs(
         tab_list,
         key=f"quality_page_tabs_{project_id}",
-        on_change="rerun",
     )
     unlinked_review_tab = tabs[0]
     traceability_tab = tabs[1]
@@ -838,10 +838,9 @@ else:
         "Control Plan",
         "Equipment",
     ]
-    tabs = st.tabs(
+    tabs = guarded_tabs(
         tab_list,
         key=f"quality_page_tabs_{project_id}",
-        on_change="rerun",
     )
     unlinked_review_tab = None
     traceability_tab = tabs[0]

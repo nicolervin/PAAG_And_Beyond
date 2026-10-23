@@ -26,6 +26,7 @@ from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
+    guarded_tabs,
     native_selected_rows,
     selectable_dataframe,
     stage_native_delete_confirmation,
@@ -57,10 +58,9 @@ if not project_id or not scenario:
     st.info("Select an active planning scenario to manage Safety requirements.")
     st.stop()
 
-review_tab, equipment_tab = st.tabs(
+review_tab, equipment_tab = guarded_tabs(
     ["Review", "Equipment"],
     key=f"safety_page_tabs_{project_id}",
-    on_change="rerun",
 )
 if equipment_tab.open:
     with equipment_tab:
@@ -248,6 +248,7 @@ if st.session_state.get(pending_delete_key):
     confirm_delete()
 
 if footer.undo:
+    st.toast("Discarded the unsaved Safety requirement edits", icon=":material/undo:")
     request_table_editor_reset(editor_key)
     st.rerun()
 

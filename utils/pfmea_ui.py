@@ -70,6 +70,7 @@ from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
+    guarded_tabs,
     native_selected_rows,
     selectable_dataframe,
     stage_native_delete_confirmation,
@@ -1631,11 +1632,14 @@ def _render_control_catalogs(project_id: str) -> None:
                 except ValueError as exc:
                     st.error(str(exc))
 
-        tabs = st.tabs([
-            "📊 Side-by-Side Review Chart",
-            "✏️ Edit Prevention Catalog",
-            "✏️ Edit Detection Catalog",
-        ])
+        tabs = guarded_tabs(
+            [
+                "📊 Side-by-Side Review Chart",
+                "✏️ Edit Prevention Catalog",
+                "✏️ Edit Detection Catalog",
+            ],
+            key=f"pfmea_control_catalog_tabs_{project_id}",
+        )
 
         with tabs[0]:
             col1, col2 = st.columns(2)
@@ -3363,7 +3367,7 @@ def _render_pattern_manager(
         st.caption("Pattern changes are stored only when Save & Refresh is selected.")
         actions = st.container(horizontal=True, horizontal_alignment="right")
         if actions.button(
-            "Undo",
+            "Discard all edits",
             icon=":material/undo:",
             key=f"pfmea_pattern_undo_{project_id}_{widget_scope}",
         ):

@@ -65,7 +65,7 @@ This standard is **locked** and applies to every existing and future data table,
 
 Every editable table in this app must use the exact label **Save & Refresh** for its primary save action button, regardless of what is being saved. Do not use table-specific variants such as **Save concerns**, **Save model definitions**, **Save features**, or **Save complexity tree**.
 
-Keep the section title, filters, and sorting controls above the table. Immediately below the table, use the shared footer pattern implemented in `utils/table_ui.py`: the orange **Unsaved changes** indicator, **Undo**, and the blue **Save & Refresh** button with the save icon must appear together in a right-aligned row.
+Keep the section title, filters, and sorting controls above the table. Immediately below the table, use the shared footer pattern implemented in `utils/table_ui.py`: the orange **Unsaved changes** indicator, **Undo last edit**, **Discard changes**, and the blue **Save & Refresh** button with the save icon must appear together in a right-aligned row.
 
 This standard is **locked** and replaces all screen-specific save button labels identified during the current-state audit, including those on Overview, Questions and concerns, all three Model definitions subsections, and Parts to fishbone.
 
@@ -82,7 +82,7 @@ Because Streamlit disables native header sorting when an editor permits row crea
 Use `utils/table_ui.py` and `utils/table_filters.py` for every new or modernized data table. These helpers implement the locked standards above and must not be recreated independently in page code.
 
 - Put keyword and relevant dropdown filters above every table with `filter_table()`.
-- Put the section title above the filters with `editable_table_heading()`. Put the orange **Unsaved changes** indicator, **Undo**, and blue **Save & Refresh** action immediately below the table with `editable_table_footer()`.
+- Put the section title above the filters with `editable_table_heading()`. Put the orange **Unsaved changes** indicator, **Undo last edit**, **Discard changes**, and blue **Save & Refresh** action immediately below the table with `editable_table_footer()`.
 - Use `selectable_dataframe()` for read-only tables and ordinary bulk-action selection. Editable-table native checkboxes expose deletion intent only; never add a named `CheckboxColumn` or separate Select all control.
 - Read editable-table deletion targets with `native_selected_rows()`; do not use this helper for ordinary bulk actions. Treat deletion selection as transient UI state and exclude it from change detection with `table_has_unsaved_changes(..., native_row_selection=True)` where applicable.
 - Refuse a normal save while editable-table deletion targets remain selected; ordinary bulk actions use their separate read-only selection surface.
@@ -112,7 +112,7 @@ Use this normal save sequence:
 
 Treat `st.session_state` as browser-session state, not permanent storage. Apply `apply_pending_table_editor_reset(editor_key)` before constructing an editor whose prior state may need clearing. After a successful save or approved destructive action, call `request_table_editor_reset(editor_key)` before rerunning so stale edits and selections cannot replay.
 
-Unsaved-change Undo normally clears the editor's session-state entry and reruns. A complex multi-table workflow may retain a pre-save snapshot in session state when it genuinely needs saved-state Undo; follow the existing Model definitions and Fishbone patterns. Session-state Undo remains limited to the current browser session and is not an audit or version-control mechanism.
+**Undo last edit** (`undo_last_table_edit(editor_key)`) steps backward one edit at a time within the current unsaved editing session while preserving earlier unsaved changes. **Redo last edit** (`redo_last_table_edit(editor_key)`) reapplies the most recently undone edit until a new edit or full reset clears the redo stack. **Discard all edits** clears the editor's session-state entry and edit history and reruns. A complex multi-table workflow may retain a pre-save snapshot in session state when it genuinely needs saved-state Undo; follow the existing Model definitions and Fishbone patterns. Session-state Undo remains limited to the current browser session and is not an audit or version-control mechanism.
 
 ### Parts Catalog saved table view
 

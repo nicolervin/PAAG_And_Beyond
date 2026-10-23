@@ -438,6 +438,8 @@ def _remapped_tables(
                 for column in ("source_project_id", "target_project_id"):
                     if column in valid_columns and str(source_row.get(column) or "") == source_project_id:
                         row[column] = new_project_id
+            if item.name == "parts" and "created_at" in valid_columns and not str(row.get("created_at") or "").strip():
+                row["created_at"] = str(row.get("updated_at") or now_iso())
             for column, value in source_row.items():
                 if column.endswith("_path") and str(value) in upload_paths and column in valid_columns:
                     row[column] = upload_paths[str(value)]
