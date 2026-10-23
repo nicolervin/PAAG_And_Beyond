@@ -1066,7 +1066,7 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
 tab_plan, tab_flow, tab_slides = st.tabs(
     ["Process plan", "Process Flow Diagram", "PAAG slides"],
     key="paag_tab",
-    bind="query-params",
+
 )
 
 with tab_plan:
