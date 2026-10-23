@@ -496,6 +496,134 @@ class ModelTreeTests(unittest.TestCase):
         self.assertTrue(activity_map.get(used_part_id, False))
         self.assertFalse(activity_map.get(unused_part_id, True))
 
+    def test_source_code_8_parts_active_in_catalog_and_bom_but_excluded_from_fishbone_placement(self) -> None:
+        import json
+
+        model_id = store.add_project_model(self.project_id, "HPC0305DW-1", "Valid Model", "tester")
+        store.add_assembly_section(self.project_id, "Main Section", "Assembly", None, "")
+        ts = store.now_iso()
+
+        received_part_id = str(uuid4())
+        sc8_part_id = str(uuid4())
+        store.execute(
+            """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, source_code, weight_lb, make_buy, model_applicability, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (received_part_id, self.project_id, "RECV-ASM-001", "Supplied Assembly", "63", "3", 2.5, "Buy", "HPC0305DW-1", ts),
+        )
+        store.execute(
+            """INSERT INTO parts (id, project_id, part_number, description, pits_tracker_number, source_code, weight_lb, make_buy, model_applicability, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (sc8_part_id, self.project_id, "SC8-SUB-008", "Component of Purchased Asm", "64", "8", 0.2, "Buy", "HPC0305DW-1", ts),
+        )
+        store.execute(
+            """INSERT INTO part_scenario_activity (project_id, scenario_id, part_id, active, updated_at)
+               VALUES (?, ?, ?, 1, ?), (?, ?, ?, 1, ?)""",
+            (self.project_id, self.scenario_id, received_part_id, ts, self.project_id, self.scenario_id, sc8_part_id, ts),
+        )
+
+        import_id = str(uuid4())
+        store.execute(
+            """INSERT INTO pits_bom_imports (
+                id, project_id, import_sequence, workbook_name, workbook_sha256,
+                bom_sheet_name, source_row_count, occurrence_count, issue_count,
+                imported_by, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (import_id, self.project_id, 102, "sc8.xlsx", "sha_sc8", "BOM", 3, 3, 0, "tester", ts),
+        )
+
+        # L1 root for active model
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                raw_levels_json, source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()), self.project_id, "", "1", 1, 1.0, "1", 1,
+                json.dumps({"Level 1": 1, "model_usages": {"HPC0305DW-1": 1.0}}),
+                "fp_sc8_root", import_id, import_id, ts, ts, ts, "Needs review",
+            ),
+        )
+        # L2 supplied assembly (source_code = 3)
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                raw_levels_json, source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()), self.project_id, "1", "63", received_part_id, 2, 1.0, "1", 2,
+                json.dumps({"Level 2": 1, "model_usages": {"HPC0305DW-1": 1.0}}),
+                "fp_sc8_asm", import_id, import_id, ts, ts, ts, "Needs review",
+            ),
+        )
+        # L3 component of purchased assembly (source_code = 8), used in valid model
+        store.execute(
+            """INSERT INTO pits_bom_occurrences (
+                id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                raw_levels_json, source_fingerprint, first_seen_import_id, last_seen_import_id,
+                first_seen_at, last_seen_at, updated_at, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()), self.project_id, "63", "64", sc8_part_id, 3, 2.0, "2", 3,
+                json.dumps({"Level 3": 2, "model_usages": {"HPC0305DW-1": 2.0}}),
+                "fp_sc8_sub", import_id, import_id, ts, ts, ts, "Needs review",
+            ),
+        )
+
+        with store.connection() as conn:
+            store._sync_bom_part_scenario_activity(conn, self.project_id, ts)
+
+        # 1. Source code 8 part remains Active in Parts Catalog when used in a valid model
+        active_ids = store.active_part_ids(self.project_id, self.scenario_id)
+        self.assertIn(received_part_id, active_ids)
+        self.assertIn(sc8_part_id, active_ids)
+
+        activity_map = store.part_scenario_activity(self.project_id, self.scenario_id)
+        self.assertTrue(activity_map.get(received_part_id, False))
+        self.assertTrue(activity_map.get(sc8_part_id, False))
+
+        # 2. Source code 8 part remains visible in Master BOM and Model BOM when used in a valid model
+        master_tree = store.pits_bom_model_tree(self.project_id, "all")
+        master_pns = {n["part_number"] for n in master_tree["nodes"]}
+        self.assertIn("RECV-ASM-001", master_pns)
+        self.assertIn("SC8-SUB-008", master_pns)
+
+        model_tree = store.pits_bom_model_tree(self.project_id, model_id)
+        model_pns = {n["part_number"] for n in model_tree["nodes"]}
+        self.assertIn("RECV-ASM-001", model_pns)
+        self.assertIn("SC8-SUB-008", model_pns)
+
+        # 3. Source code 8 part is excluded from Fishbone parts-to-place table, palette_items, and assembly child_parts
+        fishbone_path = str(Path(__file__).parent.parent / "app_pages" / "fishbone.py")
+        with patch("utils.fishbone_visual.interactive_fishbone", return_value=None) as mock_canvas:
+            at = AppTest.from_file(fishbone_path, default_timeout=30)
+            at.session_state["project_id"] = self.project_id
+            at.session_state["scenario_id"] = self.scenario_id
+            at.run(timeout=30)
+        self.assertEqual(list(at.exception), [])
+
+        pool_tables = [
+            df.value for df in at.dataframe
+            if "fishbone_section" in df.value.columns and "part_number" in df.value.columns
+        ]
+        self.assertTrue(pool_tables, "Expected Place Parts into Fishbone dataframe on fishbone page")
+        pool_pns = set(pool_tables[0]["part_number"].astype(str))
+        self.assertIn("RECV-ASM-001", pool_pns)
+        self.assertNotIn("SC8-SUB-008", pool_pns)
+
+        self.assertTrue(mock_canvas.called)
+        palette_items = mock_canvas.call_args.kwargs.get("palette_items", [])
+        palette_pns = {item["part_number"] for item in palette_items}
+        self.assertIn("RECV-ASM-001", palette_pns)
+        self.assertNotIn("SC8-SUB-008", palette_pns)
+        recv_asm_item = next(item for item in palette_items if item["part_number"] == "RECV-ASM-001")
+        child_pns = {c["part_number"] for c in recv_asm_item.get("child_parts", [])}
+        self.assertNotIn("SC8-SUB-008", child_pns)
+
 
 if __name__ == "__main__":
     unittest.main()
