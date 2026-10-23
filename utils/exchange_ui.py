@@ -6,7 +6,6 @@ import streamlit as st
 import pandas as pd
 
 from utils.excel_io import (
-    export_workbook,
     has_pits_id_sheets,
     is_pits_format,
     mapped_bom,
@@ -18,8 +17,6 @@ from utils.excel_io import (
 from utils.store import (
     audit_history,
     detect_pits_new_and_changed_parts,
-    get_planning_scenario,
-    get_project,
     import_fishbone_nodes,
     import_pits_id_snapshot,
     pits_catalog_id_resolution,
@@ -1133,12 +1130,13 @@ def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
                             )
                         preview = mapped_bom(raw, mapping)
                         preview_for_display = preview.copy()
-                        preview_for_display["model_applicability"] = preview_for_display["model_applicability"].apply(
-                            lambda value: ", ".join(
+                        preview_for_display["model_applicability"] = [
+                            ", ".join(
                                 "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
                                 for model in (split_filter_values(value) or ["All"])
                             )
-                        )
+                            for value in preview_for_display["model_applicability"]
+                        ]
                         mapped_preview = filter_table(
                             preview_for_display,
                             key="mapped_bom_preview_filters",

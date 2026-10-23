@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
+from utils.media_cache import cached_image_bytes
 from utils.store import (
     PART_MAKE_BUY_VALUES,
     PART_SOURCE_CODES,
@@ -194,10 +195,10 @@ else:
     active_models = models.loc[models["active"].fillna(1).astype(bool)].copy()
     active_model_numbers = active_models["model_number"].fillna("").astype(str).tolist()
     model_labels = {
-        str(row["model_number"]): (
-            str(row["display_name"]).strip() or "Common name not defined"
+        str(mnum): (
+            str(dname).strip() or "Common name not defined"
         )
-        for _, row in models.iterrows()
+        for mnum, dname in zip(models["model_number"], models["display_name"])
     }
 
 
@@ -228,22 +229,33 @@ def split_model_applicability(value) -> list[str]:
 
 
 feature_option_labels: dict[str, str] = {"All models": "All models"}
-for _, feature in active_features.iterrows():
-    for choice in json.loads(feature["allowed_values"] or "[]"):
-        token = f"{feature['id']}::{choice}"
-        feature_option_labels[token] = f"{feature['category']} · {feature['name']} = {choice}"
+if not active_features.empty:
+    for fid, fcat, fname, fallowed in zip(
+        active_features["id"],
+        active_features["category"],
+        active_features["name"],
+        active_features["allowed_values"],
+    ):
+        for choice in json.loads(fallowed or "[]"):
+            token = f"{fid}::{choice}"
+            feature_option_labels[token] = f"{fcat} · {fname} = {choice}"
 feature_token_by_label = {label: token for token, label in feature_option_labels.items()}
 feature_options = list(feature_token_by_label)
 rules_by_part: dict[str, list[str]] = {}
 if not rules.empty:
-    for part_id, part_rules in rules.groupby("part_id", sort=False):
-        rules_by_part[str(part_id)] = [
+    for part_id, fid, val, cat, fname in zip(
+        rules["part_id"],
+        rules["feature_id"],
+        rules["value"],
+        rules["category"],
+        rules["feature_name"],
+    ):
+        rules_by_part.setdefault(str(part_id), []).append(
             feature_option_labels.get(
-                f"{row['feature_id']}::{row['value']}",
-                f"{row['category']} · {row['feature_name']} = {row['value']}",
+                f"{fid}::{val}",
+                f"{cat} · {fname} = {val}",
             )
-            for _, row in part_rules.iterrows()
-        ]
+        )
 
 
 def readable_feature_applicability(part_id: str, legacy_value) -> str:
@@ -381,46 +393,66 @@ for col in (
     "updated_at", "assembly_id", "assembly_number",
 ):
     parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
+_part_id_strs = [str(pid) for pid in parts_for_editing["id"]]
+_model_app_vals = parts_for_editing["model_applicability"].tolist()
 linked_assembly_by_part = {
-    str(row["id"]): str(row.get("assembly_number") or "")
-    for _, row in parts_for_editing.iterrows()
-    if str(row.get("assembly_id") or "").strip()
+    pid: str(asm_num or "")
+    for pid, asm_id, asm_num in zip(
+        _part_id_strs,
+        parts_for_editing["assembly_id"],
+        parts_for_editing["assembly_number"],
+    )
+    if str(asm_id or "").strip()
 }
 
 
 def assembly_grid_applicability_status(part_id: str, value) -> str:
     return readable_feature_applicability(part_id, value)
-parts_for_editing["active"] = parts_for_editing["id"].apply(
-    lambda part_id: activity_by_part.get(str(part_id), True)
-).astype(bool)
-parts_for_editing["feature_applicability"] = pd.Series(dtype="object") if parts_for_editing.empty else parts_for_editing.apply(
-    lambda row: (
-        rules_by_part.get(str(row["id"]), [])
-        or (["All models"] if str(row["model_applicability"] or "").strip().casefold() in {"all", "all models"} else [])
-    ),
-    axis=1,
+
+
+parts_for_editing["active"] = pd.Series(
+    [bool(activity_by_part.get(pid, True)) for pid in _part_id_strs],
+    index=parts_for_editing.index,
+    dtype=bool,
 )
-parts_for_editing["applicability_status"] = pd.Series(dtype="string") if parts_for_editing.empty else parts_for_editing.apply(
-    lambda row: assembly_grid_applicability_status(
-        str(row["id"]), row["model_applicability"]
-    ),
-    axis=1,
+parts_for_editing["feature_applicability"] = (
+    pd.Series(dtype="object")
+    if parts_for_editing.empty
+    else [
+        rules_by_part.get(pid, [])
+        or (["All models"] if str(m_app or "").strip().casefold() in {"all", "all models"} else [])
+        for pid, m_app in zip(_part_id_strs, _model_app_vals)
+    ]
 )
-parts_for_editing["source_code"] = parts_for_editing["source_code"].apply(
-    lambda value: ""
-    if value is None or pd.isna(value)
-    else str(int(value))
-    if isinstance(value, float) and value.is_integer()
-    else str(value).strip()
-).astype("string")
+parts_for_editing["applicability_status"] = (
+    pd.Series(dtype="string")
+    if parts_for_editing.empty
+    else [
+        assembly_grid_applicability_status(pid, m_app)
+        for pid, m_app in zip(_part_id_strs, _model_app_vals)
+    ]
+)
+parts_for_editing["source_code"] = pd.Series(
+    [
+        ""
+        if value is None or pd.isna(value)
+        else str(int(value))
+        if isinstance(value, float) and value.is_integer()
+        else str(value).strip()
+        for value in parts_for_editing["source_code"]
+    ],
+    index=parts_for_editing.index,
+    dtype="string",
+)
 parts_for_editing["view_details"] = pd.Series(
     [":material/visibility: View details"] * len(parts_for_editing),
     index=parts_for_editing.index,
     dtype="string",
 )
-parts_for_editing["photo_status"] = parts_for_editing["image_path"].apply(
-    lambda value: "✅ Added" if str(value or "").strip() else "❌ Missing"
-)
+parts_for_editing["photo_status"] = [
+    "✅ Added" if str(value or "").strip() else "❌ Missing"
+    for value in parts_for_editing["image_path"]
+]
 updated_values = pd.to_datetime(parts_for_editing["updated_at"], errors="coerce", utc=True)
 parts_for_editing["updated_display"] = updated_values.dt.strftime(
     "%b %d, %Y %H:%M"
@@ -900,11 +932,15 @@ export_columns = [
     "source_code", "make_buy", "feature_applicability",
     "photo_status", "notes", "source", "updated_at",
 ]
-export_dataframe = parts_for_editing.reindex(columns=export_columns)
-export_hash = _hash_filtered_export(export_dataframe)
+def _build_filtered_parts_export() -> bytes:
+    export_df = parts_for_editing.reindex(columns=export_columns)
+    export_hash = _hash_filtered_export(export_df)
+    return _cached_parts_dataframe_to_excel(export_hash, export_df, "Parts")
+
+
 st.download_button(
     "Export filtered rows",
-    data=_cached_parts_dataframe_to_excel(export_hash, export_dataframe, "Parts"),
+    data=_build_filtered_parts_export,
     file_name="parts_filtered.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     icon=":material/download:",
@@ -1287,7 +1323,10 @@ with image_col.container(border=True):
     elif raw_img:
         image_path = Path(raw_img)
         if image_path.exists():
-            st.image(str(image_path), caption=part["part_number"])
+            st.image(
+                cached_image_bytes(image_path, max_dim=1200) or str(image_path),
+                caption=part["part_number"],
+            )
             if st.button("Remove image", icon=":material/delete:", key=f"del_prim_img_{part['id']}"):
                 clear_part_image(part["id"])
                 record_audit_event(
@@ -1409,14 +1448,17 @@ with image_col.container(border=True):
                                 st.caption(supp_caption)
                             st.download_button(
                                 "Download STEP file",
-                                data=supplemental_path.read_bytes(),
+                                data=lambda p=supplemental_path: p.read_bytes(),
                                 file_name=f"{part['part_number']}_{supplemental_path.name}",
                                 mime="application/step",
                                 icon=":material/download:",
                                 key=f"dl_supp_{supp_id}",
                             )
                         else:
-                            st.image(str(supplemental_path), caption=supp_caption)
+                            st.image(
+                                cached_image_bytes(supplemental_path, max_dim=1200) or str(supplemental_path),
+                                caption=supp_caption,
+                            )
                     st.caption(f"Type: `{supplemental.get('image_type')}`")
             with s_c2:
                 if st.button("Delete", icon=":material/delete:", key=f"del_supp_{supp_id}"):

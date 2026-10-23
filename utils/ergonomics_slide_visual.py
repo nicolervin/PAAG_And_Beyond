@@ -7,6 +7,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from utils.media_cache import cached_image_data_url
+
 
 def _text(value: object) -> str:
     """Safely escape text for HTML display."""
@@ -19,9 +21,13 @@ def _media_data_url(raw_path: object) -> str:
     try:
         if not path.is_file():
             return ""
+        suffix = path.suffix.lower()
+        if suffix in {".jpg", ".jpeg", ".png", ".webp"}:
+            cached = cached_image_data_url(path, max_dim=1600)
+            if cached:
+                return cached
         mime = mimetypes.guess_type(path.name)[0]
         if not mime:
-            suffix = path.suffix.lower()
             if suffix == ".mp4":
                 mime = "video/mp4"
             elif suffix == ".webm":

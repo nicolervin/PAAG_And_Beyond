@@ -93,8 +93,11 @@ class _StoreFacade(_types.ModuleType):
             setattr(_db_core, name, value)
         for module in _DOMAIN_MODULES:
             module.__dict__[name] = value
+        rev = _db_core.bump_runtime_revision()
+        _db_core._SYNCED_REVISION = rev
 
 
 _sys.modules[__name__].__class__ = _StoreFacade
+_db_core.sync_store_runtime(force=True)
 __all__ = sorted(_EXPORTED)
 

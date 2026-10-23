@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sys as _sys
 from utils import db_core as _db_core
+from utils.cache_store import is_scenario_task_completed, mark_scenario_task_completed
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
+@cached_store_read
 def yamazumi_areas(project_id: str, scenario_id: str) -> pd.DataFrame:
     return pd.DataFrame(query(
         """SELECT a.*, s.name AS section_name
@@ -15,6 +17,7 @@ def yamazumi_areas(project_id: str, scenario_id: str) -> pd.DataFrame:
         (project_id, scenario_id),
     ))
 
+@cached_store_read
 def yamazumi_area_link_status(project_id: str, scenario_id: str) -> dict[str, int | bool]:
     """Report active Fishbone-section gaps and existing one-to-one link conflicts."""
     sections = query(
@@ -50,6 +53,7 @@ def yamazumi_area_link_status(project_id: str, scenario_id: str) -> dict[str, in
         "needs_sync": bool(missing or mislinked or conflicting),
     }
 
+@cached_store_read
 def yamazumi_pitches(project_id: str, area_id: str) -> pd.DataFrame:
     rows = pd.DataFrame(query(
         """SELECT * FROM yamazumi_pitches WHERE project_id=? AND area_id=?
@@ -72,6 +76,7 @@ def yamazumi_pitches(project_id: str, area_id: str) -> pd.DataFrame:
         })
     return rows
 
+@cached_store_read
 def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
     rows = pd.DataFrame(query(
         """SELECT e.*, p.pitch_number, p.pitch_name, p.status AS pitch_status
@@ -103,6 +108,7 @@ def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
         })
     return rows
 
+@cached_store_read
 def yamazumi_pitches_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load pitch addresses across every Yamazumi area in one scenario."""
     rows = pd.DataFrame(query(
@@ -134,6 +140,7 @@ def yamazumi_pitches_for_scenario(project_id: str, scenario_id: str) -> pd.DataF
     return rows
 
 
+@cached_store_read
 def yamazumi_elements_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load work elements across every Yamazumi area in one scenario."""
     rows = pd.DataFrame(query(
@@ -171,6 +178,7 @@ def yamazumi_elements_for_scenario(project_id: str, scenario_id: str) -> pd.Data
         })
     return rows
 
+@cached_store_read
 def yamazumi_work_regions(project_id: str, area_id: str) -> pd.DataFrame:
     rows = pd.DataFrame(query(
         """SELECT * FROM yamazumi_work_regions
@@ -288,6 +296,12 @@ def replace_yamazumi_work_regions(project_id: str, area_id: str, records: list[d
 def migrate_legacy_yamazumi_flags(project_id: str, editor_name: str) -> dict:
     """Discard retired Yamazumi flags once per project and retire their schema."""
     timestamp = now_iso()
+    if is_scenario_task_completed("migrate_legacy_yamazumi_flags", project_id, ""):
+        return {
+            "definition_count": 0,
+            "affected_element_count": 0,
+            "timestamp": timestamp,
+        }
     editor = str(editor_name or "").strip()
     with connection() as conn:
         table_exists = conn.execute(
@@ -360,6 +374,8 @@ def migrate_legacy_yamazumi_flags(project_id: str, editor_name: str) -> dict:
                 conn.execute("DROP TABLE yamazumi_flag_definitions")
             if has_flags_column:
                 conn.execute("ALTER TABLE yamazumi_elements DROP COLUMN flags")
+    if not definition_count and not affected_element_count:
+        mark_scenario_task_completed("migrate_legacy_yamazumi_flags", project_id, "")
     return {
         "definition_count": definition_count,
         "affected_element_count": affected_element_count,
@@ -371,6 +387,9 @@ def rename_yamazumi_variants(
 ) -> dict[str, object]:
     """Normalize saved Yamazumi labels and describe every persisted change."""
     mapping = {str(old): str(new) for old, new in label_mapping.items() if str(old) != str(new)}
+    task_key = f"rename_yamazumi_variants:{json.dumps(sorted(mapping.items()))}"
+    if is_scenario_task_completed(task_key, project_id, scenario_id):
+        return {"changed_count": 0, "element_changes": [], "pitch_changes": []}
     element_changes: list[dict[str, object]] = []
     pitch_changes: list[dict[str, object]] = []
     timestamp = now_iso()
@@ -449,6 +468,8 @@ def rename_yamazumi_variants(
                         "new_variants": normalized,
                     }
                 )
+    if not element_changes and not pitch_changes:
+        mark_scenario_task_completed(task_key, project_id, scenario_id)
     return {
         "changed_count": len(element_changes) + len(pitch_changes),
         "element_changes": element_changes,
@@ -880,6 +901,7 @@ def _yamazumi_pitch_address_conflict_rows(
         (project_id, scenario_id, project_id, scenario_id),
     ).fetchall()
 
+@cached_store_read
 def yamazumi_pitch_address_conflicts(
     project_id: str, scenario_id: str
 ) -> pd.DataFrame:
@@ -2696,6 +2718,7 @@ def replace_yamazumi_pitches(project_id: str, area_id: str, edited: pd.DataFrame
         )
     return len(records)
 
+@cached_store_read
 def yamazumi_pitch_address_suggestion(project_id: str, area_id: str) -> dict:
     """Return project and Fishbone-aware defaults for creating pitch addresses."""
     section_walk = assembly_section_walk_order(project_id)

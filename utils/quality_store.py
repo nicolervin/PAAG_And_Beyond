@@ -15,6 +15,12 @@ from uuid import uuid4
 
 import pandas as pd
 
+from utils.cache_store import (
+    cached_store_read,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
+
 
 REQUIREMENT_COLUMNS = [
     "id", "project_id", "requirement_type", "description", "unique_identifier",
@@ -170,6 +176,8 @@ def _ensure_quality_requirement_types(
     conn: sqlite3.Connection, project_id: str
 ) -> None:
     """Seed reusable defaults and exact legacy Type values without rewriting requirements."""
+    if is_scenario_task_completed("ensure_quality_req_types", project_id, ""):
+        return
     timestamp = datetime.now(timezone.utc).isoformat()
     existing_rows = conn.execute(
         "SELECT label FROM quality_requirement_types WHERE project_id=?",
@@ -204,6 +212,7 @@ def _ensure_quality_requirement_types(
             (str(uuid4()), project_id, cleaned, default_units, timestamp, timestamp),
         )
         existing_keys.add(key)
+    mark_scenario_task_completed("ensure_quality_req_types", project_id, "")
 
 
 def _quality_requirement_type_row(
@@ -407,6 +416,7 @@ def _normalized_ids(record_ids: list[str]) -> list[str]:
     ))
 
 
+@cached_store_read
 def quality_requirement_types(project_id: str) -> pd.DataFrame:
     """Return the project Type catalog with case-insensitive requirement usage counts."""
     store = _store_module()
@@ -699,6 +709,7 @@ def delete_quality_requirement_types(
     }
 
 
+@cached_store_read
 def quality_requirements(project_id: str) -> pd.DataFrame:
     """Return project-wide repository definitions with their assignment counts."""
     store = _store_module()
@@ -1051,6 +1062,7 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
         return int(cursor.rowcount)
 
 
+@cached_store_read
 def quality_requirement_torque_details(
     project_id: str, quality_requirement_id: str | None = None
 ) -> pd.DataFrame:
@@ -1076,6 +1088,7 @@ def quality_requirement_torque_details(
     return pd.DataFrame(rows, columns=TORQUE_DETAIL_COLUMNS)
 
 
+@cached_store_read
 def torque_screw_bit_types(project_id: str) -> list[str]:
     """Return distinct saved Screw bit type values for project suggestions."""
     store = _store_module()
@@ -1186,6 +1199,7 @@ def delete_quality_requirement_torque_details(
         return int(cursor.rowcount)
 
 
+@cached_store_read
 def quality_requirement_assignments(
     project_id: str, scenario_id: str, work_element_id: str | None = None
 ) -> pd.DataFrame:
@@ -1226,6 +1240,7 @@ def quality_requirement_assignments(
     ])
 
 
+@cached_store_read
 def quality_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return active-scenario Process steps with the labels shown in Process at a Glance."""
     store = _store_module()
@@ -1286,6 +1301,7 @@ def quality_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
     return frame
 
 
+@cached_store_read
 def quality_requirement_links(
     project_id: str, quality_requirement_id: str | None = None
 ) -> pd.DataFrame:
@@ -1379,12 +1395,24 @@ def quality_requirement_links(
     )
     if not frame.empty:
         p_store = _process_store()
+        w_ids_by_scenario: dict[str, list[str]] = {}
+        for sc_val, w_val in zip(frame["scenario_id"], frame["work_element_id"]):
+            sc_id = str(sc_val or "")
+            w_id = str(w_val or "")
+            if sc_id and w_id:
+                w_ids_by_scenario.setdefault(sc_id, []).append(w_id)
+        contexts_by_scenario: dict[str, dict[str, dict]] = {
+            sc_id: p_store.work_element_op_contexts(
+                project_id, sc_id, list(dict.fromkeys(w_ids))
+            )
+            for sc_id, w_ids in w_ids_by_scenario.items()
+        }
         op_ids = []
         upstream_mod = []
         for _, row in frame.iterrows():
             sc_id = str(row["scenario_id"])
             w_id = str(row["work_element_id"])
-            contexts = p_store.work_element_op_contexts(project_id, sc_id, [w_id])
+            contexts = contexts_by_scenario.get(sc_id, {})
             op_ids.append(str(contexts.get(w_id, {}).get("op_id") or "No Op ID"))
 
             snap_pitch = str(row.get("station_pitch_snapshot") or "").strip()
@@ -1488,47 +1516,44 @@ def bulk_assign_quality_requirement(
         ).fetchall()
         already_attached = {str(r["work_element_id"]) for r in existing_rows}
 
+        steps_by_id = {
+            str(r["id"]): r
+            for r in conn.execute(
+                f"""SELECT id, operation, description, station FROM work_elements
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+                (project_id, scenario_id, *clean_step_ids),
+            ).fetchall()
+        }
+        pitch_name_by_step: dict[str, str] = {}
+        for r in conn.execute(
+            f"""SELECT yamazumi.process_element_id, pitch.pitch_name
+                FROM yamazumi_elements yamazumi
+                JOIN yamazumi_areas area ON area.id=yamazumi.area_id
+                LEFT JOIN yamazumi_pitches pitch ON pitch.id=yamazumi.pitch_id
+                WHERE yamazumi.project_id=?
+                  AND area.scenario_id=?
+                  AND yamazumi.process_element_id IN ({placeholders})
+                ORDER BY area.name, pitch.sequence, yamazumi.sequence""",
+            (project_id, scenario_id, *clean_step_ids),
+        ).fetchall():
+            pe_id = str(r["process_element_id"] or "")
+            if pe_id and pe_id not in pitch_name_by_step and r["pitch_name"]:
+                pitch_name_by_step[pe_id] = str(r["pitch_name"])
+
+        insert_tuples = []
         for step_id in clean_step_ids:
             if step_id in already_attached:
                 skipped_count += 1
                 continue
 
-            step = conn.execute(
-                """SELECT operation, description, station FROM work_elements
-                   WHERE id=? AND project_id=? AND scenario_id=?""",
-                (step_id, project_id, scenario_id),
-            ).fetchone()
+            step = steps_by_id.get(step_id)
             if not step:
                 skipped_count += 1
                 continue
 
-            pitch_row = conn.execute(
-                """SELECT pitch.pitch_name
-                   FROM yamazumi_elements yamazumi
-                   JOIN yamazumi_areas area ON area.id=yamazumi.area_id
-                   LEFT JOIN yamazumi_pitches pitch ON pitch.id=yamazumi.pitch_id
-                   WHERE yamazumi.project_id=?
-                     AND area.scenario_id=?
-                     AND yamazumi.process_element_id=?
-                   ORDER BY area.name, pitch.sequence, yamazumi.sequence
-                   LIMIT 1""",
-                (project_id, scenario_id, step_id),
-            ).fetchone()
-            pitch_snapshot = (
-                str(pitch_row["pitch_name"])
-                if pitch_row and pitch_row["pitch_name"]
-                else str(step["station"] or "")
-            )
-
+            pitch_snapshot = pitch_name_by_step.get(step_id) or str(step["station"] or "")
             assignment_id = str(uuid4())
-            conn.execute(
-                """INSERT INTO quality_requirement_assignments
-                   (id, project_id, scenario_id, work_element_id, quality_requirement_id,
-                    requirement_type, description, unique_identifier, pass_fail,
-                    target_value, tolerances, unit,
-                    process_operation_snapshot, process_description_snapshot, station_pitch_snapshot,
-                    source_updated_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            insert_tuples.append(
                 (
                     assignment_id, project_id, scenario_id, step_id,
                     quality_requirement_id, requirement["requirement_type"],
@@ -1537,9 +1562,22 @@ def bulk_assign_quality_requirement(
                     requirement["tolerances"], requirement["unit"],
                     str(step["operation"] or ""), str(step["description"] or ""), pitch_snapshot,
                     requirement["updated_at"], timestamp, timestamp,
-                ),
+                )
             )
+            already_attached.add(step_id)
             created_ids.append(assignment_id)
+
+        if insert_tuples:
+            conn.executemany(
+                """INSERT INTO quality_requirement_assignments
+                   (id, project_id, scenario_id, work_element_id, quality_requirement_id,
+                    requirement_type, description, unique_identifier, pass_fail,
+                    target_value, tolerances, unit,
+                    process_operation_snapshot, process_description_snapshot, station_pitch_snapshot,
+                    source_updated_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                insert_tuples,
+            )
 
         if created_ids and editor_name and editor_name.strip():
             store.record_audit_event(
@@ -1566,6 +1604,7 @@ def bulk_assign_quality_requirement(
     }
 
 
+@cached_store_read
 def step_equipment_tooling_status(
     project_id: str,
     scenario_id: str,
@@ -1614,6 +1653,7 @@ def step_equipment_tooling_status(
     return result
 
 
+@cached_store_read
 def project_equipment_assets(
     project_id: str, torque_only: bool = False
 ) -> list[dict[str, Any]]:
@@ -1650,6 +1690,7 @@ def project_equipment_assets(
     return assets
 
 
+@cached_store_read
 def quality_requirement_assignment(
     project_id: str, assignment_id: str
 ) -> dict[str, object]:
@@ -1743,6 +1784,7 @@ def delete_quality_requirement_assignments(
         return int(cursor.rowcount)
 
 
+@cached_store_read
 def quality_assignment_pfmea_impact(
     project_id: str, scenario_id: str, assignment_ids: list[str]
 ) -> dict:
@@ -1883,6 +1925,7 @@ def clone_quality_requirement_assignments(
     return cloned_count
 
 
+@cached_store_read
 def unlinked_quality_records(project_id: str, scenario_id: str) -> dict:
     """Return all unlinked Quality assignments, PFMEA entries, and Equipment links for reconciliation."""
     store = _store_module()
@@ -2221,6 +2264,7 @@ def bulk_delete_unlinked_records(
     return deleted_count
 
 
+@cached_store_read
 def upstream_modified_quality_assignments(
     project_id: str, scenario_id: str | None = None
 ) -> list[dict]:

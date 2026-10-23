@@ -13,6 +13,7 @@ from uuid import uuid4
 import pandas as pd
 
 from utils import db_core as store
+from utils.cache_store import cached_store_read
 from utils.control_plan_store import _live_projection_conn, _specification
 from utils.equipment_store import init_equipment_schema
 from utils.pfmea_store import PFMEA_CTQ_CLASSIFICATIONS
@@ -44,14 +45,13 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
+@cached_store_read
 def cross_functional_traceability_matrix(
     project_id: str,
     scenario_id: str,
 ) -> dict[str, Any]:
     """Calculate and return full cross-functional traceability matrix and KPI summary."""
     with store.connection() as conn:
-        init_equipment_schema(conn)
-
         # 1. Fetch work elements for this scenario
         work_rows = conn.execute(
             """SELECT id, station, operation, description, sequence

@@ -304,21 +304,24 @@ if scenario:
     ]
     scenario_rows = pd.DataFrame(all_scenarios)
     scenario_rows["view_details"] = ":material/visibility: View details"
-    scenario_rows["current_view"] = scenario_rows["id"].astype(str).map(
-        lambda value: "Current view" if value == str(scenario_id) else ""
-    )
-    scenario_rows["takt"] = scenario_rows.apply(
-        lambda row: seconds_to_display(row["takt_time_s"], row["takt_time_unit"]),
-        axis=1,
-    )
-    scenario_rows["parent_scenario"] = scenario_rows.apply(
-        lambda row: (
-            f"Rev {row.get('parent_revision_label')} · {row.get('parent_name')}"
-            if pd.notna(row.get("parent_scenario_id"))
-            and str(row.get("parent_scenario_id")).strip()
-            else "Original scenario"
-        ), axis=1,
-    )
+    scenario_rows["current_view"] = [
+        "Current view" if str(value) == str(scenario_id) else ""
+        for value in scenario_rows["id"]
+    ]
+    scenario_rows["takt"] = [
+        seconds_to_display(ts, tu)
+        for ts, tu in zip(scenario_rows["takt_time_s"], scenario_rows["takt_time_unit"])
+    ]
+    scenario_rows["parent_scenario"] = [
+        f"Rev {prev} · {pname}"
+        if pd.notna(pid) and str(pid).strip()
+        else "Original scenario"
+        for pid, prev, pname in zip(
+            scenario_rows.get("parent_scenario_id", []),
+            scenario_rows.get("parent_revision_label", []),
+            scenario_rows.get("parent_name", []),
+        )
+    ]
     scenario_rows = scenario_rows.reindex(columns=scenario_columns)
     for column in [
         column for column in scenario_columns if column not in {"takt", "takt_time_s"}
@@ -451,20 +454,23 @@ if scenario:
         selected_scenarios = native_selected_rows(
             editor_rows, editor_key=scenario_editor_key
         )
-        scenario_export = visible_scenarios.drop(
-            columns=["id", "view_details", "parent_scenario_id", "takt_time_s"],
-            errors="ignore"
-        ).copy()
-        scenario_export["takt_time_unit"] = scenario_export["takt_time_unit"].map(
-            lambda value: TIME_UNITS[str(value)].label
-        )
-        for column in ["created_at", "updated_at"]:
-            if column in scenario_export:
-                scenario_export[column] = scenario_export[column].astype("string")
+        def _export_planning_scenarios() -> bytes:
+            scenario_export = visible_scenarios.drop(
+                columns=["id", "view_details", "parent_scenario_id", "takt_time_s"],
+                errors="ignore"
+            ).copy()
+            scenario_export["takt_time_unit"] = [
+                TIME_UNITS[str(value)].label for value in scenario_export["takt_time_unit"]
+            ]
+            for column in ["created_at", "updated_at"]:
+                if column in scenario_export:
+                    scenario_export[column] = scenario_export[column].astype("string")
+            return dataframe_to_excel(scenario_export, "Planning scenarios")
+
         with st.container(horizontal=True, horizontal_alignment="right"):
             st.download_button(
                 "Export filtered",
-                data=dataframe_to_excel(scenario_export, "Planning scenarios"),
+                data=_export_planning_scenarios,
                 file_name="planning_scenarios_filtered.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 icon=":material/download:", key=f"overview_scenarios_export_{project_id}",

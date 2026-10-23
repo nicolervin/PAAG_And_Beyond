@@ -13,6 +13,8 @@ from uuid import uuid4
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from utils.cache_store import cached_store_read
+
 SUPPORTED_LAYOUT_EXTENSIONS: tuple[str, ...] = (
     ".png",
     ".jpg",
@@ -261,6 +263,7 @@ def init_layout_schema(conn: sqlite3.Connection) -> None:
 # --- Layout Plan Operations ---
 
 
+@cached_store_read
 def list_layouts(project_id: str) -> list[dict[str, Any]]:
     """Return all floor plan layouts for a project, along with latest revision info."""
     store = _store_module()
@@ -288,6 +291,7 @@ def list_layouts(project_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+@cached_store_read
 def get_layout(project_id: str, layout_id: str) -> dict[str, Any] | None:
     """Return a single layout plan by ID."""
     store = _store_module()
@@ -380,6 +384,7 @@ def update_layout(
         )
 
 
+@cached_store_read
 def layout_deletion_impact(project_id: str, layout_id: str) -> dict[str, Any]:
     """Calculate deletion impact for a layout."""
     store = _store_module()
@@ -442,6 +447,7 @@ def delete_layout(project_id: str, layout_id: str, editor_name: str) -> dict[str
 # --- Revision Operations ---
 
 
+@cached_store_read
 def list_layout_revisions(layout_id: str) -> list[dict[str, Any]]:
     """Return all revisions for a layout, newest revision first."""
     store = _store_module()
@@ -461,6 +467,7 @@ def list_layout_revisions(layout_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+@cached_store_read
 def get_layout_revision(revision_id: str) -> dict[str, Any] | None:
     """Return a single revision by ID with its shape count."""
     store = _store_module()
@@ -482,6 +489,7 @@ def get_layout_revision(revision_id: str) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+@cached_store_read
 def get_latest_layout_revision(layout_id: str) -> dict[str, Any] | None:
     """Return the latest revision for a layout with its shape count."""
     store = _store_module()
@@ -780,6 +788,10 @@ def create_layout_revision(
     crop_bottom_pct: float = 0.0,
     cad_file: Any | None = None,
     cad_web_url: str = "",
+    *,
+    override_width_px: int | None = None,
+    override_height_px: int | None = None,
+    is_blank_canvas: bool = False,
 ) -> dict[str, Any]:
     """Create a new versioned layout revision with an image/drawing and scale specifications."""
     store = _store_module()
@@ -806,12 +818,18 @@ def create_layout_revision(
     store.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     if isinstance(image_file, Image.Image):
-        img = image_file.copy().convert("RGB")
-        img = apply_image_orientation(img, normalized_rot)
-        img = apply_image_crop(img, crop_left_pct, crop_top_pct, crop_right_pct, crop_bottom_pct)
+        img = image_file if is_blank_canvas else image_file.copy().convert("RGB")
+        if not is_blank_canvas:
+            img = apply_image_orientation(img, normalized_rot)
+            img = apply_image_crop(img, crop_left_pct, crop_top_pct, crop_right_pct, crop_bottom_pct)
         suffix = ".png"
         img_w_px, img_h_px = img.size
-        target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}.png"
+        if override_width_px and override_width_px > 0:
+            img_w_px = int(override_width_px)
+        if override_height_px and override_height_px > 0:
+            img_h_px = int(override_height_px)
+        name_tag = f"layout_{layout_id}_blank_scaled_canvas_{uuid4()}.png" if is_blank_canvas else f"layout_{layout_id}_{uuid4()}.png"
+        target_path = store.UPLOAD_DIR / name_tag
         img.save(target_path, "PNG")
     else:
         filename = str(getattr(image_file, "name", "screenshot.png"))
@@ -867,6 +885,9 @@ def create_layout_revision(
                         img_w_px, img_h_px = loaded_img.size
                         target_path = store.UPLOAD_DIR / f"layout_{layout_id}_{uuid4()}{suffix}"
                         target_path.write_bytes(content)
+                from utils.media_cache import prewarm_image_cache
+
+                prewarm_image_cache(target_path)
             except Exception as exc:
                 raise ValueError("The provided file is not a readable image.") from exc
 
@@ -960,6 +981,8 @@ def create_layout_revision(
 
             # Copy forward shapes and layers from previous revision if requested
             copied_shapes_count = 0
+            if not copy_from_revision_id:
+                ensure_default_layers_for_revision(new_revision_id, _conn=conn)
             if copy_from_revision_id:
                 old_rev = conn.execute(
                     "SELECT image_width_px, image_height_px FROM layout_revisions WHERE id=?",
@@ -1428,6 +1451,7 @@ def _infer_default_layer_type_for_shape(shape: dict[str, Any]) -> str:
     return "pitches"
 
 
+@cached_store_read
 def ensure_default_layers_for_revision(
     revision_id: str, _conn: sqlite3.Connection | None = None
 ) -> list[dict[str, Any]]:
@@ -1491,15 +1515,16 @@ def ensure_default_layers_for_revision(
         return _run(conn)
 
 
+@cached_store_read
 def list_layout_layers(
     revision_id: str, scenario_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Return all layers for a layout revision (ensuring default layers exist), ordered by z_index."""
     store = _store_module()
-    with store.connection() as conn:
-        ensure_default_layers_for_revision(revision_id, _conn=conn)
+
+    def _fetch(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         if scenario_id:
-            rows = conn.execute(
+            return conn.execute(
                 """
                 SELECT l.*,
                        (SELECT COUNT(*) FROM layout_shapes s WHERE s.layer_id = l.id) AS shape_count
@@ -1509,17 +1534,22 @@ def list_layout_layers(
                 """,
                 (revision_id, scenario_id),
             ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT l.*,
-                       (SELECT COUNT(*) FROM layout_shapes s WHERE s.layer_id = l.id) AS shape_count
-                FROM layout_layers l
-                WHERE l.revision_id = ?
-                ORDER BY l.z_index ASC, l.created_at ASC
-                """,
-                (revision_id,),
-            ).fetchall()
+        return conn.execute(
+            """
+            SELECT l.*,
+                   (SELECT COUNT(*) FROM layout_shapes s WHERE s.layer_id = l.id) AS shape_count
+            FROM layout_layers l
+            WHERE l.revision_id = ?
+            ORDER BY l.z_index ASC, l.created_at ASC
+            """,
+            (revision_id,),
+        ).fetchall()
+
+    with store.connection() as conn:
+        rows = _fetch(conn)
+        if not rows:
+            ensure_default_layers_for_revision(revision_id, _conn=conn)
+            rows = _fetch(conn)
         return [dict(r) for r in rows]
 
 
@@ -1894,55 +1924,55 @@ def create_blank_scaled_revision(
         base_w_px = int(round(base_h_px * aspect))
         base_w_px = max(1200, min(4800, base_w_px))
 
-    img = Image.new("RGB", (base_w_px, base_h_px), (248, 250, 252))
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    buf.name = "blank_scaled_canvas.png"
+    img = Image.new("RGB", (64, 64), (248, 250, 252))
 
     return create_layout_revision(
         project_id=project_id,
         layout_id=layout_id,
-        image_file=buf,
+        image_file=img,
         width_value=w_val,
         height_value=h_val,
         unit=cleaned_unit,
         notes=notes or "Blank scaled engineering canvas",
         editor_name=editor,
         copy_from_revision_id=copy_from_revision_id,
+        override_width_px=base_w_px,
+        override_height_px=base_h_px,
+        is_blank_canvas=True,
     )
 
 
 # --- Shape Operations ---
 
 
+@cached_store_read
 def list_layout_shapes(revision_id: str) -> list[dict[str, Any]]:
     """Return all drawn shapes and workstation/equipment footprints for a revision with layer metadata."""
     store = _store_module()
+    sql = """
+        SELECT s.*,
+               ll.name AS layer_name,
+               ll.layer_type AS layer_type,
+               COALESCE(ll.visible, 1) AS layer_visible,
+               COALESCE(ll.locked, 0) AS layer_locked,
+               COALESCE(ll.opacity, 1.0) AS layer_opacity,
+               COALESCE(ll.z_index, 0) AS layer_z_index,
+               yp.pitch_number,
+               yp.pitch_name,
+               yp.status AS pitch_status,
+               ea.name AS equipment_name
+        FROM layout_shapes s
+        LEFT JOIN layout_layers ll ON ll.id = s.layer_id
+        LEFT JOIN yamazumi_pitches yp ON yp.id = s.pitch_id
+        LEFT JOIN equipment_assets ea ON ea.id = s.equipment_id
+        WHERE s.revision_id = ?
+        ORDER BY COALESCE(ll.z_index, 0) ASC, COALESCE(s.z_index, 0) ASC, s.created_at ASC
+    """
     with store.connection() as conn:
-        ensure_default_layers_for_revision(revision_id, _conn=conn)
-        rows = conn.execute(
-            """
-            SELECT s.*,
-                   ll.name AS layer_name,
-                   ll.layer_type AS layer_type,
-                   COALESCE(ll.visible, 1) AS layer_visible,
-                   COALESCE(ll.locked, 0) AS layer_locked,
-                   COALESCE(ll.opacity, 1.0) AS layer_opacity,
-                   COALESCE(ll.z_index, 0) AS layer_z_index,
-                   yp.pitch_number,
-                   yp.pitch_name,
-                   yp.status AS pitch_status,
-                   ea.name AS equipment_name
-            FROM layout_shapes s
-            LEFT JOIN layout_layers ll ON ll.id = s.layer_id
-            LEFT JOIN yamazumi_pitches yp ON yp.id = s.pitch_id
-            LEFT JOIN equipment_assets ea ON ea.id = s.equipment_id
-            WHERE s.revision_id = ?
-            ORDER BY COALESCE(ll.z_index, 0) ASC, COALESCE(s.z_index, 0) ASC, s.created_at ASC
-            """,
-            (revision_id,),
-        ).fetchall()
+        rows = conn.execute(sql, (revision_id,)).fetchall()
+        if rows and any(not r["layer_id"] for r in rows):
+            ensure_default_layers_for_revision(revision_id, _conn=conn)
+            rows = conn.execute(sql, (revision_id,)).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -2432,6 +2462,7 @@ def import_shapes_from_revision(
 # --- Section Pitch Dimensional Standards ---
 
 
+@cached_store_read
 def get_section_pitch_standards(layout_id: str) -> dict[str, dict[str, Any]]:
     """Return all section pitch standards configured for a layout keyed by section_id."""
     store = _store_module()
@@ -2548,6 +2579,7 @@ def set_section_pitch_standard(
 # --- Cross-Scenario Yamazumi Pitch Queries & Live Pin Map Metrics ---
 
 
+@cached_store_read
 def list_project_yamazumi_pitches(project_id: str) -> list[dict[str, Any]]:
     """List unique workstation pitches across all planning scenarios with scenario and area metadata."""
     store = _store_module()
@@ -2579,6 +2611,7 @@ def list_project_yamazumi_pitches(project_id: str) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+@cached_store_read
 def get_scenario_pitch_metrics_for_pin_map(
     project_id: str, scenario_id: str
 ) -> dict[str, dict[str, Any]]:
@@ -2698,6 +2731,7 @@ def get_scenario_pitch_metrics_for_pin_map(
         return metrics
 
 
+@cached_store_read
 def get_pitch_layout_footprints(project_id: str, scenario_id: str) -> list[dict[str, Any]]:
     """Return placed layout shapes linked to pitches in this scenario, providing real-world coordinates for the Pin Map."""
     store = _store_module()
@@ -2952,6 +2986,7 @@ def update_revision_background_from_data_url(
 # --- Saved Custom Shapes / Stencils Operations ---
 
 
+@cached_store_read
 def list_layout_custom_stencils(project_id: str) -> list[dict[str, Any]]:
     """Return all user-saved custom shapes/stencils for a project."""
     store = _store_module()

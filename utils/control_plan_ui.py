@@ -26,6 +26,7 @@ from utils.control_plan_store import (
     restore_control_plan_item,
     save_control_plan_rows,
 )
+from utils.cache_store import is_scenario_task_completed, mark_scenario_task_completed
 from utils.control_plan_flow import control_plan_process_flow
 from utils.db_core import get_db_connection
 from utils.pfmea_store import PFMEA_CLASSIFICATION_MEANINGS, migrate_pfmea_classifications
@@ -228,14 +229,10 @@ def _grouped_control_plan_display(rows: pd.DataFrame) -> pd.DataFrame:
     if "machine_fixture" not in display:
         display["machine_fixture"] = ""
     if "machine_fixture_operation" not in display:
-        display["machine_fixture_operation"] = display.apply(
-            lambda row: (
-                f"[{row['machine_fixture']}] {row['operation']}"
-                if row.get("machine_fixture")
-                else row.get("operation") or ""
-            ),
-            axis=1,
-        )
+        display["machine_fixture_operation"] = [
+            f"[{mf}] {op}" if mf else (op or "")
+            for mf, op in zip(display["machine_fixture"], display["operation"])
+        ]
     display["pr_number"] = None
     for work_id, indexes in display.groupby(
         display["work_element_id"].astype(str), sort=False
@@ -660,13 +657,14 @@ def _render_review_area(project_id: str, scenario_id: str) -> None:
             st.caption("No excluded, orphaned, or source-ineligible Control Plan items.")
             return
         display = rows.copy()
-        display["item_label"] = display.apply(
-            lambda row: (
-                f"{row.get('process_pitch_snapshot') or 'Unassigned'} — "
-                f"{row.get('process_operation_snapshot') or 'Unnamed operation'} — "
-                f"{row.get('source_description_snapshot') or 'No characteristic'}"
-            ), axis=1,
-        )
+        display["item_label"] = [
+            f"{pitch or 'Unassigned'} — {op or 'Unnamed operation'} — {desc or 'No characteristic'}"
+            for pitch, op, desc in zip(
+                display.get("process_pitch_snapshot", []),
+                display.get("process_operation_snapshot", []),
+                display.get("source_description_snapshot", []),
+            )
+        ]
         event = selectable_dataframe(
             display[["id", "item_label", "review_reason", "source_review_required"]],
             key=f"control_plan_review_{project_id}_{scenario_id}",
@@ -795,9 +793,9 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
         active = active.sort_values(
             "projection_order", kind="stable", na_position="last"
         ).reset_index(drop=True)
-    active["characteristic_type_filter"] = active["characteristic_placement"].apply(
-        _characteristic_type_label
-    )
+    active["characteristic_type_filter"] = [
+        _characteristic_type_label(val) for val in active["characteristic_placement"]
+    ]
     editable_table_heading("Control Plan characteristics")
     visible = filter_table(
         active,
@@ -1062,7 +1060,7 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
         "source_review_required": "Source review required",
     })
     st.download_button(
-        "Export filtered rows", data=dataframe_to_excel(export, "Control Plan"),
+        "Export filtered rows", data=lambda: dataframe_to_excel(export, "Control Plan"),
         file_name="control_plan_working_draft.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon=":material/download:", key=f"control_plan_export_{project_id}_{scenario_id}",
@@ -1077,9 +1075,10 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
         st.session_state[PENDING_EXCLUSION_KEY] = {
             "project_id": project_id, "scenario_id": scenario_id,
             "projection_keys": selected["projection_key"].astype(str).tolist(),
-            "labels": selected.apply(
-                lambda row: f"{row['pr_number'] or 'Characteristic'} — {row['operation']}", axis=1
-            ).tolist(),
+            "labels": [
+                f"{pr or 'Characteristic'} — {op}"
+                for pr, op in zip(selected["pr_number"], selected["operation"])
+            ],
             "editor_key": editor_key,
         }
         stage_native_delete_confirmation(editor_key)
@@ -1295,13 +1294,19 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
         "This is an editable working draft only. Document headers, revisions, approvals, "
         "issued status, and Word export remain deferred."
     )
+    migration: dict = {}
+    number_migration: dict = {}
     try:
-        migration = migrate_pfmea_classifications(
-            project_id, st.session_state.get("current_editor", "")
-        )
-        number_migration = migrate_control_plan_pr_numbers(
-            project_id, st.session_state.get("current_editor", "")
-        )
+        if not is_scenario_task_completed("migrate_pfmea_classifications", project_id):
+            migration = migrate_pfmea_classifications(
+                project_id, st.session_state.get("current_editor", "")
+            )
+            mark_scenario_task_completed("migrate_pfmea_classifications", project_id)
+        if not is_scenario_task_completed("migrate_control_plan_pr_numbers", project_id):
+            number_migration = migrate_control_plan_pr_numbers(
+                project_id, st.session_state.get("current_editor", "")
+            )
+            mark_scenario_task_completed("migrate_control_plan_pr_numbers", project_id)
     except ValueError as exc:
         st.error(str(exc))
         st.info("Enter Current editor to complete the pending one-time migration.")

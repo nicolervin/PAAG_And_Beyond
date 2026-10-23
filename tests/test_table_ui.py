@@ -359,6 +359,43 @@ class EditableTableFooterTests(unittest.TestCase):
         self.assertTrue(empty_filtered.empty)
         self.assertIsInstance(empty_filtered.index, pd.RangeIndex)
 
+    def test_paginate_table_rows_and_merge_filtered_edits_preserve_other_pages(self) -> None:
+        df = pd.DataFrame(
+            {
+                "id": [f"id-{i}" for i in range(120)],
+                "part_number": [f"P-{i:03d}" for i in range(120)],
+                "description": [f"Item {i}" for i in range(120)],
+            }
+        )
+        session_state: dict[str, object] = {
+            "large_table_page_size": 50,
+            "large_table_page_number": 2,
+        }
+        with patch.object(table_ui.st, "session_state", session_state):
+            page_df = table_ui.paginate_table_rows(
+                df,
+                key="large_table",
+                default_page_size=50,
+                page_size_options=(50, 100),
+                render_controls=False,
+            )
+        self.assertEqual(len(page_df), 50)
+        self.assertEqual(page_df.iloc[0]["id"], "id-50")
+        self.assertEqual(page_df.iloc[-1]["id"], "id-99")
+
+        edited_page = page_df.copy()
+        edited_page.loc[0, "description"] = "Updated Item 50"
+        merged = table_filters.merge_filtered_edits(df, page_df, edited_page)
+        self.assertEqual(len(merged), 120)
+        self.assertEqual(
+            merged.loc[merged["id"].eq("id-50"), "description"].iloc[0],
+            "Updated Item 50",
+        )
+        self.assertEqual(
+            merged.loc[merged["id"].eq("id-0"), "description"].iloc[0],
+            "Item 0",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

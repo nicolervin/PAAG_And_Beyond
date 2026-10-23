@@ -6,6 +6,8 @@ from typing import Any, Callable
 from PIL import Image, ImageOps
 import streamlit as st
 
+from utils.media_cache import cached_image_data_url
+
 
 _HTML = """
 <div class="fishbone-shell">
@@ -3161,13 +3163,11 @@ def _thumbnail_data_url(image_path: str, modified_ns: int) -> str:
 
 def part_thumbnail(image_path: object) -> str:
     raw = str(image_path or "").strip()
+    if not raw:
+        return ""
     if raw.startswith(("http://", "https://", "data:")):
         return raw
-    path = Path(raw)
-    try:
-        return _thumbnail_data_url(str(path), path.stat().st_mtime_ns)
-    except OSError:
-        return ""
+    return cached_image_data_url(raw, max_dim=240, output_format="JPEG", quality=78)
 
 
 def interactive_fishbone(

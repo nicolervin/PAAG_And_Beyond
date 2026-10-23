@@ -6,6 +6,8 @@ from typing import Any
 
 import sys as _sys
 from utils import db_core as _db_core
+from utils.cache_store import cached_store_read
+from utils.media_cache import prewarm_image_cache
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -13,20 +15,29 @@ PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
 
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
 
-def project_table(
-    table: str,
+
+@cached_store_read
+def _project_work_elements_table(
     project_id: str,
     order_by: str = "updated_at DESC",
     scenario_id: str | None = None,
 ) -> pd.DataFrame:
-    allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
-    if table not in allowed:
-        raise ValueError("Unsupported table")
-    if table == "work_elements" and scenario_id:
+    if scenario_id:
         return pd.DataFrame(query(
-            f"SELECT * FROM {table} WHERE project_id=? AND scenario_id=? ORDER BY {order_by}",
+            f"SELECT * FROM work_elements WHERE project_id=? AND scenario_id=? ORDER BY {order_by}",
             (project_id, scenario_id),
         ))
+    return pd.DataFrame(
+        query(f"SELECT * FROM work_elements WHERE project_id = ? ORDER BY {order_by}", (project_id,))
+    )
+
+
+@cached_store_read(scope="catalog")
+def _project_catalog_table(
+    table: str,
+    project_id: str,
+    order_by: str = "updated_at DESC",
+) -> pd.DataFrame:
     frame = pd.DataFrame(
         query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,))
     )
@@ -86,6 +97,21 @@ def project_table(
         frame["part_code"] = derived_part_code.where(derived_part_code != "", existing_part_code)
     return frame
 
+
+def project_table(
+    table: str,
+    project_id: str,
+    order_by: str = "updated_at DESC",
+    scenario_id: str | None = None,
+) -> pd.DataFrame:
+    allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
+    if table not in allowed:
+        raise ValueError("Unsupported table")
+    if table == "work_elements":
+        return _project_work_elements_table(project_id, order_by=order_by, scenario_id=scenario_id)
+    return _project_catalog_table(table, project_id, order_by=order_by)
+
+@cached_store_read
 def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]:
     """Return explicit per-scenario part activity; missing rows default to active."""
     rows = query(
@@ -99,6 +125,7 @@ def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]
     )
     return {str(row["part_id"]): bool(row["active"]) for row in rows}
 
+@cached_store_read
 def active_part_ids(project_id: str, scenario_id: str) -> set[str]:
     """Return project part IDs active in a scenario, defaulting new/unmapped parts to active."""
     rows = query(
@@ -578,6 +605,7 @@ def set_part_image(part_id: str, uploaded_file) -> str:
     target = UPLOAD_DIR / f"{part_id}{suffix}"
     target.write_bytes(uploaded_file.getvalue())
     execute("UPDATE parts SET image_path = ?, updated_at = ? WHERE id = ?", (str(target), now_iso(), part_id))
+    prewarm_image_cache(target)
     return str(target)
 
 def set_part_image_url(part_id: str, url: str) -> str:
@@ -622,6 +650,8 @@ def add_part_image(part_id: str, uploaded_file, image_type: str, caption: str) -
         "INSERT INTO part_images VALUES (?, ?, ?, ?, ?, ?)",
         (image_id, part_id, str(target), resolved_type, caption.strip(), now_iso()),
     )
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        prewarm_image_cache(target)
     return str(target)
 
 def add_part_image_url(part_id: str, url: str, image_type: str, caption: str) -> str:
@@ -648,9 +678,11 @@ def delete_part_image(image_id: str) -> None:
                 pass
     execute("DELETE FROM part_images WHERE id=?", (image_id,))
 
+@cached_store_read(scope="catalog")
 def part_images(part_id: str) -> list[dict]:
     return query("SELECT * FROM part_images WHERE part_id = ? ORDER BY created_at", (part_id,))
 
+@cached_store_read(scope="catalog")
 def complexity_features(project_id: str) -> pd.DataFrame:
     rows = query(
         "SELECT * FROM complexity_features WHERE project_id=? ORDER BY sequence, category, name",
@@ -668,14 +700,15 @@ def complexity_features(project_id: str) -> pd.DataFrame:
     return frame
 
 
+@cached_store_read(scope="catalog")
 def project_part_subsystems(project_id: str) -> list[str]:
     """Return sorted distinct non-blank subsystem values across project parts, PITS records, and feature definitions."""
     rows = query(
-        """SELECT subsystem FROM parts WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''
-           UNION ALL
-           SELECT subsystem FROM pits_records WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''
-           UNION ALL
-           SELECT subsystem FROM complexity_features WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''""",
+        """SELECT DISTINCT subsystem FROM parts WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''
+           UNION
+           SELECT DISTINCT subsystem FROM pits_records WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''
+           UNION
+           SELECT DISTINCT subsystem FROM complexity_features WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''""",
         (project_id, project_id, project_id),
     )
     by_casefold: dict[str, str] = {}
@@ -732,6 +765,7 @@ def complexity_feature_delete_impacts(
         columns=columns,
     )
 
+@cached_store_read(scope="catalog")
 def complexity_tree(project_id: str) -> pd.DataFrame:
     models = project_models(project_id)
     if models.empty:
@@ -824,6 +858,7 @@ def potential_duplicate_models(project_id: str, edited: pd.DataFrame) -> list[di
                 )
     return conflicts
 
+@cached_store_read(scope="catalog")
 def part_feature_rules(project_id: str) -> pd.DataFrame:
     """Return saved part rules for catalog parts."""
     return pd.DataFrame(query(
@@ -843,7 +878,10 @@ def update_part_feature_rules(
 ) -> int:
     """Save feature rules and resolve them to official model numbers for downstream use."""
     features = complexity_features(project_id)
-    feature_by_id = {str(row["id"]): row for _, row in features.iterrows()}
+    allowed_by_feature = {
+        str(row["id"]): set(json.loads(row["allowed_values"] or "[]"))
+        for _, row in features.iterrows()
+    }
     tree = complexity_tree(project_id)
     read_rows = (
         lambda sql, params=(): [dict(row) for row in _conn.execute(sql, params).fetchall()]
@@ -855,55 +893,72 @@ def update_part_feature_rules(
         for row in read_rows("SELECT id FROM parts WHERE project_id=?", (project_id,))
     }
     timestamp = now_iso()
-    updated = 0
-    context = nullcontext(_conn) if _conn is not None else connection()
-    with context as conn:
-        for part_id, raw_tokens in selections_by_part.items():
-            if part_id not in valid_parts:
-                continue
-            tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
-            if not tokens:
-                continue  # Preserve legacy model-number applicability until the user tags it.
-            if "All models" in tokens:
-                conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
-                conn.execute(
-                    "UPDATE parts SET model_applicability='All', updated_at=? WHERE id=? AND project_id=?",
-                    (timestamp, part_id, project_id),
-                )
-                updated += 1
-                continue
-            selected_by_feature: dict[str, set[str]] = {}
-            for token in tokens:
-                if "::" not in token:
-                    raise ValueError("Choose All models or values defined in Feature definitions.")
-                feature_id, value = token.split("::", 1)
-                feature = feature_by_id.get(feature_id)
-                allowed = json.loads(feature["allowed_values"] or "[]") if feature is not None else []
-                if value not in allowed:
-                    raise ValueError("A selected feature choice is no longer defined.")
-                selected_by_feature.setdefault(feature_id, set()).add(value)
+    resolved_applicability_cache: dict[tuple[tuple[str, tuple[str, ...]], ...], str] = {}
+    delete_params: list[tuple[str, str]] = []
+    insert_rows: list[tuple[str, str, str, str, str]] = []
+    update_rows: list[tuple[str, str, str, str]] = []
 
-            matches = tree.copy()
-            for feature_id, selected_values in selected_by_feature.items():
+    for part_id, raw_tokens in selections_by_part.items():
+        if part_id not in valid_parts:
+            continue
+        tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
+        if not tokens:
+            continue  # Preserve legacy model-number applicability until the user tags it.
+        if "All models" in tokens:
+            delete_params.append((project_id, part_id))
+            update_rows.append(("All", timestamp, part_id, project_id))
+            continue
+        selected_by_feature: dict[str, set[str]] = {}
+        for token in tokens:
+            if "::" not in token:
+                raise ValueError("Choose All models or values defined in Feature definitions.")
+            feature_id, value = token.split("::", 1)
+            allowed = allowed_by_feature.get(feature_id)
+            if allowed is None or value not in allowed:
+                raise ValueError("A selected feature choice is no longer defined.")
+            selected_by_feature.setdefault(feature_id, set()).add(value)
+
+        rule_key = tuple(
+            (feature_id, tuple(sorted(values)))
+            for feature_id, values in sorted(selected_by_feature.items())
+        )
+        normalized_models = resolved_applicability_cache.get(rule_key)
+        if normalized_models is None:
+            matches = tree
+            for feature_id, selected_values in rule_key:
                 matches = matches[matches[feature_id].isin(selected_values)]
             if matches.empty:
                 raise ValueError("A feature rule matches no official models. Update the Complexity tree or the part rule.")
             model_numbers = matches["official_model_number"].dropna().astype(str).tolist()
-            conn.execute("DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?", (project_id, part_id))
+            normalized_models = normalize_model_applicability(model_numbers)
+            resolved_applicability_cache[rule_key] = normalized_models
+
+        delete_params.append((project_id, part_id))
+        for feature_id, values in rule_key:
+            for value in values:
+                insert_rows.append((project_id, part_id, feature_id, value, timestamp))
+        update_rows.append((normalized_models, timestamp, part_id, project_id))
+
+    if not update_rows:
+        return 0
+
+    context = nullcontext(_conn) if _conn is not None else connection()
+    with context as conn:
+        conn.executemany(
+            "DELETE FROM part_feature_rules WHERE project_id=? AND part_id=?",
+            delete_params,
+        )
+        if insert_rows:
             conn.executemany(
                 """INSERT INTO part_feature_rules
                    (project_id, part_id, feature_id, value, updated_at) VALUES (?, ?, ?, ?, ?)""",
-                [
-                    (project_id, part_id, feature_id, value, timestamp)
-                    for feature_id, values in selected_by_feature.items() for value in sorted(values)
-                ],
+                insert_rows,
             )
-            conn.execute(
-                "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
-                (normalize_model_applicability(model_numbers), timestamp, part_id, project_id),
-            )
-            updated += 1
-    return updated
+        conn.executemany(
+            "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+            update_rows,
+        )
+    return len(update_rows)
 
 _INFERENCE_SUBWORDS = (
     "back", "plate", "wire", "harness", "light", "panel", "board", "switch",
@@ -1069,6 +1124,47 @@ def infer_part_feature_rules(
         for row in active_features_by_id.values()
         if str(row.get("subsystem") or "").strip()
     }
+    precomputed_choices: list[dict[str, Any]] = []
+    for (fid, val), c_models in feature_choice_models.items():
+        if not c_models:
+            continue
+        if val.strip().upper() in ("N/A", "NONE"):
+            continue
+        c_eval_models = c_models & eval_tree_models
+        if not c_eval_models:
+            continue
+        feat = active_features_by_id[fid]
+        f_subsystem = str(feat.get("subsystem") or "").strip()
+        f_sub_key = f_subsystem.casefold()
+        allowed = json.loads(feat.get("allowed_values") or "[]")
+        other_eval_models_union: set[str] = set()
+        for other_val in allowed:
+            if other_val != val:
+                other_eval_models_union |= (
+                    feature_choice_models.get((fid, other_val), set()) & eval_tree_models
+                )
+        f_name = str(feat.get("name") or "")
+        f_cat = str(feat.get("category") or "")
+        f_tokens = (
+            _tokenize_part_text(f_name)
+            | _tokenize_part_text(f_cat)
+            | _tokenize_part_text(val)
+        )
+        precomputed_choices.append(
+            {
+                "fid": fid,
+                "val": val,
+                "c_models": c_models,
+                "c_eval_models": c_eval_models,
+                "f_subsystem": f_subsystem,
+                "f_sub_key": f_sub_key,
+                "other_eval_models_union": other_eval_models_union,
+                "f_name": f_name,
+                "f_cat": f_cat,
+                "f_tokens": f_tokens,
+            }
+        )
+
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
         pid = str(p["id"])
@@ -1100,40 +1196,24 @@ def infer_part_feature_rules(
         p_tokens = _tokenize_part_text(desc) | _tokenize_part_text(part_num)
 
         candidates: list[dict[str, Any]] = []
-        for (fid, val), c_models in feature_choice_models.items():
-            if not c_models:
-                continue
-            if val.strip().upper() in ("N/A", "NONE"):
-                continue
-            c_eval_models = c_models & eval_tree_models
-            if not c_eval_models or not (p_models <= c_eval_models):
+        for choice in precomputed_choices:
+            c_eval_models = choice["c_eval_models"]
+            if not (p_models <= c_eval_models):
                 continue
 
-            feat = active_features_by_id[fid]
-            f_subsystem = str(feat.get("subsystem") or "").strip()
-            if part_has_assigned_subsystem and f_subsystem.casefold() != p_sub_key:
+            f_sub_key = choice["f_sub_key"]
+            if part_has_assigned_subsystem and f_sub_key != p_sub_key:
                 continue
             subsystem_match = (
                 1
-                if (f_subsystem and p_sub_key and f_subsystem.casefold() == p_sub_key)
+                if (f_sub_key and p_sub_key and f_sub_key == p_sub_key)
                 else 0
             )
 
-            allowed = json.loads(feat.get("allowed_values") or "[]")
-            conflicts = False
-            for other_val in allowed:
-                if other_val != val:
-                    other_models = feature_choice_models.get((fid, other_val), set()) & eval_tree_models
-                    if p_models & other_models:
-                        conflicts = True
-                        break
-            if conflicts:
+            if p_models & choice["other_eval_models_union"]:
                 continue
 
-            f_name = str(feat.get("name") or "")
-            f_cat = str(feat.get("category") or "")
-            f_tokens = _tokenize_part_text(f_name) | _tokenize_part_text(f_cat) | _tokenize_part_text(val)
-            overlap = len(p_tokens & f_tokens)
+            overlap = len(p_tokens & choice["f_tokens"])
 
             exact_match = 1.0 if p_models == c_eval_models else 0.0
             coverage = len(p_models) / len(c_eval_models) if c_eval_models else 0.0
@@ -1148,15 +1228,15 @@ def infer_part_feature_rules(
             )
             candidates.append({
                 "score": score,
-                "feature_id": fid,
-                "value": val,
+                "feature_id": choice["fid"],
+                "value": choice["val"],
                 "overlap": overlap,
                 "subsystem_match": subsystem_match,
                 "exact_match": exact_match,
-                "category": f_cat,
-                "name": f_name,
+                "category": choice["f_cat"],
+                "name": choice["f_name"],
                 "eval_models": c_eval_models,
-                "raw_models": c_models,
+                "raw_models": choice["c_models"],
             })
 
         if not candidates:
@@ -1457,6 +1537,7 @@ def apply_inferred_part_feature_rules(
             )
     return updated
 
+@cached_store_read
 def complexity_planning_snapshot(project_id: str) -> dict:
     with connection() as conn:
         return {
@@ -1658,6 +1739,7 @@ def update_complexity_tree(project_id: str, edited: pd.DataFrame) -> int:
             )
     return saved
 
+@cached_store_read
 def model_planning_snapshot(project_id: str) -> dict:
     """Capture model definitions and every project field affected by model renames."""
     with connection() as conn:
@@ -1923,9 +2005,11 @@ def update_project_model_rows(project_id: str, edited: pd.DataFrame) -> int:
             raise ValueError("Official model numbers must be unique.") from exc
     return len(edited)
 
+@cached_store_read
 def pits_records(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query("SELECT * FROM pits_records WHERE project_id = ? ORDER BY CAST(pits_id AS INTEGER), pits_id", (project_id,)))
 
+@cached_store_read
 def pits_revisions(project_id: str) -> pd.DataFrame:
     return pd.DataFrame(query(
         """SELECT p.pits_id, r.revision_no, r.imported_at, r.source_payload
@@ -1934,6 +2018,7 @@ def pits_revisions(project_id: str) -> pd.DataFrame:
         (project_id,),
     ))
 
+@cached_store_read
 def pits_bom_occurrences(
     project_id: str, *, actionable_only: bool = False
 ) -> pd.DataFrame:
@@ -4027,6 +4112,7 @@ def model_bom_tree_nodes(
         return nodes
 
 
+@cached_store_read(scope="catalog")
 def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[str, Any]:
     """Retrieve the PITS BOM tree structure with reconciliation status against Parts Catalog and Fishbone.
 
@@ -4142,6 +4228,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                         break
 
             qualifying_nodes: list[dict[str, Any]] = []
+            qualifying_trackers: set[str] = set()
             pre_stack: dict[int, dict[str, Any]] = {}
 
             for pr in parsed_rows:
@@ -4196,7 +4283,7 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
                                     break
 
                 raw_pt = str(r["parent_tracker_number"] or "").strip()
-                if not raw_pt and depth > 1:
+                if (not raw_pt or raw_pt not in qualifying_trackers) and depth > 1:
                     p_fallback = pre_stack.get(depth - 1)
                     if p_fallback:
                         raw_pt = str(p_fallback.get("child_tracker") or "").strip()
@@ -4242,6 +4329,8 @@ def pits_bom_model_tree(project_id: str, model_id: str | None = None) -> dict[st
 
                 pre_stack[depth] = node
                 pre_stack = {lvl: n for lvl, n in pre_stack.items() if lvl <= depth}
+                if node["child_tracker"]:
+                    qualifying_trackers.add(node["child_tracker"])
                 qualifying_nodes.append(node)
 
             l1_pns_tree = {
@@ -4447,6 +4536,7 @@ def _occurrence_has_active_usages(raw_levels_str: str | None) -> bool:
     return True
 
 
+@cached_store_read
 def pits_assembly_mini_bom(
     project_id: str,
     part_id: str = "",
@@ -4765,6 +4855,7 @@ def sort_bom_hierarchy(
     return ordered
 
 
+@cached_store_read
 def get_manual_model_bom(
     project_id: str,
     model_id: str,
@@ -4889,6 +4980,7 @@ def get_manual_model_bom(
         return _execute(conn)
 
 
+@cached_store_read
 def get_known_subassembly_structure(
     project_id: str,
     part_number: str,
@@ -6984,7 +7076,11 @@ def predict_model_bom_from_features(
                         "_uid": str(uuid4())[:8],
                     })
                     first_l1_done = True
-                elif idx not in replacements_by_idx and str(item.get("part_number") or "").strip().upper() in top_level_assembly_pns:
+                elif (
+                    lvl > 1
+                    and idx not in replacements_by_idx
+                    and str(item.get("part_number") or "").strip().upper() in top_level_assembly_pns
+                ) or str(item.get("part_number") or "").strip().upper() == top_pn.strip().upper():
                     continue
                 elif idx in replacements_by_idx:
                     predicted_items.append({

@@ -17,6 +17,8 @@ from uuid import uuid4
 
 import pandas as pd
 
+from utils.cache_store import cached_store_read
+
 
 PLACEMENTS = ("", "Product / Part", "Process")
 SOURCE_KINDS = ("quality", "pfmea_only")
@@ -972,6 +974,15 @@ def _live_projection_conn(
                 suffix
             )
     equipment_by_work = _equipment_by_work_element(conn, project_id, scenario_id)
+    torque_by_req_id: dict[str, str] = {}
+    for t_row in conn.execute(
+        """SELECT quality_requirement_id, tool_type, tool_orientation, screw_bit_type
+           FROM quality_requirement_torque_details
+           WHERE project_id=?""",
+        (project_id,),
+    ).fetchall():
+        vals = [_text(t_row[name]) for name in ("tool_type", "tool_orientation", "screw_bit_type")]
+        torque_by_req_id[str(t_row["quality_requirement_id"])] = " — ".join(v for v in vals if v)
     result: list[dict] = []
     first_by_work: set[str] = set()
     for entry in entries:
@@ -1012,7 +1023,7 @@ def _live_projection_conn(
                 continue
             torque = ""
             if source and _text(source.get("requirement_type")).casefold() == "torque":
-                torque = _torque_text(conn, project_id, quality_id)
+                torque = torque_by_req_id.get(quality_id, "")
             eq_list = equipment_by_work.get(work_id, [])
             eq_summary = ",".join(sorted(str(eq["equipment_id"]) for eq in eq_list))
             fingerprint = _source_fingerprint(entry, source, torque, eq_summary)
@@ -1104,6 +1115,7 @@ def _live_projection_conn(
     )
 
 
+@cached_store_read
 def control_plan_projection(project_id: str, scenario_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
@@ -1111,6 +1123,7 @@ def control_plan_projection(project_id: str, scenario_id: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@cached_store_read
 def control_plan_flow_projection(
     project_id: str, scenario_id: str
 ) -> ControlPlanFlowProjection:
@@ -1362,6 +1375,7 @@ def control_plan_flow_projection(
     }
 
 
+@cached_store_read
 def control_plan_review_items(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return excluded, orphaned, or currently source-ineligible persisted items."""
     with _store().connection() as conn:
@@ -1592,6 +1606,7 @@ def exclude_control_plan_projection_keys(
     return {"row_count": len(item_ids), "affected_ids": item_ids, "timestamp": timestamp}
 
 
+@cached_store_read
 def control_plan_evidence(
     project_id: str, scenario_id: str, pfmea_entry_id: str
 ) -> dict[str, list[str]]:
@@ -1650,6 +1665,7 @@ def control_plan_evidence(
     return result
 
 
+@cached_store_read
 def control_plan_relink_candidates(
     project_id: str, scenario_id: str, item_id: str
 ) -> pd.DataFrame:
@@ -1696,6 +1712,7 @@ def restore_control_plan_item(project_id: str, scenario_id: str, item_id: str) -
     return {"row_count": 1, "affected_ids": [item_id], "timestamp": timestamp}
 
 
+@cached_store_read
 def control_plan_assignment_impact(
     project_id: str, scenario_id: str, assignment_ids: list[str]
 ) -> dict:
@@ -1783,6 +1800,7 @@ def relink_control_plan_item(
     return {"row_count": 1, "affected_ids": [item_id], "timestamp": timestamp}
 
 
+@cached_store_read
 def control_plan_pfmea_delete_impact(
     project_id: str, scenario_id: str, entry_ids: list[str]
 ) -> dict:

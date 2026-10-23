@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys as _sys
 from utils import db_core as _db_core
+from utils.cache_store import cached_store_read
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -51,6 +52,7 @@ def serialize_ppe(val: object) -> str:
     items = parse_ppe(val)
     return json.dumps(items) if items else ""
 
+@cached_store_read
 def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load scenario-specific Safety requirements with current Process labels."""
     columns = [
@@ -303,6 +305,7 @@ def safety_requirement_delete_impact(
         "work_element_count": int(row["work_element_count"] or 0),
     }
 
+@cached_store_read(scope="scenario")
 def safety_requirement_history(
     project_id: str, scenario_id: str, limit: int = 50
 ) -> pd.DataFrame:

@@ -4,6 +4,11 @@ import math
 import pandas as pd
 import streamlit as st
 
+from utils.cache_store import (
+    cached_computation,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
 from utils.fishbone_ui import (
     normalized_id,
     ordered_yamazumi_area_ids,
@@ -178,7 +183,8 @@ if not pitch_address_conflicts.empty:
         },
     )
 
-has_yamazumi_areas = not yamazumi_areas(project_id, scenario_id).empty
+initial_areas_df = yamazumi_areas(project_id, scenario_id)
+has_yamazumi_areas = not initial_areas_df.empty
 
 
 with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
@@ -219,22 +225,35 @@ for _, feature in active_features.iterrows():
         defined_variant_options.append(short_label)
         stored_variant_labels[long_label] = short_label
 defined_variant_options = list(dict.fromkeys(defined_variant_options))
-variant_rename_result = rename_yamazumi_variants(
-    project_id, scenario_id, stored_variant_labels
-)
-if variant_rename_result["changed_count"]:
-    record_audit_event(
-        project_id,
-        "Yamazumi variants",
-        "Automatic variant rename",
-        int(variant_rename_result["changed_count"]),
-        st.session_state.get("current_editor", ""),
-        {
-            "scenario_id": scenario_id,
-            "element_changes": variant_rename_result["element_changes"],
-            "pitch_changes": variant_rename_result["pitch_changes"],
-        },
+_variant_labels_token = tuple(sorted(stored_variant_labels.items()))
+if not is_scenario_task_completed(
+    "rename_yamazumi_variants",
+    project_id,
+    scenario_id,
+    extra_token=_variant_labels_token,
+):
+    variant_rename_result = rename_yamazumi_variants(
+        project_id, scenario_id, stored_variant_labels
     )
+    mark_scenario_task_completed(
+        "rename_yamazumi_variants",
+        project_id,
+        scenario_id,
+        extra_token=_variant_labels_token,
+    )
+    if variant_rename_result["changed_count"]:
+        record_audit_event(
+            project_id,
+            "Yamazumi variants",
+            "Automatic variant rename",
+            int(variant_rename_result["changed_count"]),
+            st.session_state.get("current_editor", ""),
+            {
+                "scenario_id": scenario_id,
+                "element_changes": variant_rename_result["element_changes"],
+                "pitch_changes": variant_rename_result["pitch_changes"],
+            },
+        )
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
 fishbone_sections = active_sections
 section_name_by_id = dict(zip(active_sections["id"].astype(str), active_sections["name"].astype(str))) if not active_sections.empty else {}
@@ -271,6 +290,27 @@ yamazumi_import_widget_scope = (
     f"{project_id}_{scenario_id}_{yamazumi_import_generation}"
 )
 
+@cached_computation(scope="upload")
+def _cached_parse_yamazumi_upload(uploaded_file, is_pdf_file: bool) -> dict:
+    if hasattr(uploaded_file, "seek"):
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+    if is_pdf_file:
+        pdf_res = parse_yamazumi_pdf(uploaded_file)
+        return {
+            "dataframe": pdf_res["dataframe"],
+            "pitch_dataframe": pdf_res["pitch_dataframe"],
+            "metadata": pdf_res["metadata"],
+        }
+    return {
+        "dataframe": pd.read_excel(uploaded_file),
+        "pitch_dataframe": None,
+        "metadata": None,
+    }
+
+
 with st.expander("Import Yamazumi file (Excel or PDF)", icon=":material/upload_file:"):
     uploaded = st.file_uploader(
         "Yamazumi Excel or PDF file",
@@ -291,13 +331,10 @@ with st.expander("Import Yamazumi file (Excel or PDF)", icon=":material/upload_f
         pdf_meta = None
         parse_error = None
         try:
-            if is_pdf:
-                pdf_res = parse_yamazumi_pdf(uploaded)
-                parsed_df = pdf_res["dataframe"]
-                parsed_pitch_df = pdf_res["pitch_dataframe"]
-                pdf_meta = pdf_res["metadata"]
-            else:
-                parsed_df = pd.read_excel(uploaded)
+            upload_res = _cached_parse_yamazumi_upload(uploaded, is_pdf)
+            parsed_df = upload_res["dataframe"]
+            parsed_pitch_df = upload_res["pitch_dataframe"]
+            pdf_meta = upload_res["metadata"]
         except Exception as exc:
             parse_error = str(exc)
 
@@ -443,7 +480,7 @@ with st.expander("Import Yamazumi file (Excel or PDF)", icon=":material/upload_f
         elif parsed_df is not None and parsed_df.empty:
             st.warning("No work elements or pitches were found in the uploaded file.")
 
-areas = order_areas_by_fishbone(yamazumi_areas(project_id, scenario_id))
+areas = order_areas_by_fishbone(initial_areas_df)
 if fishbone_sections.empty and areas.empty:
     st.info(
         "Build an active Fishbone section before importing or planning Yamazumi data."
@@ -479,7 +516,6 @@ if not fishbone_sections.empty:
         except ValueError as exc:
             st.error(str(exc))
 
-areas = order_areas_by_fishbone(yamazumi_areas(project_id, scenario_id))
 if areas.empty:
     st.info("Create an area from the Fishbone or import a workbook to begin.")
     st.stop()
@@ -709,9 +745,10 @@ if st.session_state.get("yamazumi_reset_scope") in {"area", "all"}:
 pitches = yamazumi_pitches(project_id, area_id)
 pitch_address_suggestion = yamazumi_pitch_address_suggestion(project_id, area_id)
 if not pitches.empty:
-    pitches["model_variants"] = pitches["model_variants"].apply(
-        lambda value: [stored_variant_labels.get(item, item) for item in json.loads(value or '["Base"]')]
-    )
+    pitches["model_variants"] = [
+        [stored_variant_labels.get(item, item) for item in json.loads(value or '["Base"]')]
+        for value in pitches["model_variants"]
+    ]
 elements = yamazumi_elements(project_id, area_id)
 criticality_by_work_element = work_element_criticality(project_id, scenario_id)
 
@@ -723,21 +760,22 @@ def criticality_for_process_link(value: object) -> list[str]:
 
 
 if not elements.empty:
-    elements["model_variants"] = elements.apply(
-        lambda row: [
+    parsed_variants_list = [
+        [
             stored_variant_labels.get(item, item)
             for item in parse_yamazumi_model_variants(
-                row.get("model_variants"), str(row.get("model_variant") or "Base")
+                mv, str(m_single or "Base")
             )
-        ],
-        axis=1,
-    )
-    elements["model_variant"] = elements["model_variants"].apply(
-        lambda values: values[0] if values else "Base"
-    )
-    elements["criticality"] = elements["process_element_id"].apply(
-        criticality_for_process_link
-    )
+        ]
+        for mv, m_single in zip(elements["model_variants"], elements["model_variant"])
+    ]
+    elements["model_variants"] = parsed_variants_list
+    elements["model_variant"] = [
+        values[0] if values else "Base" for values in parsed_variants_list
+    ]
+    elements["criticality"] = [
+        criticality_for_process_link(val) for val in elements["process_element_id"]
+    ]
 
 region_definitions = yamazumi_work_regions(project_id, area_id)
 defined_work_regions = (
@@ -1082,7 +1120,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
     request_region_delete = not selected_regions.empty
     region_bulk.download_button(
         "Export filtered",
-        data=dataframe_to_excel(
+        data=lambda: dataframe_to_excel(
             visible_regions[["name", "description", "active"]],
             "Work regions",
         ),
@@ -2426,12 +2464,13 @@ if pitch_combined_view:
         pitch_table_source["area_id"].astype(str).isin(effective_pitch_area_ids)
     ].copy()
     if not pitch_table_source.empty:
-        pitch_table_source["model_variants"] = pitch_table_source["model_variants"].apply(
-            lambda value: [
+        pitch_table_source["model_variants"] = [
+            [
                 stored_variant_labels.get(item, item)
                 for item in json.loads(value or '["Base"]')
             ]
-        )
+            for value in pitch_table_source["model_variants"]
+        ]
     scope_caption = "every Yamazumi area" if not selected_pitch_area_ids else "the selected Yamazumi areas"
     st.caption(f"Showing {scope_caption} in this scenario. Combined views are read-only.")
 else:
@@ -2461,19 +2500,24 @@ if pitch_table_source.empty:
 else:
     pitch_rows = pitch_table_source.reindex(columns=pitch_columns).copy()
     table_pitch_label_by_id = {
-        str(row["id"]): yamazumi_pitch_label(row["pitch_number"], row["pitch_name"])
-        for _, row in pitch_table_source.iterrows()
+        str(pid): yamazumi_pitch_label(pnum, pname)
+        for pid, pnum, pname in zip(
+            pitch_table_source["id"],
+            pitch_table_source["pitch_number"],
+            pitch_table_source["pitch_name"],
+        )
     }
-    pitch_rows["feed_target"] = pitch_rows["feeds_into_pitch_id"].apply(
-        lambda value: table_pitch_label_by_id.get(str(value), "")
+    pitch_rows["feed_target"] = [
+        table_pitch_label_by_id.get(str(value), "")
         if value is not None and not pd.isna(value) else ""
-    )
-    pitch_rows["feed_target_status"] = pitch_rows.apply(
-        lambda row: yamazumi_pitch_feed_target_status(
-            row.get("pitch_type"), row.get("feeds_into_pitch_id")
-        ),
-        axis=1,
-    )
+        for value in pitch_rows["feeds_into_pitch_id"]
+    ]
+    pitch_rows["feed_target_status"] = [
+        yamazumi_pitch_feed_target_status(ptype, ftarget)
+        for ptype, ftarget in zip(
+            pitch_rows["pitch_type"], pitch_rows["feeds_into_pitch_id"]
+        )
+    ]
 pitch_filter_scope = "combined" if pitch_combined_view else str(area_id)
 visible_pitches = filter_table(
     pitch_rows,
@@ -2646,11 +2690,23 @@ else:
             ),
         }
         stage_native_delete_confirmation(pitch_editor_key)
+_lazy_yamazumi_export = (
+    getattr(dataframe_to_excel, "__module__", "") == "utils.table_ui"
+)
 st.download_button(
     "Export filtered pitches",
-    data=dataframe_to_excel(
-        visible_pitches.drop(columns=["id", "updated_at"], errors="ignore"),
-        "Pitch addresses",
+    data=(
+        (
+            lambda _df=visible_pitches: dataframe_to_excel(
+                _df.drop(columns=["id", "updated_at"], errors="ignore"),
+                "Pitch addresses",
+            )
+        )
+        if _lazy_yamazumi_export
+        else dataframe_to_excel(
+            visible_pitches.drop(columns=["id", "updated_at"], errors="ignore"),
+            "Pitch addresses",
+        )
     ),
     file_name=(
         "yamazumi_pitch_addresses_multiple_areas_filtered.xlsx"
@@ -2747,18 +2803,22 @@ if element_combined_view:
         element_table_source["area_id"].astype(str).isin(effective_element_area_ids)
     ].copy()
     if not element_table_source.empty:
-        element_table_source["model_variants"] = element_table_source.apply(
-            lambda row: [
+        element_table_source["model_variants"] = [
+            [
                 stored_variant_labels.get(item, item)
                 for item in parse_yamazumi_model_variants(
-                    row.get("model_variants"), str(row.get("model_variant") or "Base")
+                    mv, str(m_single or "Base")
                 )
-            ],
-            axis=1,
-        )
-        element_table_source["criticality"] = element_table_source[
-            "process_element_id"
-        ].apply(criticality_for_process_link)
+            ]
+            for mv, m_single in zip(
+                element_table_source["model_variants"],
+                element_table_source["model_variant"],
+            )
+        ]
+        element_table_source["criticality"] = [
+            criticality_for_process_link(val)
+            for val in element_table_source["process_element_id"]
+        ]
     scope_caption = "every Yamazumi area" if not selected_element_area_ids else "the selected Yamazumi areas"
     st.caption(f"Showing {scope_caption} in this scenario. Combined views are read-only.")
 else:
@@ -2795,9 +2855,10 @@ else:
     if element_combined_view:
         element_rows["pitch"] = element_table_source["pitch_number"].fillna("Unassigned").astype("string")
     else:
-        element_rows["pitch"] = element_rows["pitch_id"].apply(
-            lambda value: pitch_label_by_id.get(str(value), "Unassigned") if value is not None and not pd.isna(value) else "Unassigned"
-        )
+        element_rows["pitch"] = [
+            pitch_label_by_id.get(str(value), "Unassigned") if value is not None and not pd.isna(value) else "Unassigned"
+            for value in element_rows["pitch_id"]
+        ]
 element_rows["time_s"] = (
     pd.to_numeric(element_rows["time_s"], errors="coerce")
     / time_config.seconds_per_unit
@@ -3033,14 +3094,28 @@ else:
         stage_native_delete_confirmation(element_editor_key)
 st.download_button(
     "Export filtered work elements",
-    data=dataframe_to_excel(
-        visible_elements.rename(
-            columns={"time_s": time_column_label}
-        ).drop(
-            columns=["id", "pitch_id", "process_element_id", "updated_at"],
-            errors="ignore",
-        ),
-        "Yamazumi work elements",
+    data=(
+        (
+            lambda _df=visible_elements, _label=time_column_label: dataframe_to_excel(
+                _df.rename(
+                    columns={"time_s": _label}
+                ).drop(
+                    columns=["id", "pitch_id", "process_element_id", "updated_at"],
+                    errors="ignore",
+                ),
+                "Yamazumi work elements",
+            )
+        )
+        if _lazy_yamazumi_export
+        else dataframe_to_excel(
+            visible_elements.rename(
+                columns={"time_s": time_column_label}
+            ).drop(
+                columns=["id", "pitch_id", "process_element_id", "updated_at"],
+                errors="ignore",
+            ),
+            "Yamazumi work elements",
+        )
     ),
     file_name=(
         "yamazumi_work_elements_multiple_areas_filtered.xlsx"

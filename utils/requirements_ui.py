@@ -100,10 +100,10 @@ def _linked_step_display_rows(source: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=LINKED_STEP_VISIBLE_COLUMNS)
 
     linked_steps = source.copy()
-    linked_steps["scenario"] = linked_steps.apply(
-        lambda row: f"Rev {row['scenario_revision']} · {row['scenario_name']}",
-        axis=1,
-    )
+    linked_steps["scenario"] = [
+        f"Rev {rev} · {name}"
+        for rev, name in zip(linked_steps["scenario_revision"], linked_steps["scenario_name"])
+    ]
     linked_steps = linked_steps.rename(
         columns={
             "op_id": "Op ID",
@@ -301,7 +301,7 @@ def render_quality_requirement_type_catalog(
 
         st.download_button(
             "Export filtered rows",
-            data=dataframe_to_excel(
+            data=lambda: dataframe_to_excel(
                 visible_types[["label", "active", "requirement_count"]],
                 "Quality requirement types",
             ),
@@ -530,9 +530,10 @@ def render_requirements_repository_tab(
                 .astype(int)
             )
 
-    requirements["assignment_status"] = requirements["assignment_count"].apply(
-        lambda count: "Assigned" if int(count or 0) > 0 else "Unassigned / Needs Process Step"
-    )
+    requirements["assignment_status"] = [
+        "Assigned" if int(count or 0) > 0 else "Unassigned / Needs Process Step"
+        for count in requirements["assignment_count"]
+    ]
 
     catalog_by_key = {
         str(row["label"]).strip().casefold(): row
@@ -626,9 +627,10 @@ def render_requirements_repository_tab(
             "updated_at": "Updated",
         },
     )
-    editor_rows["assignment_count"] = editor_rows["assignment_count"].apply(
-        lambda value: "" if pd.isna(value) else str(int(value))
-    )
+    editor_rows["assignment_count"] = [
+        "" if pd.isna(value) else str(int(value))
+        for value in editor_rows["assignment_count"]
+    ]
 
     def show_linked_steps_for_clicked_requirement() -> None:
         requirement_id = stable_id_from_button_click(
@@ -734,7 +736,7 @@ def render_requirements_repository_tab(
     with col_exp:
         st.download_button(
             "Export filtered rows",
-            data=dataframe_to_excel(
+            data=lambda: dataframe_to_excel(
                 visible_requirements.reindex(columns=export_columns), "Quality requirements"
             ),
             file_name="quality_requirements_filtered.xlsx",

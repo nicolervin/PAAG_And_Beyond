@@ -9,3 +9,5 @@ buttonRadius = "0.4rem"
 [server]
 maxUploadSize = 50
 
+[runner]
+magicEnabled = false

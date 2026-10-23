@@ -632,8 +632,10 @@ else:
     )
     if st.session_state.get(f"pending_multi_feature_review_{project_id}"):
         review_multi_feature_applicability_dialog(project_id)
-    tree = complexity_tree(project_id)
-    tree = tree.loc[tree["model_id"].astype(str).isin(active_model_ids)].copy()
+    full_complexity_tree = complexity_tree(project_id)
+    tree = full_complexity_tree.loc[
+        full_complexity_tree["model_id"].astype(str).isin(active_model_ids)
+    ].copy()
     active_feature_ids = active_features["id"].astype(str).tolist()
     tree["id"] = tree["model_id"]
     tree = tree[["id", "model_id", "common_name", "official_model_number", *active_feature_ids]]
@@ -934,7 +936,7 @@ else:
         models["active"].fillna(1).astype(bool),
         ["id", "display_name", "model_number"],
     ].copy()
-    visual_tree = complexity_tree(project_id).set_index("model_id")
+    visual_tree = full_complexity_tree.set_index("model_id")
     visual_model_groups: list[dict[str, object]] = []
     if visual_features is not None:
         feature_ids = [str(feature_id) for feature_id in visual_features["id"]]
@@ -1020,14 +1022,16 @@ else:
             rules = part_feature_rules(project_id)
             if not catalog_parts.empty and not rules.empty:
                 part_number_by_id = {
-                    str(row["id"]).strip(): str(row["part_number"] or "").strip()
-                    for _, row in catalog_parts.iterrows()
-                    if str(row["id"]).strip() and str(row["part_number"] or "").strip()
+                    str(pid).strip(): str(pnum or "").strip()
+                    for pid, pnum in zip(catalog_parts["id"], catalog_parts["part_number"])
+                    if str(pid).strip() and str(pnum or "").strip()
                 }
-                for _, rule in rules.iterrows():
-                    part_id = str(rule.get("part_id") or "").strip()
-                    rule_feature_id = str(rule.get("feature_id") or "").strip()
-                    rule_value = str(rule.get("value") or "").strip()
+                for raw_pid, raw_fid, raw_val in zip(
+                    rules["part_id"], rules["feature_id"], rules["value"]
+                ):
+                    part_id = str(raw_pid or "").strip()
+                    rule_feature_id = str(raw_fid or "").strip()
+                    rule_value = str(raw_val or "").strip()
                     part_number = part_number_by_id.get(part_id, "")
                     if not part_number or not rule_feature_id or not rule_value:
                         continue

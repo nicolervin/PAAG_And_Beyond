@@ -16,6 +16,8 @@ from uuid import uuid4
 
 import pandas as pd
 
+from utils.cache_store import cached_store_read
+
 
 PFMEA_CLASSIFICATION_MEANINGS = {
     "": "Unclassified",
@@ -499,6 +501,7 @@ def migrate_pfmea_safety_classification(project_id: str, editor_name: str) -> di
     return migrate_pfmea_classifications(project_id, editor_name)
 
 
+@cached_store_read
 def pfmea_control_options(project_id: str, control_type: str) -> pd.DataFrame:
     option_table, _, _ = _control_tables(control_type)
     with _store().connection() as conn:
@@ -630,6 +633,7 @@ def save_pfmea_control_option_rows(
         }
 
 
+@cached_store_read
 def pfmea_control_option_delete_impact(
     project_id: str, control_type: str, option_ids: list[str]
 ) -> dict:
@@ -715,6 +719,7 @@ def _quality_control_label(row: dict) -> str:
     )
 
 
+@cached_store_read
 def pfmea_control_candidates(
     project_id: str,
     scenario_id: str,
@@ -810,6 +815,7 @@ def _selection_rows_conn(
     return result
 
 
+@cached_store_read
 def pfmea_control_selections(project_id: str, scenario_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
@@ -966,6 +972,7 @@ def _cause(conn, project_id: str, scenario_id: str, entry_id: str, cause_id: str
     return dict(row)
 
 
+@cached_store_read
 def pfmea_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
     work_element_labels = _process_work_element_labels(project_id, scenario_id)
     with _store().connection() as conn:
@@ -982,11 +989,10 @@ def pfmea_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
         op_contexts = _store().work_element_op_contexts(
             project_id, scenario_id, result["id"].astype(str).tolist()
         )
-        result["work_element"] = result.apply(
-            lambda row: work_element_labels.get(str(row["id"]))
-            or _text(row.get("work_element")),
-            axis=1,
-        )
+        result["work_element"] = [
+            work_element_labels.get(str(wid)) or _text(we_val)
+            for wid, we_val in zip(result["id"], result["work_element"])
+        ]
         result["op_id"] = result["id"].astype(str).map(
             lambda work_element_id: op_contexts[work_element_id]["op_id"]
         )
@@ -999,6 +1005,7 @@ def pfmea_process_steps(project_id: str, scenario_id: str) -> pd.DataFrame:
     return result
 
 
+@cached_store_read
 def pfmea_entries(project_id: str, scenario_id: str, work_element_id: str | None = None) -> pd.DataFrame:
     params: list[str] = [project_id, scenario_id]
     work_filter = ""
@@ -1020,18 +1027,18 @@ def pfmea_entries(project_id: str, scenario_id: str, work_element_id: str | None
                 GROUP BY e.id ORDER BY e.process_sequence_snapshot, e.created_at""",
             tuple(params),
         ).fetchall()
+        work_by_id = {
+            str(r["id"]): dict(r)
+            for r in conn.execute(
+                "SELECT * FROM work_elements WHERE project_id=? AND scenario_id=?",
+                (project_id, scenario_id),
+            ).fetchall()
+        }
         result = []
         for raw in rows:
             row = dict(raw)
             work_id = str(row.get("work_element_id") or "").strip()
-            if work_id:
-                work_row = conn.execute(
-                    "SELECT * FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
-                    (work_id, project_id, scenario_id),
-                ).fetchone()
-                work = dict(work_row) if work_row else None
-            else:
-                work = None
+            work = work_by_id.get(work_id) if work_id else None
             row["is_unlinked"] = work is None
             row["upstream_changes"] = bool(work is None or _process_hash(work) != row.get("process_source_hash"))
             result.append(row)
@@ -1088,6 +1095,7 @@ def _parse_responsibility_target(value) -> tuple[str, str]:
     return responsibility, target
 
 
+@cached_store_read
 def pfmea_known_responsibilities(project_id: str, include_inactive: bool = False) -> list[str]:
     """Harvest all known assignees/roles across PFMEA and Control Plan for dropdown selection.
     
@@ -1139,6 +1147,7 @@ def pfmea_known_responsibilities(project_id: str, include_inactive: bool = False
     return sorted(responsibilities, key=str.casefold)
 
 
+@cached_store_read
 def pfmea_inactive_assignees(project_id: str) -> list[str]:
     """Return all assignees explicitly marked inactive for this project."""
     with _store().connection() as conn:
@@ -1201,6 +1210,7 @@ def set_pfmea_assignee_active(project_id: str, name: str, active: bool) -> None:
             )
 
 
+@cached_store_read
 def pfmea_assignee_usage(project_id: str, name: str) -> int:
     """Count how many PFMEA actions and Control Plan items reference this assignee."""
     clean_name = _text(name)
@@ -1317,10 +1327,20 @@ def _pfmea_flat_rows_conn(
     for action in actions:
         actions_by_entry.setdefault(str(action["pfmea_entry_id"]), []).append(action)
 
+    work_by_id = {
+        str(r["id"]): dict(r)
+        for r in conn.execute(
+            "SELECT * FROM work_elements WHERE project_id=? AND scenario_id=?",
+            (project_id, scenario_id),
+        ).fetchall()
+    }
     result: list[dict] = []
     for entry in entries:
         entry_id = str(entry["id"])
-        work = _work_element(conn, project_id, scenario_id, str(entry["work_element_id"]))
+        work_id = str(entry["work_element_id"])
+        work = work_by_id.get(work_id)
+        if work is None:
+            work = _work_element(conn, project_id, scenario_id, work_id)
         upstream_changes = _process_hash(work) != entry["process_source_hash"]
         entry_effects = effects_by_entry.get(entry_id) or [None]
         entry_causes = causes_by_entry.get(entry_id) or [None]
@@ -1399,6 +1419,7 @@ def _pfmea_flat_rows_conn(
     return result
 
 
+@cached_store_read
 def pfmea_flat_rows(project_id: str, scenario_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _validate_context(conn, project_id, scenario_id)
@@ -1531,6 +1552,7 @@ def _save_child_rows(
                 "updated_ids": updated, "timestamp": timestamp}
 
 
+@cached_store_read
 def pfmea_effects(project_id: str, scenario_id: str, entry_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _entry(conn, project_id, scenario_id, entry_id)
@@ -1547,6 +1569,7 @@ def save_pfmea_effect_rows(project_id: str, scenario_id: str, entry_id: str, edi
                             text_field="effect_description", numeric_fields=["severity"])
 
 
+@cached_store_read
 def pfmea_causes(project_id: str, scenario_id: str, entry_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _entry(conn, project_id, scenario_id, entry_id)
@@ -1629,6 +1652,7 @@ def _rebuild_risk_rows(
                 )
 
 
+@cached_store_read
 def pfmea_risk_rows(project_id: str, scenario_id: str, entry_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _entry(conn, project_id, scenario_id, entry_id)
@@ -1645,6 +1669,7 @@ def pfmea_risk_rows(project_id: str, scenario_id: str, entry_id: str) -> pd.Data
     return pd.DataFrame([dict(row) for row in rows])
 
 
+@cached_store_read
 def pfmea_actions(project_id: str, scenario_id: str, entry_id: str) -> pd.DataFrame:
     with _store().connection() as conn:
         _entry(conn, project_id, scenario_id, entry_id)
@@ -2582,8 +2607,14 @@ def clone_pfmea_scenario(conn: sqlite3.Connection, project_id: str,
                      tuple(row[column] for column in columns))
         cloned += 1
     for table, mapping in (("pfmea_effects", effect_map), ("pfmea_causes", cause_map)):
+        rows_by_entry: dict[str, list[sqlite3.Row]] = {}
+        for raw in conn.execute(
+            f"SELECT * FROM {table} WHERE project_id=? AND scenario_id=?",
+            (project_id, source_scenario_id),
+        ).fetchall():
+            rows_by_entry.setdefault(str(raw["pfmea_entry_id"]), []).append(raw)
         for old_entry_id, new_entry_id in entry_map.items():
-            for raw in conn.execute(f"SELECT * FROM {table} WHERE pfmea_entry_id=?", (old_entry_id,)).fetchall():
+            for raw in rows_by_entry.get(old_entry_id, []):
                 row = dict(raw)
                 old_id, new_id = str(row["id"]), str(uuid4())
                 mapping[old_id] = new_id
@@ -2665,6 +2696,7 @@ def clone_pfmea_scenario(conn: sqlite3.Connection, project_id: str,
     return cloned
 
 
+@cached_store_read
 def upstream_modified_pfmea_entries(project_id: str, scenario_id: str) -> list[dict]:
     """Return linked PFMEA entries whose upstream PAAG work elements have changed since last review."""
     work_element_labels = _process_work_element_labels(project_id, scenario_id)

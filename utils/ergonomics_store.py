@@ -8,6 +8,12 @@ import sys as _sys
 from typing import Any
 from uuid import uuid4
 from utils import db_core as _db_core
+from utils.cache_store import (
+    cached_store_read,
+    is_scenario_task_completed,
+    mark_scenario_task_completed,
+)
+from utils.media_cache import cached_image_data_url
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -24,6 +30,8 @@ DEFAULT_ERGONOMIC_HAZARD_OPTIONS: tuple[str, ...] = (
 
 def ensure_default_ergonomic_hazard_options(project_id: str) -> int:
     """Seed standard ergonomics hazard options if the project has none defined."""
+    if is_scenario_task_completed("ensure_default_ergonomic_hazard_options", project_id, ""):
+        return 0
     timestamp = now_iso()
     with connection() as conn:
         if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
@@ -33,6 +41,7 @@ def ensure_default_ergonomic_hazard_options(project_id: str) -> int:
             (project_id,),
         ).fetchone()[0]
         if count > 0:
+            mark_scenario_task_completed("ensure_default_ergonomic_hazard_options", project_id, "")
             return 0
         for label in DEFAULT_ERGONOMIC_HAZARD_OPTIONS:
             conn.execute(
@@ -41,7 +50,8 @@ def ensure_default_ergonomic_hazard_options(project_id: str) -> int:
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (str(uuid4()), project_id, label, 1, timestamp, timestamp),
             )
-        return len(DEFAULT_ERGONOMIC_HAZARD_OPTIONS)
+    mark_scenario_task_completed("ensure_default_ergonomic_hazard_options", project_id, "")
+    return len(DEFAULT_ERGONOMIC_HAZARD_OPTIONS)
 
 def create_or_get_ergonomic_hazard_option(project_id: str, label: str) -> str:
     """Create a new ergonomic hazard option if it does not already exist, and return its ID."""
@@ -67,6 +77,7 @@ def create_or_get_ergonomic_hazard_option(project_id: str, label: str) -> str:
         )
         return new_id
 
+@cached_store_read
 def ergonomic_hazard_options(project_id: str) -> pd.DataFrame:
     columns = [
         "id",
@@ -208,6 +219,7 @@ def delete_ergonomic_hazard_options(project_id: str, option_ids: list[str]) -> d
             )
     return impact | {"row_count": len(ids), "timestamp": timestamp}
 
+@cached_store_read
 def ergonomics_reviews(
     project_id: str,
     scenario_id: str,
@@ -291,6 +303,7 @@ def ergonomics_reviews(
         row["legacy_description"] = str(row.get("legacy_description") or "")
     return pd.DataFrame(review_rows, columns=columns)
 
+@cached_store_read
 def ergonomics_work_elements(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Return scenario Process steps with Yamazumi-description-first labels."""
     columns = ["id", "work_element_label", "pitch", "sequence"]
@@ -320,6 +333,7 @@ def ergonomics_work_elements(project_id: str, scenario_id: str) -> pd.DataFrame:
         ).fetchall()
     return pd.DataFrame([dict(row) for row in rows], columns=columns)
 
+@cached_store_read
 def process_ergonomics_risk_work_element_ids(
     project_id: str, scenario_id: str
 ) -> set[str]:
@@ -344,6 +358,7 @@ def process_ergonomics_risk_work_element_ids(
         ).fetchall()
     return {str(row["work_element_id"]) for row in rows}
 
+@cached_store_read
 def ergonomics_review_audit_history(
     project_id: str, scenario_id: str, limit: int = 50
 ) -> pd.DataFrame:
@@ -1230,6 +1245,7 @@ MAX_VISUAL_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_VISUAL_VIDEO_BYTES = 25 * 1024 * 1024
 
 
+@cached_store_read
 def get_ergonomics_visual_media(
     project_id: str,
     scenario_id: str,
@@ -1258,11 +1274,14 @@ def get_ergonomics_visual_media(
             item["exists_on_disk"] = fpath.exists() and fpath.is_file()
             if item["exists_on_disk"] and item["media_type"] == "image":
                 try:
-                    raw_b = fpath.read_bytes()
-                    sfx = fpath.suffix.lower()
-                    mime = "image/png" if sfx == ".png" else "image/webp" if sfx == ".webp" else "image/jpeg"
-                    b64 = base64.b64encode(raw_b).decode("ascii")
-                    item["data_url"] = f"data:{mime};base64,{b64}"
+                    data_url = cached_image_data_url(fpath, max_dim=1600)
+                    if not data_url:
+                        raw_b = fpath.read_bytes()
+                        sfx = fpath.suffix.lower()
+                        mime = "image/png" if sfx == ".png" else "image/webp" if sfx == ".webp" else "image/jpeg"
+                        b64 = base64.b64encode(raw_b).decode("ascii")
+                        data_url = f"data:{mime};base64,{b64}"
+                    item["data_url"] = data_url
                 except Exception:
                     item["data_url"] = ""
             else:
@@ -1380,6 +1399,10 @@ def save_ergonomics_visual_media(
             "annotated": bool(annotations_json),
         },
     )
+    if resolved_media_type == "image":
+        from utils.media_cache import prewarm_image_cache
+
+        prewarm_image_cache(target_path)
     return {
         "id": media_id,
         "file_path": str(target_path),
@@ -1482,6 +1505,9 @@ def update_ergonomics_visual_annotations(
         if composite_image_bytes:
             target = Path(file_path_str)
             target.write_bytes(composite_image_bytes)
+            from utils.media_cache import prewarm_image_cache
+
+            prewarm_image_cache(target)
 
         conn.execute(
             """UPDATE ergonomics_visual_media
@@ -1563,6 +1589,7 @@ def delete_ergonomics_visual_media(
     )
 
 
+@cached_store_read
 def ergonomics_slide_summary(
     project_id: str,
     scenario_id: str,

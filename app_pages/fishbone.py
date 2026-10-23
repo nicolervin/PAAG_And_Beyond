@@ -100,11 +100,15 @@ models = project_models(project_id)
 feature_rules = part_feature_rules(project_id)
 feature_labels_by_part: dict[str, list[str]] = {}
 if not feature_rules.empty:
-    for part_id, part_rules in feature_rules.groupby("part_id", sort=False):
-        feature_labels_by_part[str(part_id)] = [
-            f"{row['category']} · {row['feature_name']} = {row['value']}"
-            for _, row in part_rules.iterrows()
-        ]
+    for part_id, cat, fname, val in zip(
+        feature_rules["part_id"],
+        feature_rules["category"],
+        feature_rules["feature_name"],
+        feature_rules["value"],
+    ):
+        feature_labels_by_part.setdefault(str(part_id), []).append(
+            f"{cat} · {fname} = {val}"
+        )
 framework_undo_key = f"fishbone_framework_undo_{project_id}"
 assignment_undo_key = f"fishbone_assignment_undo_{project_id}"
 pending_use_key = f"fishbone_pending_additional_uses_{project_id}"
@@ -113,11 +117,15 @@ current_assignment_undo = {
     "assignments": fishbone_assignment_snapshot(project_id),
     "pending_use_ids": list(st.session_state.get(pending_use_key, [])),
 }
-familiar_model_names = {
-    str(row["model_number"]).strip(): str(row["display_name"]).strip()
-    for _, row in models.iterrows()
-    if str(row["display_name"]).strip()
-}
+familiar_model_names = (
+    {
+        str(mnum).strip(): str(dname).strip()
+        for mnum, dname in zip(models["model_number"], models["display_name"])
+        if str(dname).strip()
+    }
+    if not models.empty
+    else {}
+)
 
 
 def familiar_models(value) -> str:
@@ -243,13 +251,12 @@ with assign_parts_tab:
 
         part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
 
-        def resolve_part_meta(row, catalog_idx: int):
-            pid = str(row["id"])
-            pnum = str(row.get("part_number") or "").strip()
+        def resolve_part_meta(pid_val, pnum_val, fallback_qty, catalog_idx: int):
+            pid = str(pid_val)
+            pnum = str(pnum_val or "").strip()
             info = master_info_by_part_id.get(pid) or master_info_by_pnum.get(pnum)
             if info:
                 return info["order"], info["level"], info["quantity"]
-            fallback_qty = row.get("quantity")
             try:
                 fqty = float(fallback_qty) if fallback_qty is not None and float(fallback_qty) > 0 else 1.0
             except (ValueError, TypeError):
@@ -257,17 +264,20 @@ with assign_parts_tab:
             return 1_000_000 + catalog_idx, "—", fqty
 
         meta_results = [
-            resolve_part_meta(row, i)
-            for i, (_, row) in enumerate(part_pool.iterrows())
+            resolve_part_meta(pid, pnum, qty, i)
+            for i, (pid, pnum, qty) in enumerate(
+                zip(part_pool["id"], part_pool["part_number"], part_pool["quantity"])
+            )
         ]
         part_pool["_master_order"] = [m[0] for m in meta_results]
         part_pool["level"] = [m[1] for m in meta_results]
         part_pool["quantity"] = [m[2] for m in meta_results]
         part_pool = part_pool.sort_values(by=["_master_order", "part_number"], ascending=[True, True]).reset_index(drop=True)
 
-        part_pool["feature_applicability"] = part_pool.apply(
-            lambda row: feature_applicability(row["id"], row["model_applicability"]), axis=1
-        )
+        part_pool["feature_applicability"] = [
+            feature_applicability(pid, m_app)
+            for pid, m_app in zip(part_pool["id"], part_pool["model_applicability"])
+        ]
         part_pool["fishbone_section"] = part_pool["id"].map(placed_by_part).fillna("Not placed")
         part_pool.loc[
             part_pool["id"].astype(str).isin(pending_use_ids), "fishbone_section"
@@ -302,15 +312,13 @@ with assign_parts_tab:
             searchable = visible_parts[["part_number", "description", "level"]].fillna("").astype(str).agg(" ".join, axis=1)
             visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
         if selected_pool_features:
+            _sel_pool_feat_set = set(selected_pool_features)
             visible_parts = visible_parts[
-                visible_parts.apply(
-                    lambda row: row["feature_applicability"] == "All models"
-                    or bool(
-                        set(selected_pool_features)
-                        & set(feature_labels_by_part.get(str(row["id"]), []))
-                    ),
-                    axis=1,
-                )
+                [
+                    f_app == "All models"
+                    or bool(_sel_pool_feat_set & set(feature_labels_by_part.get(str(pid), [])))
+                    for pid, f_app in zip(visible_parts["id"], visible_parts["feature_applicability"])
+                ]
             ]
 
         pool_key = pool_editor_key
@@ -499,12 +507,17 @@ with assign_parts_tab:
                     pass
             return status
         full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_option_labels)
-        full_assignment_editor["model_applicability"] = full_assignment_editor.apply(
-            lambda row: feature_applicability(row["part_id"], row["model_applicability"]), axis=1
-        )
-        full_assignment_editor["pits_sync_status"] = full_assignment_editor.apply(
-            _format_pits_sync_status, axis=1
-        )
+        full_assignment_editor["model_applicability"] = [
+            feature_applicability(pid, m_app)
+            for pid, m_app in zip(
+                full_assignment_editor["part_id"],
+                full_assignment_editor["model_applicability"],
+            )
+        ]
+        full_assignment_editor["pits_sync_status"] = [
+            _format_pits_sync_status(row)
+            for row in full_assignment_editor.to_dict(orient="records")
+        ]
         assignment_editor = filter_table(
             full_assignment_editor,
             key="fishbone_assignment_filters",
@@ -782,7 +795,7 @@ with fishbone_tab:
         st.info("No Fishbone sections created yet. Use **➕ Add Section** above or in the canvas toolbar to create your first Assembly section.")
     if True:
         visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections.copy()
-        records = {str(row["id"]): row.to_dict() for _, row in visible_sections.iterrows()}
+        records = {str(r["id"]): r for r in visible_sections.to_dict(orient="records")} if not visible_sections.empty else {}
 
         # Connections from database
         connections_df = assembly_section_connections(project_id)
@@ -1313,12 +1326,24 @@ with fishbone_tab:
             key=f"fishbone_visual_features_{project_id}",
             help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
         )
+        if visual_controls.button(
+            "Edit parts & photos",
+            icon=":material/edit:",
+            key="fishbone_edit_parts_visual",
+            help="Open the Parts Catalog to edit part details or add more photos.",
+        ):
+            st.switch_page("app_pages/parts.py")
 
         # Effective assignments (DB minus deleted plus draft new)
-        effective_assigned_part_ids = set()
-        for _, a in assignments.iterrows():
-            if str(a["id"]) not in draft["deleted_assignments"]:
-                effective_assigned_part_ids.add(str(a["part_id"]))
+        effective_assigned_part_ids = (
+            {
+                str(p_id)
+                for a_id, p_id in zip(assignments["id"], assignments["part_id"])
+                if str(a_id) not in draft["deleted_assignments"]
+            }
+            if not assignments.empty
+            else set()
+        )
         for na in draft["new_assignments"]:
             effective_assigned_part_ids.add(str(na["part_id"]))
 
@@ -1327,14 +1352,21 @@ with fishbone_tab:
         bom_nodes = bom_tree.get("nodes", []) if bom_tree else []
 
         part_desc_lookup: dict[str, str] = {}
-        for _, pr in parts.iterrows():
-            p_id = str(pr.get("id") or "").strip()
-            p_num = str(pr.get("part_number") or "").strip().upper()
-            p_desc = str(pr.get("description") or pr.get("part_name") or "").strip()
-            if p_id and p_desc:
-                part_desc_lookup[p_id] = p_desc
-            if p_num and p_desc:
-                part_desc_lookup[p_num] = p_desc
+        part_num_by_id: dict[str, str] = {}
+        if not parts.empty:
+            for p_id_val, p_num_val, p_desc_val in zip(
+                parts["id"], parts["part_number"], parts["description"]
+            ):
+                p_id = str(p_id_val or "").strip()
+                p_num_raw = str(p_num_val or "").strip()
+                p_num = p_num_raw.upper()
+                p_desc = str(p_desc_val or "").strip()
+                if p_id:
+                    part_num_by_id[p_id] = p_num_raw
+                if p_id and p_desc:
+                    part_desc_lookup[p_id] = p_desc
+                if p_num and p_desc:
+                    part_desc_lookup[p_num] = p_desc
 
         for bn in bom_nodes:
             b_id = str(bn.get("part_id") or bn.get("child_part_id") or "").strip()
@@ -1390,35 +1422,40 @@ with fishbone_tab:
         seen_pids = set()
         seen_pns = set()
 
-        for _, p in parts.iterrows():
-            pid = str(p["id"])
-            pn = str(p.get("part_number") or "").strip()
-            if not pid or pid in seen_pids:
-                continue
-            seen_pids.add(pid)
-            if pn:
-                seen_pns.add(pn)
+        if not parts.empty:
+            for pid_val, pn_val, raw_qty, desc_val in zip(
+                parts["id"],
+                parts["part_number"],
+                parts["quantity"],
+                parts["description"],
+            ):
+                pid = str(pid_val)
+                pn = str(pn_val or "").strip()
+                if not pid or pid in seen_pids:
+                    continue
+                seen_pids.add(pid)
+                if pn:
+                    seen_pns.add(pn)
 
-            ch_list = asm_children_by_pid.get(pid) or asm_children_by_pn.get(pn.upper(), [])
-            is_asm = len(ch_list) > 0
-            raw_qty = p.get("quantity")
-            try:
-                qty = float(raw_qty) if raw_qty is not None and float(raw_qty) > 0 else 1.0
-            except (ValueError, TypeError):
-                qty = 1.0
+                ch_list = asm_children_by_pid.get(pid) or asm_children_by_pn.get(pn.upper(), [])
+                is_asm = len(ch_list) > 0
+                try:
+                    qty = float(raw_qty) if raw_qty is not None and float(raw_qty) > 0 else 1.0
+                except (ValueError, TypeError):
+                    qty = 1.0
 
-            p_desc = str(p.get("description", "") or "").strip() or part_desc_lookup.get(pid) or part_desc_lookup.get(pn.upper()) or ""
-            palette_items.append({
-                "part_id": pid,
-                "part_number": pn or "—",
-                "description": p_desc,
-                "quantity": qty,
-                "is_assembly": is_asm,
-                "child_count": len(ch_list),
-                "child_parts": ch_list,
-                "image": part_thumbnail(image_path_by_part.get(pid, "")),
-                "placed": pid in effective_assigned_part_ids,
-            })
+                p_desc = str(desc_val or "").strip() or part_desc_lookup.get(pid) or part_desc_lookup.get(pn.upper()) or ""
+                palette_items.append({
+                    "part_id": pid,
+                    "part_number": pn or "—",
+                    "description": p_desc,
+                    "quantity": qty,
+                    "is_assembly": is_asm,
+                    "child_count": len(ch_list),
+                    "child_parts": ch_list,
+                    "image": part_thumbnail(image_path_by_part.get(pid, "")),
+                    "placed": pid in effective_assigned_part_ids,
+                })
 
         for node in bom_nodes:
             np_id = str(node.get("part_id") or node.get("child_part_id") or "")
@@ -1467,42 +1504,65 @@ with fishbone_tab:
             if ua.get("assignment_id")
         }
         visual_parts = []
-        for _, assignment in assignments.iterrows():
-            aid = str(assignment["id"])
-            if aid in draft["deleted_assignments"]:
-                continue
-            part_id = str(assignment["part_id"])
-            section_id = str(assignment["section_id"])
-            staged = staged_updates_by_aid.get(aid)
-            current_sec_id = staged.get("section_id") if staged and staged.get("section_id") else section_id
-            if current_sec_id not in records:
-                continue
-            applicability_label = feature_applicability(part_id, assignment["model_applicability"])
-            if (
-                selected_visual_features
-                and applicability_label != "All models"
-                and not set(selected_visual_features) & set(feature_labels_by_part.get(part_id, []))
+        if not assignments.empty:
+            for (
+                aid_val,
+                part_id_val,
+                section_id_val,
+                m_app_val,
+                qty_val,
+                use_desc_val,
+                sec_name_val,
+                pnum_val,
+                desc_val,
+                seq_val,
+            ) in zip(
+                assignments["id"],
+                assignments["part_id"],
+                assignments["section_id"],
+                assignments["model_applicability"],
+                assignments["quantity"],
+                assignments["use_description"],
+                assignments["section_name"],
+                assignments["part_number"],
+                assignments["description"],
+                assignments["sequence"],
             ):
-                continue
-            eff_qty = float(staged["quantity"]) if staged and staged.get("quantity") is not None else float(assignment["quantity"] or 0)
-            eff_use_desc = str(staged["use_description"]) if staged and staged.get("use_description") is not None else str(assignment["use_description"] or "")
-            visual_parts.append({
-                "id": aid,
-                "part_id": part_id,
-                "section_id": current_sec_id,
-                "section_name": str(records.get(current_sec_id, {}).get("name") or assignment["section_name"]),
-                "part_number": str(assignment["part_number"] or ""),
-                "description": str(assignment["description"] or ""),
-                "use_description": eff_use_desc,
-                "quantity": eff_qty,
-                "models": applicability_label,
-                "image": part_thumbnail(image_path_by_part.get(part_id, "")),
-                "sequence": int(staged.get("sequence") if staged and staged.get("sequence") is not None else (assignment.get("sequence") or 10)),
-            })
+                aid = str(aid_val)
+                if aid in draft["deleted_assignments"]:
+                    continue
+                part_id = str(part_id_val)
+                section_id = str(section_id_val)
+                staged = staged_updates_by_aid.get(aid)
+                current_sec_id = staged.get("section_id") if staged and staged.get("section_id") else section_id
+                if current_sec_id not in records:
+                    continue
+                applicability_label = feature_applicability(part_id, m_app_val)
+                if (
+                    selected_visual_features
+                    and applicability_label != "All models"
+                    and not set(selected_visual_features) & set(feature_labels_by_part.get(part_id, []))
+                ):
+                    continue
+                eff_qty = float(staged["quantity"]) if staged and staged.get("quantity") is not None else float(qty_val or 0)
+                eff_use_desc = str(staged["use_description"]) if staged and staged.get("use_description") is not None else str(use_desc_val or "")
+                visual_parts.append({
+                    "id": aid,
+                    "part_id": part_id,
+                    "section_id": current_sec_id,
+                    "section_name": str(records.get(current_sec_id, {}).get("name") or sec_name_val),
+                    "part_number": str(pnum_val or ""),
+                    "description": str(desc_val or ""),
+                    "use_description": eff_use_desc,
+                    "quantity": eff_qty,
+                    "models": applicability_label,
+                    "image": part_thumbnail(image_path_by_part.get(part_id, "")),
+                    "sequence": int(staged.get("sequence") if staged and staged.get("sequence") is not None else (seq_val or 10)),
+                })
         for idx, na in enumerate(draft["new_assignments"]):
-            part_row = parts.loc[parts["id"].astype(str) == na["part_id"]]
-            pn = str(part_row["part_number"].iloc[0]) if not part_row.empty else "—"
-            p_desc = str(part_row["description"].iloc[0]) if not part_row.empty and "description" in part_row.columns else "—"
+            na_pid = str(na["part_id"])
+            pn = part_num_by_id.get(na_pid) or "—"
+            p_desc = part_desc_lookup.get(na_pid) or "—"
             sec_name = records.get(na["section_id"], {}).get("name", "Section")
             visual_parts.append({
                 "id": f"draft_a_{idx}",
@@ -1518,34 +1578,47 @@ with fishbone_tab:
                 "sequence": int(na.get("sequence") or (1000 + idx * 10)),
             })
 
+        visual_parts_count_by_sec: dict[str, int] = {}
+        for vp in visual_parts:
+            s_id = vp["section_id"]
+            visual_parts_count_by_sec[s_id] = visual_parts_count_by_sec.get(s_id, 0) + 1
+
         # Node rows with grid coordinates and op prefix
         node_rows = []
-        all_sections_list = [
-            {
-                "id": str(r["id"]),
-                "name": str(r["name"]),
-                "type": str(r["section_type"]),
-                "parent_id": str(r["parent_id"]) if pd.notna(r.get("parent_id")) else None,
-            }
-            for _, r in visible_sections.iterrows()
-        ]
-        for _, row in visible_sections.iterrows():
-            sec_id = str(row["id"])
-            gx = draft["positions"].get(sec_id, (row.get("grid_x"), None))[0] if sec_id in draft["positions"] else row.get("grid_x")
-            gy = draft["positions"].get(sec_id, (None, row.get("grid_y")))[1] if sec_id in draft["positions"] else row.get("grid_y")
-            gx = int(gx) if gx is not None and pd.notna(gx) else None
-            gy = int(gy) if gy is not None and pd.notna(gy) else None
-            node_rows.append({
-                "id": sec_id,
-                "name": str(row["name"]),
-                "type": "Support Operations" if str(row["section_type"]) == "Support Operations" else "Assembly",
-                "order": int(row["sequence"]),
-                "parent_id": str(row["parent_id"]) if pd.notna(row.get("parent_id")) else None,
-                "grid_x": gx,
-                "grid_y": gy,
-                "op_prefix": "",
-                "parts": len([p for p in visual_parts if p["section_id"] == sec_id]),
-            })
+        all_sections_list = []
+        if not visible_sections.empty:
+            for r_id, r_name, r_type, r_parent, r_seq, r_gx, r_gy in zip(
+                visible_sections["id"],
+                visible_sections["name"],
+                visible_sections["section_type"],
+                visible_sections["parent_id"],
+                visible_sections["sequence"],
+                visible_sections["grid_x"],
+                visible_sections["grid_y"],
+            ):
+                sec_id = str(r_id)
+                parent_str = str(r_parent) if pd.notna(r_parent) else None
+                all_sections_list.append({
+                    "id": sec_id,
+                    "name": str(r_name),
+                    "type": str(r_type),
+                    "parent_id": parent_str,
+                })
+                gx = draft["positions"].get(sec_id, (r_gx, None))[0] if sec_id in draft["positions"] else r_gx
+                gy = draft["positions"].get(sec_id, (None, r_gy))[1] if sec_id in draft["positions"] else r_gy
+                gx = int(gx) if gx is not None and pd.notna(gx) else None
+                gy = int(gy) if gy is not None and pd.notna(gy) else None
+                node_rows.append({
+                    "id": sec_id,
+                    "name": str(r_name),
+                    "type": "Support Operations" if str(r_type) == "Support Operations" else "Assembly",
+                    "order": int(r_seq),
+                    "parent_id": parent_str,
+                    "grid_x": gx,
+                    "grid_y": gy,
+                    "op_prefix": "",
+                    "parts": visual_parts_count_by_sec.get(sec_id, 0),
+                })
 
         # Connection rows
         def _get_nodes_for_conn(cid, from_id, to_id):
@@ -1556,19 +1629,25 @@ with fishbone_tab:
 
         conn_rows = []
         if not connections_df.empty:
-            for _, conn_r in connections_df.iterrows():
-                cid = str(conn_r["id"])
+            for c_id, c_from, c_to, c_type, c_seq in zip(
+                connections_df["id"],
+                connections_df["from_section_id"],
+                connections_df["to_section_id"],
+                connections_df["connection_type"],
+                connections_df["sequence"],
+            ):
+                cid = str(c_id)
                 if cid in draft["deleted_connections"]:
                     continue
-                f_id = str(conn_r["from_section_id"])
-                t_id = str(conn_r["to_section_id"])
+                f_id = str(c_from)
+                t_id = str(c_to)
                 fn, tn = _get_nodes_for_conn(cid, f_id, t_id)
                 conn_rows.append({
                     "id": cid,
                     "from_section_id": f_id,
                     "to_section_id": t_id,
-                    "connection_type": str(conn_r["connection_type"]),
-                    "sequence": int(conn_r["sequence"]),
+                    "connection_type": str(c_type),
+                    "sequence": int(c_seq),
                     "from_node": fn,
                     "to_node": tn,
                 })
@@ -1588,10 +1667,14 @@ with fishbone_tab:
                         "to_node": tn,
                     })
             main_sec_ids = [
-                str(r["id"])
-                for _, r in visible_sections.iterrows()
-                if r["section_type"] in {"Assembly", "Main spine"} and not normalized_parent_id(r.get("parent_id"))
-            ]
+                str(r_id)
+                for r_id, r_type, r_parent in zip(
+                    visible_sections["id"],
+                    visible_sections["section_type"],
+                    visible_sections["parent_id"],
+                )
+                if r_type in {"Assembly", "Main spine"} and not normalized_parent_id(r_parent)
+            ] if not visible_sections.empty else []
             for left_id, right_id in zip(main_sec_ids, main_sec_ids[1:]):
                 cid = f"init_{left_id}_{right_id}"
                 fn, tn = _get_nodes_for_conn(cid, left_id, right_id)
@@ -1676,8 +1759,12 @@ with fishbone_tab:
             has_replacements = not replacement_sections.empty
             replacement_options = replacement_sections["id"].astype(str).tolist()
             replacement_labels = {
-                str(r["id"]): f"{r['name']} ({r['section_type']})"
-                for _, r in replacement_sections.iterrows()
+                str(rid): f"{rname} ({rtype})"
+                for rid, rname, rtype in zip(
+                    replacement_sections["id"],
+                    replacement_sections["name"],
+                    replacement_sections["section_type"],
+                )
             }
 
             st.divider()
@@ -2029,35 +2116,34 @@ def _render_framework_maintenance():
             framework_walk["depth"].astype(int),
         ))
         framework = framework_walk.drop(columns=["depth"])
-        framework["section_type"] = framework["section_type"].apply(
-            lambda val: "Support Operations" if str(val or "") == "Support Operations" else "Assembly"
-        )
-        framework["hierarchy"] = framework.apply(
-            lambda row: (
-                f"🟪  {row['name']}"
-                if str(row.get("section_type") or "") == "Support Operations"
-                else (
-                    f"🟦  {row['name']}"
-                    if framework_depth.get(str(row["id"]), 0) == 0
-                    else f"{' ' * framework_depth.get(str(row['id']), 0)}└─ 🟧  {row['name']}"
+        framework["section_type"] = [
+            "Support Operations" if str(val or "") == "Support Operations" else "Assembly"
+            for val in framework["section_type"]
+        ]
+        framework["hierarchy"] = [
+            f"🟪  {name}"
+            if sec_type == "Support Operations"
+            else (
+                f"🟦  {name}"
+                if framework_depth.get(str(sec_id), 0) == 0
+                else f"{' ' * framework_depth.get(str(sec_id), 0)}└─ 🟧  {name}"
+            )
+            for sec_id, name, sec_type in zip(
+                framework["id"], framework["name"], framework["section_type"]
+            )
+        ]
+        framework["parent_assembly"] = [
+            "Independent / Support"
+            if sec_type == "Support Operations" and not normalized_parent_id(parent_id)
+            else (
+                "Product / main assembly"
+                if not normalized_parent_id(parent_id)
+                else section_option_labels.get(
+                    normalized_parent_id(parent_id), normalized_parent_id(parent_id)
                 )
-            ),
-            axis=1,
-        )
-        framework["parent_assembly"] = framework.apply(
-            lambda row: (
-                "Independent / Support"
-                if str(row.get("section_type") or "") == "Support Operations" and not normalized_parent_id(row.get("parent_id"))
-                else (
-                    "Product / main assembly"
-                    if not normalized_parent_id(row.get("parent_id"))
-                    else section_option_labels.get(
-                        normalized_parent_id(row.get("parent_id")), normalized_parent_id(row.get("parent_id"))
-                    )
-                )
-            ),
-            axis=1,
-        )
+            )
+            for sec_type, parent_id in zip(framework["section_type"], framework["parent_id"])
+        ]
         framework["order_actions"] = [[
             ":material/first_page: Move to start",
             ":material/arrow_upward: Move earlier",
