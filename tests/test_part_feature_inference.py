@@ -754,11 +754,12 @@ class PartFeatureInferenceTests(unittest.TestCase):
 
     def test_multi_item_level1_bom_not_excluded_as_top_level_assemblies(self):
         """Verify Level 1 parts and subassemblies in a multi-item Level 1 BOM are not falsely excluded."""
+        gas_models = [m for m in self.all_models if "GSP" in m]
         # Create two Level-1 parts on the same models (so each model has >1 Level-1 row) plus a Level-2 child
         sub_pid = self._create_part_with_bom(
             part_number="308D3270G001",
             description="SUB BASE ASM GAS",
-            models=self.gas_models,
+            models=gas_models,
             tracker="TRK-L1-SUB-GAS",
         )
         other_l1_pid = self._create_part_with_bom(
@@ -769,26 +770,32 @@ class PartFeatureInferenceTests(unittest.TestCase):
         )
         # Add a Level-2 child under TRK-L1-SUB-GAS so l2_plus_pns is non-empty
         child_pid = str(uuid4())
+        ts = store.now_iso()
         store.execute(
             """INSERT INTO parts (
                    id, project_id, part_number, description, pits_tracker_number,
                    model_applicability, updated_at
                ) VALUES (?, ?, '312D1390P001', 'VALVE GAS', 'TRK-L2-VALVE', ?, ?)""",
-            (child_pid, self.project_id, ", ".join(self.gas_models), store.now_iso()),
+            (child_pid, self.project_id, ", ".join(gas_models), ts),
         )
         store.execute(
             """INSERT INTO pits_bom_occurrences (
-                   id, project_id, import_run_id, source_row, proposed_depth,
-                   parent_tracker_number, child_tracker_number, child_part_id,
-                   raw_levels_json, disposition, created_at, updated_at
-               ) VALUES (?, ?, 'run-1', 2, 2, 'TRK-L1-SUB-GAS', 'TRK-L2-VALVE', ?, ?, 'Active', ?, ?)""",
+                   id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                   proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                   source_fingerprint, raw_levels_json, first_seen_import_id, last_seen_import_id,
+                   first_seen_at, last_seen_at, updated_at
+               ) VALUES (?, ?, 'TRK-L1-SUB-GAS', 'TRK-L2-VALVE', ?, 2, 1.0, '1', 2, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 str(uuid4()),
                 self.project_id,
                 child_pid,
-                json.dumps({"model_usages": {m: 1 for m in self.gas_models}}),
-                store.now_iso(),
-                store.now_iso(),
+                f"fp_{child_pid}",
+                json.dumps({"model_usages": {m: 1 for m in gas_models}}),
+                self.import_id,
+                self.import_id,
+                ts,
+                ts,
+                ts,
             ),
         )
 
@@ -801,27 +808,34 @@ class PartFeatureInferenceTests(unittest.TestCase):
 
     def test_empty_bom_usages_falls_back_to_part_model_applicability(self):
         """Verify a part with empty BOM model_usages falls back to parts.model_applicability."""
+        gas_models = [m for m in self.all_models if "GSP" in m]
         part_id = str(uuid4())
+        ts = store.now_iso()
         store.execute(
             """INSERT INTO parts (
                    id, project_id, part_number, description, pits_tracker_number,
                    model_applicability, updated_at
                ) VALUES (?, ?, 'STK3D30SPRS', 'LP CONVERSION KIT', 'TRK-EMPTY-BOM', ?, ?)""",
-            (part_id, self.project_id, ", ".join(self.gas_models), store.now_iso()),
+            (part_id, self.project_id, ", ".join(gas_models), ts),
         )
         store.execute(
             """INSERT INTO pits_bom_occurrences (
-                   id, project_id, import_run_id, source_row, proposed_depth,
-                   parent_tracker_number, child_tracker_number, child_part_id,
-                   raw_levels_json, disposition, created_at, updated_at
-               ) VALUES (?, ?, 'run-1', 1, 1, '', 'TRK-EMPTY-BOM', ?, ?, 'Active', ?, ?)""",
+                   id, project_id, parent_tracker_number, child_tracker_number, child_part_id,
+                   proposed_depth, proposed_quantity, raw_quantity_text, source_row,
+                   source_fingerprint, raw_levels_json, first_seen_import_id, last_seen_import_id,
+                   first_seen_at, last_seen_at, updated_at
+               ) VALUES (?, ?, '', 'TRK-EMPTY-BOM', ?, 1, 1.0, '1', 1, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 str(uuid4()),
                 self.project_id,
                 part_id,
+                f"fp_{part_id}",
                 json.dumps({"model_usages": {}}),
-                store.now_iso(),
-                store.now_iso(),
+                self.import_id,
+                self.import_id,
+                ts,
+                ts,
+                ts,
             ),
         )
         inferred = store.infer_part_feature_rules(self.project_id, [part_id])
@@ -836,24 +850,25 @@ class PartFeatureInferenceTests(unittest.TestCase):
                ) VALUES (?, ?, 'UI', 'UI', 'LH Fascia', '["55 Series", "66 Series", "86 Series", "96 Series"]', 1, ?)""",
             (series_fid, self.project_id, store.now_iso()),
         )
-        for m in self.all_models:
+        series_by_idx = [
+            "55 Series",
+            "66 Series",
+            "66 Series",
+            "86 Series",
+            "86 Series",
+            "96 Series",
+        ]
+        for idx, m in enumerate(self.all_models):
             mid = self.model_ids[m]
-            if "55" in m:
-                val = "55 Series"
-            elif "65" in m:
-                val = "66 Series"
-            elif "85" in m:
-                val = "86 Series"
-            else:
-                val = "96 Series"
+            val = series_by_idx[idx]
             store.execute(
                 """INSERT INTO model_feature_values (project_id, model_id, feature_id, value, updated_at)
                    VALUES (?, ?, ?, ?, ?)""",
                 (self.project_id, mid, series_fid, val, store.now_iso()),
             )
 
-        # Part used across 66 Series and 86 Series (all 65 and 85 models = 6 models)
-        shared_models = [m for m in self.all_models if "65" in m or "85" in m]
+        # Part used across 66 Series and 86 Series
+        shared_models = self.all_models[1:5]
         fascia_pid = self._create_part_with_bom(
             part_number="308D3363P001",
             description="Left Fascia Asm",
