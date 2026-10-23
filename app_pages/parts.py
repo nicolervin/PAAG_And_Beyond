@@ -26,6 +26,7 @@ from utils.store import (
     delete_project_part,
     part_delete_impact,
     get_planning_scenario,
+    infer_part_feature_rules,
     part_feature_rules,
     part_images,
     part_scenario_activity,
@@ -48,8 +49,10 @@ from utils.table_filters import (
     apply_pending_table_editor_reset,
     capture_id_keyed_editor_draft,
     filter_table,
+    get_effective_table_editor_state,
     merge_filtered_edits,
     request_table_editor_reset,
+    was_table_editor_undo_reset,
 )
 from utils.table_ui import (
     dataframe_to_excel,
@@ -267,6 +270,29 @@ if not rules.empty:
             )
             for _, row in part_rules.iterrows()
         ]
+if not parts.empty and not active_features.empty:
+    missing_rule_part_ids = [
+        str(row["id"])
+        for _, row in parts.iterrows()
+        if str(row["id"]) not in rules_by_part
+        and str(row.get("model_applicability") or "").strip().casefold() not in {"all", "all models"}
+        and not str(row.get("assembly_id") or "").strip()
+    ]
+    if missing_rule_part_ids:
+        inferred_missing = infer_part_feature_rules(project_id, part_ids=missing_rule_part_ids)
+        if inferred_missing:
+            update_part_feature_rules(project_id, inferred_missing)
+            for pid, tokens in inferred_missing.items():
+                if tokens == ["All models"]:
+                    rules_by_part[str(pid)] = ["All models"]
+                else:
+                    labels = [
+                        feature_option_labels[tok]
+                        for tok in tokens
+                        if tok in feature_option_labels
+                    ]
+                    if labels:
+                        rules_by_part[str(pid)] = labels
 
 
 def readable_feature_applicability(part_id: str, legacy_value) -> str:
@@ -367,7 +393,7 @@ with st.expander(
     )
     st.caption(
         "Changes appear in the table immediately but remain a draft until you select "
-        "Save & Refresh below. Undo restores the last saved layout and discards unsaved "
+        "Save & Refresh below. Discard all edits restores the last saved layout and discards unsaved "
         "part edits."
     )
 if not selected_parts_columns:
@@ -565,10 +591,16 @@ def harvest_added_rows_into_draft(added_rows: list[dict[str, object]] | None) ->
 def merge_parts_editor_draft(source: pd.DataFrame) -> pd.DataFrame:
     """Capture positional edits by part ID and overlay the complete pending draft."""
     last_editor_key = st.session_state.get(parts_draft_last_editor_key) or parts_editor_key
-    state = st.session_state.get(last_editor_key, {}) or {}
-    if last_editor_key != parts_editor_key:
-        harvest_added_rows_into_draft(state.get("added_rows"))
+    is_undo_reset = was_table_editor_undo_reset(parts_editor_key)
+    if last_editor_key != parts_editor_key and not is_undo_reset:
+        old_state = get_effective_table_editor_state(last_editor_key)
+        harvest_added_rows_into_draft(old_state.get("added_rows"))
         st.session_state.pop(last_editor_key, None)
+        state = get_effective_table_editor_state(parts_editor_key)
+    else:
+        state = get_effective_table_editor_state(
+            parts_editor_key if is_undo_reset else last_editor_key
+        )
     st.session_state[parts_draft_last_editor_key] = parts_editor_key
     previous_visible = pd.DataFrame(
         st.session_state.get(parts_draft_visible_key, [])
@@ -580,7 +612,9 @@ def merge_parts_editor_draft(source: pd.DataFrame) -> pd.DataFrame:
         st.session_state.get(parts_draft_state_key, {}),
     )
     st.session_state[parts_draft_values_key] = draft_by_id
-    st.session_state[parts_draft_state_key] = {} if last_editor_key != parts_editor_key else captured_state
+    st.session_state[parts_draft_state_key] = (
+        {} if (last_editor_key != parts_editor_key and not is_undo_reset) else captured_state
+    )
     return apply_id_keyed_editor_draft(source, draft_by_id)
 
 
@@ -746,7 +780,7 @@ with filter_expander:
         multi_value_columns=["feature_applicability"],
         keyword_container=keyword_filter_slot,
     )
-    if parts_editor_key not in st.session_state:
+    if parts_editor_key not in st.session_state and not was_table_editor_undo_reset(parts_editor_key):
         st.session_state.pop(parts_draft_state_key, None)
         harvested_pre_filter_rows = (
             harvest_added_rows_into_draft(pre_filter_added_rows)
@@ -827,7 +861,7 @@ with sort_controls_slot:
 # Let the mounted editor retain ordinary cell changes without replacing its
 # data source on every edit rerun. Reapply the stable-ID draft only after
 # another control has remounted the editor, such as a filter or view change.
-current_editor_state = st.session_state.get(parts_editor_key, {}) or {}
+current_editor_state = get_effective_table_editor_state(parts_editor_key)
 if not (
     current_editor_state.get("edited_rows")
     or current_editor_state.get("added_rows")
@@ -1113,7 +1147,11 @@ if apply_bulk_applicability:
             )
             clear_parts_editor_draft()
             request_table_editor_reset(parts_editor_key)
-            st.toast(f"Updated feature applicability for {len(selected_saved_parts)} parts", icon=":material/check_circle:")
+            st.toast(
+                f"Updated feature applicability for {len(selected_saved_parts)} part(s) to {', '.join(bulk_applicability[:3])}"
+                + ("..." if len(bulk_applicability) > 3 else ""),
+                icon=":material/check_circle:",
+            )
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
@@ -1168,7 +1206,16 @@ def confirm_bulk_part_delete() -> None:
         )
         st.session_state.pop("parts_pending_bulk_delete", None)
         request_table_editor_reset(parts_editor_key)
-        st.toast(f"Deleted {len(deleted_labels)} selected parts and their fishbone uses", icon=":material/delete:")
+        del_part_details: list[str] = []
+        if impact.get("fishbone_uses", 0):
+            del_part_details.append(f"removed {impact['fishbone_uses']} Fishbone placement(s)")
+        if impact.get("process_uses", 0):
+            del_part_details.append(f"unlinked {impact['process_uses']} PAAG requirement(s)")
+        st.toast(
+            f"Deleted {len(deleted_labels)} part(s)"
+            + (f" · {', '.join(del_part_details)}" if del_part_details else ""),
+            icon=":material/delete:",
+        )
         clear_parts_editor_draft()
         st.rerun()
 
@@ -1360,7 +1407,9 @@ if save_part_table:
         st.session_state[parts_view_pending_key] = selected_parts_columns.copy()
         request_table_editor_reset(parts_editor_key)
         st.toast(
-            f"Saved {count} parts and the table view",
+            f"Saved {count} part(s) in Parts Catalog"
+            + (f" ({len(field_changes)} row(s) modified)" if field_changes else "")
+            + (" · updated table view" if parts_view_has_unsaved_changes else ""),
             icon=":material/check_circle:",
         )
         st.rerun()
@@ -1865,6 +1914,7 @@ with image_col.container(border=True):
             key=f"destructive_confirm_del_prim_url_{part['id']}",
         ):
             clear_part_image(part["id"])
+            st.toast(f"Removed external image link for {part['part_number']}", icon=":material/delete:")
             record_audit_event(
                 project_id,
                 "Parts",
@@ -1958,6 +2008,7 @@ with image_col.container(border=True):
             key=f"destructive_confirm_discard_staged_prim_{part['id']}",
         ):
             cur_staged = st.session_state.get(staged_prim_key)
+            st.toast(f"Discarded staged primary image for {part['part_number']}", icon=":material/delete:")
             if isinstance(cur_staged, dict) and cur_staged.get("source") == "upload":
                 st.session_state[discarded_prim_up_key] = cur_staged.get("source_hash")
             st.session_state.pop(staged_prim_key, None)
@@ -2027,6 +2078,7 @@ with image_col.container(border=True):
             if isinstance(cur_staged, dict) and cur_staged.get("source") == "upload":
                 st.session_state[d_key] = cur_staged.get("source_hash")
             st.session_state.pop(s_key, None)
+            st.toast(f"Discarded staged additional view for {part['part_number']}", icon=":material/delete:")
             st.session_state.pop(f"parts_pending_discard_staged_supp_{part['id']}", None)
             st.rerun()
 

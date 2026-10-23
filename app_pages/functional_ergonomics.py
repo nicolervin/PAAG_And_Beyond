@@ -46,6 +46,12 @@ from utils.store import (
 )
 from utils.table_filters import (
     apply_pending_table_editor_reset,
+    can_redo_last_table_edit,
+    can_undo_last_table_edit,
+    last_table_undo_redo_message,
+    has_unsaved_table_changes,
+    redo_last_table_edit,
+    undo_last_table_edit,
     filter_table,
     merge_filtered_edits,
     request_table_editor_reset,
@@ -574,7 +580,15 @@ def _save_rows(
     )
     st.session_state.pop(pending_merge_key, None)
     request_table_editor_reset(editor_key)
-    st.toast("Ergonomics reviews saved", icon=":material/check_circle:")
+    _ergo_parts: list[str] = []
+    if result.get("created_ids"):
+        _ergo_parts.append(f"{len(result['created_ids'])} created")
+    if result.get("updated_ids"):
+        _ergo_parts.append(f"{len(result['updated_ids'])} updated")
+    if result.get("discarded_ids"):
+        _ergo_parts.append(f"{len(result['discarded_ids'])} merged/discarded")
+    _ergo_detail = f" ({', '.join(_ergo_parts)})" if _ergo_parts else ""
+    st.toast(f"Saved {int(result['row_count'])} Ergonomics review(s){_ergo_detail}", icon=":material/check_circle:")
     st.rerun()
 
 
@@ -770,7 +784,7 @@ def _manage_hazards_dialog() -> None:
             st.toast("Standard hazard tags created", icon=":material/check_circle:")
             st.rerun()
     else:
-        tags_editor_key = f"hazard_options_editor_{project_id}"
+        tags_editor_key = apply_pending_table_editor_reset(f"hazard_options_editor_{project_id}")
         edited_tags = st.data_editor(
             cur_hazards[["id", "label", "active", "selection_count"]],
             key=tags_editor_key,
@@ -784,10 +798,46 @@ def _manage_hazards_dialog() -> None:
             width="stretch",
         )
 
+        edit_c1, edit_c2, edit_c3 = st.columns(3)
+        if edit_c1.button(
+            "Undo last edit",
+            icon=":material/undo:",
+            disabled=not can_undo_last_table_edit(tags_editor_key),
+            help="Revert the most recent cell edit while keeping earlier unsaved changes.",
+            key=f"undo_last_hazard_tags_{project_id}",
+            width="stretch",
+        ):
+            if undo_last_table_edit(tags_editor_key):
+                st.toast(last_table_undo_redo_message(tags_editor_key, default="Reverted the last cell edit."), icon=":material/undo:")
+                st.rerun()
+        if edit_c2.button(
+            "Redo last edit",
+            icon=":material/redo:",
+            disabled=not can_redo_last_table_edit(tags_editor_key),
+            help="Reapply the most recently undone cell edit.",
+            key=f"redo_last_hazard_tags_{project_id}",
+            width="stretch",
+        ):
+            if redo_last_table_edit(tags_editor_key):
+                st.toast(last_table_undo_redo_message(tags_editor_key, default="Reapplied the last undone cell edit."), icon=":material/redo:")
+                st.rerun()
+        if edit_c3.button(
+            "Discard all edits",
+            icon=":material/restart_alt:",
+            disabled=not has_unsaved_table_changes(tags_editor_key),
+            help="Discard all unsaved changes in this table and restore the last saved values.",
+            key=f"discard_hazard_tags_{project_id}",
+            width="stretch",
+        ):
+            request_table_editor_reset(tags_editor_key)
+            st.toast("Discarded unsaved hazard tag edits.", icon=":material/restart_alt:")
+            st.rerun()
+
         btn_c1, btn_c2 = st.columns(2)
         if btn_c1.button("Save changes", type="primary", icon=":material/save:", key=f"save_hazard_tags_{project_id}", width="stretch"):
             try:
                 save_ergonomic_hazard_option_rows(project_id, edited_tags)
+                request_table_editor_reset(tags_editor_key)
                 st.toast("Hazard tags updated", icon=":material/check_circle:")
                 st.session_state.pop(f"show_manage_hazards_dialog_{project_id}", None)
                 st.rerun()
@@ -1500,6 +1550,7 @@ else:
                 ):
                     st_key = f"ergo_staged_media_{discard_rid}"
                     disc_up_key = f"_discarded_ergo_up_{discard_rid}"
+                    st.toast("Discarded staged visual aid", icon=":material/delete:")
                     cur_st = st.session_state.get(st_key)
                     if isinstance(cur_st, dict) and cur_st.get("source") == "upload":
                         st.session_state[disc_up_key] = cur_st.get("hash")

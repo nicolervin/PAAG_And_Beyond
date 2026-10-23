@@ -144,6 +144,39 @@ _NAV_CSS = """
 _NAV_JS = """
 export default function(component) {
   const { parentElement, data, setTriggerValue } = component
+  if (!window.__paagEmptyMultiSelectObserver && typeof document !== 'undefined' && document.body) {
+    const closeEmptyMultiSelectDropdowns = () => {
+      const dropdowns = document.querySelectorAll('[data-testid="stMultiSelectDropdown"]')
+      for (const dropdown of dropdowns) {
+        if (dropdown.querySelector('[role="option"]')) continue
+        const openInputs = document.querySelectorAll(
+          '[data-testid="stMultiSelect"] input[role="combobox"][aria-expanded="true"], [data-testid="stMultiSelect"] [data-open="true"] input[role="combobox"]'
+        )
+        for (const input of openInputs) {
+          if ((input.value || '').trim() !== '') continue
+          input.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+              cancelable: true,
+            })
+          )
+          if (document.activeElement === input || input.getAttribute('aria-expanded') === 'true') {
+            input.blur()
+          }
+        }
+      }
+    }
+    const observer = new MutationObserver(() => {
+      closeEmptyMultiSelectDropdowns()
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    window.__paagEmptyMultiSelectObserver = observer
+    closeEmptyMultiSelectDropdowns()
+  }
   const root = parentElement.querySelector('.split-nav-root')
   if (!root) return
   root.innerHTML = ''
@@ -314,7 +347,7 @@ export default function(component) {
 """
 
 _SPLIT_NAVIGATION = st.components.v2.component(
-    "paag_split_navigation_v3",
+    "paag_split_navigation_v4",
     html=_NAV_HTML,
     css=_NAV_CSS,
     js=_NAV_JS,

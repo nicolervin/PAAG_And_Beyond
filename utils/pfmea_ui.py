@@ -3367,7 +3367,7 @@ def _render_pattern_manager(
         st.caption("Pattern changes are stored only when Save & Refresh is selected.")
         actions = st.container(horizontal=True, horizontal_alignment="right")
         if actions.button(
-            "Undo",
+            "Discard all edits",
             icon=":material/undo:",
             key=f"pfmea_pattern_undo_{project_id}_{widget_scope}",
         ):

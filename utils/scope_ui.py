@@ -25,7 +25,14 @@ def _activate_scenario(selector_key: str) -> None:
     selected_id = st.session_state.get(selector_key)
     if not selected_id:
         return
+    prev_id = str(st.session_state.get("scenario_id") or "")
     st.session_state["scenario_id"] = selected_id
+    project_id = st.session_state.get("project_id")
+    if str(selected_id) != prev_id and project_id:
+        scenarios = planning_scenarios(str(project_id))
+        matched = next((s for s in scenarios if str(s.get("id")) == str(selected_id)), None)
+        if matched:
+            st.toast(f"Switched active scenario to {scenario_option_label(matched)}", icon=":material/account_tree:")
     set_last_active_workspace(st.session_state.get("project_id"), selected_id)
 
 
@@ -139,7 +146,7 @@ def save_as_scenario_dialog(
                 st.session_state["scenario_id"] = new_scenario_id
                 set_last_active_workspace(project_id, new_scenario_id)
                 st.toast(
-                    "Scenario created; the new branch is now active",
+                    f"Created scenario Rev {revision_label.strip()} · {name.strip()} and set it as active",
                     icon=":material/check_circle:",
                 )
                 st.rerun()

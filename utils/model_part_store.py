@@ -1550,7 +1550,7 @@ def infer_part_feature_rules(
     )
 
     model_rows = read_rows(
-        "SELECT id, model_number, active FROM project_models WHERE project_id=?",
+        "SELECT id, model_number, display_name, active FROM project_models WHERE project_id=?",
         (project_id,),
     )
     if not model_rows:
@@ -1687,6 +1687,9 @@ def infer_part_feature_rules(
     for fid, feat in active_features_by_id.items():
         fname = str(feat.get("name") or "")
         nouns = _extract_feature_subject_nouns(fname)
+        if not nouns:
+            fallback_src = str(feat.get("subsystem") or "").strip() or str(feat.get("category") or "").strip()
+            nouns = _extract_feature_subject_nouns(fallback_src)
         feature_nouns_by_id[fid] = nouns
         vocab = set(_tokenize_part_text(fname)) | set(nouns)
         val_tok_map: dict[str, set[str]] = {}
@@ -1703,12 +1706,77 @@ def infer_part_feature_rules(
         feature_allowed_tokens_by_id[fid] = val_tok_map
         feature_vocab_by_id[fid] = vocab
 
+    ordered_active_feature_ids = [
+        str(row["id"])
+        for row in sorted(
+            active_features_by_id.values(),
+            key=lambda r: (
+                str(r.get("category") or "").strip().lower(),
+                str(r.get("name") or "").strip().lower(),
+            ),
+        )
+    ]
+
     inferred: dict[str, list[str]] = {}
     for p in part_rows:
         pid = str(p["id"])
-        if str(p.get("part_number") or "").strip().upper() in top_level_pns:
-            continue
         raw_models = part_models.get(pid, set())
+        if str(p.get("part_number") or "").strip().upper() in top_level_pns:
+            top_models = raw_models & configured_tree_models
+            if not top_models or top_models >= configured_tree_models:
+                p_text = " ".join(
+                    str(p.get(k) or "").strip()
+                    for k in ("description", "factory_nickname", "official_windchill_part_name")
+                )
+                p_toks = _tokenize_part_text(p_text)
+                matched_models_with_toks: list[tuple[str, set[str]]] = []
+                for m_row in model_rows:
+                    if not bool(m_row.get("active", 1)):
+                        continue
+                    m_num = str(m_row.get("model_number") or "").strip()
+                    if not m_num or m_num not in configured_tree_models:
+                        continue
+                    m_name = str(m_row.get("display_name") or "").strip()
+                    name_toks = _tokenize_part_text(m_name) if m_name else set()
+                    if m_num.lower() in p_text.lower():
+                        matched_models_with_toks.append((m_num, name_toks | _tokenize_part_text(m_num)))
+                    elif name_toks and name_toks <= p_toks:
+                        matched_models_with_toks.append((m_num, name_toks))
+                if matched_models_with_toks:
+                    filtered_matches = [
+                        m_num
+                        for m_num, toks in matched_models_with_toks
+                        if not any(toks < other_toks for _, other_toks in matched_models_with_toks)
+                    ]
+                    if filtered_matches:
+                        top_models = set(filtered_matches)
+            if top_models and top_models < configured_tree_models:
+                top_tokens: list[str] = []
+                for fid in ordered_active_feature_ids:
+                    feat = active_features_by_id[fid]
+                    try:
+                        allowed = json.loads(feat.get("allowed_values") or "[]")
+                    except Exception:
+                        allowed = []
+                    for av in allowed:
+                        val_str = str(av).strip()
+                        if not val_str or val_str.upper() in ("N/A", "NONE"):
+                            continue
+                        c_models = feature_choice_models.get((fid, val_str), set())
+                        if c_models and top_models <= c_models:
+                            if not any(
+                                str(other_av).strip() != val_str
+                                and bool(top_models & feature_choice_models.get((fid, str(other_av).strip()), set()))
+                                for other_av in allowed
+                            ):
+                                top_tokens.append(f"{fid}::{val_str}")
+                                break
+                if top_tokens:
+                    inferred[pid] = top_tokens
+                    continue
+            if top_models >= configured_tree_models or str(p.get("model_applicability") or "").strip().lower() in ("all", ""):
+                inferred[pid] = ["All models"]
+            continue
         p_models = raw_models & eval_tree_models
 
         if not p_models:
@@ -1850,15 +1918,23 @@ def infer_part_feature_rules(
             ]
 
         # Exclude any candidate whose model set is a strict superset of another candidate's
-        # model set (i.e., found on more models than the tighter matching feature choices).
+        # model set (i.e., found on more models than the tighter matching feature choices),
+        # unless the candidate has an explicit option-value keyword match in the part text
+        # and at least as strong a subsystem match.
         candidates = [
             c
             for c in candidates
             if not any(
-                other["eval_models"] < c["eval_models"]
-                or (
-                    other["eval_models"] == c["eval_models"]
-                    and other["raw_models"] < c["raw_models"]
+                (
+                    other["eval_models"] < c["eval_models"]
+                    or (
+                        other["eval_models"] == c["eval_models"]
+                        and other["raw_models"] < c["raw_models"]
+                    )
+                )
+                and not (
+                    c.get("val_overlap", 0) > 0
+                    and c["subsystem_match"] >= other["subsystem_match"]
                 )
                 for other in candidates
             )
@@ -1992,13 +2068,15 @@ def preview_inferred_part_feature_rules(
             feature_token_by_label[label] = token
     feature_options = list(feature_token_by_label.keys())
 
-    existing_rules = {
-        str(row["part_id"])
-        for row in read_rows(
-            "SELECT DISTINCT part_id FROM part_feature_rules WHERE project_id=?",
-            (project_id,),
+    existing_rule_tokens_by_part: dict[str, set[str]] = {}
+    for row in read_rows(
+        "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+        (project_id,),
+    ):
+        existing_rule_tokens_by_part.setdefault(str(row["part_id"]), set()).add(
+            f"{row['feature_id']}::{str(row.get('value') or '').strip()}"
         )
-    }
+    existing_rules = set(existing_rule_tokens_by_part.keys())
     linked_assemblies = {
         str(row["catalog_part_id"])
         for row in read_rows(
@@ -2024,7 +2102,7 @@ def preview_inferred_part_feature_rules(
     stale_rule_part_ids = (
         sorted(evaluated_existing_ids - linked_assemblies - set(inferred.keys()))
         if overwrite_existing
-        else sorted((evaluated_existing_ids & top_level_part_ids) - linked_assemblies)
+        else []
     )
 
     if not inferred:
@@ -2069,9 +2147,11 @@ def preview_inferred_part_feature_rules(
     skipped_assembly_count = 0
 
     for part_id, tokens in inferred.items():
+        is_top_level_asm = part_id in top_level_part_ids
         if not overwrite_existing and part_id in existing_rules:
-            skipped_existing_count += 1
-            continue
+            if not is_top_level_asm or existing_rule_tokens_by_part.get(part_id) == set(tokens):
+                skipped_existing_count += 1
+                continue
         if (
             not overwrite_existing
             and tokens == ["All models"]
@@ -2080,7 +2160,7 @@ def preview_inferred_part_feature_rules(
             skipped_existing_count += 1
             continue
 
-        if len(tokens) > 1:
+        if len(tokens) > 1 and not is_top_level_asm:
             p = part_info.get(part_id, {})
             models_set = part_models_map.get(part_id)
             if not models_set:
@@ -2288,8 +2368,19 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
             "active": 1 if bool(row.get("active")) else 0,
             "sequence": (index + 1) * 10,
         })
-    if len({name.casefold() for name in names}) != len(names):
-        raise ValueError("Feature names must be unique within this project.")
+    seen_names: set[str] = set()
+    dup_names: list[str] = []
+    for n in names:
+        key = n.casefold()
+        if key in seen_names and n not in dup_names:
+            dup_names.append(n)
+        seen_names.add(key)
+    if dup_names:
+        dup_list = ", ".join(f"'{d}'" for d in dup_names)
+        raise ValueError(
+            f"Feature names must be unique within this project (duplicate: {dup_list} — "
+            "include the component or subject in each feature name, such as 'Door Color' and 'Wheel Color')."
+        )
 
     timestamp = now_iso()
     with connection() as conn:
@@ -6447,16 +6538,13 @@ def sync_builder_inputs_to_items(items: list[dict[str, Any]], model_id: str) -> 
 def get_live_bom_editor_items(curr_model_id: str, d_key: str, ed_logical_key: str) -> list[dict[str, Any]]:
     """Capture live un-saved cell edits, additions, and deletions from Streamlit Session State."""
     import streamlit as st
-    from utils.table_filters import _EDITOR_INSTANCE_MARKER
+    from utils.table_filters import get_effective_table_editor_state
 
     base_items = [dict(it) for it in st.session_state.get(d_key, [])]
     if not base_items:
         base_items = [{"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}]
 
-
-    generation = int(st.session_state.get(f"_table_editor_generation_{ed_logical_key}", 0) or 0)
-    ed_key = f"{ed_logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
-    ed_state = st.session_state.get(ed_key)
+    ed_state = get_effective_table_editor_state(ed_logical_key)
     if not isinstance(ed_state, dict):
         return base_items
 
@@ -7485,6 +7573,201 @@ def _identify_top_level_assembly_pns(
     return top_level_pns
 
 
+def deduplicate_visual_box_parts(
+    part_numbers: list[str],
+    bom_descendants_by_pn: dict[str, set[str]] | None = None,
+) -> list[str]:
+    """Ensure only one specific part or group number per item appears in a Complexity tree visual box.
+
+    1. Deduplicates identical part/group numbers (case-insensitively).
+    2. Suppresses BOM parent/ancestor assembly numbers when one or more of their BOM descendant
+       parts are also present in the same visual box.
+    3. Suppresses 'G' group numbers when a 'P' piece part sharing the same base drawing root is
+       present in the same visual box.
+    """
+    unique_pns: list[str] = []
+    seen_upper: set[str] = set()
+    for raw_pn in part_numbers:
+        pn = str(raw_pn or "").strip()
+        pn_u = pn.upper()
+        if pn_u and pn_u not in seen_upper:
+            seen_upper.add(pn_u)
+            unique_pns.append(pn)
+
+    if len(unique_pns) <= 1:
+        return unique_pns
+
+    desc_map = bom_descendants_by_pn or {}
+    upper_in_box = {pn.upper() for pn in unique_pns}
+    after_bom: list[str] = []
+    for pn in unique_pns:
+        pn_u = pn.upper()
+        descendants = desc_map.get(pn_u, set())
+        has_strict_descendant_in_box = any(
+            other_u != pn_u
+            and other_u in upper_in_box
+            and pn_u not in desc_map.get(other_u, set())
+            for other_u in descendants
+        )
+        if not has_strict_descendant_in_box:
+            after_bom.append(pn)
+
+    if len(after_bom) <= 1:
+        return after_bom
+
+    piece_part_roots = {
+        _extract_part_root(pn)
+        for pn in after_bom
+        if _part_type(pn) == "P" and len(_extract_part_root(pn)) >= 4
+    }
+    if not piece_part_roots:
+        return after_bom
+
+    return [
+        pn
+        for pn in after_bom
+        if not (_part_type(pn) == "G" and _extract_part_root(pn) in piece_part_roots)
+    ]
+
+
+def complexity_visual_part_rules(
+    project_id: str,
+    *,
+    _conn: sqlite3.Connection | None = None,
+) -> tuple[dict[tuple[str, str], list[tuple[str, set[str] | None]]], dict[str, set[str]]]:
+    """Return filtered part rules per (feature_id, value) and BOM descendant lookup for Complexity tree visual."""
+    read_rows = (
+        lambda sql, params=(): [dict(row) for row in _conn.execute(sql, params).fetchall()]
+        if _conn is not None
+        else query(sql, params)
+    )
+    part_rows = read_rows(
+        """SELECT id, part_number, description, factory_nickname, official_windchill_part_name,
+                  subsystem, model_applicability, pits_tracker_number
+           FROM parts WHERE project_id=?""",
+        (project_id,),
+    )
+    rule_rows = read_rows(
+        "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+        (project_id,),
+    )
+    if not part_rows or not rule_rows:
+        return {}, {}
+
+    top_level_pns = _identify_top_level_assembly_pns(project_id, part_rows, _conn=_conn)
+
+    feature_rows = read_rows(
+        "SELECT id, subsystem FROM complexity_features WHERE project_id=?",
+        (project_id,),
+    )
+    feature_subsystem_by_id = {
+        str(row["id"]).strip(): str(row.get("subsystem") or "").strip().casefold()
+        for row in feature_rows
+        if str(row.get("id") or "").strip()
+    }
+
+    pits_sub_rows = read_rows(
+        """SELECT pits_id, subsystem
+           FROM pits_records
+           WHERE project_id=? AND TRIM(COALESCE(subsystem, '')) <> ''""",
+        (project_id,),
+    )
+    subsystem_by_pits_id = {
+        str(row["pits_id"]).strip(): str(row["subsystem"]).strip()
+        for row in pits_sub_rows
+        if str(row.get("pits_id") or "").strip() and str(row.get("subsystem") or "").strip()
+    }
+
+    part_number_by_id: dict[str, str] = {}
+    part_models_by_id: dict[str, set[str] | None] = {}
+    part_subsystem_by_id: dict[str, str] = {}
+    tracker_to_pn_upper: dict[str, str] = {}
+    id_to_pn_upper: dict[str, str] = {}
+
+    for row in part_rows:
+        pid = str(row.get("id") or "").strip()
+        pn = str(row.get("part_number") or "").strip()
+        if not pid or not pn:
+            continue
+        pn_u = pn.upper()
+        id_to_pn_upper[pid] = pn_u
+        tracker_to_pn_upper[pn_u] = pn_u
+        trk = str(row.get("pits_tracker_number") or "").strip()
+        if trk:
+            tracker_to_pn_upper[trk.upper()] = pn_u
+        if pn_u in top_level_pns:
+            continue
+        part_number_by_id[pid] = pn
+        p_sub = str(row.get("subsystem") or "").strip()
+        if not p_sub and trk:
+            p_sub = subsystem_by_pits_id.get(trk, "")
+        part_subsystem_by_id[pid] = p_sub.casefold()
+        raw_app = row.get("model_applicability")
+        app_str = "" if raw_app is None else str(raw_app or "").strip()
+        if not app_str or app_str.lower() == "all":
+            part_models_by_id[pid] = None
+        else:
+            mods = {m.strip() for m in app_str.split(",") if m.strip()}
+            part_models_by_id[pid] = mods if mods else None
+
+    part_rules_by_feature_value: dict[tuple[str, str], list[tuple[str, set[str] | None]]] = {}
+    seen_in_bucket: dict[tuple[str, str], set[str]] = {}
+    for rule in rule_rows:
+        part_id = str(rule.get("part_id") or "").strip()
+        rule_feature_id = str(rule.get("feature_id") or "").strip()
+        rule_value = str(rule.get("value") or "").strip()
+        part_number = part_number_by_id.get(part_id, "")
+        if not part_number or not rule_feature_id or not rule_value:
+            continue
+        f_sub = feature_subsystem_by_id.get(rule_feature_id, "")
+        p_sub = part_subsystem_by_id.get(part_id, "")
+        if f_sub and p_sub and f_sub != p_sub:
+            continue
+        key = (rule_feature_id, rule_value)
+        seen_pns = seen_in_bucket.setdefault(key, set())
+        pn_u = part_number.upper()
+        if pn_u not in seen_pns:
+            seen_pns.add(pn_u)
+            part_rules_by_feature_value.setdefault(key, []).append(
+                (part_number, part_models_by_id.get(part_id))
+            )
+
+    for key, bucket in part_rules_by_feature_value.items():
+        part_rules_by_feature_value[key] = sorted(bucket, key=lambda item: item[0])
+
+    occ_rows = read_rows(
+        """SELECT parent_tracker_number, child_tracker_number, child_part_id
+           FROM pits_bom_occurrences WHERE project_id=?""",
+        (project_id,),
+    )
+    children_by_parent_pn: dict[str, set[str]] = {}
+    for occ in occ_rows:
+        parent_raw = re.sub(r"#\d+$", "", str(occ.get("parent_tracker_number") or "").strip()).upper()
+        child_raw = re.sub(r"#\d+$", "", str(occ.get("child_tracker_number") or "").strip()).upper()
+        child_id = str(occ.get("child_part_id") or "").strip()
+        parent_pn = tracker_to_pn_upper.get(parent_raw, parent_raw)
+        child_pn = id_to_pn_upper.get(child_id) or tracker_to_pn_upper.get(child_raw, child_raw)
+        if parent_pn and child_pn and parent_pn != child_pn:
+            children_by_parent_pn.setdefault(parent_pn, set()).add(child_pn)
+
+    bom_descendants_by_pn: dict[str, set[str]] = {}
+    for start_pn in children_by_parent_pn:
+        visited: set[str] = set()
+        stack = list(children_by_parent_pn.get(start_pn, ()))
+        while stack:
+            curr = stack.pop()
+            if curr == start_pn or curr in visited:
+                continue
+            visited.add(curr)
+            for nxt in children_by_parent_pn.get(curr, ()):
+                if nxt not in visited:
+                    stack.append(nxt)
+        if visited:
+            bom_descendants_by_pn[start_pn] = visited
+
+    return part_rules_by_feature_value, bom_descendants_by_pn
+
+
 def predict_model_bom_from_features(
     project_id: str,
     model_id: str,
@@ -8033,7 +8316,8 @@ __domain_exports__ = [
     'sync_builder_inputs_to_items', 'get_live_bom_editor_items',
     'move_bom_rows_up', 'move_bom_rows_down', 'delete_bom_rows',
     'check_group_number_conflicts', 'sync_group_parts_to_models',
-    'predict_model_bom_from_features', 'clear_model_boms'
+    '_identify_top_level_assembly_pns', 'deduplicate_visual_box_parts',
+    'complexity_visual_part_rules', 'predict_model_bom_from_features', 'clear_model_boms'
 ]
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):

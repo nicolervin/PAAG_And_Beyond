@@ -174,6 +174,7 @@ if scenario_id:
                         additional_unsaved=is_changed,
                     )
                     if trigger_mat_discard:
+                        st.toast(f"Discarded unsaved handling change for {p_num}", icon=":material/undo:")
                         st.session_state.pop(f"mat_page_ht_{opt_id}", None)
                         st.rerun()
                     mat_save_btn = st.button(

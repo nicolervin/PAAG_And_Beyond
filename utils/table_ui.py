@@ -10,7 +10,16 @@ from typing import Iterable, NoReturn, Sequence
 import pandas as pd
 import streamlit as st
 
-from utils.table_filters import logical_table_editor_key, request_table_editor_reset
+from utils.table_filters import (
+    can_redo_last_table_edit,
+    can_undo_last_table_edit,
+    get_effective_table_editor_state,
+    last_table_undo_redo_message,
+    logical_table_editor_key,
+    redo_last_table_edit,
+    request_table_editor_reset,
+    undo_last_table_edit,
+)
 
 
 DEFAULT_SELECTION_COLUMN = "selected"
@@ -145,7 +154,7 @@ def direct_entry_editor_rows(
         )
     if not isinstance(st.session_state.get(direction_key), bool):
         st.session_state[direction_key] = bool(default_sort_descending)
-    editor_state = st.session_state.get(editor_key, {}) or {}
+    editor_state = get_effective_table_editor_state(editor_key)
     controls_locked = bool(
         editor_state.get("edited_rows")
         or editor_state.get("added_rows")
@@ -261,9 +270,11 @@ def table_has_unsaved_changes(
 ) -> bool:
     """Detect persisted data edits while ignoring action-only table columns."""
     logical_key = logical_table_editor_key(editor_key)
-    if st.session_state.get(f"_reset_table_editor_{logical_key}"):
+    if st.session_state.get(f"_reset_table_editor_{logical_key}") and not st.session_state.get(
+        f"_pending_undo_last_edit_{logical_key}"
+    ):
         return False
-    state = st.session_state.get(editor_key, {}) or {}
+    state = get_effective_table_editor_state(editor_key)
     if state.get("added_rows") or (state.get("deleted_rows") and not native_row_selection):
         return True
     ignored = set(ignored_columns)
@@ -282,7 +293,7 @@ def native_selected_rows(
     """Return rows chosen with the data editor's native corner/row selectors."""
     if id_column not in source_dataframe:
         return source_dataframe.iloc[0:0].copy()
-    state = st.session_state.get(editor_key, {}) or {}
+    state = get_effective_table_editor_state(editor_key)
     positions = [
         int(position) for position in state.get("deleted_rows", [])
         if 0 <= int(position) < len(source_dataframe)
@@ -525,10 +536,53 @@ def editable_table_footer(
             help=additional_action_help,
             key=additional_action_key or f"{key_prefix}_additional_action",
         )
-    undo = footer.button(
-        "Undo",
+    can_undo_last = can_undo_last_table_edit(
+        editor_key,
+        native_row_selection=native_row_selection,
+    )
+    undo_last = footer.button(
+        "Undo last edit",
         icon=":material/undo:",
+        disabled=not can_undo_last,
+        help="Revert the most recent cell edit while keeping earlier unsaved changes.",
+        key=f"{key_prefix}_undo_last_edit",
+    )
+    if undo_last:
+        if undo_last_table_edit(editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    editor_key,
+                    default="Reverted the last cell edit.",
+                ),
+                icon=":material/undo:",
+            )
+            st.rerun()
+    can_redo_last = can_redo_last_table_edit(
+        editor_key,
+        native_row_selection=native_row_selection,
+    )
+    redo_last = footer.button(
+        "Redo last edit",
+        icon=":material/redo:",
+        disabled=not can_redo_last,
+        help="Reapply the most recently undone cell edit.",
+        key=f"{key_prefix}_redo_last_edit",
+    )
+    if redo_last:
+        if redo_last_table_edit(editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    editor_key,
+                    default="Reapplied the last undone cell edit.",
+                ),
+                icon=":material/redo:",
+            )
+            st.rerun()
+    undo = footer.button(
+        "Discard all edits",
+        icon=":material/restart_alt:",
         disabled=not (unsaved or undo_available),
+        help="Discard all unsaved changes in this table and restore the last saved values.",
         key=f"{key_prefix}_undo",
     )
     save_and_refresh = footer.button(

@@ -484,7 +484,15 @@ def _persist_control_plan_draft(pending: dict) -> None:
         st.session_state.pop(f"{draft_key}_op_id_renumber_count", None)
     if editor_key:
         request_table_editor_reset(editor_key)
-    st.toast("Saved Control Plan working draft", icon=":material/check_circle:")
+    _cp_renum_suffix = (
+        f" · renumbered {renumbered_operation_count} operation(s)"
+        if renumbered_operation_count
+        else ""
+    )
+    st.toast(
+        f"Saved {result.get('row_count', 0)} Control Plan item(s){_cp_renum_suffix}",
+        icon=":material/check_circle:",
+    )
     st.rerun()
 
 

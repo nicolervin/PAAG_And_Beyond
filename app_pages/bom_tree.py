@@ -47,8 +47,13 @@ from utils.store import (
 from utils.table_filters import (
     _EDITOR_INSTANCE_MARKER,
     apply_pending_table_editor_reset,
+    can_redo_last_table_edit,
+    can_undo_last_table_edit,
     has_unsaved_table_changes,
+    last_table_undo_redo_message,
+    redo_last_table_edit,
     request_table_editor_reset,
+    undo_last_table_edit,
 )
 from utils.table_ui import format_clean_number, guarded_tabs, register_unsaved_source
 
@@ -78,6 +83,7 @@ if models_df.empty:
                     try:
                         new_mid = add_project_model(project_id, m_num, m_name, "")
                         st.session_state["_pending_model_tree_model"] = new_mid
+                        st.toast(f"Created model '{m_num}' and selected it in the Model Tree", icon=":material/check_circle:")
                         st.success(f"Model '{m_num}' created!")
                         st.rerun()
                     except Exception as e:
@@ -165,6 +171,7 @@ with col_m_add:
                     try:
                         new_mid = add_project_model(project_id, m_num, m_name, "")
                         st.session_state["_pending_model_tree_model"] = new_mid
+                        st.toast(f"Created model '{m_num}' and selected it in the Model Tree", icon=":material/check_circle:")
                         st.success(f"Model '{m_num}' created!")
                         st.rerun()
                     except Exception as e:
@@ -2089,7 +2096,7 @@ with tab_author:
             row_tools_idx_key = f"row_tools_idx_{selected_model_id}"
 
             # ── Action Bar (Row 1): Checkbox & Save Actions ──
-            bar_left, bar_right = st.columns([1.8, 2.2], vertical_alignment="center")
+            bar_left, bar_right = st.columns([1.3, 2.7], vertical_alignment="center")
             with bar_left:
                 auto_add_grid = st.checkbox(
                     "Auto-add new parts to Parts Catalog",
@@ -2098,16 +2105,52 @@ with tab_author:
                     help="Automatically register unknown part numbers into the project Parts Catalog when saving.",
                 )
             with bar_right:
-                act_cols = st.columns([1.5, 0.9, 1.8], gap="small", vertical_alignment="center")
+                act_cols = st.columns([1.05, 1.15, 1.15, 1.35, 1.55], gap="small", vertical_alignment="center")
                 with act_cols[0]:
                     if is_unsaved:
                         st.markdown(":orange[:material/warning: **Unsaved changes**]")
                 with act_cols[1]:
-                    undo_bom_clicked = st.button(
-                        "Undo",
+                    undo_last_bom_clicked = st.button(
+                        "Undo last edit",
                         icon=":material/undo:",
+                        key=f"undo_last_bom_grid_{selected_model_id}",
+                        help="Revert the most recent cell edit while keeping earlier unsaved BOM changes",
+                        disabled=not can_undo_last_table_edit(bom_editor_key, ignored_columns=("Select",)),
+                    )
+                    if undo_last_bom_clicked:
+                        if undo_last_table_edit(bom_editor_key):
+                            st.toast(
+                                last_table_undo_redo_message(
+                                    bom_editor_key,
+                                    default="Reverted the last BOM cell edit.",
+                                ),
+                                icon=":material/undo:",
+                            )
+                            st.rerun()
+                with act_cols[2]:
+                    redo_last_bom_clicked = st.button(
+                        "Redo last edit",
+                        icon=":material/redo:",
+                        key=f"redo_last_bom_grid_{selected_model_id}",
+                        help="Reapply the most recently undone BOM cell edit",
+                        disabled=not can_redo_last_table_edit(bom_editor_key, ignored_columns=("Select",)),
+                    )
+                    if redo_last_bom_clicked:
+                        if redo_last_table_edit(bom_editor_key):
+                            st.toast(
+                                last_table_undo_redo_message(
+                                    bom_editor_key,
+                                    default="Reapplied the last undone BOM cell edit.",
+                                ),
+                                icon=":material/redo:",
+                            )
+                            st.rerun()
+                with act_cols[3]:
+                    undo_bom_clicked = st.button(
+                        "Discard all edits",
+                        icon=":material/restart_alt:",
                         key=f"undo_bom_grid_{selected_model_id}",
-                        help="Discard unsaved edits and reload from the last saved BOM",
+                        help="Discard all unsaved edits and reload from the last saved BOM",
                         disabled=not is_unsaved,
                     )
                     if undo_bom_clicked or trigger_bom_discard:
@@ -2127,9 +2170,9 @@ with tab_author:
                         st.session_state.pop(f"bom_anchor_row_{selected_model_id}", None)
                         _clear_bld_widget_keys(selected_model_id)
                         request_table_editor_reset(bom_editor_logical_key)
-                        st.toast("Discarded unsaved changes.", icon=":material/undo:")
+                        st.toast("Discarded the unsaved BOM edits", icon=":material/undo:")
                         st.rerun()
-                with act_cols[2]:
+                with act_cols[4]:
                     save_clicked = bool(
                         st.button(
                             "Save BOM Structure",

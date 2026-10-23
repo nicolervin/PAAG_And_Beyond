@@ -91,6 +91,9 @@ st.html(
     div[class*="st-key-equipment_torque_details_editor"] button[aria-label="Delete row(s)"] {
         display: inline-flex !important;
     }
+    div[data-testid="stMultiSelectDropdown"]:not(:has([role="option"])) {
+        display: none !important;
+    }
     </style>
     """
 )
@@ -402,6 +405,7 @@ with st.sidebar:
             st.session_state.project_id = selected_project_id
             st.session_state.scenario_id = None
             st.session_state.pop("global_scenario", None)
+            st.toast(f"Switched active project to '{selected_name}'", icon=":material/folder_open:")
         active_project = get_project(st.session_state.project_id)
         active_scenario = scenario_view_selector(
             st,

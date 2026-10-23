@@ -112,6 +112,7 @@ def new_project_dialog():
                 st.session_state.pop("global_project", None)
                 st.session_state.pop("global_scenario", None)
                 set_last_active_workspace(created_project_id, None)
+                st.toast(f"Created project '{name.strip()}' and set it as active", icon=":material/check_circle:")
                 st.rerun()
 
 
@@ -289,7 +290,11 @@ with st.container(border=True):
                         "project_changed_fields": project_changed_fields,
                     },
                 )
-                st.toast("Project saved", icon=":material/check_circle:")
+                st.toast(
+                    f"Saved project '{name.strip()}'"
+                    + (f" ({len(project_changed_fields)} field(s) updated)" if project_changed_fields else ""),
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
 
 if scenario:
@@ -447,6 +452,7 @@ if scenario:
         )
         if scenario_actions.undo:
             request_table_editor_reset(scenario_editor_key)
+            st.toast("Discarded the unsaved planning scenario edits", icon=":material/undo:")
             st.rerun()
         selected_scenarios = native_selected_rows(
             editor_rows, editor_key=scenario_editor_key
@@ -556,7 +562,17 @@ if scenario:
                     st.session_state["scenario_id"] = newest_id
                     st.session_state[selected_detail_key] = newest_id
                 request_table_editor_reset(scenario_editor_key)
-                st.toast("Planning scenarios saved", icon=":material/check_circle:")
+                created_scen_count = len(result["created_ids"])
+                updated_scen_count = int(result["updated_count"])
+                scen_toast = f"Saved {result['saved_count']} planning scenario(s)"
+                scen_details: list[str] = []
+                if updated_scen_count:
+                    scen_details.append(f"{updated_scen_count} updated")
+                if created_scen_count:
+                    scen_details.append(f"{created_scen_count} branched and set active")
+                if scen_details:
+                    scen_toast += f" ({', '.join(scen_details)})"
+                st.toast(scen_toast, icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))

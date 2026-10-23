@@ -41,12 +41,17 @@ from utils.store import (
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
+    can_redo_last_table_edit,
+    can_undo_last_table_edit,
     filter_table,
     has_unsaved_table_changes,
+    last_table_undo_redo_message,
     matches_filter_value,
     merge_filtered_edits,
+    redo_last_table_edit,
     request_table_editor_reset,
     split_filter_values,
+    undo_last_table_edit,
 )
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
@@ -202,19 +207,55 @@ fishbone_tab, assign_parts_tab = guarded_tabs(
 )
 
 with assign_parts_tab:
-    place_parts_title, place_parts_undo = st.columns([5, 0.7], vertical_alignment="center")
+    place_parts_title, place_parts_undo_last, place_parts_redo_last, place_parts_undo = st.columns(
+        [3.0, 1.1, 1.1, 1.25], vertical_alignment="center"
+    )
     place_parts_title.subheader("Place Parts into Fishbone")
     placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
     trigger_pool_save, trigger_pool_discard = register_unsaved_source(
         f"fishbone_pool_{project_id}_{scenario_id}",
         editor_key=pool_editor_key,
     )
-    undo_placement = place_parts_undo.button(
-        "Undo",
+    undo_last_placement = place_parts_undo_last.button(
+        "Undo last edit",
         icon=":material/undo:",
+        disabled=not can_undo_last_table_edit(pool_editor_key, ignored_columns=()),
+        help="Revert the most recent cell or selection edit in the placement table.",
+        key="undo_last_part_placement_edit",
+    )
+    if undo_last_placement:
+        if undo_last_table_edit(pool_editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    pool_editor_key,
+                    default="Reverted the last placement table edit",
+                ),
+                icon=":material/undo:",
+            )
+            st.rerun()
+    redo_last_placement = place_parts_redo_last.button(
+        "Redo last edit",
+        icon=":material/redo:",
+        disabled=not can_redo_last_table_edit(pool_editor_key, ignored_columns=()),
+        help="Reapply the most recently undone cell or selection edit in the placement table.",
+        key="redo_last_part_placement_edit",
+    )
+    if redo_last_placement:
+        if redo_last_table_edit(pool_editor_key):
+            st.toast(
+                last_table_undo_redo_message(
+                    pool_editor_key,
+                    default="Reapplied the last undone placement table edit",
+                ),
+                icon=":material/redo:",
+            )
+            st.rerun()
+    undo_placement = place_parts_undo.button(
+        "Discard all edits",
+        icon=":material/restart_alt:",
         disabled=assignment_undo_key not in st.session_state and not placement_has_unsaved,
         help=(
-            "Discard the current unsaved selections or quantities."
+            "Discard all current unsaved selections or quantities."
             if placement_has_unsaved
             else "Undo the last part placement or additional-use staging."
         ),
@@ -473,7 +514,16 @@ with assign_parts_tab:
                 pending_use_ids.difference_update(selected_additional_use_ids)
                 st.session_state[pending_use_key] = sorted(pending_use_ids)
                 request_table_editor_reset(pool_editor_key)
-                st.toast(f"Placed {count} part uses in {section_name_by_id[target_section_id]}", icon=":material/check_circle:")
+                place_breakdown: list[str] = []
+                if selected_unplaced_ids:
+                    place_breakdown.append(f"{len(selected_unplaced_ids)} first-time")
+                if selected_additional_use_ids:
+                    place_breakdown.append(f"{len(selected_additional_use_ids)} additional")
+                st.toast(
+                    f"Placed {count} part use(s) in {section_name_by_id[target_section_id]}"
+                    + (f" ({', '.join(place_breakdown)})" if place_breakdown else ""),
+                    icon=":material/check_circle:",
+                )
                 st.session_state[clear_use_description_key] = True
                 st.rerun()
             except ValueError as exc:
@@ -708,7 +758,15 @@ with assign_parts_tab:
                     )
                     st.session_state.pop(pending_key, None)
                     request_table_editor_reset(assignment_editor_key)
-                    st.toast(f"Deleted {count} selected Fishbone uses", icon=":material/delete:")
+                    st.toast(
+                        f"Deleted {count} Fishbone part use(s)"
+                        + (
+                            f" · removed {len(assembly_impact)} assembly component row(s)"
+                            if not assembly_impact.empty
+                            else ""
+                        ),
+                        icon=":material/delete:",
+                    )
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
@@ -777,7 +835,16 @@ with assign_parts_tab:
                 )
                 st.session_state[assignment_undo_key] = current_assignment_undo
                 request_table_editor_reset(assignment_editor_key)
-                st.toast(f"Saved {count} fishbone part assignments", icon=":material/check_circle:")
+                assign_save_details: list[str] = []
+                if added_assignment_ids:
+                    assign_save_details.append(f"{len(added_assignment_ids)} added")
+                if edited_assignment_ids:
+                    assign_save_details.append(f"{len(edited_assignment_ids)} updated")
+                st.toast(
+                    f"Saved {count} Fishbone part assignment(s)"
+                    + (f" ({', '.join(assign_save_details)})" if assign_save_details else ""),
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
@@ -873,7 +940,15 @@ with fishbone_tab:
                             },
                         )
                         request_table_editor_reset(framework_editor_key)
-                        st.toast(f"Created {sec_type} '{sec_name}'", icon=":material/check_circle:")
+                        st.toast(
+                            f"Created {sec_type} '{sec_name}'"
+                            + (
+                                f" · auto-created {len(created_areas)} Yamazumi area(s)"
+                                if created_areas
+                                else ""
+                            ),
+                            icon=":material/check_circle:",
+                        )
                         st.rerun()
                     except ValueError as exc:
                         st.error(str(exc))
@@ -2116,7 +2191,24 @@ with fishbone_tab:
                 request_table_editor_reset(pool_editor_key)
                 request_table_editor_reset(assignment_editor_key)
                 request_table_editor_reset(framework_editor_key)
-                st.toast("Saved all Fishbone canvas changes", icon=":material/check_circle:")
+                canvas_save_parts: list[str] = []
+                if draft.get("positions"):
+                    canvas_save_parts.append(f"{len(draft['positions'])} node position(s)")
+                if draft.get("connections") or draft.get("deleted_connections"):
+                    conn_changes = len(draft.get("connections") or []) + len(draft.get("deleted_connections") or [])
+                    canvas_save_parts.append(f"{conn_changes} connection change(s)")
+                part_changes = (
+                    len(draft.get("new_assignments") or [])
+                    + len(draft.get("updated_assignments") or {})
+                    + len(draft.get("deleted_assignments") or [])
+                )
+                if part_changes:
+                    canvas_save_parts.append(f"{part_changes} part placement change(s)")
+                st.toast(
+                    "Saved Fishbone canvas changes"
+                    + (f" ({', '.join(canvas_save_parts)})" if canvas_save_parts else ""),
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
@@ -2558,7 +2650,12 @@ def _render_framework_maintenance():
                     st.session_state.pop(framework_delete_key, None)
                     request_table_editor_reset("assembly_framework_editor")
                     st.toast(
-                        f"Deleted {deleted['affected_section_count']} Fishbone sections",
+                        f"Deleted {deleted['affected_section_count']} Fishbone section(s)"
+                        + (
+                            f" · re-pointed {deleted.get('repointed_yamazumi_area_count', 0)} Yamazumi area(s)"
+                            if deleted.get("repointed_yamazumi_area_count")
+                            else ""
+                        ),
                         icon=":material/delete:",
                     )
                     st.rerun()
@@ -2682,7 +2779,11 @@ def _render_framework_maintenance():
                 )
                 st.session_state[framework_undo_key] = current_plan_snapshot
                 request_table_editor_reset(framework_editor_key)
-                st.toast(f"Saved {count} Fishbone sections", icon=":material/check_circle:")
+                st.toast(
+                    f"Saved {count} Fishbone section(s)"
+                    + (f" ({len(framework_changes)} modified)" if framework_changes else ""),
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))

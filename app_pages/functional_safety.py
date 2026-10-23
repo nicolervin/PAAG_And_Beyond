@@ -248,6 +248,7 @@ if st.session_state.get(pending_delete_key):
     confirm_delete()
 
 if footer.undo:
+    st.toast("Discarded the unsaved Safety requirement edits", icon=":material/undo:")
     request_table_editor_reset(editor_key)
     st.rerun()
 

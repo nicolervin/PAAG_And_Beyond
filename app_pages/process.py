@@ -821,6 +821,7 @@ def alerts_detail_dialog(
                                                 "source": "PAAG Alerts dialog",
                                             },
                                         )
+                                        st.toast(f"Classified part {p_num} as {chosen_ht}", icon=":material/check_circle:")
                                         st.success(f"Part {p_num} classified as {chosen_ht}!")
                                         st.rerun()
                                     except Exception as exc:
@@ -1077,6 +1078,7 @@ def discard_staged_media_dialog(pitch_id: str) -> None:
         type="primary",
         icon=":material/delete:",
         key=f"destructive_confirm_discard_staged_{pitch_id}",
+        on_click=lambda: st.toast("Discarded staged visual aid", icon=":material/delete:"),
     ):
         st.session_state.pop(f"staged_media_{pitch_id}", None)
         st.rerun()
@@ -2507,7 +2509,10 @@ with tab_plan:
                             "resource_detail": resource_detail,
                         },
                     )
-                    st.toast("PAAG element created and added to process work", icon=":material/check_circle:")
+                    st.toast(
+                        f"Created PAAG requirement '{final_group_name}' ({len(selected_parts)} part(s)) on '{selected_description}'",
+                        icon=":material/check_circle:",
+                    )
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
@@ -2552,7 +2557,7 @@ with tab_plan:
                     },
                 )
                 st.toast(
-                    "PAAG element added to Process at a Glance",
+                    f"Added '{selected_description}' to Process at a Glance",
                     icon=":material/check_circle:",
                 )
                 st.rerun()
@@ -3059,11 +3064,14 @@ with tab_plan:
             request_table_editor_reset(process_editor_key)
             if impact.get("quality_count", 0) > 0 or impact.get("pfmea_count", 0) > 0:
                 st.toast(
-                    f"Pitch updated. {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) will be flagged as upstream changes in Quality.",
+                    f"Updated pitch to {bulk_station.strip()} for {len(selected_ids)} step(s) · {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) flagged for review.",
                     icon=":material/info:",
                 )
             else:
-                st.toast("Pitch updated", icon=":material/check_circle:")
+                st.toast(
+                    f"Updated pitch to {bulk_station.strip()} for {len(selected_ids)} step(s)",
+                    icon=":material/check_circle:",
+                )
             st.rerun()
 
     if request_bulk_delete:
@@ -3141,6 +3149,20 @@ with tab_plan:
                 )
             )
             replace_work_elements(project_id, scenario_id, retained)
+            del_proc_impacts: list[str] = []
+            if impact.get("quality_count"):
+                del_proc_impacts.append(f"{impact['quality_count']} Quality spec(s) unlinked")
+            if impact.get("pfmea_count"):
+                del_proc_impacts.append(f"{impact['pfmea_count']} PFMEA item(s) unlinked")
+            if impact.get("equipment_count"):
+                del_proc_impacts.append(f"{impact['equipment_count']} Equipment link(s) removed")
+            if impact.get("safety_count"):
+                del_proc_impacts.append(f"{impact['safety_count']} Safety req(s) deleted")
+            st.toast(
+                f"Deleted {len(pending_ids)} Process step(s)"
+                + (f" · {', '.join(del_proc_impacts)}" if del_proc_impacts else ""),
+                icon=":material/delete:",
+            )
             record_audit_event(
                 project_id,
                 "Process plan",
@@ -3185,6 +3207,7 @@ with tab_plan:
             st.warning("Select a line in the Select column of the table to edit.")
 
     if footer_actions.undo:
+        st.toast("Discarded the unsaved Process at a Glance edits", icon=":material/undo:")
         request_table_editor_reset(process_editor_key)
         st.rerun()
 
@@ -3231,11 +3254,17 @@ with tab_plan:
             request_table_editor_reset(process_editor_key)
             if impact.get("quality_count", 0) > 0 or impact.get("pfmea_count", 0) > 0:
                 st.toast(
-                    f"Process saved. {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) will be flagged for review in Quality.",
+                    f"Saved {len(combined_elements)} Process step(s)"
+                    + (f" ({len(affected_ids)} modified)" if affected_ids else "")
+                    + f" · {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) flagged for review.",
                     icon=":material/info:",
                 )
             else:
-                st.toast("Process at a Glance saved", icon=":material/check_circle:")
+                st.toast(
+                    f"Saved {len(combined_elements)} Process step(s)"
+                    + (f" ({len(affected_ids)} modified)" if affected_ids else ""),
+                    icon=":material/check_circle:",
+                )
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
@@ -4067,7 +4096,7 @@ with tab_plan:
                 request_table_editor_reset(process_editor_key)
                 st.session_state.pop(edit_line_dialog_key, None)
                 st.toast(
-                    "Process at a Glance line updated",
+                    f"Updated Process line '{line_work_element}'",
                     icon=":material/check_circle:",
                 )
                 st.rerun()

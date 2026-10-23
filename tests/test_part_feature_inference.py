@@ -849,7 +849,8 @@ class PartFeatureInferenceTests(unittest.TestCase):
         teal_tire_id = add_part("999D8505P001", "teal tire", ["MC100"])
         # 3. "Wheel asm (black and chrome)" on MC200 must match Wheel Color=Black & Wheel Finish=Chrome, NOT Wheel Finish=Black
         wheel_bc_id = add_part("999D8505G002", "Wheel asm (black and chrome)", ["MC200"])
-        # 4. "Urban Black Coupe final asm" on MC110 must be excluded from feature auto-assignment
+        # 4. "Urban Black Coupe final asm" on MC110 must auto-assign all active feature values of MC110
+        #    and apply directly without entering the multi-feature review dialog
         final_asm_id = add_part("999D8842G002", "Urban Black Coupe final asm", ["MC110"])
 
         inferred = store.infer_part_feature_rules(
@@ -864,7 +865,88 @@ class PartFeatureInferenceTests(unittest.TestCase):
             set(inferred[wheel_bc_id]),
             {f"{wheel_col_fid}::Black", f"{wheel_fin_fid}::Chrome"},
         )
-        self.assertNotIn(final_asm_id, inferred)
+        self.assertEqual(
+            set(inferred[final_asm_id]),
+            {
+                f"{roof_opt_fid}::Coupe",
+                f"{roof_col_fid}::Smoke",
+                f"{wheel_col_fid}::Black",
+                f"{wheel_fin_fid}::Black",
+            },
+        )
+        preview = store.preview_inferred_part_feature_rules(pid, part_ids=[final_asm_id])
+        self.assertIn(final_asm_id, preview["direct"])
+        self.assertEqual(preview["review"], [])
+
+        # 5. Complexity tree visual deduplication: when parent assemblies (G groups) and child piece parts (P parts)
+        #    are both linked to the same feature choice, each box only displays the specific part/group number once.
+        wheel_tc_id = add_part("999D8505G001", "Wheel asm (teal and chrome)", ["MC100"])
+        front_tc_id = add_part("999D8402G001", "Front of car body asm (teal and chrome)", ["MC100"])
+        back_tc_id = add_part("999D8802G001", "back of car asm (teal and chrome)", ["MC100"])
+        store.execute("UPDATE complexity_features SET subsystem='Wheels' WHERE id=?", (wheel_col_fid,))
+        store.execute("UPDATE parts SET subsystem='Wheels' WHERE id IN (?, ?)", (teal_tire_id, wheel_tc_id))
+        store.execute("UPDATE parts SET subsystem='Chassis' WHERE id IN (?, ?)", (front_tc_id, back_tc_id))
+        store.update_part_feature_rules(
+            pid,
+            {
+                teal_tire_id: [f"{wheel_col_fid}::Teal"],
+                wheel_tc_id: [f"{wheel_col_fid}::Teal", f"{wheel_fin_fid}::Chrome"],
+                front_tc_id: [f"{wheel_col_fid}::Teal", f"{wheel_fin_fid}::Chrome"],
+                back_tc_id: [f"{wheel_col_fid}::Teal", f"{wheel_fin_fid}::Chrome"],
+            },
+        )
+        rules_by_fv, bom_desc = store.complexity_visual_part_rules(pid)
+        teal_candidates = [
+            pn for pn, _ in rules_by_fv.get((wheel_col_fid, "Teal"), [])
+        ]
+        # Chassis assemblies are excluded from Wheels feature bucket
+        self.assertNotIn("999D8402G001", teal_candidates)
+        self.assertNotIn("999D8802G001", teal_candidates)
+        # Group assembly 999D8505G001 and piece part 999D8505P001 deduplicate to only 999D8505P001
+        self.assertEqual(
+            store.deduplicate_visual_box_parts(teal_candidates, bom_desc),
+            ["999D8505P001"],
+        )
+
+    def test_complexity_tree_visual_feature_dropdown_includes_part_name(self) -> None:
+        from pathlib import Path
+        from streamlit.testing.v1 import AppTest
+
+        part_id = self._create_part_with_bom(
+            "PN-LCD-001",
+            "7 Inch LCD Display Module",
+            self.lcd_models,
+        )
+        store.update_part_feature_rules(
+            self.project_id,
+            {part_id: [f"{self.fascia_fid}::LCD"]},
+        )
+
+        scenario_id = str(store.planning_scenarios(self.project_id)[0]["id"])
+        feature_display_key = f"complexity_tree_visual_feature_display_{self.project_id}"
+        category_key = f"complexity_tree_visual_category_{self.project_id}"
+        model_label_key = f"complexity_tree_visual_model_label_{self.project_id}"
+
+        models_page = str(Path(__file__).resolve().parents[1] / "app_pages" / "models.py")
+        app = AppTest.from_file(models_page)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = scenario_id
+        app.session_state[category_key] = ["Control Panel"]
+        app.session_state[model_label_key] = ["Model number"]
+        app.session_state[feature_display_key] = ["Feature", "Part number", "Part name"]
+        app.run(timeout=15)
+
+        self.assertEqual(len(app.exception), 0, f"Models page raised exception: {app.exception}")
+        feature_multiselect = next(
+            ms for ms in app.multiselect if ms.key == feature_display_key
+        )
+        self.assertEqual(
+            list(feature_multiselect.options),
+            ["Feature", "Part number", "Part name"],
+        )
+        rendered_markdown = "\n".join(md.value for md in app.markdown)
+        self.assertIn("PN-LCD-001", rendered_markdown)
+        self.assertIn("7 Inch LCD Display Module", rendered_markdown)
 
 
 if __name__ == "__main__":

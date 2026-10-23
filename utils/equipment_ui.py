@@ -289,6 +289,7 @@ def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = T
         if st.session_state.get(pending_key):
             confirm_type_delete()
         if footer.undo:
+            st.toast("Discarded the unsaved edits", icon=":material/undo:")
             request_table_editor_reset(editor_key)
             st.rerun()
         if footer.save_and_refresh:
@@ -530,6 +531,7 @@ def _render_equipment_table(
     if st.session_state.get(pending_key):
         confirm_detach()
     if footer.undo:
+        st.toast("Discarded the unsaved Equipment edits", icon=":material/undo:")
         request_table_editor_reset(editor_key)
         st.rerun()
     if footer.save_and_refresh:
@@ -1108,6 +1110,7 @@ def render_torque_requirement_specifications(project_id: str) -> None:
         if st.session_state.get(pending_key):
             confirm_delete()
         if footer.undo:
+            st.toast("Discarded the unsaved edits", icon=":material/undo:")
             st.session_state.pop(bit_key, None)
             request_table_editor_reset(editor_key)
             st.rerun()
@@ -1850,6 +1853,7 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
             native_row_selection=False,
         )
         if ergo_footer.undo:
+            st.toast("Discarded the unsaved pitch ergonomics edits", icon=":material/undo:")
             request_table_editor_reset(ergo_editor_key)
             st.rerun()
         if ergo_footer.save_and_refresh:
