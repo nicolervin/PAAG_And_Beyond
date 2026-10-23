@@ -1907,7 +1907,7 @@ def infer_part_feature_rules(
             explained_by_matched_nouns.update(feature_vocab_by_id.get(m_fid, set()))
 
         def _collect_single_value_candidates(subsystem_mode: str) -> list[dict[str, Any]]:
-            found: list[dict[str, Any]] = []
+            preliminary: list[tuple[str, str, set[str], set[str], dict[str, Any], int, set[str], set[str]]] = []
             for (fid, val), c_models in feature_choice_models.items():
                 if not c_models:
                     continue
@@ -1947,9 +1947,6 @@ def infer_part_feature_rules(
                 if conflicts:
                     continue
 
-                f_name = f_meta["f_name"]
-                f_cat = f_meta["f_cat"]
-                name_tokens = f_meta["name_tokens"]
                 val_tokens = f_meta["val_tokens_by_val"].get(val)
                 if val_tokens is None:
                     val_tokens = _tokenize_part_text(val)
@@ -1970,22 +1967,32 @@ def infer_part_feature_rules(
                     continue
 
                 # Exclude generic category words from keyword scoring so only feature name and option value score
-                f_tokens = name_tokens | val_tokens
+                f_tokens = f_meta["name_tokens"] | val_tokens
                 matched_tokens = p_tokens & f_tokens
+                preliminary.append((fid, val, c_models, c_eval_models, f_meta, subsystem_match, val_tokens, matched_tokens))
 
+            active_matched_noun_fids = matched_noun_fids & {item[0] for item in preliminary}
+            active_explained_by_nouns: set[str] = set()
+            for m_fid in active_matched_noun_fids:
+                active_explained_by_nouns.update(feature_vocab_by_id.get(m_fid, set()))
+
+            found: list[dict[str, Any]] = []
+            for fid, val, c_models, c_eval_models, f_meta, subsystem_match, val_tokens, matched_tokens in preliminary:
                 # Prevent cross-feature false positives when the part explicitly names a specific feature's
                 # subject noun (e.g., "Roof" vs "Wheel") and this candidate feature's noun is absent.
                 if (
-                    matched_noun_fids
-                    and fid not in matched_noun_fids
+                    active_matched_noun_fids
+                    and fid not in active_matched_noun_fids
                     and not subsystem_match
                 ):
-                    unexplained = matched_tokens - explained_by_matched_nouns
+                    unexplained = matched_tokens - active_explained_by_nouns
                     if feature_nouns_by_id.get(fid) or not unexplained:
                         continue
 
                 overlap = len(matched_tokens)
                 val_overlap = len(p_tokens & val_tokens)
+                f_name = f_meta["f_name"]
+                f_cat = f_meta["f_cat"]
 
                 exact_match = 1.0 if p_models == c_eval_models else 0.0
                 coverage = len(p_models) / len(c_eval_models) if c_eval_models else 0.0
@@ -2160,7 +2167,8 @@ def infer_part_feature_rules(
         if top["overlap"] == 0 and top["subsystem_match"] == 0 and (
             len(models_with_bom) < 2
             or (
-                bool(all_bom_tree_models)
+                not part_has_assigned_subsystem
+                and bool(all_bom_tree_models)
                 and all_bom_tree_models < configured_tree_models
                 and p_models >= all_bom_tree_models
             )

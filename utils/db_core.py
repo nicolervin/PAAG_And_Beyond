@@ -2798,11 +2798,6 @@ def init_db() -> None:
                     json.dumps({"assembly_parts": changes}, ensure_ascii=False), timestamp,
                 ),
             )
-    if is_cacheable_runtime():
-        ident = _db_file_identity(Path(DB_PATH))
-        if ident[2]:
-            _INITIALIZED_DB_SIGNATURES.add(ident)
-
 
         manual_bom_projects = [
             str(r[0])
@@ -2842,6 +2837,11 @@ def init_db() -> None:
                    VALUES (?, ?, 'Parts', 'Manual BOM source backfill', ?, 'Schema upgrade', '{}', ?)""",
                 (str(uuid4()), mb_pid, int(cur.rowcount or 0), timestamp),
             )
+
+    if is_cacheable_runtime():
+        ident = _db_file_identity(Path(DB_PATH))
+        if ident[2]:
+            _INITIALIZED_DB_SIGNATURES.add(ident)
 
 def query(sql: str, params: tuple = ()) -> list[dict]:
     with connection() as conn:
