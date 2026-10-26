@@ -3897,14 +3897,14 @@ def escalate_pits_bom_occurrence(
         conn.execute(
             """INSERT INTO concerns
                (id, project_id, category, subject, detail, owner, priority, status,
-                related_part, related_station, created_at, updated_at)
-               VALUES (?, ?, 'Concern', ?, ?, '', 'Medium', 'Open', ?, '', ?, ?)""",
+                submitted_by, related_part, related_station, created_at, updated_at)
+               VALUES (?, ?, 'BOM', ?, ?, '', 'Medium', 'Open', ?, ?, '', ?, ?)""",
             (
                 concern_id, project_id,
                 f"PITS BOM occurrence requires review: {parent_label} â†’ {child_label}",
-                f"Source state: {escalation_state}. PITS tracker relationship "
+                f"PITS BOM occurrence requires review ({parent_label} -> {child_label}). Source state: {escalation_state}. PITS tracker relationship "
                 f"{parent_label} â†’ {occurrence['child_tracker_number']}.",
-                child_label, timestamp, timestamp,
+                str(editor_name or "").strip(), child_label, timestamp, timestamp,
             ),
         )
         conn.execute(
@@ -4534,9 +4534,9 @@ def pits_part_downstream_impacts(
 
         concern_items = []
         c_rows = conn.execute(
-            """SELECT id, category, subject, priority, status
+            """SELECT id, category, subject, detail, priority, status
                FROM concerns
-               WHERE project_id=? AND related_part=? AND status <> 'Closed'
+               WHERE project_id=? AND related_part=? AND status NOT IN ('Resolved', 'Closed')
                ORDER BY priority DESC""",
             (project_id, part_number),
         ).fetchall()
@@ -4544,7 +4544,7 @@ def pits_part_downstream_impacts(
             concern_items.append({
                 "id": str(r["id"]),
                 "category": str(r["category"] or "Question"),
-                "subject": str(r["subject"] or ""),
+                "subject": str(r["detail"] or r["subject"] or ""),
                 "priority": str(r["priority"] or "Medium"),
                 "status": str(r["status"] or "Open"),
             })
@@ -4552,9 +4552,9 @@ def pits_part_downstream_impacts(
         replaces_concern_items = []
         if replaces_part_number:
             rc_rows = conn.execute(
-                """SELECT id, category, subject, priority, status
+                """SELECT id, category, subject, detail, priority, status
                    FROM concerns
-                   WHERE project_id=? AND related_part=? AND status <> 'Closed'
+                   WHERE project_id=? AND related_part=? AND status NOT IN ('Resolved', 'Closed')
                    ORDER BY priority DESC""",
                 (project_id, replaces_part_number),
             ).fetchall()
@@ -4562,7 +4562,7 @@ def pits_part_downstream_impacts(
                 replaces_concern_items.append({
                     "id": str(r["id"]),
                     "category": str(r["category"] or "Question"),
-                    "subject": str(r["subject"] or ""),
+                    "subject": str(r["detail"] or r["subject"] or ""),
                     "priority": str(r["priority"] or "Medium"),
                     "status": str(r["status"] or "Open"),
                     "part_number": replaces_part_number,

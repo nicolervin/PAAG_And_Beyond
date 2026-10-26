@@ -1,7 +1,15 @@
 import pandas as pd
 import streamlit as st
 
-from utils.store import audit_history, project_table, record_audit_event, replace_concerns
+from utils.store import (
+    CONCERN_CATEGORIES,
+    CONCERN_STATUSES,
+    audit_history,
+    get_project,
+    project_table,
+    record_audit_event,
+    replace_concerns,
+)
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
     apply_pending_table_editor_reset,
@@ -10,82 +18,174 @@ from utils.table_filters import (
     request_table_editor_reset,
 )
 from utils.table_ui import (
+    direct_entry_editor_rows,
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
     native_selected_rows,
-    direct_entry_editor_rows,
     selectable_dataframe,
     stage_native_delete_confirmation,
 )
 
 
 project_id = st.session_state.get("project_id")
+current_editor = (
+    str(st.session_state.get("current_editor", "") or "").strip()
+    or str(st.session_state.get(f"editor_value_{project_id}", "") or "").strip()
+)
+if not current_editor and project_id:
+    project_row = get_project(project_id) or {}
+    current_editor = str(project_row.get("owner", "") or "").strip()
 editor_key = "concerns_editor"
 pending_delete_key = f"concerns_pending_delete_{project_id}"
 page_title_with_scope("Questions and concerns", scope="project")
-st.caption("Keep unresolved assumptions and cross-functional decisions visible as the process changes.")
+st.caption("Keep unresolved questions, concerns, and cross-functional resolutions visible as the process changes.")
 if not project_id:
     st.stop()
 editor_key = apply_pending_table_editor_reset(editor_key)
 
-concerns = project_table("concerns", project_id, "created_at DESC")
-columns = ["id", "category", "subject", "detail", "owner", "priority", "status", "related_part", "related_station", "created_at"]
-if concerns.empty:
+raw_concerns = project_table("concerns", project_id, "created_at DESC")
+columns = [
+    "id",
+    "category",
+    "detail",
+    "owner",
+    "priority",
+    "status",
+    "comments",
+    "resolution_comments",
+    "submitted_by",
+    "created_at",
+    "updated_at",
+]
+column_labels = {
+    "category": "Category",
+    "detail": "Description",
+    "owner": "Owner",
+    "priority": "Priority",
+    "status": "Status",
+    "comments": "Comments",
+    "resolution_comments": "Resolution comments",
+    "submitted_by": "Submitted by",
+    "created_at": "Created",
+    "updated_at": "Updated",
+}
+if raw_concerns.empty:
     concerns = pd.DataFrame(
-        {
-            "id": pd.Series(dtype="string"),
-            "category": pd.Series(dtype="string"),
-            "subject": pd.Series(dtype="string"),
-            "detail": pd.Series(dtype="string"),
-            "owner": pd.Series(dtype="string"),
-            "priority": pd.Series(dtype="string"),
-            "status": pd.Series(dtype="string"),
-            "related_part": pd.Series(dtype="string"),
-            "related_station": pd.Series(dtype="string"),
-            "created_at": pd.Series(dtype="string"),
-        }
+        {col: pd.Series(dtype="string") for col in columns}
     )
 else:
+    concerns = raw_concerns.copy()
+    if "detail" in concerns.columns and "subject" in concerns.columns:
+        detail_series = concerns["detail"].fillna("").astype(str).str.strip()
+        subject_series = concerns["subject"].fillna("").astype(str).str.strip()
+        concerns["detail"] = detail_series.where(detail_series != "", subject_series)
     concerns = concerns.reindex(columns=columns)
+    for col in columns:
+        concerns[col] = concerns[col].fillna("").astype("string")
+    valid_categories = set(CONCERN_CATEGORIES)
+    concerns["category"] = concerns["category"].map(
+        lambda val: val if str(val).strip() in valid_categories else "Other"
+    ).astype("string")
+    concerns["status"] = concerns["status"].map(
+        lambda val: "Resolved"
+        if str(val).strip() == "Closed"
+        else (str(val).strip() if str(val).strip() in CONCERN_STATUSES else "Open")
+    ).astype("string")
+    if current_editor:
+        concerns["submitted_by"] = concerns["submitted_by"].map(
+            lambda val: str(val).strip() if str(val).strip() else current_editor
+        ).astype("string")
+
+editor_state = st.session_state.get(editor_key)
+if isinstance(editor_state, dict) and current_editor:
+    for added_row in editor_state.get("added_rows") or []:
+        if isinstance(added_row, dict) and not str(added_row.get("submitted_by") or "").strip():
+            added_row["submitted_by"] = current_editor
 
 editable_table_heading("Questions and concerns")
 
 visible_concerns = filter_table(
     concerns,
     key="concerns_filters",
-    dropdown_columns=["category", "priority", "status", "owner"],
-    search_columns=["subject", "detail", "owner", "related_part", "related_station"],
+    dropdown_columns=["category", "priority", "status", "owner", "submitted_by"],
+    search_columns=["detail", "owner", "comments", "resolution_comments", "submitted_by"],
+    labels=column_labels,
     reset_widget_keys=[editor_key],
 )
 concerns_for_editing = direct_entry_editor_rows(
     visible_concerns,
     editor_key=editor_key,
     sort_columns=[
-        "category", "subject", "priority", "status", "owner",
-        "related_part", "related_station", "created_at",
+        "category",
+        "detail",
+        "priority",
+        "status",
+        "owner",
+        "comments",
+        "resolution_comments",
+        "submitted_by",
+        "created_at",
+        "updated_at",
     ],
+    labels=column_labels,
 )
 edited = st.data_editor(
-    concerns_for_editing, key=editor_key, num_rows="dynamic", hide_index=True, height=430,
-    disabled=["id", "created_at"], column_order=[column for column in columns if column != "id"],
+    concerns_for_editing,
+    key=editor_key,
+    num_rows="dynamic",
+    hide_index=True,
+    height=430,
+    disabled=["id", "submitted_by", "created_at", "updated_at"],
+    column_order=[column for column in columns if column != "id"],
     column_config={
         "id": None,
         "category": st.column_config.SelectboxColumn(
-            options=["Question", "Concern", "Decision", "Assumption"],
-            default="Question",
+            "Category",
+            options=list(CONCERN_CATEGORIES),
+            default="Other",
+            required=True,
         ),
-        "subject": st.column_config.TextColumn(required=True, pinned=True),
-        "detail": st.column_config.TextColumn(width="large"),
+        "detail": st.column_config.TextColumn(
+            "Description",
+            required=True,
+            pinned=True,
+            width="large",
+        ),
+        "owner": st.column_config.TextColumn("Owner"),
         "priority": st.column_config.SelectboxColumn(
-            options=["Low", "Medium", "High", "Critical"], default="Medium"
+            "Priority",
+            options=["Low", "Medium", "High", "Critical"],
+            default="Medium",
+            help=(
+                "How urgently this item needs attention: "
+                "Critical blocks build, safety, or launch; "
+                "High has a major process, quality, or layout impact; "
+                "Medium is a standard open item to resolve before process freeze; "
+                "Low is a minor question or improvement with a known workaround."
+            ),
         ),
         "status": st.column_config.SelectboxColumn(
-            options=["Open", "Investigating", "Waiting", "Resolved", "Closed"],
+            "Status",
+            options=list(CONCERN_STATUSES),
             default="Open",
+        ),
+        "comments": st.column_config.TextColumn("Comments", width="medium"),
+        "resolution_comments": st.column_config.TextColumn(
+            "Resolution comments",
+            width="medium",
+            help="Required once Status is set to 'Resolved'.",
+        ),
+        "submitted_by": st.column_config.TextColumn(
+            "Submitted by",
+            default=current_editor,
+            help="Automatically filled with the Current editor when an item is added.",
         ),
         "created_at": st.column_config.DatetimeColumn(
             "Created", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
+        ),
+        "updated_at": st.column_config.DatetimeColumn(
+            "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
         ),
     },
 )
@@ -110,11 +210,12 @@ def clean_text(value: object) -> str:
 def concern_summary(row: pd.Series | dict) -> str:
     """Return a short, stable description for confirmations and audit details."""
     concern_id = clean_text(row.get("id"))
-    category = clean_text(row.get("category")) or "Concern"
-    subject = clean_text(row.get("subject"))
-    detail = clean_text(row.get("detail"))
-    label = subject or detail[:80] or "Untitled concern"
-    return f"{category}: {label} (ID: {concern_id})"
+    category = clean_text(row.get("category")) or "Other"
+    detail = clean_text(row.get("detail")) or clean_text(row.get("subject"))
+    label = detail[:80] or "Untitled concern"
+    if concern_id:
+        return f"{category}: {label} (ID: {concern_id})"
+    return f"{category}: {label}"
 
 
 def pending_edit_summaries(excluded_ids: set[str] | None = None) -> list[str]:
@@ -189,6 +290,9 @@ if request_delete:
     stage_native_delete_confirmation(editor_key)
 
 
+IDENTIFYING_CONCERN_COLUMNS = ["detail", "comments", "resolution_comments", "owner"]
+
+
 @st.dialog("Delete selected concerns?", dismissible=False)
 def confirm_concern_delete() -> None:
     pending_state = st.session_state.get(pending_delete_key, {})
@@ -221,7 +325,7 @@ def confirm_concern_delete() -> None:
         )
         remaining_edits = drop_untouched_new_rows(
             draft_rows,
-            identifying_columns=["subject"],
+            identifying_columns=IDENTIFYING_CONCERN_COLUMNS,
         )
         combined_concerns = merge_filtered_edits(
             concerns,
@@ -231,8 +335,12 @@ def confirm_concern_delete() -> None:
         combined_concerns = combined_concerns.loc[
             ~combined_concerns["id"].fillna("").astype(str).isin(pending_ids)
         ].copy()
-        replace_concerns(project_id, combined_concerns)
-        editor_name = st.session_state.get("current_editor", "")
+        editor_name = current_editor
+        try:
+            replace_concerns(project_id, combined_concerns, editor_name=editor_name)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
         record_audit_event(
             project_id,
             "Questions and concerns",
@@ -269,25 +377,33 @@ if footer_actions.save_and_refresh:
     if not selected_concerns.empty:
         st.warning("Clear selected rows before saving concern edits.")
     else:
-        edited = drop_untouched_new_rows(edited, identifying_columns=["subject"])
+        edited = drop_untouched_new_rows(
+            edited,
+            identifying_columns=IDENTIFYING_CONCERN_COLUMNS,
+        )
         combined_concerns = merge_filtered_edits(concerns, visible_concerns, edited)
         changed_concerns = pending_edit_summaries()
-        replace_concerns(project_id, combined_concerns)
-        record_audit_event(
-            project_id,
-            "Questions and concerns",
-            "Save & Refresh",
-            len(changed_concerns),
-            st.session_state.get("current_editor", ""),
-            {"concerns": changed_concerns},
-        )
-        request_table_editor_reset(editor_key)
-        st.toast(
-            f"Saved {len(combined_concerns)} item(s) in Questions and concerns"
-            + (f" ({len(changed_concerns)} modified)" if changed_concerns else ""),
-            icon=":material/check_circle:",
-        )
-        st.rerun()
+        editor_name = current_editor
+        try:
+            replace_concerns(project_id, combined_concerns, editor_name=editor_name)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            record_audit_event(
+                project_id,
+                "Questions and concerns",
+                "Save & Refresh",
+                len(changed_concerns),
+                editor_name,
+                {"concerns": changed_concerns},
+            )
+            request_table_editor_reset(editor_key)
+            st.toast(
+                f"Saved {len(combined_concerns)} item(s) in Questions and concerns"
+                + (f" ({len(changed_concerns)} modified)" if changed_concerns else ""),
+                icon=":material/check_circle:",
+            )
+            st.rerun()
 
 
 with st.expander("History", icon=":material/history:"):

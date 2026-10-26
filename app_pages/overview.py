@@ -198,7 +198,7 @@ parts = project_table("parts", project_id)
 elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
 concerns = project_table("concerns", project_id)
 total_cycle = float(elements["cycle_time_s"].sum()) if not elements.empty else 0
-open_concerns = int((concerns["status"] != "Closed").sum()) if not concerns.empty else 0
+open_concerns = int((~concerns["status"].isin(["Resolved", "Closed"])).sum()) if not concerns.empty else 0
 
 metric_cols = st.columns(4)
 metric_cols[0].metric("Parts", len(parts), border=True)

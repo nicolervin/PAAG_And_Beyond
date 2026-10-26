@@ -97,9 +97,9 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
             "linked to parts, stations, and BOM reconciliation escalations."
         ),
         "workflows": [
-            "**Log a question or concern**: Add a row with Category (`Question`, `Concern`, `Risk`, `Action`), Subject, Detail, Owner, Priority, and optional Related Part or Station.",
+            "**Log a question or concern**: Add a row with Description, Category (standard tab name or `Other`), Owner, Priority (`Low`, `Medium`, `High`, `Critical`), Status (`Open`, `Investigating`, `Waiting`, `Resolved`), and Comments; **Submitted by** is automatically filled with the Current editor.",
             "**Review BOM escalations**: Changed or missing PITS BOM occurrences escalated from the BOM page appear here automatically.",
-            "**Update & close items**: Filter by status or priority, edit inline, and click **Save & Refresh**.",
+            "**Update & resolve items**: Filter by status or priority, edit inline, enter **Resolution comments** (required when Status is set to `Resolved`), and click **Save & Refresh**.",
         ],
         "connections": (
             "Connects to **BOM** (escalated source changes), **Parts Catalog**, and **Process at a Glance** stations."
