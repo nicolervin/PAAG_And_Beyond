@@ -14,6 +14,7 @@ from utils.cache_store import (
     mark_scenario_task_completed,
 )
 from utils.media_cache import cached_image_data_url
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin, safe_unlink_upload_path
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -207,16 +208,26 @@ def delete_ergonomic_hazard_options(project_id: str, option_ids: list[str]) -> d
     if not ids:
         return impact | {"row_count": 0, "timestamp": timestamp}
     placeholders = ",".join("?" for _ in ids)
+    opt_labels = [str(l) for l in impact.get("labels", []) if str(l)]
+    label = opt_labels[0] if len(opt_labels) == 1 else f"{len(ids)} ergonomic hazard options ({', '.join(opt_labels[:3])})"
     with connection() as conn:
-        cursor = conn.execute(
-            f"""DELETE FROM ergonomic_hazard_options
-                WHERE project_id=? AND id IN ({placeholders})""",
-            (project_id, *ids),
-        )
-        if int(cursor.rowcount) != len(ids):
-            raise ValueError(
-                "One or more Ergonomics hazard options changed. Refresh and try again."
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Ergonomic Hazard Option",
+            entity_table="ergonomic_hazard_options",
+            entity_id=ids[0] if len(ids) == 1 else "",
+            entity_label=label,
+        ):
+            cursor = conn.execute(
+                f"""DELETE FROM ergonomic_hazard_options
+                    WHERE project_id=? AND id IN ({placeholders})""",
+                (project_id, *ids),
             )
+            if int(cursor.rowcount) != len(ids):
+                raise ValueError(
+                    "One or more Ergonomics hazard options changed. Refresh and try again."
+                )
     return impact | {"row_count": len(ids), "timestamp": timestamp}
 
 @cached_store_read
@@ -368,10 +379,13 @@ def ergonomics_review_audit_history(
            FROM audit_log
            WHERE project_id=? AND table_name='Ergonomics reviews'
              AND json_extract(details, '$.scenario_id')=?
-           ORDER BY created_at DESC LIMIT ?""",
+           ORDER BY datetime(created_at) DESC, created_at DESC LIMIT ?""",
         (project_id, scenario_id, int(limit)),
     )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty and "created_at" in df.columns:
+        df["created_at"] = df["created_at"].map(to_eastern_iso)
+    return df
 
 def _ergonomics_review_has_real_content(values: dict) -> bool:
     """Return whether a review contains content beyond an untouched placeholder."""
@@ -949,13 +963,22 @@ def delete_ergonomics_reviews(
                 (project_id, scenario_id, *ids),
             ).fetchone()[0]
         )
-        cursor = conn.execute(
-            f"""DELETE FROM ergonomics_reviews
-                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
-            (project_id, scenario_id, *ids),
-        )
-        if int(cursor.rowcount) != len(ids):
-            raise ValueError("One or more Ergonomics reviews changed. Refresh and try again.")
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Ergonomics Review",
+            entity_table="ergonomics_reviews",
+            entity_id=ids[0] if len(ids) == 1 else "",
+            entity_label=f"{len(ids)} Ergonomics review(s)",
+        ):
+            cursor = conn.execute(
+                f"""DELETE FROM ergonomics_reviews
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+                (project_id, scenario_id, *ids),
+            )
+            if int(cursor.rowcount) != len(ids):
+                raise ValueError("One or more Ergonomics reviews changed. Refresh and try again.")
     return {
         "row_count": len(ids),
         "hazard_selection_count": selection_count,
@@ -1558,26 +1581,27 @@ def delete_ergonomics_visual_media(
         caption = row["caption"]
         review_id = row["review_id"]
 
-        conn.execute(
-            "DELETE FROM ergonomics_visual_media WHERE id=? AND project_id=? AND scenario_id=?",
-            (normalized_media_id, project_id, scenario_id),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Ergonomics Visual Aid",
+            entity_table="ergonomics_visual_media",
+            entity_id=normalized_media_id,
+            entity_label=str(caption or "Ergonomics visual aid"),
+            deleted_by=str(current_editor or "").strip(),
+            extra_file_paths=[file_path_str, orig_path_str],
+        ):
+            conn.execute(
+                "DELETE FROM ergonomics_visual_media WHERE id=? AND project_id=? AND scenario_id=?",
+                (normalized_media_id, project_id, scenario_id),
+            )
 
     if file_path_str:
-        p = Path(file_path_str)
-        try:
-            if p.exists() and p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
-                p.unlink(missing_ok=True)
-        except OSError:
-            pass
+        safe_unlink_upload_path(file_path_str)
 
     if orig_path_str and orig_path_str != file_path_str:
-        op = Path(orig_path_str)
-        try:
-            if op.exists() and op.is_file() and UPLOAD_DIR.resolve() in op.resolve().parents:
-                op.unlink(missing_ok=True)
-        except OSError:
-            pass
+        safe_unlink_upload_path(orig_path_str)
 
     record_audit_event(
         project_id,

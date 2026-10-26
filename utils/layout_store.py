@@ -14,6 +14,7 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from utils.cache_store import cached_store_read
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin, safe_unlink_upload_path
 
 SUPPORTED_LAYOUT_EXTENSIONS: tuple[str, ...] = (
     ".png",
@@ -80,13 +81,7 @@ def _require_editor(editor_name: str) -> str:
 def _remove_owned_upload(path_value: object) -> None:
     if not path_value:
         return
-    path = Path(str(path_value))
-    try:
-        upload_dir = _store_module().UPLOAD_DIR.resolve()
-        if path.exists() and path.is_file() and upload_dir in path.resolve().parents:
-            path.unlink()
-    except Exception:
-        pass
+    safe_unlink_upload_path(str(path_value))
 
 
 def to_canonical_inches(value: float, unit: str) -> float:
@@ -427,9 +422,19 @@ def delete_layout(project_id: str, layout_id: str, editor_name: str) -> dict[str
     editor = _require_editor(editor_name)
     impact = layout_deletion_impact(project_id, layout_id)
     with store.connection() as conn:
-        conn.execute(
-            "DELETE FROM layout_plans WHERE id=? AND project_id=?", (layout_id, project_id)
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Floor Plan Layout",
+            entity_table="layout_plans",
+            entity_id=layout_id,
+            entity_label=str(impact.get("layout_name") or layout_id),
+            deleted_by=editor,
+            extra_file_paths=list(impact.get("image_paths", [])),
+        ):
+            conn.execute(
+                "DELETE FROM layout_plans WHERE id=? AND project_id=?", (layout_id, project_id)
+            )
         store.record_audit_event(
             project_id,
             "Layouts",
@@ -1275,7 +1280,17 @@ def delete_layout_revision(project_id: str, revision_id: str, editor_name: str) 
             raise ValueError("Revision not found.")
         image_path = str(rev["image_path"] or "")
         cad_file_path = str(rev["cad_file_path"] or "") if "cad_file_path" in rev.keys() else ""
-        conn.execute("DELETE FROM layout_revisions WHERE id=?", (revision_id,))
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Layout Revision",
+            entity_table="layout_revisions",
+            entity_id=revision_id,
+            entity_label=f"{rev['layout_name']} — Rev {rev['revision_number']}",
+            deleted_by=editor,
+            extra_file_paths=[p for p in (image_path, cad_file_path) if p],
+        ):
+            conn.execute("DELETE FROM layout_revisions WHERE id=?", (revision_id,))
         store.record_audit_event(
             project_id,
             "Layouts",
@@ -1745,16 +1760,25 @@ def delete_layout_layer(
         if not remaining_layers:
             raise ValueError("Cannot delete the last remaining layer on a layout revision.")
 
-        if delete_layer_shapes:
-            conn.execute("DELETE FROM layout_shapes WHERE layer_id = ?", (layer_id,))
-        else:
-            target_lid = _text(move_shapes_to_layer_id) or str(remaining_layers[0]["id"])
-            conn.execute(
-                "UPDATE layout_shapes SET layer_id = ? WHERE layer_id = ?",
-                (target_lid, layer_id),
-            )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Layout Layer",
+            entity_table="layout_layers",
+            entity_id=layer_id,
+            entity_label=f"{row['name']} (Rev {row['revision_number']})",
+            deleted_by=editor,
+        ):
+            if delete_layer_shapes:
+                conn.execute("DELETE FROM layout_shapes WHERE layer_id = ?", (layer_id,))
+            else:
+                target_lid = _text(move_shapes_to_layer_id) or str(remaining_layers[0]["id"])
+                conn.execute(
+                    "UPDATE layout_shapes SET layer_id = ? WHERE layer_id = ?",
+                    (target_lid, layer_id),
+                )
 
-        conn.execute("DELETE FROM layout_layers WHERE id = ?", (layer_id,))
+            conn.execute("DELETE FROM layout_layers WHERE id = ?", (layer_id,))
         store.record_audit_event(
             project_id,
             "Layouts",
@@ -3110,10 +3134,19 @@ def delete_layout_custom_stencil(
         ).fetchone()
         if not row:
             return False
-        conn.execute(
-            "DELETE FROM layout_custom_stencils WHERE id = ? AND project_id = ?",
-            (clean_id, project_id),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Custom Layout Stencil",
+            entity_table="layout_custom_stencils",
+            entity_id=clean_id,
+            entity_label=str(row["name"] or clean_id),
+            deleted_by=editor,
+        ):
+            conn.execute(
+                "DELETE FROM layout_custom_stencils WHERE id = ? AND project_id = ?",
+                (clean_id, project_id),
+            )
         store.record_audit_event(
             project_id,
             "Layouts",

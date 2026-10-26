@@ -62,7 +62,7 @@ from utils.layout_store import (
     update_revision_background_from_data_url,
 )
 from utils.scope_ui import section_heading_with_scope
-from utils.store import assembly_sections, audit_history
+from utils.store import assembly_sections, audit_history, format_eastern_timestamp
 from utils.table_ui import editable_table_footer, selectable_dataframe
 
 SHAPE_TYPES: list[str] = [
@@ -820,7 +820,8 @@ def _create_revision_dialog(
         rev_options: dict[str, str] = {}
         for r in all_revisions:
             s_count = int(r.get("shape_count", 0))
-            rev_options[r["id"]] = f"Rev {r['revision_number']} ({s_count} shape(s) — {r['created_at'][:10]})"
+            rev_date = format_eastern_timestamp(r.get("created_at"), "%Y-%m-%d")[:10]
+            rev_options[r["id"]] = f"Rev {r['revision_number']} ({s_count} shape(s) — {rev_date})"
         rev_options["none"] = "None (start with a blank layout)"
 
         default_copy_id = "none"
@@ -1041,7 +1042,7 @@ def _import_shapes_dialog(
     )
 
     rev_choices = {
-        r["id"]: f"Rev {r['revision_number']} ({r.get('shape_count', 0)} shapes — {r['created_at'][:10]})"
+        r["id"]: f"Rev {r['revision_number']} ({r.get('shape_count', 0)} shapes — {format_eastern_timestamp(r.get('created_at'), '%Y-%m-%d')[:10]})"
         for r in other_revs
     }
     selected_source_id = st.selectbox(
@@ -1941,7 +1942,7 @@ def render_layouts_tab(
             rc1, rc2, rc3, rc4, rc5 = st.columns([2.4, 1.4, 1.4, 1.4, 1.1], vertical_alignment="center")
             with rc1:
                 rev_labels = {
-                    str(r["id"]): f"Rev {r['revision_number']} ({int(r.get('shape_count', 0))} shapes — {str(r.get('created_at', ''))[:10]})"
+                    str(r["id"]): f"Rev {r['revision_number']} ({int(r.get('shape_count', 0))} shapes — {format_eastern_timestamp(r.get('created_at'), '%Y-%m-%d')[:10]})"
                     for r in revisions
                 }
                 rev_ids_list = list(rev_labels.keys())
@@ -2102,7 +2103,7 @@ def render_layouts_tab(
                         "row_count": "Count",
                         "editor_name": "Editor",
                         "created_at": st.column_config.DatetimeColumn(
-                            "When", format="MMM DD, YYYY HH:mm"
+                            "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                         ),
                     },
                 )

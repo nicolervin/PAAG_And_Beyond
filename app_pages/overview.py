@@ -13,7 +13,8 @@ from utils.table_ui import (
     direct_entry_editor_rows, standard_details_column_config,
 )
 from utils.store import (
-    audit_history, create_project, delete_project, get_planning_scenario, get_project,
+    audit_history, create_project, delete_project, format_eastern_timestamp,
+    get_planning_scenario, get_project,
     get_project_deletion_impact, next_scenario_revision_label, planning_scenarios,
     project_table, projects, record_audit_event, save_planning_scenario_rows,
     set_last_active_workspace, update_project,
@@ -341,7 +342,7 @@ if scenario:
     for column in ["created_at", "updated_at"]:
         scenario_rows[column] = pd.to_datetime(
             scenario_rows[column], errors="coerce", utc=True
-        )
+        ).dt.tz_convert("America/New_York")
 
     with st.container(border=True):
         section_heading_with_scope(
@@ -441,10 +442,10 @@ if scenario:
                 "parent_scenario": st.column_config.TextColumn("Source scenario"),
                 "created_by": st.column_config.TextColumn("Created by"),
                 "created_at": st.column_config.DatetimeColumn(
-                    "Created", format="MMM DD, YYYY HH:mm"
+                    "Created", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
                 "updated_at": st.column_config.DatetimeColumn(
-                    "Updated", format="MMM DD, YYYY HH:mm"
+                    "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
             },
         )
@@ -611,8 +612,8 @@ if scenario:
             )
             st.caption(
                 f"Created by {detail.get('created_by') or 'Not recorded'} on "
-                f"{detail.get('created_at') or 'an unknown date'} · Last updated "
-                f"{detail.get('updated_at') or 'on an unknown date'}"
+                f"{format_eastern_timestamp(detail.get('created_at')) or 'an unknown date'} · Last updated "
+                f"{format_eastern_timestamp(detail.get('updated_at')) or 'on an unknown date'}"
             )
 
 with st.expander("History", icon=":material/history:"):
@@ -633,7 +634,7 @@ with st.expander("History", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )
@@ -651,7 +652,7 @@ with st.expander("History", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )

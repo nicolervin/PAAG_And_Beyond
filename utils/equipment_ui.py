@@ -154,7 +154,12 @@ def render_equipment_history(project_id: str, *, key_prefix: str) -> None:
             groups.append(history)
         combined = (
             pd.concat(groups, ignore_index=True)
-            .sort_values("created_at", ascending=False, kind="stable")
+            .sort_values(
+                "created_at",
+                ascending=False,
+                kind="stable",
+                key=lambda s: pd.to_datetime(s, errors="coerce", utc=True),
+            )
             .head(100)
             if groups else pd.DataFrame()
         )
@@ -171,7 +176,7 @@ def render_equipment_history(project_id: str, *, key_prefix: str) -> None:
                 "row_count": "Rows",
                 "editor_name": "Editor",
                 "created_at": st.column_config.DatetimeColumn(
-                    "When", format="MMM DD, YYYY HH:mm"
+                    "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
             },
         )
@@ -233,7 +238,7 @@ def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = T
                 ),
                 "created_at": None,
                 "updated_at": st.column_config.DatetimeColumn(
-                    "Updated", format="MMM DD, YYYY HH:mm"
+                    "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
             },
         )
@@ -618,6 +623,16 @@ def _render_equipment_detail(
             type=["png", "jpg", "jpeg", "webp"],
             key=f"equipment_primary_upload_{project_id}_{selected_id}",
         )
+        st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
+        pasted_primary = clipboard_image(key=f"equipment_primary_clip_{project_id}_{selected_id}")
+        pasted_primary_payload = getattr(pasted_primary, "image", None)
+        if pasted_primary_payload:
+            try:
+                pasted_primary_img = decode_clipboard_image(pasted_primary_payload)
+                upload = as_uploaded_file(pasted_primary_img)
+                st.success("Captured photo / screenshot!")
+            except Exception as exc:
+                st.warning(str(exc))
         image_actions = st.container(horizontal=True)
         if image_actions.button(
             "Save primary image",
@@ -1060,7 +1075,9 @@ def render_torque_requirement_specifications(project_id: str) -> None:
                 ),
                 "screw_bit_type": st.column_config.TextColumn("Screw bit type", required=True),
                 "created_at": None,
-                "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
+                "updated_at": st.column_config.DatetimeColumn(
+                    "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
+                ),
             },
         )
         changed_bit = current_bit != _text(bit_value)
@@ -1583,15 +1600,16 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
                 "Upload orientation diagram / photo",
                 type=["png", "jpg", "jpeg", "webp"],
                 key=f"zone_img_upload_{project_id}_{scenario_id}_{selected_zone_label}",
-                help="Attach a CAD screenshot or line illustration showing orientation.",
+                help="Attach a CAD screenshot, camera photo, or line illustration showing orientation.",
             )
+            st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
             pasted = clipboard_image(key=f"zone_clip_paste_{project_id}_{scenario_id}_{selected_zone_label}")
             pasted_payload = getattr(pasted, "image", None)
             if pasted_payload:
                 try:
                     pasted_img = decode_clipboard_image(pasted_payload)
                     uploaded_file = as_uploaded_file(pasted_img)
-                    st.success("Captured screenshot from clipboard!")
+                    st.success("Captured photo / screenshot!")
                 except Exception as exc:
                     st.warning(str(exc))
 

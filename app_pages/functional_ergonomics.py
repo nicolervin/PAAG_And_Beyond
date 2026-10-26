@@ -34,6 +34,7 @@ from utils.store import (
     ergonomics_reviews,
     ergonomics_slide_summary,
     ergonomics_work_elements,
+    format_eastern_timestamp,
     get_ergonomics_visual_media,
     get_planning_scenario,
     link_legacy_concern_to_work_element,
@@ -565,8 +566,8 @@ def _review_detail_frame(values: dict) -> pd.DataFrame:
                 _clean_text(values.get("notes")) or "—",
                 _clean_text(values.get("requested_due_date")) or "—",
                 _clean_text(values.get("process_part_option_id")) or "—",
-                _clean_text(values.get("created_at")) or "Not saved yet",
-                _clean_text(values.get("updated_at")) or "Not saved yet",
+                format_eastern_timestamp(_clean_text(values.get("created_at"))) or "Not saved yet",
+                format_eastern_timestamp(_clean_text(values.get("updated_at"))) or "Not saved yet",
             ],
         }
     )
@@ -1581,17 +1582,8 @@ else:
 
         confirm_discard_staged_ergo_media()
 
-    nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6 = st.columns(
-        [0.9, 3.2, 0.9, 1.4, 1.1, 1.1],
-        vertical_alignment="center",
-    )
-
-    with nav_c1:
-        if st.button("◀ Back", disabled=(curr_idx == 0), key=f"ergo_slide_prev_{scenario_id}", width="stretch"):
-            st.session_state[selected_rid_key] = review_ids[curr_idx - 1]
-            st.rerun()
-
-    with nav_c2:
+    ergo_sel_col, ergo_act_col = st.columns([2.2, 2.8], vertical_alignment="center")
+    with ergo_sel_col:
         new_sel = st.selectbox(
             "Jump to Review",
             options=review_ids,
@@ -1604,26 +1596,24 @@ else:
             st.session_state[selected_rid_key] = new_sel
             st.rerun()
 
-    with nav_c3:
-        if st.button("Next ▶", disabled=(curr_idx >= len(review_ids) - 1), key=f"ergo_slide_next_{scenario_id}", width="stretch"):
+    with ergo_act_col:
+        ergo_nav_bar = st.container(horizontal=True, vertical_alignment="center")
+        if ergo_nav_bar.button("◀ Back", disabled=(curr_idx == 0), key=f"ergo_slide_prev_{scenario_id}"):
+            st.session_state[selected_rid_key] = review_ids[curr_idx - 1]
+            st.rerun()
+        if ergo_nav_bar.button("Next ▶", disabled=(curr_idx >= len(review_ids) - 1), key=f"ergo_slide_next_{scenario_id}"):
             st.session_state[selected_rid_key] = review_ids[curr_idx + 1]
             st.rerun()
-
-    with nav_c4:
-        st.markdown(
-            f'<div style="text-align:center; font-weight:700; color:#0369a1; font-size:0.9rem; padding-top:4px;">Slide {curr_idx + 1} of {len(review_ids)}</div>',
-            unsafe_allow_html=True,
-        )
-
-    with nav_c5:
-        if st.button("Present", icon=":material/slideshow:", key=f"btn_ergo_present_{scenario_id}", width="stretch", help="Full-screen PowerPoint presentation mode"):
+        if ergo_nav_bar.button("Present", icon=":material/slideshow:", key=f"btn_ergo_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
             st.session_state[f"ergo_present_active_{scenario_id}"] = True
             st.rerun()
-
-    with nav_c6:
-        if st.button("Print", icon=":material/print:", key=f"btn_ergo_print_{scenario_id}", width="stretch", help="Export or print 11x17 or 8.5x11 slides"):
+        if ergo_nav_bar.button("Print", icon=":material/print:", key=f"btn_ergo_print_{scenario_id}", help="Export or print 11x17 or 8.5x11 slides"):
             st.session_state[f"ergo_print_active_{scenario_id}"] = True
             st.rerun()
+        ergo_nav_bar.markdown(
+            f'<span style="font-weight:700; color:#0369a1; font-size:0.88rem; white-space:nowrap;">Slide {curr_idx + 1} of {len(review_ids)}</span>',
+            unsafe_allow_html=True,
+        )
 
     curr_rev_data = reviews[reviews["id"] == curr_rid]
     if not curr_rev_data.empty:
@@ -1668,7 +1658,7 @@ else:
                 type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
                 key=f"ergo_file_upload_{curr_rid}",
             )
-            st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+            st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
             pasted = clipboard_image(key=f"ergo_paste_{curr_rid}")
 
         with up_c2:
@@ -1759,24 +1749,22 @@ else:
                         st.caption(
                             "No annotations added yet. Click below to crop, rotate 90°, or add arrows, focus boxes, callouts, or step numbers."
                         )
-                    b_col1, b_col2 = st.columns([1.5, 1])
-                    with b_col1:
-                        if st.button(
-                            "Annotate / Add Shapes",
-                            icon=":material/draw:",
-                            key=f"btn_ann_staged_ergo_{curr_rid}",
-                            type="secondary",
-                        ):
-                            st.session_state[f"ergo_annotate_staged_active_{scenario_id}"] = curr_rid
-                            st.rerun()
-                    with b_col2:
-                        if st.button(
-                            "Delete",
-                            icon=":material/delete:",
-                            key=f"destructive_btn_discard_staged_ergo_{curr_rid}",
-                        ):
-                            st.session_state[f"ergo_pending_discard_staged_{scenario_id}"] = curr_rid
-                            st.rerun()
+                    staged_ergo_btns = st.container(horizontal=True)
+                    if staged_ergo_btns.button(
+                        "Annotate / Add Shapes",
+                        icon=":material/draw:",
+                        key=f"btn_ann_staged_ergo_{curr_rid}",
+                        type="secondary",
+                    ):
+                        st.session_state[f"ergo_annotate_staged_active_{scenario_id}"] = curr_rid
+                        st.rerun()
+                    if staged_ergo_btns.button(
+                        "Delete",
+                        icon=":material/delete:",
+                        key=f"destructive_btn_discard_staged_ergo_{curr_rid}",
+                    ):
+                        st.session_state[f"ergo_pending_discard_staged_{scenario_id}"] = curr_rid
+                        st.rerun()
 
         has_ready_media = (isinstance(current_staged, dict) and bool(current_staged.get("composite_bytes"))) or is_uploaded_video
         if st.button(
@@ -1843,37 +1831,33 @@ else:
                         raw_item_ann = str(media_item.get("annotations_json") or "").strip()
                         if raw_item_ann and raw_item_ann != "[]":
                             st.caption("Markup: :material/draw: **Annotated** (editable shapes, crop & rotation)")
-                        btn_row = st.columns([1.2, 1.4, 1])
-                        with btn_row[0]:
-                            if st.button("Save", key=f"btn_save_media_{m_id}", width="stretch"):
-                                try:
-                                    update_ergonomics_visual_media(
-                                        project_id=project_id,
-                                        scenario_id=scenario_id,
-                                        media_id=m_id,
-                                        caption=card_cap,
-                                        sequence=int(card_seq),
-                                        current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
-                                    )
-                                    st.toast("Visual aid updated.", icon=":material/check_circle:")
-                                    st.rerun()
-                                except Exception as ue:
-                                    st.error(str(ue))
-                        with btn_row[1]:
-                            if m_type == "image":
-                                if st.button(
-                                    "Annotate",
-                                    icon=":material/draw:",
-                                    key=f"btn_annot_media_{m_id}",
-                                    width="stretch",
-                                    help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges",
-                                ):
-                                    st.session_state[f"ergo_annotate_active_{scenario_id}"] = media_item
-                                    st.rerun()
-                        with btn_row[2]:
-                            if st.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{m_id}", width="stretch"):
-                                st.session_state[f"ergo_del_media_target_{scenario_id}"] = media_item
+                        ergo_card_btns = st.container(horizontal=True)
+                        if ergo_card_btns.button("Save", key=f"btn_save_media_{m_id}"):
+                            try:
+                                update_ergonomics_visual_media(
+                                    project_id=project_id,
+                                    scenario_id=scenario_id,
+                                    media_id=m_id,
+                                    caption=card_cap,
+                                    sequence=int(card_seq),
+                                    current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+                                )
+                                st.toast("Visual aid updated.", icon=":material/check_circle:")
                                 st.rerun()
+                            except Exception as ue:
+                                st.error(str(ue))
+                        if m_type == "image":
+                            if ergo_card_btns.button(
+                                "Annotate",
+                                icon=":material/draw:",
+                                key=f"btn_annot_media_{m_id}",
+                                help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges",
+                            ):
+                                st.session_state[f"ergo_annotate_active_{scenario_id}"] = media_item
+                                st.rerun()
+                        if ergo_card_btns.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{m_id}"):
+                            st.session_state[f"ergo_del_media_target_{scenario_id}"] = media_item
+                            st.rerun()
 
 
 with st.expander("History", icon=":material/history:"):
@@ -1890,7 +1874,7 @@ with st.expander("History", icon=":material/history:"):
                 "row_count": "Rows",
                 "editor_name": "Editor",
                 "created_at": st.column_config.DatetimeColumn(
-                    "When", format="MMM DD, YYYY HH:mm"
+                    "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
             },
         )

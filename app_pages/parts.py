@@ -87,6 +87,7 @@ def _hash_filtered_export(dataframe: pd.DataFrame) -> str:
 
 
 PARTS_VIEW_KEY = "parts_catalog"
+PINNED_PARTS_COLUMNS = ("view_details", "part_number", "description")
 LEGACY_PARTS_COLUMN_ORDER_PREFIX = [
     "view_details", "active", "photo_status", "part_number", "description",
 ]
@@ -172,9 +173,13 @@ elif saved_parts_column_order[:5] == LEGACY_PARTS_COLUMN_ORDER_PREFIX:
         "view_details", "part_number", "description", "active", "photo_status",
         *saved_parts_column_order[5:],
     ]
+saved_parts_column_order = [
+    *(col for col in PINNED_PARTS_COLUMNS if col in saved_parts_column_order),
+    *(col for col in saved_parts_column_order if col not in PINNED_PARTS_COLUMNS),
+]
 if saved_parts_column_order == PREVIOUS_DEFAULT_PARTS_COLUMN_ORDER:
     saved_parts_column_order = DEFAULT_PARTS_COLUMN_ORDER.copy()
-current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v4"
+current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v5"
 if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state["_parts_page_mounted_token"] = current_mount_token
     st.session_state[parts_view_draft_key] = saved_parts_column_order.copy()
@@ -414,7 +419,15 @@ with st.expander(
     )
 if not selected_parts_columns:
     st.warning("Show at least one column before saving the table view.")
-parts_column_order = selected_parts_columns or ["part_number"]
+raw_parts_column_order = selected_parts_columns or [
+    "view_details",
+    "part_number",
+    "description",
+]
+parts_column_order = [
+    *(col for col in PINNED_PARTS_COLUMNS if col in raw_parts_column_order),
+    *(col for col in raw_parts_column_order if col not in PINNED_PARTS_COLUMNS),
+]
 parts_view_layout_token = hashlib.sha256(
     ",".join(parts_column_order).encode("utf-8")
 ).hexdigest()[:8]
@@ -506,11 +519,15 @@ parts_for_editing["photo_status"] = [
     "✅ Added" if str(value or "").strip() else "❌ Missing"
     for value in parts_for_editing["image_path"]
 ]
-created_values = pd.to_datetime(parts_for_editing["created_at"], errors="coerce", utc=True)
+created_values = pd.to_datetime(
+    parts_for_editing["created_at"], errors="coerce", utc=True
+).dt.tz_convert("America/New_York")
 parts_for_editing["created_display"] = created_values.dt.strftime(
     "%b %d, %Y %H:%M"
 ).fillna("")
-updated_values = pd.to_datetime(parts_for_editing["updated_at"], errors="coerce", utc=True)
+updated_values = pd.to_datetime(
+    parts_for_editing["updated_at"], errors="coerce", utc=True
+).dt.tz_convert("America/New_York")
 parts_for_editing["updated_display"] = updated_values.dt.strftime(
     "%b %d, %Y %H:%M"
 ).fillna("")
@@ -960,7 +977,7 @@ edited_parts = st.data_editor(
         "assembly_id": None,
         "assembly_number": None,
         "view_details": standard_details_column_config(
-            on_click=open_part_details, key="parts_view_details", pinned=True
+            on_click=open_part_details, key="parts_view_details", pinned=True, width="small"
         ),
         "active": st.column_config.CheckboxColumn(
             "Active",
@@ -1472,7 +1489,7 @@ def render_parts_history() -> None:
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )
@@ -1725,25 +1742,21 @@ with image_col.container(border=True):
                 st.caption(f"**Caption / Notes:** {prim_caption}")
             if _has_part_image_annotations(part.get("annotations_json")):
                 st.caption(":material/draw: **Annotated** (editable vector shapes)")
-            c_prim_act1, c_prim_act2 = st.columns(2)
-            with c_prim_act1:
-                if st.button(
-                    "Annotate",
-                    icon=":material/draw:",
-                    key=f"btn_ann_prim_img_{part['id']}",
-                    width="stretch",
-                    help="Crop, rotate 90°, or draw arrows, callouts, shapes, and text on this part image",
-                ):
-                    annotate_part_primary_image_dialog(dict(part), project_id)
-            with c_prim_act2:
-                if st.button(
-                    "Remove Image",
-                    icon=":material/delete:",
-                    key=f"destructive_del_prim_img_{part['id']}",
-                    width="stretch",
-                ):
-                    st.session_state[f"parts_pending_del_prim_img_{part['id']}"] = True
-                    st.rerun()
+            prim_act_bar = st.container(horizontal=True)
+            if prim_act_bar.button(
+                "Annotate",
+                icon=":material/draw:",
+                key=f"btn_ann_prim_img_{part['id']}",
+                help="Crop, rotate 90°, or draw arrows, callouts, shapes, and text on this part image",
+            ):
+                annotate_part_primary_image_dialog(dict(part), project_id)
+            if prim_act_bar.button(
+                "Remove Image",
+                icon=":material/delete:",
+                key=f"destructive_del_prim_img_{part['id']}",
+            ):
+                st.session_state[f"parts_pending_del_prim_img_{part['id']}"] = True
+                st.rerun()
         else:
             st.caption("No image attached.")
     else:
@@ -1768,7 +1781,7 @@ with image_col.container(border=True):
         )
         st.caption("Photos: max **10 MB** (PNG, JPG, WEBP)")
 
-        st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+        st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
         primary_clipboard_key = f"clipboard_primary_{part['id']}"
         pasted = clipboard_image(key=primary_clipboard_key)
 
@@ -1837,18 +1850,17 @@ with image_col.container(border=True):
                         st.caption(":material/check_circle: **Markup applied** (editable vector shapes)")
                     else:
                         st.caption("Ready to save — click **Annotate / Add Shapes** to add callouts before saving.")
-                    if st.button(
+                    staged_prim_btns = st.container(horizontal=True)
+                    if staged_prim_btns.button(
                         "Annotate / Add Shapes",
                         icon=":material/draw:",
                         key=f"btn_ann_staged_prim_up_{part['id']}",
-                        width="stretch",
                     ):
                         annotate_staged_part_image_dialog(staged_prim_key)
-                    if st.button(
+                    if staged_prim_btns.button(
                         "Delete",
                         icon=":material/delete:",
                         key=f"destructive_discard_staged_prim_{part['id']}",
-                        width="stretch",
                     ):
                         st.session_state[f"parts_pending_discard_staged_prim_{part['id']}"] = True
                         st.rerun()
@@ -2150,92 +2162,87 @@ with image_col.container(border=True):
             and supp_path_obj.suffix.lower() not in {".step", ".stp"}
         )
         with st.container(border=True):
-            s_c1, s_c2 = st.columns([5, 2])
-            with s_c1:
-                if is_supp_url:
-                    lower_supp = supp_raw.lower()
-                    if any(lower_supp.endswith(ext) or (ext + "?") in lower_supp for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
-                        st.image(supp_raw, caption=supp_caption)
-                    st.link_button(f":material/open_in_new: {supp_caption}", supp_raw)
-                    st.caption(f"Type: `{supplemental.get('image_type')}` | URL: {supp_raw}")
-                else:
-                    if supp_path_obj and supp_path_obj.exists():
-                        supp_suffix = supp_path_obj.suffix.lower()
-                        if supp_suffix in {".step", ".stp"}:
-                            size_mb = supp_path_obj.stat().st_size / (1024 * 1024)
-                            st.markdown(f":material/view_in_ar: **3D CAD Model (STEP)** — `{supp_path_obj.name}` ({size_mb:.1f} MB)")
-                            if supp_caption and supp_caption != "3D CAD Model (STEP)":
-                                st.caption(supp_caption)
-                            st.download_button(
-                                "Download STEP file",
-                                data=lambda p=supp_path_obj: p.read_bytes(),
-                                file_name=f"{part['part_number']}_{supp_path_obj.name}",
-                                mime="application/step",
-                                icon=":material/download:",
-                                key=f"dl_supp_{supp_id}",
-                            )
-                        else:
-                            st.image(
-                                cached_image_bytes(supp_path_obj, max_dim=1200) or str(supp_path_obj),
-                                caption=supp_caption,
-                            )
-                    if _has_part_image_annotations(supplemental.get("annotations_json")):
-                        st.caption(f"Type: `{supplemental.get('image_type')}` | :material/draw: **Annotated**")
+            if is_supp_url:
+                lower_supp = supp_raw.lower()
+                if any(lower_supp.endswith(ext) or (ext + "?") in lower_supp for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
+                    st.image(supp_raw, caption=supp_caption)
+                st.link_button(f":material/open_in_new: {supp_caption}", supp_raw)
+                st.caption(f"Type: `{supplemental.get('image_type')}` | URL: {supp_raw}")
+            else:
+                if supp_path_obj and supp_path_obj.exists():
+                    supp_suffix = supp_path_obj.suffix.lower()
+                    if supp_suffix in {".step", ".stp"}:
+                        size_mb = supp_path_obj.stat().st_size / (1024 * 1024)
+                        st.markdown(f":material/view_in_ar: **3D CAD Model (STEP)** — `{supp_path_obj.name}` ({size_mb:.1f} MB)")
+                        if supp_caption and supp_caption != "3D CAD Model (STEP)":
+                            st.caption(supp_caption)
+                        st.download_button(
+                            "Download STEP file",
+                            data=lambda p=supp_path_obj: p.read_bytes(),
+                            file_name=f"{part['part_number']}_{supp_path_obj.name}",
+                            mime="application/step",
+                            icon=":material/download:",
+                            key=f"dl_supp_{supp_id}",
+                        )
                     else:
-                        st.caption(f"Type: `{supplemental.get('image_type')}`")
-            with s_c2:
-                if is_supp_raster or is_supp_url:
-                    if st.button(
-                        "Make primary",
-                        icon=":material/star:",
-                        key=f"make_prim_supp_{supp_id}",
-                        width="stretch",
-                        help="Set this view as the Primary Image (any current Primary Image moves to Additional views)",
-                    ):
-                        try:
-                            res = promote_part_image_to_primary(part["id"], str(supp_id))
-                            record_audit_event(
-                                project_id,
-                                "Parts",
-                                "Promote view to primary image",
-                                1,
-                                st.session_state.get("current_editor", ""),
-                                {
-                                    "part_id": str(part["id"]),
-                                    "part_number": str(part["part_number"]),
-                                    "promoted_image_id": str(supp_id),
-                                    "archived_previous_primary": bool(res.get("had_previous_primary")),
-                                },
-                            )
-                            st.toast(
-                                "Switched to Primary Image (previous Primary Image moved to Additional views)"
-                                if res.get("had_previous_primary")
-                                else "Set as Primary Image",
-                                icon=":material/check_circle:",
-                            )
-                            st.rerun()
-                        except ValueError as ve:
-                            st.error(str(ve))
-                if is_supp_raster:
-                    if st.button(
-                        "Annotate",
-                        icon=":material/draw:",
-                        key=f"ann_supp_{supp_id}",
-                        width="stretch",
-                        help="Crop, rotate 90°, or draw arrows, callouts, shapes, and text on this view",
-                    ):
-                        annotate_part_supplemental_image_dialog(dict(supplemental), project_id)
-                if st.button(
-                    "Delete",
-                    icon=":material/delete:",
-                    key=f"destructive_del_supp_{supp_id}",
-                    width="stretch",
+                        st.image(
+                            cached_image_bytes(supp_path_obj, max_dim=1200) or str(supp_path_obj),
+                            caption=supp_caption,
+                        )
+                if _has_part_image_annotations(supplemental.get("annotations_json")):
+                    st.caption(f"Type: `{supplemental.get('image_type')}` | :material/draw: **Annotated**")
+                else:
+                    st.caption(f"Type: `{supplemental.get('image_type')}`")
+            supp_act_bar = st.container(horizontal=True)
+            if is_supp_raster or is_supp_url:
+                if supp_act_bar.button(
+                    "Make primary",
+                    icon=":material/star:",
+                    key=f"make_prim_supp_{supp_id}",
+                    help="Set this view as the Primary Image (any current Primary Image moves to Additional views)",
                 ):
-                    st.session_state[f"parts_pending_del_supp_{part['id']}"] = {
-                        "id": str(supp_id),
-                        "caption": str(supp_caption),
-                    }
-                    st.rerun()
+                    try:
+                        res = promote_part_image_to_primary(part["id"], str(supp_id))
+                        record_audit_event(
+                            project_id,
+                            "Parts",
+                            "Promote view to primary image",
+                            1,
+                            st.session_state.get("current_editor", ""),
+                            {
+                                "part_id": str(part["id"]),
+                                "part_number": str(part["part_number"]),
+                                "promoted_image_id": str(supp_id),
+                                "archived_previous_primary": bool(res.get("had_previous_primary")),
+                            },
+                        )
+                        st.toast(
+                            "Switched to Primary Image (previous Primary Image moved to Additional views)"
+                            if res.get("had_previous_primary")
+                            else "Set as Primary Image",
+                            icon=":material/check_circle:",
+                        )
+                        st.rerun()
+                    except ValueError as ve:
+                        st.error(str(ve))
+            if is_supp_raster:
+                if supp_act_bar.button(
+                    "Annotate",
+                    icon=":material/draw:",
+                    key=f"ann_supp_{supp_id}",
+                    help="Crop, rotate 90°, or draw arrows, callouts, shapes, and text on this view",
+                ):
+                    annotate_part_supplemental_image_dialog(dict(supplemental), project_id)
+            if supp_act_bar.button(
+                "Delete",
+                icon=":material/delete:",
+                key=f"destructive_del_supp_{supp_id}",
+            ):
+                st.session_state[f"parts_pending_del_supp_{part['id']}"] = {
+                    "id": str(supp_id),
+                    "caption": str(supp_caption),
+                }
+                st.rerun()
 
     with st.expander("Add an exploded view, 3D CAD model, drawing, or web link", icon=":material/add_photo_alternate:"):
         if st.session_state.pop(f"_clear_supp_caption_{part['id']}", False):
@@ -2271,7 +2278,7 @@ with image_col.container(border=True):
             )
             st.caption("Images: max **10 MB** (PNG, JPG, WEBP) • 3D CAD: max **50 MB** (STEP, STP)")
 
-            st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+            st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
             supp_clipboard_key = f"clipboard_supp_{part['id']}"
             supp_pasted = clipboard_image(key=supp_clipboard_key)
             supp_pasted_payload = getattr(supp_pasted, "image", None)
@@ -2334,18 +2341,17 @@ with image_col.container(border=True):
                             st.caption(":material/check_circle: **Markup applied** (editable vector shapes)")
                         else:
                             st.caption("Ready to add — click **Annotate / Add Shapes** to add callouts before saving.")
-                        if st.button(
+                        staged_supp_btns = st.container(horizontal=True)
+                        if staged_supp_btns.button(
                             "Annotate / Add Shapes",
                             icon=":material/draw:",
                             key=f"btn_ann_staged_supp_up_{part['id']}",
-                            width="stretch",
                         ):
                             annotate_staged_part_image_dialog(staged_supp_upload_key)
-                        if st.button(
+                        if staged_supp_btns.button(
                             "Delete",
                             icon=":material/delete:",
                             key=f"destructive_discard_staged_supp_up_{part['id']}",
-                            width="stretch",
                         ):
                             st.session_state[f"parts_pending_discard_staged_supp_{part['id']}"] = True
                             st.rerun()

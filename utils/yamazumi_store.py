@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys as _sys
 from utils import db_core as _db_core
 from utils.cache_store import is_scenario_task_completed, mark_scenario_task_completed
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -482,7 +483,7 @@ def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None =
     with connection() as conn:
         if area_id:
             area = conn.execute(
-                "SELECT id, section_id FROM yamazumi_areas WHERE id=? AND project_id=? AND scenario_id=?",
+                "SELECT id, name, section_id FROM yamazumi_areas WHERE id=? AND project_id=? AND scenario_id=?",
                 (area_id, project_id, scenario_id),
             ).fetchone()
             if not area:
@@ -504,25 +505,34 @@ def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None =
                     (project_id, area_id),
                 ).fetchone()[0],
             }
-            conn.execute(
-                """UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL
-                   WHERE project_id=? AND area_id=?""",
-                (project_id, area_id),
-            )
-            conn.execute("DELETE FROM yamazumi_areas WHERE id=? AND project_id=?", (area_id, project_id))
-            if linked_section is not None:
-                name_conflict = conn.execute(
-                    """SELECT 1 FROM yamazumi_areas
-                       WHERE project_id=? AND scenario_id=? AND name=? COLLATE NOCASE""",
-                    (project_id, scenario_id, linked_section["name"]),
-                ).fetchone()
-                if not name_conflict:
-                    conn.execute(
-                        """INSERT INTO yamazumi_areas
-                           (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
-                           VALUES (?, ?, ?, ?, ?, NULL, ?)""",
-                        (area_id, project_id, scenario_id, linked_section["id"], linked_section["name"], timestamp),
-                    )
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                scenario_id=scenario_id,
+                entity_type="Yamazumi Area Data",
+                entity_table="yamazumi_areas",
+                entity_id=area_id,
+                entity_label=f"Cleared Yamazumi area: {area['name']}",
+            ):
+                conn.execute(
+                    """UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL
+                       WHERE project_id=? AND area_id=?""",
+                    (project_id, area_id),
+                )
+                conn.execute("DELETE FROM yamazumi_areas WHERE id=? AND project_id=?", (area_id, project_id))
+                if linked_section is not None:
+                    name_conflict = conn.execute(
+                        """SELECT 1 FROM yamazumi_areas
+                           WHERE project_id=? AND scenario_id=? AND name=? COLLATE NOCASE""",
+                        (project_id, scenario_id, linked_section["name"]),
+                    ).fetchone()
+                    if not name_conflict:
+                        conn.execute(
+                            """INSERT INTO yamazumi_areas
+                               (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                               VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+                            (area_id, project_id, scenario_id, linked_section["id"], linked_section["name"], timestamp),
+                        )
         else:
             existing_areas = conn.execute(
                 "SELECT id, section_id, name FROM yamazumi_areas WHERE project_id=? AND scenario_id=?",
@@ -548,41 +558,50 @@ def clear_yamazumi_data(project_id: str, scenario_id: str, area_id: str | None =
                        WHERE e.project_id=? AND a.scenario_id=?""", (project_id, scenario_id)
                 ).fetchone()[0],
             }
-            conn.execute(
-                """UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL
-                   WHERE project_id=? AND area_id IN (
-                       SELECT id FROM yamazumi_areas
-                       WHERE project_id=? AND scenario_id=?
-                   )""",
-                (project_id, project_id, scenario_id),
-            )
-            conn.execute(
-                "DELETE FROM yamazumi_areas WHERE project_id=? AND scenario_id=?",
-                (project_id, scenario_id),
-            )
-            sections = conn.execute(
-                """SELECT id, name FROM assembly_sections
-                   WHERE project_id=? AND active=1
-                   ORDER BY sequence, name""",
-                (project_id,),
-            ).fetchall()
-            used_ids: set[str] = set()
-            for section in sections:
-                sec_id = str(section["id"])
-                sec_name = str(section["name"])
-                candidate_id = (
-                    area_id_by_section_id.get(sec_id)
-                    or area_id_by_name.get(sec_name.casefold())
-                )
-                if not candidate_id or candidate_id in used_ids:
-                    candidate_id = str(uuid4())
-                used_ids.add(candidate_id)
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                scenario_id=scenario_id,
+                entity_type="Yamazumi Scenario Data",
+                entity_table="yamazumi_areas",
+                entity_id=scenario_id,
+                entity_label="Cleared all Yamazumi data for scenario",
+            ):
                 conn.execute(
-                    """INSERT INTO yamazumi_areas
-                       (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
-                       VALUES (?, ?, ?, ?, ?, NULL, ?)""",
-                    (candidate_id, project_id, scenario_id, sec_id, sec_name, timestamp),
+                    """UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL
+                       WHERE project_id=? AND area_id IN (
+                           SELECT id FROM yamazumi_areas
+                           WHERE project_id=? AND scenario_id=?
+                       )""",
+                    (project_id, project_id, scenario_id),
                 )
+                conn.execute(
+                    "DELETE FROM yamazumi_areas WHERE project_id=? AND scenario_id=?",
+                    (project_id, scenario_id),
+                )
+                sections = conn.execute(
+                    """SELECT id, name FROM assembly_sections
+                       WHERE project_id=? AND active=1
+                       ORDER BY sequence, name""",
+                    (project_id,),
+                ).fetchall()
+                used_ids: set[str] = set()
+                for section in sections:
+                    sec_id = str(section["id"])
+                    sec_name = str(section["name"])
+                    candidate_id = (
+                        area_id_by_section_id.get(sec_id)
+                        or area_id_by_name.get(sec_name.casefold())
+                    )
+                    if not candidate_id or candidate_id in used_ids:
+                        candidate_id = str(uuid4())
+                    used_ids.add(candidate_id)
+                    conn.execute(
+                        """INSERT INTO yamazumi_areas
+                           (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
+                           VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+                        (candidate_id, project_id, scenario_id, sec_id, sec_name, timestamp),
+                    )
     return counts
 
 def upsert_yamazumi_area(
@@ -2113,14 +2132,24 @@ def delete_yamazumi_element(
         impact = _yamazumi_element_delete_impact(
             conn, project_id, resolved_scenario_id, area_id, element_id
         )
-        deleted = conn.execute(
-            "DELETE FROM yamazumi_elements WHERE id=? AND project_id=? AND area_id=?",
-            (element_id, project_id, area_id),
-        ).rowcount
-        if deleted != 1:
-            raise ValueError(
-                "That Yamazumi work element changed before it could be deleted."
-            )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=resolved_scenario_id,
+            entity_type="Yamazumi Work Element",
+            entity_table="yamazumi_elements",
+            entity_id=element_id,
+            entity_label=str(impact.get("description") or element_id),
+            deleted_by=editor_name or "",
+        ):
+            deleted = conn.execute(
+                "DELETE FROM yamazumi_elements WHERE id=? AND project_id=? AND area_id=?",
+                (element_id, project_id, area_id),
+            ).rowcount
+            if deleted != 1:
+                raise ValueError(
+                    "That Yamazumi work element changed before it could be deleted."
+                )
         if editor_name is not None:
             record_audit_event(
                 project_id,
@@ -2185,16 +2214,28 @@ def delete_yamazumi_elements(
             )
             for element_id in normalized_ids
         ]
-        deleted = conn.execute(
-            f"""DELETE FROM yamazumi_elements
-                 WHERE project_id=? AND id IN ({placeholders})""",
-            (project_id, *normalized_ids),
-        ).rowcount
-        if deleted != len(normalized_ids):
-            raise ValueError(
-                "The selected Yamazumi work elements changed before they could be "
-                "deleted. No work elements were deleted."
-            )
+        labels = [str(imp.get("description") or "") for imp in impacts if imp.get("description")]
+        label = labels[0] if len(labels) == 1 else f"{len(normalized_ids)} Yamazumi work elements ({', '.join(labels[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Yamazumi Work Element",
+            entity_table="yamazumi_elements",
+            entity_id=normalized_ids[0] if len(normalized_ids) == 1 else "",
+            entity_label=label,
+            deleted_by=editor_name,
+        ):
+            deleted = conn.execute(
+                f"""DELETE FROM yamazumi_elements
+                     WHERE project_id=? AND id IN ({placeholders})""",
+                (project_id, *normalized_ids),
+            ).rowcount
+            if deleted != len(normalized_ids):
+                raise ValueError(
+                    "The selected Yamazumi work elements changed before they could be "
+                    "deleted. No work elements were deleted."
+                )
         record_audit_event(
             project_id,
             "Yamazumi elements",
@@ -2245,16 +2286,27 @@ def delete_yamazumi_pitch(
         moved = conn.execute(
             "SELECT COUNT(*) FROM yamazumi_elements WHERE pitch_id=?", (pitch_id,)
         ).fetchone()[0]
-        conn.execute(
-            """UPDATE yamazumi_elements
-               SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
-               WHERE pitch_id=?""",
-            (timestamp, pitch_id),
-        )
-        conn.execute(
-            "DELETE FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
-            (pitch_id, project_id, area_id),
-        )
+        pitch_label = f"{existing['pitch_number']} — {existing['pitch_name']}".strip(" —")
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=str(existing["scenario_id"]),
+            entity_type="Yamazumi Pitch",
+            entity_table="yamazumi_pitches",
+            entity_id=pitch_id,
+            entity_label=pitch_label,
+            deleted_by=editor_name or "",
+        ):
+            conn.execute(
+                """UPDATE yamazumi_elements
+                   SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
+                   WHERE pitch_id=?""",
+                (timestamp, pitch_id),
+            )
+            conn.execute(
+                "DELETE FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
+                (pitch_id, project_id, area_id),
+            )
         if editor_name is not None:
             details = {
                 **(audit_details or {}),
@@ -2601,20 +2653,35 @@ def replace_yamazumi_pitches(project_id: str, area_id: str, edited: pd.DataFrame
                 )
             )
             placeholders = ",".join("?" for _ in removed)
-            conn.execute(
-                f"UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL WHERE id IN ({placeholders})",
+            pitch_rows = conn.execute(
+                f"SELECT pitch_number, pitch_name FROM yamazumi_pitches WHERE id IN ({placeholders})",
                 tuple(removed),
-            )
-            conn.execute(
-                f"""UPDATE yamazumi_elements
-                    SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
-                    WHERE pitch_id IN ({placeholders})""",
-                (timestamp, *removed),
-            )
-            conn.execute(
-                f"DELETE FROM yamazumi_pitches WHERE id IN ({placeholders})",
-                tuple(removed),
-            )
+            ).fetchall()
+            pitch_labels = [f"{r['pitch_number']} — {r['pitch_name']}".strip(" —") for r in pitch_rows]
+            label = pitch_labels[0] if len(pitch_labels) == 1 else f"{len(removed)} Yamazumi pitches ({', '.join(pitch_labels[:3])})"
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                scenario_id=str(area["scenario_id"]),
+                entity_type="Yamazumi Pitch",
+                entity_table="yamazumi_pitches",
+                entity_id=next(iter(removed)) if len(removed) == 1 else "",
+                entity_label=label,
+            ):
+                conn.execute(
+                    f"UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL WHERE id IN ({placeholders})",
+                    tuple(removed),
+                )
+                conn.execute(
+                    f"""UPDATE yamazumi_elements
+                        SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
+                        WHERE pitch_id IN ({placeholders})""",
+                    (timestamp, *removed),
+                )
+                conn.execute(
+                    f"DELETE FROM yamazumi_pitches WHERE id IN ({placeholders})",
+                    tuple(removed),
+                )
         staged_targets: dict[str, str | None] = {}
         for index, row in enumerate(records, start=1):
             pitch_id = str(row.get("id") or "").strip() or str(uuid4())
@@ -3007,7 +3074,26 @@ def replace_yamazumi_elements(project_id: str, area_id: str, edited: pd.DataFram
         removed = existing - kept
         if removed:
             placeholders = ",".join("?" for _ in removed)
-            conn.execute(f"DELETE FROM yamazumi_elements WHERE id IN ({placeholders})", tuple(removed))
+            area_row = conn.execute(
+                "SELECT scenario_id FROM yamazumi_areas WHERE id=? AND project_id=?",
+                (area_id, project_id),
+            ).fetchone()
+            elem_rows = conn.execute(
+                f"SELECT description FROM yamazumi_elements WHERE id IN ({placeholders})",
+                tuple(removed),
+            ).fetchall()
+            elem_labels = [str(r["description"] or "") for r in elem_rows if r["description"]]
+            label = elem_labels[0] if len(elem_labels) == 1 else f"{len(removed)} Yamazumi work elements ({', '.join(elem_labels[:3])})"
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                scenario_id=str(area_row["scenario_id"]) if area_row else None,
+                entity_type="Yamazumi Work Element",
+                entity_table="yamazumi_elements",
+                entity_id=next(iter(removed)) if len(removed) == 1 else "",
+                entity_label=label,
+            ):
+                conn.execute(f"DELETE FROM yamazumi_elements WHERE id IN ({placeholders})", tuple(removed))
     return len(records)
 
 def move_yamazumi_element(

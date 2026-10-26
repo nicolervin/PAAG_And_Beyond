@@ -35,7 +35,7 @@ from utils.quality_store import (
 )
 from utils.requirements_ui import render_requirements_repository_tab
 from utils.scope_ui import page_title_with_scope
-from utils.store import audit_history, planning_scenarios
+from utils.store import audit_history, format_eastern_timestamp, planning_scenarios
 from utils.table_ui import guarded_tabs, selectable_dataframe
 from utils.traceability_ui import render_traceability_matrix_tab
 
@@ -94,7 +94,12 @@ def render_quality_history(project_id: str) -> None:
                     history_groups.append(table_history)
             history = (
                 pd.concat(history_groups, ignore_index=True)
-                .sort_values("created_at", ascending=False, kind="stable")
+                .sort_values(
+                    "created_at",
+                    ascending=False,
+                    kind="stable",
+                    key=lambda s: pd.to_datetime(s, errors="coerce", utc=True),
+                )
                 .head(50)
                 if history_groups
                 else pd.DataFrame()
@@ -112,7 +117,7 @@ def render_quality_history(project_id: str) -> None:
                         "row_count": "Rows",
                         "editor_name": "Editor",
                         "created_at": st.column_config.DatetimeColumn(
-                            "When", format="MMM DD, YYYY HH:mm"
+                            "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                         ),
                     },
                 )
@@ -130,7 +135,7 @@ def render_quality_history(project_id: str) -> None:
                         "row_count": "Rows",
                         "editor_name": "Editor",
                         "created_at": st.column_config.DatetimeColumn(
-                            "When", format="MMM DD, YYYY HH:mm"
+                            "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                         ),
                     },
                 )
@@ -147,7 +152,7 @@ def render_quality_history(project_id: str) -> None:
                         "action": "Action", "row_count": "Rows",
                         "editor_name": "Editor",
                         "created_at": st.column_config.DatetimeColumn(
-                            "When", format="MMM DD, YYYY HH:mm"
+                            "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                         ),
                     },
                 )
@@ -162,7 +167,12 @@ def render_quality_history(project_id: str) -> None:
                 groups.append(category_history)
             history = (
                 pd.concat(groups, ignore_index=True)
-                .sort_values("created_at", ascending=False, kind="stable")
+                .sort_values(
+                    "created_at",
+                    ascending=False,
+                    kind="stable",
+                    key=lambda s: pd.to_datetime(s, errors="coerce", utc=True),
+                )
                 .head(50)
                 if groups else pd.DataFrame()
             )
@@ -177,7 +187,7 @@ def render_quality_history(project_id: str) -> None:
                         "workflow": "Workflow", "action": "Action", "row_count": "Rows",
                         "editor_name": "Editor",
                         "created_at": st.column_config.DatetimeColumn(
-                            "When", format="MMM DD, YYYY HH:mm"
+                            "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                         ),
                     },
                 )
@@ -290,7 +300,7 @@ def render_unlinked_review_tab(
         op_desc = op_group["description"]
         op_pitch = op_group["pitch"]
         op_time = str(op_group.get("unlinked_at") or "")
-        time_str = op_time[:19].replace("T", " ") if op_time else "Recently"
+        time_str = format_eastern_timestamp(op_time, "%Y-%m-%d %H:%M:%S") if op_time else "Recently"
         items = op_group.get("items", [])
 
         with st.container(border=True):

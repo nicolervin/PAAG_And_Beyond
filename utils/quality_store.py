@@ -12,6 +12,9 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 
 import pandas as pd
 
@@ -20,6 +23,7 @@ from utils.cache_store import (
     is_scenario_task_completed,
     mark_scenario_task_completed,
 )
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 
 REQUIREMENT_COLUMNS = [
@@ -178,7 +182,7 @@ def _ensure_quality_requirement_types(
     """Seed reusable defaults and exact legacy Type values without rewriting requirements."""
     if is_scenario_task_completed("ensure_quality_req_types", project_id, ""):
         return
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(EASTERN_TIMEZONE).replace(microsecond=0).isoformat()
     existing_rows = conn.execute(
         "SELECT label FROM quality_requirement_types WHERE project_id=?",
         (project_id,),
@@ -693,15 +697,25 @@ def delete_quality_requirement_types(
                 "These Type entries cannot be deleted while Quality requirements use "
                 "them: " + ", ".join(used_labels) + "."
             )
-        cursor = conn.execute(
-            f"""DELETE FROM quality_requirement_types
-                WHERE project_id=? AND id IN ({placeholders})""",
-            (project_id, *normalized_ids),
-        )
-        if int(cursor.rowcount) != len(normalized_ids):
-            raise ValueError(
-                "One or more selected Quality requirement Types changed. Refresh and try again."
+        labels = [str(row["label"]) for row in rows]
+        label = labels[0] if len(labels) == 1 else f"{len(normalized_ids)} Quality requirement Types ({', '.join(labels[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Quality Requirement Type",
+            entity_table="quality_requirement_types",
+            entity_id=normalized_ids[0] if len(normalized_ids) == 1 else "",
+            entity_label=label,
+        ):
+            cursor = conn.execute(
+                f"""DELETE FROM quality_requirement_types
+                    WHERE project_id=? AND id IN ({placeholders})""",
+                (project_id, *normalized_ids),
             )
+            if int(cursor.rowcount) != len(normalized_ids):
+                raise ValueError(
+                    "One or more selected Quality requirement Types changed. Refresh and try again."
+                )
     return {
         "row_count": len(normalized_ids),
         "deleted_ids": normalized_ids,
@@ -1055,10 +1069,24 @@ def delete_quality_requirements(project_id: str, requirement_ids: list[str]) -> 
                 f"Remove {pattern_reference_count} PFMEA pattern control reference(s) "
                 "before deleting."
             )
-        cursor = conn.execute(
-            f"DELETE FROM quality_requirements WHERE project_id=? AND id IN ({placeholders})",
+        req_rows = conn.execute(
+            f"SELECT description FROM quality_requirements WHERE project_id=? AND id IN ({placeholders})",
             (project_id, *normalized_ids),
-        )
+        ).fetchall()
+        labels = [str(r["description"] or "") for r in req_rows if r["description"]]
+        label = labels[0] if len(labels) == 1 else f"{len(normalized_ids)} Quality requirements ({', '.join(labels[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Quality Requirement",
+            entity_table="quality_requirements",
+            entity_id=normalized_ids[0] if len(normalized_ids) == 1 else "",
+            entity_label=label,
+        ):
+            cursor = conn.execute(
+                f"DELETE FROM quality_requirements WHERE project_id=? AND id IN ({placeholders})",
+                (project_id, *normalized_ids),
+            )
         return int(cursor.rowcount)
 
 
@@ -1190,12 +1218,20 @@ def delete_quality_requirement_torque_details(
             raise ValueError(
                 "One or more selected Torque tool details no longer exist. Refresh and try again."
             )
-        cursor = conn.execute(
-            f"""DELETE FROM quality_requirement_torque_details
-                WHERE project_id=? AND quality_requirement_id=?
-                  AND id IN ({placeholders})""",
-            (project_id, quality_requirement_id, *normalized_ids),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Torque Tool Detail",
+            entity_table="quality_requirement_torque_details",
+            entity_id=normalized_ids[0] if len(normalized_ids) == 1 else "",
+            entity_label=f"{len(normalized_ids)} Torque tool detail(s)",
+        ):
+            cursor = conn.execute(
+                f"""DELETE FROM quality_requirement_torque_details
+                    WHERE project_id=? AND quality_requirement_id=?
+                      AND id IN ({placeholders})""",
+                (project_id, quality_requirement_id, *normalized_ids),
+            )
         return int(cursor.rowcount)
 
 
@@ -1732,35 +1768,45 @@ def delete_quality_requirement_assignments(
         timestamp = store.now_iso()
         from utils.control_plan_store import orphan_control_plan_assignments_conn
 
-        orphaned_control_plan_ids = orphan_control_plan_assignments_conn(
-            conn, project_id, scenario_id, normalized_ids, timestamp
-        )
-        for table, detection in (
-            ("pfmea_prevention_selections", False),
-            ("pfmea_detection_selections", True),
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Quality Requirement Assignment",
+            entity_table="quality_requirement_assignments",
+            entity_id=normalized_ids[0] if len(normalized_ids) == 1 else "",
+            entity_label=f"{len(normalized_ids)} Quality requirement assignment(s)",
+            deleted_by=str(editor_name or "").strip(),
         ):
-            if not conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone():
-                continue
-            affected = conn.execute(
-                f"""SELECT DISTINCT pfmea_cause_id FROM {table}
-                    WHERE project_id=? AND scenario_id=?
-                      AND quality_requirement_assignment_id IN ({placeholders})""",
+            orphaned_control_plan_ids = orphan_control_plan_assignments_conn(
+                conn, project_id, scenario_id, normalized_ids, timestamp
+            )
+            for table, detection in (
+                ("pfmea_prevention_selections", False),
+                ("pfmea_detection_selections", True),
+            ):
+                if not conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone():
+                    continue
+                affected = conn.execute(
+                    f"""SELECT DISTINCT pfmea_cause_id FROM {table}
+                        WHERE project_id=? AND scenario_id=?
+                          AND quality_requirement_assignment_id IN ({placeholders})""",
+                    (project_id, scenario_id, *normalized_ids),
+                ).fetchall()
+                for affected_row in affected:
+                    conn.execute(
+                        """UPDATE pfmea_causes SET control_source_review_required=1,
+                           detection_review_required=CASE WHEN ? THEN 1 ELSE detection_review_required END,
+                           updated_at=? WHERE id=? AND project_id=? AND scenario_id=?""",
+                        (1 if detection else 0, timestamp, affected_row["pfmea_cause_id"], project_id, scenario_id),
+                    )
+            cursor = conn.execute(
+                f"""DELETE FROM quality_requirement_assignments
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
                 (project_id, scenario_id, *normalized_ids),
-            ).fetchall()
-            for affected_row in affected:
-                conn.execute(
-                    """UPDATE pfmea_causes SET control_source_review_required=1,
-                       detection_review_required=CASE WHEN ? THEN 1 ELSE detection_review_required END,
-                       updated_at=? WHERE id=? AND project_id=? AND scenario_id=?""",
-                    (1 if detection else 0, timestamp, affected_row["pfmea_cause_id"], project_id, scenario_id),
-                )
-        cursor = conn.execute(
-            f"""DELETE FROM quality_requirement_assignments
-                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
-            (project_id, scenario_id, *normalized_ids),
-        )
+            )
         if orphaned_control_plan_ids:
             if not str(editor_name or "").strip():
                 raise ValueError(
@@ -1825,7 +1871,7 @@ def push_quality_requirements(project_id: str, requirement_ids: list[str]) -> in
     if not normalized_ids:
         return 0
     placeholders = ", ".join("?" for _ in normalized_ids)
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(EASTERN_TIMEZONE).replace(microsecond=0).isoformat()
     with store.connection() as conn:
         requirements = conn.execute(
             f"""SELECT * FROM quality_requirements
@@ -2063,7 +2109,7 @@ def relink_quality_record(
 ) -> None:
     """Relink an individual unlinked record to an active Process step across the scenario."""
     store = _store_module()
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(EASTERN_TIMEZONE).replace(microsecond=0).isoformat()
     with store.connection() as conn:
         step = conn.execute(
             """SELECT id, operation, description, station, sequence, location
@@ -2225,29 +2271,39 @@ def bulk_delete_unlinked_records(
     store = _store_module()
     deleted_count = 0
     with store.connection() as conn:
-        for rec in records:
-            r_type = rec.get("record_type")
-            r_id = rec.get("id") or rec.get("record_id")
-            if not r_id or not r_type:
-                continue
-            if r_type == "Quality requirement":
-                conn.execute(
-                    "DELETE FROM quality_requirement_assignments WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
-                    (r_id, project_id, scenario_id),
-                )
-                deleted_count += 1
-            elif r_type == "PFMEA failure mode":
-                conn.execute(
-                    "DELETE FROM pfmea_entries WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
-                    (r_id, project_id, scenario_id),
-                )
-                deleted_count += 1
-            elif r_type == "Equipment link":
-                conn.execute(
-                    "DELETE FROM equipment_process_links WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
-                    (r_id, project_id, scenario_id),
-                )
-                deleted_count += 1
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Unlinked Quality/PFMEA/Equipment Record",
+            entity_table="quality_requirement_assignments",
+            entity_id="",
+            entity_label=f"Bulk purge of {len(records)} unlinked record(s)",
+            deleted_by=str(editor or "").strip(),
+        ):
+            for rec in records:
+                r_type = rec.get("record_type")
+                r_id = rec.get("id") or rec.get("record_id")
+                if not r_id or not r_type:
+                    continue
+                if r_type == "Quality requirement":
+                    conn.execute(
+                        "DELETE FROM quality_requirement_assignments WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
+                        (r_id, project_id, scenario_id),
+                    )
+                    deleted_count += 1
+                elif r_type == "PFMEA failure mode":
+                    conn.execute(
+                        "DELETE FROM pfmea_entries WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
+                        (r_id, project_id, scenario_id),
+                    )
+                    deleted_count += 1
+                elif r_type == "Equipment link":
+                    conn.execute(
+                        "DELETE FROM equipment_process_links WHERE id=? AND project_id=? AND scenario_id=? AND work_element_id IS NULL",
+                        (r_id, project_id, scenario_id),
+                    )
+                    deleted_count += 1
 
         store.record_audit_event(
             project_id,

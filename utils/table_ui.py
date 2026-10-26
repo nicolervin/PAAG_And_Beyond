@@ -365,10 +365,21 @@ def required_field_errors(dataframe: pd.DataFrame, required_fields: dict[str, st
     return errors
 
 
-def standard_details_column_config(*, on_click, key: str, pinned: bool = False):
+def standard_details_column_config(
+    *,
+    on_click,
+    key: str,
+    pinned: bool = False,
+    width: str | int | None = "small",
+):
     """Return the standard row Details action."""
     return st.column_config.ButtonColumn(
-        "Details", type="tertiary", on_click=on_click, key=key, pinned=pinned,
+        "Details",
+        type="tertiary",
+        on_click=on_click,
+        key=key,
+        pinned=pinned,
+        width=width,
         help="Open this row's full information and editing controls.",
     )
 
@@ -823,41 +834,39 @@ def _unsaved_changes_navigation_dialog(pending: dict[str, object]) -> None:
         f"You have unsaved changes on this page. What would you like to do before leaving for the **{target_label}** {nav_kind}?",
         icon=":material/warning:",
     )
-    c_save, c_discard, c_return = st.columns(3, gap="small")
-    with c_save:
-        if st.button(
-            "Save & Refresh",
-            type="primary",
-            icon=":material/save:",
-            key="unsaved_nav_save_refresh",
-            width="stretch",
-        ):
-            st.session_state[_UNSAVED_NAV_ACTION_KEY] = "save"
-            st.session_state[_UNSAVED_NAV_TRIGGERED_KEY] = []
-            st.rerun()
-    with c_discard:
-        if st.button(
-            "Discard changes",
-            icon=":material/delete:",
-            key="destructive_unsaved_nav_discard",
-            width="stretch",
-        ):
-            st.session_state[_UNSAVED_NAV_ACTION_KEY] = "discard"
-            st.session_state[_UNSAVED_NAV_TRIGGERED_KEY] = []
-            st.rerun()
-    with c_return:
-        if st.button(
-            "Return to page",
-            icon=":material/arrow_back:",
-            key="unsaved_nav_return",
-            width="stretch",
-        ):
-            st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
-            st.session_state.pop(_UNSAVED_NAV_ACTION_KEY, None)
-            st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
-            st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
-            st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
-            st.rerun()
+    nav_bar = st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        horizontal_alignment="right",
+    )
+    if nav_bar.button(
+        "Save & Refresh",
+        type="primary",
+        icon=":material/save:",
+        key="unsaved_nav_save_refresh",
+    ):
+        st.session_state[_UNSAVED_NAV_ACTION_KEY] = "save"
+        st.session_state[_UNSAVED_NAV_TRIGGERED_KEY] = []
+        st.rerun()
+    if nav_bar.button(
+        "Discard changes",
+        icon=":material/delete:",
+        key="destructive_unsaved_nav_discard",
+    ):
+        st.session_state[_UNSAVED_NAV_ACTION_KEY] = "discard"
+        st.session_state[_UNSAVED_NAV_TRIGGERED_KEY] = []
+        st.rerun()
+    if nav_bar.button(
+        "Return to page",
+        icon=":material/arrow_back:",
+        key="unsaved_nav_return",
+    ):
+        st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
+        st.session_state.pop(_UNSAVED_NAV_ACTION_KEY, None)
+        st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
+        st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+        st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+        st.rerun()
 
 
 def finalize_unsaved_tracking(

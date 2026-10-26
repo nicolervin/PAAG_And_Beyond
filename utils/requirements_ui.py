@@ -712,7 +712,7 @@ def render_requirements_repository_tab(
                 ),
             ),
             "updated_at": st.column_config.DatetimeColumn(
-                "Updated", format="MMM DD, YYYY HH:mm"
+                "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
             ),
             "torque_detail_count": None,
             "pfmea_pattern_reference_count": None,
@@ -1018,7 +1018,7 @@ def render_requirements_repository_tab(
                 ),
                 "created_at": None,
                 "updated_at": st.column_config.DatetimeColumn(
-                    "Updated", format="MMM DD, YYYY HH:mm"
+                    "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
             },
         )

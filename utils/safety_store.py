@@ -6,6 +6,7 @@ import json
 import sys as _sys
 from utils import db_core as _db_core
 from utils.cache_store import cached_store_read
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -258,11 +259,21 @@ def delete_safety_requirements(
             raise ValueError(
                 "One or more Safety requirements changed or no longer belong to the active scenario."
             )
-        conn.execute(
-            f"""DELETE FROM safety_requirements
-                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
-            (project_id, scenario_id, *ids),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Safety Requirement",
+            entity_table="safety_requirements",
+            entity_id=ids[0] if len(ids) == 1 else "",
+            entity_label=f"{len(ids)} Safety requirement(s)",
+            deleted_by=editor,
+        ):
+            conn.execute(
+                f"""DELETE FROM safety_requirements
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+                (project_id, scenario_id, *ids),
+            )
         record_audit_event(
             project_id,
             "Safety requirements",
@@ -314,10 +325,13 @@ def safety_requirement_history(
            FROM audit_log
            WHERE project_id=? AND table_name='Safety requirements'
              AND json_extract(details, '$.scenario_id')=?
-           ORDER BY created_at DESC LIMIT ?""",
+           ORDER BY datetime(created_at) DESC, created_at DESC LIMIT ?""",
         (project_id, scenario_id, int(limit)),
     )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty and "created_at" in df.columns:
+        df["created_at"] = df["created_at"].map(to_eastern_iso)
+    return df
 
 __domain_exports__ = [
     'safety_requirements', 'save_safety_requirements', 'delete_safety_requirements',

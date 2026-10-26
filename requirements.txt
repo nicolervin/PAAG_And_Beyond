@@ -5,4 +5,5 @@ Pillow>=12,<13
 pypdfium2>=5.0
 ezdxf>=1.4
 matplotlib>=3.10
+google-cloud-storage>=2.14,<4
 

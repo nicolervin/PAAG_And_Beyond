@@ -20,9 +20,19 @@ except Exception:  # pragma: no cover
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-DEFAULT_MAX_CACHE_BYTES = 128 * 1024 * 1024  # 128 MB compressed cap
-DEFAULT_MAX_CACHE_ENTRIES = 2048
-ZLIB_COMPRESSION_LEVEL = 1  # Fast compression (~300+ MB/s) with 70-85% reduction on DataFrames
+def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 1_000_000) -> int:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, min(maximum, int(raw)))
+    except ValueError:
+        return default
+
+
+DEFAULT_MAX_CACHE_BYTES = _env_int("PAAG_CACHE_MAX_MB", 128, 16, 4096) * 1024 * 1024  # 128 MB default compressed cap
+DEFAULT_MAX_CACHE_ENTRIES = _env_int("PAAG_CACHE_MAX_ENTRIES", 2048, 32, 65536)
+ZLIB_COMPRESSION_LEVEL = _env_int("PAAG_CACHE_ZLIB_LEVEL", 1, 1, 9)  # Fast compression (~300+ MB/s) with 70-85% reduction on DataFrames
 
 
 class CompressedLRUCache:

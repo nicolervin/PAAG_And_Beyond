@@ -1,0 +1,58 @@
+# Google Cloud Build pipeline for PAAG (Process at a Glance)
+# Builds the container image, pushes to Artifact Registry, and deploys to Cloud Run
+# with single-instance state consistency, session affinity, and GCS bucket sync.
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: paag-repo
+  _SERVICE_NAME: paag-app
+  _GCS_BUCKET: ""
+  _GCS_PREFIX: "paag-state"
+  _MEMORY: "2Gi"
+  _CPU: "2"
+  _CONCURRENCY: "80"
+  _CACHE_MAX_MB: "256"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-image"
+    args:
+      - "build"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-image"
+    args:
+      - "push"
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}"
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy-cloud-run"
+    entrypoint: "gcloud"
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE_NAME}"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--execution-environment=gen2"
+      - "--max-instances=1"
+      - "--concurrency=${_CONCURRENCY}"
+      - "--cpu=${_CPU}"
+      - "--memory=${_MEMORY}"
+      - "--timeout=3600"
+      - "--session-affinity"
+      - "--set-env-vars=PAAG_GCS_BUCKET=${_GCS_BUCKET},PAAG_GCS_PREFIX=${_GCS_PREFIX},PAAG_CACHE_MAX_MB=${_CACHE_MAX_MB}"
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest"

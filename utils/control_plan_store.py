@@ -18,6 +18,7 @@ from uuid import uuid4
 import pandas as pd
 
 from utils.cache_store import cached_store_read
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 
 PLACEMENTS = ("", "Product / Part", "Process")
@@ -780,7 +781,15 @@ def delete_custom_control_method(
         raise ValueError(
             f"Cannot delete '{name}' because it is currently used by {in_use} Control Plan row(s)."
         )
-    conn.execute("DELETE FROM control_method_catalog WHERE id=?", (method_id,))
+    with capture_deletion_to_recycle_bin(
+        conn,
+        project_id=project_id,
+        entity_type="Control Method Catalog Option",
+        entity_table="control_method_catalog",
+        entity_id=method_id,
+        entity_label=name,
+    ):
+        conn.execute("DELETE FROM control_method_catalog WHERE id=?", (method_id,))
     conn.commit()
 
 

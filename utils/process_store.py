@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys as _sys
 from utils import db_core as _db_core
 from utils.cache_store import cached_store_read
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin, safe_unlink_upload_path
 from utils.safety_store import parse_ppe
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
@@ -667,7 +668,7 @@ def delete_process_part_groups(
     placeholders = ", ".join("?" for _ in normalized_ids)
     with connection() as conn:
         group_rows = conn.execute(
-            f"""SELECT id, work_element_id FROM process_part_groups
+            f"""SELECT id, name, work_element_id FROM process_part_groups
                 WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
             (project_id, scenario_id, *normalized_ids),
         ).fetchall()
@@ -680,25 +681,36 @@ def delete_process_part_groups(
         affected_work_element_ids = {
             str(row["work_element_id"]) for row in group_rows
         }
-        cursor = conn.execute(
-            f"""DELETE FROM process_part_groups
-                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
-            (project_id, scenario_id, *normalized_ids),
-        )
-        timestamp = now_iso()
-        for work_element_id in affected_work_element_ids:
-            remaining = conn.execute(
-                """SELECT 1 FROM process_part_groups
-                   WHERE project_id=? AND scenario_id=? AND work_element_id=? LIMIT 1""",
-                (project_id, scenario_id, work_element_id),
-            ).fetchone()
-            if not remaining:
-                conn.execute(
-                    """UPDATE yamazumi_elements
-                       SET process_sync_status='Needs IE review', updated_at=?
-                       WHERE project_id=? AND process_element_id=?""",
-                    (timestamp, project_id, work_element_id),
-                )
+        names = [str(row["name"] or "") for row in group_rows if row["name"]]
+        label = names[0] if len(names) == 1 else f"{len(normalized_ids)} process part pairings ({', '.join(names[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Process Part Pairing",
+            entity_table="process_part_groups",
+            entity_id=normalized_ids[0] if len(normalized_ids) == 1 else "",
+            entity_label=label,
+        ):
+            cursor = conn.execute(
+                f"""DELETE FROM process_part_groups
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+                (project_id, scenario_id, *normalized_ids),
+            )
+            timestamp = now_iso()
+            for work_element_id in affected_work_element_ids:
+                remaining = conn.execute(
+                    """SELECT 1 FROM process_part_groups
+                       WHERE project_id=? AND scenario_id=? AND work_element_id=? LIMIT 1""",
+                    (project_id, scenario_id, work_element_id),
+                ).fetchone()
+                if not remaining:
+                    conn.execute(
+                        """UPDATE yamazumi_elements
+                           SET process_sync_status='Needs IE review', updated_at=?
+                           WHERE project_id=? AND process_element_id=?""",
+                        (timestamp, project_id, work_element_id),
+                    )
         return int(cursor.rowcount)
 
 def delete_process_part_group(
@@ -1746,26 +1758,27 @@ def delete_pitch_visual_media(
         pitch_number = row["pitch_number"]
         caption = row["caption"]
 
-        conn.execute(
-            "DELETE FROM process_visual_media WHERE id=? AND project_id=? AND scenario_id=?",
-            (normalized_media_id, project_id, scenario_id),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Pitch Visual Aid",
+            entity_table="process_visual_media",
+            entity_id=normalized_media_id,
+            entity_label=f"Pitch {pitch_number}: {caption or 'Visual aid'}",
+            deleted_by=str(current_editor or "").strip(),
+            extra_file_paths=[file_path_str, orig_path_str],
+        ):
+            conn.execute(
+                "DELETE FROM process_visual_media WHERE id=? AND project_id=? AND scenario_id=?",
+                (normalized_media_id, project_id, scenario_id),
+            )
 
     if file_path_str and not file_path_str.startswith(("http://", "https://")):
-        p = Path(file_path_str)
-        try:
-            if p.exists() and p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
-                p.unlink(missing_ok=True)
-        except OSError:
-            pass
+        safe_unlink_upload_path(file_path_str)
 
     if orig_path_str and orig_path_str != file_path_str and not orig_path_str.startswith(("http://", "https://")):
-        op = Path(orig_path_str)
-        try:
-            if op.exists() and op.is_file() and UPLOAD_DIR.resolve() in op.resolve().parents:
-                op.unlink(missing_ok=True)
-        except OSError:
-            pass
+        safe_unlink_upload_path(orig_path_str)
 
     record_audit_event(
         project_id,
@@ -2572,62 +2585,76 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
                 (project_id, scenario_id, *removed),
             ).fetchall()
             now_str = now_iso()
-            for r in removed_rows:
-                elem_id = r[0]
-                op_val = str(r[1] or "")
-                desc_val = str(r[2] or "")
-                pitch_val = str(r[3] or "")
-                seq_val = int(r[4] or 0)
-                loc_val = str(r[5] or "")
+            labels = [
+                f"{str(r[1] or '').strip()} — {str(r[2] or '').strip()}".strip(" —")
+                for r in removed_rows
+            ]
+            label = labels[0] if len(labels) == 1 else f"{len(removed)} process work elements ({', '.join(labels[:3])})"
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                scenario_id=scenario_id,
+                entity_type="Process Work Element",
+                entity_table="work_elements",
+                entity_id=next(iter(removed)) if len(removed) == 1 else "",
+                entity_label=label,
+            ):
+                for r in removed_rows:
+                    elem_id = r[0]
+                    op_val = str(r[1] or "")
+                    desc_val = str(r[2] or "")
+                    pitch_val = str(r[3] or "")
+                    seq_val = int(r[4] or 0)
+                    loc_val = str(r[5] or "")
+
+                    conn.execute(
+                        """UPDATE quality_requirement_assignments
+                           SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                               process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                               station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
+                               unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
+                               work_element_id = NULL,
+                               updated_at = ?
+                           WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
+                        (op_val, desc_val, pitch_val, now_str, now_str, project_id, scenario_id, elem_id),
+                    )
+
+                    conn.execute(
+                        """UPDATE equipment_process_links
+                           SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                               process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                               station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
+                               unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
+                               work_element_id = NULL,
+                               updated_at = ?
+                           WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
+                        (op_val, desc_val, pitch_val, now_str, now_str, project_id, scenario_id, elem_id),
+                    )
+
+                    conn.execute(
+                        """UPDATE pfmea_entries
+                           SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                               process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                               process_pitch_snapshot = CASE WHEN process_pitch_snapshot = '' THEN ? ELSE process_pitch_snapshot END,
+                               process_location_snapshot = CASE WHEN process_location_snapshot = '' THEN ? ELSE process_location_snapshot END,
+                               process_sequence_snapshot = CASE WHEN process_sequence_snapshot = 0 THEN ? ELSE process_sequence_snapshot END,
+                               work_element_id = NULL,
+                               updated_at = ?
+                           WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
+                        (op_val, desc_val, pitch_val, loc_val, seq_val, now_str, project_id, scenario_id, elem_id),
+                    )
 
                 conn.execute(
-                    """UPDATE quality_requirement_assignments
-                       SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
-                           process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
-                           station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
-                           unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
-                           work_element_id = NULL,
-                           updated_at = ?
-                       WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
-                    (op_val, desc_val, pitch_val, now_str, now_str, project_id, scenario_id, elem_id),
+                    f"""UPDATE yamazumi_elements
+                        SET process_element_id=NULL, process_sync_status='Needs IE review', updated_at=?
+                        WHERE project_id=? AND process_element_id IN ({placeholders})""",
+                    (now_str, project_id, *removed),
                 )
-
                 conn.execute(
-                    """UPDATE equipment_process_links
-                       SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
-                           process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
-                           station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
-                           unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
-                           work_element_id = NULL,
-                           updated_at = ?
-                       WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
-                    (op_val, desc_val, pitch_val, now_str, now_str, project_id, scenario_id, elem_id),
+                    f"""DELETE FROM work_elements WHERE project_id=? AND scenario_id=?
+                        AND id IN ({placeholders})""",
+                    (project_id, scenario_id, *removed),
                 )
-
-                conn.execute(
-                    """UPDATE pfmea_entries
-                       SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
-                           process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
-                           process_pitch_snapshot = CASE WHEN process_pitch_snapshot = '' THEN ? ELSE process_pitch_snapshot END,
-                           process_location_snapshot = CASE WHEN process_location_snapshot = '' THEN ? ELSE process_location_snapshot END,
-                           process_sequence_snapshot = CASE WHEN process_sequence_snapshot = 0 THEN ? ELSE process_sequence_snapshot END,
-                           work_element_id = NULL,
-                           updated_at = ?
-                       WHERE project_id=? AND scenario_id=? AND work_element_id=?""",
-                    (op_val, desc_val, pitch_val, loc_val, seq_val, now_str, project_id, scenario_id, elem_id),
-                )
-
-            conn.execute(
-                f"""UPDATE yamazumi_elements
-                    SET process_element_id=NULL, process_sync_status='Needs IE review', updated_at=?
-                    WHERE project_id=? AND process_element_id IN ({placeholders})""",
-                (now_str, project_id, *removed),
-            )
-            conn.execute(
-                f"""DELETE FROM work_elements WHERE project_id=? AND scenario_id=?
-                    AND id IN ({placeholders})""",
-                (project_id, scenario_id, *removed),
-            )
 
 @cached_store_read
 def get_pitch_unclassified_part_options(

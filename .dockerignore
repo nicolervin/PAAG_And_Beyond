@@ -1,0 +1,34 @@
+# Git & IDE metadata
+.git
+.gitignore
+.github
+.vscode
+.idea
+.claude
+
+# Local virtual environments & Python caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local SQLite database, WAL sidecars, uploads, and secrets (managed via GCS on Cloud Run)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+data/uploads/*
+!data/uploads/.gitkeep
+.streamlit/secrets.toml
+
+# OS & temporary artifacts
+.DS_Store
+Thumbs.db
+*.log
+tmp/
+temp/

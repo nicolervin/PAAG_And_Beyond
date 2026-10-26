@@ -260,16 +260,18 @@ fishbone_tab, assign_parts_tab = guarded_tabs(
 )
 
 with assign_parts_tab:
-    place_parts_title, place_parts_undo_last, place_parts_redo_last, place_parts_undo = st.columns(
-        [3.0, 1.1, 1.1, 1.25], vertical_alignment="center"
+    st.subheader("Place Parts into Fishbone")
+    place_parts_bar = st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        horizontal_alignment="right",
     )
-    place_parts_title.subheader("Place Parts into Fishbone")
     placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
     trigger_pool_save, trigger_pool_discard = register_unsaved_source(
         f"fishbone_pool_{project_id}_{scenario_id}",
         editor_key=pool_editor_key,
     )
-    undo_last_placement = place_parts_undo_last.button(
+    undo_last_placement = place_parts_bar.button(
         "Undo last edit",
         icon=":material/undo:",
         disabled=not can_undo_last_table_edit(pool_editor_key, ignored_columns=()),
@@ -286,7 +288,7 @@ with assign_parts_tab:
                 icon=":material/undo:",
             )
             st.rerun()
-    redo_last_placement = place_parts_redo_last.button(
+    redo_last_placement = place_parts_bar.button(
         "Redo last edit",
         icon=":material/redo:",
         disabled=not can_redo_last_table_edit(pool_editor_key, ignored_columns=()),
@@ -303,7 +305,7 @@ with assign_parts_tab:
                 icon=":material/redo:",
             )
             st.rerun()
-    undo_placement = place_parts_undo.button(
+    undo_placement = place_parts_bar.button(
         "Discard all edits",
         icon=":material/restart_alt:",
         disabled=assignment_undo_key not in st.session_state and not placement_has_unsaved,
@@ -603,8 +605,9 @@ with assign_parts_tab:
             updated_at = row.get("pits_quantity_updated_at")
             if status == "In sync" and updated_at and pd.notna(updated_at):
                 try:
-                    dt = pd.to_datetime(updated_at, errors="coerce")
+                    dt = pd.to_datetime(updated_at, errors="coerce", utc=True)
                     if pd.notna(dt):
+                        dt = dt.tz_convert("America/New_York")
                         return f"Updated from PITS on {dt.strftime('%b %d, %Y')}"
                 except Exception:
                     pass
@@ -684,6 +687,7 @@ with assign_parts_tab:
                 "edit_part": st.column_config.ButtonColumn(
                     "Select",
                     pinned=True,
+                    width="small",
                     type="tertiary",
                     on_click=open_assigned_part,
                     key="fishbone_assignment_edit_part",
@@ -692,6 +696,7 @@ with assign_parts_tab:
                 "add_use": st.column_config.ButtonColumn(
                     "Another Fishbone use",
                     pinned=True,
+                    width=110,
                     type="tertiary",
                     on_click=add_assigned_part_use,
                     key="fishbone_assignment_add_use",
@@ -705,11 +710,11 @@ with assign_parts_tab:
                     ],
                     required=True,
                     pinned=True,
-                    width="medium",
+                    width=130,
                 ),
                 "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d"),
-                "part_number": st.column_config.TextColumn("Part number", pinned=True),
-                "description": st.column_config.TextColumn("Part Name", width="medium", pinned=True),
+                "part_number": st.column_config.TextColumn("Part number", width=105, pinned=True),
+                "description": st.column_config.TextColumn("Part Name", width=140, pinned=True),
                 "use_description": st.column_config.TextColumn(
                     "Use / installation location",
                     width="large",
@@ -2605,14 +2610,15 @@ def _render_framework_maintenance():
                 "hierarchy": st.column_config.TextColumn(
                     "Fishbone section hierarchy",
                     pinned=True,
-                    width="large",
+                    width=160,
                     help="Blue rows are top-level Assembly sections. Orange indented rows are child Assembly sections grouped under their parent. Purple rows are Support Operations.",
                 ),
                 "active": st.column_config.CheckboxColumn("Active", help="Inactive Fishbone sections remain in history but are hidden from new part placement."),
-                "sequence": st.column_config.NumberColumn("Order", format="%d", pinned=True, help="Managed automatically by the move actions."),
+                "sequence": st.column_config.NumberColumn("Order", format="%d", pinned=True, width="small", help="Managed automatically by the move actions."),
                 "order_actions": st.column_config.ButtonColumn(
                     "Move",
                     pinned=True,
+                    width="small",
                     type="secondary",
                     on_click=handle_framework_order,
                     key="framework_order_action",
@@ -2620,12 +2626,13 @@ def _render_framework_maintenance():
                 "assemblies_action": st.column_config.ButtonColumn(
                     "Assembly grid",
                     pinned=True,
+                    width=95,
                     type="tertiary",
                     on_click=show_framework_assemblies,
                     key="framework_assemblies_action",
                     help="Show assembly numbers built or installed in this section.",
                 ),
-                "name": st.column_config.TextColumn("Fishbone section", required=True, pinned=True, width="large"),
+                "name": st.column_config.TextColumn("Fishbone section", required=True, pinned=True, width=150),
                 "section_type": st.column_config.SelectboxColumn("Type", options=["Assembly", "Support Operations"], required=True),
                 "parent_assembly": st.column_config.SelectboxColumn(
                     "Parent assembly",
@@ -2642,7 +2649,9 @@ def _render_framework_maintenance():
                 ),
                 "description": st.column_config.TextColumn("Fishbone section description", width="large"),
                 "created_at": None,
-                "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
+                "updated_at": st.column_config.DatetimeColumn(
+                    "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
+                ),
             },
         )
         framework_actions = editable_table_footer(
@@ -2958,7 +2967,7 @@ with st.expander("History", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )
@@ -2978,7 +2987,7 @@ with st.expander("History", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )

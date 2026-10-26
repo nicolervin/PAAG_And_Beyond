@@ -1342,6 +1342,7 @@ def render_pitch_canvas(
         color: #ffffff;
       }}
       .parts-table tr.part-row:hover .part-popover,
+      .parts-table tr.part-row.popover-active .part-popover,
       .part-pnum-container:hover .part-popover {{
         display: block;
       }}
@@ -2456,6 +2457,90 @@ def render_pitch_canvas(
       .paag-slide.presentation-active .visual-step-tag {{ font-size: 0.9rem; }}
       .paag-slide.presentation-active .functional-alerts-bar {{ font-size: 0.88rem; }}
 
+      .alert-block.popover-active .alert-popover {{
+        display: block;
+      }}
+
+      /* Responsive adaptation for smaller monitors, split windows, tablets, and mobile phones */
+      @media (max-width: 1280px) {{
+        .paag-slide:not(.print-tabloid):not(.print-letter) {{
+          aspect-ratio: auto;
+          min-height: auto;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .functional-alerts-bar {{
+          grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .pitch-center-title {{
+          font-size: clamp(1.1rem, 1.9vw, 1.45rem);
+        }}
+      }}
+
+      @media (max-width: 960px) {{
+        .paag-slide:not(.print-tabloid):not(.print-letter) .slide-header {{
+          grid-template-columns: 1fr;
+          gap: 6px;
+          text-align: left;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .pitch-center-title {{
+          text-align: left;
+          font-size: 1.2rem;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .doc-control-box {{
+          justify-self: start;
+          text-align: left;
+          width: 100%;
+          box-sizing: border-box;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .slide-body {{
+          grid-template-columns: 1fr;
+          gap: 12px;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .right-col .visual-grid {{
+          min-height: 360px;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .part-popover,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .alert-popover {{
+          position: fixed !important;
+          left: 16px !important;
+          right: 16px !important;
+          top: auto !important;
+          bottom: 16px !important;
+          transform: none !important;
+          width: auto !important;
+          max-width: calc(100vw - 32px) !important;
+          max-height: 75vh !important;
+          overflow-y: auto !important;
+          z-index: 9999 !important;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .part-popover::before,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .part-popover::after,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .alert-popover::before,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .alert-popover::after,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .part-popover-bridge,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .alert-popover-bridge {{
+          display: none !important;
+        }}
+      }}
+
+      @media (max-width: 640px) {{
+        .paag-slide:not(.print-tabloid):not(.print-letter) {{
+          padding: 8px 10px;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .functional-alerts-bar {{
+          grid-template-columns: 1fr;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .visual-grid.grid-layout-2,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .visual-grid.grid-layout-3,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .visual-grid.grid-layout-4,
+        .paag-slide:not(.print-tabloid):not(.print-letter) .visual-grid.grid-layout-6 {{
+          grid-template-columns: 1fr !important;
+          grid-template-rows: auto !important;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .parts-panel {{
+          overflow-x: auto;
+        }}
+      }}
+
       @media print {{
         @page {{
           size: {"17in 11in landscape" if print_format == "tabloid" else "11in 8.5in landscape"};
@@ -2630,8 +2715,27 @@ def render_pitch_canvas(
           }});
         }}
 
+        function setupTouchAndViewportPopovers() {{
+          const interactiveTargets = document.querySelectorAll('.part-row, .alert-block');
+          interactiveTargets.forEach(item => {{
+            item.addEventListener('click', (e) => {{
+              if (e.target && e.target.closest('a')) return;
+              const wasActive = item.classList.contains('popover-active');
+              interactiveTargets.forEach(other => other.classList.remove('popover-active'));
+              if (!wasActive) {{
+                item.classList.add('popover-active');
+              }}
+              e.stopPropagation();
+            }});
+          }});
+          document.addEventListener('click', () => {{
+            interactiveTargets.forEach(other => other.classList.remove('popover-active'));
+          }});
+        }}
+
         function initSlideInteractions() {{
           setupHoverLinking();
+          setupTouchAndViewportPopovers();
         }}
 
         if (document.readyState === 'loading') {{
@@ -2752,12 +2856,13 @@ def render_presentation_deck(
         border-bottom: 1px solid #334155;
         padding: 6px 12px;
         gap: 8px;
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
         user-select: none;
       }}
       .pres-btn-group {{
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 6px;
       }}
       .pres-btn {{

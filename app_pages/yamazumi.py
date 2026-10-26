@@ -4107,7 +4107,7 @@ with st.expander("Yamazumi history", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )
@@ -4125,7 +4125,7 @@ with st.expander("Yamazumi history", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )
@@ -4143,7 +4143,7 @@ with st.expander("Yamazumi history", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )
@@ -4161,7 +4161,7 @@ with st.expander("Yamazumi history", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )
@@ -4181,7 +4181,7 @@ with st.expander("Yamazumi history", icon=":material/history:"):
                     "row_count": "Rows",
                     "editor_name": "Editor",
                     "created_at": st.column_config.DatetimeColumn(
-                        "When", format="MMM DD, YYYY HH:mm"
+                        "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                     ),
                 },
             )

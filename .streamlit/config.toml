@@ -8,6 +8,11 @@ buttonRadius = "0.4rem"
 
 [server]
 maxUploadSize = 50
+enableWebsocketCompression = true
+
+[browser]
+gatherUsageStats = false
 
 [runner]
 magicEnabled = false
+fastReruns = true

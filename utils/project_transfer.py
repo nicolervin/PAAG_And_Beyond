@@ -126,7 +126,7 @@ def _registered_rows(
         )
     }
     registered = {item.name for item in PROJECT_TRANSFER_TABLES}
-    unregistered = existing - registered
+    unregistered = existing - registered - {"recycle_bin_items"}
     missing = {
         table
         for table in unregistered
@@ -187,6 +187,10 @@ def _upload_manifest(tables: dict[str, list[dict]]) -> list[dict]:
                 if not column.endswith("_path") or not str(value or "").strip():
                     continue
                 path = Path(str(value)).resolve()
+                if not path.is_file() or upload_root not in path.parents:
+                    rebased = store.resolve_upload_path(str(value), upload_root)
+                    if rebased is not None:
+                        path = rebased.resolve()
                 if not path.is_file() or upload_root not in path.parents:
                     continue
                 relative = path.relative_to(upload_root).as_posix()
