@@ -2102,7 +2102,7 @@ with tab_author:
 
             row_tools_idx_key = f"row_tools_idx_{selected_model_id}"
 
-            # ── Action Bar: Checkbox, Unsaved Indicator & Save Actions ──
+            # ── Action Bar: Checkbox, Instructions, Unsaved Indicator & Save Actions ──
             top_opt_bar = st.container(horizontal=True, vertical_alignment="center")
             auto_add_grid = top_opt_bar.checkbox(
                 "Auto-add new parts to Parts Catalog",
@@ -2110,6 +2110,25 @@ with tab_author:
                 key=f"auto_add_grid_{selected_model_id}",
                 help="Automatically register unknown part numbers into the project Parts Catalog when saving.",
             )
+            with top_opt_bar.popover(
+                "Instructions",
+                icon=":material/help_outline:",
+                help="How to author, import, predict, and save a model BOM",
+            ):
+                st.markdown(
+                    "**How to use the BOM Spreadsheet Editor:**\n"
+                    "- **Hierarchy Levels (`1`–`11`)**: Row 1 (`Level 1`) is the Top Assembly for this model. "
+                    "Deeper levels (`2`, `3`, etc.) nest under the nearest preceding shallower row.\n"
+                    "- **Add / Edit Rows**: Type directly into cells, click the `+` row at the bottom to add rows, "
+                    "or paste multiple rows from Excel (`Ctrl+V`).\n"
+                    "- **Quick Populate Tools**:\n"
+                    "  - **📥 Download Template**: Export the current BOM or a blank Excel template.\n"
+                    "  - **📤 Import File / 📋 Paste from Excel**: Load rows from `.xlsx`/`.csv` or clipboard.\n"
+                    "  - **👥 Copy from Model**: Start from another model's saved BOM.\n"
+                    "  - **✨ Predict from Features**: Generate a draft BOM from Complexity Trees feature rules.\n"
+                    "- **Undo / Redo & Save**: Step through individual cell edits with **Undo last edit** / **Redo last edit**, "
+                    "revert all unsaved changes with **Discard all edits**, and click **Save BOM Structure** to persist."
+                )
             if is_unsaved:
                 top_opt_bar.markdown(":orange[:material/warning: **Unsaved changes**]")
 

@@ -31,11 +31,18 @@ FEEDBACK_SEVERITIES: tuple[str, ...] = (
 
 FEEDBACK_STATUSES: tuple[str, ...] = (
     "Open",
-    "Under review",
-    "Planned",
-    "Resolved",
-    "Closed",
+    "Working",
+    "Tagged for Future Development",
+    "Completed",
+    "Unable to complete",
 )
+
+LEGACY_FEEDBACK_STATUS_MAP: dict[str, str] = {
+    "Under review": "Working",
+    "Planned": "Tagged for Future Development",
+    "Resolved": "Completed",
+    "Closed": "Completed",
+}
 
 FEEDBACK_COLUMNS: list[str] = [
     "id",
@@ -69,7 +76,7 @@ GLOBAL_SEARCH_COLUMNS: list[str] = [
 
 
 def init_feedback_schema(conn: sqlite3.Connection) -> None:
-    """Create the app-wide app_feedback table and indexes if absent."""
+    """Create the app-wide app_feedback table and indexes if absent, migrating legacy status constraints."""
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS app_feedback (
@@ -88,7 +95,7 @@ def init_feedback_schema(conn: sqlite3.Connection) -> None:
             steps_to_reproduce TEXT NOT NULL DEFAULT '',
             screenshot_path TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'Open'
-                CHECK (status IN ('Open', 'Under review', 'Planned', 'Resolved', 'Closed')),
+                CHECK (status IN ('Open', 'Working', 'Tagged for Future Development', 'Completed', 'Unable to complete')),
             submitted_by TEXT NOT NULL DEFAULT '',
             resolution_notes TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
@@ -100,6 +107,66 @@ def init_feedback_schema(conn: sqlite3.Connection) -> None:
             ON app_feedback(project_id, created_at DESC);
         """
     )
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='app_feedback'"
+    ).fetchone()
+    ddl_sql = str(ddl_row[0] or "") if ddl_row else ""
+    if ddl_sql and "Unable to complete" not in ddl_sql:
+        conn.executescript(
+            """
+            CREATE TABLE app_feedback__new (
+                id TEXT PRIMARY KEY,
+                project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                project_name TEXT NOT NULL DEFAULT '',
+                scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE SET NULL,
+                scenario_name TEXT NOT NULL DEFAULT '',
+                page_context TEXT NOT NULL DEFAULT '',
+                feedback_type TEXT NOT NULL DEFAULT 'Bug report'
+                    CHECK (feedback_type IN ('Bug report', 'Feature suggestion', 'UX improvement', 'Question')),
+                severity TEXT NOT NULL DEFAULT 'Medium'
+                    CHECK (severity IN ('Low', 'Medium', 'High', 'Critical')),
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                steps_to_reproduce TEXT NOT NULL DEFAULT '',
+                screenshot_path TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Open'
+                    CHECK (status IN ('Open', 'Working', 'Tagged for Future Development', 'Completed', 'Unable to complete')),
+                submitted_by TEXT NOT NULL DEFAULT '',
+                resolution_notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO app_feedback__new (
+                id, project_id, project_name, scenario_id, scenario_name,
+                page_context, feedback_type, severity, title, description,
+                steps_to_reproduce, screenshot_path, status, submitted_by,
+                resolution_notes, created_at, updated_at
+            )
+            SELECT
+                id, project_id, project_name, scenario_id, scenario_name,
+                page_context, feedback_type, severity, title, description,
+                steps_to_reproduce, screenshot_path,
+                CASE status
+                    WHEN 'Under review' THEN 'Working'
+                    WHEN 'Planned' THEN 'Tagged for Future Development'
+                    WHEN 'Resolved' THEN 'Completed'
+                    WHEN 'Closed' THEN 'Completed'
+                    WHEN 'Working' THEN 'Working'
+                    WHEN 'Tagged for Future Development' THEN 'Tagged for Future Development'
+                    WHEN 'Completed' THEN 'Completed'
+                    WHEN 'Unable to complete' THEN 'Unable to complete'
+                    ELSE 'Open'
+                END,
+                submitted_by, resolution_notes, created_at, updated_at
+            FROM app_feedback;
+            DROP TABLE app_feedback;
+            ALTER TABLE app_feedback__new RENAME TO app_feedback;
+            CREATE INDEX IF NOT EXISTS idx_app_feedback_status_created
+                ON app_feedback(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_app_feedback_project_created
+                ON app_feedback(project_id, created_at DESC);
+            """
+        )
 
 
 def _clean_text(value: object) -> str:
@@ -258,9 +325,12 @@ def list_app_feedback(
         if not include_all_projects and _clean_text(project_id):
             sql += " AND (project_id = ? OR project_id IS NULL OR project_id = '')"
             params.append(_clean_text(project_id))
-        if _clean_text(status_filter) and _clean_text(status_filter) != "All":
+        clean_status_flt = _clean_text(status_filter)
+        if clean_status_flt in {"All except Completed", "Hide Completed"}:
+            sql += " AND status != 'Completed'"
+        elif clean_status_flt and clean_status_flt not in {"All", "All (including Completed)"}:
             sql += " AND status = ?"
-            params.append(_clean_text(status_filter))
+            params.append(clean_status_flt)
         if _clean_text(feedback_type_filter) and _clean_text(feedback_type_filter) != "All":
             sql += " AND feedback_type = ?"
             params.append(_clean_text(feedback_type_filter))
@@ -321,20 +391,20 @@ def list_app_feedback(
 
 @cached_store_read
 def open_app_feedback_count(project_id: str | None = None) -> int:
-    """Return the count of Open / Under review / Planned feedback items."""
+    """Return the count of Open / Working / Tagged for Future Development feedback items."""
     with _db_core.connection() as conn:
         init_feedback_schema(conn)
         if _clean_text(project_id):
             row = conn.execute(
                 """SELECT COUNT(*) FROM app_feedback
-                   WHERE status IN ('Open', 'Under review', 'Planned')
+                   WHERE status IN ('Open', 'Working', 'Tagged for Future Development')
                      AND (project_id = ? OR project_id IS NULL OR project_id = '')""",
                 (_clean_text(project_id),),
             ).fetchone()
         else:
             row = conn.execute(
                 """SELECT COUNT(*) FROM app_feedback
-                   WHERE status IN ('Open', 'Under review', 'Planned')"""
+                   WHERE status IN ('Open', 'Working', 'Tagged for Future Development')"""
             ).fetchone()
         return int(row[0] or 0) if row else 0
 
@@ -418,6 +488,10 @@ def update_app_feedback(
             if resolution_notes is not None
             else _clean_text(existing["resolution_notes"])
         )
+        if new_status == "Unable to complete" and not new_notes:
+            raise ValueError(
+                "A reason is required in 'Resolution notes / Reason' when status is 'Unable to complete'."
+            )
         old_screenshot = _clean_text(existing["screenshot_path"])
         new_screenshot = (
             _clean_text(screenshot_path)
@@ -502,6 +576,10 @@ def save_bulk_app_feedback(
         desc = _clean_text(row.get("description"))
         steps = _clean_text(row.get("steps_to_reproduce"))
         notes = _clean_text(row.get("resolution_notes"))
+        if status == "Unable to complete" and not notes:
+            raise ValueError(
+                f"Row {idx + 1}: A reason in 'Resolution notes / Reason' is required when status is 'Unable to complete'."
+            )
         validated_updates.append(
             (fid, title, ftype, sev, status, desc, steps, notes)
         )
@@ -558,6 +636,94 @@ def save_bulk_app_feedback(
                     _conn=conn,
                 )
     return changed_count
+
+
+def bulk_update_app_feedback_status(
+    feedback_ids: list[str] | tuple[str, ...] | str,
+    status: str,
+    *,
+    resolution_notes: str | None = None,
+    active_project_id: str | None = None,
+    editor_name: str = "",
+) -> int:
+    """Move one or more selected feedback items into a resolution stage."""
+    if isinstance(feedback_ids, str):
+        raw_ids = [feedback_ids]
+    else:
+        raw_ids = list(feedback_ids)
+    normalized_ids = [_clean_text(fid) for fid in raw_ids if _clean_text(fid)]
+    if not normalized_ids:
+        raise ValueError("Select at least one feedback item to update its resolution stage.")
+
+    clean_status = _clean_text(status)
+    clean_status = LEGACY_FEEDBACK_STATUS_MAP.get(clean_status, clean_status)
+    if clean_status not in FEEDBACK_STATUSES:
+        raise ValueError(
+            f"Resolution stage must be one of: {', '.join(FEEDBACK_STATUSES)}."
+        )
+
+    clean_reason = _clean_text(resolution_notes)
+    if clean_status == "Unable to complete" and not clean_reason:
+        raise ValueError(
+            "Enter a reason before marking feedback item(s) as 'Unable to complete'."
+        )
+
+    now = _db_core.now_iso()
+    clean_editor = _clean_text(editor_name)
+    updated_count = 0
+    touched_projects: dict[str, int] = {}
+
+    with _db_core.connection() as conn:
+        init_feedback_schema(conn)
+        placeholders = ",".join("?" for _ in normalized_ids)
+        rows = conn.execute(
+            f"SELECT id, project_id, title, status, resolution_notes FROM app_feedback WHERE id IN ({placeholders})",
+            tuple(normalized_ids),
+        ).fetchall()
+        if not rows:
+            raise ValueError("The selected feedback item(s) no longer exist.")
+
+        for row in rows:
+            fid = str(row["id"])
+            if clean_reason:
+                existing_notes = _clean_text(row["resolution_notes"])
+                if not existing_notes or existing_notes == clean_reason:
+                    merged_notes = clean_reason
+                else:
+                    merged_notes = f"{existing_notes} | {clean_reason}"
+                conn.execute(
+                    "UPDATE app_feedback SET status=?, resolution_notes=?, updated_at=? WHERE id=?",
+                    (clean_status, merged_notes, now, fid),
+                )
+            else:
+                conn.execute(
+                    "UPDATE app_feedback SET status=?, updated_at=? WHERE id=?",
+                    (clean_status, now, fid),
+                )
+            updated_count += 1
+            pid = _clean_text(row["project_id"]) or _clean_text(active_project_id)
+            if pid:
+                touched_projects[pid] = touched_projects.get(pid, 0) + 1
+
+        for pid, count in touched_projects.items():
+            if conn.execute("SELECT 1 FROM projects WHERE id=?", (pid,)).fetchone():
+                audit_details: dict[str, Any] = {
+                    "status": clean_status,
+                    "updated_rows": count,
+                }
+                if clean_reason:
+                    audit_details["reason"] = clean_reason
+                _db_core.record_audit_event(
+                    pid,
+                    "App feedback",
+                    f"Set feedback stage to {clean_status}",
+                    count,
+                    editor_name=clean_editor,
+                    details=audit_details,
+                    _conn=conn,
+                )
+
+    return updated_count
 
 
 def delete_app_feedback(
@@ -1584,6 +1750,7 @@ __domain_exports__ = [
     "open_app_feedback_count",
     "update_app_feedback",
     "save_bulk_app_feedback",
+    "bulk_update_app_feedback_status",
     "delete_app_feedback",
     "global_project_search",
     "critical_thread_status_counts",

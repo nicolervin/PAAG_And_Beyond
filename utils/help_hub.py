@@ -44,6 +44,7 @@ from utils.store import (
     FEEDBACK_STATUSES,
     FEEDBACK_TYPES,
     audit_history,
+    bulk_update_app_feedback_status,
     create_app_feedback,
     critical_thread_status_counts,
     delete_app_feedback,
@@ -172,19 +173,21 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "icon": ":material/account_tree:",
         "scope": "All scenarios",
         "summary": (
-            "Step 3 of the Critical Thread: Reconcile imported PITS EBOM parent-child occurrences "
-            "into approved Manufacturing BOM (MBOM) placements in Fishbone sections."
+            "Step 3 of the Critical Thread: Inspect interactive CAD-style Model Tree BOMs by official model, "
+            "author Level 1–11 BOM structures from scratch, and reconcile parts against the Parts Catalog and Fishbone."
         ),
         "workflows": [
-            "**Filter by Review Status or Source State**: Focus on `Needs review`, `New`, `Changed`, or `Missing` occurrences.",
-            "**Assign Fishbone Section & Approve**: Map occurrences to a target Fishbone section and approve them to create/sync `fishbone_part_assignments`.",
-            "**Escalate questions**: Escalate ambiguous or changed source rows directly to **Questions and concerns**.",
+            "**🌲 View BOM & Reconcile Gaps**: Select `All models (Master BOM)` or a specific official model, filter by `Missing from Fishbone` or `Missing from Parts Catalog`, inspect part properties in the right-hand panel, and add/assign parts to the Parts Catalog or Fishbone sections.",
+            "**✏️ Build / Author BOM from Scratch**: Use the side-by-side **BOM Spreadsheet Editor** (Level 1–11, Part # / Group #, Description, Qty) and **Live Visual Tree** (`🌳 Live Hierarchy` and `🌲 CAD Browser Tree`) to build or edit a model's BOM.",
+            "**Import, Copy, or Predict BOMs**: Use **📥 Download Template**, **📤 Import File** (or **📋 Paste from Excel**), **👥 Copy from Model**, or **✨ Predict from Features** (using Complexity Trees rules) to populate a model BOM rapidly.",
+            "**Group Number Conflict Resolution**: When saving a shared group/drawing number whose child parts or quantities differ from other models, PAAG alerts you and lets you sync the updated group structure across models or confirm a model variation.",
         ],
         "connections": (
-            "Bridges **Import PITs** (`pits_bom_occurrences`) -> **Parts Catalog** -> **Fishbone** (`fishbone_part_assignments`)."
+            "Bridges **Import PITs** & **Complexity Trees** -> **BOM** -> **Parts Catalog** -> **Fishbone** (`fishbone_part_assignments`)."
         ),
         "tips": [
-            "Rejecting an occurrence requires a rejection reason so collaborators know why an EBOM row was excluded from the assembly plan.",
+            "Use **Undo last edit** and **Redo last edit** in the BOM Spreadsheet Editor to step backward or forward through individual cell changes before clicking **Save BOM Structure**.",
+            "Keep **Auto-add new parts to Parts Catalog** checked so any new part numbers typed in the BOM Editor are automatically registered in the Parts Catalog on save.",
         ],
     },
     "parts": {
@@ -1031,15 +1034,15 @@ def _default_critical_thread_steps() -> list[dict[str, Any]]:
         },
         {
             "step_number": 3,
-            "title": "BOM Reconciliation (EBOM -> MBOM)",
+            "title": "BOM (Tree, Authoring & Reconciliation)",
             "scope": "All scenarios",
             "page_url_path": "bom_tree",
             "page_title": "BOM",
             "metric_summary": "0 approved / 0 total BOM occurrences",
             "populated": False,
             "description": (
-                "Review PITS BOM parent-child occurrences, resolve validation issues, "
-                "and approve placements into Fishbone assembly sections."
+                "Inspect CAD-style Model Tree BOMs, author Level 1–11 model BOMs from scratch "
+                "(or predict from Complexity Trees features), and reconcile parts into Fishbone sections."
             ),
         },
         {
@@ -1626,7 +1629,7 @@ def _build_critical_thread_flowchart_html(
 
             <!-- Row 2: BOM Reconciliation <-> Parts Catalog (Step 3 & Step 4) -->
             <div class="paag-fc-grid-pair-sync">
-                {_node_card_html(3, "BOM Reconciliation (EBOM → MBOM)", "Reconcile New / Changed / Missing occurrences & approve sections", "project")}
+                {_node_card_html(3, "BOM (Tree, Authoring & Reconciliation)", "View CAD tree, author Level 1–11 model BOMs & sync Fishbone placements", "project")}
                 <div class="paag-fc-sync-bridge">
                     <span>◄────►</span>
                     <span>Syncs Parts &amp; Placements</span>
@@ -1850,6 +1853,18 @@ def _render_feedback_tracker_tab(
     staged_ss_key = "help_hub_staged_feedback_screenshot"
     last_paste_hash_key = "help_hub_last_paste_hash"
     last_upload_hash_key = "help_hub_last_upload_hash"
+    reset_form_key = "help_hub_reset_new_fb_form"
+
+    if st.session_state.pop(reset_form_key, False):
+        st.session_state["help_hub_new_fb_title"] = ""
+        st.session_state["help_hub_new_fb_desc"] = ""
+        st.session_state["help_hub_new_fb_steps"] = ""
+        st.session_state.pop(staged_ss_key, None)
+        st.session_state.pop(last_paste_hash_key, None)
+        st.session_state.pop(last_upload_hash_key, None)
+
+    if not st.session_state.get("help_hub_stage_unable_ids"):
+        st.session_state.pop("help_hub_unable_reason_input", None)
 
     with st.expander(
         ":material/add_circle: **Report a bug or suggest an improvement**",
@@ -1978,9 +1993,7 @@ def _render_feedback_tracker_tab(
                     submitted_by=editor_name,
                 )
                 st.session_state.pop(staged_ss_key, None)
-                st.session_state["help_hub_new_fb_title"] = ""
-                st.session_state["help_hub_new_fb_desc"] = ""
-                st.session_state["help_hub_new_fb_steps"] = ""
+                st.session_state[reset_form_key] = True
                 st.toast("Feedback submitted—thank you!", icon=":material/check_circle:")
                 st.rerun()
             except ValueError as exc:
@@ -1998,11 +2011,22 @@ def _render_feedback_tracker_tab(
             key="help_hub_fb_list_scope",
         )
     with flt_c2:
+        status_filter_options = [
+            "All except Completed",
+            "All (including Completed)",
+            *FEEDBACK_STATUSES,
+        ]
+        if (
+            "help_hub_fb_list_status" in st.session_state
+            and st.session_state["help_hub_fb_list_status"] not in status_filter_options
+        ):
+            st.session_state["help_hub_fb_list_status"] = "All except Completed"
         fb_status_flt = st.selectbox(
             "Status",
-            options=["All", *FEEDBACK_STATUSES],
+            options=status_filter_options,
             index=0,
             key="help_hub_fb_list_status",
+            help="Defaults to hiding Completed items. Choose 'All (including Completed)' or 'Completed' to view completed items.",
         )
     with flt_c3:
         fb_type_flt = st.selectbox(
@@ -2036,7 +2060,13 @@ def _render_feedback_tracker_tab(
         fb_df = fb_df[mask].reset_index(drop=True)
 
     if fb_df.empty:
-        st.caption("No feedback items match the current filters.")
+        if fb_status_flt == "All except Completed":
+            st.caption(
+                "No active feedback items match the current filters. "
+                "Select **All (including Completed)** or **Completed** in the Status filter to view completed items."
+            )
+        else:
+            st.caption("No feedback items match the current filters.")
     else:
         editor_key = "help_hub_feedback_table_editor"
         apply_pending_table_editor_reset(editor_key)
@@ -2085,7 +2115,7 @@ def _render_feedback_tracker_tab(
             column_config={
                 "_delete": st.column_config.CheckboxColumn(
                     "Select",
-                    help="Select feedback items to delete (archived in the 30-day Recycle Bin).",
+                    help="Select feedback items to move to a resolution stage (Working, Completed, Tagged for Future Development, Unable to complete, Open) or delete.",
                     default=False,
                     width="small",
                 ),
@@ -2093,7 +2123,7 @@ def _render_feedback_tracker_tab(
                     "Status",
                     options=list(FEEDBACK_STATUSES),
                     required=True,
-                    width="small",
+                    width="medium",
                 ),
                 "severity": st.column_config.SelectboxColumn(
                     "Severity",
@@ -2125,7 +2155,8 @@ def _render_feedback_tracker_tab(
                     width="medium",
                 ),
                 "resolution_notes": st.column_config.TextColumn(
-                    "Resolution notes",
+                    "Resolution notes / Reason",
+                    help="Resolution notes, or the required reason when Status is 'Unable to complete'.",
                     width="medium",
                 ),
                 "submitted_by": st.column_config.TextColumn(
@@ -2168,14 +2199,112 @@ def _render_feedback_tracker_tab(
             .equals(display_df[compare_cols].fillna("").astype(str))
         )
 
-        act_c1, act_c2, act_c3 = st.columns([1.4, 1.1, 2.5])
-        with act_c1:
+        selected_count = len(selected_for_delete)
+        count_suffix = f" ({selected_count})" if selected_count else ""
+
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.caption(
+                f"**Move selected{count_suffix} to stage:**"
+                if selected_count
+                else "**Select rows above to move to a resolution stage:**"
+            )
+            stage_actions = [
+                ("Working", ":material/engineering:", "help_hub_stage_working_btn"),
+                ("Completed", ":material/check_circle:", "help_hub_stage_completed_btn"),
+                (
+                    "Tagged for Future Development",
+                    ":material/bookmark_added:",
+                    "help_hub_stage_future_dev_btn",
+                ),
+                ("Open", ":material/restart_alt:", "help_hub_stage_open_btn"),
+            ]
+            for target_stage, stage_icon, stage_key in stage_actions:
+                if st.button(
+                    f"{target_stage}{count_suffix}",
+                    icon=stage_icon,
+                    disabled=not selected_for_delete,
+                    width="content",
+                    key=stage_key,
+                ):
+                    try:
+                        moved = bulk_update_app_feedback_status(
+                            selected_for_delete,
+                            target_stage,
+                            active_project_id=project_id,
+                            editor_name=editor_name,
+                        )
+                        request_table_editor_reset(editor_key)
+                        st.session_state.pop("help_hub_confirm_fb_delete_ids", None)
+                        st.session_state.pop("help_hub_stage_unable_ids", None)
+                        st.toast(
+                            f"Moved {moved} item{'s' if moved != 1 else ''} to '{target_stage}'.",
+                            icon=stage_icon,
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+            if st.button(
+                f"Unable to complete{count_suffix}",
+                icon=":material/block:",
+                disabled=not selected_for_delete,
+                width="content",
+                key="help_hub_stage_unable_btn",
+            ):
+                st.session_state["help_hub_stage_unable_ids"] = selected_for_delete
+                st.session_state.pop("help_hub_confirm_fb_delete_ids", None)
+
+        staged_unable_ids = st.session_state.get("help_hub_stage_unable_ids") or []
+        if staged_unable_ids:
+            with st.container(border=True):
+                st.markdown(
+                    f":material/block: **Mark {len(staged_unable_ids)} selected item{'s' if len(staged_unable_ids) != 1 else ''} as 'Unable to complete'**"
+                )
+                unable_reason = st.text_input(
+                    "Reason unable to complete (required)",
+                    placeholder="Enter the reason why this bug report or feature suggestion cannot be completed...",
+                    key="help_hub_unable_reason_input",
+                )
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    if st.button(
+                        "Confirm 'Unable to complete'",
+                        icon=":material/block:",
+                        type="primary",
+                        width="content",
+                        key="help_hub_confirm_unable_btn",
+                    ):
+                        try:
+                            moved = bulk_update_app_feedback_status(
+                                staged_unable_ids,
+                                "Unable to complete",
+                                resolution_notes=unable_reason,
+                                active_project_id=project_id,
+                                editor_name=editor_name,
+                            )
+                            st.session_state.pop("help_hub_stage_unable_ids", None)
+                            request_table_editor_reset(editor_key)
+                            st.toast(
+                                f"Marked {moved} item{'s' if moved != 1 else ''} as 'Unable to complete'.",
+                                icon=":material/block:",
+                            )
+                            st.rerun()
+                        except ValueError as exc:
+                            st.error(str(exc))
+                    if st.button(
+                        "Cancel",
+                        icon=":material/close:",
+                        width="content",
+                        key="help_hub_cancel_unable_btn",
+                    ):
+                        st.session_state.pop("help_hub_stage_unable_ids", None)
+                        st.rerun()
+
+        with st.container(horizontal=True, vertical_alignment="center"):
             if st.button(
                 "Save & Refresh",
                 icon=":material/save:",
                 type="primary",
                 disabled=not has_inline_edits,
-                width="stretch",
+                width="content",
                 key="help_hub_fb_save_btn",
             ):
                 try:
@@ -2192,28 +2321,28 @@ def _render_feedback_tracker_tab(
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
-        with act_c2:
             if st.button(
                 "Undo",
                 icon=":material/undo:",
                 disabled=not (has_inline_edits or bool(selected_for_delete)),
-                width="stretch",
+                width="content",
                 key="help_hub_fb_undo_btn",
             ):
                 request_table_editor_reset(editor_key)
                 st.session_state.pop("help_hub_confirm_fb_delete_ids", None)
+                st.session_state.pop("help_hub_stage_unable_ids", None)
                 st.rerun()
-        with act_c3:
             if st.button(
                 f"Delete selected ({len(selected_for_delete)})"
                 if selected_for_delete
                 else "Delete selected",
                 icon=":material/delete:",
                 disabled=not selected_for_delete,
-                width="stretch",
+                width="content",
                 key="destructive_help_hub_stage_fb_delete_btn",
             ):
                 st.session_state["help_hub_confirm_fb_delete_ids"] = selected_for_delete
+                st.session_state.pop("help_hub_stage_unable_ids", None)
 
         staged_delete_ids = st.session_state.get("help_hub_confirm_fb_delete_ids") or []
         if staged_delete_ids:

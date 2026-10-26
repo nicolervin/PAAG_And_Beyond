@@ -1766,7 +1766,7 @@ Future issued-document generation and approval (not implemented)
      - `project_name TEXT NOT NULL DEFAULT ''`
      - `scenario_id TEXT DEFAULT NULL`
      - `scenario_name TEXT NOT NULL DEFAULT ''`
-     - `status TEXT NOT NULL DEFAULT 'Open'` (`'Open'`, `'Under review'`, `'Planned'`, `'Resolved'`, `'Closed'`)
+     - `status TEXT NOT NULL DEFAULT 'Open'` (`'Open'`, `'Working'`, `'Tagged for Future Development'`, `'Completed'`, `'Unable to complete'`)
      - `submitted_by TEXT NOT NULL DEFAULT ''`
      - `screenshot_path TEXT NOT NULL DEFAULT ''` (optional path in `data/uploads/`)
      - `resolution_notes TEXT NOT NULL DEFAULT ''`

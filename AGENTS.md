@@ -88,6 +88,7 @@ Read and follow `DESIGN_SYSTEM.md` before changing any table or UI. Reuse `utils
 - Validate a complete bulk operation before writing; never partially apply it.
 - Record every persisted change with `record_audit_event()` and Current editor attribution, then expose the relevant `audit_history()` at the bottom of the screen as required by `DESIGN_SYSTEM.md`.
 - Do not invent universal business statuses. Status values are specific to their table.
+- Keep in-app help synchronized with UI changes: whenever a page workflow, tab, toolbar button, or feature is added, renamed, or modified, update the corresponding module guide, flowchart, or FAQ in `utils/help_hub.py` (`PAGE_MANUALS`, `_build_critical_thread_flowchart_html`, `TROUBLESHOOTING_FAQS`, `GLOSSARY_TERMS`), `utils/quality_help.py` (for Quality tabs), and any in-page `Instructions` popovers or expanders in the same change.
 
 ## Import and export
 
