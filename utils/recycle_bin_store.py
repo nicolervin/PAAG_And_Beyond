@@ -114,6 +114,7 @@ _TABLE_HUMAN_LABELS: dict[str, str] = {
     "pfmea_pattern_detection_sources": "PFMEA pattern detection source",
     "control_plan_items": "Control Plan row",
     "control_method_catalog": "Control Plan method",
+    "app_feedback": "feedback item",
 }
 
 
@@ -237,6 +238,17 @@ def _snapshot_project_tables(
         raw_tables[table_name] = dict_rows
         keyed_tables[table_name] = {
             _row_pk_tuple(r, pk_cols): r for r in dict_rows
+        }
+    if "app_feedback" in existing and "app_feedback" not in excluded:
+        fb_pk_cols = _table_pk_columns(conn, "app_feedback")
+        pk_map["app_feedback"] = fb_pk_cols
+        fb_rows = [
+            dict(r)
+            for r in conn.execute("SELECT * FROM app_feedback").fetchall()
+        ]
+        raw_tables["app_feedback"] = fb_rows
+        keyed_tables["app_feedback"] = {
+            _row_pk_tuple(r, fb_pk_cols): r for r in fb_rows
         }
     return keyed_tables, pk_map
 
@@ -542,17 +554,20 @@ def _is_upload_path_referenced_in_live_tables(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     }
-    for item in PROJECT_TRANSFER_TABLES:
-        if item.name not in existing:
+    table_names = [item.name for item in PROJECT_TRANSFER_TABLES]
+    if "app_feedback" in existing and "app_feedback" not in table_names:
+        table_names.append("app_feedback")
+    for table_name in table_names:
+        if table_name not in existing:
             continue
         cols = [
             str(r[1])
-            for r in conn.execute(f'PRAGMA table_info("{item.name}")').fetchall()
+            for r in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
             if str(r[1]).endswith("_path")
         ]
         for col in cols:
             rows = conn.execute(
-                f'SELECT "{col}" FROM "{item.name}" WHERE "{col}" IS NOT NULL AND TRIM("{col}") <> \'\''
+                f'SELECT "{col}" FROM "{table_name}" WHERE "{col}" IS NOT NULL AND TRIM("{col}") <> \'\''
             ).fetchall()
             for r in rows:
                 if _normalize_upload_key(r[0]) == target_key:
@@ -754,6 +769,7 @@ def list_recycle_bin_items(
             live_projects.get(pid)
             or str(row["project_name"] or "").strip()
             or pid
+            or "All projects"
         )
         if not sid or str(row["entity_table"] or "") == "projects":
             resolved_scenario_name = "All scenarios"
@@ -824,6 +840,8 @@ def restore_recycle_bin_items(
         topo_tables = [
             t.name for t in PROJECT_TRANSFER_TABLES if t.name in existing_tables
         ]
+        if "app_feedback" in existing_tables and "app_feedback" not in topo_tables:
+            topo_tables.append("app_feedback")
 
         restored_labels: list[str] = []
         restored_projects: list[str] = []
@@ -836,7 +854,7 @@ def restore_recycle_bin_items(
             entity_table = str(item["entity_table"] or "")
             entity_label = str(item["entity_label"] or item["entity_id"] or "")
 
-            if entity_table != "projects":
+            if entity_table not in {"projects", "app_feedback"}:
                 proj_exists = conn.execute(
                     "SELECT 1 FROM projects WHERE id=?", (project_id,)
                 ).fetchone()
@@ -846,7 +864,7 @@ def restore_recycle_bin_items(
                         f"('{item['project_name'] or project_id}') is currently deleted. "
                         "Restore the project first (or select both to restore together)."
                     )
-            if scenario_id and entity_table != "planning_scenarios":
+            if scenario_id and entity_table not in {"planning_scenarios", "app_feedback"}:
                 scen_exists = conn.execute(
                     "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
                     (scenario_id, project_id),
@@ -895,6 +913,18 @@ def restore_recycle_bin_items(
                     }
                     if not filtered:
                         continue
+                    if tbl == "app_feedback":
+                        fb_pid = str(filtered.get("project_id") or "").strip()
+                        if fb_pid and not conn.execute(
+                            "SELECT 1 FROM projects WHERE id=?", (fb_pid,)
+                        ).fetchone():
+                            filtered["project_id"] = None
+                            filtered["scenario_id"] = None
+                        fb_sid = str(filtered.get("scenario_id") or "").strip()
+                        if fb_sid and not conn.execute(
+                            "SELECT 1 FROM planning_scenarios WHERE id=?", (fb_sid,)
+                        ).fetchone():
+                            filtered["scenario_id"] = None
                     col_list = ", ".join(f'"{k}"' for k in filtered)
                     val_placeholders = ", ".join("?" for _ in filtered)
                     try:

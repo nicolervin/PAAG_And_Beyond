@@ -20,12 +20,17 @@ from utils.table_ui import (
     has_active_unsaved_changes,
     request_unsaved_page_navigation,
 )
+from utils.help_hub import (
+    open_universal_help_dialog,
+    render_floating_help_button,
+)
 from utils.store import (
     ensure_db_initialized,
     get_last_active_workspace,
     get_project,
     init_db,
     migrate_legacy_yamazumi_flags,
+    open_app_feedback_count,
     planning_scenarios,
     projects,
     recycle_bin_item_count,
@@ -575,6 +580,28 @@ with st.sidebar:
                 clear_unsaved_tracking_state()
                 st.switch_page(page_by_url_path["overview"])
     st.caption("NPI process planning · local prototype")
+    open_fb_count = open_app_feedback_count(st.session_state.get("project_id"))
+    help_button_label = (
+        f"Help & search ({open_fb_count})" if open_fb_count > 0 else "Help & search"
+    )
+    if st.button(
+        help_button_label,
+        icon=":material/help:",
+        type="secondary",
+        width="stretch",
+        key="sidebar_help_hub_btn",
+        help=(
+            f"Open Help Manual for '{navigation.title}', Global Project Search, "
+            "Critical Thread Guide, Op ID Decoder, and Bug / Feature Tracker."
+        ),
+    ):
+        open_universal_help_dialog(
+            active_page_key=active_page_key,
+            active_page_title=str(getattr(navigation, "title", "") or "Overview"),
+            project_id=st.session_state.get("project_id"),
+            scenario_id=st.session_state.get("scenario_id"),
+            editor_name=str(st.session_state.get("current_editor") or ""),
+        )
     rb_count = recycle_bin_item_count(None)
     rb_button_label = f"Recycle bin ({rb_count})" if rb_count > 0 else "Recycle bin"
     if st.button(
@@ -768,3 +795,11 @@ else:
             _run_workspace_page(secondary_page, enable=True)
 
 finalize_unsaved_tracking(page_by_url_path, split_secondary_key=split_secondary_key)
+
+render_floating_help_button(
+    active_page_key=active_page_key,
+    active_page_title=str(getattr(navigation, "title", "") or "Overview"),
+    project_id=st.session_state.get("project_id"),
+    scenario_id=st.session_state.get("scenario_id"),
+    editor_name=str(st.session_state.get("current_editor") or ""),
+)

@@ -1738,3 +1738,43 @@ Future issued-document generation and approval (not implemented)
      - **Universal Deletion Standard:** Non-dismissible confirmation dialog (`@st.dialog`) for **Delete forever** / **Empty Recycle Bin**, which permanently removes the archive row and deletes unreferenced files from `data/uploads/`.
      - **Universal Audit Trail & History Standard:** Every soft-delete archive, restore, and permanent purge is logged via `record_audit_event()` with Current editor attribution and displayed in the bottom `audit_history()` expander.
      - **No History Step Rollback:** Out-of-order history step restoration is intentionally excluded to protect relational integrity across the critical thread.
+
+
+### Universal Help & Search Hub and App Feedback Tracker (`app_feedback`, `utils/help_hub.py`, `utils/feedback_store.py`)
+
+- **Proposed by:** Project Owner & Antigravity
+- **Date recorded:** October 26, 2026
+- **Approval status:** Approved by project owner on October 26, 2026 for implementation on branch `NE_Different_screen_sizes`.
+- **Purpose:** Provide an always-accessible Universal Help & Search Hub triggered via a floating bottom-right button (with safe bottom page padding so it never covers table **Save & Refresh** footers) and a secondary sidebar shortcut next to **Recycle bin**. The Help Hub opens a rich modal dialog containing:
+  1. *Global Project Keyword Search:* Searches across the active project (and active or all scenarios) covering Parts Catalog, Fishbone sections & part assignments, BOM occurrences, Complexity Models & Features, Yamazumi areas/pitches/elements, Process at a Glance steps, Equipment assets, Quality requirements & PFMEA entries, Ergonomics reviews, Safety requirements, and Questions & concerns, with 1-click navigation to the matching page.
+  2. *Context-Aware Page Help Manual:* Defaults automatically to the guide for the tab/page the user is currently viewing, while allowing users to browse and search guides for every module in the application.
+  3. *Interactive "Critical Thread" Workflow Guide:* Step-by-step visual guide of the PAAG data flow (*Import PITS -> Complexity Trees -> BOM -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance -> Pin Map & Functional Reviews*) with live record counts for the active project/scenario and 1-click page navigation.
+  4. *Terminology, Op ID Decoder & Troubleshooting / Pro-Tips:* Searchable glossary of canonical PAAG terms, an interactive Op ID decoder/explainer, and answers to common locked states (*"Why is Save & Refresh disabled?"*, *"Why are sort/filter controls locked?"*, Split Screen usage, multi-row Excel paste, clipboard screenshot paste).
+  5. *Bug Reports & Feature Suggestions Tracker:* Allows collaborators to submit software bug reports or feature suggestions (with optional screenshot upload/clipboard paste, severity/priority, and automatic page/project/scenario context capture), browse/filter existing reports, update statuses/resolution notes, and manage entries with 30-day Recycle Bin protection.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* `app_feedback` stores app-wide software bug reports and feature suggestions with optional context links (`project_id`, `project_name`, `scenario_id`, `scenario_name`, `page_context`). Global Search queries read-only across `parts`, `assembly_sections`, `fishbone_part_assignments`, `pits_bom_occurrences`, `project_models`, `complexity_features`, `yamazumi_areas`, `yamazumi_pitches`, `yamazumi_elements`, `work_elements`, `equipment_assets`, `quality_requirements`, `pfmea_entries`, `ergonomics_reviews`, `safety_requirements`, and `concerns`.
+  2. *Critical thread relationship:* Read-only discovery and navigation overlay across the entire critical thread (*Product Architecture/PITS evidence -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> derived Pin Map & Functional Reviews*), plus non-intrusive software feedback collection that never alters engineering planning data.
+  3. *Scope:* App-wide for the Help manual, glossary, and `app_feedback` tracker (capturing active project/scenario/page metadata for context); Project- and Scenario-aware for Global Keyword Search and the live Critical Thread status counts.
+  4. *Table requirement:* Requires one new table `app_feedback` because `concerns` is strictly for project-specific NPI product/process engineering issues rather than cross-project software bug reports and feature requests:
+     - `id TEXT PRIMARY KEY` (UUID)
+     - `feedback_type TEXT NOT NULL DEFAULT 'Bug report'` (`'Bug report'` or `'Feature suggestion'`)
+     - `title TEXT NOT NULL`
+     - `description TEXT NOT NULL DEFAULT ''`
+     - `severity_or_priority TEXT NOT NULL DEFAULT 'Medium'` (`'Low'`, `'Medium'`, `'High'`, `'Critical'`)
+     - `page_context TEXT NOT NULL DEFAULT ''` (page title where submitted)
+     - `project_id TEXT DEFAULT NULL`
+     - `project_name TEXT NOT NULL DEFAULT ''`
+     - `scenario_id TEXT DEFAULT NULL`
+     - `scenario_name TEXT NOT NULL DEFAULT ''`
+     - `status TEXT NOT NULL DEFAULT 'Open'` (`'Open'`, `'Under review'`, `'Planned'`, `'Resolved'`, `'Closed'`)
+     - `submitted_by TEXT NOT NULL DEFAULT ''`
+     - `screenshot_path TEXT NOT NULL DEFAULT ''` (optional path in `data/uploads/`)
+     - `resolution_notes TEXT NOT NULL DEFAULT ''`
+     - `created_at TEXT NOT NULL` (Eastern Time ISO timestamp)
+     - `updated_at TEXT NOT NULL` (Eastern Time ISO timestamp)
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Floating & Sidebar Trigger:** Fixed bottom-right floating `? Help & Search` pill with bottom container padding so table **Save & Refresh** buttons are never obscured, paired with a sidebar button next to **Recycle bin**.
+     - **Universal Save Action Standard:** Explicit submit button for new bug reports/feature suggestions and explicit status/notes update action, attributing changes to Current editor.
+     - **Universal Deletion Standard:** Confirmed deletion with red `destructive_` button styling and archiving into the 30-day Recycle Bin (`recycle_bin_items`).
+     - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` under category `"App feedback"` with Current editor attribution and Eastern Time timestamps, exposed in a History expander inside the Feedback tab.
+

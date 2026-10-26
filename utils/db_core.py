@@ -2060,6 +2060,8 @@ def init_db() -> None:
         )
         init_recycle_bin_schema(conn)
         purge_expired_recycle_bin_items(conn)
+        from utils.feedback_store import init_feedback_schema
+        init_feedback_schema(conn)
         _upgrade_pfmea_entries_work_element_link(conn)
         _upgrade_quality_assignments_work_element_link(conn)
         _upgrade_equipment_process_links_work_element_link(conn)

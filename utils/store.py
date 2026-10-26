@@ -15,6 +15,7 @@ from utils import process_store as _process_store
 from utils import fishbone_store as _fishbone_store
 from utils import model_part_store as _model_part_store
 from utils import recycle_bin_store as _recycle_bin_store
+from utils import feedback_store as _feedback_store
 
 _DOMAIN_MODULES = [
     _project_store,
@@ -26,6 +27,7 @@ _DOMAIN_MODULES = [
     _fishbone_store,
     _model_part_store,
     _recycle_bin_store,
+    _feedback_store,
 ]
 
 for _rb_export_name in _recycle_bin_store.__domain_exports__:
@@ -36,6 +38,14 @@ for _rb_export_name in _recycle_bin_store.__domain_exports__:
     }:
         setattr(_recycle_bin_store, _rb_export_name, _db_core.domain_entrypoint(_rb_obj))
 _db_core.register_domain_module(_recycle_bin_store, _recycle_bin_store.__domain_exports__)
+
+for _fb_export_name in _feedback_store.__domain_exports__:
+    _fb_obj = getattr(_feedback_store, _fb_export_name, None)
+    if callable(_fb_obj) and _fb_export_name not in {
+        "init_feedback_schema",
+    }:
+        setattr(_feedback_store, _fb_export_name, _db_core.domain_entrypoint(_fb_obj))
+_db_core.register_domain_module(_feedback_store, _feedback_store.__domain_exports__)
 _db_core.sync_store_runtime()
 
 
