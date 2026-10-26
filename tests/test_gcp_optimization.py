@@ -191,11 +191,22 @@ class TestGcpStorageAndPaths(unittest.TestCase):
                 "INSERT INTO parts VALUES ('p1', ?)",
                 (r"C:\Windows\workspace\data\uploads\hero_part.webp",),
             )
+            conn.execute(
+                "CREATE TABLE future_module_items (id TEXT PRIMARY KEY, custom_diagram_path TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO future_module_items VALUES ('f1', ?)",
+                (r"C:\Windows\workspace\data\uploads\hero_part.webp",),
+            )
             with patch.object(db_core, "UPLOAD_DIR", upload_dir):
                 updated = db_core._rebase_cross_platform_upload_paths(conn)
-                self.assertEqual(updated, 1)
+                self.assertEqual(updated, 2)
                 row = conn.execute("SELECT photo_path FROM parts WHERE id='p1'").fetchone()
                 self.assertEqual(Path(row["photo_path"]), img_file)
+                future_row = conn.execute(
+                    "SELECT custom_diagram_path FROM future_module_items WHERE id='f1'"
+                ).fetchone()
+                self.assertEqual(Path(future_row["custom_diagram_path"]), img_file)
             conn.close()
 
     def test_cache_env_int_bounds(self) -> None:

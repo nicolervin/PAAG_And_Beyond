@@ -1106,21 +1106,19 @@ with tab_plan:
     with hdr_col_title:
         st.subheader("Create PAAG Elements")
     with hdr_col_links:
-        pop_col1, pop_col2 = st.columns(2)
-        with pop_col1:
-            st.link_button(
-                "Open Slides in new window",
-                url=build_page_url("process", query_params={"paag_tab": "PAAG slides"}),
-                icon=":material/open_in_new:",
-                help="Open PAAG Slides in a separate browser window to view slides alongside your process plan",
-            )
-        with pop_col2:
-            st.link_button(
-                "Open Parts in new window",
-                url=build_page_url("parts"),
-                icon=":material/open_in_new:",
-                help="Open Parts Catalog in a separate browser window to cross-reference parts",
-            )
+        hdr_links_bar = st.container(horizontal=True, horizontal_alignment="right")
+        hdr_links_bar.link_button(
+            "Open Slides in new window",
+            url=build_page_url("process", query_params={"paag_tab": "PAAG slides"}),
+            icon=":material/open_in_new:",
+            help="Open PAAG Slides in a separate browser window to view slides alongside your process plan",
+        )
+        hdr_links_bar.link_button(
+            "Open Parts in new window",
+            url=build_page_url("parts"),
+            icon=":material/open_in_new:",
+            help="Open Parts Catalog in a separate browser window to cross-reference parts",
+        )
     st.caption(
         "The selected fishbone section controls both lists. Use **Choose one** for alternatives such "
         "as black or silver versions of the same panel."
@@ -2864,6 +2862,7 @@ with tab_plan:
             "op_id": st.column_config.TextColumn(
                 "Op ID",
                 pinned=True,
+                width="small",
                 help=(
                     "Identifies this Work Element's current Fishbone lineage, Pitch, and "
                     "centerline-outward stack position. It may change if the Fishbone "
@@ -2872,9 +2871,11 @@ with tab_plan:
             ),
             "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
             "station": None,
-            "pitch_name": st.column_config.TextColumn("Pitch Name", pinned=True),
+            "pitch_name": st.column_config.TextColumn(
+                "Pitch Name", pinned=True, width=110
+            ),
             "work_element": st.column_config.TextColumn(
-                "Work Element", required=True, pinned=True, width="large"
+                "Work Element", required=True, pinned=True, width=180
             ),
             "resource": st.column_config.TextColumn(
                 "Resource",
@@ -4424,9 +4425,13 @@ with tab_slides:
             </style>
             """)
 
-            # Clean, unified toolbar: [ Fishbone Section ] [ Back | Pitch | Next ] [ Present | Print | Alerts | Tools ]
-            nav_col_sec, nav_col_p, nav_col_act = st.columns([1.8, 2.7, 2.2], vertical_alignment="center")
+            # Responsive toolbar: selectors + wrapping navigation & action buttons
+            vis_pids = list(visible_pitch_dict.keys())
+            curr_p_idx = vis_pids.index(selected_pitch_id) if selected_pitch_id in vis_pids else 0
+            is_first_nav = (curr_p_idx <= 0 and current_page <= 1)
+            is_last_nav = (curr_p_idx >= len(vis_pids) - 1 and current_page >= total_pages)
 
+            nav_col_sec, nav_col_p = st.columns([1.5, 2.5], vertical_alignment="center")
             with nav_col_sec:
                 curr_sec_idx = list(sec_filter_dict.keys()).index(current_sec_filter) if current_sec_filter in sec_filter_dict else 0
                 new_sec = st.selectbox(
@@ -4440,7 +4445,6 @@ with tab_slides:
                 )
                 if new_sec != current_sec_filter:
                     st.session_state[sec_filter_key] = new_sec
-                    # Switch to first pitch of newly selected section
                     if new_sec == "__ALL__":
                         next_df = scenario_pitches_df
                     elif new_sec == "__UNASSIGNED__":
@@ -4455,107 +4459,95 @@ with tab_slides:
                     st.rerun()
 
             with nav_col_p:
-                vis_pids = list(visible_pitch_dict.keys())
-                curr_p_idx = vis_pids.index(selected_pitch_id) if selected_pitch_id in vis_pids else 0
-                is_first_nav = (curr_p_idx <= 0 and current_page <= 1)
-                is_last_nav = (curr_p_idx >= len(vis_pids) - 1 and current_page >= total_pages)
+                def _format_pitch_label(pid: str) -> str:
+                    lbl = visible_pitch_dict.get(pid, pid)
+                    if pid == selected_pitch_id and total_pages > 1:
+                        return f"{lbl} · Slide {current_page}/{total_pages}"
+                    return lbl
 
-                p_col_back, p_col_sel, p_col_next = st.columns([0.8, 3.2, 0.8], vertical_alignment="center")
-                with p_col_back:
-                    if st.button(
-                        "Back",
-                        icon=":material/arrow_back:",
-                        disabled=is_first_nav,
-                        help=f"Previous slide / pitch (Slide {current_page}/{total_pages})" if total_pages > 1 else "Previous pitch",
-                        key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
-                    ):
-                        if current_page > 1:
-                            st.session_state[pitch_page_key] = current_page - 1
-                        else:
-                            if curr_p_idx > 0:
-                                prev_pid = vis_pids[curr_p_idx - 1]
-                                st.session_state[selected_pitch_key] = prev_pid
-                                try:
-                                    prev_sum = process_pitch_visual_summary(project_id, scenario_id, prev_pid)
-                                    prev_tot = max(page_count(len(prev_sum.get("elements", []))), prev_sum.get("slide_count", 1), 1)
-                                except Exception:
-                                    prev_tot = 1
-                                st.session_state[pitch_page_key] = prev_tot
-                        st.rerun()
+                new_sel = st.selectbox(
+                    "Pitch",
+                    options=vis_pids,
+                    index=curr_p_idx,
+                    format_func=_format_pitch_label,
+                    key=f"pitch_active_select_{scenario_id}",
+                    label_visibility="collapsed",
+                    help="Select pitch",
+                )
+                if new_sel != selected_pitch_id:
+                    st.session_state[selected_pitch_key] = new_sel
+                    st.session_state[pitch_page_key] = 1
+                    st.rerun()
 
-                with p_col_sel:
-                    def _format_pitch_label(pid: str) -> str:
-                        lbl = visible_pitch_dict.get(pid, pid)
-                        if pid == selected_pitch_id and total_pages > 1:
-                            return f"{lbl} · Slide {current_page}/{total_pages}"
-                        return lbl
+            slide_action_bar = st.container(horizontal=True, vertical_alignment="center")
+            if slide_action_bar.button(
+                "Back",
+                icon=":material/arrow_back:",
+                disabled=is_first_nav,
+                help=f"Previous slide / pitch (Slide {current_page}/{total_pages})" if total_pages > 1 else "Previous pitch",
+                key=f"pitch_visual_back_{scenario_id}_{selected_pitch_id}",
+            ):
+                if current_page > 1:
+                    st.session_state[pitch_page_key] = current_page - 1
+                else:
+                    if curr_p_idx > 0:
+                        prev_pid = vis_pids[curr_p_idx - 1]
+                        st.session_state[selected_pitch_key] = prev_pid
+                        try:
+                            prev_sum = process_pitch_visual_summary(project_id, scenario_id, prev_pid)
+                            prev_tot = max(page_count(len(prev_sum.get("elements", []))), prev_sum.get("slide_count", 1), 1)
+                        except Exception:
+                            prev_tot = 1
+                        st.session_state[pitch_page_key] = prev_tot
+                st.rerun()
 
-                    new_sel = st.selectbox(
-                        "Pitch",
-                        options=vis_pids,
-                        index=curr_p_idx,
-                        format_func=_format_pitch_label,
-                        key=f"pitch_active_select_{scenario_id}",
-                        label_visibility="collapsed",
-                        help="Select pitch",
-                    )
-                    if new_sel != selected_pitch_id:
-                        st.session_state[selected_pitch_key] = new_sel
+            if slide_action_bar.button(
+                "Next",
+                icon=":material/arrow_forward:",
+                disabled=is_last_nav,
+                help=f"Next slide / pitch (Slide {current_page}/{total_pages})" if total_pages > 1 else "Next pitch",
+                key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
+            ):
+                if current_page < total_pages:
+                    st.session_state[pitch_page_key] = current_page + 1
+                else:
+                    if curr_p_idx < len(vis_pids) - 1:
+                        next_pid = vis_pids[curr_p_idx + 1]
+                        st.session_state[selected_pitch_key] = next_pid
                         st.session_state[pitch_page_key] = 1
-                        st.rerun()
+                st.rerun()
 
-                with p_col_next:
-                    if st.button(
-                        "Next",
-                        icon=":material/arrow_forward:",
-                        disabled=is_last_nav,
-                        help=f"Next slide / pitch (Slide {current_page}/{total_pages})" if total_pages > 1 else "Next pitch",
-                        key=f"pitch_visual_next_{scenario_id}_{selected_pitch_id}",
-                    ):
-                        if current_page < total_pages:
-                            st.session_state[pitch_page_key] = current_page + 1
-                        else:
-                            if curr_p_idx < len(vis_pids) - 1:
-                                next_pid = vis_pids[curr_p_idx + 1]
-                                st.session_state[selected_pitch_key] = next_pid
-                                st.session_state[pitch_page_key] = 1
-                        st.rerun()
+            if slide_action_bar.button("Present", icon=":material/slideshow:", key=f"btn_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
+                st.session_state[f"paag_present_active_{scenario_id}"] = True
+                st.session_state[f"pres_pitch_id_{scenario_id}"] = selected_pitch_id
+                st.session_state[f"pres_page_num_{scenario_id}"] = current_page
+                st.rerun()
 
-            with nav_col_act:
-                # Presentation, Print, Alerts, Equipment action buttons
-                act_col1, act_col2, act_col3, act_col4, act_col5 = st.columns([1, 1, 1.3, 1, 1.3], vertical_alignment="center")
-                with act_col1:
-                    if st.button("Present", icon=":material/slideshow:", key=f"btn_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
-                        st.session_state[f"paag_present_active_{scenario_id}"] = True
-                        st.session_state[f"pres_pitch_id_{scenario_id}"] = selected_pitch_id
-                        st.session_state[f"pres_page_num_{scenario_id}"] = current_page
-                        st.rerun()
-                with act_col2:
-                    if st.button("Print", icon=":material/print:", key=f"btn_print_{scenario_id}", help="Print or export 8.5x11 or 11x17 landscape slide"):
-                        st.session_state[f"paag_print_active_{scenario_id}"] = True
-                        st.rerun()
-                with act_col3:
-                    alerts_cnt = sum(len(v) for v in pitch_summary.get("alerts", {}).values())
-                    a_label = f"Alerts ({alerts_cnt})" if alerts_cnt > 0 else "Alerts"
-                    if st.button(a_label, icon=":material/notification_important:", key=f"btn_alerts_{scenario_id}", help="View functional alerts detail"):
-                        alerts_detail_dialog(
-                            pitch_summary.get("alerts", {}),
-                            project_id=project_id,
-                            scenario_id=scenario_id,
-                            pitch_id=selected_pitch_id,
-                        )
-                with act_col4:
-                    tools_cnt = len(pitch_summary.get("tools", []))
-                    t_label = f"Tools ({tools_cnt})" if tools_cnt > 0 else "Tools"
-                    if st.button(t_label, icon=":material/construction:", key=f"btn_tools_{scenario_id}", help="View tools and equipment details"):
-                        tools_detail_dialog(pitch_summary.get("tools", []))
-                with act_col5:
-                    st.link_button(
-                        "Open Plan",
-                        url=build_page_url("process", query_params={"paag_tab": "Process plan"}),
-                        icon=":material/open_in_new:",
-                        help="Open Process plan in a separate browser window or tab to edit elements alongside slides",
-                    )
+            if slide_action_bar.button("Print", icon=":material/print:", key=f"btn_print_{scenario_id}", help="Print or export 8.5x11 or 11x17 landscape slide"):
+                st.session_state[f"paag_print_active_{scenario_id}"] = True
+                st.rerun()
+
+            alerts_cnt = sum(len(v) for v in pitch_summary.get("alerts", {}).values())
+            a_label = f"Alerts ({alerts_cnt})" if alerts_cnt > 0 else "Alerts"
+            if slide_action_bar.button(a_label, icon=":material/notification_important:", key=f"btn_alerts_{scenario_id}", help="View functional alerts detail"):
+                alerts_detail_dialog(
+                    pitch_summary.get("alerts", {}),
+                    project_id=project_id,
+                    scenario_id=scenario_id,
+                    pitch_id=selected_pitch_id,
+                )
+
+            tools_cnt = len(pitch_summary.get("tools", []))
+            t_label = f"Tools ({tools_cnt})" if tools_cnt > 0 else "Tools"
+            if slide_action_bar.button(t_label, icon=":material/construction:", key=f"btn_tools_{scenario_id}", help="View tools and equipment details"):
+                tools_detail_dialog(pitch_summary.get("tools", []))
+
+            slide_action_bar.link_button(
+                "Open Plan",
+                url=build_page_url("process", query_params={"paag_tab": "Process plan"}),
+                icon=":material/open_in_new:",
+                help="Open Process plan in a separate browser window or tab to edit elements alongside slides",
+            )
 
             if st.session_state.get(f"paag_present_active_{scenario_id}"):
                 presentation_mode_dialog(
@@ -4644,7 +4636,7 @@ with tab_slides:
                             )
                             st.caption("Photos: max **10 MB** • Videos: max **25 MB** • 3D CAD: max **50 MB** (STEP, STP)")
 
-                            st.caption("Or paste a screenshot directly from clipboard (Win+Shift+S / Ctrl+V):")
+                            st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
                             pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}")
 
                             aid_caption = st.text_input(
@@ -4728,13 +4720,11 @@ with tab_slides:
                                         st.success("Markup / crop / rotation applied", icon=":material/draw:")
                                     else:
                                         st.caption("No annotations added yet. Click below to crop, rotate 90°, or add arrows, focus boxes, callouts, or step numbers.")
-                                    b_col1, b_col2 = st.columns([1.5, 1])
-                                    with b_col1:
-                                        if st.button("Annotate / Add Shapes", icon=":material/draw:", key=f"btn_ann_staged_{selected_pitch_id}", type="secondary"):
-                                            annotate_staged_media_dialog(selected_pitch_id)
-                                    with b_col2:
-                                        if st.button("Delete", icon=":material/delete:", key=f"destructive_discard_staged_{selected_pitch_id}"):
-                                            discard_staged_media_dialog(selected_pitch_id)
+                                    staged_act_bar = st.container(horizontal=True)
+                                    if staged_act_bar.button("Annotate / Add Shapes", icon=":material/draw:", key=f"btn_ann_staged_{selected_pitch_id}", type="secondary"):
+                                        annotate_staged_media_dialog(selected_pitch_id)
+                                    if staged_act_bar.button("Delete", icon=":material/delete:", key=f"destructive_discard_staged_{selected_pitch_id}"):
+                                        discard_staged_media_dialog(selected_pitch_id)
 
                         submit_add = st.button("Add Visual Aid", icon=":material/add_photo_alternate:", type="primary", key=f"btn_add_visual_{selected_pitch_id}")
                         if submit_add:
@@ -4939,8 +4929,9 @@ with tab_slides:
                                     else:
                                         st.caption("Tagged Steps: *General pitch visual (all steps)*")
                             with g_col3:
+                                g_act_bar = st.container(horizontal=True)
                                 if media_item.get("media_type") == "image" and not str(media_item.get("file_path", "")).startswith(("http://", "https://")):
-                                    if st.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges"):
+                                    if g_act_bar.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges"):
                                         annotate_visual_media_dialog(
                                             media_id=media_item["id"],
                                             file_path=media_item.get("file_path", ""),
@@ -4950,7 +4941,7 @@ with tab_slides:
                                             project_id=project_id,
                                             scenario_id=scenario_id,
                                         )
-                                if st.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
+                                if g_act_bar.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
                                     edit_visual_media_dialog(
                                         media_id=media_item["id"],
                                         current_caption=media_item.get("caption", ""),
@@ -4961,7 +4952,7 @@ with tab_slides:
                                         scenario_id=scenario_id,
                                         current_url=media_item.get("file_path", "") if media_item.get("media_type") == "link" or str(media_item.get("file_path", "")).startswith(("http://", "https://")) else "",
                                     )
-                                if st.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{media_item['id']}"):
+                                if g_act_bar.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{media_item['id']}"):
                                     delete_visual_media_dialog(
                                         media_id=media_item["id"],
                                         caption=media_item.get("caption", ""),
@@ -4994,7 +4985,11 @@ with st.expander("Process at a Glance history", icon=":material/history:"):
     if combined_history.empty:
         st.caption("No standardized Process at a Glance changes have been recorded yet.")
     else:
-        display_history = combined_history.sort_values("created_at", ascending=False).drop(
+        display_history = combined_history.sort_values(
+            "created_at",
+            ascending=False,
+            key=lambda s: pd.to_datetime(s, errors="coerce", utc=True),
+        ).drop(
             columns=["details"], errors="ignore"
         )
         if "table_name" in display_history.columns:
@@ -5013,7 +5008,7 @@ with st.expander("Process at a Glance history", icon=":material/history:"):
                 "row_count": "Rows",
                 "editor_name": "Editor",
                 "created_at": st.column_config.DatetimeColumn(
-                    "When", format="MMM DD, YYYY HH:mm"
+                    "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
             },
         )

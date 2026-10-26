@@ -509,144 +509,72 @@ def delete_assembly_sections(
             or category_installed_count
         )
 
-        if cascade_delete_content:
-            # Delete Yamazumi work regions, elements, pitches, and areas
-            conn.execute(
-                f"""DELETE FROM yamazumi_work_regions WHERE area_id IN (
-                    SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
-                )""",
-                (project_id, *affected_ids),
-            )
-            conn.execute(
-                f"""DELETE FROM yamazumi_elements WHERE area_id IN (
-                    SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
-                )""",
-                (project_id, *affected_ids),
-            )
-            conn.execute(
-                f"""DELETE FROM yamazumi_pitches WHERE area_id IN (
-                    SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
-                )""",
-                (project_id, *affected_ids),
-            )
-            conn.execute(
-                f"DELETE FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
-            # Delete process plan groups
-            conn.execute(
-                f"DELETE FROM process_part_groups WHERE project_id=? AND section_id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
-            # Delete assembly grid categories and feature visibility
-            conn.execute(
-                f"DELETE FROM assembly_grid_feature_visibility WHERE project_id=? AND section_id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
-            conn.execute(
-                f"""DELETE FROM assembly_grid_categories
-                    WHERE project_id=? AND (section_id IN ({placeholders}) OR installed_section_id IN ({placeholders}))""",
-                (project_id, *affected_ids, *affected_ids),
-            )
-            # Clear assembly references
-            conn.execute(
-                f"UPDATE manufacturing_assemblies SET built_section_id=NULL WHERE project_id=? AND built_section_id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
-            conn.execute(
-                f"UPDATE manufacturing_assemblies SET installed_section_id=NULL WHERE project_id=? AND installed_section_id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
-            # Delete flow connections
-            conn.execute(
-                f"""DELETE FROM assembly_section_connections
-                    WHERE project_id=? AND (from_section_id IN ({placeholders}) OR to_section_id IN ({placeholders}))""",
-                (project_id, *affected_ids, *affected_ids),
-            )
-            # Delete part assignments (unassigning parts so they return to palette)
-            section_assignment_ids = [
-                str(r[0])
-                for r in conn.execute(
-                    f"SELECT id FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
-                    (project_id, *affected_ids),
-                ).fetchall()
-            ]
-            if section_assignment_ids:
-                _release_fishbone_assignment_references(
-                    conn, project_id, section_assignment_ids, timestamp, detach_pits_occurrences=True
-                )
-            conn.execute(
-                f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
-            # Delete sections
-            conn.execute(
-                f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
-        else:
-            if requires_repointing:
-                target_validation = _assembly_section_target_validation(
-                    conn, project_id, affected_ids, target_id or "", active_scenario_id
-                )
-                if not target_validation["valid"]:
-                    raise ValueError(str(target_validation["message"]))
-                yamazumi_repointed, yamazumi_merged = (
-                    _merge_yamazumi_areas_for_section_delete(
-                        conn, project_id, affected_ids, str(target_id), timestamp
-                    )
-                )
-                process_repointed = conn.execute(
-                    f"""UPDATE process_part_groups SET section_id=?, updated_at=?
-                        WHERE project_id=? AND section_id IN ({placeholders})""",
-                    (target_id, timestamp, project_id, *affected_ids),
-                ).rowcount
-                category_built_repointed = conn.execute(
-                    f"""UPDATE assembly_grid_categories
-                        SET section_id=?, updated_at=?
-                        WHERE project_id=? AND section_id IN ({placeholders})""",
-                    (target_id, timestamp, project_id, *affected_ids),
-                ).rowcount
-                category_installed_repointed = conn.execute(
-                    f"""UPDATE assembly_grid_categories
-                        SET installed_section_id=?, updated_at=?
-                        WHERE project_id=? AND installed_section_id IN ({placeholders})""",
-                    (target_id, timestamp, project_id, *affected_ids),
-                ).rowcount
-                for row in assembly_rows:
-                    if _catalog_text(row.get("built_section_id")) in affected_ids:
-                        assembly_replacements.append(
-                            {
-                                "assembly_id": str(row["assembly_id"]),
-                                "field": "built_section_id",
-                                "section_id": target_id,
-                            }
-                        )
-                    if _catalog_text(row.get("installed_section_id")) in affected_ids:
-                        assembly_replacements.append(
-                            {
-                                "assembly_id": str(row["assembly_id"]),
-                                "field": "installed_section_id",
-                                "section_id": target_id,
-                            }
-                        )
-            elif target_id:
-                _assembly_section_target_validation(
-                    conn, project_id, affected_ids, target_id, active_scenario_id
-                )
-
-            if assembly_replacements:
-                repoint_assembly_section_references(
-                    project_id, assembly_replacements, connection=conn
-                )
-
-            if rehome_parts and target_id:
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+        sec_names = [str(row["name"] or row["id"]) for row in section_rows]
+        sec_label = sec_names[0] if len(sec_names) == 1 else f"{len(sec_names)} sections: {', '.join(sec_names[:4])}"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Fishbone section",
+            entity_table="assembly_sections",
+            entity_id=affected_ids[0],
+            entity_label=sec_label,
+        ):
+            if cascade_delete_content:
+                # Delete Yamazumi work regions, elements, pitches, and areas
                 conn.execute(
-                    f"""UPDATE fishbone_part_assignments SET section_id=?, updated_at=?
-                        WHERE project_id=? AND section_id IN ({placeholders})""",
-                    (target_id, timestamp, project_id, *affected_ids),
+                    f"""DELETE FROM yamazumi_work_regions WHERE area_id IN (
+                        SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
+                    )""",
+                    (project_id, *affected_ids),
                 )
-            else:
+                conn.execute(
+                    f"""DELETE FROM yamazumi_elements WHERE area_id IN (
+                        SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
+                    )""",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"""DELETE FROM yamazumi_pitches WHERE area_id IN (
+                        SELECT id FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})
+                    )""",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"DELETE FROM yamazumi_areas WHERE project_id=? AND section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                # Delete process plan groups
+                conn.execute(
+                    f"DELETE FROM process_part_groups WHERE project_id=? AND section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                # Delete assembly grid categories and feature visibility
+                conn.execute(
+                    f"DELETE FROM assembly_grid_feature_visibility WHERE project_id=? AND section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"""DELETE FROM assembly_grid_categories
+                        WHERE project_id=? AND (section_id IN ({placeholders}) OR installed_section_id IN ({placeholders}))""",
+                    (project_id, *affected_ids, *affected_ids),
+                )
+                # Clear assembly references
+                conn.execute(
+                    f"UPDATE manufacturing_assemblies SET built_section_id=NULL WHERE project_id=? AND built_section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                conn.execute(
+                    f"UPDATE manufacturing_assemblies SET installed_section_id=NULL WHERE project_id=? AND installed_section_id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
+                # Delete flow connections
+                conn.execute(
+                    f"""DELETE FROM assembly_section_connections
+                        WHERE project_id=? AND (from_section_id IN ({placeholders}) OR to_section_id IN ({placeholders}))""",
+                    (project_id, *affected_ids, *affected_ids),
+                )
+                # Delete part assignments (unassigning parts so they return to palette)
                 section_assignment_ids = [
                     str(r[0])
                     for r in conn.execute(
@@ -662,81 +590,164 @@ def delete_assembly_sections(
                     f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
                     (project_id, *affected_ids),
                 )
-
-            if target_id:
-                # Delete connections between affected_ids and target_id (avoid self loops) and internal connections among affected_ids
+                # Delete sections
                 conn.execute(
-                    f"""DELETE FROM assembly_section_connections
-                        WHERE project_id=? AND (
-                            (from_section_id IN ({placeholders}) AND to_section_id=?) OR
-                            (to_section_id IN ({placeholders}) AND from_section_id=?) OR
-                            (from_section_id IN ({placeholders}) AND to_section_id IN ({placeholders}))
-                        )""",
-                    (project_id, *affected_ids, target_id, *affected_ids, target_id, *affected_ids, *affected_ids),
-                )
-                # Re-route incoming connections to target_id
-                existing_incoming = {
-                    row["from_section_id"]
-                    for row in conn.execute(
-                        "SELECT from_section_id FROM assembly_section_connections WHERE project_id=? AND to_section_id=?",
-                        (project_id, target_id),
-                    ).fetchall()
-                }
-                for c_row in conn.execute(
-                    f"SELECT id, from_section_id FROM assembly_section_connections WHERE project_id=? AND to_section_id IN ({placeholders})",
+                    f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
                     (project_id, *affected_ids),
-                ).fetchall():
-                    cid = c_row["id"]
-                    from_sid = c_row["from_section_id"]
-                    if from_sid in existing_incoming:
-                        conn.execute("DELETE FROM assembly_section_connections WHERE id=?", (cid,))
-                    else:
-                        conn.execute(
-                            "UPDATE assembly_section_connections SET to_section_id=?, updated_at=? WHERE id=?",
-                            (target_id, timestamp, cid),
-                        )
-                        existing_incoming.add(from_sid)
-
-                # Re-route outgoing connections from target_id
-                existing_outgoing = {
-                    row["to_section_id"]
-                    for row in conn.execute(
-                        "SELECT to_section_id FROM assembly_section_connections WHERE project_id=? AND from_section_id=?",
-                        (project_id, target_id),
-                    ).fetchall()
-                }
-                for c_row in conn.execute(
-                    f"SELECT id, to_section_id FROM assembly_section_connections WHERE project_id=? AND from_section_id IN ({placeholders})",
-                    (project_id, *affected_ids),
-                ).fetchall():
-                    cid = c_row["id"]
-                    to_sid = c_row["to_section_id"]
-                    if to_sid in existing_outgoing:
-                        conn.execute("DELETE FROM assembly_section_connections WHERE id=?", (cid,))
-                    else:
-                        conn.execute(
-                            "UPDATE assembly_section_connections SET from_section_id=?, updated_at=? WHERE id=?",
-                            (target_id, timestamp, cid),
-                        )
-                        existing_outgoing.add(to_sid)
-
-                # Clean up any lingering connections involving affected_ids
-                conn.execute(
-                    f"""DELETE FROM assembly_section_connections
-                        WHERE project_id=? AND (from_section_id IN ({placeholders}) OR to_section_id IN ({placeholders}))""",
-                    (project_id, *affected_ids, *affected_ids),
                 )
             else:
-                conn.execute(
-                    f"""DELETE FROM assembly_section_connections
-                        WHERE project_id=? AND (from_section_id IN ({placeholders}) OR to_section_id IN ({placeholders}))""",
-                    (project_id, *affected_ids, *affected_ids),
-                )
+                if requires_repointing:
+                    target_validation = _assembly_section_target_validation(
+                        conn, project_id, affected_ids, target_id or "", active_scenario_id
+                    )
+                    if not target_validation["valid"]:
+                        raise ValueError(str(target_validation["message"]))
+                    yamazumi_repointed, yamazumi_merged = (
+                        _merge_yamazumi_areas_for_section_delete(
+                            conn, project_id, affected_ids, str(target_id), timestamp
+                        )
+                    )
+                    process_repointed = conn.execute(
+                        f"""UPDATE process_part_groups SET section_id=?, updated_at=?
+                            WHERE project_id=? AND section_id IN ({placeholders})""",
+                        (target_id, timestamp, project_id, *affected_ids),
+                    ).rowcount
+                    category_built_repointed = conn.execute(
+                        f"""UPDATE assembly_grid_categories
+                            SET section_id=?, updated_at=?
+                            WHERE project_id=? AND section_id IN ({placeholders})""",
+                        (target_id, timestamp, project_id, *affected_ids),
+                    ).rowcount
+                    category_installed_repointed = conn.execute(
+                        f"""UPDATE assembly_grid_categories
+                            SET installed_section_id=?, updated_at=?
+                            WHERE project_id=? AND installed_section_id IN ({placeholders})""",
+                        (target_id, timestamp, project_id, *affected_ids),
+                    ).rowcount
+                    for row in assembly_rows:
+                        if _catalog_text(row.get("built_section_id")) in affected_ids:
+                            assembly_replacements.append(
+                                {
+                                    "assembly_id": str(row["assembly_id"]),
+                                    "field": "built_section_id",
+                                    "section_id": target_id,
+                                }
+                            )
+                        if _catalog_text(row.get("installed_section_id")) in affected_ids:
+                            assembly_replacements.append(
+                                {
+                                    "assembly_id": str(row["assembly_id"]),
+                                    "field": "installed_section_id",
+                                    "section_id": target_id,
+                                }
+                            )
+                elif target_id:
+                    _assembly_section_target_validation(
+                        conn, project_id, affected_ids, target_id, active_scenario_id
+                    )
 
-            conn.execute(
-                f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
-                (project_id, *affected_ids),
-            )
+                if assembly_replacements:
+                    repoint_assembly_section_references(
+                        project_id, assembly_replacements, connection=conn
+                    )
+
+                if rehome_parts and target_id:
+                    conn.execute(
+                        f"""UPDATE fishbone_part_assignments SET section_id=?, updated_at=?
+                            WHERE project_id=? AND section_id IN ({placeholders})""",
+                        (target_id, timestamp, project_id, *affected_ids),
+                    )
+                else:
+                    section_assignment_ids = [
+                        str(r[0])
+                        for r in conn.execute(
+                            f"SELECT id FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
+                            (project_id, *affected_ids),
+                        ).fetchall()
+                    ]
+                    if section_assignment_ids:
+                        _release_fishbone_assignment_references(
+                            conn, project_id, section_assignment_ids, timestamp, detach_pits_occurrences=True
+                        )
+                    conn.execute(
+                        f"DELETE FROM fishbone_part_assignments WHERE project_id=? AND section_id IN ({placeholders})",
+                        (project_id, *affected_ids),
+                    )
+
+                if target_id:
+                    # Delete connections between affected_ids and target_id (avoid self loops) and internal connections among affected_ids
+                    conn.execute(
+                        f"""DELETE FROM assembly_section_connections
+                            WHERE project_id=? AND (
+                                (from_section_id IN ({placeholders}) AND to_section_id=?) OR
+                                (to_section_id IN ({placeholders}) AND from_section_id=?) OR
+                                (from_section_id IN ({placeholders}) AND to_section_id IN ({placeholders}))
+                            )""",
+                        (project_id, *affected_ids, target_id, *affected_ids, target_id, *affected_ids, *affected_ids),
+                    )
+                    # Re-route incoming connections to target_id
+                    existing_incoming = {
+                        row["from_section_id"]
+                        for row in conn.execute(
+                            "SELECT from_section_id FROM assembly_section_connections WHERE project_id=? AND to_section_id=?",
+                            (project_id, target_id),
+                        ).fetchall()
+                    }
+                    for c_row in conn.execute(
+                        f"SELECT id, from_section_id FROM assembly_section_connections WHERE project_id=? AND to_section_id IN ({placeholders})",
+                        (project_id, *affected_ids),
+                    ).fetchall():
+                        cid = c_row["id"]
+                        from_sid = c_row["from_section_id"]
+                        if from_sid in existing_incoming:
+                            conn.execute("DELETE FROM assembly_section_connections WHERE id=?", (cid,))
+                        else:
+                            conn.execute(
+                                "UPDATE assembly_section_connections SET to_section_id=?, updated_at=? WHERE id=?",
+                                (target_id, timestamp, cid),
+                            )
+                            existing_incoming.add(from_sid)
+
+                    # Re-route outgoing connections from target_id
+                    existing_outgoing = {
+                        row["to_section_id"]
+                        for row in conn.execute(
+                            "SELECT to_section_id FROM assembly_section_connections WHERE project_id=? AND from_section_id=?",
+                            (project_id, target_id),
+                        ).fetchall()
+                    }
+                    for c_row in conn.execute(
+                        f"SELECT id, to_section_id FROM assembly_section_connections WHERE project_id=? AND from_section_id IN ({placeholders})",
+                        (project_id, *affected_ids),
+                    ).fetchall():
+                        cid = c_row["id"]
+                        to_sid = c_row["to_section_id"]
+                        if to_sid in existing_outgoing:
+                            conn.execute("DELETE FROM assembly_section_connections WHERE id=?", (cid,))
+                        else:
+                            conn.execute(
+                                "UPDATE assembly_section_connections SET from_section_id=?, updated_at=? WHERE id=?",
+                                (target_id, timestamp, cid),
+                            )
+                            existing_outgoing.add(to_sid)
+
+                    # Clean up any lingering connections involving affected_ids
+                    conn.execute(
+                        f"""DELETE FROM assembly_section_connections
+                            WHERE project_id=? AND (from_section_id IN ({placeholders}) OR to_section_id IN ({placeholders}))""",
+                        (project_id, *affected_ids, *affected_ids),
+                    )
+                else:
+                    conn.execute(
+                        f"""DELETE FROM assembly_section_connections
+                            WHERE project_id=? AND (from_section_id IN ({placeholders}) OR to_section_id IN ({placeholders}))""",
+                        (project_id, *affected_ids, *affected_ids),
+                    )
+
+                conn.execute(
+                    f"DELETE FROM assembly_sections WHERE project_id=? AND id IN ({placeholders})",
+                    (project_id, *affected_ids),
+                )
 
     return {
         **impact,
@@ -1486,12 +1497,38 @@ def delete_fishbone_part_assignments(project_id: str, assignment_ids: list[str])
                 "One or more selected Fishbone uses are approved PITS BOM occurrences. "
                 "Detach those occurrences in Import/Export Projects before deleting the uses."
             )
-        _release_fishbone_assignment_references(conn, project_id, selected_ids, timestamp)
-        cursor = conn.execute(
-            f"""DELETE FROM fishbone_part_assignments
-                WHERE project_id=? AND id IN ({placeholders})""",
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+        label_rows = conn.execute(
+            f"""SELECT p.part_number, s.name AS section_name
+                FROM fishbone_part_assignments a
+                LEFT JOIN parts p ON p.id = a.part_id
+                LEFT JOIN assembly_sections s ON s.id = a.section_id
+                WHERE a.project_id=? AND a.id IN ({placeholders})""",
             (project_id, *selected_ids),
+        ).fetchall()
+        labels = [
+            f"{r['part_number'] or 'Part'} in {r['section_name'] or 'Section'}"
+            for r in label_rows
+        ]
+        assign_label = (
+            labels[0]
+            if len(labels) == 1
+            else f"{len(selected_ids)} placements: {', '.join(labels[:3])}"
         )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Fishbone part placement",
+            entity_table="fishbone_part_assignments",
+            entity_id=selected_ids[0],
+            entity_label=assign_label,
+        ):
+            _release_fishbone_assignment_references(conn, project_id, selected_ids, timestamp)
+            cursor = conn.execute(
+                f"""DELETE FROM fishbone_part_assignments
+                    WHERE project_id=? AND id IN ({placeholders})""",
+                (project_id, *selected_ids),
+            )
         return int(cursor.rowcount)
 
 def delete_fishbone_part_assignment(project_id: str, assignment_id: str) -> bool:
@@ -1578,14 +1615,40 @@ def replace_fishbone_part_assignments(
             records,
         )
         if stale_ids:
+            from utils.recycle_bin_store import capture_deletion_to_recycle_bin
             stale_list = list(stale_ids)
-            _release_fishbone_assignment_references(conn, project_id, stale_list, timestamp)
             stale_placeholders = ",".join("?" for _ in stale_list)
-            conn.execute(
-                f"""DELETE FROM fishbone_part_assignments
-                    WHERE project_id=? AND id IN ({stale_placeholders})""",
+            label_rows = conn.execute(
+                f"""SELECT p.part_number, s.name AS section_name
+                    FROM fishbone_part_assignments a
+                    LEFT JOIN parts p ON p.id = a.part_id
+                    LEFT JOIN assembly_sections s ON s.id = a.section_id
+                    WHERE a.project_id=? AND a.id IN ({stale_placeholders})""",
                 (project_id, *stale_list),
+            ).fetchall()
+            labels = [
+                f"{r['part_number'] or 'Part'} in {r['section_name'] or 'Section'}"
+                for r in label_rows
+            ]
+            assign_label = (
+                labels[0]
+                if len(labels) == 1
+                else f"{len(stale_list)} placements: {', '.join(labels[:3])}"
             )
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                entity_type="Fishbone part placement",
+                entity_table="fishbone_part_assignments",
+                entity_id=stale_list[0],
+                entity_label=assign_label,
+            ):
+                _release_fishbone_assignment_references(conn, project_id, stale_list, timestamp)
+                conn.execute(
+                    f"""DELETE FROM fishbone_part_assignments
+                        WHERE project_id=? AND id IN ({stale_placeholders})""",
+                    (project_id, *stale_list),
+                )
     return len(records)
 
 def save_fishbone_plan(
@@ -2049,22 +2112,44 @@ def delete_assembly_section_connection(
         ).fetchone()
         if not row:
             return
-        conn.execute(
-            "DELETE FROM assembly_section_connections WHERE id = ? AND project_id = ?",
-            (connection_id, project_id),
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+        from_sec = conn.execute(
+            "SELECT name FROM assembly_sections WHERE id=? AND project_id=?",
+            (row["from_section_id"], project_id),
+        ).fetchone()
+        to_sec = conn.execute(
+            "SELECT name FROM assembly_sections WHERE id=? AND project_id=?",
+            (row["to_section_id"], project_id),
+        ).fetchone()
+        conn_label = (
+            f"{from_sec['name'] if from_sec else row['from_section_id']} → "
+            f"{to_sec['name'] if to_sec else row['to_section_id']} ({row['connection_type']})"
         )
-        if row["connection_type"] == "subassembly":
-            other = conn.execute(
-                """SELECT to_section_id FROM assembly_section_connections
-                   WHERE project_id = ? AND from_section_id = ? AND connection_type = 'subassembly'
-                   LIMIT 1""",
-                (project_id, row["from_section_id"]),
-            ).fetchone()
-            new_parent = other["to_section_id"] if other else None
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Fishbone section connection",
+            entity_table="assembly_section_connections",
+            entity_id=connection_id,
+            entity_label=conn_label,
+            deleted_by=editor_name,
+        ):
             conn.execute(
-                "UPDATE assembly_sections SET parent_id = ?, updated_at = ? WHERE id = ? AND project_id = ?",
-                (new_parent, timestamp, row["from_section_id"], project_id),
+                "DELETE FROM assembly_section_connections WHERE id = ? AND project_id = ?",
+                (connection_id, project_id),
             )
+            if row["connection_type"] == "subassembly":
+                other = conn.execute(
+                    """SELECT to_section_id FROM assembly_section_connections
+                       WHERE project_id = ? AND from_section_id = ? AND connection_type = 'subassembly'
+                       LIMIT 1""",
+                    (project_id, row["from_section_id"]),
+                ).fetchone()
+                new_parent = other["to_section_id"] if other else None
+                conn.execute(
+                    "UPDATE assembly_sections SET parent_id = ?, updated_at = ? WHERE id = ? AND project_id = ?",
+                    (new_parent, timestamp, row["from_section_id"], project_id),
+                )
         record_audit_event(
             project_id,
             "Fishbone framework",

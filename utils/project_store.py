@@ -9,7 +9,7 @@ globals().update({name: value for name, value in vars(_db_core).items() if not n
 
 @cached_store_read
 def projects() -> list[dict]:
-    return query("SELECT * FROM projects ORDER BY updated_at DESC")
+    return query("SELECT * FROM projects ORDER BY datetime(updated_at) DESC, updated_at DESC")
 
 @cached_store_read
 def get_project(project_id: str) -> dict | None:
@@ -76,7 +76,7 @@ def planning_scenarios(project_id: str, include_archived: bool = False) -> list[
             FROM planning_scenarios s
             LEFT JOIN planning_scenarios parent ON parent.id=s.parent_scenario_id
             WHERE s.project_id=? {archived_clause}
-            ORDER BY s.revision_sequence DESC, s.created_at DESC"""
+            ORDER BY s.revision_sequence DESC, datetime(s.created_at) DESC, s.created_at DESC"""
     rows = query(sql, (project_id,))
     if not rows and project_id and is_cacheable_runtime():
         created_default = False
@@ -889,6 +889,32 @@ def update_project(project_id: str, values: dict) -> None:
 def replace_concerns(project_id: str, edited: pd.DataFrame) -> None:
     fields = ["category", "subject", "detail", "owner", "priority", "status", "related_part", "related_station"]
     with connection() as conn:
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+        existing_concerns = conn.execute(
+            "SELECT id, subject FROM concerns WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        kept_ids = {
+            str(row.get("id")).strip()
+            for _, row in edited.iterrows()
+            if str(row.get("subject", "")).strip()
+            and row.get("id")
+            and not pd.isna(row.get("id"))
+        }
+        for c_row in existing_concerns:
+            c_id = str(c_row["id"])
+            if c_id not in kept_ids:
+                with capture_deletion_to_recycle_bin(
+                    conn,
+                    project_id=project_id,
+                    entity_type="Concern",
+                    entity_table="concerns",
+                    entity_id=c_id,
+                    entity_label=str(c_row["subject"] or c_id),
+                ):
+                    conn.execute(
+                        "DELETE FROM concerns WHERE id = ? AND project_id = ?",
+                        (c_id, project_id),
+                    )
         conn.execute("DELETE FROM concerns WHERE project_id = ?", (project_id,))
         for _, row in edited.iterrows():
             if not str(row.get("subject", "")).strip():
@@ -940,15 +966,30 @@ def delete_project(project_id: str, editor_name: str = "") -> dict[str, Any]:
         tables, record_counts = _registered_rows(conn, project_id)
         uploads = _upload_manifest(tables)
 
-        conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Project",
+            entity_table="projects",
+            entity_id=project_id,
+            entity_label=project_name,
+            deleted_by=editor_name,
+            extra_file_paths=[
+                str(u.get("database_path") or u.get("source_path") or "")
+                for u in uploads
+            ],
+        ):
+            conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
 
     deleted_files_count = 0
     for upload in uploads:
         file_path = upload.get("source_path")
         if file_path and isinstance(file_path, Path) and file_path.is_file():
             try:
-                file_path.unlink()
-                deleted_files_count += 1
+                from utils.recycle_bin_store import safe_unlink_upload_path
+                if safe_unlink_upload_path(file_path):
+                    deleted_files_count += 1
             except OSError:
                 pass
 

@@ -753,7 +753,8 @@ def _unlink_part_upload_path(raw_path: str) -> None:
     p = Path(cleaned)
     try:
         if p.exists() and p.is_file() and UPLOAD_DIR.resolve() in p.resolve().parents:
-            p.unlink(missing_ok=True)
+            from utils.recycle_bin_store import safe_unlink_upload_path
+            safe_unlink_upload_path(p)
     except OSError:
         pass
 
@@ -767,10 +768,6 @@ def delete_project_part(project_id: str, part_id: str) -> str:
         ).fetchone()
         if not part:
             raise ValueError("That part no longer exists.")
-        conn.execute(
-            "DELETE FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id=?",
-            (project_id, part_id),
-        )
         supplemental_paths = [
             p
             for row in conn.execute(
@@ -779,7 +776,29 @@ def delete_project_part(project_id: str, part_id: str) -> str:
             for p in (row[0], row[1])
             if p
         ]
-        conn.execute("DELETE FROM parts WHERE id=? AND project_id=?", (part_id, project_id))
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+        desc_row = conn.execute(
+            "SELECT description FROM parts WHERE id=? AND project_id=?",
+            (part_id, project_id),
+        ).fetchone()
+        part_desc = str(desc_row["description"] or "").strip() if desc_row else ""
+        part_label = f"{part['part_number']} — {part_desc}" if part_desc else str(part["part_number"])
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Part",
+            entity_table="parts",
+            entity_id=part_id,
+            entity_label=part_label,
+            extra_file_paths=list(
+                dict.fromkeys([part["image_path"], part["original_image_path"], *supplemental_paths])
+            ),
+        ):
+            conn.execute(
+                "DELETE FROM manufacturing_assemblies WHERE project_id=? AND catalog_part_id=?",
+                (project_id, part_id),
+            )
+            conn.execute("DELETE FROM parts WHERE id=? AND project_id=?", (part_id, project_id))
     for raw_path in dict.fromkeys([part["image_path"], part["original_image_path"], *supplemental_paths]):
         _unlink_part_upload_path(raw_path)
     return str(part["part_number"])
@@ -916,19 +935,49 @@ def set_part_image_url(part_id: str, url: str, *, caption: str = "") -> str:
 def clear_part_image(part_id: str, *, move_to_additional_views: bool = False) -> bool:
     timestamp = now_iso()
     archived = False
+    old_paths: list[str] = []
     with connection() as conn:
         if move_to_additional_views:
             archived = _archive_previous_primary_part_image(conn, part_id, timestamp)
+            conn.execute(
+                "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
+                (timestamp, part_id),
+            )
         else:
-            row = conn.execute("SELECT image_path, original_image_path FROM parts WHERE id=?", (part_id,)).fetchone()
-            if row:
-                for old_p in dict.fromkeys([str(row["image_path"] or ""), str(row["original_image_path"] or "")]):
-                    if old_p:
-                        _unlink_part_upload_path(old_p)
-        conn.execute(
-            "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
-            (timestamp, part_id),
-        )
+            from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+            row = conn.execute(
+                "SELECT project_id, part_number, image_path, original_image_path, image_caption FROM parts WHERE id=?",
+                (part_id,),
+            ).fetchone()
+            if row and (row["image_path"] or row["original_image_path"]):
+                old_paths = [
+                    p
+                    for p in dict.fromkeys(
+                        [str(row["image_path"] or ""), str(row["original_image_path"] or "")]
+                    )
+                    if p
+                ]
+                caption = str(row["image_caption"] or "Primary image").strip()
+                with capture_deletion_to_recycle_bin(
+                    conn,
+                    project_id=str(row["project_id"] or ""),
+                    entity_type="Part primary image",
+                    entity_table="parts",
+                    entity_id=part_id,
+                    entity_label=f"{row['part_number']} — {caption}",
+                    extra_file_paths=old_paths,
+                ):
+                    conn.execute(
+                        "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
+                        (timestamp, part_id),
+                    )
+            else:
+                conn.execute(
+                    "UPDATE parts SET image_path = '', original_image_path = '', annotations_json = '', image_caption = '', updated_at = ? WHERE id = ?",
+                    (timestamp, part_id),
+                )
+    for old_p in old_paths:
+        _unlink_part_upload_path(old_p)
     return archived
 
 
@@ -1130,11 +1179,37 @@ def update_part_supplemental_image_annotations(
 
 
 def delete_part_image(image_id: str) -> None:
-    rows = query("SELECT image_path, original_image_path FROM part_images WHERE id=?", (image_id,))
-    if rows:
-        for old_p in dict.fromkeys([str(rows[0]["image_path"] or ""), str(rows[0].get("original_image_path") or "")]):
-            _unlink_part_upload_path(old_p)
-    execute("DELETE FROM part_images WHERE id=?", (image_id,))
+    from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+    old_paths: list[str] = []
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT pi.id, pi.part_id, pi.image_path, pi.original_image_path, pi.image_type, pi.caption,
+                      p.project_id, p.part_number
+               FROM part_images pi
+               LEFT JOIN parts p ON p.id = pi.part_id
+               WHERE pi.id=?""",
+            (image_id,),
+        ).fetchone()
+        if not row:
+            return
+        old_paths = list(
+            dict.fromkeys([str(row["image_path"] or ""), str(row["original_image_path"] or "")])
+        )
+        proj_id = str(row["project_id"] or "")
+        p_num = str(row["part_number"] or row["part_id"] or "")
+        caption = str(row["caption"] or row["image_type"] or "Supplemental view").strip()
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=proj_id,
+            entity_type="Part image",
+            entity_table="part_images",
+            entity_id=image_id,
+            entity_label=f"{p_num} — {caption}",
+            extra_file_paths=old_paths,
+        ):
+            conn.execute("DELETE FROM part_images WHERE id=?", (image_id,))
+    for old_p in old_paths:
+        _unlink_part_upload_path(old_p)
 
 
 def promote_part_image_to_primary(part_id: str, image_id: str) -> dict:
@@ -2613,7 +2688,30 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
                 "SELECT DISTINCT part_id FROM part_feature_rules WHERE project_id=? AND feature_id=?",
                 (project_id, feature_id),
             ).fetchall()]
-            conn.execute("DELETE FROM complexity_features WHERE id=? AND project_id=?", (feature_id, project_id))
+            from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+            feat_row = conn.execute(
+                "SELECT category, name FROM complexity_features WHERE id=? AND project_id=?",
+                (feature_id, project_id),
+            ).fetchone()
+            feat_label = (
+                f"{feat_row['category']}: {feat_row['name']}".strip(": ")
+                if feat_row
+                else str(feature_id)
+            )
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                entity_type="Complexity feature",
+                entity_table="complexity_features",
+                entity_id=str(feature_id),
+                entity_label=feat_label,
+            ):
+                conn.execute("DELETE FROM complexity_features WHERE id=? AND project_id=?", (feature_id, project_id))
+                for part_id in affected_part_ids:
+                    conn.execute(
+                        "UPDATE parts SET model_applicability='', updated_at=? WHERE id=? AND project_id=?",
+                        (timestamp, part_id, project_id),
+                    )
             for part_id in affected_part_ids:
                 conn.execute(
                     "UPDATE parts SET model_applicability='', updated_at=? WHERE id=? AND project_id=?",
@@ -3006,10 +3104,22 @@ def delete_project_models(project_id: str, model_ids: list[str]) -> list[str]:
                 f"These models are still assigned elsewhere: {', '.join(sorted(blocked))}. "
                 "Remove those assignments first, or turn off Use in planning instead."
             )
-        conn.execute(
-            f"DELETE FROM project_models WHERE project_id=? AND id IN ({placeholders})",
-            (project_id, *selected_ids),
-        )
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+        for model in models:
+            m_id = str(model["id"])
+            m_label = str(model["display_name"] or model["model_number"] or m_id)
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                entity_type="Model",
+                entity_table="project_models",
+                entity_id=m_id,
+                entity_label=m_label,
+            ):
+                conn.execute(
+                    "DELETE FROM project_models WHERE project_id=? AND id=?",
+                    (project_id, m_id),
+                )
         ts = now_iso()
         _sync_assembly_catalog_part_applicability(conn, project_id, ts)
         _sync_bom_part_scenario_activity(conn, project_id, ts)

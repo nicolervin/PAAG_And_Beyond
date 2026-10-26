@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys as _sys
 from utils import db_core as _db_core
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin, safe_unlink_upload_path
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -1426,14 +1427,24 @@ def delete_assembly_grid_categories(
                 WHERE project_id=? AND category_id IN ({placeholders})""",
             (project_id, *normalized),
         ).fetchone()[0])
-        conn.execute(
-            f"""DELETE FROM assembly_grid_categories
-                WHERE project_id=? AND section_id=? AND id IN ({placeholders})""",
-            (project_id, section_id, *normalized),
-        )
-        applicability_changes = _sync_assembly_catalog_part_applicability(
-            conn, project_id, now_iso()
-        )
+        cat_names = [str(row["display_name"]) for row in categories]
+        label = cat_names[0] if len(cat_names) == 1 else f"{len(cat_names)} assembly categories ({', '.join(cat_names[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Assembly Grid Category",
+            entity_table="assembly_grid_categories",
+            entity_id=normalized[0] if len(normalized) == 1 else "",
+            entity_label=label,
+        ):
+            conn.execute(
+                f"""DELETE FROM assembly_grid_categories
+                    WHERE project_id=? AND section_id=? AND id IN ({placeholders})""",
+                (project_id, section_id, *normalized),
+            )
+            applicability_changes = _sync_assembly_catalog_part_applicability(
+                conn, project_id, now_iso()
+            )
     return {
         "deleted_count": len(normalized),
         "mapping_count": mapping_count,
@@ -2108,12 +2119,7 @@ def _assembly_image_target(assembly_id: str, uploaded_file) -> Path:
 def _remove_owned_upload(path_value) -> None:
     if not path_value:
         return
-    path = Path(str(path_value))
-    try:
-        if path.exists() and path.is_file() and UPLOAD_DIR.resolve() in path.resolve().parents:
-            path.unlink()
-    except OSError:
-        pass
+    safe_unlink_upload_path(str(path_value))
 
 def set_assembly_image(project_id: str, assembly_id: str, uploaded_file) -> str:
     target = _assembly_image_target(assembly_id, uploaded_file)
@@ -2171,7 +2177,7 @@ def delete_assembly_images(
         return 0
     placeholders = ",".join("?" for _ in normalized)
     with connection() as conn:
-        _require_catalog_assembly(conn, project_id, assembly_id)
+        assembly = _require_catalog_assembly(conn, project_id, assembly_id)
         rows = conn.execute(
             f"""SELECT id, image_path FROM manufacturing_assembly_images
                 WHERE project_id=? AND assembly_id=? AND id IN ({placeholders})""",
@@ -2179,11 +2185,20 @@ def delete_assembly_images(
         ).fetchall()
         if len(rows) != len(normalized):
             raise ValueError("One or more selected assembly images no longer exist.")
-        conn.execute(
-            f"""DELETE FROM manufacturing_assembly_images
-                WHERE project_id=? AND assembly_id=? AND id IN ({placeholders})""",
-            (project_id, assembly_id, *normalized),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Assembly Image",
+            entity_table="manufacturing_assembly_images",
+            entity_id=normalized[0] if len(normalized) == 1 else "",
+            entity_label=f"{len(rows)} assembly image(s) from {assembly['assembly_number']}",
+            extra_file_paths=[str(row["image_path"]) for row in rows],
+        ):
+            conn.execute(
+                f"""DELETE FROM manufacturing_assembly_images
+                    WHERE project_id=? AND assembly_id=? AND id IN ({placeholders})""",
+                (project_id, assembly_id, *normalized),
+            )
     for row in rows:
         _remove_owned_upload(row["image_path"])
     return len(rows)
@@ -2430,6 +2445,11 @@ def delete_assembly_catalog_rows(
     }
     image_paths: list[str] = []
     timestamp = now_iso()
+    deleted_labels = [
+        f"{all_rows[aid].get('assembly_number', '')} — {all_rows[aid].get('name', '')}".strip(" —")
+        for aid in sorted(deleted_ids) if aid in all_rows
+    ]
+    label = deleted_labels[0] if len(deleted_labels) == 1 else f"{len(deleted_ids)} manufacturing assemblies ({', '.join(deleted_labels[:3])})"
     with connection() as conn:
         if deleted_ids:
             placeholders = ",".join("?" for _ in deleted_ids)
@@ -2448,39 +2468,48 @@ def delete_assembly_catalog_rows(
                     (project_id, *deleted_ids),
                 ).fetchall()
             )
-        for depth, rows in impact["levels"].items():
-            if depth == 0 or actions.get(depth) == "Delete entirely":
-                continue
-            action = actions[depth]
-            for row in rows:
-                assembly_id = str(row["id"])
-                if assembly_id in deleted_ids:
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Manufacturing Assembly",
+            entity_table="manufacturing_assemblies",
+            entity_id=next(iter(deleted_ids)) if len(deleted_ids) == 1 else "",
+            entity_label=label,
+            extra_file_paths=image_paths,
+        ):
+            for depth, rows in impact["levels"].items():
+                if depth == 0 or actions.get(depth) == "Delete entirely":
                     continue
-                if action == "Become unassigned":
-                    conn.execute(
-                        """UPDATE manufacturing_assemblies
-                           SET parent_id=NULL, built_section_id=NULL, installed_section_id=NULL,
-                               updated_at=? WHERE id=? AND project_id=?""",
-                        (timestamp, assembly_id, project_id),
-                    )
-                else:
-                    parent_id = _catalog_text(row.get("parent_id")) or None
-                    while parent_id in deleted_ids:
-                        parent_id = (
-                            _catalog_text(all_rows.get(parent_id, {}).get("parent_id")) or None
+                action = actions[depth]
+                for row in rows:
+                    assembly_id = str(row["id"])
+                    if assembly_id in deleted_ids:
+                        continue
+                    if action == "Become unassigned":
+                        conn.execute(
+                            """UPDATE manufacturing_assemblies
+                               SET parent_id=NULL, built_section_id=NULL, installed_section_id=NULL,
+                                   updated_at=? WHERE id=? AND project_id=?""",
+                            (timestamp, assembly_id, project_id),
                         )
-                    conn.execute(
-                        """UPDATE manufacturing_assemblies SET parent_id=?, updated_at=?
-                           WHERE id=? AND project_id=?""",
-                        (parent_id, timestamp, assembly_id, project_id),
-                    )
-        if deleted_ids:
-            placeholders = ",".join("?" for _ in deleted_ids)
-            conn.execute(
-                f"""DELETE FROM manufacturing_assemblies
-                    WHERE project_id=? AND id IN ({placeholders})""",
-                (project_id, *deleted_ids),
-            )
+                    else:
+                        parent_id = _catalog_text(row.get("parent_id")) or None
+                        while parent_id in deleted_ids:
+                            parent_id = (
+                                _catalog_text(all_rows.get(parent_id, {}).get("parent_id")) or None
+                            )
+                        conn.execute(
+                            """UPDATE manufacturing_assemblies SET parent_id=?, updated_at=?
+                               WHERE id=? AND project_id=?""",
+                            (parent_id, timestamp, assembly_id, project_id),
+                        )
+            if deleted_ids:
+                placeholders = ",".join("?" for _ in deleted_ids)
+                conn.execute(
+                    f"""DELETE FROM manufacturing_assemblies
+                        WHERE project_id=? AND id IN ({placeholders})""",
+                    (project_id, *deleted_ids),
+                )
     for path in image_paths:
         _remove_owned_upload(path)
     return {**impact, "deleted_count": len(deleted_ids), "level_actions": actions}
@@ -2785,11 +2814,20 @@ def delete_manufacturing_assembly(project_id: str, assembly_id: str) -> str:
         ).fetchone()
         if not row:
             raise ValueError("That manufacturing assembly no longer exists.")
-        conn.execute(
-            "DELETE FROM manufacturing_assemblies WHERE id=? AND project_id=?",
-            (assembly_id, project_id),
-        )
-        return f"{row['assembly_number']} — {row['name']}"
+        label = f"{row['assembly_number']} — {row['name']}"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Manufacturing Assembly",
+            entity_table="manufacturing_assemblies",
+            entity_id=assembly_id,
+            entity_label=label,
+        ):
+            conn.execute(
+                "DELETE FROM manufacturing_assemblies WHERE id=? AND project_id=?",
+                (assembly_id, project_id),
+            )
+        return label
 
 def work_element_material_groups(
     project_id: str, scenario_id: str, yamazumi_element_id: str
@@ -2909,11 +2947,27 @@ def delete_work_element_material_group(
     project_id: str, scenario_id: str, group_id: str
 ) -> bool:
     with connection() as conn:
-        cursor = conn.execute(
-            """DELETE FROM work_element_material_groups
+        row = conn.execute(
+            """SELECT name FROM work_element_material_groups
                WHERE id=? AND project_id=? AND scenario_id=?""",
             (group_id, project_id, scenario_id),
-        )
+        ).fetchone()
+        if not row:
+            return False
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Work Element Material Group",
+            entity_table="work_element_material_groups",
+            entity_id=group_id,
+            entity_label=str(row["name"] or group_id),
+        ):
+            cursor = conn.execute(
+                """DELETE FROM work_element_material_groups
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (group_id, project_id, scenario_id),
+            )
         return bool(cursor.rowcount)
 
 def material_consumption_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:

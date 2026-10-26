@@ -9,6 +9,7 @@ import pandas as pd
 
 from utils.cache_store import cached_store_read
 from utils.pfmea_store import PFMEA_CLASSIFICATIONS
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 
 PATTERN_COLUMNS = [
@@ -870,15 +871,25 @@ def delete_pfmea_patterns(project_id: str, pattern_ids: list[str]) -> dict:
     with _store().connection() as conn:
         _validate_project(conn, project_id)
         found = conn.execute(
-            f"SELECT id FROM pfmea_patterns WHERE project_id=? AND id IN ({placeholders})",
+            f"SELECT id, label FROM pfmea_patterns WHERE project_id=? AND id IN ({placeholders})",
             (project_id, *ids),
         ).fetchall()
         if {str(row["id"]) for row in found} != set(ids):
             raise ValueError("One or more selected PFMEA patterns changed. Refresh and try again.")
-        cursor = conn.execute(
-            f"DELETE FROM pfmea_patterns WHERE project_id=? AND id IN ({placeholders})",
-            (project_id, *ids),
-        )
+        labels = [str(row["label"] or "") for row in found if row["label"]]
+        label = labels[0] if len(labels) == 1 else f"{len(ids)} PFMEA patterns ({', '.join(labels[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="PFMEA Pattern",
+            entity_table="pfmea_patterns",
+            entity_id=ids[0] if len(ids) == 1 else "",
+            entity_label=label,
+        ):
+            cursor = conn.execute(
+                f"DELETE FROM pfmea_patterns WHERE project_id=? AND id IN ({placeholders})",
+                (project_id, *ids),
+            )
     return {"row_count": int(cursor.rowcount), "deleted_ids": ids, "timestamp": timestamp}
 
 

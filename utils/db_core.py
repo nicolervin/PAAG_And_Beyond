@@ -15,6 +15,7 @@ import re
 from contextlib import closing, contextmanager, nullcontext
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from pathlib import Path
 
@@ -92,8 +93,38 @@ ERGONOMICS_RISK_CLASSIFICATIONS = (
     "Green",
 )
 
+EASTERN_TIMEZONE_NAME = "America/New_York"
+EASTERN_TIMEZONE = ZoneInfo(EASTERN_TIMEZONE_NAME)
+
+
 def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(EASTERN_TIMEZONE).replace(microsecond=0).isoformat()
+
+
+def to_eastern_iso(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(EASTERN_TIMEZONE).replace(microsecond=0).isoformat()
+
+
+def format_eastern_timestamp(value: object, fmt: str = "%b %d, %Y %H:%M") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(EASTERN_TIMEZONE).strftime(fmt)
 
 
 def _safe_positive_float(value: object, default: float = 60.0) -> float:
@@ -1398,19 +1429,25 @@ def _rebase_cross_platform_upload_paths(conn: sqlite3.Connection) -> int:
     if not upload_dir.exists():
         return 0
     updated_count = 0
-    existing_tables = {
+    existing_tables = [
         str(row[0])
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    }
-    for table_name, columns in _UPLOAD_PATH_COLUMNS:
-        if table_name not in existing_tables:
-            continue
-        table_cols = {
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    ]
+    explicit_cols_by_table = {tbl: set(cols) for tbl, cols in _UPLOAD_PATH_COLUMNS}
+    for table_name in existing_tables:
+        table_cols = [
             str(row[1])
             for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
-        }
-        active_cols = [c for c in columns if c in table_cols]
-        if not active_cols or "id" not in table_cols:
+        ]
+        if "id" not in table_cols:
+            continue
+        explicit_set = explicit_cols_by_table.get(table_name, set())
+        active_cols = [
+            c for c in table_cols if c in explicit_set or c.lower().endswith("_path")
+        ]
+        if not active_cols:
             continue
         col_select = ", ".join(f'"{c}"' for c in active_cols)
         non_empty_where = " OR ".join(f'TRIM(COALESCE("{c}", \'\')) <> \'\'' for c in active_cols)
@@ -2017,6 +2054,12 @@ def init_db() -> None:
         init_layout_schema(conn)
         init_process_visual_media_schema(conn)
         init_ergonomics_visual_media_schema(conn)
+        from utils.recycle_bin_store import (
+            init_recycle_bin_schema,
+            purge_expired_recycle_bin_items,
+        )
+        init_recycle_bin_schema(conn)
+        purge_expired_recycle_bin_items(conn)
         _upgrade_pfmea_entries_work_element_link(conn)
         _upgrade_quality_assignments_work_element_link(conn)
         _upgrade_equipment_process_links_work_element_link(conn)
@@ -2962,16 +3005,20 @@ def audit_history(project_id: str, table_name: str | None = None, limit: int = 1
         rows = query(
             """SELECT action, row_count, editor_name, details, created_at
                FROM audit_log WHERE project_id=? AND table_name=?
-               ORDER BY created_at DESC LIMIT ?""",
+               ORDER BY datetime(created_at) DESC, created_at DESC LIMIT ?""",
             (project_id, table_name, int(limit)),
         )
     else:
         rows = query(
             """SELECT table_name, action, row_count, editor_name, details, created_at
-               FROM audit_log WHERE project_id=? ORDER BY created_at DESC LIMIT ?""",
+               FROM audit_log WHERE project_id=?
+               ORDER BY datetime(created_at) DESC, created_at DESC LIMIT ?""",
             (project_id, int(limit)),
         )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty and "created_at" in df.columns:
+        df["created_at"] = df["created_at"].map(to_eastern_iso)
+    return df
 
 
 def backup_database(target_path: str | Path) -> Path:
@@ -3131,4 +3178,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'now_iso', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']

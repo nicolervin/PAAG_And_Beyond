@@ -11,9 +11,11 @@ import pandas as pd
 from utils.cache_store import cached_computation
 from utils.time_units import seconds_to_display, time_unit
 from utils.store import (
+    EASTERN_TIMEZONE,
     active_part_ids,
     assembly_sections,
     fishbone_part_assignments,
+    format_eastern_timestamp,
     get_planning_scenario,
     get_project,
     material_consumption_for_scenario,
@@ -894,9 +896,9 @@ def export_pfmea_to_company_template(
     ws["I10"] = "Assembly"
     ws["O6"] = f"PFMEA-{proj_name}"
     ws["O8"] = prepared_by or str(project.get("lead") or "")
-    created = str(project.get("created_at") or "")[:10]
-    ws["O10"] = created if created else datetime.now().strftime("%Y-%m-%d")
-    ws["O12"] = datetime.now().strftime("%Y-%m-%d")
+    created = format_eastern_timestamp(project.get("created_at"), "%Y-%m-%d")[:10]
+    ws["O10"] = created if created else datetime.now(EASTERN_TIMEZONE).strftime("%Y-%m-%d")
+    ws["O12"] = datetime.now(EASTERN_TIMEZONE).strftime("%Y-%m-%d")
     team = str(project.get("team") or "")
     if team:
         ws["C14"] = team

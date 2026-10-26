@@ -1789,7 +1789,9 @@ def _render_entries(project_id: str, scenario_id: str, work_element_id: str) -> 
                 "Upstream changes need review",
                 help="The current Process step or published Quality assignments differ from the reviewed PFMEA source.",
             ),
-            "updated_at": st.column_config.DatetimeColumn("Updated", format="MMM DD, YYYY HH:mm"),
+            "updated_at": st.column_config.DatetimeColumn(
+                "Updated", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
+            ),
         },
     )
     footer = editable_table_footer(

@@ -919,6 +919,54 @@ def render_ergonomics_slide(
         padding-top: 6px;
         border-top: 1px solid #f1f5f9;
       }}
+
+      /* Responsive adaptation for smaller monitors, split windows, tablets, and mobile phones */
+      @media (max-width: 1200px) {{
+        .ergo-slide:not(.print-tabloid):not(.print-letter) {{
+          aspect-ratio: auto;
+          min-height: auto;
+          overflow: visible;
+        }}
+      }}
+
+      @media (max-width: 960px) {{
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .ergo-header {{
+          grid-template-columns: 1fr;
+          gap: 6px;
+          text-align: left;
+        }}
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .header-main-title {{
+          text-align: left;
+        }}
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .header-main-title .main-op-title {{
+          white-space: normal;
+        }}
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .header-doc-control {{
+          align-items: flex-start;
+        }}
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .ergo-body {{
+          grid-template-columns: 1fr;
+        }}
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .ergo-visual-grid {{
+          min-height: 300px;
+        }}
+      }}
+
+      @media (max-width: 640px) {{
+        .ergo-slide:not(.print-tabloid):not(.print-letter) {{
+          padding: 10px;
+        }}
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .ergo-visual-grid.grid-2,
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .ergo-visual-grid.grid-3,
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .ergo-visual-grid.grid-4 {{
+          grid-template-columns: 1fr !important;
+          grid-template-rows: auto !important;
+        }}
+        .ergo-slide:not(.print-tabloid):not(.print-letter) .ergo-footer {{
+          flex-direction: column;
+          gap: 4px;
+        }}
+      }}
     </style>
     """
 
@@ -1023,6 +1071,8 @@ def render_ergonomics_presentation_deck(
         display: flex;
         justify-content: space-between;
         align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
         padding: 8px 16px;
         background: #1e293b;
         border-bottom: 1px solid #334155;
@@ -1032,6 +1082,7 @@ def render_ergonomics_presentation_deck(
       .deck-left-controls, .deck-center-controls, .deck-right-controls {{
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 8px;
       }}
 

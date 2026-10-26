@@ -15,6 +15,7 @@ from utils.cache_store import (
     is_scenario_task_completed,
     mark_scenario_task_completed,
 )
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 
 EQUIPMENT_FUNCTION_AREAS = (
@@ -481,10 +482,21 @@ def delete_equipment_types(
         if usage:
             summary = ", ".join(f"{row['label']} ({row['count']})" for row in usage)
             raise ValueError(f"Equipment Types in use cannot be deleted: {summary}.")
-        conn.execute(
-            f"DELETE FROM equipment_types WHERE project_id=? AND id IN ({placeholders})",
-            (project_id, *normalized),
-        )
+        labels = [str(row["label"]) for row in rows]
+        label = labels[0] if len(labels) == 1 else f"{len(normalized)} Equipment Types ({', '.join(labels[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Equipment Type",
+            entity_table="equipment_types",
+            entity_id=normalized[0] if len(normalized) == 1 else "",
+            entity_label=label,
+            deleted_by=editor,
+        ):
+            conn.execute(
+                f"DELETE FROM equipment_types WHERE project_id=? AND id IN ({placeholders})",
+                (project_id, *normalized),
+            )
         store.record_audit_event(
             project_id, "Equipment types", "Delete", len(normalized), editor,
             {"equipment_type_ids": normalized, "labels": [str(row["label"]) for row in rows], "store_timestamp": timestamp},
@@ -863,11 +875,23 @@ def delete_equipment_assets(
         return {"row_count": 0, "timestamp": store.now_iso()}
     placeholders = ",".join("?" for _ in normalized)
     timestamp = store.now_iso()
+    names = [str(item["name"]) for item in impact["equipment"]]
+    label = names[0] if len(names) == 1 else f"{len(normalized)} Equipment assets ({', '.join(names[:3])})"
     with store.connection() as conn:
-        conn.execute(
-            f"DELETE FROM equipment_assets WHERE project_id=? AND id IN ({placeholders})",
-            (project_id, *normalized),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Equipment Asset",
+            entity_table="equipment_assets",
+            entity_id=normalized[0] if len(normalized) == 1 else "",
+            entity_label=label,
+            deleted_by=editor,
+            extra_file_paths=[item["image_path"] for item in impact["equipment"] if item.get("image_path")],
+        ):
+            conn.execute(
+                f"DELETE FROM equipment_assets WHERE project_id=? AND id IN ({placeholders})",
+                (project_id, *normalized),
+            )
         store.record_audit_event(
             project_id, "Equipment assets", "Delete", len(normalized), editor,
             {**{key: value for key, value in impact.items() if key != "equipment"}, "equipment_ids": normalized, "names": [item["name"] for item in impact["equipment"]], "store_timestamp": timestamp},
@@ -1391,7 +1415,7 @@ def delete_equipment_image(project_id: str, equipment_id: str, editor_name: str)
     timestamp = store.now_iso()
     with store.connection() as conn:
         asset = conn.execute(
-            "SELECT image_path FROM equipment_assets WHERE id=? AND project_id=?",
+            "SELECT name, image_path FROM equipment_assets WHERE id=? AND project_id=?",
             (equipment_id, project_id),
         ).fetchone()
         if not asset:
@@ -1399,10 +1423,20 @@ def delete_equipment_image(project_id: str, equipment_id: str, editor_name: str)
         path = _text(asset["image_path"])
         if not path:
             return 0
-        conn.execute(
-            "UPDATE equipment_assets SET image_path='', updated_at=? WHERE id=? AND project_id=?",
-            (timestamp, equipment_id, project_id),
-        )
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type="Equipment Image",
+            entity_table="equipment_assets",
+            entity_id=equipment_id,
+            entity_label=f"Image for {asset['name']}",
+            deleted_by=editor,
+            extra_file_paths=[path],
+        ):
+            conn.execute(
+                "UPDATE equipment_assets SET image_path='', updated_at=? WHERE id=? AND project_id=?",
+                (timestamp, equipment_id, project_id),
+            )
         store.record_audit_event(
             project_id, "Equipment images", "Delete primary image", 1, editor,
             {"equipment_id": equipment_id, "store_timestamp": timestamp},
@@ -2016,18 +2050,27 @@ def delete_conveyor_zones(
             f"SELECT id, name, orientation_image_path FROM conveyor_zones WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
             (project_id, scenario_id, *normalized),
         ).fetchall()
-        for r in rows:
-            img = _text(r["orientation_image_path"])
-            if img:
-                store._remove_owned_upload(img)
-        conn.execute(
-            f"UPDATE yamazumi_pitches SET conveyor_zone_id=NULL WHERE conveyor_zone_id IN ({placeholders})",
-            tuple(normalized),
-        )
-        conn.execute(
-            f"DELETE FROM conveyor_zones WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
-            (project_id, scenario_id, *normalized),
-        )
+        names = [str(r["name"]) for r in rows]
+        label = names[0] if len(names) == 1 else f"{len(normalized)} Conveyor zones ({', '.join(names[:3])})"
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type="Conveyor Zone",
+            entity_table="conveyor_zones",
+            entity_id=normalized[0] if len(normalized) == 1 else "",
+            entity_label=label,
+            deleted_by=editor,
+            extra_file_paths=[_text(r["orientation_image_path"]) for r in rows if _text(r["orientation_image_path"])],
+        ):
+            conn.execute(
+                f"UPDATE yamazumi_pitches SET conveyor_zone_id=NULL WHERE conveyor_zone_id IN ({placeholders})",
+                tuple(normalized),
+            )
+            conn.execute(
+                f"DELETE FROM conveyor_zones WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
+                (project_id, scenario_id, *normalized),
+            )
         store.record_audit_event(
             project_id,
             "Conveyor zones",
@@ -2041,6 +2084,10 @@ def delete_conveyor_zones(
             },
             _conn=conn,
         )
+    for r in rows:
+        img = _text(r["orientation_image_path"])
+        if img:
+            store._remove_owned_upload(img)
     return {"row_count": len(normalized), "timestamp": timestamp}
 
 
@@ -2117,16 +2164,28 @@ def delete_conveyor_zone_image(
     previous = ""
     with store.connection() as conn:
         row = conn.execute(
-            "SELECT orientation_image_path FROM conveyor_zones WHERE id=? AND project_id=? AND scenario_id=?",
+            "SELECT name, orientation_image_path FROM conveyor_zones WHERE id=? AND project_id=? AND scenario_id=?",
             (zone_id, project_id, scenario_id),
         ).fetchone()
         if not row:
             raise ValueError("That conveyor zone no longer exists.")
         previous = _text(row["orientation_image_path"])
-        conn.execute(
-            "UPDATE conveyor_zones SET orientation_image_path='', updated_at=? WHERE id=? AND project_id=? AND scenario_id=?",
-            (timestamp, zone_id, project_id, scenario_id),
-        )
+        if previous:
+            with capture_deletion_to_recycle_bin(
+                conn,
+                project_id=project_id,
+                scenario_id=scenario_id,
+                entity_type="Conveyor Zone Image",
+                entity_table="conveyor_zones",
+                entity_id=zone_id,
+                entity_label=f"Orientation image for {row['name']}",
+                deleted_by=editor,
+                extra_file_paths=[previous],
+            ):
+                conn.execute(
+                    "UPDATE conveyor_zones SET orientation_image_path='', updated_at=? WHERE id=? AND project_id=? AND scenario_id=?",
+                    (timestamp, zone_id, project_id, scenario_id),
+                )
         store.record_audit_event(
             project_id,
             "Conveyor zones",

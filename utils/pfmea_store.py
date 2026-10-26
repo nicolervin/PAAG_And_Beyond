@@ -13,10 +13,12 @@ import math
 import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from utils.cache_store import cached_store_read
+from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 
 PFMEA_CLASSIFICATION_MEANINGS = {
@@ -346,7 +348,7 @@ def _source_key(source_type: str, source_id: str) -> str:
 
 
 def _source_version_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(ZoneInfo("America/New_York")).replace(microsecond=0).isoformat()
 
 
 def _source_values(value) -> list[str]:
@@ -684,27 +686,37 @@ def delete_pfmea_control_options(
         )
     placeholders = ",".join("?" for _ in ids)
     timestamp = _store().now_iso()
+    opt_labels = [str(l) for l in impact.get("labels", []) if str(l)]
+    label = opt_labels[0] if len(opt_labels) == 1 else f"{len(ids)} PFMEA {control_type} option(s) ({', '.join(opt_labels[:3])})"
     with _store().connection() as conn:
-        affected = conn.execute(
-            f"SELECT DISTINCT pfmea_cause_id FROM {selection_table} "
-            f"WHERE project_id=? AND {option_column} IN ({placeholders})",
-            (project_id, *ids),
-        ).fetchall()
-        for row in affected:
-            conn.execute(
-                """UPDATE pfmea_causes
-                   SET control_source_review_required=1,
-                       detection_review_required=CASE WHEN ?='Detection'
-                           THEN 1 ELSE detection_review_required END,
-                       updated_at=? WHERE id=? AND project_id=?""",
-                (control_type, timestamp, row["pfmea_cause_id"], project_id),
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            entity_type=f"PFMEA {control_type} Option",
+            entity_table=option_table,
+            entity_id=ids[0] if len(ids) == 1 else "",
+            entity_label=label,
+        ):
+            affected = conn.execute(
+                f"SELECT DISTINCT pfmea_cause_id FROM {selection_table} "
+                f"WHERE project_id=? AND {option_column} IN ({placeholders})",
+                (project_id, *ids),
+            ).fetchall()
+            for row in affected:
+                conn.execute(
+                    """UPDATE pfmea_causes
+                       SET control_source_review_required=1,
+                           detection_review_required=CASE WHEN ?='Detection'
+                               THEN 1 ELSE detection_review_required END,
+                           updated_at=? WHERE id=? AND project_id=?""",
+                    (control_type, timestamp, row["pfmea_cause_id"], project_id),
+                )
+            cursor = conn.execute(
+                f"DELETE FROM {option_table} WHERE project_id=? AND id IN ({placeholders})",
+                (project_id, *ids),
             )
-        cursor = conn.execute(
-            f"DELETE FROM {option_table} WHERE project_id=? AND id IN ({placeholders})",
-            (project_id, *ids),
-        )
-        if int(cursor.rowcount) != len(ids):
-            raise ValueError(f"One or more {control_type} options changed. Refresh and try again.")
+            if int(cursor.rowcount) != len(ids):
+                raise ValueError(f"One or more {control_type} options changed. Refresh and try again.")
     return impact | {"row_count": len(ids), "timestamp": timestamp}
 
 
@@ -2553,14 +2565,31 @@ def delete_pfmea_records(project_id: str, scenario_id: str, table: str,
                     "Enter Current editor before deleting PFMEA entries used by the "
                     "Control Plan working draft."
                 )
-        cursor = conn.execute(
-            f"DELETE FROM {table} WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
-            (project_id, scenario_id, *ids),
-        )
+        type_names = {
+            "pfmea_entries": "PFMEA Failure Mode Entry",
+            "pfmea_effects": "PFMEA Effect",
+            "pfmea_causes": "PFMEA Cause",
+            "pfmea_actions": "PFMEA Recommended Action",
+        }
+        entity_type = type_names.get(table, "PFMEA Record")
         timestamp = _store().now_iso()
-        for entry_id in entry_ids:
-            if conn.execute("SELECT 1 FROM pfmea_entries WHERE id=?", (entry_id,)).fetchone():
-                _rebuild_risk_rows(conn, project_id, scenario_id, entry_id, timestamp)
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type=entity_type,
+            entity_table=table,
+            entity_id=ids[0] if len(ids) == 1 else "",
+            entity_label=f"{len(ids)} {entity_type}(s)",
+            deleted_by=_text(editor_name),
+        ):
+            cursor = conn.execute(
+                f"DELETE FROM {table} WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})",
+                (project_id, scenario_id, *ids),
+            )
+            for entry_id in entry_ids:
+                if conn.execute("SELECT 1 FROM pfmea_entries WHERE id=?", (entry_id,)).fetchone():
+                    _rebuild_risk_rows(conn, project_id, scenario_id, entry_id, timestamp)
         if control_plan_item_ids:
             _store().record_audit_event(
                 project_id,

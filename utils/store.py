@@ -14,6 +14,7 @@ from utils import yamazumi_store as _yamazumi_store
 from utils import process_store as _process_store
 from utils import fishbone_store as _fishbone_store
 from utils import model_part_store as _model_part_store
+from utils import recycle_bin_store as _recycle_bin_store
 
 _DOMAIN_MODULES = [
     _project_store,
@@ -24,8 +25,17 @@ _DOMAIN_MODULES = [
     _process_store,
     _fishbone_store,
     _model_part_store,
+    _recycle_bin_store,
 ]
 
+for _rb_export_name in _recycle_bin_store.__domain_exports__:
+    _rb_obj = getattr(_recycle_bin_store, _rb_export_name, None)
+    if callable(_rb_obj) and _rb_export_name not in {
+        "init_recycle_bin_schema",
+        "capture_deletion_to_recycle_bin",
+    }:
+        setattr(_recycle_bin_store, _rb_export_name, _db_core.domain_entrypoint(_rb_obj))
+_db_core.register_domain_module(_recycle_bin_store, _recycle_bin_store.__domain_exports__)
 _db_core.sync_store_runtime()
 
 

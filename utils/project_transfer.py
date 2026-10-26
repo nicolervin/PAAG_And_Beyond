@@ -126,7 +126,7 @@ def _registered_rows(
         )
     }
     registered = {item.name for item in PROJECT_TRANSFER_TABLES}
-    unregistered = existing - registered
+    unregistered = existing - registered - {"recycle_bin_items"}
     missing = {
         table
         for table in unregistered

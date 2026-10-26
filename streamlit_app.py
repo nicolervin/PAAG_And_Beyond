@@ -28,6 +28,7 @@ from utils.store import (
     migrate_legacy_yamazumi_flags,
     planning_scenarios,
     projects,
+    recycle_bin_item_count,
     set_last_active_workspace,
 )
 
@@ -95,6 +96,46 @@ st.html(
     }
     div[data-testid="stMultiSelectDropdown"]:has([role="listbox"][data-empty="true"]) {
         display: none !important;
+    }
+    /* Responsive forgiving button and toolbar layout across screen sizes */
+    div[data-testid="stButton"] button,
+    div[data-testid="stDownloadButton"] button,
+    div[data-testid="stLinkButton"] a,
+    div[data-testid="stPopover"] > div > button {
+        min-height: 2.35rem;
+        height: auto !important;
+        white-space: normal !important;
+        word-break: normal !important;
+        overflow-wrap: break-word !important;
+        line-height: 1.25 !important;
+        padding: 0.35rem 0.65rem !important;
+    }
+    div[data-testid="stButton"] button p,
+    div[data-testid="stDownloadButton"] button p,
+    div[data-testid="stLinkButton"] a p,
+    div[data-testid="stPopover"] > div > button p {
+        white-space: normal !important;
+        line-height: 1.25 !important;
+        text-align: center;
+    }
+    @media (max-width: 1200px) {
+        div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            min-width: min(100%, 160px) !important;
+        }
+    }
+    @media (max-width: 768px) {
+        .main .block-container {
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            padding-top: 1.5rem !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            min-width: min(100%, 260px) !important;
+            flex: 1 1 100% !important;
+        }
     }
     </style>
     """
@@ -217,12 +258,19 @@ pages = {
     ],
 }
 registered_pages = pages
+recycle_bin_page = st.Page(
+    "app_pages/recycle_bin.py",
+    title="Recycle Bin",
+    icon=":material/delete:",
+    url_path="recycle_bin",
+)
 unlisted_pages = [
     st.Page("app_pages/functional_equipment.py", title="Equipment", url_path="Equipment"),
     st.Page("app_pages/functional_ergonomics.py", title="Ergonomics", url_path="Ergonomics"),
     st.Page("app_pages/functional_quality.py", title="Quality", url_path="Quality"),
     st.Page("app_pages/functional_materials.py", title="Materials", url_path="Materials"),
     st.Page("app_pages/functional_safety.py", title="Safety", url_path="Safety"),
+    recycle_bin_page,
 ]
 navigation = st.navigation(
     {"_top": [project_exchange_page], **registered_pages, "_unlisted": unlisted_pages},
@@ -517,7 +565,35 @@ with st.sidebar:
         )
     else:
         set_last_active_workspace(None, None)
+        if active_page_key == "recycle_bin" and "overview" in page_by_url_path:
+            if st.button(
+                "Back to overview",
+                icon=":material/dashboard:",
+                width="stretch",
+                key="sidebar_back_to_overview_btn",
+            ):
+                clear_unsaved_tracking_state()
+                st.switch_page(page_by_url_path["overview"])
     st.caption("NPI process planning · local prototype")
+    rb_count = recycle_bin_item_count(None)
+    rb_button_label = f"Recycle bin ({rb_count})" if rb_count > 0 else "Recycle bin"
+    if st.button(
+        rb_button_label,
+        icon=":material/delete:",
+        type="primary" if active_page_key == "recycle_bin" else "secondary",
+        width="stretch",
+        key="sidebar_recycle_bin_btn",
+        help="View and restore deleted items (kept for 30 days before permanent deletion).",
+    ):
+        if active_page_key != "recycle_bin":
+            if has_active_unsaved_changes():
+                request_unsaved_page_navigation(
+                    "recycle_bin",
+                    label="Recycle Bin",
+                )
+            else:
+                clear_unsaved_tracking_state()
+                st.switch_page(recycle_bin_page)
 
 pending_navigation = str(
     st.session_state.pop("split_workspace_pending_navigation", "") or ""
@@ -648,58 +724,45 @@ else:
         st.markdown("---")
         split_bar = st.container(border=True, key="split_divider_toolbar")
         with split_bar:
-            b_info, b_swap, b_orient, b_popout, b_close = st.columns(
-                [2.3, 0.9, 0.9, 0.9, 0.8],
-                vertical_alignment="center",
-                gap="small",
+            top_icon = _material_icon_name(navigation.icon)
+            bottom_icon = _material_icon_name(secondary_page.icon)
+            split_row = st.container(horizontal=True, vertical_alignment="center")
+            split_row.markdown(
+                f"**:material/splitscreen: Split Screen (Top & Bottom)** &nbsp;&bull;&nbsp; "
+                f":material/{top_icon}: **Top:** {navigation.title} &nbsp;&bull;&nbsp; "
+                f":material/{bottom_icon}: **Bottom:** {secondary_page.title}"
             )
-            with b_info:
-                top_icon = _material_icon_name(navigation.icon)
-                bottom_icon = _material_icon_name(secondary_page.icon)
-                st.markdown(
-                    f"**:material/splitscreen: Split Screen (Top & Bottom)** &nbsp;&bull;&nbsp; "
-                    f":material/{top_icon}: **Top:** {navigation.title} &nbsp;&bull;&nbsp; "
-                    f":material/{bottom_icon}: **Bottom:** {secondary_page.title}"
-                )
-            with b_swap:
-                if st.button(
-                    "Swap Panes",
-                    icon=":material/swap_vert:",
-                    key="split_swap_panes_btn",
-                    help="Swap top and bottom pages",
-                    width="stretch",
-                ):
-                    st.session_state["split_workspace_pending_navigation"] = secondary_url_path
-                    st.session_state[split_secondary_key] = active_page_key
-                    st.rerun()
-            with b_orient:
-                if st.button(
-                    "Side-by-side",
-                    icon=":material/view_column_2:",
-                    key="split_to_side_by_side_btn",
-                    help="Switch to side-by-side columns view",
-                    width="stretch",
-                ):
-                    st.session_state[split_orientation_key] = "side_by_side"
-                    st.rerun()
-            with b_popout:
-                st.link_button(
-                    "Pop out",
-                    url=build_page_url(secondary_url_path),
-                    icon=":material/open_in_new:",
-                    help=f"Pop out {secondary_page.title} to a separate browser window",
-                    width="stretch",
-                )
-            with b_close:
-                if st.button(
-                    "Close",
-                    icon=":material/close:",
-                    key="split_workspace_close_button",
-                    help="Close split view and return to full single screen",
-                    width="stretch",
-                ):
-                    st.session_state.pop(split_secondary_key, None)
-                    st.rerun()
+            if split_row.button(
+                "Swap Panes",
+                icon=":material/swap_vert:",
+                key="split_swap_panes_btn",
+                help="Swap top and bottom pages",
+            ):
+                st.session_state["split_workspace_pending_navigation"] = secondary_url_path
+                st.session_state[split_secondary_key] = active_page_key
+                st.rerun()
+            if split_row.button(
+                "Side-by-side",
+                icon=":material/view_column_2:",
+                key="split_to_side_by_side_btn",
+                help="Switch to side-by-side columns view",
+            ):
+                st.session_state[split_orientation_key] = "side_by_side"
+                st.rerun()
+            split_row.link_button(
+                "Pop out",
+                url=build_page_url(secondary_url_path),
+                icon=":material/open_in_new:",
+                help=f"Pop out {secondary_page.title} to a separate browser window",
+            )
+            if split_row.button(
+                "Close",
+                icon=":material/close:",
+                key="split_workspace_close_button",
+                help="Close split view and return to full single screen",
+            ):
+                st.session_state.pop(split_secondary_key, None)
+                st.rerun()
 
         with st.container(key="split_bottom_pane"):
             _run_workspace_page(secondary_page, enable=True)

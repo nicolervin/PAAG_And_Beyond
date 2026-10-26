@@ -312,7 +312,7 @@ with st.expander("History", icon=":material/history:"):
                 "row_count": "Rows",
                 "editor_name": "Editor",
                 "created_at": st.column_config.DatetimeColumn(
-                    "When", format="MMM DD, YYYY HH:mm"
+                    "When", format="MMM DD, YYYY HH:mm", timezone="America/New_York"
                 ),
             },
         )

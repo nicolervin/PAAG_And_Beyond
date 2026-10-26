@@ -1704,3 +1704,37 @@ Future issued-document generation and approval (not implemented)
      - **Non-Destructive Editing & File Cleanup:** Preserves `original_image_path` for vector re-editing; deleting or replacing a part image cleans up both `image_path` and `original_image_path` from `data/uploads/`.
      - **Universal Audit Trail & History Display Standard:** Every saved image upload, paste, removal, or annotation update records a `record_audit_event()` entry under `"Parts"` with Current editor attribution, surfaced in the bottom `audit_history()` expander on the Parts Catalog page.
      - **Scope Badges:** Preserves `page_title_with_scope()` on the Parts Catalog page.
+
+
+### App-Wide 30-Day Recycle Bin (`recycle_bin_items`, `utils/recycle_bin_store.py`, `app_pages/recycle_bin.py`)
+
+- **Proposed by:** Project Owner & Antigravity
+- **Date recorded:** October 23, 2026
+- **Approval status:** Approved by project owner on October 23, 2026 for implementation on branch `NE_Different_screen_sizes`.
+- **Purpose:** Provide an app-wide 30-day Recycle Bin (accessible from the bottom-left corner of the page in the sidebar) where records deleted across the application are retained for 30 days along with their cascaded child records and owned media files (`data/uploads/`) before being permanently purged. Allows collaborators to inspect and restore accidentally deleted items without introducing risky out-of-order history-step rollback.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects across all deletable entities in the application: `projects`, `planning_scenarios`, `project_models` / `complexity_features`, `parts` & `part_images`, `assembly_sections` & `fishbone_part_assignments`, `manufacturing_assemblies`, `yamazumi_areas` / `yamazumi_pitches` / `yamazumi_elements`, `work_elements` / `process_part_groups` / `pitch_visuals`, `layout_plans` / `layout_revisions` / `layout_layers`, `equipment_assets` / `equipment_placements` / `conveyor_zones`, `quality_requirements` / `pfmea_entries`, `ergonomics_assessments`, `safety_requirements`, and `concerns`.
+  2. *Critical thread relationship:* Acts as a soft-delete archive wrapper around existing critical-thread deletion operations (*Product Architecture -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance -> Pin Map & Functional Reviews*). Deleted records are removed from active tables so normal queries, exports, and calculations remain fast and clean, while their full row graph (`payload_json`) and `data/uploads/` file paths (`file_paths_json`) are preserved in `recycle_bin_items` for 30 days before permanent purge.
+  3. *Scope:* App-wide / Scenario-aware. Stores optional `project_id` and `scenario_id` on each archived item so users can filter to the active Project & Scenario or view all projects (including recovering an entire deleted Project or Planning Scenario).
+  4. *Table requirement:* Requires one new table `recycle_bin_items` because existing tables cannot hold deleted parent+child graphs across heterogeneous entities or retain records after a parent project or scenario is deleted:
+     - `id TEXT PRIMARY KEY` (UUID)
+     - `project_id TEXT DEFAULT NULL` (preserved as text so deleted projects remain identifiable)
+     - `project_name TEXT NOT NULL DEFAULT ''`
+     - `scenario_id TEXT DEFAULT NULL`
+     - `scenario_name TEXT NOT NULL DEFAULT ''`
+     - `entity_type TEXT NOT NULL` (e.g., `'Part'`, `'Fishbone section'`, `'Yamazumi pitch'`, `'Work element'`, `'Visual aid'`, `'Planning scenario'`, `'Project'`, etc.)
+     - `entity_table TEXT NOT NULL` (primary source table name)
+     - `entity_id TEXT NOT NULL` (original UUID of the deleted root record)
+     - `entity_label TEXT NOT NULL` (human-readable name/number)
+     - `summary_text TEXT NOT NULL DEFAULT ''` (summary of cascaded child counts included in the snapshot)
+     - `payload_json TEXT NOT NULL` (serialized JSON of the root row and all cascaded child table rows in topological restore order)
+     - `file_paths_json TEXT NOT NULL DEFAULT '[]'` (list of `data/uploads/` files preserved until expiration or permanent deletion)
+     - `deleted_by TEXT NOT NULL DEFAULT ''`
+     - `deleted_at TEXT NOT NULL` (UTC ISO timestamp)
+     - `expires_at TEXT NOT NULL` (UTC ISO timestamp, `deleted_at + 30 days`)
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Navigation & Scope Badge:** Dedicated **Recycle Bin** entry at the very bottom-left corner of the page (bottom of the sidebar) opening `app_pages/recycle_bin.py` with `page_title_with_scope("Recycle Bin", scope="scenario-aware")`, plus automatic purge of items past `expires_at` (`> 30 days`).
+     - **Universal Save & Restore Action Standard:** Explicit **Restore** action that re-inserts the archived record and its cascaded children atomically, logs a `"Restore"` event to `audit_log`, and reruns.
+     - **Universal Deletion Standard:** Non-dismissible confirmation dialog (`@st.dialog`) for **Delete forever** / **Empty Recycle Bin**, which permanently removes the archive row and deletes unreferenced files from `data/uploads/`.
+     - **Universal Audit Trail & History Standard:** Every soft-delete archive, restore, and permanent purge is logged via `record_audit_event()` with Current editor attribution and displayed in the bottom `audit_history()` expander.
+     - **No History Step Rollback:** Out-of-order history step restoration is intentionally excluded to protect relational integrity across the critical thread.
