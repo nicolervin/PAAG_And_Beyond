@@ -2102,170 +2102,158 @@ with tab_author:
 
             row_tools_idx_key = f"row_tools_idx_{selected_model_id}"
 
-            # ── Action Bar (Row 1): Checkbox & Save Actions ──
-            bar_left, bar_right = st.columns([1.3, 2.7], vertical_alignment="center")
-            with bar_left:
-                auto_add_grid = st.checkbox(
-                    "Auto-add new parts to Parts Catalog",
-                    value=True,
-                    key=f"auto_add_grid_{selected_model_id}",
-                    help="Automatically register unknown part numbers into the project Parts Catalog when saving.",
-                )
-            with bar_right:
-                act_cols = st.columns([1.05, 1.15, 1.15, 1.35, 1.55], gap="small", vertical_alignment="center")
-                with act_cols[0]:
-                    if is_unsaved:
-                        st.markdown(":orange[:material/warning: **Unsaved changes**]")
-                with act_cols[1]:
-                    undo_last_bom_clicked = st.button(
-                        "Undo last edit",
+            # ── Action Bar: Checkbox, Unsaved Indicator & Save Actions ──
+            top_opt_bar = st.container(horizontal=True, vertical_alignment="center")
+            auto_add_grid = top_opt_bar.checkbox(
+                "Auto-add new parts to Parts Catalog",
+                value=True,
+                key=f"auto_add_grid_{selected_model_id}",
+                help="Automatically register unknown part numbers into the project Parts Catalog when saving.",
+            )
+            if is_unsaved:
+                top_opt_bar.markdown(":orange[:material/warning: **Unsaved changes**]")
+
+            save_action_bar = st.container(horizontal=True, vertical_alignment="center")
+            undo_last_bom_clicked = save_action_bar.button(
+                "Undo last edit",
+                icon=":material/undo:",
+                key=f"undo_last_bom_grid_{selected_model_id}",
+                help="Revert the most recent cell edit while keeping earlier unsaved BOM changes",
+                disabled=not can_undo_last_table_edit(bom_editor_key, ignored_columns=("Select",)),
+            )
+            if undo_last_bom_clicked:
+                if undo_last_table_edit(bom_editor_key):
+                    st.toast(
+                        last_table_undo_redo_message(
+                            bom_editor_key,
+                            default="Reverted the last BOM cell edit.",
+                        ),
                         icon=":material/undo:",
-                        key=f"undo_last_bom_grid_{selected_model_id}",
-                        help="Revert the most recent cell edit while keeping earlier unsaved BOM changes",
-                        disabled=not can_undo_last_table_edit(bom_editor_key, ignored_columns=("Select",)),
                     )
-                    if undo_last_bom_clicked:
-                        if undo_last_table_edit(bom_editor_key):
-                            st.toast(
-                                last_table_undo_redo_message(
-                                    bom_editor_key,
-                                    default="Reverted the last BOM cell edit.",
-                                ),
-                                icon=":material/undo:",
-                            )
-                            st.rerun()
-                with act_cols[2]:
-                    redo_last_bom_clicked = st.button(
-                        "Redo last edit",
+                    st.rerun()
+
+            redo_last_bom_clicked = save_action_bar.button(
+                "Redo last edit",
+                icon=":material/redo:",
+                key=f"redo_last_bom_grid_{selected_model_id}",
+                help="Reapply the most recently undone BOM cell edit",
+                disabled=not can_redo_last_table_edit(bom_editor_key, ignored_columns=("Select",)),
+            )
+            if redo_last_bom_clicked:
+                if redo_last_table_edit(bom_editor_key):
+                    st.toast(
+                        last_table_undo_redo_message(
+                            bom_editor_key,
+                            default="Reapplied the last undone BOM cell edit.",
+                        ),
                         icon=":material/redo:",
-                        key=f"redo_last_bom_grid_{selected_model_id}",
-                        help="Reapply the most recently undone BOM cell edit",
-                        disabled=not can_redo_last_table_edit(bom_editor_key, ignored_columns=("Select",)),
                     )
-                    if redo_last_bom_clicked:
-                        if redo_last_table_edit(bom_editor_key):
-                            st.toast(
-                                last_table_undo_redo_message(
-                                    bom_editor_key,
-                                    default="Reapplied the last undone BOM cell edit.",
-                                ),
-                                icon=":material/redo:",
-                            )
-                            st.rerun()
-                with act_cols[3]:
-                    undo_bom_clicked = st.button(
-                        "Discard all edits",
-                        icon=":material/restart_alt:",
-                        key=f"undo_bom_grid_{selected_model_id}",
-                        help="Discard all unsaved edits and reload from the last saved BOM",
-                        disabled=not is_unsaved,
-                    )
-                    if undo_bom_clicked or trigger_bom_discard:
-                        saved_bom = get_manual_model_bom(project_id, selected_model_id)
-                        if saved_bom:
-                            for it in saved_bom:
-                                if "_uid" not in it:
-                                    it["_uid"] = str(uuid4())[:8]
-                            st.session_state[draft_key] = saved_bom
-                        else:
-                            st.session_state[draft_key] = [
-                                {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
-                            ]
-                        st.session_state.pop(draft_mod_key, None)
-                        st.session_state.pop(f"_bom_predicted_{project_id}_{selected_model_id}", None)
-                        st.session_state.pop(f"row_tools_idx_{selected_model_id}", None)
-                        st.session_state.pop(f"bom_anchor_row_{selected_model_id}", None)
-                        _clear_bld_widget_keys(selected_model_id)
-                        request_table_editor_reset(bom_editor_logical_key)
-                        st.toast("Discarded the unsaved BOM edits", icon=":material/undo:")
-                        st.rerun()
-                with act_cols[4]:
-                    save_clicked = bool(
-                        st.button(
-                            "Save BOM Structure",
-                            icon=":material/save:",
-                            type="primary",
-                            key=f"save_bom_grid_{selected_model_id}",
-                            width="stretch",
-                        )
-                        or trigger_bom_save
-                    )
+                    st.rerun()
+
+            undo_bom_clicked = save_action_bar.button(
+                "Discard all edits",
+                icon=":material/restart_alt:",
+                key=f"undo_bom_grid_{selected_model_id}",
+                help="Discard all unsaved edits and reload from the last saved BOM",
+                disabled=not is_unsaved,
+            )
+            if undo_bom_clicked or trigger_bom_discard:
+                saved_bom = get_manual_model_bom(project_id, selected_model_id)
+                if saved_bom:
+                    for it in saved_bom:
+                        if "_uid" not in it:
+                            it["_uid"] = str(uuid4())[:8]
+                    st.session_state[draft_key] = saved_bom
+                else:
+                    st.session_state[draft_key] = [
+                        {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
+                    ]
+                st.session_state.pop(draft_mod_key, None)
+                st.session_state.pop(f"_bom_predicted_{project_id}_{selected_model_id}", None)
+                st.session_state.pop(f"row_tools_idx_{selected_model_id}", None)
+                st.session_state.pop(f"bom_anchor_row_{selected_model_id}", None)
+                _clear_bld_widget_keys(selected_model_id)
+                request_table_editor_reset(bom_editor_logical_key)
+                st.toast("Discarded the unsaved BOM edits", icon=":material/undo:")
+                st.rerun()
+
+            save_clicked = bool(
+                save_action_bar.button(
+                    "Save BOM Structure",
+                    icon=":material/save:",
+                    type="primary",
+                    key=f"save_bom_grid_{selected_model_id}",
+                )
+                or trigger_bom_save
+            )
 
             # ── Action Bar (Row 2): Template, Import/Paste, Copy, Predict ──
-            tool_c1, tool_c2, tool_c3, tool_c4 = st.columns([1.05, 0.95, 1.05, 1.15], gap="small")
-            with tool_c1:
-                live_for_dl = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
-                has_tree_items = any(
-                    bool(clean_bom_cell_text(it.get("part_number")) or clean_bom_cell_text(it.get("description")))
-                    for it in live_for_dl
+            tools_bar = st.container(horizontal=True, vertical_alignment="center")
+            live_for_dl = _get_live_editor_items(selected_model_id, draft_key, bom_editor_logical_key)
+            has_tree_items = any(
+                bool(clean_bom_cell_text(it.get("part_number")) or clean_bom_cell_text(it.get("description")))
+                for it in live_for_dl
+            )
+            clean_model_tag = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(target_model_label).strip())
+            dl_file_name = f"BOM_{clean_model_tag}.xlsx" if has_tree_items else f"BOM_Template_{clean_model_tag}.xlsx"
+            dl_help = (
+                f"Download the existing BOM hierarchy for {target_model_label} (Level, Part #, Description, Qty) to edit in Excel"
+                if has_tree_items
+                else "Download an Excel template pre-formatted with Level, Part #, Description, Qty"
+            )
+            tools_bar.download_button(
+                label="📥 Download Template",
+                data=lambda items=live_for_dl: generate_bom_excel_template(items),
+                file_name=dl_file_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_template_{selected_model_id}",
+                help=dl_help,
+            )
+            with tools_bar.popover(
+                "📤 Import File",
+                help="Upload a BOM spreadsheet or paste rows from Excel to populate the table",
+            ):
+                up_file = st.file_uploader(
+                    "Upload spreadsheet (.xlsx, .csv)",
+                    type=["xlsx", "xls", "csv"],
+                    key=f"up_bom_{selected_model_id}",
                 )
-                clean_model_tag = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(target_model_label).strip())
-                dl_file_name = f"BOM_{clean_model_tag}.xlsx" if has_tree_items else f"BOM_Template_{clean_model_tag}.xlsx"
-                dl_help = (
-                    f"Download the existing BOM hierarchy for {target_model_label} (Level, Part #, Description, Qty) to edit in Excel"
-                    if has_tree_items
-                    else "Download an Excel template pre-formatted with Level, Part #, Description, Qty"
-                )
-                st.download_button(
-                    label="📥 Download Template",
-                    data=lambda items=live_for_dl: generate_bom_excel_template(items),
-                    file_name=dl_file_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"dl_template_{selected_model_id}",
-                    help=dl_help,
-                    width="stretch",
-                )
-            with tool_c2:
-                with st.popover(
-                    "📤 Import File",
-                    help="Upload a BOM spreadsheet or paste rows from Excel to populate the table",
-                    width="stretch",
-                ):
-                    up_file = st.file_uploader(
-                        "Upload spreadsheet (.xlsx, .csv)",
-                        type=["xlsx", "xls", "csv"],
-                        key=f"up_bom_{selected_model_id}",
-                    )
-                    if up_file is not None:
-                        if st.button("Apply to Editor", type="primary", key=f"btn_apply_up_{selected_model_id}", width="stretch"):
-                            try:
-                                parsed = parse_uploaded_bom_file(up_file)
-                                if not parsed:
-                                    st.error("No valid BOM rows found in the uploaded file.")
-                                else:
-                                    st.session_state[draft_key] = parsed
-                                    st.session_state[draft_mod_key] = True
-                                    st.session_state.pop(f"_bom_predicted_{project_id}_{selected_model_id}", None)
-                                    request_table_editor_reset(bom_editor_logical_key)
-                                    st.toast(f"Imported {len(parsed)} rows from {up_file.name}!", icon=":material/check_circle:")
-                                    st.rerun()
-                            except Exception as up_err:
-                                st.error(f"Failed to read file: {up_err}")
-                    st.divider()
-                    st.caption("Or copy & paste rows directly from Excel:")
-                    if st.button(
-                        "📋 Paste from Excel",
-                        key=f"btn_paste_{selected_model_id}",
-                        help="Paste tabular data directly from Excel clipboard",
-                        width="stretch",
-                    ):
-                        paste_bom_from_excel_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
-            with tool_c3:
+                if up_file is not None:
+                    if st.button("Apply to Editor", type="primary", key=f"btn_apply_up_{selected_model_id}", width="stretch"):
+                        try:
+                            parsed = parse_uploaded_bom_file(up_file)
+                            if not parsed:
+                                st.error("No valid BOM rows found in the uploaded file.")
+                            else:
+                                st.session_state[draft_key] = parsed
+                                st.session_state[draft_mod_key] = True
+                                st.session_state.pop(f"_bom_predicted_{project_id}_{selected_model_id}", None)
+                                request_table_editor_reset(bom_editor_logical_key)
+                                st.toast(f"Imported {len(parsed)} rows from {up_file.name}!", icon=":material/check_circle:")
+                                st.rerun()
+                        except Exception as up_err:
+                            st.error(f"Failed to read file: {up_err}")
+                st.divider()
+                st.caption("Or copy & paste rows directly from Excel:")
                 if st.button(
-                    "👥 Copy from Model",
-                    key=f"btn_copy_model_{selected_model_id}",
-                    help="Copy the BOM hierarchy from another saved model in this project",
+                    "📋 Paste from Excel",
+                    key=f"btn_paste_{selected_model_id}",
+                    help="Paste tabular data directly from Excel clipboard",
                     width="stretch",
                 ):
-                    copy_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key, source_model_key)
-            with tool_c4:
-                if st.button(
-                    "✨ Predict from Features",
-                    key=f"btn_predict_features_{selected_model_id}",
-                    help="Predict BOM structure based on Complexity Trees feature choices",
-                    width="stretch",
-                ):
-                    generate_bom_from_features_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
+                    paste_bom_from_excel_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
+            if tools_bar.button(
+                "👥 Copy from Model",
+                key=f"btn_copy_model_{selected_model_id}",
+                help="Copy the BOM hierarchy from another saved model in this project",
+            ):
+                copy_bom_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key, source_model_key)
+            if tools_bar.button(
+                "✨ Predict from Features",
+                key=f"btn_predict_features_{selected_model_id}",
+                help="Predict BOM structure based on Complexity Trees feature choices",
+            ):
+                generate_bom_from_features_dialog(project_id, selected_model_id, draft_key, bom_editor_logical_key)
 
             # ── Build DataFrame from current draft ──
             # Columns match Excel order: Level, Part #, Description, Qty
@@ -2328,18 +2316,20 @@ with tab_author:
             )
 
             # ── Clear BOM action at bottom of table editor ──
-            _, clear_btn_col = st.columns([2.6, 1.4])
-            with clear_btn_col:
-                if st.button(
-                    "Clear BOM Structure",
-                    icon=":material/delete_sweep:",
-                    type="primary",
-                    key=f"destructive_clear_bom_btn_{selected_model_id}",
-                    help="Clear the BOM structure (without deleting parts from the Parts Catalog) so you can start over",
-                    width="stretch",
-                ):
-                    st.session_state[f"_pending_clear_bom_{selected_model_id}"] = True
-                    st.rerun()
+            clear_btn_bar = st.container(
+                horizontal=True,
+                vertical_alignment="center",
+                horizontal_alignment="right",
+            )
+            if clear_btn_bar.button(
+                "Clear BOM Structure",
+                icon=":material/delete_sweep:",
+                type="primary",
+                key=f"destructive_clear_bom_btn_{selected_model_id}",
+                help="Clear the BOM structure (without deleting parts from the Parts Catalog) so you can start over",
+            ):
+                st.session_state[f"_pending_clear_bom_{selected_model_id}"] = True
+                st.rerun()
 
             # ── Save action ──
             if save_clicked:

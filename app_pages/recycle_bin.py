@@ -171,25 +171,21 @@ else:
     selected_rows = merged_df[merged_df["Select"].fillna(False).astype(bool)].copy()
     selected_ids = [str(rid) for rid in selected_rows["id"].tolist() if str(rid).strip()]
 
-    btn_col1, btn_col2, _spacer = st.columns([1.4, 1.6, 4.0])
-    with btn_col1:
-        restore_clicked = st.button(
-            f"Restore selected ({len(selected_ids)})" if selected_ids else "Restore selected",
-            icon=":material/restore_from_trash:",
-            type="primary",
-            disabled=not selected_ids,
-            width="stretch",
-            key="recycle_bin_restore_btn",
-        )
-    with btn_col2:
-        perm_delete_clicked = st.button(
-            f"Delete permanently ({len(selected_ids)})" if selected_ids else "Delete permanently",
-            icon=":material/delete_forever:",
-            type="secondary",
-            disabled=not selected_ids,
-            width="stretch",
-            key="destructive_recycle_bin_perm_delete_btn",
-        )
+    btn_bar = st.container(horizontal=True, vertical_alignment="center")
+    restore_clicked = btn_bar.button(
+        f"Restore selected ({len(selected_ids)})" if selected_ids else "Restore selected",
+        icon=":material/restore_from_trash:",
+        type="primary",
+        disabled=not selected_ids,
+        key="recycle_bin_restore_btn",
+    )
+    perm_delete_clicked = btn_bar.button(
+        f"Delete permanently ({len(selected_ids)})" if selected_ids else "Delete permanently",
+        icon=":material/delete_forever:",
+        type="secondary",
+        disabled=not selected_ids,
+        key="destructive_recycle_bin_perm_delete_btn",
+    )
 
     if restore_clicked and selected_ids:
         try:

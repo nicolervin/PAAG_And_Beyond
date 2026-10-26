@@ -1517,6 +1517,12 @@ def critical_thread_status_counts(
                 f"{ergo_count} Ergo · {safety_count} Safety"
             ),
             "populated": (quality_count + equipment_count + ergo_count + safety_count) > 0,
+            "functional_counts": {
+                "equipment": equipment_count,
+                "quality": quality_count,
+                "ergonomics": ergo_count,
+                "safety": safety_count,
+            },
             "description": (
                 "Review the derived Pin Map and complete functional reviews across Equipment, "
                 "Ergonomics, Quality (Requirements, Torque, PFMEA, Control Plan), Materials, and Safety."

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 from pathlib import Path
 import re
 from typing import Any
@@ -999,53 +1000,789 @@ def _render_global_search_tab(
                     )
 
 
+def _default_critical_thread_steps() -> list[dict[str, Any]]:
+    """Fallback step metadata when no project is selected yet."""
+    return [
+        {
+            "step_number": 1,
+            "title": "Import PITs (Source Evidence)",
+            "scope": "All scenarios",
+            "page_url_path": "pits_exchange",
+            "page_title": "Import PITs",
+            "metric_summary": "0 PITS records · 0 BOM workbook imports",
+            "populated": False,
+            "description": (
+                "Import Product Architecture / PITS tracker workbooks as source evidence. "
+                "Changed records enter reconciliation without silently overwriting reviewed planning decisions."
+            ),
+        },
+        {
+            "step_number": 2,
+            "title": "Complexity Trees (Models & Features)",
+            "scope": "All scenarios",
+            "page_url_path": "models",
+            "page_title": "Complexity Trees",
+            "metric_summary": "0 models · 0 complexity features",
+            "populated": False,
+            "description": (
+                "Define product models, platform sizes, and differentiating complexity features "
+                "so parts and assemblies can be mapped to model applicability rules."
+            ),
+        },
+        {
+            "step_number": 3,
+            "title": "BOM Reconciliation (EBOM -> MBOM)",
+            "scope": "All scenarios",
+            "page_url_path": "bom_tree",
+            "page_title": "BOM",
+            "metric_summary": "0 approved / 0 total BOM occurrences",
+            "populated": False,
+            "description": (
+                "Review PITS BOM parent-child occurrences, resolve validation issues, "
+                "and approve placements into Fishbone assembly sections."
+            ),
+        },
+        {
+            "step_number": 4,
+            "title": "Parts Catalog",
+            "scope": "All scenarios + scenario active flags",
+            "page_url_path": "parts",
+            "page_title": "Parts Catalog",
+            "metric_summary": "0 catalog parts",
+            "populated": False,
+            "description": (
+                "Maintain the project-wide part master, reference images, annotated callouts, "
+                "feature applicability rules, and scenario-specific Active status."
+            ),
+        },
+        {
+            "step_number": 5,
+            "title": "Fishbone Assembly Structure",
+            "scope": "All scenarios",
+            "page_url_path": "fishbone",
+            "page_title": "Fishbone",
+            "metric_summary": "0 sections · 0 part placements",
+            "populated": False,
+            "description": (
+                "Structure main-line, subassembly, and feeder sections, sequence part placements, "
+                "and define manufacturing assemblies across the assembly grid."
+            ),
+        },
+        {
+            "step_number": 6,
+            "title": "Yamazumi Line Balancing",
+            "scope": "Active scenario",
+            "page_url_path": "yamazumi",
+            "page_title": "Yamazumi",
+            "metric_summary": "0 areas · 0 pitches · 0 work elements",
+            "populated": False,
+            "description": (
+                "Balance operator work elements against scenario takt time across pitches, "
+                "assign material groups from Fishbone placements, and push reviewed stacks to Process at a Glance."
+            ),
+        },
+        {
+            "step_number": 7,
+            "title": "Process at a Glance",
+            "scope": "Active scenario",
+            "page_url_path": "process",
+            "page_title": "Process at a Glance",
+            "metric_summary": "0 Process steps",
+            "populated": False,
+            "description": (
+                "Maintain the authoritative scenario Process plan with deterministic Op IDs, "
+                "part handling/consumption groups, visual aids, and functional review links."
+            ),
+        },
+        {
+            "step_number": 8,
+            "title": "Pin Map & Functional Reviews",
+            "scope": "Active scenario + shared repositories",
+            "page_url_path": "pin_map",
+            "page_title": "Pin Map",
+            "metric_summary": "0 Quality reqs · 0 Equipment · 0 Ergo · 0 Safety",
+            "populated": False,
+            "functional_counts": {
+                "equipment": 0,
+                "quality": 0,
+                "ergonomics": 0,
+                "safety": 0,
+            },
+            "description": (
+                "Review the derived Pin Map and complete functional reviews across Equipment, "
+                "Ergonomics, Quality (Requirements, Torque, PFMEA, Control Plan), Materials, and Safety."
+            ),
+        },
+    ]
+
+
+def _build_critical_thread_flowchart_html(
+    steps: list[dict[str, Any]],
+    active_manual_key: str,
+) -> str:
+    """Build an interactive-looking visual SVG/HTML flowchart of the PAAG Critical Thread."""
+    step_map = {int(s["step_number"]): s for s in steps}
+    populated_steps = sum(1 for s in steps if s.get("populated"))
+    total_steps = max(len(steps), 1)
+    pct = int(round((populated_steps / total_steps) * 100))
+
+    def _node_card_html(
+        step_num: int,
+        short_title: str,
+        subtitle: str,
+        scope_kind: str = "project",
+    ) -> str:
+        s = step_map.get(step_num, {})
+        is_pop = bool(s.get("populated"))
+        url_path = str(s.get("page_url_path") or "")
+        is_current = bool(url_path and url_path == active_manual_key)
+        metric = html.escape(str(s.get("metric_summary") or ""))
+        scope_label = "All scenarios" if scope_kind == "project" else "Active scenario"
+        scope_cls = "paag-fc-scope-project" if scope_kind == "project" else "paag-fc-scope-scenario"
+        status_cls = "paag-fc-node-pop" if is_pop else "paag-fc-node-empty"
+        current_cls = " paag-fc-node-current" if is_current else ""
+        status_badge = (
+            '<span class="paag-fc-status paag-fc-status-ok">✓ Populated</span>'
+            if is_pop
+            else '<span class="paag-fc-status paag-fc-status-pending">○ Pending</span>'
+        )
+        here_badge = (
+            '<span class="paag-fc-here-badge">★ You are here</span>' if is_current else ""
+        )
+        return f"""
+        <div class="paag-fc-node {status_cls}{current_cls}">
+            <div class="paag-fc-node-top">
+                <span class="paag-fc-step-num">STEP {step_num}</span>
+                <span class="paag-fc-scope {scope_cls}">{scope_label}</span>
+                {here_badge}
+                {status_badge}
+            </div>
+            <div class="paag-fc-node-title">{html.escape(short_title)}</div>
+            <div class="paag-fc-node-sub">{html.escape(subtitle)}</div>
+            <div class="paag-fc-node-metric">{metric}</div>
+        </div>
+        """
+
+    s8 = step_map.get(8, {})
+    func_counts = s8.get("functional_counts") or {}
+    eq_cnt = int(func_counts.get("equipment", 0))
+    q_cnt = int(func_counts.get("quality", 0))
+    er_cnt = int(func_counts.get("ergonomics", 0))
+    sf_cnt = int(func_counts.get("safety", 0))
+    s4_pop = bool(step_map.get(4, {}).get("populated"))
+    s5_pop = bool(step_map.get(5, {}).get("populated"))
+
+    func_branches = [
+        (
+            "functional_equipment",
+            "Equipment",
+            "Catalog · Placements · Conveyors",
+            f"{eq_cnt} assets",
+            eq_cnt > 0,
+        ),
+        (
+            "functional_quality",
+            "Quality",
+            "QR Repo · Torque · PFMEA · CP",
+            f"{q_cnt} requirements",
+            q_cnt > 0,
+        ),
+        (
+            "functional_ergonomics",
+            "Ergonomics",
+            "Posture · Risk Class (Green/Red)",
+            f"{er_cnt} reviews",
+            er_cnt > 0,
+        ),
+        (
+            "functional_materials",
+            "Materials",
+            "Line-side · Kitting · Delivery",
+            "Synced with Parts & ASM" if (s4_pop or s5_pop) else "Awaiting parts",
+            s4_pop or s5_pop,
+        ),
+        (
+            "functional_safety",
+            "Safety",
+            "Hazards & Required PPE",
+            f"{sf_cnt} requirements",
+            sf_cnt > 0,
+        ),
+    ]
+
+    func_cards_html = []
+    for f_key, f_title, f_sub, f_metric, f_pop in func_branches:
+        f_curr = f_key == active_manual_key
+        f_cls = "paag-fc-mini-pop" if f_pop else "paag-fc-mini-empty"
+        if f_curr:
+            f_cls += " paag-fc-node-current"
+        f_dot = "●" if f_pop else "○"
+        f_here = '<span class="paag-fc-here-mini">★ Here</span>' if f_curr else ""
+        func_cards_html.append(
+            f"""
+            <div class="paag-fc-mini-node {f_cls}">
+                <div class="paag-fc-mini-header">
+                    <span class="paag-fc-mini-dot">{f_dot}</span>
+                    <span class="paag-fc-mini-title">{html.escape(f_title)}</span>
+                    {f_here}
+                </div>
+                <div class="paag-fc-mini-sub">{html.escape(f_sub)}</div>
+                <div class="paag-fc-mini-metric">{html.escape(f_metric)}</div>
+            </div>
+            """
+        )
+
+    return f"""
+    <style>
+    .paag-fc-wrap {{
+        font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: #1e293b;
+        background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+        border: 1px solid #cbd5e1;
+        border-radius: 14px;
+        padding: 16px 18px 20px 18px;
+        margin-bottom: 12px;
+    }}
+    .paag-fc-topbar {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #e2e8f0;
+    }}
+    .paag-fc-progress-wrap {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #0f172a;
+    }}
+    .paag-fc-progress-track {{
+        width: 140px;
+        height: 8px;
+        background: #e2e8f0;
+        border-radius: 999px;
+        overflow: hidden;
+    }}
+    .paag-fc-progress-fill {{
+        height: 100%;
+        width: {pct}%;
+        background: linear-gradient(90deg, #0f766e, #10b981);
+        border-radius: 999px;
+    }}
+    .paag-fc-legend {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        font-size: 0.76rem;
+        color: #475569;
+    }}
+    .paag-fc-legend-item {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 999px;
+        padding: 2px 9px;
+    }}
+    .paag-fc-lane {{
+        border-radius: 12px;
+        padding: 12px 14px 14px 14px;
+        position: relative;
+    }}
+    .paag-fc-lane-project {{
+        background: rgba(238, 242, 255, 0.65);
+        border: 1.5px dashed #818cf8;
+    }}
+    .paag-fc-lane-scenario {{
+        background: rgba(240, 253, 250, 0.75);
+        border: 1.5px dashed #14b8a6;
+    }}
+    .paag-fc-lane-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 10px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }}
+    .paag-fc-lane-project .paag-fc-lane-header {{
+        color: #3730a3;
+    }}
+    .paag-fc-lane-scenario .paag-fc-lane-header {{
+        color: #0f766e;
+    }}
+    .paag-fc-grid-2 {{
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        align-items: stretch;
+    }}
+    .paag-fc-grid-pair-sync {{
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        gap: 10px;
+        align-items: center;
+    }}
+    .paag-fc-sync-bridge {{
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #4338ca;
+        background: #e0e7ff;
+        border: 1px solid #a5b4fc;
+        border-radius: 8px;
+        padding: 6px 8px;
+        min-width: 92px;
+        line-height: 1.2;
+    }}
+    .paag-fc-center-row {{
+        display: flex;
+        justify-content: center;
+    }}
+    .paag-fc-center-row > .paag-fc-node {{
+        width: min(100%, 560px);
+    }}
+    .paag-fc-node {{
+        background: #ffffff;
+        border-radius: 10px;
+        padding: 10px 13px;
+        box-shadow: 0 2px 5px rgba(15, 23, 42, 0.06);
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }}
+    .paag-fc-node-pop {{
+        border: 1.5px solid #10b981;
+        border-left: 5px solid #059669;
+    }}
+    .paag-fc-node-empty {{
+        border: 1.5px solid #cbd5e1;
+        border-left: 5px solid #94a3b8;
+    }}
+    .paag-fc-node-current {{
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.28), 0 4px 12px rgba(37, 99, 235, 0.16) !important;
+        border-color: #2563eb !important;
+    }}
+    .paag-fc-node-top {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 5px;
+    }}
+    .paag-fc-step-num {{
+        font-size: 0.7rem;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        background: #0f172a;
+        color: #ffffff;
+        padding: 2px 7px;
+        border-radius: 5px;
+    }}
+    .paag-fc-scope {{
+        font-size: 0.69rem;
+        font-weight: 700;
+        padding: 2px 7px;
+        border-radius: 999px;
+    }}
+    .paag-fc-scope-project {{
+        background: #e0e7ff;
+        color: #3730a3;
+    }}
+    .paag-fc-scope-scenario {{
+        background: #ccfbf1;
+        color: #115e59;
+    }}
+    .paag-fc-status {{
+        margin-left: auto;
+        font-size: 0.71rem;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 999px;
+    }}
+    .paag-fc-status-ok {{
+        background: #d1fae5;
+        color: #065f46;
+    }}
+    .paag-fc-status-pending {{
+        background: #f1f5f9;
+        color: #64748b;
+    }}
+    .paag-fc-here-badge {{
+        font-size: 0.69rem;
+        font-weight: 800;
+        background: #dbeafe;
+        color: #1d4ed8;
+        border: 1px solid #93c5fd;
+        padding: 1px 7px;
+        border-radius: 999px;
+    }}
+    .paag-fc-node-title {{
+        font-size: 0.96rem;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 2px;
+    }}
+    .paag-fc-node-sub {{
+        font-size: 0.79rem;
+        color: #475569;
+        margin-bottom: 6px;
+        line-height: 1.3;
+    }}
+    .paag-fc-node-metric {{
+        font-size: 0.76rem;
+        font-weight: 600;
+        color: #0f766e;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        padding: 3px 8px;
+        display: inline-block;
+    }}
+    .paag-fc-connector-row {{
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
+        padding: 4px 0;
+        color: #475569;
+        font-size: 0.74rem;
+        font-weight: 600;
+    }}
+    .paag-fc-arrow-pill {{
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 999px;
+        padding: 2px 10px;
+        color: #334155;
+        font-size: 0.73rem;
+        font-weight: 600;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }}
+    .paag-fc-funnel {{
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin: 6px 0;
+    }}
+    .paag-fc-funnel-bracket {{
+        width: 56%;
+        height: 10px;
+        border-left: 2px solid #64748b;
+        border-right: 2px solid #64748b;
+        border-bottom: 2px solid #64748b;
+        border-radius: 0 0 8px 8px;
+    }}
+    .paag-fc-fanout-bracket {{
+        width: 82%;
+        height: 10px;
+        border-left: 2px solid #0d9488;
+        border-right: 2px solid #0d9488;
+        border-top: 2px solid #0d9488;
+        border-radius: 8px 8px 0 0;
+    }}
+    .paag-fc-fanin-bracket {{
+        width: 82%;
+        height: 10px;
+        border-left: 2px solid #0d9488;
+        border-right: 2px solid #0d9488;
+        border-bottom: 2px solid #0d9488;
+        border-radius: 0 0 8px 8px;
+    }}
+    .paag-fc-boundary-gate {{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        margin: 10px 0;
+    }}
+    .paag-fc-boundary-line {{
+        flex: 1;
+        height: 2px;
+        background: linear-gradient(90deg, transparent, #64748b, transparent);
+    }}
+    .paag-fc-boundary-badge {{
+        background: #0f172a;
+        color: #f8fafc;
+        font-size: 0.74rem;
+        font-weight: 700;
+        padding: 4px 14px;
+        border-radius: 999px;
+        letter-spacing: 0.03em;
+        box-shadow: 0 2px 6px rgba(15, 23, 42, 0.15);
+    }}
+    .paag-fc-grid-5 {{
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+    }}
+    .paag-fc-mini-node {{
+        background: #ffffff;
+        border-radius: 8px;
+        padding: 8px 9px;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+    }}
+    .paag-fc-mini-pop {{
+        border: 1.5px solid #10b981;
+        border-top: 3.5px solid #059669;
+    }}
+    .paag-fc-mini-empty {{
+        border: 1.5px solid #cbd5e1;
+        border-top: 3.5px solid #94a3b8;
+    }}
+    .paag-fc-mini-header {{
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-bottom: 3px;
+    }}
+    .paag-fc-mini-dot {{
+        font-size: 0.75rem;
+        color: #059669;
+    }}
+    .paag-fc-mini-empty .paag-fc-mini-dot {{
+        color: #94a3b8;
+    }}
+    .paag-fc-mini-title {{
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: #0f172a;
+    }}
+    .paag-fc-here-mini {{
+        margin-left: auto;
+        font-size: 0.64rem;
+        font-weight: 800;
+        background: #dbeafe;
+        color: #1d4ed8;
+        padding: 1px 5px;
+        border-radius: 999px;
+    }}
+    .paag-fc-mini-sub {{
+        font-size: 0.7rem;
+        color: #64748b;
+        margin-bottom: 4px;
+        line-height: 1.25;
+    }}
+    .paag-fc-mini-metric {{
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: #0f766e;
+    }}
+    @media (max-width: 900px) {{
+        .paag-fc-grid-2,
+        .paag-fc-grid-pair-sync,
+        .paag-fc-grid-5 {{
+            grid-template-columns: 1fr;
+        }}
+    }}
+    </style>
+
+    <div class="paag-fc-wrap">
+        <div class="paag-fc-topbar">
+            <div class="paag-fc-progress-wrap">
+                <span>Critical Thread Readiness: {populated_steps} / {len(steps)} stages populated ({pct}%)</span>
+                <div class="paag-fc-progress-track"><div class="paag-fc-progress-fill"></div></div>
+            </div>
+            <div class="paag-fc-legend">
+                <span class="paag-fc-legend-item"><strong style="color:#059669;">●</strong> Populated</span>
+                <span class="paag-fc-legend-item"><strong style="color:#94a3b8;">○</strong> Pending</span>
+                <span class="paag-fc-legend-item"><strong style="color:#2563eb;">★</strong> Current page</span>
+            </div>
+        </div>
+
+        <!-- PHASE 1: PROJECT-WIDE SWIMLANE -->
+        <div class="paag-fc-lane paag-fc-lane-project">
+            <div class="paag-fc-lane-header">
+                <span>Phase 1 · Project-Wide Product Architecture &amp; MBOM Spine</span>
+                <span>Scope: All scenarios (shared across project)</span>
+            </div>
+
+            <!-- Row 1: Parallel Upstream Inputs (Step 1 & Step 2) -->
+            <div class="paag-fc-grid-2">
+                {_node_card_html(1, "Import PITs (Source Evidence)", "Upstream Product Architecture & Level 1–11 EBOM workbooks", "project")}
+                {_node_card_html(2, "Complexity Trees (Models & Features)", "Product models, EAU volumes, milestone dates & feature matrix", "project")}
+            </div>
+
+            <!-- Connectors from Row 1 to Row 2 -->
+            <div class="paag-fc-connector-row">
+                <span class="paag-fc-arrow-pill">▼ Stages EBOM occurrences &amp; tracker rows</span>
+                <span class="paag-fc-arrow-pill">▼ Supplies model &amp; feature applicability rules</span>
+            </div>
+
+            <!-- Row 2: BOM Reconciliation <-> Parts Catalog (Step 3 & Step 4) -->
+            <div class="paag-fc-grid-pair-sync">
+                {_node_card_html(3, "BOM Reconciliation (EBOM → MBOM)", "Reconcile New / Changed / Missing occurrences & approve sections", "project")}
+                <div class="paag-fc-sync-bridge">
+                    <span>◄────►</span>
+                    <span>Syncs Parts &amp; Placements</span>
+                </div>
+                {_node_card_html(4, "Parts Catalog", "Master part attributes, annotated photos & scenario active flags", "project")}
+            </div>
+
+            <!-- Converging Funnel into Step 5 (Fishbone) -->
+            <div class="paag-fc-funnel">
+                <div class="paag-fc-funnel-bracket"></div>
+                <span class="paag-fc-arrow-pill" style="margin-top:3px;">▼ Approved MBOM placements &amp; active catalog parts converge</span>
+            </div>
+
+            <!-- Row 3: Fishbone Assembly Structure (Step 5) -->
+            <div class="paag-fc-center-row">
+                {_node_card_html(5, "Fishbone Assembly Structure", "Main line, subassembly & parallel sections · Part placements · Manufacturing Assembly Grid (ASM)", "project")}
+            </div>
+        </div>
+
+        <!-- SCOPE BOUNDARY CROSSING -->
+        <div class="paag-fc-boundary-gate">
+            <div class="paag-fc-boundary-line"></div>
+            <div class="paag-fc-boundary-badge">
+                ▼ SCOPE BOUNDARY: Fishbone Sections map 1-to-1 into Scenario Yamazumi Areas &amp; Material Groups ▼
+            </div>
+            <div class="paag-fc-boundary-line"></div>
+        </div>
+
+        <!-- PHASE 2: SCENARIO-SPECIFIC SWIMLANE -->
+        <div class="paag-fc-lane paag-fc-lane-scenario">
+            <div class="paag-fc-lane-header">
+                <span>Phase 2 · Scenario Line Balancing, Process Plan &amp; Functional Reviews</span>
+                <span>Scope: Active scenario (isolated per scenario)</span>
+            </div>
+
+            <!-- Row 4: Yamazumi Line Balancing (Step 6) -->
+            <div class="paag-fc-center-row">
+                {_node_card_html(6, "Yamazumi Line Balancing", "Scenario areas, guided pitch addresses (Pitch / Subassembly / Kitter / Waterspider) & operator elements vs. Takt Time", "scenario")}
+            </div>
+
+            <!-- Connector from Step 6 to Step 7 -->
+            <div class="paag-fc-funnel">
+                <span class="paag-fc-arrow-pill">▼ Push balanced pitch stacks &amp; material groups into Process steps</span>
+            </div>
+
+            <!-- Row 5: Process at a Glance (Step 7) -->
+            <div class="paag-fc-center-row">
+                {_node_card_html(7, "Process at a Glance (Authoritative Scenario Plan)", "Deterministic Op IDs (M1S1b.01-ML1-004.4) · Part Handle vs. Consume pairings · Pitch visual aids", "scenario")}
+            </div>
+
+            <!-- Fan-Out from Step 7 to 5 Functional Reviews -->
+            <div class="paag-fc-funnel">
+                <span class="paag-fc-arrow-pill" style="margin-bottom:3px;">▼ Process steps anchor all 5 Cross-Functional Engineering Reviews ▼</span>
+                <div class="paag-fc-fanout-bracket"></div>
+            </div>
+
+            <!-- Row 6: 5 Parallel Functional Review Branches -->
+            <div class="paag-fc-grid-5">
+                {"".join(func_cards_html)}
+            </div>
+
+            <!-- Fan-In from Functional Reviews into Step 8 (Pin Map) -->
+            <div class="paag-fc-funnel">
+                <div class="paag-fc-fanin-bracket"></div>
+                <span class="paag-fc-arrow-pill" style="margin-top:3px;">▼ Synthesizes station-by-station risk, torque, tool &amp; PPE indicators ▼</span>
+            </div>
+
+            <!-- Row 7: Pin Map & 2D Layout (Step 8) -->
+            <div class="paag-fc-center-row">
+                {_node_card_html(8, "Pin Map & 2D Plant Layout", "Derived station-by-station indicator matrix + interactive 2D floorplan & conveyor layout canvas", "scenario")}
+            </div>
+        </div>
+    </div>
+    """
+
+
 def _render_workflow_guide_tab(
     project_id: str | None,
     scenario_id: str | None,
+    active_page_key: str = "",
 ) -> None:
     st.markdown(
-        "The **Critical Thread** is the backbone of Process at a Glance. Upstream product architecture "
-        "evidence flows into collaborator-reviewed catalog and Fishbone structures, which then drive "
-        "scenario-specific line balancing, Process steps, and Functional Reviews."
+        "The **Critical Thread** is the visual engineering flowchart of Process at a Glance. "
+        "Upstream product architecture evidence flows through project-wide BOM & Fishbone structures "
+        "into scenario-specific Yamazumi line balancing, Process steps, Functional Reviews, and the derived Pin Map."
     )
     if not project_id:
         st.info(
-            "Select or create a project on **Overview** to see live record counts for each step.",
+            "Select or create a project on **Overview** to populate live record counts inside the flowchart below.",
             icon=":material/info:",
         )
-        return
+        steps = _default_critical_thread_steps()
+    else:
+        steps = critical_thread_status_counts(project_id, scenario_id) or _default_critical_thread_steps()
 
-    steps = critical_thread_status_counts(project_id, scenario_id)
-    populated_steps = sum(1 for s in steps if s.get("populated"))
-    st.caption(
-        f"Active workspace progress: **{populated_steps} of {len(steps)}** Critical Thread stages have records populated."
-    )
+    active_manual_key = resolve_manual_key(active_page_key)
+    st.html(_build_critical_thread_flowchart_html(steps, active_manual_key))
 
-    for step in steps:
-        is_pop = bool(step.get("populated"))
-        status_icon = ":material/check_circle:" if is_pop else ":material/radio_button_unchecked:"
-        status_label = "Populated" if is_pop else "Not yet populated"
-        with st.container(border=True):
-            c1, c2 = st.columns([4.2, 1.3], vertical_alignment="center")
-            with c1:
-                st.markdown(
-                    f"**Step {step['step_number']}: {step['title']}** &nbsp;·&nbsp; `{step['scope']}`"
-                )
-                st.caption(
-                    f"{status_icon} **{status_label}** — {step['metric_summary']}"
-                )
-                st.markdown(step["description"])
-            with c2:
-                if st.button(
-                    f"Go to {step['page_title']}",
-                    icon=":material/open_in_new:",
-                    width="stretch",
-                    key=f"help_hub_thread_go_{step['step_number']}",
-                ):
-                    navigate_to_page_from_hub(
-                        step["page_url_path"],
-                        step["page_title"],
-                    )
+    st.markdown("##### :material/ads_click: Click any flowchart node to open that workspace")
+    row1_cols = st.columns(4)
+    for col, step in zip(row1_cols, steps[:4]):
+        with col:
+            is_pop = bool(step.get("populated"))
+            btn_icon = ":material/check_circle:" if is_pop else ":material/open_in_new:"
+            if st.button(
+                f"{step['step_number']}. {step['page_title']}",
+                icon=btn_icon,
+                width="stretch",
+                key=f"help_hub_thread_go_{step['step_number']}",
+                help=f"{step['title']} ({step['metric_summary']})",
+            ):
+                navigate_to_page_from_hub(step["page_url_path"], step["page_title"])
+
+    row2_cols = st.columns(4)
+    for col, step in zip(row2_cols, steps[4:8]):
+        with col:
+            is_pop = bool(step.get("populated"))
+            btn_icon = ":material/check_circle:" if is_pop else ":material/open_in_new:"
+            if st.button(
+                f"{step['step_number']}. {step['page_title']}",
+                icon=btn_icon,
+                width="stretch",
+                key=f"help_hub_thread_go_{step['step_number']}",
+                help=f"{step['title']} ({step['metric_summary']})",
+            ):
+                navigate_to_page_from_hub(step["page_url_path"], step["page_title"])
+
+    func_nav = [
+        ("functional_equipment", "Equipment", ":material/precision_manufacturing:"),
+        ("functional_quality", "Quality", ":material/verified:"),
+        ("functional_ergonomics", "Ergonomics", ":material/accessibility_new:"),
+        ("functional_materials", "Materials", ":material/inventory_2:"),
+        ("functional_safety", "Safety", ":material/health_and_safety:"),
+    ]
+    func_cols = st.columns(5)
+    for col, (f_url, f_label, f_icon) in zip(func_cols, func_nav):
+        with col:
+            if st.button(
+                f_label,
+                icon=f_icon,
+                width="stretch",
+                key=f"help_hub_thread_func_{f_url}",
+                help=f"Open {f_label} functional review workspace",
+            ):
+                navigate_to_page_from_hub(f_url, f_label)
+
+    with st.expander(":material/list_alt: View detailed stage-by-stage descriptions", expanded=False):
+        for step in steps:
+            is_pop = bool(step.get("populated"))
+            status_icon = ":material/check_circle:" if is_pop else ":material/radio_button_unchecked:"
+            status_label = "Populated" if is_pop else "Not yet populated"
+            st.markdown(
+                f"**Step {step['step_number']}: {step['title']}** (`{step['scope']}`) — "
+                f"{status_icon} *{status_label}* ({step['metric_summary']})\n\n"
+                f"{step['description']}"
+            )
 
 
 def _render_glossary_and_troubleshooting_tab() -> None:
@@ -1593,7 +2330,11 @@ def open_universal_help_dialog(
         _render_global_search_tab(project_id, scenario_id)
 
     with tab_workflow:
-        _render_workflow_guide_tab(project_id, scenario_id)
+        _render_workflow_guide_tab(
+            project_id,
+            scenario_id,
+            active_page_key=active_page_key,
+        )
 
     with tab_glossary:
         _render_glossary_and_troubleshooting_tab()

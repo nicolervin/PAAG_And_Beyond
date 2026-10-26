@@ -109,24 +109,29 @@ st.html(
     div[data-testid="stPopover"] > div > button {
         min-height: 2.35rem;
         height: auto !important;
-        white-space: normal !important;
-        word-break: normal !important;
-        overflow-wrap: break-word !important;
+        white-space: nowrap !important;
+        word-break: keep-all !important;
+        overflow-wrap: normal !important;
         line-height: 1.25 !important;
-        padding: 0.35rem 0.65rem !important;
+        padding: 0.35rem 0.75rem !important;
     }
     div[data-testid="stButton"] button p,
     div[data-testid="stDownloadButton"] button p,
     div[data-testid="stLinkButton"] a p,
     div[data-testid="stPopover"] > div > button p {
-        white-space: normal !important;
+        white-space: nowrap !important;
+        word-break: keep-all !important;
+        overflow-wrap: normal !important;
         line-height: 1.25 !important;
         text-align: center;
     }
+    div[data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:not(:has(div[data-testid="stHorizontalBlock"], div[data-testid="stDataFrame"], div[data-testid="stForm"], div[data-testid="stTabs"], div[data-testid="stMarkdown"], div[data-testid="stTextInput"], div[data-testid="stSelectbox"])):has(div[data-testid="stButton"], div[data-testid="stDownloadButton"], div[data-testid="stLinkButton"], div[data-testid="stPopover"]) {
+        min-width: fit-content !important;
+    }
     @media (max-width: 1200px) {
-        div[data-testid="stHorizontalBlock"] {
-            flex-wrap: wrap !important;
-        }
         div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
             min-width: min(100%, 160px) !important;
         }

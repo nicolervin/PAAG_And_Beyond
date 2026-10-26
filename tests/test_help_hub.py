@@ -9,6 +9,7 @@ import utils.db_core as db_core
 from utils import store
 from utils.help_hub import (
     PAGE_MANUALS,
+    _build_critical_thread_flowchart_html,
     decode_operation_or_pitch_id,
     resolve_manual_key,
 )
@@ -149,6 +150,12 @@ class HelpHubTests(unittest.TestCase):
         step_by_num = {s["step_number"]: s for s in steps}
         self.assertTrue(step_by_num[4]["populated"])  # Parts Catalog
         self.assertTrue(step_by_num[5]["populated"])  # Fishbone
+
+        flowchart_html = _build_critical_thread_flowchart_html(steps, "fishbone")
+        self.assertIn("STEP 1", flowchart_html)
+        self.assertIn("STEP 8", flowchart_html)
+        self.assertIn("★ You are here", flowchart_html)
+        self.assertIn("1 catalog parts", flowchart_html)
 
     def test_op_id_decoder_and_manual_resolution(self) -> None:
         self.assertEqual(resolve_manual_key("__default__"), "overview")

@@ -260,16 +260,18 @@ fishbone_tab, assign_parts_tab = guarded_tabs(
 )
 
 with assign_parts_tab:
-    place_parts_title, place_parts_undo_last, place_parts_redo_last, place_parts_undo = st.columns(
-        [3.0, 1.1, 1.1, 1.25], vertical_alignment="center"
+    st.subheader("Place Parts into Fishbone")
+    place_parts_bar = st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        horizontal_alignment="right",
     )
-    place_parts_title.subheader("Place Parts into Fishbone")
     placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
     trigger_pool_save, trigger_pool_discard = register_unsaved_source(
         f"fishbone_pool_{project_id}_{scenario_id}",
         editor_key=pool_editor_key,
     )
-    undo_last_placement = place_parts_undo_last.button(
+    undo_last_placement = place_parts_bar.button(
         "Undo last edit",
         icon=":material/undo:",
         disabled=not can_undo_last_table_edit(pool_editor_key, ignored_columns=()),
@@ -286,7 +288,7 @@ with assign_parts_tab:
                 icon=":material/undo:",
             )
             st.rerun()
-    redo_last_placement = place_parts_redo_last.button(
+    redo_last_placement = place_parts_bar.button(
         "Redo last edit",
         icon=":material/redo:",
         disabled=not can_redo_last_table_edit(pool_editor_key, ignored_columns=()),
@@ -303,7 +305,7 @@ with assign_parts_tab:
                 icon=":material/redo:",
             )
             st.rerun()
-    undo_placement = place_parts_undo.button(
+    undo_placement = place_parts_bar.button(
         "Discard all edits",
         icon=":material/restart_alt:",
         disabled=assignment_undo_key not in st.session_state and not placement_has_unsaved,
