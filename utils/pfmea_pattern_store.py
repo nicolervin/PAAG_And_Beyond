@@ -947,7 +947,7 @@ DEFAULT_PFMEA_PATTERNS = [
         "label": "Torque Fastener",
         "notes": "Standard pattern for threaded fastener tightening operations",
         "potential_failure_mode": "Fastener undertorqued, overtorqued, or missing",
-        "class_code": "CC",
+        "class_code": "S",
         "effects": [{"effect_description": "Joint loosening under operational vibration; potential assembly component separation"}],
         "causes": [{"cause_description": "Torque tool shut-off set improperly or operator skipped fastener"}],
         "actions": [{"recommended_action": "Implement DC electric torque tool with count interlocking and automated batch complete confirmation"}],
@@ -956,7 +956,7 @@ DEFAULT_PFMEA_PATTERNS = [
         "label": "Press Fit Component",
         "notes": "Standard pattern for press-fit pins, bearings, or bushings",
         "potential_failure_mode": "Bushing pressed out-of-spec, cocked, or missing",
-        "class_code": "SC",
+        "class_code": "E",
         "effects": [{"effect_description": "Interference fit failure; component noise or premature wear in service"}],
         "causes": [{"cause_description": "Press force/distance limits exceeded or part misaligned during insertion"}],
         "actions": [{"recommended_action": "Use automated press with force vs. distance curve monitoring interlock"}],
@@ -965,7 +965,7 @@ DEFAULT_PFMEA_PATTERNS = [
         "label": "Visual Quality Inspection",
         "notes": "Standard pattern for surface finish or cosmetic defects",
         "potential_failure_mode": "Surface scratch, gouge, or contamination present",
-        "class_code": "KPC",
+        "class_code": "Q",
         "effects": [{"effect_description": "Customer complaint; aesthetic dissatisfaction or coating adhesion failure"}],
         "causes": [{"cause_description": "Handling damage during transfer or contaminated wash bath"}],
         "actions": [{"recommended_action": "Install automated vision camera system or standardized boundary sample light box"}],
@@ -991,6 +991,6 @@ def seed_default_pfmea_patterns(project_id: str) -> list[str]:
             causes=pat["causes"],
             actions=pat["actions"],
         )
-        created_ids.append(res["pattern"]["id"])
+        created_ids.append(str(res.get("pattern_id") or (res.get("pattern") or {}).get("id") or ""))
     return created_ids
 

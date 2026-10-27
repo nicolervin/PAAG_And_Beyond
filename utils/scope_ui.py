@@ -20,13 +20,42 @@ PROJECT_WIDE_HELP = (
 )
 
 
+def sync_active_scenario_state(scenario_id: str | None) -> None:
+    """Synchronize session state and URL query params for the active scenario."""
+    if scenario_id:
+        scen_str = str(scenario_id)
+        st.session_state["scenario_id"] = scen_str
+        st.session_state["global_scenario"] = scen_str
+        for state_key in list(st.session_state.keys()):
+            if str(state_key).startswith("page_scenario_view_"):
+                st.session_state[state_key] = scen_str
+        st.session_state["_qp_synced_scenario_id"] = scen_str
+        try:
+            if st.query_params.get("scenario_id") != scen_str:
+                st.query_params["scenario_id"] = scen_str
+        except Exception:
+            pass
+    else:
+        st.session_state["scenario_id"] = None
+        st.session_state.pop("global_scenario", None)
+        for state_key in list(st.session_state.keys()):
+            if str(state_key).startswith("page_scenario_view_"):
+                st.session_state.pop(state_key, None)
+        st.session_state.pop("_qp_synced_scenario_id", None)
+        try:
+            if "scenario_id" in st.query_params:
+                del st.query_params["scenario_id"]
+        except Exception:
+            pass
+
+
 def _activate_scenario(selector_key: str) -> None:
     """Promote a scenario selector change to the shared cross-page state."""
     selected_id = st.session_state.get(selector_key)
     if not selected_id:
         return
     prev_id = str(st.session_state.get("scenario_id") or "")
-    st.session_state["scenario_id"] = selected_id
+    sync_active_scenario_state(str(selected_id))
     project_id = st.session_state.get("project_id")
     if str(selected_id) != prev_id and project_id:
         scenarios = planning_scenarios(str(project_id))
@@ -63,7 +92,7 @@ def scenario_view_selector(
     current_id = str(st.session_state.get("scenario_id") or "")
     if current_id not in scenario_by_id:
         current_id = str(scenarios[0]["id"])
-        st.session_state["scenario_id"] = current_id
+        sync_active_scenario_state(current_id)
     if st.session_state.get(key) != current_id:
         st.session_state[key] = current_id
     selected_id = parent.selectbox(
@@ -143,7 +172,7 @@ def save_as_scenario_dialog(
                     st.session_state.get("current_editor", ""),
                     takt_time_unit=takt_time_unit,
                 )
-                st.session_state["scenario_id"] = new_scenario_id
+                sync_active_scenario_state(new_scenario_id)
                 set_last_active_workspace(project_id, new_scenario_id)
                 st.toast(
                     f"Created scenario Rev {revision_label.strip()} · {name.strip()} and set it as active",

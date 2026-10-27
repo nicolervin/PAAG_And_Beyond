@@ -147,10 +147,8 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE quality_requirement_types SET units_available='inch;mm;mil' WHERE LOWER(TRIM(label))='dimensional'")
         conn.execute("UPDATE quality_requirement_types SET units_available='in-lbs;ft-lbs;N·m' WHERE LOWER(TRIM(label))='torque'")
 
-    assignment_cols = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(quality_requirement_assignments)").fetchall()
-    }
+    assignment_info = conn.execute("PRAGMA table_info(quality_requirement_assignments)").fetchall()
+    assignment_cols = {row["name"] for row in assignment_info}
     if "process_operation_snapshot" not in assignment_cols:
         conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN process_operation_snapshot TEXT NOT NULL DEFAULT ''")
     if "process_description_snapshot" not in assignment_cols:
@@ -159,6 +157,18 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN station_pitch_snapshot TEXT NOT NULL DEFAULT ''")
     if "unlinked_at" not in assignment_cols:
         conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN unlinked_at TEXT NOT NULL DEFAULT ''")
+
+    work_col_notnull = any(
+        row["name"] == "work_element_id" and int(row["notnull"] or 0) == 1
+        for row in assignment_info
+    )
+    fk_rows = conn.execute("PRAGMA foreign_key_list(quality_requirement_assignments)").fetchall()
+    work_fk_cascade = any(
+        str(fk["table"]) == "work_elements" and str(fk["on_delete"]).upper() != "SET NULL"
+        for fk in fk_rows
+    )
+    if work_col_notnull or work_fk_cascade:
+        _upgrade_quality_assignments_schema(conn)
 
     # Backfill snapshots for existing linked assignments where snapshots are currently blank
     conn.execute(
@@ -173,6 +183,65 @@ def init_quality_schema(conn: sqlite3.Connection) -> None:
     project_rows = conn.execute("SELECT id FROM projects").fetchall()
     for project_row in project_rows:
         _ensure_quality_requirement_types(conn, str(project_row["id"]))
+
+
+def _upgrade_quality_assignments_schema(conn: sqlite3.Connection) -> None:
+    """Rebuild quality_requirement_assignments so work_element_id is nullable with ON DELETE SET NULL."""
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE quality_requirement_assignments_new (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                quality_requirement_id TEXT NOT NULL
+                    REFERENCES quality_requirements(id) ON DELETE RESTRICT,
+                requirement_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                unique_identifier TEXT NOT NULL,
+                pass_fail INTEGER NOT NULL DEFAULT 0 CHECK (pass_fail IN (0, 1)),
+                target_value REAL,
+                tolerances TEXT NOT NULL DEFAULT '',
+                unit TEXT NOT NULL DEFAULT '',
+                process_operation_snapshot TEXT NOT NULL DEFAULT '',
+                process_description_snapshot TEXT NOT NULL DEFAULT '',
+                station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                unlinked_at TEXT NOT NULL DEFAULT '',
+                source_updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(work_element_id, quality_requirement_id)
+            );
+            INSERT INTO quality_requirement_assignments_new (
+                id, project_id, scenario_id, work_element_id, quality_requirement_id,
+                requirement_type, description, unique_identifier, pass_fail,
+                target_value, tolerances, unit,
+                process_operation_snapshot, process_description_snapshot,
+                station_pitch_snapshot, unlinked_at,
+                source_updated_at, created_at, updated_at
+            )
+            SELECT
+                id, project_id, scenario_id, NULLIF(work_element_id, ''), quality_requirement_id,
+                requirement_type, description, unique_identifier, pass_fail,
+                target_value, tolerances, unit,
+                COALESCE(process_operation_snapshot, ''),
+                COALESCE(process_description_snapshot, ''),
+                COALESCE(station_pitch_snapshot, ''),
+                COALESCE(unlinked_at, ''),
+                source_updated_at, created_at, updated_at
+            FROM quality_requirement_assignments;
+            DROP TABLE quality_requirement_assignments;
+            ALTER TABLE quality_requirement_assignments_new RENAME TO quality_requirement_assignments;
+            CREATE INDEX IF NOT EXISTS idx_quality_assignments_scenario
+                ON quality_requirement_assignments(project_id, scenario_id, work_element_id);
+            CREATE INDEX IF NOT EXISTS idx_quality_assignments_requirement
+                ON quality_requirement_assignments(project_id, quality_requirement_id);
+            """
+        )
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 

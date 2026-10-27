@@ -5,7 +5,7 @@ from streamlit.runtime.scriptrunner import StopException
 from utils.time_units import format_seconds
 from utils.fishbone_ui import FISHBONE_LINKED_PAGES, render_fishbone_sidebar_context
 from utils.gcp_auth import detect_authenticated_user_email
-from utils.scope_ui import scenario_view_selector
+from utils.scope_ui import scenario_view_selector, sync_active_scenario_state
 
 from utils.split_workspace import (
     build_page_url,
@@ -215,18 +215,28 @@ if (
 pending_project_id = st.session_state.pop("pending_active_project_id", None)
 if pending_project_id and str(pending_project_id) in valid_project_ids:
     st.session_state.project_id = str(pending_project_id)
+    st.session_state["_qp_synced_project_id"] = str(pending_project_id)
+    sync_active_scenario_state(None)
+    try:
+        st.query_params["project_id"] = str(pending_project_id)
+    except Exception:
+        pass
     st.session_state.scenario_id = None
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
 
 # Synchronize project context from URL query params (e.g. pop-out window or shared tab)
+prev_qp_project_id = st.session_state.get("_qp_synced_project_id")
 qp_project_id = st.query_params.get("project_id")
 if (
     qp_project_id
     and str(qp_project_id) in valid_project_ids
+    and str(qp_project_id) != str(prev_qp_project_id)
     and str(qp_project_id) != str(st.session_state.get("project_id"))
 ):
     st.session_state.project_id = str(qp_project_id)
+    st.session_state["_qp_synced_project_id"] = str(qp_project_id)
+    sync_active_scenario_state(None)
     st.session_state.scenario_id = None
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
@@ -238,12 +248,17 @@ if str(st.session_state.get("project_id") or "") not in valid_project_ids:
     st.session_state.pop("global_scenario", None)
 
 # Synchronize scenario context from URL query params
+prev_qp_scenario_id = st.session_state.get("_qp_synced_scenario_id")
 qp_scenario_id = st.query_params.get("scenario_id")
-if qp_scenario_id and st.session_state.get("project_id"):
+if (
+    qp_scenario_id
+    and str(qp_scenario_id) != str(prev_qp_scenario_id)
+    and st.session_state.get("project_id")
+):
     available_scenarios = planning_scenarios(st.session_state["project_id"])
     if any(str(s["id"]) == str(qp_scenario_id) for s in available_scenarios):
         st.session_state.scenario_id = str(qp_scenario_id)
-        st.session_state["global_scenario"] = str(qp_scenario_id)
+        sync_active_scenario_state(str(qp_scenario_id))
 
 project_exchange_page = st.Page(
     "app_pages/exchange.py",
@@ -368,10 +383,12 @@ elif "page" in st.query_params:
 
 if st.session_state.get("project_id"):
     qp_proj = str(st.session_state["project_id"])
+    st.session_state["_qp_synced_project_id"] = qp_proj
     if st.query_params.get("project_id") != qp_proj:
         st.query_params["project_id"] = qp_proj
 if st.session_state.get("scenario_id"):
     qp_scen = str(st.session_state["scenario_id"])
+    st.session_state["_qp_synced_scenario_id"] = qp_scen
     if st.query_params.get("scenario_id") != qp_scen:
         st.query_params["scenario_id"] = qp_scen
 
@@ -511,6 +528,12 @@ with st.sidebar:
         if selected_project_id != st.session_state.project_id:
             clear_unsaved_tracking_state()
             st.session_state.project_id = selected_project_id
+            st.session_state["_qp_synced_project_id"] = str(selected_project_id)
+            sync_active_scenario_state(None)
+            try:
+                st.query_params["project_id"] = str(selected_project_id)
+            except Exception:
+                pass
             st.session_state.scenario_id = None
             st.session_state.pop("global_scenario", None)
             st.toast(f"Switched active project to '{selected_name}'", icon=":material/folder_open:")
