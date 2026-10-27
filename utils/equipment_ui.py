@@ -1909,12 +1909,233 @@ def render_equipment_overview(
     station_count = int(all_assets["equipment_tier"].eq("Station/Pitch Equipment").sum()) if not all_assets.empty else 0
     capital_count = int(all_assets["equipment_tier"].eq("Capital Equipment").sum()) if not all_assets.empty else 0
 
-    # Top KPI Metrics row
-    kpi_cols = st.columns(4)
-    kpi_cols[0].metric("Total Equipment", len(all_assets))
-    kpi_cols[1].metric("Handheld Tools", handheld_count)
-    kpi_cols[2].metric("Station Equipment", station_count)
-    kpi_cols[3].metric("Capital Equipment", capital_count)
+    # Top 5-card readiness banner
+    total_assets = len(all_assets)
+    if not all_assets.empty:
+        spec_complete_count = int(
+            sum(
+                1
+                for _, r in all_assets.iterrows()
+                if _text(r.get("image_path"))
+                or (_text(r.get("manufacturer")) and _text(r.get("model")))
+                or _text(r.get("description"))
+            )
+        )
+        placed_count = int(
+            sum(1 for _, r in all_assets.iterrows() if _text(r.get("pitch_id")))
+        )
+        linked_assets_count = int(
+            sum(
+                1
+                for _, r in all_assets.iterrows()
+                if int(r.get("process_link_count") or 0) > 0
+            )
+        )
+        total_process_links = int(
+            pd.to_numeric(all_assets["process_link_count"], errors="coerce")
+            .fillna(0)
+            .sum()
+        )
+        equipped_pitches = len(
+            {_text(r.get("pitch_id")) for _, r in all_assets.iterrows() if _text(r.get("pitch_id"))}
+        )
+    else:
+        spec_complete_count = 0
+        placed_count = 0
+        linked_assets_count = 0
+        total_process_links = 0
+        equipped_pitches = 0
+
+    spec_pct = (spec_complete_count / total_assets * 100.0) if total_assets > 0 else 0.0
+
+    if scenario_id:
+        pitches_df = equipment_pitch_options(project_id, scenario_id)
+        total_active_pitches = len(pitches_df)
+        needs_matrix = equipment_needs_vs_placements_matrix(project_id, scenario_id)
+        total_needs = len(needs_matrix)
+        satisfied_needs = (
+            int(needs_matrix["is_satisfied"].sum()) if not needs_matrix.empty else 0
+        )
+        missing_needs = max(total_needs - satisfied_needs, 0)
+        need_pct = (satisfied_needs / total_needs * 100.0) if total_needs > 0 else 100.0
+
+        mismatches_df = equipment_placement_mismatches(project_id, scenario_id)
+        mismatch_count = len(mismatches_df)
+        torque_warning_count = 0
+        if not all_assets.empty:
+            for _, r in all_assets.iterrows():
+                if int(r.get("torque_requirement_count") or 0) > 0:
+                    torque_warning_count += len(
+                        equipment_torque_compatibility_warnings(
+                            project_id, scenario_id, _text(r.get("id"))
+                        )
+                    )
+        sizing = scenario_conveyor_line_sizing(project_id, scenario_id)
+        zone_count = int(sizing.get("zone_count") or 0)
+        zone_assigned_pitches = (
+            int(sizing.get("active_pitches") or 0) if zone_count > 0 else 0
+        )
+        total_length_ft = float(sizing.get("total_length_ft") or 0.0)
+        helper_pitches = int(sizing.get("helper_pitches") or 0)
+        growth_pitches = int(sizing.get("growth_pitches") or 0)
+    else:
+        total_active_pitches = 0
+        total_needs = 0
+        satisfied_needs = 0
+        missing_needs = 0
+        need_pct = 0.0
+        mismatch_count = 0
+        torque_warning_count = 0
+        zone_count = 0
+        zone_assigned_pitches = 0
+        total_length_ft = 0.0
+        helper_pitches = 0
+        growth_pitches = 0
+
+    total_warnings = mismatch_count + torque_warning_count
+
+    kpi_cols = st.columns(5)
+
+    # Card 1: Equipment catalog & tiers
+    cat_icon = "🟢" if total_assets > 0 else "🟡"
+    if total_assets == 0:
+        cat_delta = "Add tools & equipment below"
+        cat_delta_color = "off"
+    else:
+        cat_delta = (
+            f"{handheld_count} handheld · {station_count} station · "
+            f"{capital_count} capital ({spec_pct:.0f}% spec/photo)"
+        )
+        cat_delta_color = "normal" if spec_pct >= 80.0 else "off"
+    kpi_cols[0].metric(
+        "Equipment catalog & tiers",
+        f"{cat_icon} {total_assets:,}",
+        delta=cat_delta,
+        delta_color=cat_delta_color,
+        help=(
+            "Project-wide shared equipment catalog broken down by tier "
+            "(Handheld Tools, Station/Pitch Equipment, Capital Equipment) and "
+            "percentage of assets with a photo, manufacturer/model, or description."
+        ),
+    )
+
+    # Card 2: Station placement & step links
+    if not scenario_id:
+        place_val = "🟡 —"
+        place_delta = "Select a scenario to place equipment"
+        place_delta_color = "off"
+    else:
+        if total_assets == 0:
+            place_icon = "🟡"
+        elif placed_count == total_assets and linked_assets_count > 0:
+            place_icon = "🟢"
+        elif placed_count > 0 or linked_assets_count > 0:
+            place_icon = "🟡"
+        else:
+            place_icon = "🔴"
+        place_val = f"{place_icon} {placed_count} / {total_assets}"
+        place_delta = (
+            f"{linked_assets_count} linked ({total_process_links} step links) · "
+            f"{equipped_pitches}/{total_active_pitches} pitches"
+        )
+        place_delta_color = (
+            "normal" if total_assets > 0 and placed_count == total_assets else "off"
+        )
+    kpi_cols[1].metric(
+        "Station placement & step links",
+        place_val,
+        delta=place_delta,
+        delta_color=place_delta_color,
+        help=(
+            "Active-scenario workstation pitch placements (equipment_placements) "
+            "and explicit Process at a Glance step links (equipment_process_links), "
+            "plus how many active Yamazumi pitches have assigned equipment."
+        ),
+    )
+
+    # Card 3: Process & Quality need fulfillment
+    if not scenario_id or total_needs == 0:
+        need_icon = "🟢" if total_assets > 0 else "🟡"
+        need_val = f"{need_icon} 0 needs"
+        need_delta = "No Drawing or PFMEA tool needs detected"
+        need_delta_color = "off"
+    else:
+        if missing_needs == 0:
+            need_icon = "🟢"
+            need_delta = "All Drawing & PFMEA equipment needs met"
+            need_delta_color = "normal"
+        elif need_pct >= 50.0:
+            need_icon = "🟡"
+            need_delta = f"{missing_needs} requirement{'s' if missing_needs != 1 else ''} missing linked equipment"
+            need_delta_color = "inverse"
+        else:
+            need_icon = "🔴"
+            need_delta = f"{missing_needs} requirement{'s' if missing_needs != 1 else ''} missing linked equipment"
+            need_delta_color = "inverse"
+        need_val = f"{need_icon} {need_pct:.0f}% ({satisfied_needs}/{total_needs})"
+    kpi_cols[2].metric(
+        "Process & Quality need fulfillment",
+        need_val,
+        delta=need_delta,
+        delta_color=need_delta_color,
+        help=(
+            "Audits Drawing Requirements (Torque, Vision, ESD, Scan, Test) and "
+            "PFMEA Control methods against placed and linked Equipment assets in "
+            "the active scenario (Needs vs. Placements Audit tab)."
+        ),
+    )
+
+    # Card 4: Placement & torque alerts
+    if total_warnings == 0:
+        warn_icon = "🟢"
+        warn_delta = "0 pitch mismatches · 0 torque warnings"
+        warn_delta_color = "normal"
+    else:
+        warn_icon = "🟡" if total_warnings <= 2 else "🔴"
+        warn_delta = (
+            f"{mismatch_count} pitch mismatch{'es' if mismatch_count != 1 else ''} · "
+            f"{torque_warning_count} torque warning{'s' if torque_warning_count != 1 else ''}"
+        )
+        warn_delta_color = "inverse"
+    kpi_cols[3].metric(
+        "Placement & torque alerts",
+        f"{warn_icon} {total_warnings}",
+        delta=warn_delta,
+        delta_color=warn_delta_color,
+        help=(
+            "Flags equipment linked to Process steps whose current Yamazumi pitch "
+            "differs from the equipment's placed pitch, plus Torque tools linked "
+            "to Torque requirements that are not published to the linked Process step."
+        ),
+    )
+
+    # Card 5: Conveyor & line sizing
+    if zone_count > 0 and total_active_pitches > 0 and zone_assigned_pitches >= total_active_pitches:
+        conv_icon = "🟢"
+        conv_delta_color = "normal"
+    else:
+        conv_icon = "🟡"
+        conv_delta_color = "off"
+    kpi_cols[4].metric(
+        "Conveyor & line sizing",
+        f"{conv_icon} {zone_count} zone{'s' if zone_count != 1 else ''}",
+        delta=(
+            f"{zone_assigned_pitches}/{total_active_pitches} pitches · "
+            f"{total_length_ft:.1f} ft · {helper_pitches} helper · "
+            f"{growth_pitches} growth"
+        ),
+        delta_color=conv_delta_color,
+        help=(
+            "Active-scenario Conveyor Zone coverage across active Yamazumi pitches "
+            "and total calculated line length including helper and growth pitches "
+            "(Conveyor Zones & Line Sizing tab)."
+        ),
+    )
+
+
+
+
+
 
     tab_labels = [
         ":material/inventory_2: Equipment Catalog & Placements",

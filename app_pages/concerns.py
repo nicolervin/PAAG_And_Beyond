@@ -103,6 +103,169 @@ if isinstance(editor_state, dict) and current_editor:
         if isinstance(added_row, dict) and not str(added_row.get("submitted_by") or "").strip():
             added_row["submitted_by"] = current_editor
 
+total_concerns = int(len(concerns))
+open_df = concerns[concerns["status"].str.strip() != "Resolved"] if not concerns.empty else concerns
+open_count = int(len(open_df))
+resolved_count = int(total_concerns - open_count)
+resolved_pct = (resolved_count / total_concerns * 100.0) if total_concerns > 0 else 0.0
+
+critical_open_count = (
+    int((open_df["priority"].str.strip() == "Critical").sum())
+    if not open_df.empty
+    else 0
+)
+high_open_count = (
+    int((open_df["priority"].str.strip() == "High").sum())
+    if not open_df.empty
+    else 0
+)
+crit_high_open = critical_open_count + high_open_count
+
+unassigned_open_count = (
+    int((open_df["owner"].fillna("").astype(str).str.strip() == "").sum())
+    if not open_df.empty
+    else 0
+)
+
+waiting_count = (
+    int((open_df["status"].str.strip() == "Waiting").sum())
+    if not open_df.empty
+    else 0
+)
+investigating_count = (
+    int((open_df["status"].str.strip() == "Investigating").sum())
+    if not open_df.empty
+    else 0
+)
+not_started_count = (
+    int((open_df["status"].str.strip() == "Open").sum())
+    if not open_df.empty
+    else 0
+)
+
+open_icon = "🟢" if open_count == 0 else ("🔴" if critical_open_count > 0 else "🟡")
+if total_concerns == 0:
+    open_delta = "No items logged yet"
+    open_delta_color = "off"
+elif open_count == 0:
+    open_delta = f"All {resolved_count} resolved (100%)"
+    open_delta_color = "normal"
+else:
+    open_delta = f"{resolved_count} of {total_concerns} resolved ({resolved_pct:.0f}%)"
+    open_delta_color = "off"
+
+crit_high_icon = (
+    "🟢" if crit_high_open == 0 else ("🔴" if critical_open_count > 0 else "🟡")
+)
+if crit_high_open == 0:
+    crit_high_delta = "No high-urgency blockers"
+    crit_high_delta_color = "normal"
+else:
+    crit_high_delta = f"{critical_open_count} critical · {high_open_count} high"
+    crit_high_delta_color = "inverse" if critical_open_count > 0 else "off"
+
+unassigned_icon = "🟢" if unassigned_open_count == 0 else "🟡"
+if open_count == 0:
+    unassigned_delta = "No open items"
+    unassigned_delta_color = "off"
+elif unassigned_open_count == 0:
+    unassigned_delta = "All open items owned"
+    unassigned_delta_color = "normal"
+else:
+    unassigned_delta = "Needs owner assigned"
+    unassigned_delta_color = "inverse"
+
+waiting_icon = "🟢" if waiting_count == 0 else "🟡"
+waiting_delta = f"{investigating_count} investigating · {not_started_count} open"
+
+if current_editor:
+    my_open_df = (
+        open_df[
+            open_df["owner"].fillna("").astype(str).str.strip().str.lower()
+            == current_editor.lower()
+        ]
+        if not open_df.empty
+        else open_df
+    )
+    my_open_count = int(len(my_open_df))
+    my_crit_count = (
+        int((my_open_df["priority"].str.strip() == "Critical").sum())
+        if not my_open_df.empty
+        else 0
+    )
+    my_high_count = (
+        int((my_open_df["priority"].str.strip() == "High").sum())
+        if not my_open_df.empty
+        else 0
+    )
+    my_icon = "🟢" if my_open_count == 0 else ("🔴" if my_crit_count > 0 else "🟡")
+    my_value_str = f"{my_icon} {my_open_count}"
+    if my_open_count == 0:
+        my_delta = f"0 open for {current_editor}"
+        my_delta_color = "normal"
+    else:
+        my_delta = f"{my_crit_count} critical, {my_high_count} high · {current_editor}"
+        my_delta_color = "inverse" if my_crit_count > 0 else "off"
+else:
+    my_value_str = "—"
+    my_delta = "Set Current editor in sidebar"
+    my_delta_color = "off"
+
+banner_cols = st.columns(5)
+banner_cols[0].metric(
+    "Open concerns",
+    f"{open_icon} {open_count}",
+    delta=open_delta,
+    delta_color=open_delta_color,
+    help=(
+        "Total unresolved questions and concerns (status of Open, Investigating, or Waiting). "
+        "Target is 0 open items before launch readiness. "
+        "🟢 = 0 open, 🟡 = open items (none Critical), 🔴 = 1 or more Critical open items."
+    ),
+)
+banner_cols[1].metric(
+    "Critical & high open",
+    f"{crit_high_icon} {crit_high_open}",
+    delta=crit_high_delta,
+    delta_color=crit_high_delta_color,
+    help=(
+        "Unresolved items marked Critical (blocks build, safety, or launch) or High "
+        "(major process, quality, or layout impact). "
+        "🟢 = 0 critical/high open, 🟡 = High open (no Critical), 🔴 = Critical open."
+    ),
+)
+banner_cols[2].metric(
+    "Unassigned open",
+    f"{unassigned_icon} {unassigned_open_count}",
+    delta=unassigned_delta,
+    delta_color=unassigned_delta_color,
+    help=(
+        "Open items with a blank Owner field. Every open question or concern should have "
+        "an owner assigned to drive resolution."
+    ),
+)
+banner_cols[3].metric(
+    "Waiting / blocked",
+    f"{waiting_icon} {waiting_count}",
+    delta=waiting_delta,
+    delta_color="off",
+    help=(
+        "Open items in Waiting status (blocked on external engineering, supplier, or "
+        "cross-functional input), with a breakdown of items actively Investigating versus "
+        "still in initial Open status."
+    ),
+)
+banner_cols[4].metric(
+    "Assigned to me",
+    my_value_str,
+    delta=my_delta,
+    delta_color=my_delta_color,
+    help=(
+        "Open questions and concerns where Owner matches the Current editor in the left sidebar "
+        "(case-insensitive). Shows how many unresolved action items are currently assigned to you."
+    ),
+)
+
 editable_table_heading("Questions and concerns")
 
 visible_concerns = filter_table(

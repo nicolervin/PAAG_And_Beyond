@@ -874,16 +874,53 @@ def update_project_yamazumi_line_code(project_id: str, value: object) -> dict:
         "updated_at": timestamp,
     }
 
+def _optional_positive_real(value: object, label: str) -> float | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a number.") from exc
+    if math.isnan(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
 def update_project(project_id: str, values: dict) -> None:
+    existing = get_project(project_id) or {}
     takt_unit = normalize_time_unit(values.get("takt_time_unit", "seconds"))
-    values = {**values, "takt_time_unit": takt_unit}
+    baseline_parts = _optional_positive_real(
+        values["baseline_parts"] if "baseline_parts" in values else existing.get("baseline_parts"),
+        "Baseline parts",
+    )
+    baseline_hpu = _optional_positive_real(
+        values["baseline_hpu"] if "baseline_hpu" in values else existing.get("baseline_hpu"),
+        "Baseline HPU",
+    )
+    baseline_cycle_time_s = _optional_positive_real(
+        values["baseline_cycle_time_s"]
+        if "baseline_cycle_time_s" in values
+        else existing.get("baseline_cycle_time_s"),
+        "Baseline cycle time",
+    )
+    values = {
+        **values,
+        "takt_time_unit": takt_unit,
+        "baseline_parts": baseline_parts,
+        "baseline_hpu": baseline_hpu,
+        "baseline_cycle_time_s": baseline_cycle_time_s,
+    }
     fields = [
         "name", "program", "product_line", "building_location", "owner", "revision", "status",
-        "takt_time_s", "takt_time_unit", "notes",
+        "takt_time_s", "takt_time_unit", "baseline_parts", "baseline_hpu",
+        "baseline_cycle_time_s", "notes",
     ]
     execute(
         f"UPDATE projects SET {', '.join(f'{field} = ?' for field in fields)}, updated_at = ? WHERE id = ?",
-        tuple(values.get(field, "") for field in fields) + (now_iso(), project_id),
+        tuple(
+            values.get(field) if field.startswith("baseline_") else values.get(field, "")
+            for field in fields
+        ) + (now_iso(), project_id),
     )
 
 def replace_concerns(project_id: str, edited: pd.DataFrame, editor_name: str = "") -> None:

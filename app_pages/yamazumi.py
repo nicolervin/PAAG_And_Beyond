@@ -157,6 +157,7 @@ st.caption(
     "Draft work directly, balance one operator per physical pitch, and route every change to IE review before updating Process at a Glance."
 )
 
+yamazumi_banner_container = st.container()
 pitch_address_conflicts = yamazumi_pitch_address_conflicts(
     project_id, scenario_id
 )
@@ -1290,17 +1291,159 @@ efficiency = total_work / (active_pitch_count * takt) * 100 if active_pitch_coun
 pitch_totals = elements.assign(time_s=times).groupby("pitch_number", dropna=True)["time_s"].sum() if not elements.empty else pd.Series(dtype=float)
 bottleneck = str(pitch_totals.idxmax()) if not pitch_totals.empty else "—"
 
-metrics = st.container(horizontal=True)
-metrics.metric(
-    "Total work content",
-    format_seconds(total_work, yamazumi_time_unit),
+element_count = int(len(elements))
+unassigned_elements_count = (
+    int(elements["pitch_id"].fillna("").astype(str).str.strip().eq("").sum())
+    if not elements.empty
+    else 0
+)
+work_icon = "🟢" if (total_work > 0 and unassigned_elements_count == 0) else "🟡"
+takt_label = format_seconds(takt, takt_time_unit)
+if unassigned_elements_count > 0:
+    work_delta = f"Takt: {takt_label} · {unassigned_elements_count} unassigned"
+    work_delta_color = "inverse"
+else:
+    work_delta = f"Takt: {takt_label} · {element_count} element(s)"
+    work_delta_color = "off"
+
+open_blocked_count = (
+    int(pitches["status"].isin(["Open", "Blocked"]).sum())
+    if not pitches.empty
+    else 0
+)
+min_needed_pitches = math.ceil(theoretical - 1e-9) if theoretical > 0 else 0
+pitches_icon = (
+    "🟢"
+    if (active_pitch_count >= min_needed_pitches and active_pitch_count > 0)
+    else ("🔴" if active_pitch_count < min_needed_pitches else "🟡")
+)
+theo_str = f"Theoretical: {theoretical:.2f} ops"
+pitches_delta = (
+    f"{theo_str} · {open_blocked_count} Open/Blocked"
+    if open_blocked_count > 0
+    else theo_str
+)
+pitches_delta_color = (
+    "inverse"
+    if active_pitch_count < min_needed_pitches
+    else ("normal" if active_pitch_count > 0 else "off")
+)
+
+eff_icon = "🟢" if efficiency >= 85.0 else ("🟡" if efficiency >= 70.0 else "🔴")
+if active_pitch_count == 0 or takt <= 0:
+    eff_delta = "Need active pitches & takt"
+    eff_delta_color = "off"
+elif efficiency >= 85.0:
+    eff_delta = "Meets ≥ 85% target"
+    eff_delta_color = "normal"
+else:
+    eff_delta = f"{efficiency - 85.0:.1f}% vs 85% target"
+    eff_delta_color = "inverse"
+
+assigned_elements = (
+    elements.assign(time_s=times).loc[
+        elements["pitch_number"].fillna("").astype(str).str.strip().ne("")
+    ]
+    if not elements.empty
+    else pd.DataFrame()
+)
+assigned_pitch_totals = (
+    assigned_elements.groupby("pitch_number", dropna=True)["time_s"].sum()
+    if not assigned_elements.empty
+    else pd.Series(dtype=float)
+)
+bottleneck = (
+    str(assigned_pitch_totals.idxmax())
+    if not assigned_pitch_totals.empty
+    else "—"
+)
+bottleneck_time_s = (
+    float(assigned_pitch_totals.max())
+    if not assigned_pitch_totals.empty
+    else 0.0
+)
+pitches_over_takt = (
+    int((assigned_pitch_totals > takt + 1e-9).sum())
+    if (not assigned_pitch_totals.empty and takt > 0)
+    else 0
+)
+if assigned_pitch_totals.empty or takt <= 0:
+    over_takt_val = "⚪ —"
+    over_takt_delta = "No assigned pitches"
+    over_takt_delta_color = "off"
+elif pitches_over_takt == 0:
+    over_takt_val = "🟢 0"
+    over_takt_delta = (
+        f"Within takt · Peak: {bottleneck} "
+        f"({format_seconds(bottleneck_time_s, yamazumi_time_unit)})"
+    )
+    over_takt_delta_color = "normal"
+else:
+    over_takt_val = f"🔴 {pitches_over_takt}"
+    over_amount = bottleneck_time_s - takt
+    over_takt_delta = (
+        f"Bottleneck: {bottleneck} "
+        f"(+{format_seconds(over_amount, yamazumi_time_unit)} over)"
+    )
+    over_takt_delta_color = "inverse"
+
+with yamazumi_banner_container:
+    ym1, ym2, ym3, ym4 = st.columns(4)
+    ym1.metric(
+        "Total work content",
+        f"{work_icon} {format_seconds(total_work, yamazumi_time_unit)}",
+        delta=work_delta,
+        delta_color=work_delta_color,
+        help=(
+            f"Sum of work-element cycle times in the selected Yamazumi area ({area['name']}), "
+            "alongside the area's target takt time and work-element count."
+        ),
+    )
+    ym2.metric(
+        "Active pitches vs. theoretical",
+        f"{pitches_icon} {active_pitch_count}",
+        delta=pitches_delta,
+        delta_color=pitches_delta_color,
+        help=(
+            "Number of Active pitches (operators) in the selected Yamazumi area compared "
+            "against theoretical minimum operators (Total work content ÷ Takt time)."
+        ),
+    )
+    ym3.metric(
+        "Line balance efficiency",
+        f"{eff_icon} {efficiency:.1f}%"
+        if (active_pitch_count > 0 and takt > 0)
+        else "⚪ —",
+        delta=eff_delta,
+        delta_color=eff_delta_color,
+        help=(
+            "Line balance efficiency for the selected Yamazumi area: "
+            "Total work content ÷ (Active pitches × Takt time) × 100."
+        ),
+    )
+    ym4.metric(
+        "Pitches over takt",
+        over_takt_val,
+        delta=over_takt_delta,
+        delta_color=over_takt_delta_color,
+        help=(
+            "Count of pitches in the selected Yamazumi area whose stacked work time exceeds "
+            "the target takt time, along with the highest-loaded (bottleneck) pitch."
+        ),
+    )
+_legacy_metric_noop = dict(
+
+
+
+# --- Yamazumi board keys ---
+
     border=True,
 )
-metrics.metric("Theoretical operators", f"{theoretical:.2f}", border=True)
-metrics.metric("Active pitches / operators", active_pitch_count, border=True)
-metrics.metric("Line balance efficiency", f"{efficiency:.1f}%", border=True)
-metrics.metric("Bottleneck pitch", bottleneck, border=True)
-metrics.metric("Takt", format_seconds(takt, takt_time_unit), border=True)
+
+
+
+
+
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"

@@ -2829,6 +2829,243 @@ def get_pitch_layout_footprints(project_id: str, scenario_id: str) -> list[dict[
 
 
 
+@cached_store_read
+def get_pin_map_readiness_metrics(
+    project_id: str, scenario_id: str
+) -> dict[str, Any]:
+    """Compute top-of-page 5-card readiness metrics for the Pin Map page."""
+    store = _store_module()
+    footprints = get_pitch_layout_footprints(project_id, scenario_id)
+    pitch_metrics = get_scenario_pitch_metrics_for_pin_map(project_id, scenario_id)
+
+    with store.connection() as conn:
+        def _has_table(tbl: str) -> bool:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (tbl,),
+                ).fetchone()
+                is not None
+            )
+
+        all_pitch_ids = list(pitch_metrics.keys())
+        active_pitch_ids = [
+            pid
+            for pid, pm in pitch_metrics.items()
+            if str(pm.get("pitch_status") or "Active").strip() == "Active"
+        ]
+        target_pitch_ids = set(active_pitch_ids if active_pitch_ids else all_pitch_ids)
+        total_active_pitches = len(target_pitch_ids)
+        total_pitches = len(all_pitch_ids)
+
+        # 1. 2D layout footprint coverage
+        placed_active_pitch_ids = {
+            str(fp["pitch_id"])
+            for fp in footprints
+            if str(fp.get("pitch_id") or "") in target_pitch_ids
+        }
+        placed_layout_ids = {
+            str(fp["layout_id"])
+            for fp in footprints
+            if str(fp.get("layout_id") or "")
+        }
+        placed_active_pitches = len(placed_active_pitch_ids)
+        placed_layouts_count = len(placed_layout_ids)
+
+        # 2. Process linkage on Pin Map & 5. Functional & tool callouts
+        pm_rows = conn.execute(
+            """SELECT p.id AS pitch_id,
+                      work.id AS process_element_id,
+                      work.cycle_time_s,
+                      work.tool,
+                      work.torque,
+                      work.quality_requirement,
+                      work.ergo_requirement
+               FROM yamazumi_pitches p
+               JOIN yamazumi_areas a ON a.id = p.area_id
+               LEFT JOIN yamazumi_elements yamazumi
+                 ON yamazumi.pitch_id = p.id AND yamazumi.project_id = p.project_id
+               LEFT JOIN work_elements work
+                 ON work.id = yamazumi.process_element_id
+                AND work.project_id = p.project_id
+                AND work.scenario_id = a.scenario_id
+               WHERE p.project_id = ? AND a.scenario_id = ?""",
+            (project_id, scenario_id),
+        ).fetchall()
+
+        pitches_with_work_ids: set[str] = set()
+        seen_work_ids: set[str] = set()
+        linked_cycle_time_s = 0.0
+
+        tool_eq_pitches: set[str] = set()
+        qual_pitches: set[str] = set()
+        ergo_pitches: set[str] = set()
+        safety_pitches: set[str] = set()
+        work_to_pitch: dict[str, set[str]] = {}
+
+        for row in pm_rows:
+            pid = str(row["pitch_id"] or "")
+            wid = str(row["process_element_id"] or "").strip()
+            if not wid:
+                continue
+            if pid in target_pitch_ids:
+                pitches_with_work_ids.add(pid)
+            work_to_pitch.setdefault(wid, set()).add(pid)
+            if wid not in seen_work_ids:
+                seen_work_ids.add(wid)
+                try:
+                    linked_cycle_time_s += float(row["cycle_time_s"] or 0.0)
+                except (TypeError, ValueError):
+                    pass
+            if pid in target_pitch_ids:
+                if _text(row["tool"]):
+                    tool_eq_pitches.add(pid)
+                if _text(row["torque"]) or _text(row["quality_requirement"]):
+                    qual_pitches.add(pid)
+                if _text(row["ergo_requirement"]):
+                    ergo_pitches.add(pid)
+
+        # Also check relational Functional Review tables for pitch / step callouts
+        if _has_table("equipment_placements"):
+            eq_rows = conn.execute(
+                """SELECT DISTINCT pitch_id
+                   FROM equipment_placements
+                   WHERE project_id = ? AND scenario_id = ? AND pitch_id IS NOT NULL""",
+                (project_id, scenario_id),
+            ).fetchall()
+            for r in eq_rows:
+                pid = str(r["pitch_id"] or "")
+                if pid in target_pitch_ids:
+                    tool_eq_pitches.add(pid)
+
+        if _has_table("quality_requirement_assignments"):
+            q_rows = conn.execute(
+                """SELECT DISTINCT work_element_id
+                   FROM quality_requirement_assignments
+                   WHERE project_id = ? AND scenario_id = ?""",
+                (project_id, scenario_id),
+            ).fetchall()
+            for r in q_rows:
+                wid = str(r["work_element_id"] or "")
+                for pid in work_to_pitch.get(wid, ()):
+                    if pid in target_pitch_ids:
+                        qual_pitches.add(pid)
+
+        if _has_table("ergonomics_reviews"):
+            e_rows = conn.execute(
+                """SELECT DISTINCT work_element_id
+                   FROM ergonomics_reviews
+                   WHERE project_id = ? AND scenario_id = ?
+                     AND (risk_classification != 'Unassigned' OR COALESCE(notes, '') != '')""",
+                (project_id, scenario_id),
+            ).fetchall()
+            for r in e_rows:
+                wid = str(r["work_element_id"] or "")
+                for pid in work_to_pitch.get(wid, ()):
+                    if pid in target_pitch_ids:
+                        ergo_pitches.add(pid)
+
+        if _has_table("safety_requirements"):
+            s_rows = conn.execute(
+                """SELECT DISTINCT work_element_id
+                   FROM safety_requirements
+                   WHERE project_id = ? AND scenario_id = ? AND active = 1""",
+                (project_id, scenario_id),
+            ).fetchall()
+            for r in s_rows:
+                wid = str(r["work_element_id"] or "")
+                for pid in work_to_pitch.get(wid, ()):
+                    if pid in target_pitch_ids:
+                        safety_pitches.add(pid)
+
+        callout_pitch_ids = tool_eq_pitches | qual_pitches | ergo_pitches | safety_pitches
+
+        # 3. Spatial takt & status hotspots
+        over_takt_count = 0
+        blocked_count = 0
+        under_85_count = 0
+        hotspot_pitch_ids: set[str] = set()
+        for pid, pm in pitch_metrics.items():
+            p_status = str(pm.get("pitch_status") or "Active").strip()
+            util = float(pm.get("utilization_pct") or 0.0)
+            steps_cnt = int(pm.get("step_count") or 0)
+            if p_status == "Blocked":
+                blocked_count += 1
+                hotspot_pitch_ids.add(pid)
+            if util > 100.0:
+                over_takt_count += 1
+                hotspot_pitch_ids.add(pid)
+            elif p_status == "Active" and steps_cnt > 0 and util < 85.0:
+                under_85_count += 1
+
+        # 4. Floor plan calibration & CAD
+        latest_rev_rows = conn.execute(
+            """SELECT p.id AS layout_id,
+                      r.id AS revision_id,
+                      r.scale_width_in,
+                      r.scale_height_in,
+                      r.image_path,
+                      r.notes,
+                      r.cad_file_path,
+                      r.cad_web_url,
+                      (SELECT COUNT(*) FROM layout_shapes s WHERE s.revision_id = r.id) AS shape_count
+               FROM layout_plans p
+               LEFT JOIN layout_revisions r
+                 ON r.layout_id = p.id
+                AND r.revision_number = (
+                    SELECT MAX(r2.revision_number)
+                    FROM layout_revisions r2
+                    WHERE r2.layout_id = p.id
+                )
+               WHERE p.project_id = ?""",
+            (project_id,),
+        ).fetchall()
+
+        total_layouts = len(latest_rev_rows)
+        calibrated_layouts = 0
+        cad_or_bg_layouts = 0
+        total_shapes = 0
+        for lrow in latest_rev_rows:
+            sw = float(lrow["scale_width_in"] or 0.0)
+            sh = float(lrow["scale_height_in"] or 0.0)
+            if sw > 0.0 and sh > 0.0:
+                calibrated_layouts += 1
+            img_p = str(lrow["image_path"] or "").lower()
+            notes_l = str(lrow["notes"] or "").lower()
+            has_custom_bg = bool(
+                img_p
+                and "blank_scaled_canvas" not in img_p
+                and "blank scaled" not in notes_l
+            )
+            has_cad = bool(_text(lrow["cad_file_path"]) or _text(lrow["cad_web_url"]))
+            if has_custom_bg or has_cad:
+                cad_or_bg_layouts += 1
+            total_shapes += int(lrow["shape_count"] or 0)
+
+        return {
+            "total_pitches": total_pitches,
+            "total_active_pitches": total_active_pitches,
+            "placed_active_pitches": placed_active_pitches,
+            "placed_layouts_count": placed_layouts_count,
+            "pitches_with_work": len(pitches_with_work_ids),
+            "linked_steps_count": len(seen_work_ids),
+            "linked_cycle_time_s": round(linked_cycle_time_s, 1),
+            "hotspots_count": len(hotspot_pitch_ids),
+            "over_takt_count": over_takt_count,
+            "blocked_count": blocked_count,
+            "under_85_count": under_85_count,
+            "total_layouts": total_layouts,
+            "calibrated_layouts": calibrated_layouts,
+            "cad_or_bg_layouts": cad_or_bg_layouts,
+            "total_shapes": total_shapes,
+            "callout_pitches_count": len(callout_pitch_ids),
+            "tool_eq_pitches_count": len(tool_eq_pitches),
+            "qual_pitches_count": len(qual_pitches),
+            "ergo_pitches_count": len(ergo_pitches),
+            "safety_pitches_count": len(safety_pitches),
+        }
+
+
 def ensure_default_pin_map_page(
     project_id: str,
     editor_name: str = "Workspace",
@@ -3211,6 +3448,7 @@ __domain_exports__ = [
     "list_project_yamazumi_pitches",
     "get_scenario_pitch_metrics_for_pin_map",
     "get_pitch_layout_footprints",
+    "get_pin_map_readiness_metrics",
     "list_layout_custom_stencils",
     "save_layout_custom_stencil",
     "delete_layout_custom_stencil",

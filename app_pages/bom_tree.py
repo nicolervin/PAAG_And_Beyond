@@ -64,6 +64,7 @@ st.caption(
     "Interactive product structure and CAD-style BOM tree by official model, "
     "with BOM authoring from scratch and gap reconciliation against the Parts Catalog and Fishbone diagram."
 )
+bom_banner_container = st.container()
 
 project_id = st.session_state.get("project_id")
 if not project_id:
@@ -196,6 +197,165 @@ def on_cad_tree_select() -> None:
         st.session_state["selected_model_tree_node_id"] = str(event["node_id"])
 
 
+tree_data = pits_bom_model_tree(project_id, selected_model_id)
+nodes = tree_data["nodes"]
+roots = tree_data["roots"]
+metrics = tree_data["metrics"]
+
+total_bom_items = int(metrics.get("total", 0))
+placed_fishbone_count = int(metrics.get("placed_fishbone", 0))
+missing_fishbone_count = int(metrics.get("missing_fishbone", 0))
+missing_catalog_count = int(metrics.get("missing_catalog", 0))
+in_catalog_count = max(0, total_bom_items - missing_catalog_count)
+
+selected_view_label = model_options.get(selected_model_id, selected_model_id)
+items_icon = "🟢" if total_bom_items > 0 else "🟡"
+
+active_model_count = int(len(active_models))
+models_with_bom_count = 0
+unexpanded_sub_count = 0
+conflict_group_set: set[str] = set()
+
+for _, m_row in active_models.iterrows():
+    mid = str(m_row["id"])
+    m_bom = get_manual_model_bom(project_id, mid)
+    if m_bom:
+        models_with_bom_count += 1
+        if selected_model_id in ("all", mid):
+            unexpanded_sub_count += len(detect_unexpanded_subassemblies(project_id, m_bom))
+            for cf in check_group_number_conflicts(project_id, mid, m_bom):
+                grp_id = str(cf.get("group_identifier") or "").strip().upper()
+                if grp_id:
+                    conflict_group_set.add(grp_id)
+
+missing_bom_models = max(0, active_model_count - models_with_bom_count)
+models_bom_icon = (
+    "🟢"
+    if (active_model_count > 0 and missing_bom_models == 0)
+    else ("🟡" if models_with_bom_count > 0 else "🔴")
+)
+if active_model_count == 0:
+    models_bom_delta = "No active models"
+    models_bom_delta_color = "off"
+elif missing_bom_models == 0:
+    models_bom_delta = f"All {active_model_count} active model(s) have BOMs"
+    models_bom_delta_color = "normal"
+else:
+    models_bom_delta = f"{missing_bom_models} active model(s) empty"
+    models_bom_delta_color = "inverse"
+
+if total_bom_items > 0:
+    cat_cov_pct = (in_catalog_count / total_bom_items) * 100.0
+    cat_cov_icon = (
+        "🟢"
+        if missing_catalog_count == 0
+        else ("🟡" if in_catalog_count > 0 else "🔴")
+    )
+    cat_cov_value = f"{cat_cov_icon} {cat_cov_pct:.0f}%"
+    if missing_catalog_count == 0:
+        cat_cov_delta = f"All {total_bom_items} in Parts Catalog"
+        cat_cov_delta_color = "normal"
+    else:
+        cat_cov_delta = f"{missing_catalog_count} missing from Parts Catalog"
+        cat_cov_delta_color = "inverse"
+
+    fb_cov_pct = (placed_fishbone_count / total_bom_items) * 100.0
+    fb_cov_icon = (
+        "🟢"
+        if missing_fishbone_count == 0
+        else ("🟡" if placed_fishbone_count > 0 else "🔴")
+    )
+    fb_cov_value = f"{fb_cov_icon} {fb_cov_pct:.0f}%"
+    if missing_fishbone_count == 0:
+        fb_cov_delta = f"All {total_bom_items} placed in Fishbone"
+        fb_cov_delta_color = "normal"
+    else:
+        fb_cov_delta = f"{placed_fishbone_count} placed · {missing_fishbone_count} missing"
+        fb_cov_delta_color = "inverse"
+else:
+    cat_cov_value = "—"
+    cat_cov_delta = "No BOM items in selected view"
+    cat_cov_delta_color = "off"
+    fb_cov_value = "—"
+    fb_cov_delta = "No BOM items in selected view"
+    fb_cov_delta_color = "off"
+
+conflict_group_count = len(conflict_group_set)
+total_struct_issues = unexpanded_sub_count + conflict_group_count
+struct_icon = (
+    "🟢"
+    if total_struct_issues == 0
+    else ("🔴" if conflict_group_count > 0 else "🟡")
+)
+if total_bom_items == 0:
+    struct_value = "—"
+    struct_delta = "No BOM items to analyze"
+    struct_delta_color = "off"
+elif total_struct_issues == 0:
+    struct_value = f"{struct_icon} 0"
+    struct_delta = "Subassemblies expanded & groups consistent"
+    struct_delta_color = "normal"
+else:
+    struct_value = f"{struct_icon} {total_struct_issues}"
+    struct_delta = (
+        f"{unexpanded_sub_count} unexpanded sub(s) · {conflict_group_count} group conflict(s)"
+    )
+    struct_delta_color = "inverse" if conflict_group_count > 0 else "off"
+
+with bom_banner_container:
+    b_cols = st.columns(5)
+    b_cols[0].metric(
+        "BOM items (selected view)",
+        f"{items_icon} {total_bom_items:,}",
+        delta=f"{len(roots)} root group(s) · {selected_view_label}",
+        delta_color="off",
+        help=(
+            "Total BOM nodes in the currently selected model (or Master BOM across all models) "
+            "and the number of Level 1 root assembly groups."
+        ),
+    )
+    b_cols[1].metric(
+        "Models with BOMs",
+        f"{models_bom_icon} {models_with_bom_count} / {active_model_count}",
+        delta=models_bom_delta,
+        delta_color=models_bom_delta_color,
+        help=(
+            "Number of active models in the project that have a BOM structure defined or imported. "
+            "🟢 = all active models populated, 🟡 = some active models missing BOMs, 🔴 = 0 models populated."
+        ),
+    )
+    b_cols[2].metric(
+        "Catalog coverage",
+        cat_cov_value,
+        delta=cat_cov_delta,
+        delta_color=cat_cov_delta_color,
+        help=(
+            "Percentage of BOM items in the selected view that exist in the project's Parts Catalog. "
+            "Items missing from the catalog should be added or synced before downstream planning."
+        ),
+    )
+    b_cols[3].metric(
+        "Fishbone placement",
+        fb_cov_value,
+        delta=fb_cov_delta,
+        delta_color=fb_cov_delta_color,
+        help=(
+            "Percentage of BOM items in the selected view that are assigned to at least one "
+            "Fishbone section or subassembly."
+        ),
+    )
+    b_cols[4].metric(
+        "Subassemblies & groups",
+        struct_value,
+        delta=struct_delta,
+        delta_color=struct_delta_color,
+        help=(
+            "Flags known subassemblies in the selected view that have not yet been expanded into child "
+            "components, plus any shared group/drawing numbers whose child parts differ across models. "
+            "🟢 = 0 issues, 🟡 = unexpanded subassemblies available to expand, 🔴 = group structure conflict across models."
+        ),
+    )
+
 # Top tabs: View vs Author
 tab_view, tab_author = guarded_tabs(
     [
@@ -230,11 +390,6 @@ with tab_view:
             key="model_tree_status_filter",
         )
 
-    tree_data = pits_bom_model_tree(project_id, selected_model_id)
-    nodes = tree_data["nodes"]
-    roots = tree_data["roots"]
-    metrics = tree_data["metrics"]
-
     if not nodes:
         target_disp = model_options.get(selected_model_id, selected_model_id)
         st.info(
@@ -243,19 +398,6 @@ with tab_view:
             "or import a PITS workbook with a BOM tab via **Import/Export PITS**."
         )
     else:
-        # Metric Cards
-        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-        with m_col1:
-            st.metric("Total items in tree", metrics["total"])
-        with m_col2:
-            st.metric("Placed in Fishbone", metrics["placed_fishbone"])
-        with m_col3:
-            st.metric("Missing from Fishbone", metrics["missing_fishbone"])
-        with m_col4:
-            st.metric("Missing from Catalog", metrics["missing_catalog"])
-
-        st.markdown("---")
-
         # Filter nodes
         q = (search_query or "").strip().lower()
         clean_q = "".join(c for c in q if c.isalnum())

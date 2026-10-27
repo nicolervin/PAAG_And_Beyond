@@ -6,7 +6,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `projects`
 
-- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, building location, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
+- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, building location, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), optional baseline targets for executive KPI comparison (`baseline_parts`, `baseline_hpu`, and `baseline_cycle_time_s` in canonical seconds), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
 - **Key relationships:** Parent of `planning_scenarios`, `parts`, `project_models`, `complexity_features`, `assembly_sections`, `concerns`, source-import records, Yamazumi records, Process at a Glance records, and `audit_log` entries.
 - **Scope:** Project-wide; this is the root of all other business data.
 

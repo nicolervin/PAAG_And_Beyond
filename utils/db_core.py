@@ -1528,6 +1528,9 @@ def init_db() -> None:
                     ),
                 owner TEXT DEFAULT '', revision TEXT DEFAULT 'A', status TEXT DEFAULT 'Draft',
                 takt_time_s REAL DEFAULT 60,
+                baseline_parts REAL,
+                baseline_hpu REAL,
+                baseline_cycle_time_s REAL,
                 takt_time_unit TEXT NOT NULL DEFAULT 'seconds'
                     CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours')),
                 notes TEXT DEFAULT '',
@@ -2117,6 +2120,9 @@ def init_db() -> None:
             )
         if "building_location" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN building_location TEXT NOT NULL DEFAULT ''")
+        for column in ("baseline_parts", "baseline_hpu", "baseline_cycle_time_s"):
+            if column not in project_columns:
+                conn.execute(f"ALTER TABLE projects ADD COLUMN {column} REAL")
         for project_row in conn.execute(
             "SELECT id FROM projects WHERE yamazumi_line_code=''"
         ).fetchall():

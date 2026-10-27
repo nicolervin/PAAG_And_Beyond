@@ -37,6 +37,7 @@ from utils.store import (
     save_fishbone_canvas_positions,
     update_assembly_section_rows,
     yamazumi_area_creation_summary,
+    yamazumi_areas,
 )
 from utils.scope_ui import page_title_with_scope
 from utils.table_filters import (
@@ -215,18 +216,150 @@ def audit_bool(value) -> bool:
     return bool(value)
 
 
-metrics = st.columns(4)
-metrics[0].metric("Parts available", len(parts), border=True)
-metrics[1].metric("Fishbone sections", len(sections), border=True)
 placed_catalog_parts = (
-    assignments.loc[
-        assignments["part_id"].astype(str).isin(placeable_part_ids), "part_id"
-    ].nunique()
+    int(
+        assignments.loc[
+            assignments["part_id"].astype(str).isin(placeable_part_ids), "part_id"
+        ].nunique()
+    )
     if not assignments.empty
     else 0
 )
-metrics[2].metric("Fishbone uses placed", len(assignments), border=True)
-metrics[3].metric("Parts not yet placed", max(0, len(parts) - placed_catalog_parts), border=True)
+active_section_count = int(len(active_sections))
+sections_with_parts_ids = (
+    set(assignments["section_id"].astype(str)) if not assignments.empty else set()
+)
+active_sections_with_parts = (
+    int(active_sections["id"].astype(str).isin(sections_with_parts_ids).sum())
+    if active_section_count > 0
+    else 0
+)
+empty_active_sections = max(0, active_section_count - active_sections_with_parts)
+sec_icon = (
+    "🟢"
+    if (active_section_count > 0 and empty_active_sections == 0)
+    else ("🟡" if active_section_count > 0 else "🔴")
+)
+if active_section_count == 0:
+    sec_delta = "No active sections"
+    sec_delta_color = "off"
+elif empty_active_sections == 0:
+    sec_delta = f"All {active_section_count} section(s) have parts"
+    sec_delta_color = "normal"
+else:
+    sec_delta = f"{empty_active_sections} empty section(s) (0 parts)"
+    sec_delta_color = "inverse"
+
+placeable_parts_count = int(len(parts))
+unplaced_parts_count = max(0, placeable_parts_count - placed_catalog_parts)
+placement_pct = (
+    round((placed_catalog_parts / placeable_parts_count) * 100)
+    if placeable_parts_count > 0
+    else 0
+)
+placement_icon = (
+    "🟢"
+    if (placeable_parts_count > 0 and unplaced_parts_count == 0)
+    else ("🟡" if placed_catalog_parts > 0 else "🔴")
+)
+if placeable_parts_count == 0:
+    placement_delta = "No active placeable parts"
+    placement_delta_color = "off"
+elif unplaced_parts_count == 0:
+    placement_delta = f"All {placeable_parts_count} active part(s) placed"
+    placement_delta_color = "normal"
+else:
+    placement_delta = f"{unplaced_parts_count} of {placeable_parts_count} active part(s) unplaced"
+    placement_delta_color = "inverse"
+
+total_uses_placed = int(len(assignments))
+inactive_uses_count = int(len(inactive_assignments))
+multi_use_parts = (
+    int((assignments.groupby("part_id").size() > 1).sum())
+    if not assignments.empty
+    else 0
+)
+uses_icon = "🟢" if total_uses_placed > 0 else "🟡"
+if total_uses_placed == 0:
+    uses_delta = "No part uses placed yet"
+else:
+    uses_delta = f"Across {placed_catalog_parts} unique part(s) · {multi_use_parts} multi-use"
+
+scenario_areas = yamazumi_areas(project_id, scenario_id)
+linked_section_ids = (
+    set(scenario_areas["section_id"].fillna("").astype(str))
+    if not scenario_areas.empty
+    else set()
+)
+synced_section_count = (
+    int(active_sections["id"].astype(str).isin(linked_section_ids).sum())
+    if active_section_count > 0
+    else 0
+)
+unsynced_section_count = max(0, active_section_count - synced_section_count)
+ym_sync_icon = (
+    "🟢"
+    if (active_section_count > 0 and unsynced_section_count == 0)
+    else ("🟡" if synced_section_count > 0 else "🔴")
+)
+if active_section_count == 0:
+    ym_sync_delta = "No active Fishbone sections"
+    ym_sync_delta_color = "off"
+elif unsynced_section_count == 0:
+    ym_sync_delta = "All sections linked to Yamazumi"
+    ym_sync_delta_color = "normal"
+else:
+    ym_sync_delta = f"{unsynced_section_count} section(s) missing Yamazumi area"
+    ym_sync_delta_color = "inverse"
+
+metrics = st.columns(4)
+metrics[0].metric(
+    "Active sections",
+    f"{sec_icon} {active_section_count}",
+    delta=sec_delta,
+    delta_color=sec_delta_color,
+    help=(
+        "Number of active Fishbone framework sections (Main spine, Subassembly, and Support "
+        "Operations) and whether each active section has at least one part placed in it."
+    ),
+)
+metrics[1].metric(
+    "Part placement coverage",
+    f"{placement_icon} {placement_pct}%" if placeable_parts_count > 0 else "⚪ —",
+    delta=placement_delta,
+    delta_color=placement_delta_color,
+    help=(
+        "Percentage of placeable active Parts Catalog items (excluding Source Code 8 phantom "
+        "assemblies) assigned to at least one Fishbone section."
+    ),
+)
+metrics[2].metric(
+    "Fishbone uses placed",
+    f"{uses_icon} {total_uses_placed}",
+    delta=uses_delta,
+    delta_color="off",
+    help=(
+        "Total active part occurrences placed across Fishbone sections. A single catalog part "
+        "can be placed in multiple Fishbone uses/locations."
+        + (
+            f" ({inactive_uses_count} additional use(s) belong to parts marked inactive in this scenario.)"
+            if inactive_uses_count > 0
+            else ""
+        )
+    ),
+)
+metrics[3].metric(
+    "Downstream Yamazumi sync",
+    f"{ym_sync_icon} {synced_section_count} / {active_section_count}"
+    if active_section_count > 0
+    else "⚪ —",
+    delta=ym_sync_delta,
+    delta_color=ym_sync_delta_color,
+    help=(
+        "Shows how many active Fishbone sections have a linked Yamazumi area in the current "
+        "planning scenario."
+    ),
+)
 
 
 master_tree_data = pits_bom_model_tree(project_id, "all")

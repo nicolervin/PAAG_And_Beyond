@@ -17,7 +17,8 @@ from utils.store import (
     get_planning_scenario, get_project,
     get_project_deletion_impact, next_scenario_revision_label, planning_scenarios,
     project_table, projects, record_audit_event, save_planning_scenario_rows,
-    set_last_active_workspace, update_project,
+    active_part_ids, project_models, set_last_active_workspace, update_project,
+    yamazumi_pitches_for_scenario,
 )
 
 
@@ -174,6 +175,237 @@ def confirm_delete_project_dialog(target_project_id: str):
             st.error(str(exc))
 
 
+if not project_id:
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        if st.button("New project", icon=":material/add:"):
+            new_project_dialog()
+    st.info("Create a project to begin.")
+    st.stop()
+
+project = get_project(project_id)
+if not project:
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        if st.button("New project", icon=":material/add:"):
+            new_project_dialog()
+    st.info("The selected project was not found. Please select or create a project.")
+    st.stop()
+
+scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
+parts = project_table("parts", project_id)
+elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
+concerns = project_table("concerns", project_id)
+total_cycle = float(elements["cycle_time_s"].sum()) if not elements.empty else 0.0
+active_takt_unit = str((scenario or project).get("takt_time_unit") or "seconds")
+
+# 1. Active parts metric
+active_parts_count = len(active_part_ids(project_id, scenario_id)) if scenario_id else len(parts)
+total_catalog_parts = len(parts)
+baseline_parts_val = project.get("baseline_parts")
+has_baseline_parts = (
+    baseline_parts_val is not None
+    and not pd.isna(baseline_parts_val)
+    and float(baseline_parts_val) > 0
+)
+if has_baseline_parts:
+    base_parts = float(baseline_parts_val)
+    parts_pct_diff = ((active_parts_count - base_parts) / base_parts) * 100.0
+    parts_icon = (
+        "🟢"
+        if active_parts_count <= base_parts
+        else ("🟡" if active_parts_count <= base_parts * 1.05 else "🔴")
+    )
+    parts_value_str = f"{parts_icon} {active_parts_count:,}"
+    parts_delta = f"{parts_pct_diff:+.1f}% vs. baseline ({int(round(base_parts)):,})"
+    parts_delta_color = "inverse"
+else:
+    parts_value_str = f"{active_parts_count:,}"
+    parts_delta = f"{total_catalog_parts:,} in catalog · Set baseline below"
+    parts_delta_color = "off"
+parts_help = (
+    f"Number of Parts Catalog items marked Active in the current scenario "
+    f"({active_parts_count:,} of {total_catalog_parts:,} total catalog parts). "
+    "Compared against Baseline parts in Project definition—a negative % means fewer parts than "
+    "baseline (🟢 at/below baseline, 🟡 within +5%, 🔴 >5% above baseline)."
+)
+
+# 2. Hours per unit (HPU) metric — Option A: (Active Operator Pitches × 2,000 hrs/yr) ÷ Active Model EAU
+ANNUAL_HOURS_PER_OPERATOR = 2000.0
+pitches_df = (
+    yamazumi_pitches_for_scenario(project_id, scenario_id)
+    if scenario_id
+    else pd.DataFrame()
+)
+active_pitch_count = (
+    int((pitches_df["status"].fillna("").astype(str) == "Active").sum())
+    if not pitches_df.empty and "status" in pitches_df.columns
+    else 0
+)
+models_df = project_models(project_id)
+active_models_df = (
+    models_df[models_df["active"].fillna(1).astype(bool)]
+    if not models_df.empty and "active" in models_df.columns
+    else models_df
+)
+total_active_eau = (
+    float(
+        pd.to_numeric(active_models_df["eau"], errors="coerce")
+        .fillna(0.0)
+        .clip(lower=0.0)
+        .sum()
+    )
+    if not active_models_df.empty and "eau" in active_models_df.columns
+    else 0.0
+)
+annual_labor_hours = active_pitch_count * ANNUAL_HOURS_PER_OPERATOR
+current_hpu = (
+    annual_labor_hours / total_active_eau
+    if (active_pitch_count > 0 and total_active_eau > 0)
+    else None
+)
+baseline_hpu_val = project.get("baseline_hpu")
+has_baseline_hpu = (
+    baseline_hpu_val is not None
+    and not pd.isna(baseline_hpu_val)
+    and float(baseline_hpu_val) > 0
+)
+if current_hpu is not None:
+    hpu_num_str = f"{current_hpu:.2f}" if current_hpu >= 1.0 else f"{current_hpu:.3f}"
+    if has_baseline_hpu:
+        base_hpu = float(baseline_hpu_val)
+        hpu_pct_diff = ((current_hpu - base_hpu) / base_hpu) * 100.0
+        hpu_icon = (
+            "🟢"
+            if current_hpu <= base_hpu
+            else ("🟡" if current_hpu <= base_hpu * 1.05 else "🔴")
+        )
+        hpu_value_str = f"{hpu_icon} {hpu_num_str} hrs"
+        base_hpu_str = f"{base_hpu:.2f}" if base_hpu >= 1.0 else f"{base_hpu:.3f}"
+        hpu_delta = f"{hpu_pct_diff:+.1f}% vs. baseline ({base_hpu_str} hrs)"
+        hpu_delta_color = "inverse"
+    else:
+        hpu_value_str = f"{hpu_num_str} hrs"
+        hpu_delta = f"{active_pitch_count} active pitch(es) · {int(round(total_active_eau)):,} EAU"
+        hpu_delta_color = "off"
+else:
+    hpu_value_str = "—"
+    if active_pitch_count == 0 and total_active_eau <= 0:
+        hpu_delta = "Needs active pitches & model EAU"
+    elif total_active_eau <= 0:
+        hpu_delta = "Set EAU on active models"
+    else:
+        hpu_delta = "No active Yamazumi pitches"
+    hpu_delta_color = "off"
+hpu_help = (
+    "Labor Hours Per Unit = (Active Yamazumi Operator Pitches × 2,000 annual working hours per operator) "
+    "÷ Total EAU of Active Models. "
+    f"Current scenario: {active_pitch_count} active pitch(es) ({int(annual_labor_hours):,} labor hrs/yr) "
+    f"÷ {int(round(total_active_eau)):,} active-model EAU. "
+    "Compared against Baseline HPU in Project definition—a negative % means fewer labor hours per unit."
+)
+
+# 3. Σ Cycle time metric
+baseline_cycle_val = project.get("baseline_cycle_time_s")
+has_baseline_cycle = (
+    baseline_cycle_val is not None
+    and not pd.isna(baseline_cycle_val)
+    and float(baseline_cycle_val) > 0
+)
+cycle_formatted = format_seconds(total_cycle, active_takt_unit)
+if has_baseline_cycle:
+    base_cycle_s = float(baseline_cycle_val)
+    cycle_pct_diff = ((total_cycle - base_cycle_s) / base_cycle_s) * 100.0
+    cycle_icon = (
+        "🟢"
+        if total_cycle <= base_cycle_s
+        else ("🟡" if total_cycle <= base_cycle_s * 1.05 else "🔴")
+    )
+    cycle_value_str = f"{cycle_icon} {cycle_formatted}"
+    cycle_delta = (
+        f"{cycle_pct_diff:+.1f}% vs. baseline "
+        f"({format_seconds(base_cycle_s, active_takt_unit)})"
+    )
+    cycle_delta_color = "inverse"
+else:
+    cycle_value_str = cycle_formatted
+    cycle_delta = f"{len(elements)} work element(s) · Set baseline below"
+    cycle_delta_color = "off"
+cycle_help = (
+    f"Sum of work-element cycle times (Σ cycle_time_s) across {len(elements)} Process at a Glance "
+    "step(s) in the active scenario. Compared against Baseline Σ cycle time in Project definition—"
+    "a negative % means less total cycle time than baseline."
+)
+
+# 4. Open concerns metric
+open_concerns_df = (
+    concerns[~concerns["status"].isin(["Resolved", "Closed"])]
+    if not concerns.empty
+    else concerns
+)
+open_concerns = int(len(open_concerns_df))
+resolved_concerns = int(len(concerns) - open_concerns)
+critical_open = (
+    int((open_concerns_df["priority"].fillna("") == "Critical").sum())
+    if not open_concerns_df.empty and "priority" in open_concerns_df.columns
+    else 0
+)
+high_open = (
+    int((open_concerns_df["priority"].fillna("") == "High").sum())
+    if not open_concerns_df.empty and "priority" in open_concerns_df.columns
+    else 0
+)
+concerns_icon = "🟢" if open_concerns == 0 else ("🔴" if critical_open > 0 else "🟡")
+concerns_value_str = f"{concerns_icon} {open_concerns}"
+if len(concerns) == 0:
+    concerns_delta = "No concerns logged (target: 0 open)"
+    concerns_delta_color = "off"
+elif open_concerns == 0:
+    concerns_delta = f"All {resolved_concerns} resolved (target: 0 open)"
+    concerns_delta_color = "normal"
+elif critical_open > 0:
+    concerns_delta = (
+        f"{critical_open} critical, {high_open} high · "
+        f"{resolved_concerns}/{len(concerns)} resolved"
+    )
+    concerns_delta_color = "inverse"
+else:
+    concerns_delta = f"{high_open} high priority · {resolved_concerns}/{len(concerns)} resolved"
+    concerns_delta_color = "off"
+concerns_help = (
+    "Unresolved items in Questions and concerns (status of Open, Investigating, or Waiting; "
+    "target is 0 open). 🟢 = 0 open concerns, 🟡 = open concerns (none Critical), "
+    "🔴 = 1 or more Critical open concerns."
+)
+
+metric_cols = st.columns(4)
+metric_cols[0].metric(
+    "Active parts",
+    parts_value_str,
+    delta=parts_delta,
+    delta_color=parts_delta_color,
+    help=parts_help,
+)
+metric_cols[1].metric(
+    "Hours per unit (HPU)",
+    hpu_value_str,
+    delta=hpu_delta,
+    delta_color=hpu_delta_color,
+    help=hpu_help,
+)
+metric_cols[2].metric(
+    "Σ Cycle time",
+    cycle_value_str,
+    delta=cycle_delta,
+    delta_color=cycle_delta_color,
+    help=cycle_help,
+)
+metric_cols[3].metric(
+    "Open concerns",
+    concerns_value_str,
+    delta=concerns_delta,
+    delta_color=concerns_delta_color,
+    help=concerns_help,
+)
+
 with st.container(horizontal=True, horizontal_alignment="right"):
     if st.button("New project", icon=":material/add:"):
         new_project_dialog()
@@ -184,37 +416,6 @@ with st.container(horizontal=True, horizontal_alignment="right"):
         key=f"destructive_delete_project_{project_id}",
     ):
         confirm_delete_project_dialog(project_id)
-
-if not project_id:
-    st.info("Create a project to begin.")
-    st.stop()
-
-project = get_project(project_id)
-if not project:
-    st.info("The selected project was not found. Please select or create a project.")
-    st.stop()
-scenario = get_planning_scenario(project_id, scenario_id) if scenario_id else None
-parts = project_table("parts", project_id)
-elements = project_table("work_elements", project_id, "sequence", scenario_id=scenario_id)
-concerns = project_table("concerns", project_id)
-total_cycle = float(elements["cycle_time_s"].sum()) if not elements.empty else 0
-open_concerns = int((~concerns["status"].isin(["Resolved", "Closed"])).sum()) if not concerns.empty else 0
-
-metric_cols = st.columns(4)
-metric_cols[0].metric("Parts", len(parts), border=True)
-metric_cols[1].metric("Work elements", len(elements), border=True)
-active_takt = float((scenario or project)["takt_time_s"])
-active_takt_unit = str((scenario or project).get("takt_time_unit") or "seconds")
-active_unit_config = time_unit(active_takt_unit)
-metric_cols[2].metric(
-    "Draft cycle time", format_seconds(total_cycle, active_takt_unit),
-    delta=(
-        f"{seconds_to_display(total_cycle - active_takt, active_takt_unit):+.{active_unit_config.decimals}f} "
-        f"{active_unit_config.suffix} vs takt"
-    ),
-    delta_color="inverse", border=True,
-)
-metric_cols[3].metric("Open concerns", open_concerns, border=True)
 
 with st.container(border=True):
     section_heading_with_scope("Project definition", scope="project")
@@ -248,6 +449,71 @@ with st.container(border=True):
             step=project_unit_config.step,
             format=f"%.{project_unit_config.decimals}f",
         )
+        baseline_row = st.columns(3)
+        raw_base_parts = project.get("baseline_parts")
+        has_base_parts = (
+            raw_base_parts is not None
+            and not pd.isna(raw_base_parts)
+            and float(raw_base_parts) > 0
+        )
+        baseline_parts_input = baseline_row[0].number_input(
+            "Baseline parts",
+            min_value=0,
+            value=int(round(float(raw_base_parts))) if has_base_parts else None,
+            step=1,
+            placeholder="Optional target...",
+            help=(
+                "Reference or carry-over part count used to calculate % difference on the "
+                "Active parts banner metric (lower than baseline is favorable)."
+            ),
+        )
+        raw_base_hpu = project.get("baseline_hpu")
+        has_base_hpu = (
+            raw_base_hpu is not None
+            and not pd.isna(raw_base_hpu)
+            and float(raw_base_hpu) > 0
+        )
+        baseline_hpu_input = baseline_row[1].number_input(
+            "Baseline HPU (hrs/unit)",
+            min_value=0.0,
+            value=float(raw_base_hpu) if has_base_hpu else None,
+            step=0.01,
+            format="%.3f",
+            placeholder="Optional target...",
+            help=(
+                "Reference or carry-over Hours Per Unit (HPU) used to calculate % difference on the "
+                "Hours per unit banner metric (lower than baseline is favorable)."
+            ),
+        )
+        raw_base_cycle = project.get("baseline_cycle_time_s")
+        has_base_cycle = (
+            raw_base_cycle is not None
+            and not pd.isna(raw_base_cycle)
+            and float(raw_base_cycle) > 0
+        )
+        baseline_cycle_original_display = (
+            seconds_to_display(
+                float(raw_base_cycle), project.get("takt_time_unit") or "seconds"
+            )
+            if has_base_cycle
+            else None
+        )
+        baseline_cycle_input = baseline_row[2].number_input(
+            f"Baseline Σ cycle time ({project_unit_config.label.lower()})",
+            min_value=0.0,
+            value=(
+                float(baseline_cycle_original_display)
+                if baseline_cycle_original_display is not None
+                else None
+            ),
+            step=project_unit_config.step,
+            format=f"%.{project_unit_config.decimals}f",
+            placeholder="Optional target...",
+            help=(
+                "Reference or carry-over total work-element cycle time (in the default takt unit) "
+                "used to calculate % difference on the Σ Cycle time banner metric."
+            ),
+        )
         notes = st.text_area(
             "Planning notes", value=project["notes"],
             placeholder="Assumptions, scope, milestones, or known changes…",
@@ -264,6 +530,19 @@ with st.container(border=True):
                     and float(takt) == float(project_original_display)
                     else display_to_seconds(takt, project_takt_unit)
                 )
+                if baseline_cycle_input is None or float(baseline_cycle_input) <= 0:
+                    baseline_cycle_seconds = None
+                elif (
+                    has_base_cycle
+                    and project_takt_unit != str(project.get("takt_time_unit") or "seconds")
+                    and baseline_cycle_original_display is not None
+                    and float(baseline_cycle_input) == float(baseline_cycle_original_display)
+                ):
+                    baseline_cycle_seconds = float(raw_base_cycle)
+                else:
+                    baseline_cycle_seconds = display_to_seconds(
+                        float(baseline_cycle_input), project_takt_unit
+                    )
                 project_values = {
                     "name": name.strip(), "program": program.strip(),
                     "product_line": product_line.strip(),
@@ -272,6 +551,17 @@ with st.container(border=True):
                     "status": project.get("status", "Draft"),
                     "takt_time_s": project_takt_seconds,
                     "takt_time_unit": project_takt_unit,
+                    "baseline_parts": (
+                        float(baseline_parts_input)
+                        if baseline_parts_input is not None and float(baseline_parts_input) > 0
+                        else None
+                    ),
+                    "baseline_hpu": (
+                        float(baseline_hpu_input)
+                        if baseline_hpu_input is not None and float(baseline_hpu_input) > 0
+                        else None
+                    ),
+                    "baseline_cycle_time_s": baseline_cycle_seconds,
                     "notes": notes,
                 }
                 project_changed_fields = [
@@ -592,16 +882,10 @@ if scenario:
             st.divider()
             st.subheader(f"Scenario details · {detail['name']}")
             detail_metrics = st.columns(4)
-            detail_metrics[0].metric("Revision", detail["revision_label"], border=True)
-            detail_metrics[1].metric("Status", detail["status"], border=True)
-            detail_metrics[2].metric(
-                "Takt", format_seconds(detail["takt_time_s"], detail["takt_time_unit"]),
-                border=True
-            )
-            detail_metrics[3].metric(
-                "Current view", "Yes" if str(detail["id"]) == str(scenario_id) else "No",
-                border=True,
-            )
+            detail_metrics[0].metric("Revision", detail["revision_label"])
+            detail_metrics[1].metric("Status", detail["status"])
+            detail_metrics[2].metric("Takt", format_seconds(detail["takt_time_s"], detail["takt_time_unit"]))
+            detail_metrics[3].metric("Current view", "Yes" if str(detail["id"]) == str(scenario_id) else "No")
             source_label = (
                 f"Rev {detail.get('parent_revision_label')} · {detail.get('parent_name')}"
                 if detail.get("parent_scenario_id") else "Original scenario"

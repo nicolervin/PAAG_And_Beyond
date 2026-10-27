@@ -136,6 +136,39 @@ st.html(
             min-width: min(100%, 160px) !important;
         }
     }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:has(div[data-testid="stMetric"]) {
+        min-width: min(100%, 205px) !important;
+        flex: 1 1 205px !important;
+    }
+    div[data-testid="stMetricValue"],
+    div[data-testid="stMetricValue"] > div {
+        font-size: clamp(1.15rem, 1.3vw, 1.45rem) !important;
+        line-height: 1.25 !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+    }
+    div[data-testid="stMetricLabel"] p,
+    div[data-testid="stMetricLabel"] > div {
+        font-size: 0.84rem !important;
+        line-height: 1.25 !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+    }
+    div[data-testid="stMetricDelta"],
+    div[data-testid="stMetricDelta"] > div {
+        font-size: 0.78rem !important;
+        line-height: 1.3 !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        align-items: flex-start !important;
+    }
+    div[data-testid="stMetricDelta"] svg {
+        flex-shrink: 0 !important;
+        margin-top: 0.15rem !important;
+    }
     @media (max-width: 768px) {
         .main .block-container {
             padding-left: 0.75rem !important;
