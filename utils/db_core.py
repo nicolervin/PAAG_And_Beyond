@@ -96,6 +96,33 @@ ERGONOMICS_RISK_CLASSIFICATIONS = (
 EASTERN_TIMEZONE_NAME = "America/New_York"
 EASTERN_TIMEZONE = ZoneInfo(EASTERN_TIMEZONE_NAME)
 
+CONCERN_CATEGORIES = (
+    "Overview",
+    "Questions and concerns",
+    "Import/Export Projects",
+    "Import PITs",
+    "Complexity Trees",
+    "BOM",
+    "Parts Catalog",
+    "Fishbone",
+    "Yamazumi",
+    "Process at a Glance",
+    "Pin Map",
+    "Equipment",
+    "Ergonomics",
+    "Quality",
+    "Materials",
+    "Safety",
+    "Other",
+)
+
+CONCERN_STATUSES = (
+    "Open",
+    "Investigating",
+    "Waiting",
+    "Resolved",
+)
+
 
 def now_iso() -> str:
     return datetime.now(EASTERN_TIMEZONE).replace(microsecond=0).isoformat()
@@ -1501,6 +1528,9 @@ def init_db() -> None:
                     ),
                 owner TEXT DEFAULT '', revision TEXT DEFAULT 'A', status TEXT DEFAULT 'Draft',
                 takt_time_s REAL DEFAULT 60,
+                baseline_parts REAL,
+                baseline_hpu REAL,
+                baseline_cycle_time_s REAL,
                 takt_time_unit TEXT NOT NULL DEFAULT 'seconds'
                     CHECK(takt_time_unit IN ('seconds', 'minutes', 'hours')),
                 notes TEXT DEFAULT '',
@@ -1597,8 +1627,10 @@ def init_db() -> None:
                 ON safety_requirements(project_id, scenario_id, work_element_id, active);
             CREATE TABLE IF NOT EXISTS concerns (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                category TEXT DEFAULT 'Question', subject TEXT NOT NULL, detail TEXT DEFAULT '',
+                category TEXT DEFAULT 'Other', subject TEXT NOT NULL DEFAULT '', detail TEXT DEFAULT '',
                 owner TEXT DEFAULT '', priority TEXT DEFAULT 'Medium', status TEXT DEFAULT 'Open',
+                comments TEXT NOT NULL DEFAULT '', resolution_comments TEXT NOT NULL DEFAULT '',
+                submitted_by TEXT NOT NULL DEFAULT '',
                 related_part TEXT DEFAULT '', related_station TEXT DEFAULT '',
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
@@ -2088,6 +2120,9 @@ def init_db() -> None:
             )
         if "building_location" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN building_location TEXT NOT NULL DEFAULT ''")
+        for column in ("baseline_parts", "baseline_hpu", "baseline_cycle_time_s"):
+            if column not in project_columns:
+                conn.execute(f"ALTER TABLE projects ADD COLUMN {column} REAL")
         for project_row in conn.execute(
             "SELECT id FROM projects WHERE yamazumi_line_code=''"
         ).fetchall():
@@ -2214,6 +2249,42 @@ def init_db() -> None:
             """CREATE UNIQUE INDEX IF NOT EXISTS uq_parts_project_pits_tracker_number
                ON parts(project_id, pits_tracker_number)
                WHERE pits_tracker_number <> ''"""
+        )
+        concern_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(concerns)").fetchall()
+        }
+        for column in ("comments", "resolution_comments", "submitted_by"):
+            if column not in concern_columns:
+                conn.execute(
+                    f"ALTER TABLE concerns ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+        conn.execute(
+            """UPDATE concerns SET detail = subject
+               WHERE (detail IS NULL OR TRIM(detail) = '')
+                 AND (subject IS NOT NULL AND TRIM(subject) <> '')"""
+        )
+        conn.execute(
+            "UPDATE concerns SET status = 'Resolved' WHERE status = 'Closed'"
+        )
+        valid_categories_sql = ", ".join(f"'{cat}'" for cat in CONCERN_CATEGORIES)
+        conn.execute(
+            f"""UPDATE concerns SET category = 'Other'
+                WHERE category IS NULL OR TRIM(category) = ''
+                   OR category NOT IN ({valid_categories_sql})"""
+        )
+        conn.execute(
+            """UPDATE concerns
+               SET submitted_by = COALESCE(
+                   NULLIF((SELECT TRIM(editor_name) FROM audit_log
+                           WHERE audit_log.project_id = concerns.project_id
+                             AND TRIM(COALESCE(editor_name, '')) <> ''
+                           ORDER BY created_at DESC LIMIT 1), ''),
+                   NULLIF((SELECT TRIM(owner) FROM projects
+                           WHERE projects.id = concerns.project_id
+                             AND TRIM(COALESCE(owner, '')) <> ''), ''),
+                   ''
+               )
+               WHERE submitted_by IS NULL OR TRIM(submitted_by) = ''"""
         )
         complexity_feature_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(complexity_features)").fetchall()
@@ -3180,4 +3251,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'CONCERN_CATEGORIES', 'CONCERN_STATUSES', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']

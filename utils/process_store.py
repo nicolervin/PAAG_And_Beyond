@@ -2902,7 +2902,290 @@ def work_element_downstream_impact(
         }
 
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
+@cached_store_read
+def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
+    """Compute scenario-wide Process at a Glance readiness metrics and functional alert counts."""
+    with connection() as conn:
+        def _has_table(tbl: str) -> bool:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (tbl,),
+                ).fetchone()
+                is not None
+            )
+
+        # 1. Process steps and Yamazumi sync
+        work_rows = conn.execute(
+            "SELECT id FROM work_elements WHERE project_id=? AND scenario_id=?",
+            (project_id, scenario_id),
+        ).fetchall()
+        work_ids = [str(r["id"]) for r in work_rows]
+        work_id_set = set(work_ids)
+        total_steps = len(work_ids)
+
+        yamazumi_rows = conn.execute(
+            """SELECT e.id, e.process_element_id
+               FROM yamazumi_elements e
+               JOIN yamazumi_areas a ON a.id=e.area_id
+               WHERE e.project_id=? AND a.scenario_id=?""",
+            (project_id, scenario_id),
+        ).fetchall()
+        total_yamazumi_elements = len(yamazumi_rows)
+        linked_process_ids: set[str] = set()
+        synced_yamazumi_elements = 0
+        for yr in yamazumi_rows:
+            pid = str(yr["process_element_id"] or "").strip()
+            if pid and pid in work_id_set:
+                synced_yamazumi_elements += 1
+                linked_process_ids.add(pid)
+        unlinked_process_steps = len(work_id_set - linked_process_ids)
+        unsynced_yamazumi_elements = total_yamazumi_elements - synced_yamazumi_elements
+
+        # 2. Part consumption coverage
+        fb_rows = conn.execute(
+            """SELECT DISTINCT assignment.part_id
+               FROM fishbone_part_assignments assignment
+               JOIN parts part
+                 ON part.id=assignment.part_id AND part.project_id=assignment.project_id
+               JOIN assembly_sections section
+                 ON section.id=assignment.section_id AND section.project_id=assignment.project_id
+               LEFT JOIN part_scenario_activity activity
+                 ON activity.project_id=assignment.project_id
+                AND activity.scenario_id=?
+                AND activity.part_id=assignment.part_id
+               WHERE assignment.project_id=?
+                 AND section.active=1
+                 AND COALESCE(activity.active, 1)=1""",
+            (scenario_id, project_id),
+        ).fetchall()
+        active_fb_part_ids = {str(r[0]) for r in fb_rows if r[0]}
+        total_fishbone_parts = len(active_fb_part_ids)
+
+        opt_rows = conn.execute(
+            """SELECT option.part_id, option.handling_type
+               FROM process_part_options option
+               JOIN process_part_groups group_row ON group_row.id=option.group_id
+               JOIN work_elements we
+                 ON we.id=group_row.work_element_id
+                AND we.project_id=group_row.project_id
+                AND we.scenario_id=group_row.scenario_id
+               JOIN parts part
+                 ON part.id=option.part_id AND part.project_id=group_row.project_id
+               LEFT JOIN part_scenario_activity activity
+                 ON activity.project_id=group_row.project_id
+                AND activity.scenario_id=group_row.scenario_id
+                AND activity.part_id=option.part_id
+               WHERE group_row.project_id=? AND group_row.scenario_id=?
+                 AND COALESCE(activity.active, 1)=1""",
+            (project_id, scenario_id),
+        ).fetchall()
+        consumed_fb_part_ids = {
+            str(r["part_id"])
+            for r in opt_rows
+            if str(r["handling_type"] or "").strip() == "Consume"
+            and str(r["part_id"]) in active_fb_part_ids
+        }
+        consumed_parts = len(consumed_fb_part_ids)
+        unclassified_pairings = sum(
+            1 for r in opt_rows if not str(r["handling_type"] or "").strip()
+        )
+
+        # 3. Pitch visual aids
+        pitch_rows = conn.execute(
+            """SELECT p.id, COALESCE(p.status, 'Active') AS status
+               FROM yamazumi_pitches p
+               JOIN yamazumi_areas a ON a.id=p.area_id
+               WHERE p.project_id=? AND a.scenario_id=?""",
+            (project_id, scenario_id),
+        ).fetchall()
+        all_pitch_ids = {str(r["id"]) for r in pitch_rows if r["id"]}
+        active_pitch_ids = {
+            str(r["id"])
+            for r in pitch_rows
+            if r["id"] and str(r["status"] or "Active").strip() == "Active"
+        }
+        target_pitch_ids = active_pitch_ids if active_pitch_ids else all_pitch_ids
+        total_active_pitches = len(target_pitch_ids)
+
+        media_rows = (
+            conn.execute(
+                """SELECT id, pitch_id
+                   FROM process_visual_media
+                   WHERE project_id=? AND scenario_id=?""",
+                (project_id, scenario_id),
+            ).fetchall()
+            if _has_table("process_visual_media")
+            else []
+        )
+        total_visual_media = len(media_rows)
+        tagged_rows = (
+            conn.execute(
+                """SELECT t.media_id, y.pitch_id
+                   FROM process_visual_media_tags t
+                   LEFT JOIN yamazumi_elements y ON (
+                       y.process_element_id = t.work_element_id
+                       OR (y.process_element_id IS NULL AND y.id = t.work_element_id)
+                   ) AND y.project_id = t.project_id
+                   LEFT JOIN yamazumi_areas a ON a.id = y.area_id AND a.scenario_id = t.scenario_id
+                   WHERE t.project_id=? AND t.scenario_id=?""",
+                (project_id, scenario_id),
+            ).fetchall()
+            if _has_table("process_visual_media_tags")
+            else []
+        )
+        tagged_media_ids: set[str] = set()
+        pitches_with_media_ids: set[str] = set()
+        for tr in tagged_rows:
+            mid = str(tr["media_id"] or "").strip()
+            if mid:
+                tagged_media_ids.add(mid)
+            t_pid = str(tr["pitch_id"] or "").strip()
+            if t_pid in target_pitch_ids:
+                pitches_with_media_ids.add(t_pid)
+        untagged_visual_media = 0
+        for mr in media_rows:
+            mid = str(mr["id"] or "").strip()
+            m_pid = str(mr["pitch_id"] or "").strip()
+            if mid not in tagged_media_ids:
+                untagged_visual_media += 1
+                if m_pid in target_pitch_ids:
+                    pitches_with_media_ids.add(m_pid)
+        pitches_with_media = len(pitches_with_media_ids)
+
+        # 4. Functional alerts (Quality, Materials, Ergo, Safety)
+        torque_alert_count = 0
+        pfmea_alert_count = 0
+        ergo_alert_count = 0
+        safety_req_count = 0
+        steps_missing_ppe = 0
+
+        if work_ids:
+            if (
+                _has_table("quality_requirement_assignments")
+                and _has_table("quality_requirement_torque_details")
+            ):
+                torque_alert_count = int(
+                    conn.execute(
+                        """SELECT COUNT(*)
+                           FROM quality_requirement_assignments assignment
+                           JOIN quality_requirement_torque_details detail
+                             ON detail.quality_requirement_id=assignment.quality_requirement_id
+                            AND detail.project_id=assignment.project_id
+                           JOIN work_elements work
+                             ON work.id=assignment.work_element_id
+                            AND work.project_id=assignment.project_id
+                            AND work.scenario_id=assignment.scenario_id
+                           WHERE assignment.project_id=? AND assignment.scenario_id=?
+                             AND assignment.requirement_type='Torque'""",
+                        (project_id, scenario_id),
+                    ).fetchone()[0]
+                )
+
+            if _has_table("pfmea_entries"):
+                pfmea_alert_count = int(
+                    conn.execute(
+                        """SELECT COUNT(*)
+                           FROM pfmea_entries pfmea
+                           JOIN work_elements work
+                             ON work.id=pfmea.work_element_id
+                            AND work.project_id=pfmea.project_id
+                            AND work.scenario_id=pfmea.scenario_id
+                           LEFT JOIN pfmea_effects effect ON effect.pfmea_entry_id=pfmea.id
+                           LEFT JOIN pfmea_risk_rows risk ON risk.pfmea_entry_id=pfmea.id
+                           WHERE pfmea.project_id=? AND pfmea.scenario_id=?
+                             AND (COALESCE(effect.severity, 0) >= 8 OR COALESCE(risk.rpn, 0) >= 100)""",
+                        (project_id, scenario_id),
+                    ).fetchone()[0]
+                )
+
+            if _has_table("ergonomics_reviews"):
+                ergo_alert_count = int(
+                    conn.execute(
+                        """SELECT COUNT(*)
+                           FROM ergonomics_reviews review
+                           JOIN work_elements work
+                             ON work.id=review.work_element_id
+                            AND work.project_id=review.project_id
+                            AND work.scenario_id=review.scenario_id
+                           WHERE review.project_id=? AND review.scenario_id=?
+                             AND review.risk_classification IN ('Red', 'Favorable Red', 'Yellow')
+                             AND review.status IN ('Open', 'Pending')""",
+                        (project_id, scenario_id),
+                    ).fetchone()[0]
+                )
+
+            work_ids_with_ppe: set[str] = set()
+            if _has_table("safety_requirements"):
+                s_rows = conn.execute(
+                    """SELECT safety.ppe, safety.work_element_id
+                       FROM safety_requirements safety
+                       JOIN work_elements work
+                         ON work.id=safety.work_element_id
+                        AND work.project_id=safety.project_id
+                        AND work.scenario_id=safety.scenario_id
+                       WHERE safety.project_id=? AND safety.scenario_id=?
+                         AND safety.active=1""",
+                    (project_id, scenario_id),
+                ).fetchall()
+                safety_req_count = len(s_rows)
+                for sr in s_rows:
+                    raw_ppe = sr["ppe"] if "ppe" in sr.keys() else ""
+                    if parse_ppe(raw_ppe):
+                        work_ids_with_ppe.add(str(sr["work_element_id"]))
+
+            if (
+                _has_table("equipment_process_links")
+                and _has_table("equipment_placements")
+                and _has_table("equipment_function_links")
+            ):
+                s_eq_rows = conn.execute(
+                    """SELECT link.work_element_id
+                       FROM equipment_process_links link
+                       JOIN equipment_placements placement ON placement.id=link.placement_id
+                       JOIN equipment_function_links func ON func.equipment_id=placement.equipment_id
+                       WHERE link.project_id=? AND link.scenario_id=?
+                         AND func.functional_area='Safety'""",
+                    (project_id, scenario_id),
+                ).fetchall()
+                for eqr in s_eq_rows:
+                    if eqr["work_element_id"]:
+                        work_ids_with_ppe.add(str(eqr["work_element_id"]))
+
+            steps_missing_ppe = len(work_id_set - work_ids_with_ppe)
+
+        quality_alerts = torque_alert_count + pfmea_alert_count
+        materials_alerts = unclassified_pairings
+        ergo_alerts = ergo_alert_count
+        safety_alerts = safety_req_count + steps_missing_ppe
+        total_alerts = quality_alerts + materials_alerts + ergo_alerts + safety_alerts
+
+        return {
+            "total_steps": total_steps,
+            "total_yamazumi_elements": total_yamazumi_elements,
+            "synced_yamazumi_elements": synced_yamazumi_elements,
+            "unsynced_yamazumi_elements": unsynced_yamazumi_elements,
+            "unlinked_process_steps": unlinked_process_steps,
+            "total_fishbone_parts": total_fishbone_parts,
+            "consumed_parts": consumed_parts,
+            "unclassified_pairings": unclassified_pairings,
+            "total_active_pitches": total_active_pitches,
+            "pitches_with_media": pitches_with_media,
+            "total_visual_media": total_visual_media,
+            "untagged_visual_media": untagged_visual_media,
+            "quality_alerts": quality_alerts,
+            "torque_alert_count": torque_alert_count,
+            "pfmea_alert_count": pfmea_alert_count,
+            "materials_alerts": materials_alerts,
+            "ergo_alerts": ergo_alerts,
+            "safety_alerts": safety_alerts,
+            "safety_req_count": safety_req_count,
+            "steps_missing_ppe": steps_missing_ppe,
+            "total_alerts": total_alerts,
+        }
+
+
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

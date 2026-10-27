@@ -69,11 +69,271 @@ for column, default in {
     if column not in models.columns:
         models[column] = pd.Series(dtype="bool" if column == "active" else "string")
 
-active_count = int(models["active"].fillna(1).astype(bool).sum())
-summary = st.columns(3)
-summary[0].metric("Defined models", len(models))
-summary[1].metric("Active for planning", active_count)
-summary[2].metric("Imported from PITS", int(models["source_payload"].fillna("{}").ne("{}").sum()))
+active_mask = models["active"].fillna(1).astype(bool) if not models.empty else pd.Series(dtype="bool")
+active_count = int(active_mask.sum()) if not models.empty else 0
+total_models = int(len(models))
+pits_count = int(models["source_payload"].fillna("{}").ne("{}").sum()) if not models.empty else 0
+active_models_df = models.loc[active_mask].copy() if not models.empty else models
+
+missing_name_count = (
+    int(
+        (
+            active_models_df["display_name"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            == ""
+        ).sum()
+    )
+    if not active_models_df.empty and "display_name" in active_models_df.columns
+    else 0
+)
+models_icon = (
+    "🟢"
+    if (active_count > 0 and missing_name_count == 0)
+    else ("🟡" if active_count > 0 else "🔴")
+)
+if active_count == 0:
+    models_delta = f"{total_models} defined · Activate models below"
+    models_delta_color = "inverse"
+elif missing_name_count > 0:
+    models_delta = f"{missing_name_count} missing Model name · {pits_count} from PITS"
+    models_delta_color = "off"
+else:
+    models_delta = f"{total_models} defined · {pits_count} from PITS"
+    models_delta_color = "normal"
+
+eau_series = (
+    pd.to_numeric(active_models_df["eau"], errors="coerce").fillna(0.0)
+    if not active_models_df.empty and "eau" in active_models_df.columns
+    else pd.Series(dtype="float64")
+)
+total_active_eau = float(eau_series.clip(lower=0.0).sum()) if not eau_series.empty else 0.0
+missing_eau_count = int((eau_series <= 0).sum()) if not eau_series.empty else 0
+eau_icon = (
+    "🟢"
+    if (active_count > 0 and missing_eau_count == 0)
+    else ("🟡" if (total_active_eau > 0 and missing_eau_count > 0) else "🔴")
+)
+if active_count == 0:
+    eau_delta = "No active models"
+    eau_delta_color = "off"
+elif missing_eau_count == 0:
+    eau_delta = f"All {active_count} active models have EAU"
+    eau_delta_color = "normal"
+else:
+    eau_delta = f"{missing_eau_count} active model(s) missing EAU"
+    eau_delta_color = "inverse"
+
+banner_features = complexity_features(project_id)
+banner_active_features = (
+    banner_features.loc[banner_features["active"].fillna(1).astype(bool)].copy()
+    if not banner_features.empty
+    else banner_features
+)
+active_feature_count = int(len(banner_active_features))
+feature_categories_count = (
+    int(
+        banner_active_features["category"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .nunique()
+    )
+    if not banner_active_features.empty and "category" in banner_active_features.columns
+    else 0
+)
+linked_subsystem_count = (
+    int(
+        (
+            banner_active_features["subsystem"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            != ""
+        ).sum()
+    )
+    if not banner_active_features.empty and "subsystem" in banner_active_features.columns
+    else 0
+)
+features_icon = "🟢" if active_feature_count > 0 else "🟡"
+if active_feature_count > 0:
+    cat_word = "category" if feature_categories_count == 1 else "categories"
+    features_delta = f"{feature_categories_count} {cat_word} · {linked_subsystem_count} with subsystem"
+else:
+    features_delta = "Add feature definitions below"
+
+banner_active_model_ids = (
+    set(active_models_df["id"].astype(str)) if not active_models_df.empty else set()
+)
+banner_active_feature_ids = (
+    banner_active_features["id"].astype(str).tolist()
+    if not banner_active_features.empty
+    else []
+)
+banner_full_tree = (
+    complexity_tree(project_id)
+    if (banner_active_model_ids and banner_active_feature_ids)
+    else pd.DataFrame()
+)
+banner_active_tree = (
+    banner_full_tree.loc[
+        banner_full_tree["model_id"].astype(str).isin(banner_active_model_ids)
+    ].copy()
+    if not banner_full_tree.empty
+    else pd.DataFrame()
+)
+total_tree_cells = len(banner_active_model_ids) * len(banner_active_feature_ids)
+mapped_tree_cells = 0
+if total_tree_cells > 0 and not banner_active_tree.empty:
+    for fid in banner_active_feature_ids:
+        if fid in banner_active_tree.columns:
+            mapped_tree_cells += int(
+                (
+                    banner_active_tree[fid]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    != ""
+                ).sum()
+            )
+unmapped_tree_cells = max(0, total_tree_cells - mapped_tree_cells)
+if total_tree_cells > 0:
+    mapped_pct = (mapped_tree_cells / total_tree_cells) * 100.0
+    tree_icon = (
+        "🟢"
+        if unmapped_tree_cells == 0
+        else ("🟡" if mapped_tree_cells > 0 else "🔴")
+    )
+    tree_value_str = f"{tree_icon} {mapped_pct:.0f}%"
+    if unmapped_tree_cells == 0:
+        tree_delta = f"All {total_tree_cells} cells mapped"
+        tree_delta_color = "normal"
+    else:
+        tree_delta = f"{unmapped_tree_cells} of {total_tree_cells} cell(s) unmapped"
+        tree_delta_color = "inverse"
+else:
+    tree_value_str = "—"
+    tree_delta = "Needs active models & features"
+    tree_delta_color = "off"
+
+similar_model_ids: set[str] = set()
+exact_pair_count = 0
+near_pair_count = 0
+pair_examples: list[str] = []
+if len(banner_active_tree) >= 2 and banner_active_feature_ids:
+    tree_records = banner_active_tree.to_dict("records")
+    for idx_a in range(len(tree_records)):
+        row_a = tree_records[idx_a]
+        mid_a = str(row_a.get("model_id") or "")
+        label_a = (
+            str(row_a.get("common_name") or "").strip()
+            or str(row_a.get("official_model_number") or "").strip()
+            or mid_a[:6]
+        )
+        for idx_b in range(idx_a + 1, len(tree_records)):
+            row_b = tree_records[idx_b]
+            mid_b = str(row_b.get("model_id") or "")
+            label_b = (
+                str(row_b.get("common_name") or "").strip()
+                or str(row_b.get("official_model_number") or "").strip()
+                or mid_b[:6]
+            )
+            mutual_assigned = 0
+            diff_count = 0
+            for fid in banner_active_feature_ids:
+                val_a = "" if pd.isna(row_a.get(fid)) else str(row_a.get(fid) or "").strip()
+                val_b = "" if pd.isna(row_b.get(fid)) else str(row_b.get(fid) or "").strip()
+                if val_a and val_b:
+                    mutual_assigned += 1
+                    if val_a != val_b:
+                        diff_count += 1
+                elif val_a or val_b:
+                    diff_count += 1
+            if mutual_assigned > 0 and diff_count <= 2:
+                similar_model_ids.add(mid_a)
+                similar_model_ids.add(mid_b)
+                if diff_count == 0:
+                    exact_pair_count += 1
+                else:
+                    near_pair_count += 1
+                if len(pair_examples) < 5:
+                    pair_examples.append(f"{label_a} ↔ {label_b} ({diff_count} diff)")
+
+if active_count >= 2 and active_feature_count > 0:
+    similar_value_str = f"{len(similar_model_ids)} / {active_count}"
+    similar_delta = (
+        f"{exact_pair_count} exact (0 diff) · {near_pair_count} within 1–2 features"
+    )
+else:
+    similar_value_str = "—"
+    similar_delta = "Map ≥2 models & ≥1 feature"
+
+similar_help = (
+    "Active models whose Complexity tree feature choices differ from another active model by "
+    "0 to 2 features (0 differences = identical feature profile; 1–2 differences = near-identical "
+    "models that can share most assembly work and tooling)."
+)
+if pair_examples:
+    similar_help += " Closest pairs: " + "; ".join(pair_examples) + "."
+
+summary = st.columns(5)
+summary[0].metric(
+    "Active models",
+    f"{models_icon} {active_count}",
+    delta=models_delta,
+    delta_color=models_delta_color,
+    help=(
+        "Number of models checked as Active for planning out of all defined models. "
+        "Active models appear in the Complexity tree and Parts Catalog model applicability. "
+        "🟢 = active models defined with friendly Model names, "
+        "🟡 = 1+ active models missing a friendly Model name, 🔴 = 0 active models."
+    ),
+)
+summary[1].metric(
+    "Total active EAU",
+    f"{eau_icon} {int(round(total_active_eau)):,}",
+    delta=eau_delta,
+    delta_color=eau_delta_color,
+    help=(
+        "Sum of Estimated Annual Usage (EAU) across all active models (used to calculate "
+        "Hours per unit on Project overview). 🟢 = all active models have EAU > 0, "
+        "🟡 = some active models are missing EAU, 🔴 = total active EAU is 0."
+    ),
+)
+summary[2].metric(
+    "Active features",
+    f"{features_icon} {active_feature_count}",
+    delta=features_delta,
+    delta_color="off",
+    help=(
+        "Number of active complexity features (such as Door Style, Ice Maker, or Color) "
+        "used to differentiate models in the Complexity tree and infer part applicability."
+    ),
+)
+summary[3].metric(
+    "Tree mapping",
+    tree_value_str,
+    delta=tree_delta,
+    delta_color=tree_delta_color,
+    help=(
+        "Percentage of (Active Model × Active Feature) cells in the Complexity tree table "
+        "that have an assigned option. 🟢 = 100% mapped, 🟡 = partially mapped, 🔴 = 0% mapped."
+    ),
+)
+summary[4].metric(
+    "Similar models (0–2 features)",
+    similar_value_str,
+    delta=similar_delta,
+    delta_color="off",
+    help=similar_help,
+)
+
+
+
+
 
 has_unsaved_changes = table_has_unsaved_changes(
     model_editor_key, native_row_selection=True

@@ -874,19 +874,232 @@ def update_project_yamazumi_line_code(project_id: str, value: object) -> dict:
         "updated_at": timestamp,
     }
 
+def _optional_positive_real(value: object, label: str) -> float | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a number.") from exc
+    if math.isnan(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
 def update_project(project_id: str, values: dict) -> None:
+    existing = get_project(project_id) or {}
     takt_unit = normalize_time_unit(values.get("takt_time_unit", "seconds"))
-    values = {**values, "takt_time_unit": takt_unit}
+    baseline_parts = _optional_positive_real(
+        values["baseline_parts"] if "baseline_parts" in values else existing.get("baseline_parts"),
+        "Baseline parts",
+    )
+    baseline_hpu = _optional_positive_real(
+        values["baseline_hpu"] if "baseline_hpu" in values else existing.get("baseline_hpu"),
+        "Baseline HPU",
+    )
+    baseline_cycle_time_s = _optional_positive_real(
+        values["baseline_cycle_time_s"]
+        if "baseline_cycle_time_s" in values
+        else existing.get("baseline_cycle_time_s"),
+        "Baseline cycle time",
+    )
+    values = {
+        **values,
+        "takt_time_unit": takt_unit,
+        "baseline_parts": baseline_parts,
+        "baseline_hpu": baseline_hpu,
+        "baseline_cycle_time_s": baseline_cycle_time_s,
+    }
     fields = [
         "name", "program", "product_line", "building_location", "owner", "revision", "status",
-        "takt_time_s", "takt_time_unit", "notes",
+        "takt_time_s", "takt_time_unit", "baseline_parts", "baseline_hpu",
+        "baseline_cycle_time_s", "notes",
     ]
     execute(
         f"UPDATE projects SET {', '.join(f'{field} = ?' for field in fields)}, updated_at = ? WHERE id = ?",
-        tuple(values.get(field, "") for field in fields) + (now_iso(), project_id),
+        tuple(
+            values.get(field) if field.startswith("baseline_") else values.get(field, "")
+            for field in fields
+        ) + (now_iso(), project_id),
     )
 
-def replace_concerns(project_id: str, edited: pd.DataFrame) -> None:
+def replace_concerns(project_id: str, edited: pd.DataFrame, editor_name: str = "") -> None:
+    def _clean(row: pd.Series, key: str, default: str = "") -> str:
+        val = row.get(key, default)
+        if val is None or pd.isna(val):
+            return default
+        return str(val).strip()
+
+    validated_rows: list[dict[str, str]] = []
+    for _, row in edited.iterrows():
+        detail_val = _clean(row, "detail") or _clean(row, "subject") or _clean(row, "title")
+        comments_val = _clean(row, "comments")
+        res_comments_val = _clean(row, "resolution_comments") or _clean(row, "resolution_notes")
+        owner_val = _clean(row, "owner")
+        if not detail_val and not comments_val and not res_comments_val and not owner_val:
+            continue
+        if not detail_val:
+            raise ValueError("Description is required for every question or concern.")
+
+        status_val = _clean(row, "status", "Open") or "Open"
+        if status_val == "Closed":
+            status_val = "Resolved"
+        if status_val not in CONCERN_STATUSES:
+            raise ValueError(
+                f"Invalid status '{status_val}'. Allowed statuses: {', '.join(CONCERN_STATUSES)}."
+            )
+        if status_val == "Resolved" and not res_comments_val:
+            raise ValueError(
+                f"Resolution comments are required when Status is set to 'Resolved' (Description: {detail_val[:60]})."
+            )
+
+        category_val = _clean(row, "category", "Other") or "Other"
+        if category_val not in CONCERN_CATEGORIES:
+            category_val = "Other"
+        priority_val = _clean(row, "priority", "Medium") or "Medium"
+
+        validated_rows.append(
+            {
+                "id": _clean(row, "id"),
+                "category": category_val,
+                "subject": _clean(row, "subject") if "subject" in edited.columns else "",
+                "detail": detail_val,
+                "owner": owner_val,
+                "priority": priority_val,
+                "status": status_val,
+                "comments": comments_val,
+                "resolution_comments": res_comments_val,
+                "submitted_by": _clean(row, "submitted_by"),
+                "related_part": _clean(row, "related_part") if "related_part" in edited.columns else "",
+                "related_station": _clean(row, "related_station") if "related_station" in edited.columns else "",
+                "created_at": _clean(row, "created_at"),
+                "updated_at": _clean(row, "updated_at"),
+            }
+        )
+
+    fields = [
+        "category",
+        "subject",
+        "detail",
+        "owner",
+        "priority",
+        "status",
+        "comments",
+        "resolution_comments",
+        "submitted_by",
+        "related_part",
+        "related_station",
+    ]
+    with connection() as conn:
+        from utils.recycle_bin_store import capture_deletion_to_recycle_bin
+
+        existing_concerns = conn.execute(
+            "SELECT * FROM concerns WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        existing_by_id = {str(r["id"]): dict(r) for r in existing_concerns}
+        kept_ids = {
+            r["id"]
+            for r in validated_rows
+            if r["id"] and r["id"] in existing_by_id
+        }
+        for c_row in existing_concerns:
+            c_id = str(c_row["id"])
+            if c_id not in kept_ids:
+                label = str(c_row["detail"] or c_row["subject"] or c_id)
+                with capture_deletion_to_recycle_bin(
+                    conn,
+                    project_id=project_id,
+                    entity_type="Concern",
+                    entity_table="concerns",
+                    entity_id=c_id,
+                    entity_label=label,
+                    deleted_by=editor_name,
+                ):
+                    conn.execute(
+                        "DELETE FROM concerns WHERE id = ? AND project_id = ?",
+                        (c_id, project_id),
+                    )
+        conn.execute("DELETE FROM concerns WHERE project_id = ?", (project_id,))
+        timestamp = now_iso()
+        for r in validated_rows:
+            row_id = r["id"]
+            if row_id and row_id in existing_by_id:
+                prev = existing_by_id[row_id]
+                submitted_by_val = (
+                    r["submitted_by"]
+                    or str(prev.get("submitted_by") or "").strip()
+                    or str(editor_name or "").strip()
+                )
+                related_part_val = (
+                    r["related_part"]
+                    if "related_part" in edited.columns
+                    else str(prev.get("related_part") or "")
+                )
+                related_station_val = (
+                    r["related_station"]
+                    if "related_station" in edited.columns
+                    else str(prev.get("related_station") or "")
+                )
+                subject_val = (
+                    r["subject"]
+                    if ("subject" in edited.columns and r["subject"])
+                    else r["detail"]
+                )
+                created_at_val = r["created_at"] or str(prev.get("created_at") or timestamp)
+                prev_comparable = (
+                    str(prev.get("category") or ""),
+                    str(prev.get("detail") or prev.get("subject") or ""),
+                    str(prev.get("owner") or ""),
+                    str(prev.get("priority") or ""),
+                    str(prev.get("status") or ""),
+                    str(prev.get("comments") or ""),
+                    str(prev.get("resolution_comments") or ""),
+                    str(prev.get("submitted_by") or "").strip() or submitted_by_val,
+                )
+                curr_comparable = (
+                    r["category"],
+                    r["detail"],
+                    r["owner"],
+                    r["priority"],
+                    r["status"],
+                    r["comments"],
+                    r["resolution_comments"],
+                    submitted_by_val,
+                )
+                updated_at_val = (
+                    timestamp
+                    if curr_comparable != prev_comparable
+                    else str(prev.get("updated_at") or timestamp)
+                )
+            else:
+                row_id = row_id or str(uuid4())
+                submitted_by_val = r["submitted_by"] or str(editor_name or "").strip()
+                related_part_val = r["related_part"]
+                related_station_val = r["related_station"]
+                subject_val = r["subject"] or r["detail"]
+                created_at_val = r["created_at"] or timestamp
+                updated_at_val = timestamp
+
+            values = [
+                r["category"],
+                subject_val,
+                r["detail"],
+                r["owner"],
+                r["priority"],
+                r["status"],
+                r["comments"],
+                r["resolution_comments"],
+                submitted_by_val,
+                related_part_val,
+                related_station_val,
+            ]
+            conn.execute(
+                f"INSERT INTO concerns (id, project_id, {', '.join(fields)}, created_at, updated_at) VALUES ({', '.join(['?'] * (len(fields) + 4))})",
+                (row_id, project_id, *values, created_at_val, updated_at_val),
+            )
+
+
+def _legacy_replace_concerns_unused(project_id: str, edited: pd.DataFrame) -> None:
     fields = ["category", "subject", "detail", "owner", "priority", "status", "related_part", "related_station"]
     with connection() as conn:
         from utils.recycle_bin_store import capture_deletion_to_recycle_bin

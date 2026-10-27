@@ -11,6 +11,7 @@ import streamlit as st
 
 from utils.clipboard_image import clipboard_image, decode_clipboard_image
 from utils.image_annotator import decode_data_url, image_annotator
+from utils.equipment_store import conveyor_zones, scenario_pitches_ergonomics_geometry
 from utils.equipment_ui import render_functional_equipment_tab
 from utils.ergonomics_slide_visual import (
     render_ergonomics_presentation_deck,
@@ -111,15 +112,6 @@ page_title_with_scope(
     scope="scenario",
     scenario_name=_clean_text((scenario or {}).get("name")),
 )
-if scenario:
-    st.metric(
-        "Current scenario takt time",
-        format_seconds(scenario["takt_time_s"], scenario["takt_time_unit"]),
-        help=(
-            "Use the active scenario's takt time to judge whether a previously "
-            "assessed frequency-driven ergonomic risk still applies under this timing."
-        ),
-    )
 st.caption(
     "Review ergonomic concerns for the active planning scenario, including concerns "
     "captured before a Process at a Glance step is available."
@@ -127,6 +119,279 @@ st.caption(
 if not project_id or not scenario:
     st.info("Select an active planning scenario to manage Ergonomics reviews.")
     st.stop()
+
+reviews = ergonomics_reviews(project_id, scenario_id).copy()
+work_elements = ergonomics_work_elements(project_id, scenario_id)
+
+# Top 5-card readiness banner
+total_reviews = len(reviews)
+if not reviews.empty:
+    closed_count = int(
+        sum(1 for s in reviews["status"] if _clean_text(s).startswith("Closed"))
+    )
+    in_review_count = int(
+        sum(
+            1
+            for s in reviews["status"]
+            if _clean_text(s) in ("Pending", "Validation")
+        )
+    )
+    open_count = int(
+        sum(
+            1
+            for s in reviews["status"]
+            if _clean_text(s) in ("Started", "Open", "")
+        )
+    )
+    active_open_count = total_reviews - closed_count
+    today_ts = pd.Timestamp(date.today())
+    overdue_count = 0
+    for _, r in reviews.iterrows():
+        if not _clean_text(r.get("status")).startswith("Closed"):
+            due_dt = pd.to_datetime(r.get("requested_due_date"), errors="coerce")
+            if pd.notna(due_dt) and due_dt < today_ts:
+                overdue_count += 1
+
+    red_count = int(
+        sum(1 for rc in reviews["risk_classification"] if _clean_text(rc) == "Red")
+    )
+    fav_red_count = int(
+        sum(
+            1
+            for rc in reviews["risk_classification"]
+            if _clean_text(rc) == "Favorable Red"
+        )
+    )
+    fav_green_count = int(
+        sum(
+            1
+            for rc in reviews["risk_classification"]
+            if _clean_text(rc) == "Favorable Green"
+        )
+    )
+    green_count = int(
+        sum(1 for rc in reviews["risk_classification"] if _clean_text(rc) == "Green")
+    )
+    open_red_count = int(
+        sum(
+            1
+            for s, rc in zip(reviews["status"], reviews["risk_classification"])
+            if not _clean_text(s).startswith("Closed") and _clean_text(rc) == "Red"
+        )
+    )
+    open_fav_red_count = int(
+        sum(
+            1
+            for s, rc in zip(reviews["status"], reviews["risk_classification"])
+            if not _clean_text(s).startswith("Closed")
+            and _clean_text(rc) == "Favorable Red"
+        )
+    )
+    open_high_risk = open_red_count + open_fav_red_count
+
+    linked_reviews = int(
+        sum(1 for w in reviews["work_element_id"] if _clean_text(w))
+    )
+    unlinked_reviews = total_reviews - linked_reviews
+    assessed_steps = len(
+        {
+            _clean_text(w)
+            for w, rc in zip(reviews["work_element_id"], reviews["risk_classification"])
+            if _clean_text(w) and _clean_text(rc) not in ("", "Not yet assessed")
+        }
+    )
+
+    hazard_tagged_count = int(
+        sum(1 for h in reviews["hazard_option_ids"] if len(_id_list(h)) > 0)
+    )
+    unassigned_open = int(
+        sum(
+            1
+            for s, rev in zip(reviews["status"], reviews["reviewer"])
+            if not _clean_text(s).startswith("Closed") and not _clean_text(rev)
+        )
+    )
+    hazard_counts: dict[str, int] = {}
+    for h_list in reviews.get("hazard_labels", []):
+        if isinstance(h_list, (list, tuple, set)):
+            for h_lbl in h_list:
+                clean_h = _clean_text(h_lbl)
+                if clean_h:
+                    hazard_counts[clean_h] = hazard_counts.get(clean_h, 0) + 1
+    if hazard_counts:
+        top_raw = max(hazard_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        top_short = top_raw.split("(")[0].strip() or top_raw
+        if len(top_short) > 22:
+            top_short = top_short[:20].rstrip() + "…"
+        top_hazard_label = f"{top_short} ({hazard_counts[top_raw]})"
+    else:
+        top_hazard_label = "None tagged"
+else:
+    closed_count = 0
+    in_review_count = 0
+    open_count = 0
+    active_open_count = 0
+    overdue_count = 0
+    red_count = 0
+    fav_red_count = 0
+    fav_green_count = 0
+    green_count = 0
+    open_red_count = 0
+    open_fav_red_count = 0
+    open_high_risk = 0
+    linked_reviews = 0
+    unlinked_reviews = 0
+    assessed_steps = 0
+    hazard_tagged_count = 0
+    unassigned_open = 0
+    top_hazard_label = "None tagged"
+
+closure_pct = (closed_count / total_reviews * 100.0) if total_reviews > 0 else 100.0
+total_steps = len(work_elements)
+step_cov_pct = (assessed_steps / total_steps * 100.0) if total_steps > 0 else 0.0
+
+ergo_zones_df = conveyor_zones(project_id, scenario_id)
+ergo_zone_count = len(ergo_zones_df)
+pitches_geom_df = scenario_pitches_ergonomics_geometry(project_id, scenario_id)
+if not pitches_geom_df.empty:
+    elev_pitch_count = int(
+        sum(
+            1
+            for _, pr in pitches_geom_df.iterrows()
+            if float(pr.get("platform_height_in") or 0.0) > 0.0
+            or float(pr.get("pit_depth_in") or 0.0) > 0.0
+        )
+    )
+else:
+    elev_pitch_count = 0
+
+ergo_kpi_cols = st.columns(5)
+
+# Card 1: Ergonomics review status & closure
+if total_reviews == 0:
+    close_val = "🟢 0 open"
+    close_delta = "No ergonomic concerns logged"
+    close_delta_color = "off"
+else:
+    if active_open_count == 0 and overdue_count == 0:
+        close_icon = "🟢"
+        close_delta_color = "normal"
+    elif overdue_count > 0 or closure_pct < 50.0:
+        close_icon = "🔴" if overdue_count > 0 else "🟡"
+        close_delta_color = "inverse" if overdue_count > 0 else "off"
+    else:
+        close_icon = "🟡"
+        close_delta_color = "off"
+    close_val = f"{close_icon} {closure_pct:.0f}% ({closed_count}/{total_reviews})"
+    close_delta = f"{open_count} started/open · {in_review_count} pending/val · {overdue_count} overdue"
+
+ergo_kpi_cols[0].metric(
+    "Ergonomics review closure",
+    close_val,
+    delta=close_delta,
+    delta_color=close_delta_color,
+    help=(
+        "Active-scenario Ergonomics review progress across Open, In Review, "
+        "and Closed statuses, highlighting non-closed reviews past their "
+        "requested due date."
+    ),
+)
+
+# Card 2: Ergonomic risk profile
+if open_high_risk == 0:
+    risk_icon = "🟢"
+    risk_delta_color = "normal" if total_reviews > 0 else "off"
+elif open_red_count > 0:
+    risk_icon = "🔴"
+    risk_delta_color = "inverse"
+else:
+    risk_icon = "🟡"
+    risk_delta_color = "inverse"
+
+ergo_kpi_cols[1].metric(
+    "Ergonomic risk profile",
+    f"{risk_icon} {open_high_risk} high-risk",
+    delta=(
+        f"{red_count} Red · {fav_red_count} Fav. Red · "
+        f"{fav_green_count} Fav. Green · {green_count} Green"
+    ),
+    delta_color=risk_delta_color,
+    help=(
+        "Breakdown of Ergonomics reviews by controlled risk classification "
+        "(Red, Favorable Red, Favorable Green, Green), highlighting open Red "
+        "and Favorable Red items requiring mitigation."
+    ),
+)
+
+# Card 3: Process step linkage & coverage
+if total_reviews == 0:
+    link_icon = "🟡"
+    link_delta = f"0 unlinked · 0/{total_steps} Process steps (0%)"
+    link_delta_color = "off"
+elif unlinked_reviews == 0:
+    link_icon = "🟢"
+    link_delta = f"0 unlinked · {assessed_steps}/{total_steps} steps ({step_cov_pct:.0f}%)"
+    link_delta_color = "normal"
+else:
+    link_icon = "🟡"
+    link_delta = (
+        f"{unlinked_reviews} unlinked legacy · "
+        f"{assessed_steps}/{total_steps} steps ({step_cov_pct:.0f}%)"
+    )
+    link_delta_color = "inverse"
+
+ergo_kpi_cols[2].metric(
+    "Process step linkage",
+    f"{link_icon} {linked_reviews} / {total_reviews}",
+    delta=link_delta,
+    delta_color=link_delta_color,
+    help=(
+        "Tracks how many Ergonomics reviews are linked to an active Process at a "
+        "Glance step versus preserved as unlinked legacy concerns, plus overall "
+        "Process step assessment coverage."
+    ),
+)
+
+# Card 4: Top hazards & reviewer assignment
+if total_reviews == 0:
+    haz_icon = "🟡"
+    haz_delta_color = "off"
+elif hazard_tagged_count == total_reviews and unassigned_open == 0:
+    haz_icon = "🟢"
+    haz_delta_color = "normal"
+else:
+    haz_icon = "🟡"
+    haz_delta_color = "inverse" if unassigned_open > 0 else "off"
+
+ergo_kpi_cols[3].metric(
+    "Top hazards & reviewers",
+    f"{haz_icon} {hazard_tagged_count} / {total_reviews}",
+    delta=f"{unassigned_open} unassigned open · Top: {top_hazard_label}",
+    delta_color=haz_delta_color,
+    help=(
+        "Completeness of ergonomic hazard tagging, reviewer assignment on open "
+        "reviews, and the most frequently cited ergonomic hazard in the active scenario."
+    ),
+)
+
+# Card 5: Scenario takt & workstation geometry
+takt_s = float(scenario.get("takt_time_s") or 0.0)
+takt_icon = "🟢" if takt_s > 0 else "🟡"
+takt_str = format_seconds(scenario["takt_time_s"], scenario["takt_time_unit"])
+ergo_kpi_cols[4].metric(
+    "Scenario takt & geometry",
+    f"{takt_icon} {takt_str}",
+    delta=(
+        f"{ergo_zone_count} conveyor zone{'s' if ergo_zone_count != 1 else ''} · "
+        f"{elev_pitch_count} pitch{'es' if elev_pitch_count != 1 else ''} w/ platform/pit"
+    ),
+    delta_color="normal" if (ergo_zone_count > 0 or elev_pitch_count > 0) else "off",
+    help=(
+        "Use the active scenario's takt time to judge whether frequency-driven "
+        "ergonomic risks apply under this timing, alongside Conveyor Zone and "
+        "workstation platform/pit elevation coverage."
+    ),
+)
 
 review_tab, equipment_tab = guarded_tabs(
     ["Review", "Equipment"],
@@ -145,7 +410,6 @@ editor_key = apply_pending_table_editor_reset(logical_editor_key)
 pending_delete_key = f"ergonomics_reviews_pending_delete_{project_id}_{scenario_id}"
 pending_merge_key = f"ergonomics_reviews_pending_merge_{project_id}_{scenario_id}"
 
-reviews = ergonomics_reviews(project_id, scenario_id).copy()
 if reviews.empty:
     reviews = pd.DataFrame(
         {
@@ -216,7 +480,6 @@ reviews["work_element_label"] = pd.Series(
     dtype="string",
 )
 
-work_elements = ergonomics_work_elements(project_id, scenario_id)
 work_label_by_id = {
     _clean_text(row["id"]): " · ".join(
         value
@@ -402,6 +665,7 @@ edited = st.data_editor(
             format_func=lambda value: (
                 "Unlinked — no Process step" if not value else work_label_by_id.get(value, value)
             ),
+    
             help=(
                 "Leave blank for a legacy item or pre-PAAG concern. Linking to a step "
                 "may merge this review with the step's automatic review."
@@ -424,6 +688,7 @@ edited = st.data_editor(
             options=list(ERGONOMICS_RISK_CLASSIFICATIONS),
             default="Not yet assessed",
             required=True,
+    
             help=(
                 "Favorable Red and Favorable Green are assessments on a "
                 "non-production-intent part awaiting confirmation. Red and Green are "

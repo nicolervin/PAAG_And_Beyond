@@ -27,6 +27,7 @@ from utils.store import (
     process_part_groups,
     set_process_part_option_handling_type,
     process_pitch_visual_summary,
+    process_readiness_metrics,
     project_models,
     project_table,
     reconcile_yamazumi_to_process,
@@ -117,6 +118,156 @@ st.caption(
     "assembly is handled as one catalog part."
 )
 st.caption(f"Rev {scenario['revision_label']} · {scenario['name']} · {scenario['status']}")
+
+_paag_metrics = process_readiness_metrics(project_id, scenario_id)
+_total_steps = int(_paag_metrics["total_steps"])
+_total_yam = int(_paag_metrics["total_yamazumi_elements"])
+_synced_yam = int(_paag_metrics["synced_yamazumi_elements"])
+_unsynced_yam = int(_paag_metrics["unsynced_yamazumi_elements"])
+_unlinked_steps = int(_paag_metrics["unlinked_process_steps"])
+
+if _total_steps == 0 and _total_yam == 0:
+    _steps_val = "🟢 0"
+    _steps_delta = "No Yamazumi or Process steps yet"
+    _steps_dcol = "off"
+elif _total_yam > 0:
+    _sync_pct = round(_synced_yam / _total_yam * 100)
+    if _unsynced_yam == 0 and _unlinked_steps == 0:
+        _steps_val = f"🟢 {_total_steps:,} (100%)"
+        _steps_delta = f"All {_total_yam:,} Yamazumi elements in Process"
+        _steps_dcol = "normal"
+    else:
+        _steps_icon = "🟡" if (_sync_pct >= 50 and _unlinked_steps == 0) else "🔴"
+        _steps_val = f"{_steps_icon} {_total_steps:,} ({_sync_pct}%)"
+        if _unsynced_yam > 0 and _unlinked_steps > 0:
+            _steps_delta = f"{_unsynced_yam:,} Yamazumi not added · {_unlinked_steps:,} unlinked"
+        elif _unsynced_yam > 0:
+            _steps_delta = f"{_unsynced_yam:,} Yamazumi element{'s' if _unsynced_yam != 1 else ''} not yet added"
+        else:
+            _steps_delta = f"{_unlinked_steps:,} step{'s' if _unlinked_steps != 1 else ''} missing Yamazumi link"
+        _steps_dcol = "inverse"
+else:
+    _steps_val = f"🔴 {_total_steps:,} (0%)"
+    _steps_delta = f"{_unlinked_steps:,} step{'s' if _unlinked_steps != 1 else ''} missing Yamazumi link"
+    _steps_dcol = "inverse"
+
+_total_fb_parts = int(_paag_metrics["total_fishbone_parts"])
+_consumed_parts = int(_paag_metrics["consumed_parts"])
+_unclass_pairings = int(_paag_metrics["unclassified_pairings"])
+if _total_fb_parts == 0:
+    _parts_val = "🟢 0 / 0"
+    _parts_delta = "No Fishbone parts placed yet"
+    _parts_dcol = "off"
+else:
+    _part_cov_pct = round(_consumed_parts / _total_fb_parts * 100)
+    _unconsumed_parts = max(_total_fb_parts - _consumed_parts, 0)
+    if _unconsumed_parts == 0 and _unclass_pairings == 0:
+        _parts_val = f"🟢 100% ({_consumed_parts:,}/{_total_fb_parts:,})"
+        _parts_delta = "All Fishbone parts consumed"
+        _parts_dcol = "normal"
+    else:
+        _parts_icon = "🟡" if (_part_cov_pct >= 50 and _unclass_pairings == 0) else ("🟡" if _part_cov_pct >= 80 else "🔴")
+        _parts_val = f"{_parts_icon} {_part_cov_pct}% ({_consumed_parts:,}/{_total_fb_parts:,})"
+        if _unconsumed_parts > 0 and _unclass_pairings > 0:
+            _parts_delta = f"{_unconsumed_parts:,} unconsumed · {_unclass_pairings:,} unclassified"
+        elif _unconsumed_parts > 0:
+            _parts_delta = f"{_unconsumed_parts:,} Fishbone part{'s' if _unconsumed_parts != 1 else ''} not yet consumed"
+        else:
+            _parts_delta = f"{_unclass_pairings:,} part pairing{'s' if _unclass_pairings != 1 else ''} unclassified"
+        _parts_dcol = "inverse"
+
+_total_pitches = int(_paag_metrics["total_active_pitches"])
+_pitches_media = int(_paag_metrics["pitches_with_media"])
+_total_media = int(_paag_metrics["total_visual_media"])
+_untagged_media = int(_paag_metrics["untagged_visual_media"])
+if _total_pitches == 0:
+    _media_val = "🟢 0 / 0"
+    _media_delta = "No active pitches yet"
+    _media_dcol = "off"
+else:
+    _media_cov_pct = round(_pitches_media / _total_pitches * 100)
+    _pitches_missing_media = max(_total_pitches - _pitches_media, 0)
+    if _pitches_missing_media == 0 and _untagged_media == 0:
+        _media_val = f"🟢 100% ({_pitches_media:,}/{_total_pitches:,})"
+        _media_delta = f"{_total_media:,} visual aid{'s' if _total_media != 1 else ''} attached"
+        _media_dcol = "normal"
+    else:
+        _media_icon = "🟢" if _pitches_missing_media == 0 else ("🟡" if _media_cov_pct >= 50 else "🔴")
+        _media_val = f"{_media_icon} {_media_cov_pct}% ({_pitches_media:,}/{_total_pitches:,})"
+        if _pitches_missing_media > 0 and _untagged_media > 0:
+            _media_delta = f"{_pitches_missing_media:,} pitch{'es' if _pitches_missing_media != 1 else ''} without visuals · {_untagged_media:,} untagged"
+        elif _pitches_missing_media > 0:
+            _media_delta = f"{_pitches_missing_media:,} pitch{'es' if _pitches_missing_media != 1 else ''} missing visual aids ({_total_media:,} total)"
+        else:
+            _media_delta = f"{_untagged_media:,} visual aid{'s' if _untagged_media != 1 else ''} not tagged to steps"
+        _media_dcol = "inverse" if _pitches_missing_media > 0 else "off"
+
+_q_alerts = int(_paag_metrics["quality_alerts"])
+_m_alerts = int(_paag_metrics["materials_alerts"])
+_e_alerts = int(_paag_metrics["ergo_alerts"])
+_s_alerts = int(_paag_metrics["safety_alerts"])
+_tot_alerts = int(_paag_metrics["total_alerts"])
+_pfmea_alerts = int(_paag_metrics["pfmea_alert_count"])
+_missing_ppe = int(_paag_metrics["steps_missing_ppe"])
+
+_alerts_breakdown = f"{_q_alerts:,} Quality · {_m_alerts:,} Materials · {_e_alerts:,} Ergo · {_s_alerts:,} Safety"
+if _total_steps == 0:
+    _alerts_val = "🟢 0"
+    _alerts_delta = _alerts_breakdown
+    _alerts_dcol = "off"
+elif _tot_alerts == 0:
+    _alerts_val = "🟢 0"
+    _alerts_delta = "All functional checks nominal"
+    _alerts_dcol = "normal"
+else:
+    _has_red_alert = (_e_alerts > 0 or _m_alerts > 0 or _pfmea_alerts > 0)
+    _alerts_icon = "🔴" if _has_red_alert else "🟡"
+    _alerts_val = f"{_alerts_icon} {_tot_alerts:,}"
+    _alerts_delta = _alerts_breakdown
+    _alerts_dcol = "inverse" if (_has_red_alert or _missing_ppe > 0) else "off"
+
+_pm1, _pm2, _pm3, _pm4 = st.columns(4)
+_pm1.metric(
+    "Process steps",
+    _steps_val,
+    delta=_steps_delta,
+    delta_color=_steps_dcol,
+    help=(
+        "Total Process at a Glance work elements in the active scenario and the percentage "
+        "of scenario Yamazumi elements synced into Process."
+    ),
+)
+_pm2.metric(
+    "Part consumption coverage",
+    _parts_val,
+    delta=_parts_delta,
+    delta_color=_parts_dcol,
+    help=(
+        "Share of active Fishbone-placed parts in this scenario that have been paired as "
+        "'Consume' on at least one Process step, plus any unclassified part pairings."
+    ),
+)
+_pm3.metric(
+    "Pitch visual aids",
+    _media_val,
+    delta=_media_delta,
+    delta_color=_media_dcol,
+    help=(
+        "Share of active Yamazumi pitches in this scenario that have at least one photo, "
+        "video, 3D CAD model, or web link attached on PAAG slides."
+    ),
+)
+_pm4.metric(
+    "Functional alerts",
+    _alerts_val,
+    delta=_alerts_delta,
+    delta_color=_alerts_dcol,
+    help=(
+        "Scenario-wide alerts across Quality (Torque specs & high-risk PFMEA Sev ≥ 8 or RPN ≥ 100), "
+        "Materials (unclassified part handling), Ergonomics (Open/Pending Red, Favorable Red, or Yellow reviews), "
+        "and Safety (active safety requirements & steps without assigned PPE)."
+    ),
+)
 
 sections = assembly_section_walk_order(project_id)
 if not sections.empty:

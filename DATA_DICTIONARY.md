@@ -6,7 +6,7 @@ This file is the authoritative reference for every Process at a Glance database 
 
 ### `projects`
 
-- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, building location, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
+- **Purpose:** The top-level record for an NPI planning project. It holds the project identity, program or product, product line, building location, lead industrial engineer, baseline revision, status, default takt time in canonical seconds, its saved `takt_time_unit` display preference (`seconds`, `minutes`, or `hours`), optional baseline targets for executive KPI comparison (`baseline_parts`, `baseline_hpu`, and `baseline_cycle_time_s` in canonical seconds), the project-wide Yamazumi line-code suggestion, notes, and timestamps.
 - **Key relationships:** Parent of `planning_scenarios`, `parts`, `project_models`, `complexity_features`, `assembly_sections`, `concerns`, source-import records, Yamazumi records, Process at a Glance records, and `audit_log` entries.
 - **Scope:** Project-wide; this is the root of all other business data.
 
@@ -28,8 +28,8 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 
 ### `concerns`
 
-- **Purpose:** Tracks project questions, concerns, decisions, and assumptions, including ownership, priority, status, and optional related part or station text.
-- **Key relationships:** Belongs directly to `projects`. Related-part and related-station values are descriptive text rather than enforced foreign keys.
+- **Purpose:** Tracks project questions and concerns categorized by standard PAAG module tabs (`Overview`, `Questions and concerns`, `Import/Export Projects`, `Import PITs`, `Complexity Trees`, `BOM`, `Parts Catalog`, `Fishbone`, `Yamazumi`, `Process at a Glance`, `Pin Map`, `Equipment`, `Ergonomics`, `Quality`, `Materials`, `Safety`, or `Other`), including description (`detail`), ownership (`owner`), priority (`priority`), status (`status`: `Open`, `Investigating`, `Waiting`, `Resolved`), comments (`comments`), resolution comments (`resolution_comments`, required when status is `Resolved`), contributor attribution (`submitted_by`), and creation/update timestamps (`created_at`, `updated_at`). Legacy `subject`, `related_part`, and `related_station` columns are retained in the database for backward compatibility and PITS BOM escalation traceability but are hidden from the active Questions and concerns table.
+- **Key relationships:** Belongs directly to `projects`. Referenced by `pits_bom_occurrence_concerns` when BOM occurrences are escalated; legacy related-part and related-station values remain descriptive text rather than enforced foreign keys.
 - **Scope:** Project-wide.
 
 ### `audit_log`
@@ -1778,3 +1778,25 @@ Future issued-document generation and approval (not implemented)
      - **Universal Deletion Standard:** Confirmed deletion with red `destructive_` button styling and archiving into the 30-day Recycle Bin (`recycle_bin_items`).
      - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` under category `"App feedback"` with Current editor attribution and Eastern Time timestamps, exposed in a History expander inside the Feedback tab.
 
+
+
+### Questions and Concerns Table Field Updates (`concerns`, `app_pages/concerns.py`, `utils/project_store.py`)
+
+- **Proposed by:** Project Owner
+- **Date recorded:** October 26, 2026
+- **Approval status:** Approved by project owner on October 26, 2026 for implementation on branch `NE_questions_and_concerns_metrics`.
+- **Purpose:** Update the project-wide **Questions and concerns** table (`concerns`) to categorize items by standard PAAG navigation tab names plus `Other`, rename `detail` to **Description** (removing `subject`, `related_part`, and `related_station` from the active table UI), add **Updated** (`updated_at`), **Comments** (`comments`), **Submitted by** (`submitted_by`, populated from Current editor), and **Resolution comments** (`resolution_comments`), remove `Closed` from `status` options in favor of `Resolved`, and enforce that **Resolution comments** are required whenever **Status** is set to `Resolved`.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (`concerns.project_id -> projects.id`) and `pits_bom_occurrence_concerns` (`concern_id -> concerns.id`).
+  2. *Critical thread relationship:* Project-wide engineering issue and escalation tracker supporting the critical thread across all standard module tabs.
+  3. *Scope:* Project-wide (`All scenarios`).
+  4. *Table requirement:* Extends existing `concerns` table in-place with safe migrations in `init_db()`:
+     - `comments TEXT NOT NULL DEFAULT ''`
+     - `resolution_comments TEXT NOT NULL DEFAULT ''`
+     - `submitted_by TEXT NOT NULL DEFAULT ''`
+     - Backfills `detail = subject` for any legacy rows where `detail` was blank, migrates legacy `status = 'Closed'` to `'Resolved'`, and normalizes legacy categories not in the standard tab list to `'Other'`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Scope Badge:** `page_title_with_scope("Questions and concerns", scope="project")`.
+     - **Universal Save Action Standard:** Explicit **Save & Refresh** and **Undo** footer actions; store-layer validation blocks saving any row with `status = 'Resolved'` when `resolution_comments` is blank while preserving unsaved editor state.
+     - **Universal Deletion Standard:** Native row selection and non-dismissible confirmation dialog with 30-day Recycle Bin protection.
+     - **Universal Audit Trail & History Standard:** Recorded via `record_audit_event()` with Current editor attribution and displayed in the bottom `audit_history()` expander.

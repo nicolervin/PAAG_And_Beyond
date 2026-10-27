@@ -1349,7 +1349,7 @@ def global_project_search(
             # 11. Questions & Concerns
             con_rows = conn.execute(
                 """SELECT id, category, subject, detail, owner, priority, status,
-                          related_part, related_station
+                          comments, resolution_comments, submitted_by, related_part, related_station
                    FROM concerns WHERE project_id=?
                    ORDER BY created_at DESC""",
                 (pid,),
@@ -1365,12 +1365,15 @@ def global_project_search(
                     r["priority"],
                     r["status"],
                     r["related_part"],
+                    r["comments"],
+                    r["resolution_comments"],
+                    r["submitted_by"],
                     r["related_station"],
                 ):
                     results.append(
                         {
                             "category": "Questions & Concerns",
-                            "item_label": f"{_clean_text(r['category'])}: {_clean_text(r['subject'])}",
+                            "item_label": f"{_clean_text(r['category'])}: {_clean_text(r['detail']) or _clean_text(r['subject'])}",
                             "detail": f"{_clean_text(r['status'])} ({_clean_text(r['priority'])}) · {_clean_text(r['detail'])}".strip(
                                 " ·"
                             ),

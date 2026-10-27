@@ -72,11 +72,11 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "icon": ":material/dashboard:",
         "scope": "All scenarios + Active scenario sections",
         "summary": (
-            "Project command center for creating projects, managing project-wide metadata "
+            "Project command center with executive KPI banner (Active parts, Hours per unit, Σ Cycle time, and Open concerns vs. baseline), project-wide metadata "
             "(2-character Line Code, takt time, building location), and managing planning scenarios."
         ),
         "workflows": [
-            "**Create or edit a project**: Set the project name, product line, 2-character Yamazumi line code (e.g. `M1`), default takt time, and owner.",
+            "**Create or edit a project**: Set the project name, product line, 2-character Yamazumi line code (e.g. `M1`), default takt time, owner, and optional baseline targets (`Baseline parts`, `Baseline HPU (hrs/unit)`, and `Baseline Σ cycle time`) to track % improvement in the top metrics banner.",
             "**Manage planning scenarios**: Create working scenarios, clone an existing scenario (including Yamazumi, Process at a Glance, Quality assignments, PFMEA, Control Plan, Equipment placements, Ergonomics, and Safety), or compare scenario readiness.",
             "**Delete with safety net**: Deleted projects and scenarios are archived in the 30-day Recycle Bin and can be restored with all child data.",
         ],
@@ -93,13 +93,13 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "icon": ":material/forum:",
         "scope": "All scenarios",
         "summary": (
-            "Project-wide issue, question, and risk log for cross-functional collaborators, "
+            "Project-wide issue, question, and risk log with a 5-card triage banner (Open concerns, Critical & high open, Unassigned open, Waiting / blocked, and Assigned to me), "
             "linked to parts, stations, and BOM reconciliation escalations."
         ),
         "workflows": [
-            "**Log a question or concern**: Add a row with Category (`Question`, `Concern`, `Risk`, `Action`), Subject, Detail, Owner, Priority, and optional Related Part or Station.",
+            "**Log a question or concern**: Add a row with Description, Category (standard tab name or `Other`), Owner, Priority (`Low`, `Medium`, `High`, `Critical`), Status (`Open`, `Investigating`, `Waiting`, `Resolved`), and Comments; **Submitted by** is automatically filled with the Current editor.",
             "**Review BOM escalations**: Changed or missing PITS BOM occurrences escalated from the BOM page appear here automatically.",
-            "**Update & close items**: Filter by status or priority, edit inline, and click **Save & Refresh**.",
+            "**Update & resolve items**: Filter by status or priority, edit inline, enter **Resolution comments** (required when Status is set to `Resolved`), and click **Save & Refresh**.",
         ],
         "connections": (
             "Connects to **BOM** (escalated source changes), **Parts Catalog**, and **Process at a Glance** stations."
@@ -153,8 +153,9 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "icon": ":material/view_in_ar:",
         "scope": "All scenarios",
         "summary": (
-            "Step 2 of the Critical Thread: Define product models, EAU volumes, milestone dates, "
-            "complexity features, and model-to-feature matrix mappings."
+            "Step 2 of the Critical Thread: Define product models, EAU volumes, complexity features, "
+            "and model-to-feature matrix mappings with a 5-card readiness banner (Active models, Total active EAU, Active features, Tree mapping, and Similar models within 0–2 features)."
+
         ),
         "workflows": [
             "**Define Models**: Add or import product models (`model_number`, `display_name`, `platform_size`, `eau`, milestone dates).",
@@ -173,7 +174,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "icon": ":material/account_tree:",
         "scope": "All scenarios",
         "summary": (
-            "Step 3 of the Critical Thread: Inspect interactive CAD-style Model Tree BOMs by official model, "
+            "Step 3 of the Critical Thread: Inspect interactive CAD-style Model Tree BOMs with a 5-card readiness banner (BOM items, Models with BOMs, Catalog coverage, Fishbone placement, and Subassemblies & groups), "
             "author Level 1–11 BOM structures from scratch, and reconcile parts against the Parts Catalog and Fishbone."
         ),
         "workflows": [
@@ -195,7 +196,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "icon": ":material/category:",
         "scope": "All scenarios + Scenario active toggle",
         "summary": (
-            "Step 4 of the Critical Thread: Maintain the project-wide part master, engineering/ME ownership, "
+            "Step 4 of the Critical Thread: Maintain the project-wide part master with a 5-card readiness banner (Active parts, Photo coverage, Feature tagging, Fishbone placement, and Sourcing & Part Code), engineering/ME ownership, "
             "annotated reference photos, complexity rules, and scenario-specific active status."
         ),
         "workflows": [
@@ -217,7 +218,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "scope": "All scenarios",
         "summary": (
             "Step 5 of the Critical Thread: Design the assembly section flow (Main Line, Subassemblies, "
-            "Parallel branches), place parts into sections, and configure the Manufacturing Assembly Grid."
+            "Parallel branches) with a 4-card readiness banner (Active sections, Part placement coverage, Fishbone uses placed, and Downstream Yamazumi sync), place parts into sections, and configure the Manufacturing Assembly Grid."
         ),
         "workflows": [
             "**Build Section Flow**: Create assembly sections and connect them (`series`, `parallel`, `subassembly`) on the visual Fishbone diagram.",
@@ -237,7 +238,8 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "scope": "Active scenario",
         "summary": (
             "Step 6 of the Critical Thread: Scenario-specific line balancing across areas, pitches "
-            "(Pitch, Waterspider, Subassembly, Kitter, Repacker), and operator work elements against takt time."
+            "(Pitch, Waterspider, Subassembly, Kitter, Repacker), and operator work elements against takt time, "
+            "with a 4-card readiness banner (Total work content, Active pitches vs. theoretical, Line balance efficiency, and Pitches over takt)."
         ),
         "workflows": [
             "**Create Areas & Pitches**: Link Yamazumi areas to Fishbone sections and create pitches with guided addresses (e.g. `M1S1b.01`).",
@@ -259,7 +261,8 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "scope": "Active scenario",
         "summary": (
             "Step 7 of the Critical Thread: Authoritative scenario Process plan with deterministic Op IDs, "
-            "part Handle/Consume assignments, pitch visual aids, and functional review summaries."
+            "part Handle/Consume assignments, pitch visual aids, and functional review summaries, "
+            "with a 4-card readiness banner (Process steps, Part consumption coverage, Pitch visual aids, and Functional alerts)."
         ),
         "workflows": [
             "**Manage Process steps**: Edit sequence, pitch (`station`), description, cycle time, resource type (`Human`, `Cobots`, `Automation`), and workstation heights.",
@@ -280,7 +283,9 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "scope": "Active scenario (derived view) + Layout Canvas",
         "summary": (
             "Step 8 of the Critical Thread: Visual station-by-station Pin Map derived from Process at a Glance, "
-            "Yamazumi pitches, Quality/Torque, Ergonomics, Safety, and interactive 2D Plant Layout."
+            "Yamazumi pitches, Quality/Torque, Ergonomics, Safety, and interactive 2D Plant Layout, "
+            "with a 5-card readiness banner (2D layout footprint coverage, Process linkage on Pin Map, "
+            "Spatial takt & status hotspots, Floor plan calibration & CAD, and Functional & tool callouts)."
         ),
         "workflows": [
             "**Derived Pin Map Table**: Inspect every pitch and Process step with its aggregated Quality, Torque, Ergonomics, Safety, and Equipment indicators.",
@@ -299,7 +304,9 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "scope": "All scenarios (Catalog) + Active scenario (Placements & Links)",
         "summary": (
             "Shared Equipment Catalog (Handheld Tools, Station/Pitch Equipment, Capital Equipment), "
-            "scenario pitch placements, Process step links, and Conveyor Zone calculators."
+            "scenario pitch placements, Process step links, and Conveyor Zone calculators, "
+            "with a 5-card readiness banner (Equipment catalog & tiers, Station placement & step links, "
+            "Process & Quality need fulfillment, Placement & torque alerts, and Conveyor & line sizing)."
         ),
         "workflows": [
             "**Equipment Catalog**: Define shared equipment types and assets (`All scenarios`) with manufacturer, model, and reference photos.",
@@ -319,7 +326,9 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "scope": "Active scenario",
         "summary": (
             "Scenario-specific Ergonomics reviews linked to Process steps and part options, "
-            "with controlled risk classifications (`Green`, `Favorable Green`, `Favorable Red`, `Red`) and visual media."
+            "with controlled risk classifications (`Green`, `Favorable Green`, `Favorable Red`, `Red`) and visual media, "
+            "plus a 5-card readiness banner (Ergonomics review closure, Ergonomic risk profile, Process step linkage, "
+            "Top hazards & reviewers, and Scenario takt & geometry)."
         ),
         "workflows": [
             "**Create & update Ergonomics reviews**: Link reviews to Process steps, select ergonomic hazards, assign a reviewer and due date, and set the risk classification.",

@@ -25,6 +25,7 @@ from utils.store import (
     connection,
     delete_part_image,
     delete_project_part,
+    fishbone_part_assignments,
     part_delete_impact,
     get_planning_scenario,
     infer_part_feature_rules,
@@ -151,6 +152,7 @@ if not scenario:
     st.error("The active planning scenario no longer exists.")
     st.stop()
 st.caption(f"Active scenario: Rev {scenario['revision_label']} · {scenario['name']}")
+parts_banner_container = st.container()
 current_editor = str(st.session_state.get("current_editor", "") or "").strip()
 editor_view_scope = hashlib.sha256(current_editor.encode("utf-8")).hexdigest()[:12]
 parts_view_draft_key = f"parts_catalog_view_columns_{project_id}_{editor_view_scope}"
@@ -459,6 +461,8 @@ for col in (
     "created_at", "updated_at", "assembly_id", "assembly_number",
 ):
     parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
+
+
 _part_id_strs = [str(pid) for pid in parts_for_editing["id"]]
 _model_app_vals = parts_for_editing["model_applicability"].tolist()
 linked_assembly_by_part = {
@@ -535,6 +539,207 @@ parts_for_editing["updated_display"] = updated_values.dt.strftime(
 
 for col in ("applicability_status", "photo_status", "created_display", "updated_display"):
     parts_for_editing[col] = parts_for_editing[col].fillna("").astype("string")
+
+
+
+
+total_catalog_parts = int(len(parts_for_editing))
+active_parts_df = (
+    parts_for_editing.loc[parts_for_editing["active"].astype(bool)]
+    if not parts_for_editing.empty
+    else parts_for_editing
+)
+active_parts_count = int(len(active_parts_df))
+inactive_parts_count = max(0, total_catalog_parts - active_parts_count)
+active_parts_icon = "🟢" if active_parts_count > 0 else "🟡"
+if total_catalog_parts == 0:
+    active_parts_delta = "No parts in catalog"
+    active_parts_delta_color = "off"
+elif inactive_parts_count == 0:
+    active_parts_delta = f"All {total_catalog_parts} catalog part(s) active"
+    active_parts_delta_color = "normal"
+else:
+    active_parts_delta = f"{total_catalog_parts} total · {inactive_parts_count} inactive"
+    active_parts_delta_color = "off"
+
+with_photo_count = (
+    int((active_parts_df["photo_status"] == "✅ Added").sum())
+    if active_parts_count > 0
+    else 0
+)
+missing_photo_count = max(0, active_parts_count - with_photo_count)
+photo_pct = (
+    round((with_photo_count / active_parts_count) * 100)
+    if active_parts_count > 0
+    else 0
+)
+photo_icon = (
+    "🟢"
+    if (active_parts_count > 0 and missing_photo_count == 0)
+    else ("🟡" if with_photo_count > 0 else "🔴")
+)
+if active_parts_count == 0:
+    photo_delta = "No active parts"
+    photo_delta_color = "off"
+elif missing_photo_count == 0:
+    photo_delta = "All active parts have photos"
+    photo_delta_color = "normal"
+else:
+    photo_delta = f"{missing_photo_count} missing photo"
+    photo_delta_color = "inverse"
+
+needs_tagging_count = (
+    int((active_parts_df["applicability_status"] == "Needs feature tagging").sum())
+    if active_parts_count > 0
+    else 0
+)
+tagged_count = max(0, active_parts_count - needs_tagging_count)
+tagged_pct = (
+    round((tagged_count / active_parts_count) * 100)
+    if active_parts_count > 0
+    else 0
+)
+tagged_icon = (
+    "🟢"
+    if (active_parts_count > 0 and needs_tagging_count == 0)
+    else ("🟡" if tagged_count > 0 else "🔴")
+)
+if active_parts_count == 0:
+    tagged_delta = "No active parts"
+    tagged_delta_color = "off"
+elif needs_tagging_count == 0:
+    tagged_delta = "All active parts tagged"
+    tagged_delta_color = "normal"
+else:
+    tagged_delta = f"{needs_tagging_count} need feature tagging"
+    tagged_delta_color = "inverse"
+
+fb_assignments = fishbone_part_assignments(project_id)
+placed_part_ids = (
+    set(fb_assignments["part_id"].astype(str))
+    if not fb_assignments.empty
+    else set()
+)
+placeable_active_df = (
+    active_parts_df.loc[
+        active_parts_df["source_code"].fillna("").astype(str).str.strip() != "8"
+    ]
+    if active_parts_count > 0
+    else active_parts_df
+)
+placeable_active_count = int(len(placeable_active_df))
+placed_active_count = (
+    int(placeable_active_df["id"].astype(str).isin(placed_part_ids).sum())
+    if placeable_active_count > 0
+    else 0
+)
+unplaced_active_count = max(0, placeable_active_count - placed_active_count)
+fb_pct = (
+    round((placed_active_count / placeable_active_count) * 100)
+    if placeable_active_count > 0
+    else 0
+)
+fb_icon = (
+    "🟢"
+    if (placeable_active_count > 0 and unplaced_active_count == 0)
+    else ("🟡" if placed_active_count > 0 else "🔴")
+)
+if placeable_active_count == 0:
+    fb_delta = "No placeable active parts"
+    fb_delta_color = "off"
+elif unplaced_active_count == 0:
+    fb_delta = "All active parts placed"
+    fb_delta_color = "normal"
+else:
+    fb_delta = f"{unplaced_active_count} not in Fishbone"
+    fb_delta_color = "inverse"
+
+if active_parts_count > 0:
+    _make_buy_clean = active_parts_df["make_buy"].fillna("").astype(str).str.strip()
+    _part_code_clean = active_parts_df["part_code"].fillna("").astype(str).str.strip()
+    classified_count = int(((_make_buy_clean != "") & (_part_code_clean != "")).sum())
+    make_count = int((_make_buy_clean.str.casefold() == "make").sum())
+    buy_count = int((_make_buy_clean.str.casefold() == "buy").sum())
+    subasm_code_count = int((_part_code_clean == "Completed Subassembly").sum())
+else:
+    classified_count = 0
+    make_count = 0
+    buy_count = 0
+    subasm_code_count = 0
+missing_sourcing_count = max(0, active_parts_count - classified_count)
+sourcing_pct = (
+    round((classified_count / active_parts_count) * 100)
+    if active_parts_count > 0
+    else 0
+)
+sourcing_icon = (
+    "🟢"
+    if (active_parts_count > 0 and missing_sourcing_count == 0)
+    else ("🟡" if classified_count > 0 else "🔴")
+)
+if active_parts_count == 0:
+    sourcing_delta = "No active parts"
+    sourcing_delta_color = "off"
+elif missing_sourcing_count == 0:
+    sourcing_delta = f"Make: {make_count} · Buy: {buy_count}"
+    sourcing_delta_color = "normal"
+else:
+    sourcing_delta = f"{missing_sourcing_count} missing Make/Buy or Code"
+    sourcing_delta_color = "inverse"
+
+with parts_banner_container:
+    pm1, pm2, pm3, pm4, pm5 = st.columns(5)
+    pm1.metric(
+        "Active parts",
+        f"{active_parts_icon} {active_parts_count}",
+        delta=active_parts_delta,
+        delta_color=active_parts_delta_color,
+        help=(
+            "Number of Parts Catalog items marked Active in the current planning scenario. "
+            "Catalog records are shared across the project, while the Active toggle scopes "
+            "scenario visibility."
+        ),
+    )
+    pm2.metric(
+        "Photo coverage",
+        f"{photo_icon} {photo_pct}%" if active_parts_count > 0 else "⚪ —",
+        delta=photo_delta,
+        delta_color=photo_delta_color,
+        help=(
+            "Percentage of active parts with a Primary Image or CAD web link attached. "
+            "Part thumbnails flow into Fishbone, Yamazumi, Process at a Glance, and Pin Map."
+        ),
+    )
+    pm3.metric(
+        "Feature tagging",
+        f"{tagged_icon} {tagged_pct}%" if active_parts_count > 0 else "⚪ —",
+        delta=tagged_delta,
+        delta_color=tagged_delta_color,
+        help=(
+            "Percentage of active parts assigned to 'All models' or specific Complexity Tree "
+            "feature rules."
+        ),
+    )
+    pm4.metric(
+        "Fishbone placement",
+        f"{fb_icon} {fb_pct}%" if placeable_active_count > 0 else "⚪ —",
+        delta=fb_delta,
+        delta_color=fb_delta_color,
+        help=(
+            "Percentage of placeable active catalog parts (excluding Source Code 8 phantom "
+            "assemblies) assigned to at least one Fishbone section."
+        ),
+    )
+    pm5.metric(
+        "Sourcing & Part Code",
+        f"{sourcing_icon} {sourcing_pct}%" if active_parts_count > 0 else "⚪ —",
+        delta=sourcing_delta,
+        delta_color=sourcing_delta_color,
+        help=(
+            "Percentage of active parts with both Make vs Buy and Part Code populated "
+            f"(Make: {make_count}, Buy: {buy_count}, Completed Subassemblies: {subasm_code_count})."
+        ),
+    )
 
 
 def _is_blank_cell(value: object) -> bool:

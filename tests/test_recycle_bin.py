@@ -210,6 +210,80 @@ class RecycleBinTests(unittest.TestCase):
             f"Expected Eastern Time offset in audit_history, got {created_val}",
         )
 
+    def test_concerns_fields_and_resolved_validation(self) -> None:
+        proj_id = create_project("Concerns Project", "P-700", "Tester", 60.0)
+        scens = planning_scenarios(proj_id)
+        scen_id = str(scens[0]["id"]) if scens else None
+
+        # 1. Resolved without resolution_comments must raise ValueError
+        with self.assertRaisesRegex(ValueError, "Resolution comments are required"):
+            replace_concerns(
+                proj_id,
+                pd.DataFrame(
+                    [
+                        {
+                            "id": "",
+                            "category": "Quality",
+                            "detail": "Check torque tolerance",
+                            "owner": "AQE",
+                            "priority": "High",
+                            "status": "Resolved",
+                            "comments": "Needs verification",
+                            "resolution_comments": "",
+                            "submitted_by": "",
+                        }
+                    ]
+                ),
+                editor_name="Alice",
+            )
+
+        # 2. Save Open concern and verify submitted_by defaults to editor_name
+        replace_concerns(
+            proj_id,
+            pd.DataFrame(
+                [
+                    {
+                        "id": "",
+                        "category": "Quality",
+                        "detail": "Check torque tolerance",
+                        "owner": "AQE",
+                        "priority": "High",
+                        "status": "Open",
+                        "comments": "Needs verification",
+                        "resolution_comments": "",
+                        "submitted_by": "",
+                    }
+                ]
+            ),
+            editor_name="Alice",
+        )
+        saved = project_table("concerns", proj_id)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved.iloc[0]["detail"], "Check torque tolerance")
+        self.assertEqual(saved.iloc[0]["category"], "Quality")
+        self.assertEqual(saved.iloc[0]["comments"], "Needs verification")
+        self.assertEqual(saved.iloc[0]["submitted_by"], "Alice")
+        self.assertTrue(bool(str(saved.iloc[0]["updated_at"]).strip()))
+
+        # 3. Resolve with resolution_comments succeeds
+        saved_df = saved.copy()
+        saved_df.loc[0, "status"] = "Resolved"
+        saved_df.loc[0, "resolution_comments"] = "Verified torque spec 12 Nm"
+        replace_concerns(proj_id, saved_df, editor_name="Bob")
+        resolved_df = project_table("concerns", proj_id)
+        self.assertEqual(resolved_df.iloc[0]["status"], "Resolved")
+        self.assertEqual(resolved_df.iloc[0]["resolution_comments"], "Verified torque spec 12 Nm")
+        self.assertEqual(resolved_df.iloc[0]["submitted_by"], "Alice")
+
+        # 4. AppTest smoke check for app_pages/concerns.py
+        at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app_pages" / "concerns.py"))
+        at.session_state["project_id"] = proj_id
+        if scen_id:
+            at.session_state["scenario_id"] = scen_id
+        at.session_state["current_editor"] = "Alice"
+        at.run(timeout=15)
+        self.assertEqual(len(at.exception), 0, f"AppTest exception on concerns.py: {at.exception}")
+
 
 if __name__ == "__main__":
     unittest.main()

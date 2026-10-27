@@ -10,6 +10,7 @@ from utils.fishbone_ui import ordered_yamazumi_area_ids, section_breadcrumb_labe
 from utils.layout_canvas import layout_image_data_url
 from utils.layout_store import (
     from_canonical_inches,
+    get_pin_map_readiness_metrics,
     get_pitch_layout_footprints,
     get_scenario_pitch_metrics_for_pin_map,
     to_canonical_inches,
@@ -146,12 +147,11 @@ def render_pin_map_tab(
     linked_work = visible.loc[visible["process_element_id"].notna()].drop_duplicates(
         subset=["process_element_id"], keep="first"
     )
-    summary = st.columns(3)
-    summary[0].metric("Visible pitches", len(visible_pitches))
-    summary[1].metric("Linked process steps", len(linked_work))
-    summary[2].metric(
-        "Linked cycle time",
-        f"{pd.to_numeric(linked_work['cycle_time_s'], errors='coerce').fillna(0).sum():.1f} s",
+    _vis_ct = pd.to_numeric(linked_work["cycle_time_s"], errors="coerce").fillna(0).sum()
+    st.caption(
+        f"Filtered view: **{len(visible_pitches):,}** visible pitch{'es' if len(visible_pitches) != 1 else ''} · "
+        f"**{len(linked_work):,}** linked Process step{'s' if len(linked_work) != 1 else ''} · "
+        f"**{_vis_ct:.1f} s** linked cycle time"
     )
 
     view_mode = st.radio(
@@ -603,6 +603,156 @@ page_title_with_scope(
 )
 
 editor_name = str(st.session_state.get("current_editor") or "").strip() or "Current Editor"
+
+_pm_readiness = get_pin_map_readiness_metrics(project_id, scenario_id)
+_tot_act_pitches = int(_pm_readiness["total_active_pitches"])
+_placed_pitches = int(_pm_readiness["placed_active_pitches"])
+_placed_layouts = int(_pm_readiness["placed_layouts_count"])
+if _tot_act_pitches == 0:
+    _fp_val = "🟢 0 / 0"
+    _fp_delta = "No active pitches yet"
+    _fp_dcol = "off"
+else:
+    _fp_pct = round(_placed_pitches / _tot_act_pitches * 100)
+    _unplaced = max(_tot_act_pitches - _placed_pitches, 0)
+    if _unplaced == 0:
+        _fp_val = f"🟢 100% ({_placed_pitches:,}/{_tot_act_pitches:,})"
+        _fp_delta = f"All placed across {max(1, _placed_layouts):,} layout{'s' if _placed_layouts != 1 else ''}"
+        _fp_dcol = "normal"
+    else:
+        _fp_icon = "🟡" if _fp_pct >= 50 else "🔴"
+        _fp_val = f"{_fp_icon} {_fp_pct}% ({_placed_pitches:,}/{_tot_act_pitches:,})"
+        _fp_delta = f"{_unplaced:,} pitch{'es' if _unplaced != 1 else ''} not yet placed on floor plan"
+        _fp_dcol = "inverse"
+
+_work_pitches = int(_pm_readiness["pitches_with_work"])
+_linked_steps = int(_pm_readiness["linked_steps_count"])
+_linked_ct = float(_pm_readiness["linked_cycle_time_s"])
+if _tot_act_pitches == 0:
+    _lnk_val = "🟢 0 / 0"
+    _lnk_delta = "No active pitches yet"
+    _lnk_dcol = "off"
+else:
+    _lnk_pct = round(_work_pitches / _tot_act_pitches * 100)
+    _missing_work = max(_tot_act_pitches - _work_pitches, 0)
+    if _missing_work == 0:
+        _lnk_val = f"🟢 100% ({_work_pitches:,}/{_tot_act_pitches:,})"
+        _lnk_delta = f"{_linked_steps:,} steps · {_linked_ct:.1f} s total"
+        _lnk_dcol = "normal"
+    else:
+        _lnk_icon = "🟡" if _lnk_pct >= 50 else "🔴"
+        _lnk_val = f"{_lnk_icon} {_lnk_pct}% ({_work_pitches:,}/{_tot_act_pitches:,})"
+        _lnk_delta = f"{_missing_work:,} missing work · {_linked_steps:,} steps ({_linked_ct:.1f} s)"
+        _lnk_dcol = "inverse"
+
+_hotspots = int(_pm_readiness["hotspots_count"])
+_over_takt = int(_pm_readiness["over_takt_count"])
+_blocked = int(_pm_readiness["blocked_count"])
+_under_85 = int(_pm_readiness["under_85_count"])
+_tot_pitches_all = int(_pm_readiness["total_pitches"])
+if _tot_pitches_all == 0:
+    _hot_val = "🟢 0"
+    _hot_delta = "0 over takt · 0 blocked · 0 under 85%"
+    _hot_dcol = "off"
+elif _hotspots == 0 and _under_85 == 0:
+    _hot_val = "🟢 0"
+    _hot_delta = "All active pitches within 85–100% takt"
+    _hot_dcol = "normal"
+elif _hotspots == 0:
+    _hot_val = f"🟡 0 ({_under_85:,} <85%)"
+    _hot_delta = f"0 over takt · 0 blocked · {_under_85:,} under 85% util"
+    _hot_dcol = "off"
+else:
+    _hot_val = f"🔴 {_hotspots:,}"
+    _hot_delta = f"{_over_takt:,} over takt (>100%) · {_blocked:,} blocked · {_under_85:,} <85%"
+    _hot_dcol = "inverse"
+
+_tot_layouts = int(_pm_readiness["total_layouts"])
+_cal_layouts = int(_pm_readiness["calibrated_layouts"])
+_cad_layouts = int(_pm_readiness["cad_or_bg_layouts"])
+_tot_shapes = int(_pm_readiness["total_shapes"])
+if _tot_layouts == 0:
+    _cal_val = "🟡 0"
+    _cal_delta = "Open Canvas to initialize floor plan"
+    _cal_dcol = "off"
+elif _cal_layouts == _tot_layouts:
+    _cal_val = f"🟢 {_tot_layouts:,} (100% scaled)"
+    _cal_delta = f"{_tot_shapes:,} shape{'s' if _tot_shapes != 1 else ''} · {_cad_layouts:,} with floorplan/CAD"
+    _cal_dcol = "normal" if _tot_shapes > 0 else "off"
+else:
+    _uncal = max(_tot_layouts - _cal_layouts, 0)
+    _cal_val = f"🟡 {_cal_layouts:,}/{_tot_layouts:,} scaled"
+    _cal_delta = f"{_uncal:,} missing scale · {_tot_shapes:,} shape{'s' if _tot_shapes != 1 else ''}"
+    _cal_dcol = "inverse"
+
+_callout_pitches = int(_pm_readiness["callout_pitches_count"])
+_te_cnt = int(_pm_readiness["tool_eq_pitches_count"])
+_qu_cnt = int(_pm_readiness["qual_pitches_count"])
+_er_cnt = int(_pm_readiness["ergo_pitches_count"])
+_sa_cnt = int(_pm_readiness["safety_pitches_count"])
+_callout_breakdown = f"{_te_cnt:,} Tool/Eq · {_qu_cnt:,} Qual · {_er_cnt:,} Ergo · {_sa_cnt:,} Safety"
+if _tot_act_pitches == 0:
+    _co_val = "🟢 0 / 0"
+    _co_delta = _callout_breakdown
+    _co_dcol = "off"
+else:
+    _co_pct = round(_callout_pitches / _tot_act_pitches * 100)
+    _co_icon = "🟢" if _callout_pitches > 0 else "🟡"
+    _co_val = f"{_co_icon} {_co_pct}% ({_callout_pitches:,}/{_tot_act_pitches:,})"
+    _co_delta = _callout_breakdown
+    _co_dcol = "normal" if _callout_pitches == _tot_act_pitches else "off"
+
+_pmc1, _pmc2, _pmc3, _pmc4, _pmc5 = st.columns(5)
+_pmc1.metric(
+    "2D layout footprint coverage",
+    _fp_val,
+    delta=_fp_delta,
+    delta_color=_fp_dcol,
+    help=(
+        "Share of active Yamazumi pitches in this scenario that have been placed as "
+        "workstation footprints on a 2D plant floor plan layout."
+    ),
+)
+_pmc2.metric(
+    "Process linkage on Pin Map",
+    _lnk_val,
+    delta=_lnk_delta,
+    delta_color=_lnk_dcol,
+    help=(
+        "Share of active pitches with linked Process at a Glance work elements on the Pin Map, "
+        "plus total linked steps and cycle time."
+    ),
+)
+_pmc3.metric(
+    "Spatial takt & status hotspots",
+    _hot_val,
+    delta=_hot_delta,
+    delta_color=_hot_dcol,
+    help=(
+        "Flags pitches exceeding target takt time (>100% utilization) or marked Blocked, "
+        "plus active pitches running below 85% takt utilization."
+    ),
+)
+_pmc4.metric(
+    "Floor plan calibration & CAD",
+    _cal_val,
+    delta=_cal_delta,
+    delta_color=_cal_dcol,
+    help=(
+        "Tracks project 2D floor plan layouts, real-world dimension scale calibration, "
+        "total placed canvas shapes, and floorplan/CAD attachments."
+    ),
+)
+_pmc5.metric(
+    "Functional & tool callouts",
+    _co_val,
+    delta=_co_delta,
+    delta_color=_co_dcol,
+    help=(
+        "Active pitches carrying Tool/Equipment, Quality/Torque, Ergonomics, or Safety "
+        "callouts on the Pin Map."
+    ),
+)
 
 pin_map_workspace_mode = st.radio(
     "Pin Map view",
