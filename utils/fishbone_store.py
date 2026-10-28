@@ -1920,8 +1920,14 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
                 ),
             )
 
-def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) -> None:
+def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict] | dict) -> None:
     """Restore the last set of fishbone part uses."""
+    if isinstance(snapshot, dict):
+        assignment_rows = list(snapshot.get("assignments") or [])
+        explicit_components = snapshot.get("assembly_components")
+    else:
+        assignment_rows = list(snapshot or [])
+        explicit_components = None
     with connection() as conn:
         saved_option_assignments = [
             dict(row)
@@ -1942,6 +1948,18 @@ def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) 
                 (project_id,),
             ).fetchall()
         ]
+        saved_assembly_components = (
+            list(explicit_components)
+            if explicit_components is not None
+            else [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM manufacturing_assembly_components
+                       WHERE project_id = ?""",
+                    (project_id,),
+                ).fetchall()
+            ]
+        )
         if saved_option_assignments:
             opt_ids = [str(r["id"]) for r in saved_option_assignments]
             opt_placeholders = ",".join("?" for _ in opt_ids)
@@ -1955,8 +1973,24 @@ def restore_fishbone_assignment_snapshot(project_id: str, snapshot: list[dict]) 
                 (project_id,),
             )
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
-        _insert_snapshot_rows(conn, "fishbone_part_assignments", snapshot)
-        restored_assignment_ids = {str(r.get("id")) for r in snapshot if r.get("id")}
+        _insert_snapshot_rows(conn, "fishbone_part_assignments", assignment_rows)
+        restored_assignment_ids = {str(r.get("id")) for r in assignment_rows if r.get("id")}
+        if saved_assembly_components:
+            valid_assembly_ids = {
+                str(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM manufacturing_assemblies WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+            }
+            restorable_components = [
+                comp
+                for comp in saved_assembly_components
+                if str(comp.get("fishbone_assignment_id") or "") in restored_assignment_ids
+                and str(comp.get("assembly_id") or "") in valid_assembly_ids
+            ]
+            if restorable_components:
+                _insert_snapshot_rows(conn, "manufacturing_assembly_components", restorable_components)
         for row in saved_option_assignments:
             aid = str(row.get("fishbone_assignment_id") or "")
             if aid in restored_assignment_ids:

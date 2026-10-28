@@ -261,8 +261,87 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
     if "conveyor_zone_id" not in pitch_cols:
         conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN conveyor_zone_id TEXT REFERENCES conveyor_zones(id) ON DELETE SET NULL")
 
+    _ensure_equipment_process_links_schema(conn)
+
     for project in conn.execute("SELECT id FROM projects").fetchall():
         _ensure_default_equipment_types(conn, str(project["id"]))
+
+
+def _ensure_equipment_process_links_schema(conn: sqlite3.Connection) -> None:
+    """Ensure equipment_process_links has nullable work_element_id (ON DELETE SET NULL) and snapshot columns."""
+    link_info = conn.execute("PRAGMA table_info(equipment_process_links)").fetchall()
+    link_cols = {row[1] for row in link_info}
+    if "process_operation_snapshot" not in link_cols:
+        conn.execute("ALTER TABLE equipment_process_links ADD COLUMN process_operation_snapshot TEXT NOT NULL DEFAULT ''")
+    if "process_description_snapshot" not in link_cols:
+        conn.execute("ALTER TABLE equipment_process_links ADD COLUMN process_description_snapshot TEXT NOT NULL DEFAULT ''")
+    if "station_pitch_snapshot" not in link_cols:
+        conn.execute("ALTER TABLE equipment_process_links ADD COLUMN station_pitch_snapshot TEXT NOT NULL DEFAULT ''")
+    if "unlinked_at" not in link_cols:
+        conn.execute("ALTER TABLE equipment_process_links ADD COLUMN unlinked_at TEXT NOT NULL DEFAULT ''")
+    if "updated_at" not in link_cols:
+        conn.execute("ALTER TABLE equipment_process_links ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE equipment_process_links SET updated_at = created_at WHERE updated_at = ''")
+
+    work_col_notnull = any(
+        row[1] == "work_element_id" and int(row[3] or 0) == 1
+        for row in link_info
+    )
+    fk_rows = conn.execute("PRAGMA foreign_key_list(equipment_process_links)").fetchall()
+    work_fk_cascade = any(
+        str(fk[2]) == "work_elements" and str(fk[6]).upper() != "SET NULL"
+        for fk in fk_rows
+    )
+    if work_col_notnull or work_fk_cascade:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE equipment_process_links_new (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    placement_id TEXT NOT NULL REFERENCES equipment_placements(id) ON DELETE CASCADE,
+                    work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                    process_operation_snapshot TEXT NOT NULL DEFAULT '',
+                    process_description_snapshot TEXT NOT NULL DEFAULT '',
+                    station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                    unlinked_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(placement_id, work_element_id)
+                );
+                INSERT INTO equipment_process_links_new (
+                    id, project_id, scenario_id, placement_id, work_element_id,
+                    process_operation_snapshot, process_description_snapshot,
+                    station_pitch_snapshot, unlinked_at, created_at, updated_at
+                )
+                SELECT
+                    id, project_id, scenario_id, placement_id, NULLIF(work_element_id, ''),
+                    COALESCE(process_operation_snapshot, ''),
+                    COALESCE(process_description_snapshot, ''),
+                    COALESCE(station_pitch_snapshot, ''),
+                    COALESCE(unlinked_at, ''),
+                    created_at,
+                    COALESCE(NULLIF(updated_at, ''), created_at)
+                FROM equipment_process_links;
+                DROP TABLE equipment_process_links;
+                ALTER TABLE equipment_process_links_new RENAME TO equipment_process_links;
+                CREATE INDEX IF NOT EXISTS idx_equipment_process_links_work
+                    ON equipment_process_links(project_id, scenario_id, work_element_id);
+                """
+            )
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+
+    conn.execute(
+        """UPDATE equipment_process_links
+           SET process_operation_snapshot = COALESCE((SELECT we.operation FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), ''),
+               process_description_snapshot = COALESCE((SELECT we.description FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), ''),
+               station_pitch_snapshot = COALESCE((SELECT we.station FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), '')
+           WHERE work_element_id IS NOT NULL AND work_element_id != ''
+             AND process_operation_snapshot = '' AND station_pitch_snapshot = ''"""
+    )
 
 
 def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -> None:
@@ -531,7 +610,8 @@ def equipment_assets(
                    COALESCE(pitch.pitch_number, '') AS pitch_number,
                    COALESCE(pitch.pitch_name, '') AS pitch_name,
                    (SELECT COUNT(*) FROM equipment_process_links process_link
-                    WHERE process_link.placement_id=placement.id) AS process_link_count,
+                    WHERE process_link.placement_id=placement.id
+                      AND process_link.work_element_id IS NOT NULL) AS process_link_count,
                    (SELECT COUNT(*) FROM equipment_torque_requirement_links torque_link
                     WHERE torque_link.equipment_id=asset.id) AS torque_requirement_count
             FROM equipment_assets asset
@@ -716,7 +796,8 @@ def save_function_equipment_rows(
                             AND element.project_id=process_link.project_id
                            LEFT JOIN yamazumi_areas area ON area.id=element.area_id
                             AND area.scenario_id=process_link.scenario_id
-                           WHERE process_link.placement_id=?""",
+                           WHERE process_link.placement_id=?
+                             AND process_link.work_element_id IS NOT NULL""",
                         (placement["id"],),
                     ).fetchall()
                     if linked_work and any(
@@ -948,17 +1029,42 @@ def equipment_placement_detail(project_id: str, scenario_id: str, equipment_id: 
         raise ValueError("That equipment record no longer exists.")
     placement_id = _text(rows[0].get("id"))
     work_ids = []
+    unlinked_links: list[dict[str, str]] = []
     if placement_id:
         work_ids = [
             str(row["work_element_id"])
             for row in store.query(
                 """SELECT work_element_id FROM equipment_process_links
                    WHERE project_id=? AND scenario_id=? AND placement_id=?
+                     AND work_element_id IS NOT NULL
                    ORDER BY created_at, id""",
                 (project_id, scenario_id, placement_id),
             )
         ]
-    return {"placement_id": placement_id, "pitch_id": _text(rows[0].get("pitch_id")), "work_element_ids": work_ids}
+        unlinked_links = [
+            {
+                "id": str(row["id"]),
+                "process_operation_snapshot": _text(row.get("process_operation_snapshot")),
+                "process_description_snapshot": _text(row.get("process_description_snapshot")),
+                "station_pitch_snapshot": _text(row.get("station_pitch_snapshot")),
+                "unlinked_at": _text(row.get("unlinked_at")),
+            }
+            for row in store.query(
+                """SELECT id, process_operation_snapshot, process_description_snapshot,
+                          station_pitch_snapshot, unlinked_at
+                   FROM equipment_process_links
+                   WHERE project_id=? AND scenario_id=? AND placement_id=?
+                     AND work_element_id IS NULL
+                   ORDER BY created_at, id""",
+                (project_id, scenario_id, placement_id),
+            )
+        ]
+    return {
+        "placement_id": placement_id,
+        "pitch_id": _text(rows[0].get("pitch_id")),
+        "work_element_ids": work_ids,
+        "unlinked_links": unlinked_links,
+    }
 
 
 def save_equipment_placement(
@@ -989,13 +1095,19 @@ def save_equipment_placement(
             raise ValueError("The active planning scenario no longer exists.")
         if normalized_pitch:
             _require_pitch(conn, project_id, scenario_id, normalized_pitch)
+        work_snapshots_by_id: dict[str, tuple[str, str, str]] = {}
         for work_id in normalized_work:
             work = conn.execute(
-                "SELECT id FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+                "SELECT id, operation, description, station FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
                 (work_id, project_id, scenario_id),
             ).fetchone()
             if not work:
                 raise ValueError("One selected Process Function is outside the active scenario.")
+            work_snapshots_by_id[work_id] = (
+                _text(work["operation"]),
+                _text(work["description"]),
+                _text(work["station"]),
+            )
             link_pitch = conn.execute(
                 """SELECT pitch.id FROM yamazumi_elements element
                    JOIN yamazumi_areas area ON area.id=element.area_id
@@ -1015,7 +1127,7 @@ def save_equipment_placement(
         before_work = {
             str(row["work_element_id"])
             for row in conn.execute(
-                "SELECT work_element_id FROM equipment_process_links WHERE placement_id=?",
+                "SELECT work_element_id FROM equipment_process_links WHERE placement_id=? AND work_element_id IS NOT NULL",
                 (placement["id"],),
             ).fetchall()
         } if placement else set()
@@ -1033,13 +1145,22 @@ def save_equipment_placement(
                 "UPDATE equipment_placements SET pitch_id=?, updated_at=? WHERE id=?",
                 (normalized_pitch, timestamp, placement_id),
             )
-            conn.execute("DELETE FROM equipment_process_links WHERE placement_id=?", (placement_id,))
+            conn.execute(
+                "DELETE FROM equipment_process_links WHERE placement_id=? AND work_element_id IS NOT NULL",
+                (placement_id,),
+            )
         for work_id in normalized_work:
+            op_snap, desc_snap, pitch_snap = work_snapshots_by_id.get(work_id, ("", "", ""))
             conn.execute(
                 """INSERT INTO equipment_process_links
-                   (id, project_id, scenario_id, placement_id, work_element_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (str(uuid4()), project_id, scenario_id, placement_id, work_id, timestamp, timestamp),
+                   (id, project_id, scenario_id, placement_id, work_element_id,
+                    process_operation_snapshot, process_description_snapshot,
+                    station_pitch_snapshot, unlinked_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)""",
+                (
+                    str(uuid4()), project_id, scenario_id, placement_id, work_id,
+                    op_snap, desc_snap, pitch_snap, timestamp, timestamp,
+                ),
             )
         if mark_pitch_blocked and normalized_pitch:
             conn.execute(
@@ -1170,6 +1291,232 @@ def unlink_moved_equipment_links(
             _conn=conn,
         )
     return {"row_count": count, "timestamp": timestamp}
+
+
+@cached_store_read
+def equipment_unlinked_process_links(
+    project_id: str,
+    scenario_id: str,
+    functional_area: str | None = None,
+) -> pd.DataFrame:
+    """Return equipment process links whose linked PAAG process step was deleted (work_element_id IS NULL)."""
+    store = _store_module()
+    where = [
+        "link.project_id=?",
+        "link.scenario_id=?",
+        "link.work_element_id IS NULL",
+    ]
+    params: list[object] = [project_id, scenario_id]
+    if functional_area:
+        where.append(
+            """EXISTS (
+                SELECT 1 FROM equipment_function_links fn_link
+                WHERE fn_link.project_id=asset.project_id
+                  AND fn_link.equipment_id=asset.id
+                  AND fn_link.functional_area=?
+            )"""
+        )
+        params.append(functional_area)
+    rows = store.query(
+        f"""SELECT link.id AS link_id,
+                   asset.id AS equipment_id,
+                   asset.name AS equipment_name,
+                   COALESCE(eqtype.label, '') AS equipment_type,
+                   placement.id AS placement_id,
+                   COALESCE(placement.pitch_id, '') AS saved_pitch_id,
+                   COALESCE(pitch.pitch_number, 'Unassigned') AS saved_pitch,
+                   COALESCE(link.process_operation_snapshot, '') AS process_operation_snapshot,
+                   COALESCE(link.process_description_snapshot, '') AS process_description_snapshot,
+                   COALESCE(link.station_pitch_snapshot, '') AS station_pitch_snapshot,
+                   COALESCE(link.unlinked_at, '') AS unlinked_at
+            FROM equipment_process_links link
+            JOIN equipment_placements placement
+              ON placement.id = link.placement_id
+             AND placement.project_id = link.project_id
+             AND placement.scenario_id = link.scenario_id
+            JOIN equipment_assets asset
+              ON asset.id = placement.equipment_id
+             AND asset.project_id = link.project_id
+            LEFT JOIN equipment_types eqtype
+              ON eqtype.id = asset.equipment_type_id
+             AND eqtype.project_id = asset.project_id
+            LEFT JOIN yamazumi_pitches pitch
+              ON pitch.id = placement.pitch_id
+            WHERE {' AND '.join(where)}
+            ORDER BY asset.name COLLATE NOCASE, link.created_at, link.id""",
+        tuple(params),
+    )
+    return pd.DataFrame(rows, columns=[
+        "link_id",
+        "equipment_id",
+        "equipment_name",
+        "equipment_type",
+        "placement_id",
+        "saved_pitch_id",
+        "saved_pitch",
+        "process_operation_snapshot",
+        "process_description_snapshot",
+        "station_pitch_snapshot",
+        "unlinked_at",
+    ])
+
+
+def clear_unlinked_equipment_process_links(
+    project_id: str,
+    scenario_id: str,
+    link_ids: list[str] | None,
+    editor_name: str,
+    equipment_id: str | None = None,
+) -> dict[str, object]:
+    """Delete obsolete unlinked process-step links while keeping the equipment placement in its Station / Pitch."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    timestamp = store.now_iso()
+    with store.connection() as conn:
+        if link_ids:
+            clean_ids = [str(lid).strip() for lid in link_ids if str(lid).strip()]
+            if not clean_ids:
+                return {"row_count": 0, "timestamp": timestamp}
+            placeholders = ",".join("?" for _ in clean_ids)
+            cur = conn.execute(
+                f"""DELETE FROM equipment_process_links
+                    WHERE project_id=? AND scenario_id=?
+                      AND work_element_id IS NULL
+                      AND id IN ({placeholders})""",
+                (project_id, scenario_id, *clean_ids),
+            )
+            count = int(cur.rowcount or 0)
+        elif equipment_id:
+            cur = conn.execute(
+                """DELETE FROM equipment_process_links
+                   WHERE project_id=? AND scenario_id=?
+                     AND work_element_id IS NULL
+                     AND placement_id IN (
+                         SELECT id FROM equipment_placements
+                         WHERE project_id=? AND scenario_id=? AND equipment_id=?
+                     )""",
+                (project_id, scenario_id, project_id, scenario_id, equipment_id),
+            )
+            count = int(cur.rowcount or 0)
+        else:
+            cur = conn.execute(
+                """DELETE FROM equipment_process_links
+                   WHERE project_id=? AND scenario_id=? AND work_element_id IS NULL""",
+                (project_id, scenario_id),
+            )
+            count = int(cur.rowcount or 0)
+        if count > 0:
+            store.record_audit_event(
+                project_id,
+                "Equipment placements",
+                "Clear Obsolete Process Link",
+                count,
+                editor,
+                {
+                    "scenario_id": scenario_id,
+                    "equipment_id": equipment_id or "",
+                    "link_ids": link_ids or [],
+                    "cleared_count": count,
+                    "store_timestamp": timestamp,
+                },
+                _conn=conn,
+            )
+    return {"row_count": count, "timestamp": timestamp}
+
+
+def relink_unlinked_equipment_process_link(
+    project_id: str,
+    scenario_id: str,
+    link_id: str,
+    target_work_element_id: str,
+    editor_name: str,
+) -> dict[str, object]:
+    """Relink a disconnected equipment_process_links row to an active Process Function on the equipment's Pitch."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    clean_link_id = _text(link_id)
+    clean_work_id = _text(target_work_element_id)
+    if not clean_link_id or not clean_work_id:
+        raise ValueError("Choose both the disconnected equipment link and the replacement Process Function.")
+    timestamp = store.now_iso()
+    with store.connection() as conn:
+        link_row = conn.execute(
+            """SELECT link.id, link.placement_id, placement.equipment_id, placement.pitch_id
+               FROM equipment_process_links link
+               JOIN equipment_placements placement ON placement.id = link.placement_id
+               WHERE link.id=? AND link.project_id=? AND link.scenario_id=?
+                 AND link.work_element_id IS NULL""",
+            (clean_link_id, project_id, scenario_id),
+        ).fetchone()
+        if not link_row:
+            raise ValueError("That disconnected equipment process link no longer exists or was already resolved.")
+        placement_id = str(link_row["placement_id"])
+        saved_pitch_id = _text(link_row["pitch_id"])
+        work = conn.execute(
+            "SELECT id, operation, description, station FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+            (clean_work_id, project_id, scenario_id),
+        ).fetchone()
+        if not work:
+            raise ValueError("The replacement Process Function does not exist in the active scenario.")
+        link_pitch = conn.execute(
+            """SELECT pitch.id FROM yamazumi_elements element
+               JOIN yamazumi_areas area ON area.id=element.area_id
+                 AND area.project_id=element.project_id AND area.scenario_id=?
+               JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
+               WHERE element.project_id=? AND element.process_element_id=?
+               ORDER BY element.sequence, element.id LIMIT 1""",
+            (scenario_id, project_id, clean_work_id),
+        ).fetchone()
+        target_pitch_id = _text(link_pitch["id"]) if link_pitch else ""
+        if saved_pitch_id and target_pitch_id and target_pitch_id != saved_pitch_id:
+            raise ValueError("The replacement Process Function must belong to the equipment's Station / Pitch.")
+        if not saved_pitch_id and target_pitch_id:
+            conn.execute(
+                "UPDATE equipment_placements SET pitch_id=?, updated_at=? WHERE id=?",
+                (target_pitch_id, timestamp, placement_id),
+            )
+        existing_dup = conn.execute(
+            """SELECT id FROM equipment_process_links
+               WHERE placement_id=? AND work_element_id=? AND id<>?""",
+            (placement_id, clean_work_id, clean_link_id),
+        ).fetchone()
+        if existing_dup:
+            conn.execute("DELETE FROM equipment_process_links WHERE id=?", (clean_link_id,))
+        else:
+            conn.execute(
+                """UPDATE equipment_process_links
+                   SET work_element_id=?,
+                       process_operation_snapshot=?,
+                       process_description_snapshot=?,
+                       station_pitch_snapshot=?,
+                       unlinked_at='',
+                       updated_at=?
+                   WHERE id=?""",
+                (
+                    clean_work_id,
+                    _text(work["operation"]),
+                    _text(work["description"]),
+                    _text(work["station"]),
+                    timestamp,
+                    clean_link_id,
+                ),
+            )
+        store.record_audit_event(
+            project_id,
+            "Equipment placements",
+            "Relink Disconnected Process Step",
+            1,
+            editor,
+            {
+                "scenario_id": scenario_id,
+                "equipment_id": str(link_row["equipment_id"]),
+                "link_id": clean_link_id,
+                "work_element_id": clean_work_id,
+                "store_timestamp": timestamp,
+            },
+            _conn=conn,
+        )
+    return {"row_count": 1, "timestamp": timestamp}
 
 
 @cached_store_read
@@ -1482,14 +1829,32 @@ def clone_equipment_scenario(
             (new_placement_id, project_id, target_scenario_id, source["equipment_id"], new_pitch_id, timestamp, timestamp),
         )
         for link in links_by_placement.get(old_placement_id, []):
-            new_work_id = process_id_map.get(str(link["work_element_id"]))
-            if not new_work_id:
-                raise ValueError("An Equipment Process Function could not be remapped while cloning the scenario.")
+            raw_work_id = _text(link["work_element_id"])
+            if raw_work_id:
+                new_work_id = process_id_map.get(raw_work_id)
+                if not new_work_id:
+                    raise ValueError("An Equipment Process Function could not be remapped while cloning the scenario.")
+            else:
+                new_work_id = None
             conn.execute(
                 """INSERT INTO equipment_process_links
-                   (id, project_id, scenario_id, placement_id, work_element_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (str(uuid4()), project_id, target_scenario_id, new_placement_id, new_work_id, timestamp, timestamp),
+                   (id, project_id, scenario_id, placement_id, work_element_id,
+                    process_operation_snapshot, process_description_snapshot,
+                    station_pitch_snapshot, unlinked_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()),
+                    project_id,
+                    target_scenario_id,
+                    new_placement_id,
+                    new_work_id,
+                    _text(link["process_operation_snapshot"]) if "process_operation_snapshot" in link.keys() else "",
+                    _text(link["process_description_snapshot"]) if "process_description_snapshot" in link.keys() else "",
+                    _text(link["station_pitch_snapshot"]) if "station_pitch_snapshot" in link.keys() else "",
+                    _text(link["unlinked_at"]) if "unlinked_at" in link.keys() else "",
+                    timestamp,
+                    timestamp,
+                ),
             )
 
     # Clone conveyor zones
@@ -1589,10 +1954,10 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
                JOIN equipment_assets asset
                  ON asset.id = placement.equipment_id
                 AND asset.project_id = link.project_id
-               JOIN equipment_types eqtype
-                 ON eqtype.id = asset.equipment_type_id
-                AND eqtype.project_id = link.project_id
-               WHERE link.project_id=? AND link.scenario_id=?""",
+                JOIN equipment_types eqtype
+                  ON eqtype.id = asset.equipment_type_id
+                 AND eqtype.project_id = link.project_id
+                WHERE link.project_id=? AND link.scenario_id=? AND link.work_element_id IS NOT NULL""",
             (project_id, scenario_id),
         ).fetchall()
 
@@ -1620,7 +1985,7 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
                       a.requirement_type, a.description, a.unique_identifier,
                       a.target_value, a.tolerances, a.unit
                FROM quality_requirement_assignments a
-               WHERE a.project_id=? AND a.scenario_id=?""",
+               WHERE a.project_id=? AND a.scenario_id=? AND a.work_element_id IS NOT NULL""",
             (project_id, scenario_id),
         ).fetchall()
 

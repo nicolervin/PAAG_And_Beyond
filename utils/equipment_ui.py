@@ -15,6 +15,7 @@ from utils.equipment_store import (
     EQUIPMENT_TIERS,
     UNIT_ORIENTATION_OPTIONS,
     attach_equipment_to_function,
+    clear_unlinked_equipment_process_links,
     conveyor_zones,
     delete_conveyor_zone_image,
     delete_conveyor_zones,
@@ -34,7 +35,9 @@ from utils.equipment_store import (
     equipment_torque_published_specifications,
     equipment_torque_requirement_ids,
     equipment_types,
+    equipment_unlinked_process_links,
     move_equipment_to_linked_pitch,
+    relink_unlinked_equipment_process_link,
     save_conveyor_zone,
     save_equipment_placement,
     save_equipment_torque_requirements,
@@ -712,6 +715,44 @@ def _render_equipment_detail(
             valid_defaults = [
                 value for value in placement["work_element_ids"] if value in process_labels
             ]
+            unlinked_links = list(placement.get("unlinked_links") or [])
+            if unlinked_links:
+                bullet_lines = []
+                for ulink in unlinked_links:
+                    op_snap = _text(ulink.get("process_operation_snapshot")) or "(Unnamed operation)"
+                    desc_snap = _text(ulink.get("process_description_snapshot"))
+                    pitch_snap = _text(ulink.get("station_pitch_snapshot"))
+                    detail_parts = [f"**{op_snap}**"]
+                    if desc_snap and desc_snap != op_snap:
+                        detail_parts.append(desc_snap)
+                    if pitch_snap:
+                        detail_parts.append(f"formerly at {pitch_snap}")
+                    bullet_lines.append(" — ".join(detail_parts))
+                st.warning(
+                    "⚠️ **Deleted Process Function link(s) detected on this equipment** "
+                    "(the equipment itself remains placed at its Station / Pitch):\n\n"
+                    + "\n".join(f"- {line}" for line in bullet_lines)
+                )
+                if st.button(
+                    "Clear obsolete process link(s) (keep equipment in Pitch)",
+                    icon=":material/cleaning_services:",
+                    key=f"clear_detail_unlinked_eq_{project_id}_{scenario_id}_{selected_id}",
+                ):
+                    try:
+                        clear_res = clear_unlinked_equipment_process_links(
+                            project_id,
+                            scenario_id,
+                            [str(u["id"]) for u in unlinked_links if u.get("id")],
+                            _editor_name(),
+                            equipment_id=selected_id,
+                        )
+                        st.toast(
+                            f"Cleared {clear_res['row_count']} obsolete process link(s). Equipment stays in its Station / Pitch.",
+                            icon=":material/check_circle:",
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
             selected_work = st.multiselect(
                 "Linked Process Functions",
                 options=list(process_labels),
@@ -853,8 +894,138 @@ def _render_mismatch_review(
 ) -> None:
     if not scenario_id or linked_assets.empty:
         return
-    mismatches = equipment_placement_mismatches(project_id, scenario_id)
     allowed_ids = set(linked_assets["id"].astype(str))
+    unlinked_df = equipment_unlinked_process_links(project_id, scenario_id, functional_area)
+    if not unlinked_df.empty:
+        unlinked_df = unlinked_df.loc[unlinked_df["equipment_id"].astype(str).isin(allowed_ids)].copy()
+    if not unlinked_df.empty:
+        with st.expander(
+            f"Disconnected process step links ({len(unlinked_df)}) — Equipment remains in Station / Pitch",
+            expanded=True,
+            icon=":material/link_off:",
+        ):
+            st.warning(
+                "One or more PAAG Process Functions previously linked to this equipment were deleted. "
+                "The equipment itself remains anchored in its Station / Pitch. "
+                "You can relink each item to an active Process Function on that Pitch or clear the obsolete process link."
+            )
+            unlinked_display = unlinked_df.rename(
+                columns={
+                    "equipment_name": "Equipment name",
+                    "equipment_type": "Equipment type",
+                    "saved_pitch": "Station / Pitch (Intact)",
+                    "process_operation_snapshot": "Deleted Process Operation",
+                    "process_description_snapshot": "Deleted Step Description",
+                    "station_pitch_snapshot": "Previous Step Pitch",
+                }
+            )[
+                [
+                    "Equipment name",
+                    "Equipment type",
+                    "Station / Pitch (Intact)",
+                    "Deleted Process Operation",
+                    "Deleted Step Description",
+                    "Previous Step Pitch",
+                ]
+            ]
+            selectable_dataframe(
+                unlinked_display,
+                key=f"equipment_unlinked_table_{project_id}_{scenario_id}_{functional_area}",
+                hide_index=True,
+            )
+            link_options: dict[str, pd.Series] = {
+                str(row["link_id"]): row for _, row in unlinked_df.iterrows()
+            }
+            chosen_link_id = st.selectbox(
+                "Disconnected equipment process link to resolve",
+                options=list(link_options.keys()),
+                format_func=lambda lid: (
+                    f"{link_options[lid]['equipment_name']} @ {link_options[lid]['saved_pitch']} — "
+                    f"Deleted step: {link_options[lid]['process_operation_snapshot'] or '(Unnamed step)'}"
+                ),
+                key=f"eq_unlinked_resolve_select_{project_id}_{scenario_id}_{functional_area}",
+            )
+            chosen_row = link_options.get(str(chosen_link_id))
+            pitch_for_relink = _text(chosen_row["saved_pitch_id"]) if chosen_row is not None else ""
+            relink_candidates = (
+                equipment_process_options(project_id, scenario_id, pitch_for_relink)
+                if pitch_for_relink
+                else pd.DataFrame()
+            )
+            relink_labels = {
+                _text(r["id"]): f"{r['op_id']} — {r['work_element']}"
+                for _, r in relink_candidates.iterrows()
+            }
+            col_relink_sel, col_relink_btn, col_clear_one, col_clear_all = st.columns([2.2, 1.2, 1.3, 1.3])
+            target_work_id = col_relink_sel.selectbox(
+                "Replacement Process Function on this Pitch",
+                options=["", *relink_labels.keys()],
+                format_func=lambda wid: (
+                    "Choose active Process Function..."
+                    if not wid
+                    else relink_labels.get(str(wid), "Unavailable Process Function")
+                ),
+                disabled=not relink_labels,
+                key=f"eq_unlinked_relink_target_{project_id}_{scenario_id}_{functional_area}_{chosen_link_id}",
+            )
+            if col_relink_btn.button(
+                "Relink to step",
+                type="primary",
+                icon=":material/link:",
+                disabled=not target_work_id,
+                key=f"eq_unlinked_relink_btn_{project_id}_{scenario_id}_{functional_area}_{chosen_link_id}",
+            ):
+                try:
+                    relink_unlinked_equipment_process_link(
+                        project_id,
+                        scenario_id,
+                        str(chosen_link_id),
+                        str(target_work_id),
+                        _editor_name(),
+                    )
+                    st.toast("Relinked equipment to the selected Process Function.", icon=":material/check_circle:")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+            if col_clear_one.button(
+                "Clear selected link",
+                icon=":material/check:",
+                key=f"eq_unlinked_clear_one_{project_id}_{scenario_id}_{functional_area}_{chosen_link_id}",
+                help="Remove the obsolete step link while keeping the equipment anchored in its Station / Pitch.",
+            ):
+                try:
+                    clear_unlinked_equipment_process_links(
+                        project_id,
+                        scenario_id,
+                        [str(chosen_link_id)],
+                        _editor_name(),
+                    )
+                    st.toast("Cleared obsolete process link. Equipment remains in its Station / Pitch.", icon=":material/check_circle:")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+            if col_clear_all.button(
+                "Clear all obsolete links",
+                icon=":material/cleaning_services:",
+                key=f"eq_unlinked_clear_all_{project_id}_{scenario_id}_{functional_area}",
+                help="Clear all disconnected step links in this view while keeping all equipment in their Station / Pitch.",
+            ):
+                try:
+                    res_clear = clear_unlinked_equipment_process_links(
+                        project_id,
+                        scenario_id,
+                        [str(lid) for lid in link_options.keys()],
+                        _editor_name(),
+                    )
+                    st.toast(
+                        f"Cleared {res_clear['row_count']} obsolete process link(s). Equipment remains in Station / Pitch.",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    mismatches = equipment_placement_mismatches(project_id, scenario_id)
     mismatches = mismatches.loc[mismatches["equipment_id"].astype(str).isin(allowed_ids)]
     if mismatches.empty:
         return

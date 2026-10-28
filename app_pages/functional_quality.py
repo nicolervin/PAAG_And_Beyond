@@ -871,34 +871,26 @@ if unlinked_review_tab is not None and unlinked_review_tab.open:
             active_scenario,
             unlinked_data,
         )
-    render_quality_history(project_id)
-    st.stop()
-if traceability_tab.open:
+elif traceability_tab.open:
     with traceability_tab:
         render_traceability_matrix_tab(
             project_id,
             scenario_id,
             active_scenario,
         )
-    render_quality_history(project_id)
-    st.stop()
-if pfmea_tab.open:
+elif pfmea_tab.open:
     with pfmea_tab:
         if not active_scenario:
             st.info("Select an active planning scenario before opening PFMEA.")
         else:
             render_pfmea_tab(project_id, scenario_id, str(active_scenario["name"]))
-    render_quality_history(project_id)
-    st.stop()
-if control_plan_tab.open:
+elif control_plan_tab.open:
     with control_plan_tab:
         if not active_scenario:
             st.info("Select an active planning scenario before opening Control Plan.")
         else:
             render_control_plan_tab(project_id, scenario_id, str(active_scenario["name"]))
-    render_quality_history(project_id)
-    st.stop()
-if equipment_tab.open:
+elif equipment_tab.open:
     with equipment_tab:
         render_functional_equipment_tab(
             project_id,
@@ -906,14 +898,12 @@ if equipment_tab.open:
             "Quality",
             render_history=False,
         )
-    render_quality_history(project_id)
-    st.stop()
-
-with requirements_repository_tab:
-    render_requirements_repository_tab(
-        project_id=project_id,
-        scenario_id=scenario_id,
-        active_scenario=active_scenario,
-    )
+else:
+    with requirements_repository_tab:
+        render_requirements_repository_tab(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            active_scenario=active_scenario,
+        )
 
 render_quality_history(project_id)

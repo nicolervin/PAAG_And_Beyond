@@ -857,6 +857,12 @@ if scenario:
                 if result["created_ids"]:
                     newest_id = str(result["created_ids"][-1])
                     st.session_state["scenario_id"] = newest_id
+                    st.session_state["global_scenario"] = newest_id
+                    st.session_state["_qp_synced_scenario_id"] = newest_id
+                    try:
+                        st.query_params["scenario_id"] = newest_id
+                    except Exception:
+                        pass
                     st.session_state[selected_detail_key] = newest_id
                 request_table_editor_reset(scenario_editor_key)
                 created_scen_count = len(result["created_ids"])

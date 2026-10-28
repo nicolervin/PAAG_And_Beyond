@@ -586,7 +586,7 @@ def _quality_sources(conn: sqlite3.Connection, project_id: str, scenario_id: str
                   a.target_value, a.tolerances, a.unit, a.source_updated_at,
                   a.updated_at AS assignment_updated_at, a.created_at
            FROM quality_requirement_assignments a
-           WHERE a.project_id=? AND a.scenario_id=?
+           WHERE a.project_id=? AND a.scenario_id=? AND a.work_element_id IS NOT NULL
            ORDER BY a.created_at, a.id""",
         (project_id, scenario_id),
     ).fetchall()
@@ -814,7 +814,7 @@ def _equipment_by_work_element(
                JOIN equipment_types eqtype
                  ON eqtype.id = asset.equipment_type_id
                 AND eqtype.project_id = link.project_id
-               WHERE link.project_id=? AND link.scenario_id=?
+               WHERE link.project_id=? AND link.scenario_id=? AND link.work_element_id IS NOT NULL
                ORDER BY asset.name""",
             (project_id, scenario_id),
         ).fetchall()
