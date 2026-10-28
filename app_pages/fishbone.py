@@ -47,6 +47,7 @@ from utils.table_filters import (
     filter_table,
     has_unsaved_table_changes,
     last_table_undo_redo_message,
+    logical_table_editor_key,
     matches_filter_value,
     merge_filtered_edits,
     redo_last_table_edit,
@@ -60,7 +61,10 @@ from utils.table_ui import (
     editable_table_footer,
     guarded_tabs,
     native_selected_rows,
+    prepare_editor_selection_column,
     register_unsaved_source,
+    render_select_all_control,
+    resolve_editor_selected_rows,
     stage_native_delete_confirmation,
     selectable_dataframe,
     table_has_unsaved_changes,
@@ -560,9 +564,13 @@ with assign_parts_tab:
         if st.session_state.get(pool_signature_key) != pool_signature:
             st.session_state[pool_signature_key] = pool_signature
             st.session_state.pop(pool_key, None)
+            st.session_state.pop(f"_select_all_{logical_table_editor_key(pool_key)}", None)
 
         visible_parts = visible_parts.copy()
         visible_parts["place"] = False
+        visible_parts = prepare_editor_selection_column(
+            visible_parts, editor_key=pool_key, column="place"
+        )
         visible_parts["edit_part"] = ":material/edit: Edit part"
         visible_parts["models_familiar"] = visible_parts["feature_applicability"]
 
@@ -619,7 +627,9 @@ with assign_parts_tab:
         )
         if st.session_state.pop(f"fishbone_open_pool_part_{project_id}", False):
             st.switch_page("app_pages/parts.py")
-        selected_parts = edited_pool.loc[edited_pool["place"].fillna(False).astype(bool)].copy()
+        selected_parts = resolve_editor_selected_rows(
+            visible_parts, edited_pool, editor_key=pool_key, column="place"
+        )
         selected_part_ids = selected_parts["id"].astype(str).tolist()
         selected_quantities = {
             str(row["id"]): float(row["quantity"])
@@ -629,6 +639,14 @@ with assign_parts_tab:
         selected_unplaced_ids = [part_id for part_id in selected_part_ids if part_id not in placed_part_ids]
         selected_additional_use_ids = [part_id for part_id in selected_part_ids if part_id in pending_use_ids]
         placement_row = st.container(horizontal=True, vertical_alignment="bottom")
+        render_select_all_control(
+            placement_row,
+            editor_key=pool_key,
+            selectable_count=len(visible_parts),
+            selected_count=len(selected_parts),
+            key_prefix=f"fishbone_pool_select_{project_id}_{scenario_id}",
+            column="place",
+        )
         target_section_id = placement_row.selectbox(
             "Place selected parts in",
             options=active_sections["id"].astype(str).tolist(),

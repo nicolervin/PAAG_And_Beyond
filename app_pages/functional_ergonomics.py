@@ -23,6 +23,7 @@ from utils.scope_ui import page_title_with_scope
 from utils.store import (
     ERGONOMICS_RISK_CLASSIFICATIONS,
     ERGONOMICS_REVIEW_STATUSES,
+    acknowledge_ergonomics_upstream_changes,
     create_legacy_ergonomics_review,
     create_or_get_ergonomic_hazard_option,
     delete_ergonomics_reviews,
@@ -67,6 +68,7 @@ from utils.table_ui import (
     guarded_tabs,
     native_selected_rows,
     selectable_dataframe,
+    selected_dataframe_rows,
     stage_native_delete_confirmation,
 )
 
@@ -430,8 +432,20 @@ if reviews.empty:
             "hazard_labels": pd.Series(dtype="object"),
             "work_element_label": pd.Series(dtype="string"),
             "pitch": pd.Series(dtype="string"),
+            "source_snapshot_json": pd.Series(dtype="string"),
+            "source_acknowledged_at": pd.Series(dtype="string"),
+            "sync_status": pd.Series(dtype="string"),
+            "upstream_changed": pd.Series(dtype="bool"),
+            "upstream_diff_summary": pd.Series(dtype="string"),
         }
     )
+
+if "sync_status" not in reviews.columns:
+    reviews["sync_status"] = "Synced"
+if "upstream_changed" not in reviews.columns:
+    reviews["upstream_changed"] = False
+if "upstream_diff_summary" not in reviews.columns:
+    reviews["upstream_diff_summary"] = ""
 
 if "legacy_description" not in reviews.columns:
     reviews["legacy_description"] = ""
@@ -558,12 +572,98 @@ if top_actions.button(
 ):
     st.session_state[f"show_manage_hazards_dialog_{project_id}"] = True
 
+changed_reviews = reviews[reviews["upstream_changed"].fillna(False).astype(bool)].copy()
+filter_changed_only = False
+if not changed_reviews.empty:
+    with st.container(border=True):
+        q_head_col, q_toggle_col = st.columns([3, 1.3], vertical_alignment="center")
+        with q_head_col:
+            st.markdown(f"**⚠️ Upstream Process changes to review ({len(changed_reviews)})**")
+            st.caption(
+                "These Process at a Glance steps were edited upstream after their Ergonomics "
+                "assessment was saved. Select rows below to **Acknowledge** that your existing "
+                "review still stands, or **Edit** the rows in the main table and click "
+                "**Save & Refresh** to update and clear the flag automatically."
+            )
+        with q_toggle_col:
+            filter_changed_only = st.toggle(
+                "Filter main table to changed rows",
+                key=f"ergo_filter_upstream_changed_{scenario_id}",
+            )
+        ack_queue_df = changed_reviews[
+            [
+                "id",
+                "pitch",
+                "work_element_label",
+                "upstream_diff_summary",
+                "status",
+                "risk_classification",
+                "reviewer",
+            ]
+        ].copy()
+        ack_event = selectable_dataframe(
+            ack_queue_df,
+            key=f"ergo_upstream_ack_queue_{project_id}_{scenario_id}",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "id": None,
+                "pitch": st.column_config.TextColumn("Pitch", width="small"),
+                "work_element_label": st.column_config.TextColumn(
+                    "Process step description", width="medium"
+                ),
+                "upstream_diff_summary": st.column_config.TextColumn(
+                    "Upstream Process changes (since last review)", width="large"
+                ),
+                "status": st.column_config.TextColumn("Status", width="small"),
+                "risk_classification": st.column_config.TextColumn(
+                    "Risk classification", width="medium"
+                ),
+                "reviewer": st.column_config.TextColumn("Reviewer", width="small"),
+            },
+        )
+        selected_ack_rows = selected_dataframe_rows(
+            ack_queue_df, ack_event, id_column="id"
+        )
+        ack_bar = st.container(horizontal=True, vertical_alignment="center")
+        if ack_bar.button(
+            f"Acknowledge selected ({len(selected_ack_rows)})",
+            type="primary",
+            icon=":material/task_alt:",
+            disabled=selected_ack_rows.empty,
+            key=f"ergo_ack_upstream_btn_{project_id}_{scenario_id}",
+        ):
+            try:
+                ack_res = acknowledge_ergonomics_upstream_changes(
+                    project_id,
+                    scenario_id,
+                    selected_ack_rows["id"].astype(str).tolist(),
+                    editor_name=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
+                )
+                request_table_editor_reset(editor_key)
+                st.toast(
+                    f"Acknowledged upstream Process changes for {ack_res['row_count']} Ergonomics review(s)",
+                    icon=":material/task_alt:",
+                )
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
 visible_reviews = filter_table(
     reviews,
     key=f"ergonomics_reviews_filters_{project_id}_{scenario_id}",
-    dropdown_columns=["link_filter", "status", "risk_classification", "reviewer"],
-    search_columns=["work_element_label", "legacy_description", "pitch", "reviewer", "notes", "hazard_labels"],
+    dropdown_columns=["sync_status", "link_filter", "status", "risk_classification", "reviewer"],
+    search_columns=[
+        "work_element_label",
+        "legacy_description",
+        "pitch",
+        "reviewer",
+        "notes",
+        "hazard_labels",
+        "upstream_diff_summary",
+    ],
     labels={
+        "sync_status": "Sync status",
         "link_filter": "Link status",
         "status": "Status",
         "risk_classification": "Risk classification",
@@ -571,6 +671,10 @@ visible_reviews = filter_table(
     },
     reset_widget_keys=[editor_key],
 )
+if filter_changed_only:
+    visible_reviews = visible_reviews[
+        visible_reviews["upstream_changed"].fillna(False).astype(bool)
+    ].copy()
 
 
 def open_ergo_slide() -> None:
@@ -610,8 +714,10 @@ edited = st.data_editor(
     height=470,
     column_order=[
         "link_status",
+        "sync_status",
         "view_slide",
         "work_element_id",
+        "upstream_diff_summary",
         "legacy_description",
         "status",
         "risk_classification",
@@ -626,6 +732,11 @@ edited = st.data_editor(
         "scenario_id",
         "link_status",
         "link_filter",
+        "sync_status",
+        "upstream_changed",
+        "upstream_diff_summary",
+        "source_snapshot_json",
+        "source_acknowledged_at",
         "process_part_option_id",
         "created_at",
         "updated_at",
@@ -638,6 +749,9 @@ edited = st.data_editor(
         "project_id": None,
         "scenario_id": None,
         "link_filter": None,
+        "upstream_changed": None,
+        "source_snapshot_json": None,
+        "source_acknowledged_at": None,
         "process_part_option_id": None,
         "created_at": None,
         "updated_at": None,
@@ -651,6 +765,16 @@ edited = st.data_editor(
             disabled=True,
             width="small",
             help="Unlinked reviews have no Process at a Glance Work Element yet.",
+        ),
+        "sync_status": st.column_config.TextColumn(
+            "Sync status",
+            width="small",
+            help="Shows whether the linked Process at a Glance step changed upstream since this review was last saved or acknowledged.",
+        ),
+        "upstream_diff_summary": st.column_config.TextColumn(
+            "Upstream changes",
+            width="large",
+            help="Summary of upstream Process at a Glance step changes since this review was last saved or acknowledged.",
         ),
         "view_slide": st.column_config.ButtonColumn(
             "Slide",

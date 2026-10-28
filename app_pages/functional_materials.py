@@ -1,16 +1,23 @@
+import pandas as pd
 import streamlit as st
 
 from utils.equipment_ui import render_functional_equipment_tab
 from utils.functional_review_ui import render_functional_review_shell
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
+    acknowledge_materials_upstream_changes,
     audit_history,
     get_planning_scenario,
     get_scenario_part_handling_options,
     record_audit_event,
     set_process_part_option_handling_type,
 )
-from utils.table_ui import guarded_tabs, register_unsaved_source
+from utils.table_ui import (
+    guarded_tabs,
+    register_unsaved_source,
+    selectable_dataframe,
+    selected_dataframe_rows,
+)
 
 project_id = str(st.session_state.get("project_id") or "")
 scenario_id = str(st.session_state.get("scenario_id") or "")
@@ -78,11 +85,88 @@ if scenario_id:
         delta_color="inverse",
     )
 
+    changed_options = [o for o in part_options if o.get("upstream_changed")]
+    filter_changed_only = False
+    if changed_options:
+        with st.container(border=True):
+            q_head_col, q_toggle_col = st.columns([3, 1.3], vertical_alignment="center")
+            with q_head_col:
+                st.markdown(
+                    f"**⚠️ Upstream Process changes to review ({len(changed_options)})**"
+                )
+                st.caption(
+                    "These Process at a Glance steps or part groups were edited upstream after "
+                    "their Materials handling classification was saved. Select rows below to "
+                    "**Acknowledge** that your existing classification still stands, or change "
+                    "the classification on a card below and click **Update** to clear the flag automatically."
+                )
+            with q_toggle_col:
+                filter_changed_only = st.toggle(
+                    "Filter cards to changed items",
+                    key=f"mat_filter_upstream_changed_{scenario_id}",
+                )
+            ack_queue_df = pd.DataFrame(
+                [
+                    {
+                        "id": str(o.get("option_id") or ""),
+                        "station": str(o.get("station") or ""),
+                        "operation": str(o.get("operation") or ""),
+                        "part_number": str(o.get("part_number") or ""),
+                        "part_description": str(o.get("part_description") or ""),
+                        "handling_type": str(o.get("handling_type") or "Unclassified"),
+                        "upstream_diff_summary": str(o.get("upstream_diff_summary") or ""),
+                    }
+                    for o in changed_options
+                ]
+            )
+            ack_event = selectable_dataframe(
+                ack_queue_df,
+                key=f"mat_upstream_ack_queue_{project_id}_{scenario_id}",
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "id": None,
+                    "station": st.column_config.TextColumn("Station", width="small"),
+                    "operation": st.column_config.TextColumn("Process step", width="medium"),
+                    "part_number": st.column_config.TextColumn("Part number", width="small"),
+                    "part_description": st.column_config.TextColumn("Description", width="medium"),
+                    "handling_type": st.column_config.TextColumn("Handling", width="small"),
+                    "upstream_diff_summary": st.column_config.TextColumn(
+                        "Upstream Process changes (since last review)", width="large"
+                    ),
+                },
+            )
+            selected_ack_rows = selected_dataframe_rows(
+                ack_queue_df, ack_event, id_column="id"
+            )
+            ack_bar = st.container(horizontal=True, vertical_alignment="center")
+            if ack_bar.button(
+                f"Acknowledge selected ({len(selected_ack_rows)})",
+                type="primary",
+                icon=":material/task_alt:",
+                disabled=selected_ack_rows.empty,
+                key=f"mat_ack_upstream_btn_{project_id}_{scenario_id}",
+            ):
+                try:
+                    ack_res = acknowledge_materials_upstream_changes(
+                        project_id,
+                        scenario_id,
+                        selected_ack_rows["id"].astype(str).tolist(),
+                        editor_name=str(st.session_state.get("current_editor") or "Collaborator"),
+                    )
+                    st.toast(
+                        f"Acknowledged upstream Process changes for {ack_res['row_count']} part handling item(s)",
+                        icon=":material/task_alt:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
     f_col1, f_col2 = st.columns([2, 2], vertical_alignment="center")
     with f_col1:
         status_filter = st.radio(
             "Filter status",
-            options=["All", "Unclassified Only", "Classified Only"],
+            options=["All", "Unclassified Only", "Classified Only", "Upstream Changes Only"],
             horizontal=True,
             key=f"mat_status_filter_{scenario_id}",
         )
@@ -99,6 +183,10 @@ if scenario_id:
         filtered = [o for o in filtered if not o.get("handling_type")]
     elif status_filter == "Classified Only":
         filtered = [o for o in filtered if o.get("handling_type")]
+    elif status_filter == "Upstream Changes Only":
+        filtered = [o for o in filtered if o.get("upstream_changed")]
+    if filter_changed_only:
+        filtered = [o for o in filtered if o.get("upstream_changed")]
     if station_filter != "All Stations":
         filtered = [o for o in filtered if str(o.get("station") or "") == station_filter]
 
@@ -130,6 +218,36 @@ if scenario_id:
                         st.success("📦 Consume", icon=":material/check_circle:")
                     else:
                         st.info("🖐️ Handle", icon=":material/pan_tool:")
+
+                if opt.get("upstream_changed"):
+                    ack_col1, ack_col2 = st.columns([3, 1], vertical_alignment="center")
+                    with ack_col1:
+                        st.warning(
+                            f"**Upstream Process change:** {opt.get('upstream_diff_summary') or 'Upstream Process step updated'}",
+                            icon=":material/sync_problem:",
+                        )
+                    with ack_col2:
+                        if st.button(
+                            "Acknowledge",
+                            icon=":material/task_alt:",
+                            key=f"mat_card_ack_{opt_id}",
+                            width="stretch",
+                            help="Confirm the existing handling classification still applies after this upstream Process change.",
+                        ):
+                            try:
+                                acknowledge_materials_upstream_changes(
+                                    project_id,
+                                    scenario_id,
+                                    [opt_id],
+                                    editor_name=str(st.session_state.get("current_editor") or "Collaborator"),
+                                )
+                                st.toast(
+                                    f"Acknowledged upstream change for Part {p_num}",
+                                    icon=":material/task_alt:",
+                                )
+                                st.rerun()
+                            except ValueError as exc:
+                                st.error(str(exc))
 
                 c_pl, c_sel, c_save = st.columns([2, 1.5, 1], vertical_alignment="bottom")
                 selected_placement_id = opt.get("fishbone_assignment_id")

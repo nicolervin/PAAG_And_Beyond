@@ -16,7 +16,12 @@ from utils.table_filters import (
     merge_filtered_edits,
     request_table_editor_reset,
 )
-from utils.table_ui import selectable_dataframe
+from utils.table_ui import (
+    prepare_editor_selection_column,
+    render_select_all_control,
+    resolve_editor_selected_rows,
+    selectable_dataframe,
+)
 
 
 project_id = st.session_state.get("project_id")
@@ -103,6 +108,9 @@ else:
         "deleted_at",
         "days_remaining",
     ]
+    visible_df = prepare_editor_selection_column(
+        visible_df, editor_key=editor_key, column="Select"
+    )
     disabled_columns = [col for col in visible_df.columns if col != "Select"]
 
     edited_visible = st.data_editor(
@@ -167,11 +175,20 @@ else:
         },
     )
 
-    merged_df = merge_filtered_edits(table_df, visible_df, edited_visible)
-    selected_rows = merged_df[merged_df["Select"].fillna(False).astype(bool)].copy()
+    selected_rows = resolve_editor_selected_rows(
+        visible_df, edited_visible, editor_key=editor_key, column="Select"
+    )
     selected_ids = [str(rid) for rid in selected_rows["id"].tolist() if str(rid).strip()]
 
     btn_bar = st.container(horizontal=True, vertical_alignment="center")
+    render_select_all_control(
+        btn_bar,
+        editor_key=editor_key,
+        selectable_count=len(visible_df),
+        selected_count=len(selected_ids),
+        key_prefix=f"recycle_bin_select_{'all' if include_all_projects else project_id}",
+        column="Select",
+    )
     restore_clicked = btn_bar.button(
         f"Restore selected ({len(selected_ids)})" if selected_ids else "Restore selected",
         icon=":material/restore_from_trash:",

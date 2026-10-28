@@ -441,11 +441,38 @@ def save_process_part_group(
             existing_options = {
                 str(row["part_id"]): dict(row)
                 for row in conn.execute(
-                    """SELECT id, part_id, handling_type, fishbone_assignment_id
+                    """SELECT id, part_id, handling_type, fishbone_assignment_id,
+                              source_snapshot_json, source_acknowledged_at
                        FROM process_part_options WHERE group_id=?""",
                     (group_id,),
                 ).fetchall()
             }
+            we_inputs = _fetch_work_element_snapshot_inputs(
+                conn, project_id, scenario_id, [work_element_id]
+            )
+            we_snap_row = we_inputs.get(str(work_element_id), {})
+            sec_row = (
+                conn.execute(
+                    "SELECT name FROM assembly_sections WHERE id=?",
+                    (section_id,),
+                ).fetchone()
+                if section_id
+                else None
+            )
+            live_mat_snap_json = json.dumps(
+                build_materials_process_snapshot(
+                    {
+                        "station": we_snap_row.get("pitch", ""),
+                        "work_element_label": we_snap_row.get("work_element_label", ""),
+                        "section_name": str(sec_row["name"]) if sec_row else "",
+                        "group_name": name,
+                        "selection_rule": selection_rule,
+                        "quantity": quantity,
+                        "group_notes": str(notes or "").strip(),
+                    }
+                ),
+                sort_keys=True,
+            )
             conn.execute(
                 f"""DELETE FROM process_part_options
                     WHERE group_id=? AND part_id NOT IN ({placeholders})""",
@@ -475,13 +502,27 @@ def save_process_part_group(
                     fishbone_assignment_id=fishbone_assignment_id,
                 )
                 if existing_option:
+                    prev_ht = str(existing_option.get("handling_type") or "").strip()
+                    new_ht = str(handling_type or "").strip()
+                    existing_snap = str(existing_option.get("source_snapshot_json") or "").strip()
+                    existing_ack = str(existing_option.get("source_acknowledged_at") or "").strip()
+                    if prev_ht and prev_ht == new_ht and existing_snap:
+                        snap_to_save = existing_snap
+                        ack_to_save = existing_ack or timestamp
+                    else:
+                        snap_to_save = live_mat_snap_json
+                        ack_to_save = timestamp if new_ht else ""
                     conn.execute(
                         """UPDATE process_part_options
-                           SET handling_type=?, fishbone_assignment_id=?, updated_at=?
+                           SET handling_type=?, fishbone_assignment_id=?,
+                               source_snapshot_json=?, source_acknowledged_at=?,
+                               updated_at=?
                            WHERE id=? AND group_id=?""",
                         (
                             handling_type,
                             fishbone_assignment_id,
+                            snap_to_save,
+                            ack_to_save,
                             timestamp,
                             option_id,
                             group_id,
@@ -491,14 +532,17 @@ def save_process_part_group(
                     conn.execute(
                         """INSERT INTO process_part_options
                            (id, group_id, part_id, handling_type,
-                            fishbone_assignment_id, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
+                            fishbone_assignment_id, source_snapshot_json,
+                            source_acknowledged_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             option_id,
                             group_id,
                             part_id,
                             handling_type,
                             fishbone_assignment_id,
+                            live_mat_snap_json,
+                            timestamp if handling_type else "",
                             timestamp,
                         ),
                     )
@@ -589,13 +633,27 @@ def set_process_part_option_handling_type(
             handling_type=normalized,
             fishbone_assignment_id=target_assignment_id,
         )
+        opt_inputs = _fetch_part_option_snapshot_inputs(
+            conn, project_id, scenario_id, [process_part_option_id]
+        )
+        opt_snap_row = opt_inputs.get(str(process_part_option_id))
+        live_snap_json = (
+            json.dumps(build_materials_process_snapshot(opt_snap_row), sort_keys=True)
+            if opt_snap_row
+            else ""
+        )
+        ack_at = timestamp if normalized else ""
         conn.execute(
             """UPDATE process_part_options
-               SET handling_type=?, fishbone_assignment_id=?, updated_at=?
+               SET handling_type=?, fishbone_assignment_id=?,
+                   source_snapshot_json=?, source_acknowledged_at=?,
+                   updated_at=?
                WHERE id=?""",
             (
                 normalized,
                 target_assignment_id,
+                live_snap_json,
+                ack_at,
                 timestamp,
                 process_part_option_id,
             ),
@@ -2727,10 +2785,23 @@ def get_scenario_part_handling_options(
         rows = conn.execute(
             f"""SELECT option.id AS option_id, option.part_id, option.handling_type,
                        option.fishbone_assignment_id,
+                       COALESCE(option.source_snapshot_json, '') AS source_snapshot_json,
+                       COALESCE(option.source_acknowledged_at, '') AS source_acknowledged_at,
                        group_row.id AS group_id, group_row.name AS group_name,
+                       group_row.selection_rule, group_row.quantity,
+                       COALESCE(group_row.notes, '') AS group_notes,
                        group_row.section_id, group_row.work_element_id,
                        part.part_number, part.description AS part_description,
                        we.operation, we.station,
+                       COALESCE(
+                           (SELECT NULLIF(TRIM(yamazumi.description), '')
+                            FROM yamazumi_elements yamazumi
+                            WHERE yamazumi.project_id=group_row.project_id
+                              AND yamazumi.process_element_id=we.id
+                            ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                           NULLIF(TRIM(we.operation), ''),
+                           ''
+                       ) AS work_element_label,
                        sec.name AS section_name,
                        fba.use_description AS fishbone_use_description
                 FROM process_part_groups group_row
@@ -2757,8 +2828,75 @@ def get_scenario_part_handling_options(
                 opt["placements"] = p_opts.to_dict(orient="records") if not p_opts.empty else []
             else:
                 opt["placements"] = []
+            ht = str(opt.get("handling_type") or "").strip()
+            if ht:
+                live_snap = build_materials_process_snapshot(opt)
+                diffs = format_process_snapshot_diff(opt.get("source_snapshot_json"), live_snap)
+                opt["upstream_changed"] = bool(diffs)
+                opt["upstream_diff_summary"] = " · ".join(diffs)
+                opt["sync_status"] = "⚠️ Upstream change" if diffs else "Synced"
+            else:
+                opt["upstream_changed"] = False
+                opt["upstream_diff_summary"] = ""
+                opt["sync_status"] = "Unclassified"
             result.append(opt)
         return result
+
+
+def acknowledge_materials_upstream_changes(
+    project_id: str,
+    scenario_id: str,
+    option_ids: list[str],
+    editor_name: str = "Collaborator",
+) -> dict:
+    """Refresh stored upstream Process snapshots for selected Materials part options and log history."""
+    editor = str(editor_name or "").strip() or "Collaborator"
+    ids = list(dict.fromkeys(str(v).strip() for v in option_ids if str(v).strip()))
+    timestamp = now_iso()
+    if not ids:
+        return {"row_count": 0, "acknowledged_ids": [], "timestamp": timestamp}
+    placeholders = ",".join("?" for _ in ids)
+    acknowledged_ids: list[str] = []
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        opt_inputs = _fetch_part_option_snapshot_inputs(
+            conn, project_id, scenario_id, ids
+        )
+        for oid in ids:
+            if oid not in opt_inputs:
+                continue
+            snap_json = json.dumps(
+                build_materials_process_snapshot(opt_inputs[oid]), sort_keys=True
+            )
+            conn.execute(
+                """UPDATE process_part_options
+                   SET source_snapshot_json=?, source_acknowledged_at=?, updated_at=?
+                   WHERE id=?""",
+                (snap_json, timestamp, timestamp, oid),
+            )
+            acknowledged_ids.append(oid)
+        if acknowledged_ids:
+            record_audit_event(
+                project_id,
+                "Process part options",
+                "Acknowledge upstream change",
+                len(acknowledged_ids),
+                editor,
+                {
+                    "scenario_id": scenario_id,
+                    "acknowledged_option_ids": acknowledged_ids,
+                },
+                _conn=conn,
+            )
+    return {
+        "row_count": len(acknowledged_ids),
+        "acknowledged_ids": acknowledged_ids,
+        "timestamp": timestamp,
+    }
 
 
 def work_element_downstream_impact(
@@ -3185,7 +3323,7 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
         }
 
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'acknowledge_materials_upstream_changes', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

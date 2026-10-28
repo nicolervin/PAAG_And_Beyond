@@ -248,12 +248,17 @@ def ergonomics_reviews(
         "notes",
         "requested_due_date",
         "legacy_description",
+        "source_snapshot_json",
+        "source_acknowledged_at",
         "created_at",
         "updated_at",
         "hazard_option_ids",
         "hazard_labels",
         "work_element_label",
         "pitch",
+        "sync_status",
+        "upstream_changed",
+        "upstream_diff_summary",
     ]
     params: tuple = (project_id, scenario_id)
     work_clause = ""
@@ -279,7 +284,23 @@ def ergonomics_reviews(
                                NULLIF(TRIM(work.operation), ''),
                                ''
                            ) AS work_element_label,
-                           COALESCE(work.station, '') AS pitch
+                           COALESCE(work.station, '') AS pitch,
+                           COALESCE(
+                               (SELECT yamazumi.time_s
+                                FROM yamazumi_elements yamazumi
+                                WHERE yamazumi.project_id=review.project_id
+                                  AND yamazumi.process_element_id=review.work_element_id
+                                ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                               work.cycle_time_s,
+                               0.0
+                           ) AS cycle_time_s,
+                           COALESCE(work.unit_orientation, '') AS unit_orientation,
+                           work.conveyor_height_in AS conveyor_height_in,
+                           work.platform_height_in AS platform_height_in,
+                           work.pit_depth_in AS pit_depth_in,
+                           COALESCE(work.resource_type, 'Human') AS resource_type,
+                           COALESCE(work.resource_detail, '') AS resource_detail,
+                           COALESCE(work.model_applicability, 'All') AS model_applicability
                     FROM ergonomics_reviews review
                     LEFT JOIN work_elements work
                       ON work.id=review.work_element_id
@@ -312,6 +333,26 @@ def ergonomics_reviews(
         row["hazard_option_ids"] = [str(item["hazard_option_id"]) for item in selections]
         row["hazard_labels"] = [str(item["label"]) for item in selections]
         row["legacy_description"] = str(row.get("legacy_description") or "")
+        row["source_snapshot_json"] = str(row.get("source_snapshot_json") or "")
+        row["source_acknowledged_at"] = str(row.get("source_acknowledged_at") or "")
+        has_we = bool(str(row.get("work_element_id") or "").strip())
+        has_real = _ergonomics_review_has_real_content(row) or bool(
+            row["source_acknowledged_at"].strip()
+        )
+        if has_we and has_real:
+            live_snap = build_ergonomics_process_snapshot(row)
+            diffs = format_process_snapshot_diff(row["source_snapshot_json"], live_snap)
+            row["upstream_changed"] = bool(diffs)
+            row["upstream_diff_summary"] = " · ".join(diffs)
+            row["sync_status"] = "⚠️ Upstream change" if diffs else "Synced"
+        elif has_we:
+            row["upstream_changed"] = False
+            row["upstream_diff_summary"] = ""
+            row["sync_status"] = "Synced"
+        else:
+            row["upstream_changed"] = False
+            row["upstream_diff_summary"] = ""
+            row["sync_status"] = "Unlinked"
     return pd.DataFrame(review_rows, columns=columns)
 
 @cached_store_read
@@ -663,17 +704,69 @@ def save_ergonomics_review_rows(
                 (project_id, scenario_id, *sorted(discard_ids)),
             )
 
+        we_inputs = _fetch_work_element_snapshot_inputs(
+            conn,
+            project_id,
+            scenario_id,
+            [str(r["work_element_id"]) for r in rows_to_save if r.get("work_element_id")],
+        )
+        surviving_merge_ids = {str(m["surviving_review_id"]) for m in merge_audit}
+
         created_ids: list[str] = []
         updated_ids: list[str] = []
         for row in rows_to_save:
             review_id = row["id"]
             existing = existing_rows.get(review_id)
+            we_id_str = str(row["work_element_id"] or "").strip()
+            we_row = we_inputs.get(we_id_str) if we_id_str else None
+            live_snap_json = (
+                json.dumps(build_ergonomics_process_snapshot(we_row), sort_keys=True)
+                if we_row
+                else ""
+            )
             if existing:
+                existing_haz_set = set(existing_hazards_by_review.get(review_id, {}).keys())
+                new_haz_set = set(row["hazard_option_ids"])
+                row_modified = (
+                    review_id in surviving_merge_ids
+                    or str(existing.get("work_element_id") or "") != str(row["work_element_id"] or "")
+                    or str(existing.get("process_part_option_id") or "") != str(row["process_part_option_id"] or "")
+                    or str(existing.get("status") or "Started") != row["status"]
+                    or str(existing.get("risk_classification") or "Not yet assessed") != row["risk_classification"]
+                    or str(existing.get("reviewer") or "").strip() != row["reviewer"]
+                    or str(existing.get("notes") or "").strip() != row["notes"]
+                    or str(existing.get("requested_due_date") or "") != str(row["requested_due_date"] or "")
+                    or str(existing.get("legacy_description") or "").strip() != row["legacy_description"]
+                    or existing_haz_set != new_haz_set
+                )
+                was_untouched = (
+                    not _ergonomics_review_has_real_content(
+                        {**existing, "hazard_option_ids": list(existing_haz_set)}
+                    )
+                    and not str(existing.get("source_acknowledged_at") or "").strip()
+                )
+                existing_snap_json = str(existing.get("source_snapshot_json") or "").strip()
+                existing_ack_at = str(existing.get("source_acknowledged_at") or "").strip()
+                if not we_id_str:
+                    snap_json = ""
+                    ack_at = ""
+                elif row_modified or was_untouched or not existing_snap_json:
+                    snap_json = live_snap_json
+                    ack_at = (
+                        timestamp
+                        if (_ergonomics_review_has_real_content(row) or row_modified)
+                        else existing_ack_at
+                    )
+                else:
+                    snap_json = existing_snap_json
+                    ack_at = existing_ack_at
                 conn.execute(
                     """UPDATE ergonomics_reviews
                        SET work_element_id=?, process_part_option_id=?, status=?,
                            risk_classification=?, reviewer=?, notes=?,
-                           requested_due_date=?, legacy_description=?, updated_at=?
+                           requested_due_date=?, legacy_description=?,
+                           source_snapshot_json=?, source_acknowledged_at=?,
+                           updated_at=?
                        WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
                         row["work_element_id"],
@@ -684,6 +777,8 @@ def save_ergonomics_review_rows(
                         row["notes"],
                         row["requested_due_date"],
                         row["legacy_description"],
+                        snap_json,
+                        ack_at,
                         timestamp,
                         review_id,
                         project_id,
@@ -692,13 +787,19 @@ def save_ergonomics_review_rows(
                 )
                 updated_ids.append(review_id)
             else:
+                ack_at = (
+                    timestamp
+                    if (we_id_str and _ergonomics_review_has_real_content(row))
+                    else ""
+                )
                 conn.execute(
                     """INSERT INTO ergonomics_reviews
                        (id, project_id, scenario_id, work_element_id,
                         process_part_option_id, status, reviewer, notes,
-                        requested_due_date, legacy_description, created_at, updated_at,
-                        risk_classification)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        requested_due_date, legacy_description,
+                        source_snapshot_json, source_acknowledged_at,
+                        created_at, updated_at, risk_classification)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         review_id,
                         project_id,
@@ -710,6 +811,8 @@ def save_ergonomics_review_rows(
                         row["notes"],
                         row["requested_due_date"],
                         row["legacy_description"],
+                        live_snap_json,
+                        ack_at,
                         timestamp,
                         timestamp,
                         row["risk_classification"],
@@ -849,12 +952,26 @@ def save_ergonomics_review(
             }
             if inactive_new:
                 raise ValueError("Inactive Ergonomics hazards cannot be newly selected.")
+        we_inputs = (
+            _fetch_work_element_snapshot_inputs(conn, project_id, scenario_id, [work_element_id])
+            if work_element_id
+            else {}
+        )
+        we_row = we_inputs.get(str(work_element_id)) if work_element_id else None
+        live_snap_json = (
+            json.dumps(build_ergonomics_process_snapshot(we_row), sort_keys=True)
+            if we_row
+            else ""
+        )
+        ack_at = timestamp if work_element_id else ""
         if existing_review:
             conn.execute(
                 """UPDATE ergonomics_reviews
                    SET work_element_id=?, process_part_option_id=?, status=?,
                        risk_classification=?, reviewer=?, notes=?,
-                       requested_due_date=?, legacy_description=?, updated_at=?
+                       requested_due_date=?, legacy_description=?,
+                       source_snapshot_json=?, source_acknowledged_at=?,
+                       updated_at=?
                    WHERE id=? AND project_id=? AND scenario_id=?""",
                 (
                     work_element_id,
@@ -865,6 +982,8 @@ def save_ergonomics_review(
                     notes,
                     requested_due_date,
                     legacy_description,
+                    live_snap_json,
+                    ack_at,
                     timestamp,
                     review_id,
                     project_id,
@@ -876,9 +995,10 @@ def save_ergonomics_review(
                 """INSERT INTO ergonomics_reviews
                    (id, project_id, scenario_id, work_element_id,
                     process_part_option_id, status, reviewer, notes,
-                    requested_due_date, legacy_description, created_at, updated_at,
-                    risk_classification)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    requested_due_date, legacy_description,
+                    source_snapshot_json, source_acknowledged_at,
+                    created_at, updated_at, risk_classification)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     review_id,
                     project_id,
@@ -890,6 +1010,8 @@ def save_ergonomics_review(
                     notes,
                     requested_due_date,
                     legacy_description,
+                    live_snap_json,
+                    ack_at,
                     timestamp,
                     timestamp,
                     risk_classification,
@@ -1136,6 +1258,16 @@ def link_legacy_concern_to_work_element(
             "Not yet assessed": 1,
         }
 
+        we_inputs = _fetch_work_element_snapshot_inputs(
+            conn, project_id, scenario_id, [target_work_element_id]
+        )
+        we_row = we_inputs.get(str(target_work_element_id))
+        live_snap_json = (
+            json.dumps(build_ergonomics_process_snapshot(we_row), sort_keys=True)
+            if we_row
+            else ""
+        )
+
         if existing_rows:
             target_review = dict(existing_rows[0])
             surviving_id = target_review["id"]
@@ -1188,7 +1320,9 @@ def link_legacy_concern_to_work_element(
             conn.execute(
                 """UPDATE ergonomics_reviews
                    SET legacy_description=?, notes=?, risk_classification=?,
-                       status=?, reviewer=?, requested_due_date=?, updated_at=?
+                       status=?, reviewer=?, requested_due_date=?,
+                       source_snapshot_json=?, source_acknowledged_at=?,
+                       updated_at=?
                    WHERE id=?""",
                 (
                     legacy_title,
@@ -1197,6 +1331,8 @@ def link_legacy_concern_to_work_element(
                     merged_status,
                     merged_reviewer,
                     merged_due_date,
+                    live_snap_json,
+                    timestamp,
                     timestamp,
                     surviving_id,
                 ),
@@ -1235,9 +1371,18 @@ def link_legacy_concern_to_work_element(
             surviving_id = legacy_review_id
             conn.execute(
                 """UPDATE ergonomics_reviews
-                   SET work_element_id=?, legacy_description=?, updated_at=?
+                   SET work_element_id=?, legacy_description=?,
+                       source_snapshot_json=?, source_acknowledged_at=?,
+                       updated_at=?
                    WHERE id=?""",
-                (target_work_element_id, legacy_title, timestamp, surviving_id),
+                (
+                    target_work_element_id,
+                    legacy_title,
+                    live_snap_json,
+                    timestamp,
+                    timestamp,
+                    surviving_id,
+                ),
             )
             discarded_id = None
 
@@ -1742,6 +1887,72 @@ def ergonomics_slide_summary(
         }
 
 
+def acknowledge_ergonomics_upstream_changes(
+    project_id: str,
+    scenario_id: str,
+    review_ids: list[str],
+    editor_name: str = "Collaborator",
+) -> dict:
+    """Refresh stored upstream Process snapshots for selected Ergonomics reviews and log history."""
+    editor = str(editor_name or "").strip() or "Collaborator"
+    ids = list(dict.fromkeys(str(v).strip() for v in review_ids if str(v).strip()))
+    timestamp = now_iso()
+    if not ids:
+        return {"row_count": 0, "acknowledged_ids": [], "timestamp": timestamp}
+    placeholders = ",".join("?" for _ in ids)
+    acknowledged_ids: list[str] = []
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        rows = conn.execute(
+            f"""SELECT id, work_element_id
+                FROM ergonomics_reviews
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        ).fetchall()
+        we_inputs = _fetch_work_element_snapshot_inputs(
+            conn,
+            project_id,
+            scenario_id,
+            [str(r["work_element_id"]) for r in rows if r["work_element_id"]],
+        )
+        for row in rows:
+            we_id = str(row["work_element_id"] or "").strip()
+            if not we_id or we_id not in we_inputs:
+                continue
+            snap_json = json.dumps(
+                build_ergonomics_process_snapshot(we_inputs[we_id]), sort_keys=True
+            )
+            conn.execute(
+                """UPDATE ergonomics_reviews
+                   SET source_snapshot_json=?, source_acknowledged_at=?, updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (snap_json, timestamp, timestamp, str(row["id"]), project_id, scenario_id),
+            )
+            acknowledged_ids.append(str(row["id"]))
+        if acknowledged_ids:
+            record_audit_event(
+                project_id,
+                "Ergonomics reviews",
+                "Acknowledge upstream change",
+                len(acknowledged_ids),
+                editor,
+                {
+                    "scenario_id": scenario_id,
+                    "acknowledged_review_ids": acknowledged_ids,
+                },
+                _conn=conn,
+            )
+    return {
+        "row_count": len(acknowledged_ids),
+        "acknowledged_ids": acknowledged_ids,
+        "timestamp": timestamp,
+    }
+
+
 __domain_exports__ = [
     'ergonomic_hazard_options',
     'save_ergonomic_hazard_option_rows',
@@ -1756,6 +1967,7 @@ __domain_exports__ = [
     'ergonomics_review_save_plan',
     'save_ergonomics_review_rows',
     'save_ergonomics_review',
+    'acknowledge_ergonomics_upstream_changes',
     'delete_ergonomics_reviews',
     'create_legacy_ergonomics_review',
     'delete_unlinked_ergonomics_reviews',

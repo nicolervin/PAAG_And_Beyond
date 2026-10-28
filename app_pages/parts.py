@@ -62,7 +62,10 @@ from utils.table_ui import (
     editable_table_footer,
     editable_table_heading,
     native_selected_rows,
+    prepare_editor_selection_column,
+    render_select_all_control,
     required_field_errors,
+    resolve_editor_selected_rows,
     selectable_dataframe,
     selected_rows_action_bar,
     stage_native_delete_confirmation,
@@ -987,7 +990,9 @@ if qp_part_id or qp_part_number:
 
 filter_expander = st.expander("Filter columns", icon=":material/filter_list:", expanded=False)
 sort_controls_slot = st.container()
-keyword_filter_slot = st.container()
+keyword_and_selection_row = st.container(horizontal=True, vertical_alignment="bottom")
+keyword_filter_slot = keyword_and_selection_row.container()
+parts_action_slot = keyword_and_selection_row.empty()
 
 with filter_expander:
     pre_filter_editor_state = deepcopy(st.session_state.get(parts_editor_key, {}) or {})
@@ -1058,7 +1063,6 @@ with filter_expander:
     if False:
         if harvest_added_rows_into_draft(pre_filter_added_rows) or True:
             st.rerun()
-    parts_action_slot = st.empty()
     clear_filter_actions = st.container(horizontal=True, horizontal_alignment="right")
     if clear_filter_actions.button(
         "Clear filters",
@@ -1077,6 +1081,9 @@ with filter_expander:
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.rerun()
+
+
+    parts_bulk_feature_slot = st.empty()
 
 
 candidate_sort_columns = [
@@ -1137,9 +1144,13 @@ parts_editor_rows = apply_id_keyed_editor_draft(
 parts_for_editing = parts_editor_rows.copy()
 visible_editor_columns = [
     "id",
+    "selected",
     *[col for col in parts_column_order if col != "id" and col in parts_editor_rows.columns],
 ]
-parts_editor_display_rows = parts_editor_rows.reindex(columns=visible_editor_columns)
+parts_editor_display_rows = prepare_editor_selection_column(
+    parts_editor_rows.reindex(columns=visible_editor_columns),
+    editor_key=parts_editor_key,
+)
 
 
 def open_part_details() -> None:
@@ -1159,11 +1170,13 @@ if "part_code" in parts_editor_display_rows.columns:
         if cleaned_code and cleaned_code not in part_code_options:
             part_code_options.append(cleaned_code)
 
+
+
 edited_parts = st.data_editor(
     parts_editor_display_rows,
     key=parts_editor_key,
     hide_index=True,
-    num_rows="dynamic",
+    num_rows="add",
     height=430,
     disabled=[
         col for col in [
@@ -1174,9 +1187,16 @@ edited_parts = st.data_editor(
         ]
         if col in visible_editor_columns
     ],
-    column_order=parts_column_order,
+    column_order=["selected", *parts_column_order],
     column_config={
         "id": None,
+        "selected": st.column_config.CheckboxColumn(
+            "Select",
+            default=False,
+            pinned=True,
+            width="small",
+            help="Select parts for bulk feature updates or deletion.",
+        ),
         "official_windchill_part_name": None,
         "technology_engineer": None,
         "assembly_id": None,
@@ -1342,11 +1362,64 @@ st.download_button(
     icon=":material/download:",
 )
 
-selected_saved_parts = native_selected_rows(parts_editor_display_rows, editor_key=parts_editor_key)
-if not selected_saved_parts.empty:
+native_selected_parts = native_selected_rows(
+    parts_editor_display_rows, editor_key=parts_editor_key
+)
+selected_all_parts = resolve_editor_selected_rows(
+    parts_editor_display_rows,
+    edited_parts,
+    editor_key=parts_editor_key,
+    include_draft_new=True,
+)
+selected_saved_parts = selected_all_parts.loc[
+    ~selected_all_parts["id"].astype(str).str.startswith("__draft_new__")
+].copy()
+selectable_saved_parts_count = int(
+    (
+        parts_editor_display_rows["id"].fillna("").astype(str).str.strip().ne("")
+        & ~parts_editor_display_rows["id"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.startswith("__draft_new__")
+    ).sum()
+)
+bulk_controls = selected_rows_action_bar(
+    parent=parts_action_slot,
+)
+render_select_all_control(
+    bulk_controls,
+    editor_key=parts_editor_key,
+    selectable_count=selectable_saved_parts_count,
+    selected_count=len(selected_saved_parts),
+    key_prefix=f"parts_select_{scenario_id}",
+)
+feature_bulk_controls = selected_rows_action_bar(
+    parent=parts_bulk_feature_slot,
+)
+bulk_applicability = feature_bulk_controls.multiselect(
+    "Feature applicability for selected parts",
+    options=feature_options,
+    placeholder="Choose All models or feature values",
+    key="parts_bulk_feature_applicability",
+)
+apply_bulk_applicability = feature_bulk_controls.button(
+    f"Apply to selected ({len(selected_saved_parts)})",
+    type="primary",
+    icon=":material/checklist:",
+    disabled=selected_saved_parts.empty,
+)
+delete_selected_parts = bulk_controls.button(
+    f"Delete selected ({len(selected_all_parts)})",
+    icon=":material/delete:",
+    disabled=selected_all_parts.empty,
+    key="destructive_parts_delete_selected",
+    help="Delete the selected part(s) from the project catalog.",
+)
+if delete_selected_parts or not native_selected_parts.empty:
     selected_draft_ids = set(
-        selected_saved_parts.loc[
-            selected_saved_parts["id"].astype(str).str.startswith("__draft_new__"),
+        selected_all_parts.loc[
+            selected_all_parts["id"].astype(str).str.startswith("__draft_new__"),
             "id",
         ].astype(str)
     )
@@ -1361,28 +1434,12 @@ if not selected_saved_parts.empty:
             current_draft_vals.pop(did, None)
         st.session_state[parts_draft_values_key] = current_draft_vals
         request_table_editor_reset(parts_editor_key)
-        if len(selected_draft_ids) == len(selected_saved_parts):
+        if selected_saved_parts.empty:
             st.rerun()
-if not selected_saved_parts.empty:
-    selected_saved_parts = selected_saved_parts.loc[
-        ~selected_saved_parts["id"].astype(str).str.startswith("__draft_new__")
-    ].copy()
-bulk_controls = selected_rows_action_bar(
-    parent=parts_action_slot,
+request_delete_bulk_parts = bool(
+    (delete_selected_parts or not native_selected_parts.empty)
+    and not selected_saved_parts.empty
 )
-bulk_applicability = bulk_controls.multiselect(
-    "Feature applicability for selected parts",
-    options=feature_options,
-    placeholder="Choose All models or feature values",
-    key="parts_bulk_feature_applicability",
-)
-apply_bulk_applicability = bulk_controls.button(
-    f"Apply to selected ({len(selected_saved_parts)})",
-    type="primary",
-    icon=":material/checklist:",
-    disabled=selected_saved_parts.empty,
-)
-request_delete_bulk_parts = not selected_saved_parts.empty
 
 if apply_bulk_applicability:
     if has_parts_draft or table_has_unsaved_changes(

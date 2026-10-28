@@ -910,6 +910,335 @@ def _repair_dangling_legacy_foreign_keys(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _normalize_snapshot_float(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        num = float(value)
+        if math.isnan(num) or math.isinf(num):
+            return None
+        return round(num, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_ergonomics_process_snapshot(row: dict) -> dict:
+    """Build a normalized upstream Process step snapshot for an Ergonomics review."""
+    return {
+        "pitch": str(row.get("pitch") if "pitch" in row else (row.get("station") or "")).strip(),
+        "work_element_label": str(
+            row.get("work_element_label")
+            if "work_element_label" in row
+            else (row.get("operation") or "")
+        ).strip(),
+        "cycle_time_s": _normalize_snapshot_float(row.get("cycle_time_s")) or 0.0,
+        "unit_orientation": str(row.get("unit_orientation") or "").strip(),
+        "conveyor_height_in": _normalize_snapshot_float(row.get("conveyor_height_in")),
+        "platform_height_in": _normalize_snapshot_float(row.get("platform_height_in")),
+        "pit_depth_in": _normalize_snapshot_float(row.get("pit_depth_in")),
+        "resource_type": str(row.get("resource_type") or "Human").strip() or "Human",
+        "resource_detail": str(row.get("resource_detail") or "").strip(),
+        "model_applicability": str(row.get("model_applicability") or "All").strip() or "All",
+    }
+
+
+def build_safety_process_snapshot(row: dict) -> dict:
+    """Build a normalized upstream Process step snapshot for a Safety requirement."""
+    return {
+        "pitch": str(row.get("pitch") if "pitch" in row else (row.get("station") or "")).strip(),
+        "work_element_label": str(
+            row.get("work_element_label")
+            if "work_element_label" in row
+            else (row.get("operation") or "")
+        ).strip(),
+        "cycle_time_s": _normalize_snapshot_float(row.get("cycle_time_s")) or 0.0,
+        "unit_orientation": str(row.get("unit_orientation") or "").strip(),
+        "conveyor_height_in": _normalize_snapshot_float(row.get("conveyor_height_in")),
+        "platform_height_in": _normalize_snapshot_float(row.get("platform_height_in")),
+        "pit_depth_in": _normalize_snapshot_float(row.get("pit_depth_in")),
+        "resource_type": str(row.get("resource_type") or "Human").strip() or "Human",
+        "resource_detail": str(row.get("resource_detail") or "").strip(),
+    }
+
+
+def build_materials_process_snapshot(row: dict) -> dict:
+    """Build a normalized upstream Process & part-group snapshot for a Materials part option."""
+    qty = _normalize_snapshot_float(row.get("quantity"))
+    return {
+        "pitch": str(row.get("station") if "station" in row else (row.get("pitch") or "")).strip(),
+        "work_element_label": str(
+            row.get("work_element_label")
+            if "work_element_label" in row
+            else (row.get("operation") or "")
+        ).strip(),
+        "section_name": str(row.get("section_name") or "").strip(),
+        "group_name": str(
+            row.get("group_name") if "group_name" in row else (row.get("name") or "")
+        ).strip(),
+        "selection_rule": str(row.get("selection_rule") or "Use all").strip() or "Use all",
+        "quantity": qty if qty is not None else 1.0,
+        "group_notes": str(
+            row.get("group_notes") if "group_notes" in row else (row.get("notes") or "")
+        ).strip(),
+    }
+
+
+def _format_snapshot_field_value(key: str, value) -> str:
+    if value is None or value == "":
+        return "Unassigned" if key == "pitch" else "—"
+    if key == "cycle_time_s":
+        num = _normalize_snapshot_float(value) or 0.0
+        return f"{int(num)}s" if num.is_integer() else f"{num:g}s"
+    if key in {"conveyor_height_in", "platform_height_in", "pit_depth_in"}:
+        num = _normalize_snapshot_float(value)
+        if num is None:
+            return "—"
+        return f'{int(num)}"' if num.is_integer() else f'{num:g}"'
+    if key == "quantity":
+        num = _normalize_snapshot_float(value)
+        if num is None:
+            return "1"
+        return f"{int(num)}" if num.is_integer() else f"{num:g}"
+    text = str(value).strip()
+    if not text:
+        return "Unassigned" if key == "pitch" else "—"
+    if key in {"work_element_label", "group_name", "group_notes"}:
+        short = text if len(text) <= 44 else f"{text[:41]}..."
+        return f'"{short}"'
+    return text
+
+
+_SNAPSHOT_FIELD_LABELS: list[tuple[str, str]] = [
+    ("pitch", "Pitch"),
+    ("work_element_label", "Operation"),
+    ("cycle_time_s", "Time"),
+    ("unit_orientation", "Orientation"),
+    ("conveyor_height_in", "Conveyor height"),
+    ("platform_height_in", "Platform height"),
+    ("pit_depth_in", "Pit depth"),
+    ("resource_type", "Resource"),
+    ("resource_detail", "Resource detail"),
+    ("model_applicability", "Models"),
+    ("section_name", "Section"),
+    ("group_name", "Part group"),
+    ("selection_rule", "Selection rule"),
+    ("quantity", "Quantity"),
+    ("group_notes", "Part notes"),
+]
+
+
+def format_process_snapshot_diff(
+    stored_snapshot_json: str | None,
+    live_snapshot: dict,
+) -> list[str]:
+    """Compare a stored JSON snapshot against a live snapshot dict and return human-readable diffs."""
+    raw = str(stored_snapshot_json or "").strip()
+    if not raw or not live_snapshot:
+        return []
+    try:
+        stored = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(stored, dict) or not stored:
+        return []
+    diffs: list[str] = []
+    for key, label in _SNAPSHOT_FIELD_LABELS:
+        if key not in live_snapshot or key not in stored:
+            continue
+        old_val = stored.get(key)
+        new_val = live_snapshot.get(key)
+        if key in {"cycle_time_s", "conveyor_height_in", "platform_height_in", "pit_depth_in", "quantity"}:
+            norm_old = _normalize_snapshot_float(old_val)
+            norm_new = _normalize_snapshot_float(new_val)
+            if key == "cycle_time_s":
+                norm_old = norm_old or 0.0
+                norm_new = norm_new or 0.0
+            if norm_old == norm_new:
+                continue
+        else:
+            norm_old = str(old_val or "").strip()
+            norm_new = str(new_val or "").strip()
+            if norm_old == norm_new:
+                continue
+        diffs.append(
+            f"{label}: {_format_snapshot_field_value(key, old_val)} → {_format_snapshot_field_value(key, new_val)}"
+        )
+    return diffs
+
+
+def _fetch_work_element_snapshot_inputs(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    work_element_ids: list[str] | set[str] | None = None,
+) -> dict[str, dict]:
+    """Fetch live Process step rows ready for build_ergonomics/safety_process_snapshot."""
+    ids = [str(wid).strip() for wid in (work_element_ids or []) if str(wid).strip()]
+    if work_element_ids is not None and not ids:
+        return {}
+    id_clause = ""
+    params: tuple = (project_id, scenario_id)
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        id_clause = f" AND work.id IN ({placeholders})"
+        params = (*params, *ids)
+    rows = conn.execute(
+        f"""SELECT work.id,
+                   COALESCE(work.station, '') AS pitch,
+                   COALESCE(
+                       (SELECT NULLIF(TRIM(yamazumi.description), '')
+                        FROM yamazumi_elements yamazumi
+                        WHERE yamazumi.project_id=work.project_id
+                          AND yamazumi.process_element_id=work.id
+                        ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                       NULLIF(TRIM(work.operation), ''),
+                       ''
+                   ) AS work_element_label,
+                   COALESCE(
+                       (SELECT yamazumi.time_s
+                        FROM yamazumi_elements yamazumi
+                        WHERE yamazumi.project_id=work.project_id
+                          AND yamazumi.process_element_id=work.id
+                        ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                       work.cycle_time_s,
+                       0.0
+                   ) AS cycle_time_s,
+                   COALESCE(work.unit_orientation, '') AS unit_orientation,
+                   work.conveyor_height_in,
+                   work.platform_height_in,
+                   work.pit_depth_in,
+                   COALESCE(work.resource_type, 'Human') AS resource_type,
+                   COALESCE(work.resource_detail, '') AS resource_detail,
+                   COALESCE(work.model_applicability, 'All') AS model_applicability
+            FROM work_elements work
+            WHERE work.project_id=? AND work.scenario_id=?{id_clause}""",
+        params,
+    ).fetchall()
+    return {str(row["id"]): dict(row) for row in rows}
+
+
+def _fetch_part_option_snapshot_inputs(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    option_ids: list[str] | set[str] | None = None,
+) -> dict[str, dict]:
+    """Fetch live Process & part-group rows ready for build_materials_process_snapshot."""
+    ids = [str(oid).strip() for oid in (option_ids or []) if str(oid).strip()]
+    if option_ids is not None and not ids:
+        return {}
+    id_clause = ""
+    params: tuple = (project_id, scenario_id)
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        id_clause = f" AND option.id IN ({placeholders})"
+        params = (*params, *ids)
+    rows = conn.execute(
+        f"""SELECT option.id AS option_id,
+                   group_row.name AS group_name,
+                   group_row.selection_rule,
+                   group_row.quantity,
+                   COALESCE(group_row.notes, '') AS group_notes,
+                   COALESCE(we.station, '') AS station,
+                   COALESCE(
+                       (SELECT NULLIF(TRIM(yamazumi.description), '')
+                        FROM yamazumi_elements yamazumi
+                        WHERE yamazumi.project_id=group_row.project_id
+                          AND yamazumi.process_element_id=we.id
+                        ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                       NULLIF(TRIM(we.operation), ''),
+                       ''
+                   ) AS work_element_label,
+                   COALESCE(sec.name, '') AS section_name
+            FROM process_part_groups group_row
+            JOIN process_part_options option ON option.group_id=group_row.id
+            JOIN work_elements we ON we.id=group_row.work_element_id
+            LEFT JOIN assembly_sections sec ON sec.id=group_row.section_id
+            WHERE group_row.project_id=? AND group_row.scenario_id=?{id_clause}""",
+        params,
+    ).fetchall()
+    return {str(row["option_id"]): dict(row) for row in rows}
+
+
+def _backfill_upstream_process_snapshots(conn: sqlite3.Connection) -> None:
+    """Backfill baseline upstream Process snapshots on existing rows without false alerts."""
+    ergo_missing = conn.execute(
+        """SELECT id, project_id, scenario_id, work_element_id
+           FROM ergonomics_reviews
+           WHERE work_element_id IS NOT NULL
+             AND TRIM(work_element_id) <> ''
+             AND (source_snapshot_json IS NULL OR TRIM(source_snapshot_json) = '')"""
+    ).fetchall()
+    for row in ergo_missing:
+        inputs = _fetch_work_element_snapshot_inputs(
+            conn,
+            str(row["project_id"]),
+            str(row["scenario_id"]),
+            [str(row["work_element_id"])],
+        )
+        we_row = inputs.get(str(row["work_element_id"]))
+        if we_row:
+            snap_json = json.dumps(build_ergonomics_process_snapshot(we_row), sort_keys=True)
+            conn.execute(
+                "UPDATE ergonomics_reviews SET source_snapshot_json=? WHERE id=?",
+                (snap_json, str(row["id"])),
+            )
+
+    safety_missing = conn.execute(
+        """SELECT id, project_id, scenario_id, work_element_id, updated_at
+           FROM safety_requirements
+           WHERE work_element_id IS NOT NULL
+             AND TRIM(work_element_id) <> ''
+             AND (source_snapshot_json IS NULL OR TRIM(source_snapshot_json) = '')"""
+    ).fetchall()
+    for row in safety_missing:
+        inputs = _fetch_work_element_snapshot_inputs(
+            conn,
+            str(row["project_id"]),
+            str(row["scenario_id"]),
+            [str(row["work_element_id"])],
+        )
+        we_row = inputs.get(str(row["work_element_id"]))
+        if we_row:
+            snap_json = json.dumps(build_safety_process_snapshot(we_row), sort_keys=True)
+            conn.execute(
+                """UPDATE safety_requirements
+                   SET source_snapshot_json=?,
+                       source_acknowledged_at=COALESCE(NULLIF(TRIM(source_acknowledged_at), ''), updated_at)
+                   WHERE id=?""",
+                (snap_json, str(row["id"])),
+            )
+
+    mat_missing = conn.execute(
+        """SELECT option.id AS option_id,
+                  option.handling_type,
+                  option.updated_at,
+                  group_row.project_id,
+                  group_row.scenario_id
+           FROM process_part_options option
+           JOIN process_part_groups group_row ON group_row.id=option.group_id
+           WHERE option.source_snapshot_json IS NULL OR TRIM(option.source_snapshot_json) = ''"""
+    ).fetchall()
+    for row in mat_missing:
+        inputs = _fetch_part_option_snapshot_inputs(
+            conn,
+            str(row["project_id"]),
+            str(row["scenario_id"]),
+            [str(row["option_id"])],
+        )
+        opt_row = inputs.get(str(row["option_id"]))
+        if opt_row:
+            snap_json = json.dumps(build_materials_process_snapshot(opt_row), sort_keys=True)
+            ack_at = str(row["updated_at"] or "") if str(row["handling_type"] or "").strip() else ""
+            conn.execute(
+                """UPDATE process_part_options
+                   SET source_snapshot_json=?,
+                       source_acknowledged_at=COALESCE(NULLIF(TRIM(source_acknowledged_at), ''), ?)
+                   WHERE id=?""",
+                (snap_json, ack_at, str(row["option_id"])),
+            )
+
+
 def _create_started_ergonomics_review(
     conn: sqlite3.Connection,
     project_id: str,
@@ -927,20 +1256,48 @@ def _create_started_ergonomics_review(
     if existing:
         return str(existing["id"])
     review_id = str(uuid4())
-    conn.execute(
-        """INSERT INTO ergonomics_reviews
-           (id, project_id, scenario_id, work_element_id, status,
-            reviewer, notes, requested_due_date, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'Started', '', '', NULL, ?, ?)""",
-        (
-            review_id,
-            project_id,
-            scenario_id,
-            work_element_id,
-            timestamp,
-            timestamp,
-        ),
-    )
+    er_cols = {
+        str(r[1]) for r in conn.execute("PRAGMA table_info(ergonomics_reviews)").fetchall()
+    }
+    snap_json = ""
+    if "source_snapshot_json" in er_cols:
+        inputs = _fetch_work_element_snapshot_inputs(
+            conn, project_id, scenario_id, [work_element_id]
+        )
+        we_row = inputs.get(str(work_element_id))
+        if we_row:
+            snap_json = json.dumps(build_ergonomics_process_snapshot(we_row), sort_keys=True)
+        conn.execute(
+            """INSERT INTO ergonomics_reviews
+               (id, project_id, scenario_id, work_element_id, status,
+                reviewer, notes, requested_due_date, source_snapshot_json,
+                source_acknowledged_at, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'Started', '', '', NULL, ?, '', ?, ?)""",
+            (
+                review_id,
+                project_id,
+                scenario_id,
+                work_element_id,
+                snap_json,
+                timestamp,
+                timestamp,
+            ),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO ergonomics_reviews
+               (id, project_id, scenario_id, work_element_id, status,
+                reviewer, notes, requested_due_date, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'Started', '', '', NULL, ?, ?)""",
+            (
+                review_id,
+                project_id,
+                scenario_id,
+                work_element_id,
+                timestamp,
+                timestamp,
+            ),
+        )
     return review_id
 
 def _create_work_element_with_started_ergonomics_review(
@@ -1092,8 +1449,10 @@ def _clone_ergonomics_reviews(
             """INSERT INTO ergonomics_reviews
                (id, project_id, scenario_id, work_element_id,
                 process_part_option_id, status, risk_classification, reviewer,
-                notes, requested_due_date, legacy_description, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                notes, requested_due_date, legacy_description,
+                source_snapshot_json, source_acknowledged_at,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 cloned_review_id,
                 project_id,
@@ -1106,6 +1465,8 @@ def _clone_ergonomics_reviews(
                 source_review["notes"],
                 source_review["requested_due_date"],
                 source_review["legacy_description"] if "legacy_description" in source_review.keys() else "",
+                source_review["source_snapshot_json"] if "source_snapshot_json" in source_review.keys() else "",
+                source_review["source_acknowledged_at"] if "source_acknowledged_at" in source_review.keys() else "",
                 timestamp,
                 timestamp,
             ),
@@ -1620,6 +1981,8 @@ def init_db() -> None:
                 requirement_description TEXT NOT NULL,
                 ppe TEXT NOT NULL DEFAULT '',
                 active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                source_snapshot_json TEXT NOT NULL DEFAULT '',
+                source_acknowledged_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -2018,6 +2381,8 @@ def init_db() -> None:
                     CHECK (handling_type IS NULL OR handling_type IN ('Handle', 'Consume')),
                 fishbone_assignment_id TEXT
                     REFERENCES fishbone_part_assignments(id),
+                source_snapshot_json TEXT NOT NULL DEFAULT '',
+                source_acknowledged_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 UNIQUE(group_id, part_id)
             );
@@ -2047,6 +2412,8 @@ def init_db() -> None:
                 notes TEXT DEFAULT '',
                 requested_due_date TEXT,
                 legacy_description TEXT NOT NULL DEFAULT '',
+                source_snapshot_json TEXT NOT NULL DEFAULT '',
+                source_acknowledged_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -2306,6 +2673,14 @@ def init_db() -> None:
                 """ALTER TABLE process_part_options
                    ADD COLUMN fishbone_assignment_id TEXT
                    REFERENCES fishbone_part_assignments(id)"""
+            )
+        if "source_snapshot_json" not in process_option_columns:
+            conn.execute(
+                "ALTER TABLE process_part_options ADD COLUMN source_snapshot_json TEXT NOT NULL DEFAULT ''"
+            )
+        if "source_acknowledged_at" not in process_option_columns:
+            conn.execute(
+                "ALTER TABLE process_part_options ADD COLUMN source_acknowledged_at TEXT NOT NULL DEFAULT ''"
             )
         manufacturing_assembly_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(manufacturing_assemblies)").fetchall()
@@ -2806,12 +3181,32 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_work_elements_scenario ON work_elements(project_id, scenario_id, sequence)"
         )
         _backfill_missing_ergonomics_reviews(conn)
+        ergonomics_review_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(ergonomics_reviews)").fetchall()
+        }
+        if "source_snapshot_json" not in ergonomics_review_columns:
+            conn.execute(
+                "ALTER TABLE ergonomics_reviews ADD COLUMN source_snapshot_json TEXT NOT NULL DEFAULT ''"
+            )
+        if "source_acknowledged_at" not in ergonomics_review_columns:
+            conn.execute(
+                "ALTER TABLE ergonomics_reviews ADD COLUMN source_acknowledged_at TEXT NOT NULL DEFAULT ''"
+            )
 
         safety_req_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(safety_requirements)").fetchall()
         }
         if "ppe" not in safety_req_columns:
             conn.execute("ALTER TABLE safety_requirements ADD COLUMN ppe TEXT NOT NULL DEFAULT ''")
+        if "source_snapshot_json" not in safety_req_columns:
+            conn.execute(
+                "ALTER TABLE safety_requirements ADD COLUMN source_snapshot_json TEXT NOT NULL DEFAULT ''"
+            )
+        if "source_acknowledged_at" not in safety_req_columns:
+            conn.execute(
+                "ALTER TABLE safety_requirements ADD COLUMN source_acknowledged_at TEXT NOT NULL DEFAULT ''"
+            )
+        _backfill_upstream_process_snapshots(conn)
 
         area_columns = {row[1] for row in conn.execute("PRAGMA table_info(yamazumi_areas)").fetchall()}
         if "scenario_id" not in area_columns:
@@ -3251,4 +3646,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'CONCERN_CATEGORIES', 'CONCERN_STATUSES', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'CONCERN_CATEGORIES', 'CONCERN_STATUSES', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', 'build_ergonomics_process_snapshot', 'build_safety_process_snapshot', 'build_materials_process_snapshot', 'format_process_snapshot_diff', '_fetch_work_element_snapshot_inputs', '_fetch_part_option_snapshot_inputs', '_backfill_upstream_process_snapshots', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']
