@@ -86,7 +86,10 @@ from utils.table_ui import (
     format_clean_number,
     guarded_tabs,
     native_selected_rows,
+    prepare_editor_selection_column,
+    render_select_all_control,
     required_field_errors,
+    resolve_editor_selected_rows,
     selectable_dataframe,
     selected_rows_action_bar,
     stage_native_delete_confirmation,
@@ -284,7 +287,15 @@ model_labels = {
 model_numbers_by_label = {label: number for number, label in model_labels.items()}
 
 
-@st.dialog("Process at a Glance Presentation", width="large")
+def close_presentation_mode_dialog() -> None:
+    st.session_state[f"paag_present_active_{scenario_id}"] = False
+
+
+@st.dialog(
+    "Process at a Glance Presentation",
+    width="large",
+    on_dismiss=close_presentation_mode_dialog,
+)
 def presentation_mode_dialog(
     project_id: str,
     scenario_id: str,
@@ -430,7 +441,15 @@ def presentation_mode_dialog(
     st.html(slide_html, unsafe_allow_javascript=True)
 
 
-@st.dialog("Export & Print Process at a Glance", width="large")
+def close_print_slide_dialog() -> None:
+    st.session_state[f"paag_print_active_{scenario_id}"] = False
+
+
+@st.dialog(
+    "Export & Print Process at a Glance",
+    width="large",
+    on_dismiss=close_print_slide_dialog,
+)
 def print_slide_dialog(
     pitch_summary: dict,
     active_page_rows: list[dict],
@@ -2743,17 +2762,28 @@ with tab_plan:
                             for group in saved_groups
                         ]
                     )
-                    st.data_editor(
+                    pairing_rows = prepare_editor_selection_column(
+                        pairing_rows, editor_key=pairing_editor_key
+                    )
+                    pairing_action_slot = st.empty()
+                    edited_pairings = st.data_editor(
                         pairing_rows,
                         key=pairing_editor_key,
                         hide_index=True,
-                        num_rows="delete",
-                        disabled=list(pairing_rows.columns),
+                        num_rows="fixed",
+                        disabled=[col for col in pairing_rows.columns if col != "selected"],
                         column_order=[
-                            "requirement", "selection_rule", "quantity", "parts"
+                            "selected", "requirement", "selection_rule", "quantity", "parts"
                         ],
                         column_config={
                             "id": None,
+                            "selected": st.column_config.CheckboxColumn(
+                                "Select",
+                                default=False,
+                                pinned=True,
+                                width="small",
+                                help="Select one or more part requirements to remove from this step.",
+                            ),
                             "requirement": st.column_config.TextColumn("Part requirement"),
                             "selection_rule": st.column_config.TextColumn("Selection rule"),
                             "quantity": st.column_config.NumberColumn(
@@ -2764,10 +2794,30 @@ with tab_plan:
                             ),
                         },
                     )
-                    selected_pairings = native_selected_rows(
+                    selected_pairings = resolve_editor_selected_rows(
+                        pairing_rows, edited_pairings, editor_key=pairing_editor_key
+                    )
+                    pairing_bulk = selected_rows_action_bar(parent=pairing_action_slot)
+                    render_select_all_control(
+                        pairing_bulk,
+                        editor_key=pairing_editor_key,
+                        selectable_count=len(pairing_rows),
+                        selected_count=len(selected_pairings),
+                        key_prefix=f"pairing_select_{scenario_id}_{selected_process_id}",
+                    )
+                    remove_selected_pairings = pairing_bulk.button(
+                        f"Remove selected ({len(selected_pairings)})",
+                        icon=":material/delete:",
+                        disabled=selected_pairings.empty,
+                        key=f"destructive_remove_pairings_{scenario_id}_{selected_process_id}",
+                        help="Remove the selected part requirements from this work element.",
+                    )
+                    native_selected_pairings = native_selected_rows(
                         pairing_rows, editor_key=pairing_editor_key
                     )
-                    request_pairing_delete = not selected_pairings.empty
+                    request_pairing_delete = bool(
+                        remove_selected_pairings or not native_selected_pairings.empty
+                    )
                     if request_pairing_delete:
                         selected_ids = set(selected_pairings["id"].astype(str))
                         selected_group_rows = [
@@ -2973,6 +3023,9 @@ with tab_plan:
         multi_value_columns=["handling", "model_applicability"],
         universal_values={"model_applicability": ["All", "All models", ""]},
     )
+    visible_elements = prepare_editor_selection_column(
+        visible_elements, editor_key=process_editor_key
+    )
     process_action_slot = st.empty()
 
 
@@ -2983,7 +3036,7 @@ with tab_plan:
         visible_elements,
         key=process_editor_key,
         hide_index=True,
-        num_rows="delete",
+        num_rows="fixed",
         height=470,
         disabled=[
             "id",
@@ -3006,8 +3059,8 @@ with tab_plan:
                 pinned=True,
                 width="small",
                 help=(
-                    "Select a line to open with Edit line below the table or apply a bulk "
-                    "pitch update."
+                    "Select one or more lines to edit with Edit line, apply a bulk "
+                    "pitch update, or delete."
                 ),
             ),
             "op_id": st.column_config.TextColumn(
@@ -3142,29 +3195,12 @@ with tab_plan:
     )
 
     native_selected = native_selected_rows(visible_elements, editor_key=process_editor_key)
-    selected_mask = (
-        edited["selected"].fillna(False).astype(bool).copy()
-        if "selected" in edited.columns
-        else pd.Series(False, index=edited.index, dtype="bool")
+    selected = resolve_editor_selected_rows(
+        visible_elements,
+        edited,
+        editor_key=process_editor_key,
+        prior_editor_state=prior_editor_state,
     )
-    editor_state = st.session_state.get(process_editor_key, {}) or {}
-    edited_rows_map = (
-        editor_state.get("edited_rows")
-        or prior_editor_state.get("edited_rows")
-        or {}
-    )
-    for raw_pos, row_changes in edited_rows_map.items():
-        try:
-            pos = int(raw_pos)
-        except (ValueError, TypeError):
-            continue
-        if (
-            0 <= pos < len(selected_mask)
-            and isinstance(row_changes, dict)
-            and "selected" in row_changes
-        ):
-            selected_mask.iat[pos] = bool(row_changes["selected"])
-    selected = edited.loc[selected_mask].copy()
 
 
     def current_process_editor_rows() -> pd.DataFrame:
@@ -3225,6 +3261,13 @@ with tab_plan:
     bulk = selected_rows_action_bar(
         parent=process_action_slot,
     )
+    render_select_all_control(
+        bulk,
+        editor_key=process_editor_key,
+        selectable_count=len(visible_elements),
+        selected_count=len(selected),
+        key_prefix=f"process_select_{scenario_id}",
+    )
     bulk_station = bulk.text_input("Pitch for selected", key=f"process_bulk_pitch_{scenario_id}")
     apply_bulk = bulk.button(
         f"Apply to selected ({len(selected)})",
@@ -3232,7 +3275,14 @@ with tab_plan:
         icon=":material/checklist:",
         disabled=selected.empty,
     )
-    request_bulk_delete = not native_selected.empty
+    delete_selected = bulk.button(
+        f"Delete selected ({len(selected)})",
+        icon=":material/delete:",
+        disabled=selected.empty,
+        key=f"destructive_process_delete_selected_{scenario_id}",
+        help="Delete the selected work element line(s) from this Process at a Glance plan.",
+    )
+    request_bulk_delete = bool(delete_selected or not native_selected.empty)
 
     if apply_bulk:
         if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
@@ -3275,8 +3325,14 @@ with tab_plan:
             st.rerun()
 
     if request_bulk_delete:
-        st.session_state[f"process_pending_delete_{scenario_id}"] = native_selected["id"].astype(str).tolist()
-        stage_native_delete_confirmation(process_editor_key)
+        if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+            st.warning("Save or undo other edits before deleting selected steps.")
+        else:
+            delete_target = selected if not selected.empty else native_selected
+            st.session_state[f"process_pending_delete_{scenario_id}"] = (
+                delete_target["id"].astype(str).tolist()
+            )
+            stage_native_delete_confirmation(process_editor_key)
 
 
     @st.dialog("Delete selected Process steps?", dismissible=False)
@@ -3542,12 +3598,22 @@ with tab_plan:
     if st.session_state.get(pairing_delete_key):
         confirm_pairing_bulk_removal()
 
-    @st.dialog("Edit Process at a Glance line", width="large")
+    def close_edit_process_line_dialog() -> None:
+        st.session_state.pop(edit_line_dialog_key, None)
+        st.session_state.pop(f"process_selected_line_id_{scenario_id}", None)
+        if not table_has_unsaved_changes(process_editor_key, native_row_selection=True):
+            request_table_editor_reset(process_editor_key)
+
+    @st.dialog(
+        "Edit Process at a Glance line",
+        width="large",
+        on_dismiss=close_edit_process_line_dialog,
+    )
     def edit_process_line_dialog() -> None:
         target_id = str(st.session_state.get(edit_line_dialog_key) or "").strip()
         match_rows = elements.loc[elements["id"].astype(str) == target_id]
         if not target_id or match_rows.empty:
-            st.session_state.pop(edit_line_dialog_key, None)
+            close_edit_process_line_dialog()
             st.rerun()
         line_row = match_rows.iloc[0]
 
@@ -4142,7 +4208,7 @@ with tab_plan:
             "Cancel",
             key=f"edit_line_cancel_{scenario_id}_{target_id}",
         ):
-            st.session_state.pop(edit_line_dialog_key, None)
+            close_edit_process_line_dialog()
             st.rerun()
         if dialog_actions.button(
             "Save line changes",
@@ -4294,7 +4360,7 @@ with tab_plan:
                     },
                 )
                 request_table_editor_reset(process_editor_key)
-                st.session_state.pop(edit_line_dialog_key, None)
+                close_edit_process_line_dialog()
                 st.toast(
                     f"Updated Process line '{line_work_element}'",
                     icon=":material/check_circle:",
@@ -4353,7 +4419,7 @@ with tab_plan:
                     f"process_part_source_consumed_{scenario_id}_{sec_id}"
                 )
             st.session_state.pop(pending_unlink_line_req_key, None)
-            st.session_state.pop(edit_line_dialog_key, None)
+            close_edit_process_line_dialog()
             st.toast(
                 "Part requirement removed from line.",
                 icon=":material/check_circle:",

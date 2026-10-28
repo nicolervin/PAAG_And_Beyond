@@ -51,9 +51,18 @@ The read-only combined-area **Yamazumi work elements** table is an approved exce
 
 This exception changes only the deletion entry point. Clicking **Delete selected (N)** must reset and rerun the selection surface before opening the same non-dismissible, relationship-aware confirmation required by the universal standard. Confirmation validates all selected IDs against the active project and scenario, deletes atomically through the store layer, records Current editor history, resets the table, shows a toast, and reruns. Cancel clears the pending request without deleting any record. The editable single-area Work elements table retains the universal native-toolbar workflow, and no other table inherits this exception.
 
+### Unified `Select` column for bulk-action & deletion tables
+
+On editable tables that combine row-level selection for bulk actions (or modal line editing) with deletion — including **Process at a Glance by pitch**, **Existing Part requirements**, **Parts Catalog**, and **Yamazumi work regions** — never show two separate checkbox columns at once. Instead:
+
+- Hide the native far-left delete gutter checkbox by using `num_rows="fixed"` (when row creation is not enabled) or `num_rows="add"` (when bottom-row entry/paste is enabled).
+- Provide a single pinned `Select` `CheckboxColumn` prepared via `prepare_editor_selection_column()` and resolved via `resolve_editor_selected_rows()`.
+- Render `render_select_all_control()` (**Select all** / **Clear selection**) and an explicit **Delete selected (N)** button (with a `destructive_` key prefix) in the table's `selected_rows_action_bar()` alongside any bulk-apply controls.
+- Clicking **Delete selected (N)** must refuse deletion while unrelated cell edits are unsaved, stage the selected IDs, reset the editor, and open the non-dismissible, relationship-aware confirmation dialog.
+
 ## Universal Table Row Selection Standard
 
-Every data table in this app must show Streamlit's native row-selection checkboxes on the far left. The unlabeled checkbox in the upper-left corner must select or clear all rows currently visible in the table with one click.
+Every data table in this app must provide a single, unambiguous row-selection mechanism on the far left — never two checkbox columns side by side. Read-only tables (`selectable_dataframe()`) and simple delete-only editors (`num_rows="dynamic"` or `num_rows="delete"` without a named `Select` column) use Streamlit's native far-left row-selection checkboxes, whose upper-left header checkbox selects or clears all visible rows. Editable tables that support bulk actions or modal line actions use the unified pinned `Select` column (`num_rows="fixed"` or `num_rows="add"`) paired with `render_select_all_control()` (**Select all** / **Clear selection**) in the action bar.
 
 Selection is transient and does not write data by itself. On editable tables, the native checkboxes expose deletion intent through the editor's `deleted_rows` state; they are not a supported general-purpose bulk-selection event. On tables with an approved deletion workflow, the native Delete action converts that intent into a pending confirmed deletion. Editable tables that need an ordinary bulk action must add a compact read-only native-selection surface for that action unless Streamlit later provides supported editor selection events. Filters define which rows are currently visible and therefore which rows the upper-left checkbox selects.
 

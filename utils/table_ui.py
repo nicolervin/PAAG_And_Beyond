@@ -18,6 +18,7 @@ from utils.table_filters import (
     logical_table_editor_key,
     redo_last_table_edit,
     request_table_editor_reset,
+    reset_table_editor_selection,
     undo_last_table_edit,
 )
 
@@ -159,6 +160,7 @@ def direct_entry_editor_rows(
         editor_state.get("edited_rows")
         or editor_state.get("added_rows")
         or editor_state.get("deleted_rows")
+        or bool(st.session_state.get(f"_select_all_{sort_scope}", False))
         or additional_unsaved_changes
     )
     controls = st.container(horizontal=True, vertical_alignment="bottom")
@@ -301,6 +303,183 @@ def table_has_unsaved_changes(
         any(column not in ignored for column in changes)
         for changes in (state.get("edited_rows") or {}).values()
     )
+
+
+def prepare_editor_selection_column(
+    dataframe: pd.DataFrame,
+    *,
+    editor_key: str,
+    column: str = DEFAULT_SELECTION_COLUMN,
+    id_column: str = "id",
+) -> pd.DataFrame:
+    """Populate a boolean row-selection column, respecting active Select All state."""
+    prepared = dataframe.copy()
+    logical_key = logical_table_editor_key(editor_key)
+    select_all = bool(st.session_state.get(f"_select_all_{logical_key}", False))
+    if select_all and not prepared.empty:
+        if id_column in prepared.columns:
+            ids = prepared[id_column].fillna("").astype(str).str.strip()
+            selectable = ids.ne("") & ~ids.str.startswith("__draft_new__")
+            prepared[column] = selectable.astype(bool)
+        else:
+            prepared[column] = pd.Series(True, index=prepared.index, dtype="bool")
+    elif column not in prepared.columns:
+        prepared[column] = pd.Series(False, index=prepared.index, dtype="bool")
+    else:
+        prepared[column] = prepared[column].fillna(False).astype(bool)
+    return prepared
+
+
+def resolve_editor_selected_rows(
+    source_dataframe: pd.DataFrame,
+    edited_dataframe: pd.DataFrame | None = None,
+    *,
+    editor_key: str,
+    column: str = DEFAULT_SELECTION_COLUMN,
+    id_column: str = "id",
+    prior_editor_state: dict | None = None,
+    include_draft_new: bool = False,
+) -> pd.DataFrame:
+    """Resolve rows selected via the Select checkbox column or native row selection."""
+    if source_dataframe.empty:
+        return source_dataframe.iloc[0:0].copy()
+
+    logical_key = logical_table_editor_key(editor_key)
+    select_all_default = bool(st.session_state.get(f"_select_all_{logical_key}", False))
+
+    state = get_effective_table_editor_state(editor_key)
+    edited_rows = state.get("edited_rows", {}) or {}
+    prior_edited_rows = (
+        (prior_editor_state.get("edited_rows", {}) or {})
+        if isinstance(prior_editor_state, dict)
+        else {}
+    )
+    deleted_positions = {
+        int(pos)
+        for pos in (state.get("deleted_rows") or [])
+        if str(pos).lstrip("-").isdigit() and 0 <= int(pos) < len(source_dataframe)
+    }
+
+    selected_positions: list[int] = []
+    for pos in range(len(source_dataframe)):
+        if id_column in source_dataframe.columns:
+            raw_id = source_dataframe.iloc[pos].get(id_column)
+            stable_id = (
+                ""
+                if raw_id is None or pd.isna(raw_id)
+                else str(raw_id).strip()
+            )
+            if not stable_id:
+                continue
+            if not include_draft_new and stable_id.startswith("__draft_new__"):
+                continue
+
+        is_selected: bool | None = None
+        if (
+            edited_dataframe is not None
+            and column in edited_dataframe.columns
+            and pos < len(edited_dataframe)
+        ):
+            val = edited_dataframe.iloc[pos].get(column)
+            if val is not None and not pd.isna(val):
+                is_selected = bool(val)
+
+        changes = edited_rows.get(pos, edited_rows.get(str(pos), {})) or {}
+        if column in changes:
+            is_selected = bool(changes[column])
+        elif is_selected is None:
+            prior_changes = (
+                prior_edited_rows.get(pos, prior_edited_rows.get(str(pos), {})) or {}
+            )
+            if column in prior_changes:
+                is_selected = bool(prior_changes[column])
+
+        if is_selected is None:
+            if select_all_default:
+                if id_column in source_dataframe.columns:
+                    raw_id = source_dataframe.iloc[pos].get(id_column)
+                    sid = (
+                        ""
+                        if raw_id is None or pd.isna(raw_id)
+                        else str(raw_id).strip()
+                    )
+                    is_selected = bool(sid and not sid.startswith("__draft_new__"))
+                else:
+                    is_selected = True
+            elif column in source_dataframe.columns:
+                val = source_dataframe.iloc[pos].get(column)
+                is_selected = (
+                    bool(val) if val is not None and not pd.isna(val) else False
+                )
+            else:
+                is_selected = False
+
+        if pos in deleted_positions:
+            is_selected = True
+
+        if is_selected:
+            selected_positions.append(pos)
+
+    if not selected_positions:
+        return source_dataframe.iloc[0:0].copy()
+
+    base_df = (
+        edited_dataframe
+        if (
+            edited_dataframe is not None
+            and len(edited_dataframe) == len(source_dataframe)
+        )
+        else source_dataframe
+    )
+    selected = base_df.iloc[selected_positions].copy()
+    for pos in selected_positions:
+        row_index = base_df.index[pos]
+        prior_changes = (
+            prior_edited_rows.get(pos, prior_edited_rows.get(str(pos), {})) or {}
+        )
+        for col, val in prior_changes.items():
+            if col in selected.columns:
+                selected.loc[row_index, col] = val
+        changes = edited_rows.get(pos, edited_rows.get(str(pos), {})) or {}
+        for col, val in changes.items():
+            if col in selected.columns:
+                selected.loc[row_index, col] = val
+    return selected
+
+
+def render_select_all_control(
+    host,
+    *,
+    editor_key: str,
+    selectable_count: int,
+    selected_count: int,
+    key_prefix: str,
+    column: str = DEFAULT_SELECTION_COLUMN,
+) -> None:
+    """Render Select all / Clear selection buttons inside a bulk action bar."""
+    logical_key = logical_table_editor_key(editor_key)
+    all_selected = selectable_count > 0 and selected_count >= selectable_count
+    if not all_selected:
+        if host.button(
+            "Select all",
+            icon=":material/select_all:",
+            disabled=selectable_count <= 0,
+            key=f"{key_prefix}_select_all",
+            help="Select all visible saved rows in this table.",
+        ):
+            st.session_state[f"_select_all_{logical_key}"] = True
+            reset_table_editor_selection(editor_key, column=column)
+            st.rerun()
+    if selected_count > 0:
+        if host.button(
+            "Clear selection",
+            icon=":material/deselect:",
+            key=f"{key_prefix}_clear_selection",
+            help="Uncheck all selected rows in this table.",
+        ):
+            st.session_state.pop(f"_select_all_{logical_key}", None)
+            reset_table_editor_selection(editor_key, column=column)
+            st.rerun()
 
 
 def native_selected_rows(

@@ -60,7 +60,10 @@ from utils.table_filters import (
 )
 from utils.table_ui import (
     has_active_unsaved_changes,
+    prepare_editor_selection_column,
+    render_select_all_control,
     request_unsaved_page_navigation,
+    resolve_editor_selected_rows,
     selectable_dataframe,
 )
 from utils.yamazumi_naming import parse_yamazumi_pitch_address
@@ -201,6 +204,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Edit catalog attributes**: Update descriptions, factory nicknames, make/buy, part code, weight, and engineering owners, then click **Save & Refresh**.",
+            "**Select rows for bulk actions or deletion**: Check the **Select** column (or click **Select all**) to apply bulk feature applicability changes or click **Delete selected (N)**.",
             "**Freeze / Pin columns**: Use the **Freeze left columns** selector above the Parts Catalog table to pin `Part number`, `Factory nickname`, or any other columns while scrolling horizontally.",
             "**Attach & annotate photos**: Upload or paste (`Ctrl+V`) part photos and use **Annotate / Add Shapes** to draw editable vector arrows, boxes, and callouts.",
             "**Toggle Active in scenario**: Mark parts active or inactive for the active planning scenario without deleting them from other scenarios.",
@@ -266,6 +270,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Manage Process steps**: Edit sequence, pitch (`station`), description, cycle time, resource type (`Human`, `Cobots`, `Automation`), and workstation heights.",
+            "**Select lines for Edit, Bulk Pitch, or Delete**: Check the **Select** column (or click **Select all**) in **Process at a Glance by pitch** to open **Edit line**, apply a bulk pitch update, or click **Delete selected (N)**.",
             "**Deterministic Op IDs**: Operation IDs (e.g. `M1S1b.01-ML1-004.4`) are formatted from Pitch Address + Flow Prefix + Sequence.",
             "**Part Pairing (`Handle` vs `Consume`)**: Pair Fishbone parts with Process steps and mark whether the step first **Consumes** the part or **Handles** an already-consumed part.",
             "**Pitch Visual Aids**: Upload or paste images, videos, CAD renders, or links for each pitch and tag relevant Process steps.",
@@ -333,6 +338,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "workflows": [
             "**Create & update Ergonomics reviews**: Link reviews to Process steps, select ergonomic hazards, assign a reviewer and due date, and set the risk classification.",
             "**Attach visual media**: Upload or paste posture photos and videos with annotated callouts.",
+            "**Edit or Acknowledge upstream Process changes**: When a linked Process step is edited upstream (pitch, operation text, time, height, or parts), review the `⚠️ Upstream Process changes to review` queue to either **Acknowledge selected** directly or **Edit** the review and click **Save & Refresh** to clear the flag automatically.",
         ],
         "connections": (
             "Links to **Process at a Glance** (`work_elements`) and feeds **Pin Map** ergonomic risk indicators."
@@ -372,6 +378,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Review material presentation**: Inspect how catalog parts and manufacturing assemblies are grouped and delivered to pitches in the active scenario.",
+            "**Edit or Acknowledge upstream Process changes**: When a Process step or part group is edited upstream after a part-use was classified as `Consume` or `Handle`, use the `⚠️ Upstream Process changes to review` queue (or the card's **Acknowledge** button) to confirm the existing classification still applies, or update the classification and click **Update** to clear the flag automatically.",
         ],
         "connections": (
             "Connects **Parts Catalog**, **Fishbone** manufacturing assemblies, and **Yamazumi / Process** material groups."
@@ -391,6 +398,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "workflows": [
             "**Add Safety requirements**: Select a Process step, specify the safety requirement description and required PPE, and click **Save & Refresh**.",
             "**Edit or deactivate requirements**: Update inline in the Safety table and save.",
+            "**Edit or Acknowledge upstream Process changes**: When a linked Process step changes upstream after a Safety requirement was saved, select rows in the `⚠️ Upstream Process changes to review` queue and click **Acknowledge selected**, or edit the requirement in the main table and click **Save & Refresh** to clear the flag automatically.",
         ],
         "connections": (
             "Links to **Process at a Glance** (`work_elements`) and feeds **Pin Map** safety indicators."
@@ -594,6 +602,17 @@ TROUBLESHOOTING_FAQS: list[dict[str, str]] = [
             "Click **Recycle bin** at the bottom-left of the sidebar. Every deleted project, scenario, part, "
             "Process step, Fishbone section, and Functional Review is kept for **30 days** along with its child records "
             "and uploaded images. Check the item and click **Restore selected**."
+        ),
+    },
+    {
+        "question": "What does '⚠️ Upstream change' mean on Ergonomics, Safety, or Materials?",
+        "answer": (
+            "When a Process at a Glance step is edited upstream (for example, moved to a new pitch, renamed, "
+            "given a new duration/conveyor height, or updated with different parts) *after* a functional review "
+            "was saved, PAAG flags that review with **⚠️ Upstream change** and shows a before -> after diff summary. "
+            "You have two non-blocking options:\n"
+            "- **Acknowledge directly**: Select the row(s) in the **⚠️ Upstream Process changes to review** queue at the top of the table and click **Acknowledge selected** if your existing assessment still holds.\n"
+            "- **Edit first, then Save**: Update the row in the main table (or card) and click **Save & Refresh** / **Update**—saving your edit automatically refreshes the upstream snapshot and clears the flag in one step."
         ),
     },
 ]
@@ -2082,6 +2101,9 @@ def _render_feedback_tracker_tab(
 
         display_df = fb_df.copy()
         display_df.insert(0, "_delete", False)
+        display_df = prepare_editor_selection_column(
+            display_df, editor_key=editor_key, column="_delete"
+        )
         display_df["created_at_display"] = display_df["created_at"].map(
             lambda v: format_eastern_timestamp(v)
         )
@@ -2187,8 +2209,14 @@ def _render_feedback_tracker_tab(
             },
         )
 
+        selected_feedback_rows = resolve_editor_selected_rows(
+            display_df[visible_cols],
+            edited_df,
+            editor_key=editor_key,
+            column="_delete",
+        )
         selected_for_delete = (
-            edited_df[edited_df["_delete"].fillna(False).astype(bool)]["id"]
+            selected_feedback_rows["id"]
             .astype(str)
             .tolist()
         )
@@ -2212,6 +2240,14 @@ def _render_feedback_tracker_tab(
         count_suffix = f" ({selected_count})" if selected_count else ""
 
         with st.container(horizontal=True, vertical_alignment="center"):
+            render_select_all_control(
+                st,
+                editor_key=editor_key,
+                selectable_count=len(display_df),
+                selected_count=selected_count,
+                key_prefix="help_hub_fb_select",
+                column="_delete",
+            )
             st.caption(
                 f"**Move selected{count_suffix} to stage:**"
                 if selected_count

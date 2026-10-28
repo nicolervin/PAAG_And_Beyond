@@ -558,5 +558,50 @@ class EditableTableFooterTests(unittest.TestCase):
         self.assertEqual(filtered["part_number"].tolist(), ["P-200"])
 
 
+class UnifiedEditorSelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.df = pd.DataFrame(
+            {
+                "id": ["row-1", "row-2", "__draft_new__0"],
+                "name": ["First", "Second", "Draft"],
+            }
+        )
+
+    def test_prepare_and_resolve_editor_selection_with_select_all(self) -> None:
+        session_state: dict[str, object] = {"_select_all_my_editor": True}
+        with patch.object(table_ui.st, "session_state", session_state):
+            prepared = table_ui.prepare_editor_selection_column(
+                self.df, editor_key="my_editor__editor_instance_0"
+            )
+            self.assertEqual(prepared["selected"].tolist(), [True, True, False])
+
+            selected = table_ui.resolve_editor_selected_rows(
+                prepared,
+                prepared,
+                editor_key="my_editor__editor_instance_0",
+            )
+            self.assertEqual(selected["id"].tolist(), ["row-1", "row-2"])
+
+    def test_reset_table_editor_selection_preserves_non_selection_cell_edits(self) -> None:
+        session_state: dict[str, object] = {}
+        with patch.object(table_filters.st, "session_state", session_state):
+            key0 = table_filters.apply_pending_table_editor_reset("my_editor")
+            session_state[key0] = {
+                "edited_rows": {
+                    0: {"selected": True, "name": "Updated First"},
+                    1: {"selected": True},
+                },
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+            session_state["_select_all_my_editor"] = True
+            table_filters.reset_table_editor_selection(key0)
+            key1 = table_filters.apply_pending_table_editor_reset(key0)
+            effective = table_filters.get_effective_table_editor_state(key1)
+
+        self.assertEqual(effective["edited_rows"], {0: {"name": "Updated First"}})
+        self.assertTrue(session_state.get("_select_all_my_editor"))
+
+
 if __name__ == "__main__":
     unittest.main()

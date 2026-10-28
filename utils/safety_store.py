@@ -58,8 +58,11 @@ def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load scenario-specific Safety requirements with current Process labels."""
     columns = [
         "id", "project_id", "scenario_id", "work_element_id",
-        "requirement_description", "ppe", "active", "created_at", "updated_at",
+        "requirement_description", "ppe", "active",
+        "source_snapshot_json", "source_acknowledged_at",
+        "created_at", "updated_at",
         "work_element_label", "pitch",
+        "sync_status", "upstream_changed", "upstream_diff_summary",
     ]
     with connection() as conn:
         if not conn.execute(
@@ -77,7 +80,22 @@ def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
                              AND yamazumi.process_element_id=requirement.work_element_id
                            ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
                           NULLIF(TRIM(work.operation), ''), '') AS work_element_label,
-                      COALESCE(work.station, '') AS pitch
+                      COALESCE(work.station, '') AS pitch,
+                      COALESCE(
+                          (SELECT yamazumi.time_s
+                           FROM yamazumi_elements yamazumi
+                           WHERE yamazumi.project_id=requirement.project_id
+                             AND yamazumi.process_element_id=requirement.work_element_id
+                           ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                          work.cycle_time_s,
+                          0.0
+                      ) AS cycle_time_s,
+                      COALESCE(work.unit_orientation, '') AS unit_orientation,
+                      work.conveyor_height_in AS conveyor_height_in,
+                      work.platform_height_in AS platform_height_in,
+                      work.pit_depth_in AS pit_depth_in,
+                      COALESCE(work.resource_type, 'Human') AS resource_type,
+                      COALESCE(work.resource_detail, '') AS resource_detail
                FROM safety_requirements requirement
                JOIN work_elements work
                  ON work.id=requirement.work_element_id
@@ -96,15 +114,27 @@ def safety_requirements(project_id: str, scenario_id: str) -> pd.DataFrame:
             "requirement_description": pd.Series(dtype="string"),
             "ppe": pd.Series(dtype="object"),
             "active": pd.Series(dtype="bool"),
+            "source_snapshot_json": pd.Series(dtype="string"),
+            "source_acknowledged_at": pd.Series(dtype="string"),
             "created_at": pd.Series(dtype="string"),
             "updated_at": pd.Series(dtype="string"),
             "work_element_label": pd.Series(dtype="string"),
             "pitch": pd.Series(dtype="string"),
+            "sync_status": pd.Series(dtype="string"),
+            "upstream_changed": pd.Series(dtype="bool"),
+            "upstream_diff_summary": pd.Series(dtype="string"),
         })
     result_rows = []
     for row in rows:
         d = dict(row)
         d["ppe"] = parse_ppe(d.get("ppe"))
+        d["source_snapshot_json"] = str(d.get("source_snapshot_json") or "")
+        d["source_acknowledged_at"] = str(d.get("source_acknowledged_at") or "")
+        live_snap = build_safety_process_snapshot(d)
+        diffs = format_process_snapshot_diff(d["source_snapshot_json"], live_snap)
+        d["upstream_changed"] = bool(diffs)
+        d["upstream_diff_summary"] = " · ".join(diffs)
+        d["sync_status"] = "⚠️ Upstream change" if diffs else "Synced"
         result_rows.append(d)
     return pd.DataFrame(result_rows, columns=columns)
 
@@ -179,8 +209,20 @@ def save_safety_requirements(
                 (project_id, scenario_id),
             ).fetchall()
         }
+        we_inputs = _fetch_work_element_snapshot_inputs(
+            conn,
+            project_id,
+            scenario_id,
+            [str(r["work_element_id"]) for r in prepared if r.get("work_element_id")],
+        )
         for row in prepared:
             previous = existing.get(row["id"])
+            we_row = we_inputs.get(str(row["work_element_id"]))
+            live_snap_json = (
+                json.dumps(build_safety_process_snapshot(we_row), sort_keys=True)
+                if we_row
+                else ""
+            )
             if previous:
                 changed = any(
                     (previous.get(field) or "") != (row[field] or "") if field == "ppe"
@@ -191,11 +233,14 @@ def save_safety_requirements(
                     continue
                 conn.execute(
                     """UPDATE safety_requirements
-                       SET work_element_id=?, requirement_description=?, ppe=?, active=?, updated_at=?
+                       SET work_element_id=?, requirement_description=?, ppe=?, active=?,
+                           source_snapshot_json=?, source_acknowledged_at=?, updated_at=?
                        WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
                         row["work_element_id"], row["requirement_description"],
-                        row["ppe"], row["active"], timestamp, row["id"], project_id, scenario_id,
+                        row["ppe"], row["active"],
+                        live_snap_json, timestamp, timestamp,
+                        row["id"], project_id, scenario_id,
                     ),
                 )
                 changed_ids.append(row["id"])
@@ -203,11 +248,15 @@ def save_safety_requirements(
                 conn.execute(
                     """INSERT INTO safety_requirements
                        (id, project_id, scenario_id, work_element_id,
-                        requirement_description, ppe, active, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        requirement_description, ppe, active,
+                        source_snapshot_json, source_acknowledged_at,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         row["id"], project_id, scenario_id, row["work_element_id"],
-                        row["requirement_description"], row["ppe"], row["active"], timestamp, timestamp,
+                        row["requirement_description"], row["ppe"], row["active"],
+                        live_snap_json, timestamp,
+                        timestamp, timestamp,
                     ),
                 )
                 created_ids.append(row["id"])
@@ -333,9 +382,76 @@ def safety_requirement_history(
         df["created_at"] = df["created_at"].map(to_eastern_iso)
     return df
 
+def acknowledge_safety_upstream_changes(
+    project_id: str,
+    scenario_id: str,
+    requirement_ids: list[str],
+    editor_name: str = "Collaborator",
+) -> dict:
+    """Refresh stored upstream Process snapshots for selected Safety requirements and log history."""
+    editor = str(editor_name or "").strip() or "Collaborator"
+    ids = list(dict.fromkeys(str(v).strip() for v in requirement_ids if str(v).strip()))
+    timestamp = now_iso()
+    if not ids:
+        return {"row_count": 0, "acknowledged_ids": [], "timestamp": timestamp}
+    placeholders = ",".join("?" for _ in ids)
+    acknowledged_ids: list[str] = []
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM planning_scenarios WHERE id=? AND project_id=?",
+            (scenario_id, project_id),
+        ).fetchone():
+            raise ValueError("The active planning scenario no longer exists.")
+        rows = conn.execute(
+            f"""SELECT id, work_element_id
+                FROM safety_requirements
+                WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+            (project_id, scenario_id, *ids),
+        ).fetchall()
+        we_inputs = _fetch_work_element_snapshot_inputs(
+            conn,
+            project_id,
+            scenario_id,
+            [str(r["work_element_id"]) for r in rows if r["work_element_id"]],
+        )
+        for row in rows:
+            we_id = str(row["work_element_id"] or "").strip()
+            if not we_id or we_id not in we_inputs:
+                continue
+            snap_json = json.dumps(
+                build_safety_process_snapshot(we_inputs[we_id]), sort_keys=True
+            )
+            conn.execute(
+                """UPDATE safety_requirements
+                   SET source_snapshot_json=?, source_acknowledged_at=?, updated_at=?
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (snap_json, timestamp, timestamp, str(row["id"]), project_id, scenario_id),
+            )
+            acknowledged_ids.append(str(row["id"]))
+        if acknowledged_ids:
+            record_audit_event(
+                project_id,
+                "Safety requirements",
+                "Acknowledge upstream change",
+                len(acknowledged_ids),
+                editor,
+                {
+                    "scenario_id": scenario_id,
+                    "acknowledged_requirement_ids": acknowledged_ids,
+                },
+                _conn=conn,
+            )
+    return {
+        "row_count": len(acknowledged_ids),
+        "acknowledged_ids": acknowledged_ids,
+        "timestamp": timestamp,
+    }
+
+
 __domain_exports__ = [
     'safety_requirements', 'save_safety_requirements', 'delete_safety_requirements',
     'safety_requirement_delete_impact', 'safety_requirement_history',
+    'acknowledge_safety_upstream_changes',
     'STANDARD_PPE_OPTIONS', 'parse_ppe', 'serialize_ppe',
 ]
 for _export_name in __domain_exports__:

@@ -71,7 +71,10 @@ from utils.table_ui import (
     editable_table_footer,
     editable_table_heading,
     native_selected_rows,
+    prepare_editor_selection_column,
+    render_select_all_control,
     required_field_errors,
+    resolve_editor_selected_rows,
     selectable_dataframe,
     selected_rows_action_bar,
     selected_dataframe_rows,
@@ -1102,23 +1105,33 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         labels={"active": "Active"},
         reset_widget_keys=[region_editor_key],
     )
-    region_editor_rows = direct_entry_editor_rows(
-        visible_regions,
+    region_editor_rows = prepare_editor_selection_column(
+        direct_entry_editor_rows(
+            visible_regions,
+            editor_key=region_editor_key,
+            sort_columns=["name", "description", "active"],
+            labels={"name": "Work region name"},
+        ),
         editor_key=region_editor_key,
-        sort_columns=["name", "description", "active"],
-        labels={"name": "Work region name"},
     )
     region_action_slot = st.empty()
     edited_regions = st.data_editor(
         region_editor_rows,
         key=region_editor_key,
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="add",
         height=300,
         disabled=["id", "color", "sequence", "updated_at"],
-        column_order=["name", "description", "active"],
+        column_order=["selected", "name", "description", "active"],
         column_config={
             "id": None,
+            "selected": st.column_config.CheckboxColumn(
+                "Select",
+                default=False,
+                pinned=True,
+                width="small",
+                help="Select work regions for bulk status updates or deletion.",
+            ),
             "name": st.column_config.TextColumn(
                 "Work region name", required=True, pinned=True
             ),
@@ -1135,11 +1148,21 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         native_row_selection=True,
     )
 
-    selected_regions = native_selected_rows(
+    native_selected_regions = native_selected_rows(
         region_editor_rows, editor_key=region_editor_key
+    )
+    selected_regions = resolve_editor_selected_rows(
+        region_editor_rows, edited_regions, editor_key=region_editor_key
     )
     region_bulk = selected_rows_action_bar(
         parent=region_action_slot,
+    )
+    render_select_all_control(
+        region_bulk,
+        editor_key=region_editor_key,
+        selectable_count=len(region_editor_rows),
+        selected_count=len(selected_regions),
+        key_prefix=f"yamazumi_region_select_{area_id}",
     )
     bulk_region_active = region_bulk.selectbox(
         "Active for selected regions",
@@ -1156,7 +1179,16 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
         disabled=selected_regions.empty,
         key=f"apply_yamazumi_region_bulk_{area_id}",
     )
-    request_region_delete = not selected_regions.empty
+    delete_regions_btn = region_bulk.button(
+        f"Delete selected ({len(selected_regions)})",
+        icon=":material/delete:",
+        disabled=selected_regions.empty,
+        key=f"destructive_yamazumi_region_delete_{area_id}",
+        help="Delete the selected work region(s) from this Yamazumi area.",
+    )
+    request_region_delete = bool(
+        delete_regions_btn or not native_selected_regions.empty
+    )
     region_bulk.download_button(
         "Export filtered",
         data=lambda: dataframe_to_excel(
@@ -1170,7 +1202,7 @@ with setup_columns[1].expander("Define work regions", icon=":material/category:"
     )
 
     def region_records_from(dataframe: pd.DataFrame) -> list[dict]:
-        return dataframe.to_dict("records")
+        return dataframe.drop(columns=["selected"], errors="ignore").to_dict("records")
 
     if apply_region_bulk:
         if table_has_unsaved_changes(region_editor_key, native_row_selection=True):

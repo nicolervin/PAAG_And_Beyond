@@ -112,6 +112,8 @@ def filter_table(
     if st.session_state.get(signature_key) != row_identity:
         st.session_state[signature_key] = row_identity
         for widget_key in reset_widget_keys:
+            logical_widget_key = logical_table_editor_key(widget_key)
+            st.session_state.pop(f"_select_all_{logical_widget_key}", None)
             prior_widget_state = get_effective_table_editor_state(widget_key)
             st.session_state.pop(widget_key, None)
             if isinstance(prior_widget_state, dict) and (
@@ -167,6 +169,7 @@ def capture_id_keyed_editor_draft(
     captured_editor_state: dict[str, dict] | None = None,
     *,
     id_column: str = "id",
+    ignored_columns: Iterable[str] = ("selected",),
 ) -> tuple[dict[str, dict], dict[str, dict]]:
     """Capture new positional editor changes under stable persisted row IDs.
 
@@ -177,14 +180,20 @@ def capture_id_keyed_editor_draft(
     draft = deepcopy(draft_by_id or {})
     prior_state = captured_editor_state or {}
     current_state: dict[str, dict] = {}
+    ignored = set(ignored_columns)
     for raw_position, raw_changes in (editor_state.get("edited_rows") or {}).items():
         try:
             position = int(raw_position)
         except (TypeError, ValueError):
             continue
-        changes = dict(raw_changes or {})
+        changes = {
+            column: value
+            for column, value in dict(raw_changes or {}).items()
+            if column not in ignored
+        }
         position_key = str(position)
-        current_state[position_key] = deepcopy(changes)
+        if changes:
+            current_state[position_key] = deepcopy(changes)
         if not (0 <= position < len(previous_editor_rows)):
             continue
         stable_id = previous_editor_rows.iloc[position].get(id_column)
@@ -920,6 +929,39 @@ def request_table_editor_reset(key: str) -> None:
     st.session_state[f"_reset_table_editor_{logical_key}"] = True
 
 
+def reset_table_editor_selection(key: str, *, column: str = "selected") -> None:
+    """Clear only selection-column edits on a data editor while preserving other unsaved cell edits."""
+    logical_key = logical_table_editor_key(key)
+    current = get_effective_table_editor_state(key)
+    cleaned_edited: dict[str, dict] = {}
+    for raw_pos, changes in (current.get("edited_rows") or {}).items():
+        if not isinstance(changes, dict):
+            continue
+        filtered = {col: val for col, val in changes.items() if col != column}
+        if filtered:
+            cleaned_edited[str(raw_pos)] = deepcopy(filtered)
+    cleaned_added: list[dict] = []
+    for row in current.get("added_rows") or []:
+        if not isinstance(row, dict):
+            continue
+        filtered_row = {col: val for col, val in row.items() if col != column}
+        if filtered_row:
+            cleaned_added.append(deepcopy(filtered_row))
+    has_other_edits = bool(cleaned_edited or cleaned_added)
+    if has_other_edits:
+        st.session_state[f"_table_undo_seed_{logical_key}"] = {
+            "edited_rows": cleaned_edited,
+            "added_rows": cleaned_added,
+            "deleted_rows": [],
+        }
+        st.session_state[f"_pending_undo_last_edit_{logical_key}"] = True
+    else:
+        st.session_state.pop(f"_table_undo_seed_{logical_key}", None)
+        st.session_state.pop(f"_pending_undo_last_edit_{logical_key}", None)
+    st.session_state[f"_preserve_select_all_{logical_key}"] = True
+    request_table_editor_reset(logical_key)
+
+
 def apply_pending_table_editor_reset(key: str) -> str:
     """Return the current editor-instance key, rotating it after a reset request.
 
@@ -932,9 +974,14 @@ def apply_pending_table_editor_reset(key: str) -> str:
     generation_key = f"_table_editor_generation_{logical_key}"
     generation = int(st.session_state.get(generation_key, 0) or 0)
     if st.session_state.pop(f"_reset_table_editor_{logical_key}", False):
+        preserve_select_all = bool(
+            st.session_state.pop(f"_preserve_select_all_{logical_key}", False)
+        )
         is_undo_reset = bool(
             st.session_state.pop(f"_pending_undo_last_edit_{logical_key}", False)
         )
+        if not preserve_select_all and not is_undo_reset:
+            st.session_state.pop(f"_select_all_{logical_key}", None)
         previous_key = f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
         st.session_state.pop(previous_key, None)
         st.session_state.pop(f"_table_undo_mutated_obj_id_{previous_key}", None)
