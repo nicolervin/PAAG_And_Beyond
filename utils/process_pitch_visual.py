@@ -141,7 +141,58 @@ SOURCE_CODE_LABELS: dict[str, str] = {
 }
 
 
-def _part_popover_content(part: dict) -> str:
+def _yamazumi_step_url(
+    pitch: dict | None = None,
+    *,
+    yamazumi_elem: dict | None = None,
+    linked_elem: dict | None = None,
+) -> str:
+    """Build a direct URL to the Yamazumi tab for the pitch's section/area and optional element."""
+    p = pitch or {}
+    y = yamazumi_elem or {}
+    l = linked_elem or {}
+    area_id = str(p.get("area_id") or y.get("area_id") or l.get("area_id") or "").strip()
+    section_id = str(p.get("section_id") or y.get("section_id") or l.get("section_id") or "").strip()
+    pitch_id = str(p.get("id") or p.get("pitch_id") or y.get("pitch_id") or l.get("pitch_id") or "").strip()
+    pitch_number = str(p.get("pitch_number") or y.get("pitch_number") or l.get("pitch_number") or "").strip()
+    yamazumi_element_id = str(
+        y.get("yamazumi_element_id")
+        or l.get("yamazumi_element_id")
+        or (y.get("id") if y.get("id") and y.get("id") != y.get("work_element_id") else "")
+        or y.get("id")
+        or ""
+    ).strip()
+    work_element_id = str(
+        y.get("work_element_id")
+        or y.get("process_element_id")
+        or l.get("work_element_id")
+        or l.get("id")
+        or ""
+    ).strip()
+
+    url_params: list[str] = []
+    if area_id:
+        url_params.append(f"area_id={quote_plus(area_id)}")
+    if section_id:
+        url_params.append(f"section_id={quote_plus(section_id)}")
+    if pitch_id:
+        url_params.append(f"pitch_id={quote_plus(pitch_id)}")
+    if pitch_number:
+        url_params.append(f"pitch_number={quote_plus(pitch_number)}")
+    if yamazumi_element_id:
+        url_params.append(f"yamazumi_element_id={quote_plus(yamazumi_element_id)}")
+    if work_element_id:
+        url_params.append(f"work_element_id={quote_plus(work_element_id)}")
+    query_str = f"?{'&'.join(url_params)}" if url_params else ""
+    return f"./yamazumi{query_str}#yamazumi-board-section"
+
+
+def _part_popover_content(
+    part: dict,
+    *,
+    pitch: dict | None = None,
+    step_urls_by_num: dict[int, str] | None = None,
+) -> str:
     p_num = _text(part.get("part_number") or "Part")
     p_desc = _text(part.get("description") or part.get("part_name") or "")
     p_nick = _text(part.get("factory_nickname") or "")
@@ -260,13 +311,6 @@ def _part_popover_content(part: dict) -> str:
                 <span class="eng-val" title="{p_de or '—'}">{p_de or '—'}</span>
               </div>
             </div>""",
-        f"""<div class="eng-item">
-              <span class="eng-role-tag te">TE</span>
-              <div class="eng-info">
-                <span class="eng-title">Technology Engineer</span>
-                <span class="eng-val" title="{p_te or '—'}">{p_te or '—'}</span>
-              </div>
-            </div>""",
     ]
     if p_ame:
         eng_items_html.append(
@@ -361,9 +405,21 @@ def _part_popover_content(part: dict) -> str:
     linked_steps = part.get("linked_steps") or []
     linked_steps_html = ""
     if linked_steps:
-        steps_badges = " ".join(
-            f'<span class="popover-step-pill">{_text(s)}</span>' for s in linked_steps
-        )
+        import re as _re
+
+        step_badge_items: list[str] = []
+        for s in linked_steps:
+            s_raw = str(s or "").strip()
+            m_step = _re.match(r"^(?:Step\s+)?(\d+)\b", s_raw, _re.IGNORECASE)
+            s_url = ""
+            if m_step and step_urls_by_num:
+                s_url = step_urls_by_num.get(int(m_step.group(1)), "")
+            if not s_url:
+                s_url = _yamazumi_step_url(pitch)
+            step_badge_items.append(
+                f'<a href="{s_url}" target="_top" class="popover-step-pill popover-step-link" title="Open in Yamazumi">{_text(s)} ↗</a>'
+            )
+        steps_badges = " ".join(step_badge_items)
         linked_steps_html = f"""
         <div class="popover-steps-box">
           <div class="popover-steps-label">Used In Process Step(s):</div>
@@ -425,6 +481,115 @@ def _part_popover_content(part: dict) -> str:
       </div>
       <div class="popover-footer">
         <a href="{parts_catalog_url}" target="_top" class="popover-action-link">Open in Parts Catalog ↗</a>
+      </div>
+    </div>
+    """
+
+
+def _step_popover_content(
+    step_num: int,
+    yamazumi_elem: dict,
+    linked_elem: dict | None,
+    variant_name: str,
+    has_media: bool,
+    pitch: dict | None = None,
+) -> str:
+    """Build detailed HTML popover content for a Yamazumi step badge."""
+    raw_desc = str(yamazumi_elem.get("description") or yamazumi_elem.get("yamazumi_description") or "").strip()
+    linked = linked_elem or {}
+    raw_op = str(linked.get("operation") or "").strip()
+    display_desc = _text(raw_desc or raw_op or f"Step {step_num}")
+    e_time = float(yamazumi_elem.get("time_s") or linked.get("time_s") or 0.0)
+    work_type = str(yamazumi_elem.get("work_type") or linked.get("work_type") or "Cycle").strip() or "Cycle"
+    w_lower = work_type.lower()
+    if w_lower == "periodic":
+        wt_class = "periodic"
+    elif w_lower == "fluctuation":
+        wt_class = "fluctuation"
+    else:
+        wt_class = "cycle"
+
+    op_sub_html = ""
+    if raw_op and raw_desc and raw_op.casefold() != raw_desc.casefold():
+        op_sub_html = f'<div class="step-popover-subdesc"><strong>PAAG Operation:</strong> {_text(raw_op)}</div>'
+
+    grid_items: list[str] = []
+    if variant_name:
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Variant</span>'
+            f'<span class="grid-val" title="{_text(variant_name)}">{_text(variant_name)}</span></div>'
+        )
+    op_id_val = str(linked.get("op_id") or yamazumi_elem.get("op_id") or "").strip()
+    if op_id_val and op_id_val != "Yamazumi link required":
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Op ID</span>'
+            f'<span class="grid-val" title="{_text(op_id_val)}">{_text(op_id_val)}</span></div>'
+        )
+    motion_cls = str(
+        linked.get("motion_classification") or yamazumi_elem.get("motion_classification") or ""
+    ).strip()
+    if motion_cls:
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Classification</span>'
+            f'<span class="grid-val" title="{_text(motion_cls)}">{_text(motion_cls)}</span></div>'
+        )
+    models_val = linked.get("model_applicability") or linked.get("models")
+    if isinstance(models_val, list):
+        models_str = ", ".join(str(m) for m in models_val if str(m).strip())
+    else:
+        models_str = str(models_val or "").strip()
+    if models_str:
+        grid_items.append(
+            f'<div class="popover-grid-item"><span class="grid-label">Models</span>'
+            f'<span class="grid-val" title="{_text(models_str)}">{_text(models_str)}</span></div>'
+        )
+
+    grid_html = f'<div class="part-popover-grid">{"".join(grid_items)}</div>' if grid_items else ""
+
+    parts_pills: list[str] = []
+    for p in linked.get("parts") or []:
+        if not isinstance(p, dict):
+            continue
+        p_num = _text(p.get("part_number") or "")
+        if not p_num:
+            continue
+        p_qty = _clean_number(p.get("quantity") or 1)
+        parts_pills.append(f'<span class="popover-step-pill">{p_num} (×{p_qty})</span>')
+    parts_html = (
+        f'<div class="popover-steps-box">'
+        f'<div class="popover-steps-label">Parts Consumed / Handled</div>'
+        f'<div class="popover-steps-list">{"".join(parts_pills)}</div>'
+        f'</div>'
+        if parts_pills
+        else ""
+    )
+
+    media_html = (
+        '<div class="step-popover-media-note">📷 Visual aid attached to this step</div>'
+        if has_media
+        else ""
+    )
+
+    yamazumi_url = _yamazumi_step_url(pitch, yamazumi_elem=yamazumi_elem, linked_elem=linked_elem)
+
+    return f"""
+    <div class="step-popover-card">
+      <div class="step-popover-header">
+        <div class="step-popover-badges">
+          <a href="{yamazumi_url}" target="_top" class="step-popover-num step-popover-link" title="Open in Yamazumi">Step {step_num} ↗</a>
+          <span class="step-popover-type {wt_class}">{_text(work_type)}</span>
+        </div>
+        <span class="step-popover-time">{_clean_number(e_time)}s</span>
+      </div>
+      <div class="step-popover-body">
+        <div class="step-popover-desc">{display_desc}</div>
+        {op_sub_html}
+        {grid_html}
+        {parts_html}
+        {media_html}
+      </div>
+      <div class="popover-footer">
+        <a href="{yamazumi_url}" target="_top" class="popover-action-link">Open in Yamazumi ↗</a>
       </div>
     </div>
     """
@@ -616,6 +781,66 @@ def render_pitch_canvas(
         ergo_badges.append(f'<span class="badge-ergo conveyor" style="background:#f3e8ff;color:#6b21a8;padding:1px 5px;border-radius:3px;font-size:0.72rem;margin-left:4px;">Conveyor: {conveyor_h:g}"</span>')
     ergo_chips_html = f'<div class="ergo-chips-bar" style="margin-top:2px;font-weight:normal;">{"".join(ergo_badges)}</div>' if ergo_badges else ""
 
+    # Map work elements on this pitch to 1-based sequential step numbers and Yamazumi links
+    all_pitch_elements = list(pitch.get("elements", []))
+    if not all_pitch_elements and elements_list:
+        all_pitch_elements = list(elements_list)
+
+    step_num_by_wid: dict[str, int] = {}
+    element_by_wid: dict[str, dict] = {}
+    step_urls_by_num: dict[int, str] = {}
+    for idx, el in enumerate(all_pitch_elements):
+        s_num = idx + 1
+        w_id = str(el.get("work_element_id") or el.get("id") or "").strip()
+        y_id = str(el.get("yamazumi_element_id") or "").strip()
+        desc_key = f"desc::{str(el.get('yamazumi_description') or el.get('operation') or '').strip().casefold()}"
+        if w_id:
+            step_num_by_wid[w_id] = s_num
+            element_by_wid[w_id] = el
+        if y_id:
+            step_num_by_wid[y_id] = s_num
+            element_by_wid[y_id] = el
+        if desc_key != "desc::" and desc_key not in step_num_by_wid:
+            step_num_by_wid[desc_key] = s_num
+            element_by_wid[desc_key] = el
+        step_urls_by_num[s_num] = _yamazumi_step_url(pitch, linked_elem=el)
+
+    # Ensure every Yamazumi stack element has a sequential step number even if unlinked
+    if yamazumi_stacks:
+        cur_idx = len(all_pitch_elements) + 1
+        for v_data in yamazumi_stacks.values():
+            v_els = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
+            for e in v_els:
+                if not isinstance(e, dict):
+                    continue
+                e_wid = str(e.get("work_element_id") or e.get("process_element_id") or "").strip()
+                e_id = str(e.get("id") or "").strip()
+                e_desc_key = f"desc::{str(e.get('description') or e.get('yamazumi_description') or '').strip().casefold()}"
+                existing_step = (
+                    (step_num_by_wid.get(e_wid) if e_wid else None)
+                    or (step_num_by_wid.get(e_id) if e_id else None)
+                    or (step_num_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
+                )
+                if not existing_step:
+                    assigned_num = cur_idx
+                    cur_idx += 1
+                    if e_wid:
+                        step_num_by_wid[e_wid] = assigned_num
+                    if e_id:
+                        step_num_by_wid[e_id] = assigned_num
+                    if e_desc_key != "desc::":
+                        step_num_by_wid[e_desc_key] = assigned_num
+                    step_urls_by_num[assigned_num] = _yamazumi_step_url(pitch, yamazumi_elem=e)
+                else:
+                    linked_for_step = (
+                        (element_by_wid.get(e_wid) if e_wid else None)
+                        or (element_by_wid.get(e_id) if e_id else None)
+                        or (element_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
+                    )
+                    step_urls_by_num[existing_step] = _yamazumi_step_url(
+                        pitch, yamazumi_elem=e, linked_elem=linked_for_step
+                    )
+
     # 2. BUILD LEFT COLUMN: PARTS TABLE
     part_rows_html: list[str] = []
     for part in parts:
@@ -637,9 +862,9 @@ def render_pitch_canvas(
         for ht in h_types:
             ht_clean = str(ht).strip()
             if ht_clean.casefold() in {"consume", "c"}:
-                h_badges.append('<span class="h-badge va">Consume</span>')
+                h_badges.append('<span class="h-badge va" title="Consume">C</span>')
             elif ht_clean.casefold() in {"handle", "h"}:
-                h_badges.append('<span class="h-badge nvan">Handle</span>')
+                h_badges.append('<span class="h-badge nvan" title="Handle">H</span>')
             elif ht_clean:
                 h_badges.append(f'<span class="h-badge">{_text(ht_clean)}</span>')
         h_cell = " ".join(h_badges) if h_badges else '<span class="text-muted">—</span>'
@@ -650,7 +875,9 @@ def render_pitch_canvas(
             else '<div class="part-nick-space">&nbsp;</div>'
         )
 
-        popover_content = _part_popover_content(part)
+        popover_content = _part_popover_content(
+            part, pitch=pitch, step_urls_by_num=step_urls_by_num
+        )
 
         part_rows_html.append(
             f"""
@@ -659,11 +886,13 @@ def render_pitch_canvas(
               <td class="col-pnum">
                 <div class="part-pnum-container">
                   <strong>{p_num}</strong>
-                  <span class="part-info-cue" title="Hover for part details">i</span>
-                  <div class="part-popover" role="tooltip">
-                    <div class="part-popover-bridge"></div>
-                    {popover_content}
-                  </div>
+                  <span class="part-info-trigger">
+                    <span class="part-info-cue" title="Hover for part details">i</span>
+                    <div class="part-popover" role="tooltip">
+                      <div class="part-popover-bridge"></div>
+                      {popover_content}
+                    </div>
+                  </span>
                 </div>
               </td>
               <td class="col-desc">
@@ -694,33 +923,6 @@ def render_pitch_canvas(
         parts_section_html = '<div class="part-placeholder no-parts"><span>No Parts Paired</span></div>'
 
     # 3. BUILD LEFT COLUMN: MINI YAMAZUMI STACK
-    # Map work elements on this pitch to 1-based sequential step numbers
-    all_pitch_elements = list(pitch.get("elements", []))
-    if not all_pitch_elements and elements_list:
-        all_pitch_elements = list(elements_list)
-
-    step_num_by_wid: dict[str, int] = {}
-    for idx, el in enumerate(all_pitch_elements):
-        s_num = idx + 1
-        w_id = str(el.get("work_element_id") or el.get("id") or "").strip()
-        y_id = str(el.get("yamazumi_element_id") or "").strip()
-        if w_id:
-            step_num_by_wid[w_id] = s_num
-        if y_id:
-            step_num_by_wid[y_id] = s_num
-
-    # If step_num_by_wid is still empty, populate from yamazumi_stacks
-    if not step_num_by_wid and yamazumi_stacks:
-        cur_idx = 1
-        for v_data in yamazumi_stacks.values():
-            v_els = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
-            for e in v_els:
-                if not isinstance(e, dict):
-                    continue
-                e_wid = str(e.get("work_element_id") or e.get("process_element_id") or e.get("id") or "").strip()
-                if e_wid and e_wid not in step_num_by_wid:
-                    step_num_by_wid[e_wid] = cur_idx
-                    cur_idx += 1
 
     # Map visual media to tagged step numbers
     media_step_numbers_map: dict[str, list[int]] = {}
@@ -774,7 +976,7 @@ def render_pitch_canvas(
             target_stack_h = max(target_stack_h, n_elems * 8)
             target_stack_h = min(target_stack_h, chart_px_height)
 
-            desired_min = 18
+            desired_min = 24
             if n_elems * desired_min > target_stack_h:
                 desired_min = max(7, target_stack_h // n_elems)
 
@@ -825,24 +1027,50 @@ def render_pitch_canvas(
                     type_class = "type-cycle"
 
             b_height = allocated_heights[idx_e] if idx_e < len(allocated_heights) else (max(16, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 16)
-            compact_class = "compact" if b_height < 15 else ""
+            compact_class = "compact" if b_height < 15 else ("multiline" if b_height >= 36 else "")
 
-            e_wid = str(e.get("work_element_id") or e.get("process_element_id") or e.get("id") or "").strip()
-            step_num = step_num_by_wid.get(e_wid, 0)
-            if step_num == 0:
-                step_num = step_num_by_wid.get(str(e.get("id") or "").strip(), 0)
+            e_wid = str(e.get("work_element_id") or e.get("process_element_id") or "").strip()
+            e_id = str(e.get("id") or "").strip()
+            e_desc_key = f"desc::{str(e.get('description') or e.get('yamazumi_description') or '').strip().casefold()}"
+            step_num = (
+                (step_num_by_wid.get(e_wid, 0) if e_wid else 0)
+                or (step_num_by_wid.get(e_id, 0) if e_id else 0)
+                or (step_num_by_wid.get(e_desc_key, 0) if e_desc_key != "desc::" else 0)
+            )
+            linked_el = (
+                (element_by_wid.get(e_wid) if e_wid else None)
+                or (element_by_wid.get(e_id) if e_id else None)
+                or (element_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
+            )
 
             has_media = step_num > 0 and step_num in all_tagged_step_nums
-            step_badge_html = f'<span class="stack-step-badge">{step_num}</span>' if step_num > 0 else ""
+            if step_num > 0:
+                step_popover_html = _step_popover_content(
+                    step_num=step_num,
+                    yamazumi_elem=e,
+                    linked_elem=linked_el,
+                    variant_name=v_name,
+                    has_media=has_media,
+                    pitch=pitch,
+                )
+                step_badge_html = (
+                    f'<span class="stack-step-trigger">'
+                    f'<span class="stack-step-badge">{step_num}</span>'
+                    f'<div class="step-popover" role="tooltip">'
+                    f'<div class="step-popover-bridge"></div>'
+                    f'{step_popover_html}'
+                    f'</div>'
+                    f'</span>'
+                )
+            else:
+                step_badge_html = ""
             cam_icon_html = f'<span class="stack-cam-icon" title="Visual aid attached for Step {step_num}">📷</span>' if has_media else ""
             step_attr = f'data-step-num="{step_num}"' if step_num > 0 else ""
             visual_class = "has-visual" if has_media else ""
-            step_prefix = f"Step {step_num} · " if step_num > 0 else ""
-            media_info = " · 📷 Visual aid attached" if has_media else ""
 
             blocks_html.append(
                 f"""
-                <div class="stack-block {type_class} motion-bar {e_color} {visual_class} {compact_class}" {step_attr} style="height:{b_height}px" title="{step_prefix}{e_desc} · {_clean_number(e_time)} s · {work_type or 'Cycle'}{media_info}">
+                <div class="stack-block {type_class} motion-bar {e_color} {visual_class} {compact_class}" {step_attr} style="height:{b_height}px">
                   <div class="block-left">
                     {step_badge_html}
                     <span class="block-label">{e_desc}</span>
@@ -854,11 +1082,11 @@ def render_pitch_canvas(
                 </div>
                 """
             )
-        # Takt line position from bottom
+        # Takt line position from bottom (no inline label box to avoid cluttering the bars)
         takt_line_html = ""
         if eff_takt_s > 0 and ref_time > 0:
             takt_bottom_px = min(chart_px_height, int(chart_px_height * (eff_takt_s / ref_time)))
-            takt_line_html = f'<div class="takt-line" style="bottom:{takt_bottom_px}px"><span class="takt-label">Takt: {_clean_number(eff_takt_s)}s</span></div>'
+            takt_line_html = f'<div class="takt-line" style="bottom:{takt_bottom_px}px" title="Takt: {_clean_number(eff_takt_s)}s"></div>'
 
         # Metrics: variant time, takt time, percent utilized
         if eff_takt_s > 0:
@@ -1042,10 +1270,35 @@ def render_pitch_canvas(
         ("Materials", "Materials", "materials", "functional_materials", alerts.get("materials", [])),
         ("Equipment", "Equipment", "equipment", "functional_equipment", alerts.get("equipment", [])),
     ]
+    base_task_count = len(all_pitch_elements) if all_pitch_elements else len(set(step_num_by_wid.values()))
     alert_blocks_html: list[str] = []
     for cat_name, display_name, cat_key, page_slug, cat_list in alert_categories:
         if cat_list:
-            items_str = " · ".join(_text(item.get("label") or "Alert") for item in cat_list)
+            missing_ppe_items = [
+                item for item in cat_list
+                if str(item.get("label") or "").strip().lower().startswith("no ppe assigned")
+            ]
+            other_items = [
+                item for item in cat_list
+                if not str(item.get("label") or "").strip().lower().startswith("no ppe assigned")
+            ]
+            if missing_ppe_items:
+                eff_total_tasks = max(base_task_count, len(missing_ppe_items))
+                assigned_ppe_tasks = max(0, eff_total_tasks - len(missing_ppe_items))
+                items_str = f"No PPE assigned ({assigned_ppe_tasks}/{eff_total_tasks} tasks)"
+            elif cat_key == "safety":
+                cleaned_labels = []
+                for item in other_items:
+                    raw_lbl = _text(item.get("label") or "Alert")
+                    if raw_lbl.lower().startswith("safety:"):
+                        raw_lbl = raw_lbl[7:].strip() or raw_lbl
+                    cleaned_labels.append(raw_lbl)
+                if len(cleaned_labels) == 1 and len(cleaned_labels[0]) <= 28:
+                    items_str = cleaned_labels[0]
+                else:
+                    items_str = f"{len(cleaned_labels)} requirement{'s' if len(cleaned_labels) != 1 else ''}"
+            else:
+                items_str = " · ".join(_text(item.get("label") or "Alert") for item in other_items)
             first_detail = _text(cat_list[0].get("detail") or cat_list[0].get("label") or "")
 
             popover_items_html = []
@@ -1143,7 +1396,7 @@ def render_pitch_canvas(
         min-height: 680px;
       }}
       .paag-slide.print-tabloid .slide-body {{
-        grid-template-columns: 32% 68%;
+        grid-template-columns: minmax(0, 32fr) minmax(0, 68fr);
         gap: 14px;
       }}
       .paag-slide.print-tabloid .right-col {{
@@ -1192,16 +1445,24 @@ def render_pitch_canvas(
       /* Header Banner */
       .slide-header {{
         display: grid;
-        grid-template-columns: 1.3fr 1.6fr 1.3fr;
+        grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.6fr) minmax(0, 1.3fr);
         align-items: center;
+        gap: 8px;
         padding-bottom: 5px;
         border-bottom: 2px solid #e2e8f0;
+      }}
+      .header-left {{
+        min-width: 0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .brand-title {{
         font-size: 1.15rem;
         font-weight: 800;
         color: #0f172a;
         letter-spacing: -0.01em;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .brand-sub {{
         font-size: 0.75rem;
@@ -1209,12 +1470,17 @@ def render_pitch_canvas(
         color: #64748b;
         text-transform: uppercase;
         letter-spacing: 0.05em;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .pitch-center-title {{
         text-align: center;
         font-size: 1.45rem;
         font-weight: 800;
         color: #1e293b;
+        min-width: 0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .doc-control-box {{
         justify-self: end;
@@ -1226,6 +1492,11 @@ def render_pitch_canvas(
         color: #334155;
         line-height: 1.4;
         text-align: right;
+        min-width: 0;
+        max-width: 100%;
+        box-sizing: border-box;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .doc-control-box strong {{
         color: #0f172a;
@@ -1235,7 +1506,7 @@ def render_pitch_canvas(
         flex: 1 1 auto;
         min-height: 0;
         display: grid;
-        grid-template-columns: 37% 63%;
+        grid-template-columns: minmax(0, 37fr) minmax(0, 63fr);
         gap: 12px;
         overflow: visible;
       }}
@@ -1244,14 +1515,22 @@ def render_pitch_canvas(
         flex-direction: column;
         gap: 8px;
         min-height: 0;
+        min-width: 0;
+        max-width: 100%;
         height: 100%;
+        box-sizing: border-box;
         overflow: visible;
+        position: relative;
+        z-index: 20;
       }}
       .right-col {{
         display: flex;
         flex-direction: column;
         min-height: 0;
+        min-width: 0;
+        max-width: 100%;
         height: 100%;
+        box-sizing: border-box;
         overflow: visible;
       }}
       /* Left Column Subpanels */
@@ -1263,11 +1542,16 @@ def render_pitch_canvas(
         display: flex;
         flex-direction: column;
         min-height: 0;
+        min-width: 0;
+        max-width: 100%;
+        box-sizing: border-box;
       }}
       .panel-title-bar {{
         display: flex;
         justify-content: space-between;
         align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
         font-size: 0.78rem;
         font-weight: 800;
         text-transform: uppercase;
@@ -1275,27 +1559,34 @@ def render_pitch_canvas(
         margin-bottom: 3px;
         letter-spacing: 0.03em;
       }}
+      .header-page-row {{
+        margin-bottom: 4px;
+      }}
       .page-badge {{
+        display: inline-block;
         background: #0284c7;
         color: white;
-        padding: 2px 7px;
+        padding: 2px 8px;
         border-radius: 999px;
         font-size: 0.72rem;
         font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
       }}
       .tools-list {{
         margin: 0;
         padding-left: 16px;
         font-size: 0.78rem;
         color: #1e293b;
-        max-height: 52px;
+        max-height: 64px;
         overflow-y: auto;
       }}
       .tool-item {{
         margin-bottom: 3px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.25;
       }}
       .badge-ppe {{
         background: #e0f2fe;
@@ -1312,52 +1603,67 @@ def render_pitch_canvas(
       }}
       .parts-table {{
         width: 100%;
+        max-width: 100%;
+        table-layout: fixed;
         border-collapse: collapse;
-        font-size: 0.76rem;
+        font-size: 0.74rem;
+        box-sizing: border-box;
       }}
       .parts-table th {{
         text-align: left;
         background: #f1f5f9;
-        padding: 3px 5px;
+        padding: 3px 4px;
         color: #475569;
-        font-size: 0.70rem;
+        font-size: 0.68rem;
         font-weight: 700;
+        line-height: 1.15;
         border-bottom: 2px solid #e2e8f0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .parts-table td {{
-        padding: 2px 5px;
+        padding: 3px 4px;
         border-bottom: 1px solid #f1f5f9;
         vertical-align: middle;
       }}
       .parts-table tr.part-row {{
-        cursor: pointer;
         transition: background-color 0.15s ease;
       }}
       .parts-table tr.part-row:hover {{
         background-color: #f1f5f9;
       }}
-      .parts-table tr.part-row:hover .part-info-cue {{
-        opacity: 1;
-        background: #0284c7;
-        color: #ffffff;
-      }}
-      .parts-table tr.part-row:hover .part-popover,
-      .parts-table tr.part-row.popover-active .part-popover,
-      .part-pnum-container:hover .part-popover {{
+      .part-info-trigger:hover .part-popover,
+      .part-info-trigger.popover-active .part-popover {{
         display: block;
       }}
       .part-pnum-container {{
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 3px;
+        max-width: 100%;
+      }}
+      .part-pnum-container strong {{
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.15;
+      }}
+      .part-info-trigger {{
         position: relative;
         display: inline-flex;
         align-items: center;
-        gap: 4px;
+        justify-content: center;
+        padding: 4px 6px;
+        margin: -4px -6px;
+        cursor: pointer;
+        flex-shrink: 0;
       }}
       .part-info-cue {{
         display: inline-block;
         font-size: 0.62rem;
-        color: #94a3b8;
-        background: #f1f5f9;
-        border: 1px solid #cbd5e1;
+        color: #ffffff;
+        background: #0284c7;
+        border: 1px solid #0284c7;
         border-radius: 999px;
         width: 13px;
         height: 13px;
@@ -1367,15 +1673,17 @@ def render_pitch_canvas(
         cursor: pointer;
         transition: all 0.15s ease;
       }}
-      .parts-table tr.part-row:hover .part-info-cue {{
+      .part-info-trigger:hover .part-info-cue,
+      .part-info-trigger.popover-active .part-info-cue {{
         color: #ffffff;
-        background: #0284c7;
-        border-color: #0284c7;
+        background: #0369a1;
+        border-color: #0369a1;
+        box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.25);
       }}
-      .col-thumb {{ width: 44px; min-width: 44px; text-align: center; }}
+      .col-thumb {{ width: 38px; min-width: 38px; text-align: center; }}
       .part-thumb {{
-        width: 38px;
-        height: 32px;
+        width: 34px;
+        height: 28px;
         object-fit: contain;
         border-radius: 4px;
         background: #f8fafc;
@@ -1384,56 +1692,54 @@ def render_pitch_canvas(
         margin: 0 auto;
       }}
       .thumb-ph {{
-        width: 38px;
-        height: 32px;
-        line-height: 32px;
+        width: 34px;
+        height: 28px;
+        line-height: 28px;
         text-align: center;
         background: #f1f5f9;
         border: 1px dashed #cbd5e1;
-        font-size: 0.65rem;
+        font-size: 0.62rem;
         color: #64748b;
         font-weight: 700;
         border-radius: 4px;
         margin: 0 auto;
       }}
-      .col-pnum {{ white-space: nowrap; font-weight: 700; font-size: 0.8rem; color: #1e293b; }}
-      .col-desc {{ max-width: 160px; }}
+      .col-pnum {{ width: 23%; white-space: normal; font-weight: 700; font-size: 0.76rem; color: #1e293b; overflow: visible; }}
+      .col-desc {{ width: auto; min-width: 0; }}
       .part-desc-text {{
         font-weight: 600;
         color: #0f172a;
-        line-height: 1.25;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        line-height: 1.2;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .part-nick-text {{
-        font-size: 0.72rem;
+        font-size: 0.70rem;
         color: #0284c7;
         font-weight: 700;
-        line-height: 1.2;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        line-height: 1.15;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
         margin-top: 2px;
       }}
       .part-nick-space {{
-        font-size: 0.72rem;
-        line-height: 1.2;
-        min-height: 14px;
-        margin-top: 2px;
+        display: none;
       }}
-      .col-qty {{ text-align: right; font-weight: 800; font-size: 0.82rem; white-space: nowrap; padding-right: 8px; }}
-      .col-handling {{ text-align: center; white-space: nowrap; }}
+      .col-qty {{ width: 30px; text-align: center; font-weight: 800; font-size: 0.78rem; white-space: nowrap; padding: 2px 3px; }}
+      .col-handling {{ width: 52px; text-align: center; white-space: normal; word-break: break-word; padding: 2px 3px; }}
       .h-badge {{
         display: inline-block;
         font-size: 0.68rem;
         padding: 2px 6px;
         border-radius: 3px;
-        font-weight: 700;
-        letter-spacing: 0.02em;
+        font-weight: 800;
+        letter-spacing: 0.01em;
+        margin: 1px 0;
       }}
       .h-badge.va {{ background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }}
-      .h-badge.nvan {{ background: #ffedd5; color: #c2410c; border: 1px solid #fed7aa; }}
+      .h-badge.nvan {{ background: #fef9c3; color: #854d0e; border: 1px solid #fde047; }}
       .text-muted {{ color: #94a3b8; }}
       .part-placeholder.no-parts {{ padding: 14px; text-align: center; font-size: 0.78rem; color: #94a3b8; font-style: italic; }}
 
@@ -1442,7 +1748,7 @@ def render_pitch_canvas(
         display: none;
         position: absolute;
         top: -10px;
-        left: calc(100% + 14px);
+        left: calc(100% + 8px);
         width: 410px;
         max-width: 440px;
         background: #ffffff;
@@ -1463,8 +1769,8 @@ def render_pitch_canvas(
         position: absolute;
         top: 0;
         bottom: 0;
-        left: -18px;
-        width: 18px;
+        left: -14px;
+        width: 14px;
       }}
       .parts-table tr.part-row:nth-child(n+4):nth-last-child(-n+3) .part-popover {{
         top: auto;
@@ -1819,6 +2125,22 @@ def render_pitch_canvas(
         font-size: 0.7rem;
         font-weight: 600;
         color: #1e293b;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+      }}
+      a.popover-step-link {{
+        color: #1d4ed8;
+        border-color: #93c5fd;
+        background: #eff6ff;
+        cursor: pointer;
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }}
+      a.popover-step-link:hover {{
+        background: #dbeafe;
+        border-color: #3b82f6;
+        text-decoration: underline;
       }}
       .popover-notes-box {{
         margin-top: 5px;
@@ -1837,6 +2159,7 @@ def render_pitch_canvas(
         min-height: 230px;
         padding: 6px 10px;
         box-sizing: border-box;
+        overflow: visible;
       }}
       .stack-panel .panel-title-bar {{
         margin-bottom: 4px;
@@ -1868,20 +2191,29 @@ def render_pitch_canvas(
 
       .stacks-container {{
         display: flex;
-        gap: 8px;
+        gap: 6px;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
         height: auto;
         min-height: 195px;
-        overflow-x: auto;
+        overflow: visible;
       }}
       .variant-stack-col {{
         flex: 1 1 0;
-        min-width: 90px;
+        min-width: 0;
         display: flex;
         flex-direction: column;
         justify-content: flex-end;
+        position: relative;
+        overflow: visible;
+      }}
+      .variant-stack-col:hover,
+      .variant-stack-col:focus-within {{
+        z-index: 40;
       }}
       .variant-header {{
-        font-size: 0.70rem;
+        font-size: 0.68rem;
         font-weight: 700;
         text-align: center;
         color: #334155;
@@ -1890,8 +2222,10 @@ def render_pitch_canvas(
         flex-wrap: wrap;
         justify-content: center;
         align-items: center;
-        gap: 3px;
+        gap: 2px;
         line-height: 1.15;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .variant-name {{
         font-weight: 800;
@@ -1931,12 +2265,13 @@ def render_pitch_canvas(
         display: flex;
         flex-direction: column;
         justify-content: flex-end;
-        overflow: hidden;
+        overflow: visible;
       }}
       .stack-blocks-wrapper {{
         display: flex;
         flex-direction: column-reverse;
         width: 100%;
+        overflow: visible;
       }}
       .stack-block {{
         width: 100%;
@@ -1946,13 +2281,17 @@ def render_pitch_canvas(
         justify-content: space-between;
         align-items: center;
         padding: 0 4px;
-        font-size: 0.68rem;
+        font-size: 0.66rem;
         font-weight: 700;
-        overflow: hidden;
+        overflow: visible;
         position: relative;
         cursor: pointer;
         transition: filter 0.15s ease, outline 0.15s ease, box-shadow 0.15s ease;
         line-height: 1.1;
+      }}
+      .stack-block:hover,
+      .stack-block:focus-within {{
+        z-index: 50;
       }}
       .stack-block.compact {{
         padding: 0 2px;
@@ -1970,10 +2309,53 @@ def render_pitch_canvas(
       .stack-block .block-left {{
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 3px;
         min-width: 0;
-        overflow: hidden;
+        overflow: visible;
         flex: 1 1 auto;
+      }}
+      .stack-block.multiline {{
+        padding: 2px 4px;
+        align-items: center;
+      }}
+      .stack-block.multiline .block-left {{
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        min-width: 0;
+        max-height: 100%;
+        overflow: visible;
+        line-height: 1.15;
+      }}
+      .stack-block.multiline .stack-step-badge {{
+        font-size: 0.66rem;
+        padding: 0 4px;
+        min-width: 14px;
+        line-height: 13px;
+      }}
+      .stack-block.multiline .block-label {{
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        white-space: normal;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        overflow-wrap: break-word;
+        word-break: normal;
+        line-height: 1.15;
+        max-height: 2.3em;
+      }}
+      .stack-block.multiline .block-right {{
+        margin-left: 3px;
+        font-size: 0.64rem;
+      }}
+      .stack-step-trigger {{
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        flex-shrink: 0;
+        padding: 1px;
+        margin: -1px;
       }}
       .stack-step-badge {{
         display: inline-flex;
@@ -1981,27 +2363,174 @@ def render_pitch_canvas(
         justify-content: center;
         background: #0f172a;
         color: #ffffff;
-        font-size: 0.74rem;
+        font-size: 0.70rem;
         font-weight: 800;
-        padding: 1px 5px;
-        min-width: 17px;
+        padding: 1px 4px;
+        min-width: 15px;
         text-align: center;
         border-radius: 4px;
-        line-height: 14px;
+        line-height: 13px;
         flex-shrink: 0;
         border: 1px solid rgba(255, 255, 255, 0.4);
         box-sizing: border-box;
+        cursor: pointer;
+        transition: transform 0.12s ease, background 0.12s ease;
+      }}
+      .stack-step-trigger:hover .stack-step-badge {{
+        transform: scale(1.1);
+        border-color: #ffffff;
       }}
       .stack-block.has-visual .stack-step-badge {{
         background: #0284c7;
         border-color: #bae6fd;
       }}
+      .step-popover {{
+        display: none;
+        position: absolute;
+        bottom: calc(100% + 8px);
+        left: -4px;
+        width: 260px;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        box-shadow: 0 12px 28px -4px rgba(15, 23, 42, 0.28), 0 4px 10px -2px rgba(15, 23, 42, 0.14);
+        padding: 9px 11px;
+        z-index: 1200;
+        white-space: normal;
+        text-align: left;
+        font-weight: normal;
+        color: #1e293b;
+        box-sizing: border-box;
+        cursor: default;
+        pointer-events: auto;
+      }}
+      .step-popover-bridge {{
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: -10px;
+        height: 10px;
+      }}
+      .step-popover::before {{
+        content: "";
+        position: absolute;
+        bottom: -7px;
+        left: 10px;
+        width: 0;
+        height: 0;
+        border-left: 7px solid transparent;
+        border-right: 7px solid transparent;
+        border-top: 7px solid #cbd5e1;
+      }}
+      .step-popover::after {{
+        content: "";
+        position: absolute;
+        bottom: -6px;
+        left: 11px;
+        width: 0;
+        height: 0;
+        border-left: 6px solid transparent;
+        border-right: 6px solid transparent;
+        border-top: 6px solid #ffffff;
+      }}
+      .stack-step-trigger:hover .step-popover,
+      .stack-step-trigger:focus-within .step-popover,
+      .stack-step-trigger.popover-active .step-popover {{
+        display: block;
+      }}
+      .step-popover-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 5px;
+        margin-bottom: 6px;
+      }}
+      .step-popover-badges {{
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }}
+      .step-popover-num {{
+        font-size: 0.78rem;
+        font-weight: 800;
+        color: #0f172a;
+        text-decoration: none;
+      }}
+      a.step-popover-link {{
+        color: #1d4ed8;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        padding: 1px 6px;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }}
+      a.step-popover-link:hover {{
+        background: #dbeafe;
+        border-color: #3b82f6;
+        text-decoration: underline;
+      }}
+      .step-popover-type {{
+        font-size: 0.65rem;
+        font-weight: 700;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }}
+      .step-popover-type.cycle {{
+        background: #dcfce7;
+        color: #166534;
+        border: 1px solid #86efac;
+      }}
+      .step-popover-type.periodic {{
+        background: #fef9c3;
+        color: #854d0e;
+        border: 1px solid #fde047;
+      }}
+      .step-popover-type.fluctuation {{
+        background: #fee2e2;
+        color: #991b1b;
+        border: 1px solid #fca5a5;
+      }}
+      .step-popover-time {{
+        font-size: 0.78rem;
+        font-weight: 800;
+        color: #0f172a;
+        background: #f1f5f9;
+        padding: 1px 6px;
+        border-radius: 4px;
+        border: 1px solid #cbd5e1;
+      }}
+      .step-popover-desc {{
+        font-size: 0.78rem;
+        font-weight: 700;
+        color: #0f172a;
+        line-height: 1.35;
+        word-break: break-word;
+      }}
+      .step-popover-subdesc {{
+        font-size: 0.70rem;
+        color: #475569;
+        margin-top: 3px;
+        line-height: 1.25;
+      }}
+      .step-popover-media-note {{
+        margin-top: 5px;
+        font-size: 0.68rem;
+        font-weight: 600;
+        color: #0369a1;
+        background: #f0f9ff;
+        border: 1px solid #bae6fd;
+        border-radius: 4px;
+        padding: 2px 6px;
+      }}
       .stack-block .block-right {{
         display: flex;
         align-items: center;
-        gap: 3px;
+        gap: 2px;
         flex-shrink: 0;
-        margin-left: 4px;
+        margin-left: 3px;
       }}
       .stack-cam-icon {{
         font-size: 0.65rem;
@@ -2119,9 +2648,10 @@ def render_pitch_canvas(
         border-color: #94a3b8;
       }}
       .visual-tag-title {{
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.2;
         flex: 1 1 auto;
         min-width: 0;
       }}
@@ -2171,9 +2701,9 @@ def render_pitch_canvas(
         font-weight: 600;
         color: #cbd5e1;
         max-width: 90%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .media-link-btn {{
         display: inline-flex;
@@ -2214,10 +2744,10 @@ def render_pitch_canvas(
         padding: 6px 10px;
         font-size: 0.82rem;
         font-weight: 700;
-        line-height: 1.3;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        line-height: 1.25;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .caption-callout.empty {{
         background: #fef9c3;
@@ -2249,12 +2779,12 @@ def render_pitch_canvas(
         border: 1px solid #cbd5e1;
         border-radius: 6px;
         background: #f8fafc;
-        padding: 5px 10px;
+        padding: 3px 8px;
         display: grid;
         grid-template-columns: repeat(5, 1fr);
-        gap: 8px;
+        gap: 6px;
         align-items: center;
-        font-size: 0.78rem;
+        font-size: 0.70rem;
         position: relative;
         z-index: 50;
         overflow: visible;
@@ -2262,10 +2792,11 @@ def render_pitch_canvas(
       .alert-block {{
         position: relative;
         overflow: visible;
-        padding: 3px 6px;
+        padding: 2px 6px;
         border-radius: 4px;
         display: flex;
-        align-items: center;
+        align-items: baseline;
+        flex-wrap: wrap;
         gap: 4px;
         min-width: 0;
         cursor: pointer;
@@ -2275,9 +2806,11 @@ def render_pitch_canvas(
         flex-shrink: 0;
       }}
       .alert-summary {{
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        font-size: 0.68rem;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.15;
         min-width: 0;
         flex: 1 1 auto;
       }}
@@ -2611,7 +3144,7 @@ def render_pitch_canvas(
       <!-- Header Banner -->
       <header class="slide-header">
         <div class="header-left">
-          <div class="brand-sub">Process at a Glance{f' · {section_name}' if section_name else ''}</div>
+          <div class="header-page-row"><span class="page-badge">Page {eff_page_num} of {eff_total_pages}</span></div>
           <div class="brand-title">Process at a Glance for {eff_project_name}</div>
         </div>
         <div class="pitch-center-title">
@@ -2641,7 +3174,6 @@ def render_pitch_canvas(
           <div class="panel-section">
             <div class="panel-title-bar">
               <span>Tools &amp; PPE Required</span>
-              <span class="page-badge">Page {eff_page_num} of {eff_total_pages}</span>
             </div>
             {tools_section_html}
           </div>
@@ -2649,7 +3181,7 @@ def render_pitch_canvas(
           <!-- Parts Table -->
           <div class="panel-section parts-panel">
             <div class="panel-title-bar">
-              <span>Parts (Consume &amp; Handle)</span>
+              <span>Parts</span>
             </div>
             {parts_section_html}
           </div>
@@ -2716,7 +3248,7 @@ def render_pitch_canvas(
         }}
 
         function setupTouchAndViewportPopovers() {{
-          const interactiveTargets = document.querySelectorAll('.part-row, .alert-block');
+          const interactiveTargets = document.querySelectorAll('.part-info-trigger, .stack-step-trigger, .alert-block');
           interactiveTargets.forEach(item => {{
             item.addEventListener('click', (e) => {{
               if (e.target && e.target.closest('a')) return;

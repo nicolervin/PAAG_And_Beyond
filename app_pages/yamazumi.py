@@ -576,6 +576,61 @@ for _, row in areas.iterrows():
     )
 pending_area_selector_key = f"yamazumi_pending_area_{scenario_id}"
 pending_area_id = str(st.session_state.pop(pending_area_selector_key, "") or "")
+
+qp_area_id = str(st.query_params.get("area_id") or "").strip()
+qp_section_id = str(st.query_params.get("section_id") or "").strip()
+qp_pitch_id = str(st.query_params.get("pitch_id") or "").strip()
+qp_pitch_number = str(st.query_params.get("pitch_number") or "").strip()
+qp_yamazumi_element_id = str(st.query_params.get("yamazumi_element_id") or "").strip()
+qp_work_element_id = str(st.query_params.get("work_element_id") or "").strip()
+if any(
+    (
+        qp_area_id,
+        qp_section_id,
+        qp_pitch_id,
+        qp_pitch_number,
+        qp_yamazumi_element_id,
+        qp_work_element_id,
+    )
+):
+    matched_qp_area_id = ""
+    if qp_area_id in area_labels:
+        matched_qp_area_id = qp_area_id
+    elif qp_section_id:
+        sec_matches = areas.loc[
+            areas["section_id"].fillna("").astype(str).str.strip() == qp_section_id
+        ]
+        if not sec_matches.empty:
+            matched_qp_area_id = str(sec_matches.iloc[0]["id"])
+    if not matched_qp_area_id and (qp_pitch_id or qp_pitch_number):
+        scen_pitches = yamazumi_pitches_for_scenario(project_id, scenario_id)
+        if not scen_pitches.empty:
+            if qp_pitch_id:
+                p_matches = scen_pitches.loc[
+                    scen_pitches["id"].fillna("").astype(str).str.strip() == qp_pitch_id
+                ]
+                if not p_matches.empty:
+                    matched_qp_area_id = str(p_matches.iloc[0].get("area_id") or "")
+            if not matched_qp_area_id and qp_pitch_number:
+                p_matches = scen_pitches.loc[
+                    scen_pitches["pitch_number"].fillna("").astype(str).str.strip()
+                    == qp_pitch_number
+                ]
+                if not p_matches.empty:
+                    matched_qp_area_id = str(p_matches.iloc[0].get("area_id") or "")
+    if matched_qp_area_id in area_labels:
+        pending_area_id = matched_qp_area_id
+    for _qp_key in (
+        "area_id",
+        "section_id",
+        "pitch_id",
+        "pitch_number",
+        "yamazumi_element_id",
+        "work_element_id",
+    ):
+        if _qp_key in st.query_params:
+            del st.query_params[_qp_key]
+
 if pending_area_id in area_labels:
     st.session_state[area_selector_key] = pending_area_id
 area_id = st.selectbox(
@@ -1506,6 +1561,27 @@ def close_other_yamazumi_dialogs(keep: str) -> None:
     ):
         if dialog_key != keep:
             st.session_state.pop(dialog_key, None)
+
+
+if (qp_yamazumi_element_id or qp_work_element_id) and not elements.empty:
+    matched_elem_rows = pd.DataFrame()
+    if qp_yamazumi_element_id:
+        matched_elem_rows = elements.loc[
+            elements["id"].fillna("").astype(str).str.strip() == qp_yamazumi_element_id
+        ]
+    if matched_elem_rows.empty and qp_work_element_id:
+        if "process_element_id" in elements.columns:
+            matched_elem_rows = elements.loc[
+                elements["process_element_id"].fillna("").astype(str).str.strip()
+                == qp_work_element_id
+            ]
+        if matched_elem_rows.empty:
+            matched_elem_rows = elements.loc[
+                elements["id"].fillna("").astype(str).str.strip() == qp_work_element_id
+            ]
+    if not matched_elem_rows.empty:
+        close_other_yamazumi_dialogs(edit_element_dialog_key)
+        st.session_state[edit_element_dialog_key] = str(matched_elem_rows.iloc[0]["id"])
 
 
 def handle_yamazumi_move() -> None:
@@ -2458,6 +2534,7 @@ def confirm_interactive_element_delete() -> None:
 
 
 
+st.markdown('<div id="yamazumi-board-section"></div>', unsafe_allow_html=True)
 board_heading, board_filter = st.columns([3, 2], vertical_alignment="bottom")
 with board_heading:
     st.subheader("Interactive balancing board")

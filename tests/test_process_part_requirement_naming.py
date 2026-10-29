@@ -103,6 +103,13 @@ class ProcessPartRequirementNamingTests(unittest.TestCase):
         self.assertEqual(len(req_inputs), 1)
         self.assertEqual(req_inputs[0].value, "Mounting Bracket, M4 Hex Screw")
 
+        # Each selected part has an "Unlink this part from the PAAG element" button in Create PAAG Elements
+        for pid in (part_1, part_2):
+            unlink_btn = app.button(
+                key=f"destructive_create_unlink_part_{self.scenario_id}_{self.section_id}_{self.yamazumi_id}_{pid}"
+            )
+            self.assertEqual(unlink_btn.label, "Unlink this part from the PAAG element")
+
         # Submit pairing without changing the name
         submit_btn = next(
             b for b in app.button
@@ -113,13 +120,30 @@ class ProcessPartRequirementNamingTests(unittest.TestCase):
 
         # Check group was saved with the auto name
         groups = store.query(
-            """SELECT name, selection_rule FROM process_part_groups
+            """SELECT id, name, selection_rule FROM process_part_groups
                WHERE project_id=? AND scenario_id=?""",
             (self.project_id, self.scenario_id),
         )
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["name"], "Mounting Bracket, M4 Hex Screw")
         self.assertEqual(groups[0]["selection_rule"], "Use all")
+
+        # Unlink one part from the multi-part group; the other part remains
+        group_id = str(groups[0]["id"])
+        store.unlink_part_from_process_group(self.project_id, self.scenario_id, group_id, part_1)
+        remaining_opts = store.query(
+            "SELECT part_id FROM process_part_options WHERE group_id = ?",
+            (group_id,),
+        )
+        self.assertEqual([str(r["part_id"]) for r in remaining_opts], [part_2])
+
+        # Unlink the last remaining part; the group itself is cleaned up
+        store.unlink_part_from_process_group(self.project_id, self.scenario_id, group_id, part_2)
+        remaining_groups = store.query(
+            "SELECT id FROM process_part_groups WHERE id = ?",
+            (group_id,),
+        )
+        self.assertEqual(len(remaining_groups), 0)
 
     def test_handle_operation_requires_name(self) -> None:
         part_id = str(uuid4())
