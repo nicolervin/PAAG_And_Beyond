@@ -270,10 +270,10 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Manage Process steps**: Edit sequence, pitch (`station`), description, cycle time, resource type (`Human`, `Cobots`, `Automation`), and workstation heights.",
-            "**Select lines for Edit, Bulk Pitch, or Delete**: Check the **Select** column (or click **Select all**) in **Process at a Glance by pitch** to open **Edit line**, apply a bulk pitch update, or click **Delete selected (N)**.",
+            "**Select lines for Edit, Bulk Pitch, or Delete**: Check the **Select** column (or click **Select all**) in **Process at a Glance by pitch** to open **Edit line** (and click **Save PAAG Element**), apply a bulk pitch update, or click **Delete selected (N)**.",
             "**Deterministic Op IDs**: Operation IDs (e.g. `M1S1b.01-ML1-004.4`) are formatted from Pitch Address + Flow Prefix + Sequence.",
-            "**Part Pairing (`Handle` vs `Consume`)**: Pair Fishbone parts with Process steps and mark whether the step first **Consumes** the part or **Handles** an already-consumed part.",
-            "**Pitch Visual Aids**: Upload or paste images, videos, CAD renders, or links for each pitch and tag relevant Process steps.",
+            "**Parts Consumed or Handled (`Handle` vs `Consume`)**: Pair Fishbone parts with PAAG elements, classify whether each part is **Consumed** or **Handled**, and use **Unlink this part from the PAAG element** on any individual part card if needed.",
+            "**Pitch Visual Aids**: Upload or paste images, videos, CAD renders, or links for each pitch and tag relevant Process steps. Hover over Yamazumi step badge numbers on the PAAG Slide Viewer to inspect step details or click the **Step # ↗** / **Open in Yamazumi ↗** links to jump directly to that section and work element on the Yamazumi tab.",
         ],
         "connections": (
             "Drives the **Pin Map** and anchors all **Functional Reviews** (Equipment, Ergonomics, Quality, Materials, Safety)."
