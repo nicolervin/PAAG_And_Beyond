@@ -15,6 +15,7 @@ from utils.store import (
     audit_history,
     create_part_and_assign_to_section,
     delete_process_part_groups,
+    unlink_part_from_process_group,
     fishbone_part_assignments,
     get_planning_scenario,
     get_pitch_unclassified_part_options,
@@ -1853,6 +1854,24 @@ with tab_plan:
                     [selected_not_consumed_parts, selected_consumed_parts],
                     ignore_index=True,
                 )
+            excluded_create_parts_key = (
+                f"process_create_excluded_parts_{scenario_id}_{section_id}"
+            )
+            raw_selected_part_ids = (
+                set(selected_parts["part_id"].astype(str).tolist())
+                if not selected_parts.empty and "part_id" in selected_parts.columns
+                else set()
+            )
+            excluded_create_part_ids = {
+                pid
+                for pid in st.session_state.get(excluded_create_parts_key, set())
+                if pid in raw_selected_part_ids
+            }
+            st.session_state[excluded_create_parts_key] = excluded_create_part_ids
+            if excluded_create_part_ids and not selected_parts.empty:
+                selected_parts = selected_parts.loc[
+                    ~selected_parts["part_id"].astype(str).isin(excluded_create_part_ids)
+                ].reset_index(drop=True)
 
         if work_selection_expired or part_selection_expired:
             request_table_editor_reset(work_source_key)
@@ -2338,6 +2357,25 @@ with tab_plan:
                                 ),
                             }
                         )
+                        if st.button(
+                            "Unlink this part from the PAAG element",
+                            icon=":material/link_off:",
+                            key=(
+                                f"destructive_create_unlink_part_{scenario_id}_{section_id}_"
+                                f"{selected_yamazumi_id}_{selected_part_id}"
+                            ),
+                        ):
+                            if len(selected_parts) <= 1:
+                                st.session_state.pop(excluded_create_parts_key, None)
+                                request_table_editor_reset(not_consumed_part_source_key)
+                                request_table_editor_reset(consumed_part_source_key)
+                            else:
+                                current_excluded = set(
+                                    st.session_state.get(excluded_create_parts_key, set())
+                                )
+                                current_excluded.add(selected_part_id)
+                                st.session_state[excluded_create_parts_key] = current_excluded
+                            st.rerun()
             pair_controls.markdown("##### PAAG Element Configuration")
             tool_res_container = pair_controls.container()
             tool_c1, tool_c2 = tool_res_container.columns(2)
@@ -2666,6 +2704,7 @@ with tab_plan:
                             fishbone_assignment_ids_by_part
                         ),
                     )
+                    st.session_state.pop(excluded_create_parts_key, None)
                     request_table_editor_reset(work_source_key)
                     request_table_editor_reset(not_consumed_part_source_key)
                     request_table_editor_reset(consumed_part_source_key)
@@ -2792,7 +2831,7 @@ with tab_plan:
                                 "Quantity", format="%.2f"
                             ),
                             "parts": st.column_config.TextColumn(
-                                "Parts in requirement", width="large"
+                                "Parts Consumed or Handled", width="large"
                             ),
                         },
                     )
@@ -3766,11 +3805,26 @@ with tab_plan:
                             )
                         default_part_ids.append(opid)
 
+                edit_ms_key = (
+                    f"edit_line_parts_{scenario_id}_{target_id}_"
+                    f"{req_mode}_{edit_sec_id}"
+                )
+                pending_remove_edit_part = st.session_state.pop(
+                    f"_pending_remove_{edit_ms_key}", None
+                )
+                if pending_remove_edit_part and isinstance(
+                    st.session_state.get(edit_ms_key), list
+                ):
+                    st.session_state[edit_ms_key] = [
+                        p
+                        for p in st.session_state[edit_ms_key]
+                        if str(p) != str(pending_remove_edit_part)
+                    ]
                 if not part_label_map:
                     st.info("No active Fishbone parts are assigned to this section.")
                 else:
                     selected_edit_part_ids = st.multiselect(
-                        "Parts in requirement",
+                        "Parts Consumed or Handled",
                         options=list(part_label_map.keys()),
                         default=default_part_ids,
                         format_func=lambda pid, labels=part_label_map: labels.get(
@@ -3780,10 +3834,7 @@ with tab_plan:
                             "Remove an incorrectly assigned part and select the replacement "
                             "part(s) from this Fishbone section."
                         ),
-                        key=(
-                            f"edit_line_parts_{scenario_id}_{target_id}_"
-                            f"{req_mode}_{edit_sec_id}"
-                        ),
+                        key=edit_ms_key,
                     )
 
                 for pid in selected_edit_part_ids:
@@ -3892,6 +3943,30 @@ with tab_plan:
                                 ),
                             }
                         )
+                        if st.button(
+                            "Unlink this part from the PAAG element",
+                            icon=":material/link_off:",
+                            key=(
+                                f"destructive_edit_line_remove_part_{scenario_id}_{target_id}_"
+                                f"{req_mode}_{edit_sec_id}_{pid}"
+                            ),
+                        ):
+                            if active_group and pid in existing_options_by_part:
+                                st.session_state[f"process_pending_unlink_line_req_{scenario_id}"] = {
+                                    "group_id": str(editing_group_id),
+                                    "part_id": str(pid),
+                                    "part_number": str(pnum),
+                                    "part_label": f"{pnum} — {pdesc}" if pdesc else str(pnum),
+                                    "target_id": str(target_id),
+                                    "work_element": str(line_work_element),
+                                    "requirement": str(active_group.get("name") or ""),
+                                    "edit_sec_id": str(edit_sec_id),
+                                    "edit_ms_key": edit_ms_key,
+                                }
+                                st.rerun()
+                            else:
+                                st.session_state[f"_pending_remove_{edit_ms_key}"] = str(pid)
+                                st.rerun()
 
                 rule_options = ["Use all", "Choose one", "Optional"]
                 orig_rule = (
@@ -3991,21 +4066,6 @@ with tab_plan:
                     placeholder="Model choice, installation intent, or other guidance",
                     key=f"edit_line_notes_{scenario_id}_{target_id}_{req_mode}",
                 )
-
-                if active_group:
-                    if st.button(
-                        "Unlink this Part requirement from line",
-                        icon=":material/link_off:",
-                        key=f"destructive_edit_line_remove_req_{scenario_id}_{target_id}_{editing_group_id}",
-                    ):
-                        st.session_state[f"process_pending_unlink_line_req_{scenario_id}"] = {
-                            "group_id": str(editing_group_id),
-                            "target_id": str(target_id),
-                            "work_element": str(line_work_element),
-                            "requirement": str(active_group.get("name") or ""),
-                            "edit_sec_id": str(edit_sec_id),
-                        }
-                        st.rerun()
 
         st.divider()
         st.markdown("##### Line details")
@@ -4213,7 +4273,7 @@ with tab_plan:
             close_edit_process_line_dialog()
             st.rerun()
         if dialog_actions.button(
-            "Save line changes",
+            "Save PAAG Element",
             type="primary",
             icon=":material/save:",
             key=f"edit_line_save_{scenario_id}_{target_id}",
@@ -4373,15 +4433,22 @@ with tab_plan:
 
     pending_unlink_line_req_key = f"process_pending_unlink_line_req_{scenario_id}"
 
-    @st.dialog("Unlink Part requirement from line?", dismissible=False)
+    @st.dialog("Unlink part from PAAG element?", dismissible=False)
     def confirm_unlink_line_req_dialog() -> None:
         info = st.session_state.get(pending_unlink_line_req_key) or {}
+        part_id = str(info.get("part_id") or "").strip()
+        part_label = str(
+            info.get("part_label")
+            or info.get("part_number")
+            or info.get("requirement")
+            or "this part"
+        )
         req_name = str(info.get("requirement") or "this Part requirement")
-        we_name = str(info.get("work_element") or "this Process step")
-        st.warning(f"Unlink **{req_name}** from **{we_name}**?")
+        we_name = str(info.get("work_element") or "this PAAG element")
+        st.warning(f"Unlink **{part_label}** from **{we_name}**?")
         st.caption(
-            "Downstream effects: This removes the Part requirement pairing from this Process step in the active scenario. "
-            "The Process step itself, Fishbone part placements, and Parts Catalog records remain intact, and the Fishbone parts return to Available Parts for pairing."
+            "Downstream effects: This removes the part pairing from this PAAG element in the active scenario. "
+            "The PAAG element itself, Fishbone part placements, and Parts Catalog records remain intact, and the Fishbone part returns to Available Parts for pairing."
         )
         actions = st.container(horizontal=True)
         if actions.button("Cancel", key=f"cancel_unlink_line_req_{scenario_id}"):
@@ -4396,10 +4463,18 @@ with tab_plan:
             grp_id = str(info.get("group_id") or "")
             tgt_id = str(info.get("target_id") or "")
             sec_id = str(info.get("edit_sec_id") or "")
+            ms_key = str(info.get("edit_ms_key") or "")
             if grp_id:
-                removed = delete_process_part_groups(
-                    project_id, scenario_id, [grp_id]
-                )
+                if part_id:
+                    removed = unlink_part_from_process_group(
+                        project_id, scenario_id, grp_id, part_id
+                    )
+                else:
+                    removed = delete_process_part_groups(
+                        project_id, scenario_id, [grp_id]
+                    )
+                if ms_key:
+                    st.session_state.pop(ms_key, None)
                 record_audit_event(
                     project_id,
                     "Process part pairings",
@@ -4411,6 +4486,7 @@ with tab_plan:
                         "work_element_id": tgt_id,
                         "work_element": we_name,
                         "requirement": req_name,
+                        "part": part_label,
                     },
                 )
                 request_table_editor_reset(process_editor_key)
@@ -4423,7 +4499,7 @@ with tab_plan:
             st.session_state.pop(pending_unlink_line_req_key, None)
             close_edit_process_line_dialog()
             st.toast(
-                "Part requirement removed from line.",
+                "Part unlinked from PAAG element.",
                 icon=":material/check_circle:",
             )
             st.rerun()

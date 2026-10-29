@@ -302,16 +302,25 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
         tool_cat_sb = app.selectbox(key=f"edit_line_tool_cat_{self.scenario_id}_{we_id}")
         self.assertIn("Tape machine", tool_cat_sb.options)
 
-        # Replace PART-100 with PART-200 in the Parts in requirement multiselect
+        # Replace PART-100 with PART-200 in the Parts Consumed or Handled multiselect
         parts_ms = app.multiselect(
             key=f"edit_line_parts_{self.scenario_id}_{we_id}_{group_id}_{self.section_id}"
         )
+        self.assertEqual(parts_ms.label, "Parts Consumed or Handled")
         self.assertEqual(parts_ms.value, [part_id_1])
+
+        # Verify per-part "Unlink this part from the PAAG element" button is present for PART-100
+        unlink_part_btn = app.button(
+            key=f"destructive_edit_line_remove_part_{self.scenario_id}_{we_id}_{group_id}_{self.section_id}_{part_id_1}"
+        )
+        self.assertEqual(unlink_part_btn.label, "Unlink this part from the PAAG element")
+
         parts_ms.set_value([part_id_2]).run(timeout=30)
         self.assertEqual(list(app.exception), [])
 
-        # Click "Save line changes"
+        # Click "Save PAAG Element"
         save_btn = app.button(key=f"edit_line_save_{self.scenario_id}_{we_id}")
+        self.assertEqual(save_btn.label, "Save PAAG Element")
         save_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
 

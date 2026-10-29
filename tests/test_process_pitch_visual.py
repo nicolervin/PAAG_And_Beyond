@@ -546,7 +546,11 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("Dog Bone", html)
         self.assertIn("part-nick-text", html)
         self.assertIn("Consume / Handle", html)
+        self.assertIn("<span>Parts</span>", html)
+        self.assertNotIn("Parts (Consume &amp; Handle)", html)
         self.assertIn("h-badge va", html)
+        self.assertIn('<span class="h-badge va" title="Consume">C</span>', html)
+        self.assertIn(".h-badge.nvan { background: #fef9c3; color: #854d0e;", html)
         self.assertIn("part-thumb", html)
         self.assertIn("BRKT-001", html)
         self.assertIn("Functional Alerts", html)
@@ -559,6 +563,10 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("part-popover", html)
         self.assertIn("part-popover-bridge", html)
         self.assertIn("part-info-cue", html)
+        self.assertIn("part-info-trigger", html)
+        self.assertIn(".part-info-trigger:hover .part-popover", html)
+        self.assertNotIn(".parts-table tr.part-row:hover .part-popover", html)
+        self.assertNotIn(".part-pnum-container:hover .part-popover", html)
         self.assertIn("Open in Parts Catalog", html)
         self.assertIn('href="./parts?part_number=BRKT-001#part-details-section"', html)
         self.assertIn("<video class=\"visual-player\" controls", html)
@@ -824,9 +832,10 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertEqual(str(summary.get("section_id")), self.section_id)
         self.assertEqual(str(summary.get("section_name")), "Main")
 
-        # Verify render_pitch_canvas outputs the section name in slide header
+        # Verify render_pitch_canvas outputs the section name in slide header and page badge at top left
         html = render_pitch_canvas(summary, summary["elements"][:1], scenario_name="Test Scenario", project_name="Test Project")
-        self.assertIn("Process at a Glance · Main", html)
+        self.assertNotIn("Process at a Glance · Main", html)
+        self.assertIn('<div class="header-page-row"><span class="page-badge">Page 1 of 1</span></div>', html)
         self.assertIn("<div><strong>Section:</strong> Main</div>", html)
 
     def test_fishbone_section_filtering_in_viewer_and_print_dialog(self) -> None:
@@ -1098,6 +1107,12 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertEqual(len(missing_ppe_alerts), 6)
         self.assertTrue(any("Step 1" in a["label"] for a in missing_ppe_alerts))
 
+        # Verify rendered slide header collapses missing PPE into compact "No PPE assigned (0/6 tasks)"
+        # while keeping individual step details inside the hover popover
+        html1 = render_pitch_canvas(summary)
+        self.assertIn('<span class="alert-summary">No PPE assigned (0/6 tasks)</span>', html1)
+        self.assertIn('<div class="popover-item-title">No PPE Assigned: Step 1 (Motion 1)</div>', html1)
+
         # 3. Assign PPE to Step 1 (self.work_ids[0])
         ppe_df = pd.DataFrame([{
             "work_element_id": self.work_ids[0],
@@ -1116,6 +1131,11 @@ class ProcessPitchVisualTests(unittest.TestCase):
         # Step 1 should now be satisfied, remaining 5 steps still alert
         self.assertEqual(len(missing_ppe_alerts2), 5)
         self.assertFalse(any("Step 1" in a["label"] for a in missing_ppe_alerts2))
+
+        html2 = render_pitch_canvas(summary2)
+        self.assertIn('<span class="alert-summary">No PPE assigned (1/6 tasks)</span>', html2)
+        self.assertNotIn('No PPE Assigned: Step 1', html2)
+        self.assertIn('<div class="popover-item-title">No PPE Assigned: Step 2 (Motion 2)</div>', html2)
 
         # 5. Verify assigned PPE is listed under tools with is_ppe=True
         ppe_tools = [t for t in summary2["tools"] if t.get("is_ppe")]
@@ -1168,7 +1188,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("Open in Parts Catalog", html)
         self.assertIn("Assigned Engineers (Parts Catalog)", html)
         self.assertIn("Design Engineer", html)
-        self.assertIn("Technology Engineer", html)
+        self.assertNotIn("Technology Engineer", html)
         self.assertIn("PMQE / AQE", html)
         self.assertIn("Buyer / GCL", html)
 
@@ -1404,6 +1424,57 @@ class ProcessPitchVisualTests(unittest.TestCase):
         many_heights = [int(m) for m in re.findall(r'class="stack-block[^"]*"[^>]*style="height:(\d+)px"', html_many)]
         self.assertEqual(len(many_heights), 15)
         self.assertLessEqual(sum(many_heights), 175)
+
+    def test_small_screen_text_wrapping_in_parts_and_yamazumi_boxes(self) -> None:
+        pitch_data = {
+            "pitch_id": "p_wrap",
+            "scenario_takt_s": 20.0,
+            "parts": [
+                {
+                    "part_id": "p1",
+                    "part_number": "3456",
+                    "part_name": "graphics package rescue",
+                    "quantity": 1,
+                    "handling_type": "Consume",
+                },
+                {
+                    "part_id": "p2",
+                    "part_number": "6788",
+                    "part_name": "graphics package adventure",
+                    "quantity": 1,
+                    "handling_type": "Consume",
+                },
+            ],
+            "yamazumi_stacks": {
+                "Base": {
+                    "total_time_s": 11.0,
+                    "elements": [
+                        {"id": "e1", "yamazumi_description": "Add standard graphics", "time_s": 6.0, "work_type": "Cycle"},
+                        {"id": "e2", "yamazumi_description": "get material", "time_s": 5.0, "work_type": "Cycle"},
+                    ],
+                },
+                "graphics package = Rescue": {
+                    "total_time_s": 19.0,
+                    "elements": [
+                        {"id": "e3", "yamazumi_description": "add rescue graphics", "time_s": 14.0, "work_type": "Cycle"},
+                        {"id": "e2", "yamazumi_description": "get material", "time_s": 5.0, "work_type": "Cycle"},
+                    ],
+                },
+            },
+        }
+        html = render_pitch_canvas(pitch_data, [], scenario_name="Test Plan")
+        self.assertIn("table-layout: fixed;", html)
+        self.assertIn(".part-desc-text {\n        font-weight: 600;\n        color: #0f172a;\n        line-height: 1.2;\n        white-space: normal;", html)
+        self.assertIn("stack-block type-cycle motion-bar green  multiline", html)
+        self.assertIn(".stack-block.multiline .block-label {\n        display: -webkit-box;", html)
+        self.assertIn("stack-step-trigger", html)
+        self.assertIn("step-popover", html)
+        self.assertIn(".stack-step-trigger:hover .step-popover", html)
+        self.assertIn("step-popover-link", html)
+        self.assertIn("Open in Yamazumi ↗", html)
+        self.assertIn("./yamazumi?", html)
+        self.assertNotIn('<span class="takt-label">', html)
+        self.assertIn('title="Takt: 20s"', html)
 
 
 if __name__ == "__main__":
