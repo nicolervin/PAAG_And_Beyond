@@ -253,6 +253,7 @@ def yamazumi_elements_for_section(
              ON group_row.work_element_id=element.process_element_id
             AND group_row.scenario_id=area.scenario_id
            WHERE element.project_id=? AND area.scenario_id=? AND area.section_id=?
+             AND LOWER(COALESCE(NULLIF(TRIM(element.work_type), ''), 'Cycle')) = 'cycle'
            GROUP BY element.id
            ORDER BY area.name, pitch.sequence, element.sequence""",
         (project_id, scenario_id, section_id),
@@ -809,7 +810,7 @@ def reconcile_yamazumi_to_process(project_id: str, scenario_id: str, element_ids
             )
             model_applicability = (
                 "All"
-                if any(value.casefold() == "base" for value in model_variants)
+                if any(value.casefold() in {"base", "all", "all models"} for value in model_variants)
                 else ", ".join(model_variants)
             )
             process_id = str(row["process_element_id"] or "").strip()
@@ -2429,7 +2430,7 @@ def process_pitch_visual_summary(
             # Cycle work on Yamazumi: keep it green, no orange or gray classifications
             m_class = "Cycle"
             m_color = "green"
-        variants = parse_yamazumi_model_variants(yel["model_variants"], fallback="Base")
+        variants = ["All models" if v.casefold() == "base" else v for v in parse_yamazumi_model_variants(yel["model_variants"], fallback="All models")]
         item_data = {
             "id": yel["id"],
             "work_element_id": wid,
@@ -2446,7 +2447,7 @@ def process_pitch_visual_summary(
                 variant_stacks[v] = []
             variant_stacks[v].append(item_data)
     if not variant_stacks:
-        variant_stacks["Base"] = []
+        variant_stacks["All models"] = []
 
     # Aggregated parts list with sorted handling types and linked pitch steps
     final_parts: list[dict] = []

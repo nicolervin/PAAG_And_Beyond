@@ -279,6 +279,8 @@ class TableHeaderActions:
     save_and_refresh: bool
     undo: bool
     additional_action: bool = False
+    secondary_action: bool = False
+    delete_action: bool = False
 
 
 def table_has_unsaved_changes(
@@ -531,6 +533,16 @@ def editable_table_footer(
     undo_available: bool = False,
     native_row_selection: bool = False,
     additional_unsaved_changes: bool = False,
+    delete_action_label: str | None = None,
+    delete_action_icon: str | None = None,
+    delete_action_key: str | None = None,
+    delete_action_disabled: bool = False,
+    delete_action_help: str | None = None,
+    secondary_action_label: str | None = None,
+    secondary_action_icon: str | None = None,
+    secondary_action_key: str | None = None,
+    secondary_action_disabled: bool = False,
+    secondary_action_help: str | None = None,
     additional_action_label: str | None = None,
     additional_action_icon: str | None = None,
     additional_action_key: str | None = None,
@@ -557,6 +569,24 @@ def editable_table_footer(
     )
     if unsaved:
         footer.markdown(":orange[:material/warning: **Unsaved changes**]")
+    delete_action = False
+    if delete_action_label:
+        delete_action = footer.button(
+            delete_action_label,
+            icon=delete_action_icon,
+            disabled=delete_action_disabled,
+            help=delete_action_help,
+            key=delete_action_key or f"{key_prefix}_delete_action",
+        )
+    secondary_action = False
+    if secondary_action_label:
+        secondary_action = footer.button(
+            secondary_action_label,
+            icon=secondary_action_icon,
+            disabled=secondary_action_disabled,
+            help=secondary_action_help,
+            key=secondary_action_key or f"{key_prefix}_secondary_action",
+        )
     additional_action = False
     if additional_action_label:
         additional_action = footer.button(
@@ -625,6 +655,8 @@ def editable_table_footer(
         save_and_refresh=bool(save_and_refresh or trigger_save),
         undo=bool(undo or trigger_discard),
         additional_action=additional_action,
+        secondary_action=secondary_action,
+        delete_action=delete_action,
     )
 
 

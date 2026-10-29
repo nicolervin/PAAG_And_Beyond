@@ -76,6 +76,8 @@ YAMAZUMI_PITCH_TYPES = ("Pitch", "Waterspider", "Subassembly", "Kitter", "Repack
 
 YAMAZUMI_FEEDER_PITCH_TYPES = ("Subassembly", "Kitter")
 
+YAMAZUMI_CONVEYOR_TYPES = ("1-sided", "2-sided")
+
 ERGONOMICS_REVIEW_STATUSES = (
     "Started",
     "Open",
@@ -1804,7 +1806,9 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 scenario_id TEXT REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                 section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
-                name TEXT NOT NULL, takt_override_s REAL, updated_at TEXT NOT NULL,
+                name TEXT NOT NULL, takt_override_s REAL,
+                conveyor_type TEXT NOT NULL DEFAULT '2-sided' CHECK(conveyor_type IN ('1-sided', '2-sided')),
+                updated_at TEXT NOT NULL,
                 UNIQUE(project_id, scenario_id, name)
             );
             CREATE TABLE IF NOT EXISTS yamazumi_pitches (
@@ -2775,6 +2779,22 @@ def init_db() -> None:
             finally:
                 conn.execute("PRAGMA legacy_alter_table = OFF")
                 conn.execute("PRAGMA foreign_keys = ON")
+        area_columns = {row[1] for row in conn.execute("PRAGMA table_info(yamazumi_areas)").fetchall()}
+        if "conveyor_type" not in area_columns:
+            conn.execute(
+                "ALTER TABLE yamazumi_areas ADD COLUMN conveyor_type "
+                "TEXT NOT NULL DEFAULT '2-sided' CHECK(conveyor_type IN ('1-sided', '2-sided'))"
+            )
+            conn.execute(
+                """UPDATE yamazumi_areas
+                   SET takt_override_s = COALESCE(
+                       (SELECT s.takt_time_s FROM planning_scenarios s
+                        WHERE s.id = yamazumi_areas.scenario_id
+                          AND s.project_id = yamazumi_areas.project_id),
+                       60.0
+                   )
+                   WHERE takt_override_s IS NULL"""
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_yamazumi_areas_scenario ON yamazumi_areas(project_id, scenario_id, name)"
         )
@@ -3180,4 +3200,4 @@ def domain_entrypoint(function):
         return function(*args, **kwargs)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'YAMAZUMI_CONVEYOR_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']

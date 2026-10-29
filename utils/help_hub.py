@@ -228,7 +228,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
             "Feeds **Yamazumi** areas (1-to-1 with Fishbone sections) and constrains which parts can be assigned in **Yamazumi** and **Process at a Glance**."
         ),
         "tips": [
-            "Use the sidebar **Fishbone section context** selector on downstream pages to filter Yamazumi and Process views to a specific section.",
+            "Each active Fishbone section automatically creates a corresponding Yamazumi area and can be selected directly on the **Yamazumi** and **Process at a Glance** pages.",
         ],
     },
     "yamazumi": {
@@ -240,8 +240,9 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
             "(Pitch, Waterspider, Subassembly, Kitter, Repacker), and operator work elements against takt time."
         ),
         "workflows": [
-            "**Create Areas & Pitches**: Link Yamazumi areas to Fishbone sections and create pitches with guided addresses (e.g. `M1S1b.01`).",
-            "**Interactive Yamazumi Board**: Drag and drop work elements between pitches or `Unassigned` to balance operator cycle time against the red Takt Time line.",
+            "**Create Areas & Pitches or Import Files**: Link Yamazumi areas to Fishbone sections, create pitches with guided addresses (e.g. `M1S1b.01`), or upload one or more Excel/PDF Yamazumi files, assign specific pitches or pitch ranges (with `Pitch Type` and assigned features shown in the `Feature` column) to one or more Yamazumi areas (pitches already placed are removed from the preview while unplaced pitches stay loaded until all pitches are placed or the **Import Yamazumi File** expander is minimized), and map detected model variants to `All models` or official project features in the import preview.",
+            "**Interactive Yamazumi Tab**: Select one or more Yamazumi areas in the top **Yamazumi Area** selector, review top summary metrics (including **Actual Operators**, the count of pitches containing work elements), drag and drop work elements between paired North/South pitches (odd and even workstation pairs aligned directly across the assembly flow line) or `Unassigned` on the interactive balancing board to balance operator cycle time against the red Takt Time line, and add or edit work elements per model-variant stack so edits in one model variant only update that specific model variant's work element (assigning or changing a work element's model variant automatically adds any missing model variant to its pitch).",
+            "**Yamazumi Tables Tab**: Review and edit each Yamazumi area's **Area Takt Time** (initialized to the current rev takt time when the area is set up) and **Conveyor Type** (`1-sided` or `2-sided`) in the **Yamazumi Area** table, view, filter, and bulk-edit **Pitch Addresses** (including `Pitch Type` and `Feeds Into Pitch`, which stay synchronized with **Edit Pitch** on the Interactive Yamazumi board) and **Yamazumi Work Elements** across all Yamazumi areas in the scenario, select pitches in the **Pitch Addresses** table and click **Delete Pitches**, **Copy Pitches** (to copy them to another planning scenario), or **Move Pitches** (to move them to another Yamazumi area), and select work elements in the **Yamazumi Work Elements** table and click **Delete Work Element** or **Copy Work Element** (to duplicate each selected work element immediately beneath itself).",
             "**Assign Material Groups**: Link Fishbone part placements to Yamazumi elements (`Use all` or `Choose one`).",
             "**Push to Process at a Glance**: Sync balanced pitch stacks into **Process at a Glance** steps.",
         ],

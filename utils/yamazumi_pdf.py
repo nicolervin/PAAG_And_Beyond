@@ -412,6 +412,17 @@ def parse_yamazumi_pdf(pdf_source: bytes | io.BytesIO | str) -> dict[str, Any]:
             .reset_index(drop=True)
         )
 
+    detected_variants: list[str] = []
+    for p_row in detected_pitches:
+        for v_item in p_row.get("Model_variants") or []:
+            v_str = str(v_item or "").strip()
+            if v_str and v_str not in detected_variants:
+                detected_variants.append(v_str)
+    for e_row in all_elements:
+        v_str = str(e_row.get("Model_variant") or "").strip()
+        if v_str and v_str not in detected_variants:
+            detected_variants.append(v_str)
+
     return {
         "metadata": {
             "plant": plant,
@@ -419,6 +430,7 @@ def parse_yamazumi_pdf(pdf_source: bytes | io.BytesIO | str) -> dict[str, Any]:
             "subline": subline,
             "takt_time": takt_time,
             "region_map": region_map,
+            "variants": detected_variants,
         },
         "pitches": detected_pitches,
         "pitch_dataframe": pitch_df,

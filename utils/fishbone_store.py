@@ -780,7 +780,7 @@ def _create_yamazumi_areas_for_section(
     created: list[dict[str, str]] = []
     conflicts: list[dict[str, str]] = []
     scenarios = conn.execute(
-        """SELECT id, name, revision_label, status
+        """SELECT id, name, revision_label, status, takt_time_s
            FROM planning_scenarios WHERE project_id=?
            ORDER BY revision_sequence, created_at, id""",
         (project_id,),
@@ -813,11 +813,16 @@ def _create_yamazumi_areas_for_section(
             )
             continue
         area_id = str(uuid4())
+        try:
+            raw_scenario_takt = float(scenario["takt_time_s"])
+            scenario_takt_s = raw_scenario_takt if math.isfinite(raw_scenario_takt) and raw_scenario_takt > 0 else 60.0
+        except (TypeError, ValueError, KeyError, IndexError):
+            scenario_takt_s = 60.0
         conn.execute(
             """INSERT INTO yamazumi_areas
-               (id, project_id, scenario_id, section_id, name, takt_override_s, updated_at)
-               VALUES (?, ?, ?, ?, ?, NULL, ?)""",
-            (area_id, project_id, scenario_id, section_id, section_name, timestamp),
+               (id, project_id, scenario_id, section_id, name, takt_override_s, conveyor_type, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, '2-sided', ?)""",
+            (area_id, project_id, scenario_id, section_id, section_name, scenario_takt_s, timestamp),
         )
         created.append(
             {

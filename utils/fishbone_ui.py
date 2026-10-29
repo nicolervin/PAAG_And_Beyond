@@ -30,32 +30,13 @@ def normalized_id(value: object) -> str:
 
 
 def section_breadcrumb_labels(sections: pd.DataFrame) -> dict[str, str]:
-    """Return accessible ancestry labels for a Fishbone walk."""
+    """Return concise section labels keyed by section ID."""
     if sections.empty:
         return {}
-    records = {
-        str(row["id"]): row.to_dict() for _, row in sections.iterrows()
+    return {
+        str(row["id"]): str(row.get("name") or row["id"])
+        for _, row in sections.iterrows()
     }
-    labels: dict[str, str] = {}
-
-    def label_for(section_id: str, trail: set[str] | None = None) -> str:
-        if section_id in labels:
-            return labels[section_id]
-        row = records[section_id]
-        name = str(row.get("name") or section_id)
-        parent_id = normalized_id(row.get("parent_id"))
-        visited = set(trail or ())
-        if parent_id in records and parent_id not in visited and parent_id != section_id:
-            visited.add(section_id)
-            label = f"{label_for(parent_id, visited)} › {name}"
-        else:
-            label = name
-        labels[section_id] = label
-        return label
-
-    for section_id in records:
-        label_for(section_id)
-    return labels
 
 
 def ordered_section_ids(

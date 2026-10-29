@@ -3,7 +3,6 @@ import streamlit as st
 from streamlit.runtime.scriptrunner import StopException
 
 from utils.time_units import format_seconds
-from utils.fishbone_ui import FISHBONE_LINKED_PAGES, render_fishbone_sidebar_context
 from utils.gcp_auth import detect_authenticated_user_email
 from utils.scope_ui import scenario_view_selector
 
@@ -179,21 +178,31 @@ if (
         else None,
     )
 
+# Initialize project and scenario context from URL query params once per session
+# (e.g. when opening a pop-out window or shared link) so stale URL query params
+# do not overwrite in-session project or scenario switches.
+if not st.session_state.get("_qp_context_initialized"):
+    st.session_state["_qp_context_initialized"] = True
+    qp_project_id = st.query_params.get("project_id")
+    if (
+        qp_project_id
+        and str(qp_project_id) in valid_project_ids
+        and str(qp_project_id) != str(st.session_state.get("project_id"))
+    ):
+        st.session_state.project_id = str(qp_project_id)
+        st.session_state.scenario_id = None
+        st.session_state.pop("global_project", None)
+        st.session_state.pop("global_scenario", None)
+    qp_scenario_id = st.query_params.get("scenario_id")
+    if qp_scenario_id and st.session_state.get("project_id"):
+        available_scenarios = planning_scenarios(st.session_state["project_id"])
+        if any(str(s["id"]) == str(qp_scenario_id) for s in available_scenarios):
+            st.session_state.scenario_id = str(qp_scenario_id)
+            st.session_state["global_scenario"] = str(qp_scenario_id)
+
 pending_project_id = st.session_state.pop("pending_active_project_id", None)
 if pending_project_id and str(pending_project_id) in valid_project_ids:
     st.session_state.project_id = str(pending_project_id)
-    st.session_state.scenario_id = None
-    st.session_state.pop("global_project", None)
-    st.session_state.pop("global_scenario", None)
-
-# Synchronize project context from URL query params (e.g. pop-out window or shared tab)
-qp_project_id = st.query_params.get("project_id")
-if (
-    qp_project_id
-    and str(qp_project_id) in valid_project_ids
-    and str(qp_project_id) != str(st.session_state.get("project_id"))
-):
-    st.session_state.project_id = str(qp_project_id)
     st.session_state.scenario_id = None
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
@@ -203,14 +212,6 @@ if str(st.session_state.get("project_id") or "") not in valid_project_ids:
     st.session_state.scenario_id = default_scenario_id
     st.session_state.pop("global_project", None)
     st.session_state.pop("global_scenario", None)
-
-# Synchronize scenario context from URL query params
-qp_scenario_id = st.query_params.get("scenario_id")
-if qp_scenario_id and st.session_state.get("project_id"):
-    available_scenarios = planning_scenarios(st.session_state["project_id"])
-    if any(str(s["id"]) == str(qp_scenario_id) for s in available_scenarios):
-        st.session_state.scenario_id = str(qp_scenario_id)
-        st.session_state["global_scenario"] = str(qp_scenario_id)
 
 project_exchange_page = st.Page(
     "app_pages/exchange.py",
@@ -496,6 +497,10 @@ with st.sidebar:
             str(st.session_state.project_id or ""),
             str(resolved_scenario_id or ""),
         )
+        if st.session_state.get("project_id") and st.query_params.get("project_id") != str(st.session_state["project_id"]):
+            st.query_params["project_id"] = str(st.session_state["project_id"])
+        if resolved_scenario_id and st.query_params.get("scenario_id") != str(resolved_scenario_id):
+            st.query_params["scenario_id"] = str(resolved_scenario_id)
         if st.session_state.get("_last_persisted_workspace") != workspace_pair:
             set_last_active_workspace(
                 st.session_state.project_id,
@@ -520,19 +525,6 @@ with st.sidebar:
             on_navigate_change=_on_top_split_navigation,
             on_split_change=_on_top_split_open,
             on_close_split_change=_on_split_close,
-        )
-        fishbone_context_title = navigation.title
-        if (
-            fishbone_context_title not in FISHBONE_LINKED_PAGES
-            and secondary_page is not None
-            and secondary_page.title in FISHBONE_LINKED_PAGES
-        ):
-            fishbone_context_title = secondary_page.title
-        render_fishbone_sidebar_context(
-            st,
-            page_title=fishbone_context_title,
-            project_id=st.session_state.project_id,
-            scenario_id=(active_scenario or {}).get("id"),
         )
         st.divider()
         st.subheader("Application")

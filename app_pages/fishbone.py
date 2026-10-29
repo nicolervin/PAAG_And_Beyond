@@ -81,6 +81,10 @@ if not project_id or not scenario_id:
     st.stop()
 pool_editor_key = f"parts_fishbone_pool_v3_{project_id}_{scenario_id}"
 assignment_editor_key = f"fishbone_assignment_editor_{scenario_id}"
+if not st.session_state.get(f"_concise_section_labels_v2_{scenario_id}"):
+    st.session_state[f"_concise_section_labels_v2_{scenario_id}"] = True
+    request_table_editor_reset("assembly_framework_editor")
+    request_table_editor_reset(assignment_editor_key)
 framework_editor_key = apply_pending_table_editor_reset("assembly_framework_editor")
 assignment_editor_key = apply_pending_table_editor_reset(assignment_editor_key)
 pool_editor_key = apply_pending_table_editor_reset(pool_editor_key)
@@ -141,7 +145,7 @@ else:
     inactive_assignments = all_assignments.loc[~assignment_is_active].copy()
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
 section_name_by_id = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
-section_option_labels = section_breadcrumb_labels(sections)
+section_option_labels = dict(section_name_by_id)
 parent_options = active_sections["id"].astype(str).tolist() if not active_sections.empty else []
 models = project_models(project_id)
 feature_rules = part_feature_rules(project_id)
@@ -850,7 +854,9 @@ with assign_parts_tab:
         section_id_by_label = {
             label: section_id for section_id, label in section_option_labels.items()
         }
-        assignments_to_save["section_id"] = assignments_to_save["section"].map(section_id_by_label)
+        assignments_to_save["section_id"] = assignments_to_save["section"].apply(
+            lambda val: section_id_by_label.get(str(val or "").split(" › ")[-1].strip())
+        )
         if not inactive_assignments.empty:
             assignments_to_save = pd.concat(
                 [assignments_to_save, inactive_assignments], ignore_index=True, sort=False
@@ -1913,11 +1919,10 @@ with fishbone_tab:
             has_replacements = not replacement_sections.empty
             replacement_options = replacement_sections["id"].astype(str).tolist()
             replacement_labels = {
-                str(rid): f"{rname} ({rtype})"
-                for rid, rname, rtype in zip(
+                str(rid): str(rname)
+                for rid, rname in zip(
                     replacement_sections["id"],
                     replacement_sections["name"],
-                    replacement_sections["section_type"],
                 )
             }
 
@@ -2063,7 +2068,7 @@ with fishbone_tab:
 
             all_sec_ids = visible_sections["id"].astype(str).tolist() if not visible_sections.empty else []
             sec_labels = {
-                str(r["id"]): f"{r['name']} ({r['section_type']})"
+                str(r["id"]): str(r["name"])
                 for _, r in visible_sections.iterrows()
             } if not visible_sections.empty else {}
 
@@ -2871,7 +2876,9 @@ def _render_framework_maintenance():
         }
         framework_to_save = merge_filtered_edits(full_framework, framework, framework_editor)
         framework_to_save["parent_id"] = framework_to_save["parent_assembly"].apply(
-            lambda name: None if name in {"Product / main assembly", "Independent / Support"} else id_by_label.get(name)
+            lambda name: None
+            if name in {"Product / main assembly", "Independent / Support"}
+            else id_by_label.get(str(name or "").split(" › ")[-1].strip())
         )
         if refresh_framework:
             try:

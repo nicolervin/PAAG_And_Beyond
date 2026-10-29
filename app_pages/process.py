@@ -122,7 +122,7 @@ sections = assembly_section_walk_order(project_id)
 if not sections.empty:
     sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy()
 section_ids = sections["id"].astype(str).tolist() if not sections.empty else []
-section_labels = section_breadcrumb_labels(sections)
+section_labels = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
 
 
 models = project_models(project_id)
@@ -340,7 +340,7 @@ def print_slide_dialog(
     labels_dict = (
         section_labels
         if section_labels is not None
-        else (section_breadcrumb_labels(sec_df) if not sec_df.empty else {})
+        else (dict(zip(sec_df["id"].astype(str), sec_df["name"].astype(str))) if not sec_df.empty else {})
     )
 
     curr_pitch_name = all_pitch_dict.get(
@@ -430,10 +430,8 @@ def print_slide_dialog(
 
             def _fmt_sec_opt(sid: str) -> str:
                 if not sid:
-                    return f"(Unassigned Pitches) ({len(sec_pitch_map.get('', []))} pitches)"
-                lbl = labels_dict.get(sid, sid)
-                cnt = len(sec_pitch_map.get(sid, []))
-                return f"{lbl} ({cnt} pitch{'es' if cnt != 1 else ''})"
+                    return "Unassigned Pitches"
+                return labels_dict.get(sid, sid)
 
             def_secs = (
                 [curr_pitch_sec_id]
@@ -1141,7 +1139,6 @@ with tab_plan:
         ).strip().casefold()
 
         yamazumi_rows = yamazumi_elements_for_section(project_id, scenario_id, section_id)
-        section_has_yamazumi_work = not yamazumi_rows.empty
         if not yamazumi_rows.empty:
             yamazumi_rows["work_type"] = (
                 yamazumi_rows["work_type"]
@@ -1151,6 +1148,11 @@ with tab_plan:
                 .str.capitalize()
                 .replace({"": "Cycle"})
             )
+            yamazumi_rows = yamazumi_rows.loc[
+                yamazumi_rows["work_type"].str.casefold() == "cycle"
+            ].copy()
+        section_has_yamazumi_work = not yamazumi_rows.empty
+        if not yamazumi_rows.empty:
             yamazumi_rows["model_variants"] = [
                 parse_yamazumi_model_variants(mv, str(m_single or "Base"))
                 for mv, m_single in zip(
@@ -4254,7 +4256,7 @@ with tab_slides:
         section_pitch_counts[s_id] = section_pitch_counts.get(s_id, 0) + 1
 
     sec_filter_choices: list[tuple[str, str]] = [
-        ("__ALL__", f"All Fishbone Sections ({len(scenario_pitches_df)} pitches)"),
+        ("__ALL__", "All Fishbone Sections"),
     ]
 
     if not sections.empty:
@@ -4262,14 +4264,12 @@ with tab_slides:
             s_id = str(s_row["id"])
             count = section_pitch_counts.get(s_id, 0)
             if count > 0:
-                depth = int(s_row.get("depth") or 0)
-                indent = "  " * depth + ("└─ " if depth > 0 else "")
                 sec_name = str(s_row.get("name") or "")
-                sec_filter_choices.append((s_id, f"{indent}{sec_name} ({count} pitch{'es' if count != 1 else ''})"))
+                sec_filter_choices.append((s_id, sec_name))
 
     unassigned_count = section_pitch_counts.get("", 0)
     if unassigned_count > 0:
-        sec_filter_choices.append(("__UNASSIGNED__", f"(Unassigned Pitches) ({unassigned_count} pitches)"))
+        sec_filter_choices.append(("__UNASSIGNED__", "Unassigned Pitches"))
 
     sec_filter_dict = dict(sec_filter_choices)
     sec_filter_key = f"paag_section_filter_{scenario_id}"
