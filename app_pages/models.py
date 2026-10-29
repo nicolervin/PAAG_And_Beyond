@@ -55,6 +55,12 @@ page_title_with_scope("Complexity Trees", scope="project")
 st.caption("Translate each Model number into the Model name and description the IE and lean team use during planning.")
 if not project_id:
     st.stop()
+if st.session_state.get("_models_active_project_id") != str(project_id):
+    if st.session_state.get("_models_active_project_id") is not None:
+        request_table_editor_reset("model_definitions_editor_v2")
+        request_table_editor_reset("complexity_feature_editor")
+        request_table_editor_reset("complexity_tree_editor")
+    st.session_state["_models_active_project_id"] = str(project_id)
 model_editor_key = apply_pending_table_editor_reset("model_definitions_editor_v2")
 feature_editor_key = apply_pending_table_editor_reset("complexity_feature_editor")
 tree_editor_key = apply_pending_table_editor_reset("complexity_tree_editor")

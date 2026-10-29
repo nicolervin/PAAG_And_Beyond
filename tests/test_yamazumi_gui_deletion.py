@@ -72,24 +72,27 @@ class YamazumiGuiDeletionTests(unittest.TestCase):
 
     @staticmethod
     def button(app: AppTest, label: str):
+        for button in app.button:
+            if button.label == label and str(button.key).startswith("destructive_gui_"):
+                return button
         return next(button for button in app.button if button.label == label)
 
     def test_pitch_gui_cancel_restores_draft_and_confirm_unassigns(self) -> None:
         app = self.run_page(pitch=True)
-        pitch_name = next(field for field in app.text_input if field.label == "Pitch name")
+        pitch_name = next(field for field in app.text_input if field.label == "Pitch Name")
         pitch_name.set_value("Unsaved pitch name")
         app = self.rerun(app)
-        app = self.rerun(self.button(app, "Delete pitch…").click())
-        self.assertIsNotNone(self.button(app, "Delete pitch"))
+        app = self.rerun(self.button(app, "Delete Pitch…").click())
+        self.assertIsNotNone(self.button(app, "Delete Pitch"))
 
         app = self.rerun(self.button(app, "Cancel").click())
         restored_name = next(
-            field for field in app.text_input if field.label == "Pitch name"
+            field for field in app.text_input if field.label == "Pitch Name"
         )
         self.assertEqual(restored_name.value, "Unsaved pitch name")
 
-        app = self.rerun(self.button(app, "Delete pitch…").click())
-        self.rerun(self.button(app, "Delete pitch").click())
+        app = self.rerun(self.button(app, "Delete Pitch…").click())
+        self.rerun(self.button(app, "Delete Pitch").click())
         self.assertEqual(
             store.query("SELECT COUNT(*) AS count FROM yamazumi_pitches WHERE id=?", (self.pitch_id,))[0]["count"],
             0,
@@ -116,10 +119,10 @@ class YamazumiGuiDeletionTests(unittest.TestCase):
             )
         app = self.run_page(element=True)
         description = next(
-            field for field in app.text_area if field.label == "Work description"
+            field for field in app.text_area if field.label == "Work Description"
         )
         description.set_value("Unsaved element description")
-        self.assertIsNotNone(self.button(app, "Delete work element…"))
+        self.assertIsNotNone(self.button(app, "Delete Work Element…"))
         pending_key = (
             f"yamazumi_gui_element_pending_delete_{self.project_id}_"
             f"{self.scenario_id}_{self.area_id}"
@@ -144,13 +147,13 @@ class YamazumiGuiDeletionTests(unittest.TestCase):
 
         app = self.rerun(self.button(app, "Cancel").click())
         restored_description = next(
-            field for field in app.text_area if field.label == "Work description"
+            field for field in app.text_area if field.label == "Work Description"
         )
         self.assertEqual(restored_description.value, "Unsaved element description")
 
         app.session_state[pending_key] = pending
         app = self.rerun(app)
-        self.rerun(self.button(app, "Delete work element").click())
+        self.rerun(self.button(app, "Delete Work Element").click())
         self.assertEqual(
             store.query("SELECT COUNT(*) AS count FROM yamazumi_elements WHERE id=?", (self.element_id,))[0]["count"],
             0,
@@ -177,10 +180,44 @@ class YamazumiGuiDeletionTests(unittest.TestCase):
         with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
             app.run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertTrue(self.button(app, "Delete work element…").disabled)
+        self.assertTrue(self.button(app, "Delete Work Element…").disabled)
         self.assertTrue(
             any("Save & Refresh or Undo" in info.value for info in app.info)
         )
+
+    def test_pitch_type_links_between_pitch_addresses_table_and_edit_pitch_dialog(self) -> None:
+        app = self.run_page(pitch=True)
+        pitch_type_select = next(
+            sb for sb in app.selectbox if sb.key == f"edit_pitch_type_{self.pitch_id}"
+        )
+        self.assertEqual(pitch_type_select.value, "Pitch")
+
+        # Close Edit Pitch dialog, then update Pitch Type in the Pitch Addresses table
+        app = self.rerun(self.button(app, "Cancel").click())
+        pitch_editor_key = f"yamazumi_pitch_editor_{self.scenario_id}_{self.area_id}"
+        app.session_state[pitch_editor_key] = {
+            "edited_rows": {0: {"pitch_type": "Waterspider"}},
+            "added_rows": [],
+            "deleted_rows": [],
+        }
+        # Re-open Edit Pitch from the interactive board and confirm it reflects the table's Pitch Type
+        edit_pitch_key = f"yamazumi_edit_pitch_target_{self.project_id}_{self.area_id}"
+        app.session_state[edit_pitch_key] = self.pitch_id
+        app = self.rerun(app)
+        pitch_type_select = next(
+            sb for sb in app.selectbox if sb.key == f"edit_pitch_type_{self.pitch_id}"
+        )
+        self.assertEqual(pitch_type_select.value, "Waterspider")
+
+        # Change Pitch Type in Edit Pitch dialog and save; confirm DB and table update
+        pitch_type_select.select("Repacker")
+        app = self.rerun(app)
+        app = self.rerun(self.button(app, "Save Pitch").click())
+        saved_pitch = store.query(
+            "SELECT pitch_type FROM yamazumi_pitches WHERE id=?",
+            (self.pitch_id,),
+        )[0]
+        self.assertEqual(saved_pitch["pitch_type"], "Repacker")
 
 
 if __name__ == "__main__":

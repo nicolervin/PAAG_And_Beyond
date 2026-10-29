@@ -35,10 +35,8 @@ class FishboneUiTests(unittest.TestCase):
         labels = section_breadcrumb_labels(self.sections)
 
         self.assertEqual(labels["main-a"], "Main A")
-        self.assertEqual(labels["child-a"], "Main A › Child A")
-        self.assertEqual(
-            labels["grandchild"], "Main A › Child A › Grandchild"
-        )
+        self.assertEqual(labels["child-a"], "Child A")
+        self.assertEqual(labels["grandchild"], "Grandchild")
         self.assertEqual(labels["orphan"], "Orphan")
 
     def test_active_options_retain_an_explicit_inactive_current_value(self) -> None:
@@ -91,7 +89,7 @@ class FishboneUiTests(unittest.TestCase):
         )
         self.assertEqual(
             fishbone_context_label(["child-a"], active, labels),
-            "Main A › Child A",
+            "Child A",
         )
         self.assertEqual(
             fishbone_context_label(["main-a", "main-b"], active, labels),
@@ -158,7 +156,7 @@ class FishboneUiTests(unittest.TestCase):
                 scenario_id="scenario",
             )
 
-        parent.markdown.assert_called_once_with("**Main A › Child A**")
+        parent.markdown.assert_called_once_with("**Child A**")
         self.assertEqual(
             parent.selectbox.call_args.args[1],
             ["main-a", "child-a", "main-b", "orphan"],

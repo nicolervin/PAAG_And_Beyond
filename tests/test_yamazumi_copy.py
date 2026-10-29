@@ -427,7 +427,7 @@ class YamazumiCopyPageTests(unittest.TestCase):
         for suffix in ("", "-wal", "-shm"):
             Path(f"{self.database_path}{suffix}").unlink(missing_ok=True)
 
-    def run_page(self, *, pending: bool = False) -> AppTest:
+    def run_page(self) -> AppTest:
         app = AppTest.from_file(
             str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
         )
@@ -435,50 +435,84 @@ class YamazumiCopyPageTests(unittest.TestCase):
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "Copy page tester"
         app.session_state[f"yamazumi_area_{self.scenario_id}"] = self.source_area_id
-        if pending:
-            app.session_state[
-                f"yamazumi_copy_pending_{self.project_id}_{self.scenario_id}"
-            ] = {
-                "active_scenario_id": self.scenario_id,
-                "source_scenario_id": self.scenario_id,
-                "source_area_id": self.source_area_id,
-                "target_scenario_id": self.scenario_id,
-                "target_area_id": self.target_area_id,
-                "pitch_ids": [self.pitch_id],
-                "element_ids": [],
-                "standalone_target_pitch_id": None,
-                "pitch_number_overrides": {self.pitch_id: "P-COPY"},
-                "feed_target_overrides": {},
-            }
         with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
             app.run(timeout=30)
         self.assertEqual(list(app.exception), [])
         return app
 
     def test_populated_copy_expander_and_confirmed_dialog(self) -> None:
-        self.run_page()
+        app = self.run_page()
+        button_labels = [button.label for button in app.button]
+        self.assertIn("Delete Pitches", button_labels)
+        self.assertIn("Copy Pitches", button_labels)
+        self.assertIn("Move Pitches", button_labels)
+        self.assertIn("Delete Work Element", button_labels)
+        self.assertIn("Copy Work Element", button_labels)
+        self.assertLess(
+            button_labels.index("Delete Pitches"),
+            button_labels.index("Copy Pitches"),
+        )
+        self.assertLess(
+            button_labels.index("Copy Pitches"),
+            button_labels.index("Move Pitches"),
+        )
+        self.assertLess(
+            button_labels.index("Delete Work Element"),
+            button_labels.index("Copy Work Element"),
+        )
+        expander_labels = [expander.label for expander in app.expander]
+        self.assertNotIn("Copy to Another Area", expander_labels)
+        self.assertNotIn("Copy to another area", expander_labels)
 
-        app = self.run_page(pending=True)
-        confirm = next(
-            button for button in app.button if button.label == "Copy to another area"
+    def test_import_pitch_table_shows_feature_column(self) -> None:
+        from types import SimpleNamespace
+        import pandas as pd
+
+        store.add_assembly_section(
+            self.project_id, "Import Target Section", "Assembly", None, ""
         )
-        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
-            app = confirm.click().run(timeout=30)
+        parsed_df = pd.DataFrame(
+            [
+                {
+                    "Sub-Line": "Import Target Section",
+                    "Pitch_number": "IMP-01",
+                    "Pitch_name": "Imported Pitch 1",
+                    "Work_Description": "Install bracket",
+                    "Seconds": 12.0,
+                    "Model_variant": "Sunroof",
+                    "Model_variants": ["Sunroof"],
+                    "Work_type": "Cycle",
+                    "Work_Region": "None",
+                    "Order_Index": 1,
+                }
+            ]
+        )
+        fake_upload = SimpleNamespace(name="test.xlsx", size=100, getvalue=lambda: b"test")
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Import preview tester"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = self.source_area_id
+        with (
+            patch("utils.yamazumi_board.yamazumi_board", return_value=None),
+            patch("streamlit.file_uploader", return_value=[fake_upload]),
+            patch("pandas.read_excel", return_value=parsed_df),
+        ):
+            app.run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertEqual(
-            store.query(
-                "SELECT COUNT(*) AS count FROM yamazumi_pitches WHERE area_id=?",
-                (self.target_area_id,),
-            )[0]["count"],
-            1,
-        )
-        self.assertEqual(
-            store.query(
-                "SELECT COUNT(*) AS count FROM yamazumi_elements WHERE area_id=?",
-                (self.target_area_id,),
-            )[0]["count"],
-            1,
-        )
+        import_tables = [
+            table.value
+            for table in app.dataframe
+            if "Pitch_number" in table.value.columns
+            and "Target_area" in table.value.columns
+        ]
+        self.assertEqual(len(import_tables), 1)
+        import_df = import_tables[0]
+        self.assertIn("Feature", import_df.columns)
+        self.assertNotIn("Detected_subline", import_df.columns)
+        self.assertEqual(str(import_df.iloc[0]["Feature"]), "All models")
 
 
 if __name__ == "__main__":

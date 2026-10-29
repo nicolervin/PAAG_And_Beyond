@@ -3,7 +3,6 @@ import streamlit as st
 from streamlit.runtime.scriptrunner import StopException
 
 from utils.time_units import format_seconds
-from utils.fishbone_ui import FISHBONE_LINKED_PAGES, render_fishbone_sidebar_context
 from utils.gcp_auth import detect_authenticated_user_email
 from utils.scope_ui import scenario_view_selector, sync_active_scenario_state
 
@@ -259,7 +258,6 @@ if (
     if any(str(s["id"]) == str(qp_scenario_id) for s in available_scenarios):
         st.session_state.scenario_id = str(qp_scenario_id)
         sync_active_scenario_state(str(qp_scenario_id))
-
 project_exchange_page = st.Page(
     "app_pages/exchange.py",
     title="Import/Export Projects",
@@ -552,6 +550,10 @@ with st.sidebar:
             str(st.session_state.project_id or ""),
             str(resolved_scenario_id or ""),
         )
+        if st.session_state.get("project_id") and st.query_params.get("project_id") != str(st.session_state["project_id"]):
+            st.query_params["project_id"] = str(st.session_state["project_id"])
+        if resolved_scenario_id and st.query_params.get("scenario_id") != str(resolved_scenario_id):
+            st.query_params["scenario_id"] = str(resolved_scenario_id)
         if st.session_state.get("_last_persisted_workspace") != workspace_pair:
             set_last_active_workspace(
                 st.session_state.project_id,
@@ -576,19 +578,6 @@ with st.sidebar:
             on_navigate_change=_on_top_split_navigation,
             on_split_change=_on_top_split_open,
             on_close_split_change=_on_split_close,
-        )
-        fishbone_context_title = navigation.title
-        if (
-            fishbone_context_title not in FISHBONE_LINKED_PAGES
-            and secondary_page is not None
-            and secondary_page.title in FISHBONE_LINKED_PAGES
-        ):
-            fishbone_context_title = secondary_page.title
-        render_fishbone_sidebar_context(
-            st,
-            page_title=fishbone_context_title,
-            project_id=st.session_state.project_id,
-            scenario_id=(active_scenario or {}).get("id"),
         )
         st.divider()
         st.subheader("Application")

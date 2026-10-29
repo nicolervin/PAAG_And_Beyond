@@ -880,15 +880,15 @@ class YamazumiPitchFeedTests(unittest.TestCase):
                 [pitch_id],
                 editor_name="Move tester",
             )
-        with self.assertRaisesRegex(ValueError, "Current editor"):
-            store.move_yamazumi_pitches(
-                self.project_id,
-                self.scenario_id,
-                self.area_id,
-                self.same_scenario_other_area_id,
-                [pitch_id],
-                editor_name="",
-            )
+        result = store.move_yamazumi_pitches(
+            self.project_id,
+            self.scenario_id,
+            self.area_id,
+            self.same_scenario_other_area_id,
+            [pitch_id],
+            editor_name="",
+        )
+        self.assertEqual(result["pitch_count"], 1)
 
     def test_move_pitches_rolls_back_when_audit_fails(self) -> None:
         pitch_id = self.add_pitch("P-MOVE-ROLLBACK")

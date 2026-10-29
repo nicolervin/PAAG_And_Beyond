@@ -66,7 +66,7 @@ def render_pin_map_tab(
     pitch_rows = pin_map.drop_duplicates(subset=["pitch_id"], keep="first").copy()
     controls = st.container(horizontal=True, vertical_alignment="bottom")
     sections = assembly_section_walk_order(project_id)
-    section_labels = section_breadcrumb_labels(sections)
+    section_labels = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
     area_rows = (
         pitch_rows[["area_id", "area_name", "section_id"]]
         .drop_duplicates(subset=["area_id"], keep="first")
@@ -76,15 +76,10 @@ def render_pin_map_tab(
         area_rows,
         sections["id"].astype(str).tolist() if not sections.empty else [],
     )
-    area_labels = {}
-    for _, area_row in area_rows.iterrows():
-        area_id = str(area_row["id"])
-        area_name = str(area_row["name"])
-        section_id = clean_text(area_row.get("section_id"))
-        area_labels[area_id] = (
-            f"{area_name} · Fishbone: {section_labels[section_id]}"
-            if section_id in section_labels else f"{area_name} · Unlinked"
-        )
+    area_labels = {
+        str(area_row["id"]): str(area_row["name"])
+        for _, area_row in area_rows.iterrows()
+    }
     area_filter_key = f"pin_map_areas_{scenario_id}"
     stored_areas = st.session_state.get(area_filter_key, [])
     if isinstance(stored_areas, (list, tuple)):

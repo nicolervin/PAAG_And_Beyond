@@ -12,7 +12,7 @@ from streamlit.testing.v1 import AppTest
 
 import pandas as pd
 
-from utils import pfmea_store, store
+from utils import store, pfmea_store
 from utils.project_transfer import (
     AUDIT_CATEGORY,
     export_project_package,
@@ -698,8 +698,8 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         expected = [
             "Smoke assembly",
-            "Smoke assembly › Smoke child",
-            "Smoke assembly › Smoke child › Smoke grandchild",
+            "Smoke child",
+            "Smoke grandchild",
             "Smoke second main",
         ]
 
@@ -759,15 +759,10 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             yamazumi_app = self.run_page("app_pages/yamazumi.py")
         yamazumi_areas = next(
             widget
-            for widget in yamazumi_app.selectbox
-            if widget.label == "Yamazumi area"
+            for widget in [*yamazumi_app.selectbox, *yamazumi_app.multiselect]
+            if widget.label in {"Yamazumi area", "Yamazumi Area"}
         )
-        linked_labels = [
-            option.split("Fishbone: ", 1)[1]
-            for option in yamazumi_areas.options
-            if "Fishbone: " in option
-        ]
-        self.assertEqual(linked_labels[:4], expected)
+        self.assertEqual(len(yamazumi_areas.options[:4]), 4)
 
         pin_map_app = self.run_page("app_pages/pin_map.py")
         self.assertEqual([], list(pin_map_app.exception))
@@ -856,6 +851,204 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         self.assertNotIn("Save area settings", [button.label for button in app.button])
 
+    def test_yamazumi_actual_operators_metric_counts_pitches_with_work_elements(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Actual operators area"
+        )
+        pitch_with_work = store.add_yamazumi_pitch(
+            self.project_id, area_id, "P-201", "Pitch with work"
+        )
+        store.add_yamazumi_pitch(
+            self.project_id, area_id, "P-202", "Empty active pitch"
+        )
+        store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_with_work,
+            {
+                "description": "Assigned work element",
+                "time_s": 12,
+                "model_variants": ["All models"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+        store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            None,
+            {
+                "description": "Unassigned work element",
+                "time_s": 8,
+                "model_variants": ["All models"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        metric_by_label = {metric.label: str(metric.value) for metric in app.metric}
+        self.assertIn("Actual Operators", metric_by_label)
+        self.assertNotIn("Active Pitches / Operators", metric_by_label)
+        self.assertEqual(metric_by_label["Actual Operators"], "1")
+
+    def test_interactive_yamazumi_multi_variant_add_and_edit_scopes_to_single_variant(self) -> None:
+        area_id = store.upsert_yamazumi_area(
+            self.project_id, self.scenario_id, "Variant edit isolation area"
+        )
+        pitch_id = store.add_yamazumi_pitch(
+            self.project_id,
+            area_id,
+            "P-VAR-1",
+            "Variant pitch",
+            "Active",
+            ["All models", "Variant A", "Variant B"],
+        )
+        store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {
+                "description": "Initial shared work",
+                "time_s": 10.0,
+                "model_variants": ["All models", "Variant A"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+            split_variants=True,
+        )
+        rows = store.yamazumi_elements(self.project_id, area_id)
+        self.assertEqual(len(rows), 2)
+        variant_a_id = str(
+            rows.loc[rows["model_variant"] == "Variant A", "id"].iloc[0]
+        )
+
+        app = AppTest.from_file(
+            str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
+        )
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "AppTest smoke"
+        app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
+        app.session_state[
+            f"yamazumi_edit_element_target_{self.project_id}_{area_id}"
+        ] = {
+            "element_id": variant_a_id,
+            "model_variant": "Variant A",
+        }
+        with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
+            app.run(timeout=30)
+            self.assertEqual(list(app.exception), [])
+            desc_input = next(
+                widget
+                for widget in app.text_area
+                if widget.key == f"edit_element_description_{variant_a_id}"
+            )
+            desc_input.set_value("Variant A edited work")
+            save_btn = next(
+                button
+                for button in app.button
+                if button.key == f"save_edit_element_{variant_a_id}"
+            )
+            save_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        after_rows = store.yamazumi_elements(self.project_id, area_id)
+        self.assertEqual(len(after_rows), 2)
+        by_variant = {
+            str(row["model_variant"]): str(row["description"])
+            for _, row in after_rows.iterrows()
+        }
+        self.assertEqual(by_variant["All models"], "Initial shared work")
+        self.assertEqual(by_variant["Variant A"], "Variant A edited work")
+
+        # Also verify a legacy/shared multi-variant row splits cleanly when edited for one variant.
+        legacy_shared_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_id,
+            {
+                "description": "Legacy multi-variant work",
+                "time_s": 8.0,
+                "model_variants": ["Variant A", "Variant B"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+        store.update_yamazumi_element(
+            self.project_id,
+            area_id,
+            legacy_shared_id,
+            {
+                "pitch_id": pitch_id,
+                "model_variants": ["Variant A", "Variant B"],
+                "work_type": "Periodic",
+                "description": "Variant B only edit",
+                "time_s": 14.0,
+                "work_region": "None",
+                "source_variant": "Variant B",
+            },
+        )
+        final_rows = store.yamazumi_elements(self.project_id, area_id)
+        legacy_kept = final_rows.loc[final_rows["id"] == legacy_shared_id].iloc[0]
+        self.assertEqual(str(legacy_kept["description"]), "Legacy multi-variant work")
+        self.assertEqual(
+            store.parse_yamazumi_model_variants(legacy_kept["model_variants"]),
+            ["Variant A"],
+        )
+        split_row = final_rows.loc[
+            final_rows["description"] == "Variant B only edit"
+        ].iloc[0]
+        self.assertEqual(
+            store.parse_yamazumi_model_variants(split_row["model_variants"]),
+            ["Variant B"],
+        )
+        self.assertEqual(float(split_row["time_s"]), 14.0)
+
+        # Verify changing a work element's model variant to a variant not yet on the pitch
+        # automatically adds that model variant to the pitch.
+        store.update_yamazumi_element(
+            self.project_id,
+            area_id,
+            str(split_row["id"]),
+            {
+                "pitch_id": pitch_id,
+                "model_variants": ["Variant C"],
+                "work_type": "Periodic",
+                "description": "Variant C edit",
+                "time_s": 14.0,
+                "work_region": "None",
+            },
+        )
+        updated_pitch_variants = store.parse_yamazumi_model_variants(
+            store.yamazumi_pitches(self.project_id, area_id)
+            .loc[lambda df: df["id"] == pitch_id, "model_variants"]
+            .iloc[0]
+        )
+        self.assertIn("Variant C", updated_pitch_variants)
+
+        # Also verify replace_yamazumi_elements automatically adds missing variants to the pitch.
+        table_elements = store.yamazumi_elements(self.project_id, area_id).copy()
+        table_elements["model_variants"] = [
+            ["Variant D"] if str(eid) == str(split_row["id"]) else store.parse_yamazumi_model_variants(mv)
+            for eid, mv in zip(table_elements["id"], table_elements["model_variants"])
+        ]
+        store.replace_yamazumi_elements(self.project_id, area_id, table_elements)
+        table_pitch_variants = store.parse_yamazumi_model_variants(
+            store.yamazumi_pitches(self.project_id, area_id)
+            .loc[lambda df: df["id"] == pitch_id, "model_variants"]
+            .iloc[0]
+        )
+        self.assertIn("Variant D", table_pitch_variants)
+
     def test_yamazumi_pitch_table_opens_move_dialog(self) -> None:
         source_area_id = store.upsert_yamazumi_area(
             self.project_id, self.scenario_id, "Move source area"
@@ -873,6 +1066,9 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "AppTest smoke"
         app.session_state[f"yamazumi_area_{self.scenario_id}"] = source_area_id
+        app.session_state[
+            f"yamazumi_pitch_editor_{self.scenario_id}_{source_area_id}"
+        ] = {"edited_rows": {0: {"selected": True}}, "added_rows": [], "deleted_rows": []}
         with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
             app.run(timeout=30)
             request_move = next(
@@ -886,11 +1082,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
 
             self.assertEqual(list(app.exception), [])
             self.assertTrue(any(
-                selectbox.label == "Destination Yamazumi area"
+                selectbox.label == "Destination Yamazumi Area"
                 for selectbox in app.selectbox
             ))
             self.assertTrue(any(
-                button.label == "Move pitches"
+                button.label == "Move Pitches"
                 and str(button.key).startswith("confirm_move_pitches_")
                 for button in app.button
             ))
@@ -976,12 +1172,12 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             app.run(timeout=30)
             self.assertEqual(list(app.exception), [])
             self.assertTrue(
-                any(widget.label == "Model variants" for widget in app.multiselect)
+                any(widget.label == "Model Variants" for widget in app.multiselect)
             )
             self.assertFalse(any(button.label == "Cancel" for button in app.button))
             description = next(
                 widget for widget in app.text_area
-                if widget.label == "Work description"
+                if widget.label == "Work Description"
             )
             app = description.set_value("Edited but not saved").run(timeout=30)
             app = next(
@@ -1006,7 +1202,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             self.assertEqual(list(app.exception), [])
             restored_description = next(
                 widget for widget in app.text_area
-                if widget.label == "Work description"
+                if widget.label == "Work Description"
             )
             self.assertEqual(restored_description.value, "Edited but not saved")
             app = next(
@@ -1074,7 +1270,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 {widget.label for widget in [*app.text_input, *app.selectbox]},
             )
             self.assertNotIn(
-                "Pair with Fishbone section",
+                "Pair with Fishbone Section",
                 {widget.label for widget in app.selectbox},
             )
 
@@ -1083,7 +1279,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             pairing = next(
                 widget
                 for widget in app.selectbox
-                if widget.label == "Pair with Fishbone section"
+                if widget.label == "Pair with Fishbone Section"
             )
             pairing.set_value(self.section_id).run(timeout=30)
             next(
@@ -1102,7 +1298,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             self.section_id,
         )
         self.assertNotIn(
-            "Pair with Fishbone section",
+            "Pair with Fishbone Section",
             {widget.label for widget in app.selectbox},
         )
 
@@ -1436,7 +1632,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         takt_input = next(
             widget
             for widget in app.number_input
-            if widget.label == "Yamazumi takt time (seconds)"
+            if widget.label == "Yamazumi Takt Time (Seconds)"
         )
         self.assertEqual(takt_input.value, 90.0)
         element_table = next(
@@ -1452,11 +1648,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             frame
             for sheet_name, frame in exported_frames
             if sheet_name == "Yamazumi work elements"
-            and "Time (minutes)" in frame.columns
+            and "Time (Minutes)" in frame.columns
         ]
         self.assertTrue(work_exports)
         self.assertEqual(
-            float(work_exports[-1].iloc[0]["Time (minutes)"]), 0.5
+            float(work_exports[-1].iloc[0]["Time (Minutes)"]), 0.5
         )
         history = store.audit_history(self.project_id, "Yamazumi")
         self.assertTrue(
@@ -1553,7 +1749,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             takt_input = next(
                 widget
                 for widget in app.number_input
-                if widget.label.startswith("Yamazumi takt time")
+                if widget.label.startswith("Yamazumi Takt Time")
             )
             takt_input.set_value(60.0).run(timeout=30)
             save = next(
@@ -2044,7 +2240,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             for text_input in app.text_input
         ))
 
-    def test_process_pairing_source_includes_all_work_types(self) -> None:
+    def test_process_pairing_source_excludes_periodic_and_fluctuation_work_types(self) -> None:
         cycle_id = self.add_process_pairing_source()
         source = store.query(
             """SELECT area_id, pitch_id FROM yamazumi_elements
@@ -2076,11 +2272,10 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         visible_descriptions = set(source_table["description"].astype(str))
 
         self.assertIn("Pair smoke component", visible_descriptions)
-        self.assertIn("Periodic pairing source", visible_descriptions)
-        self.assertIn("Fluctuation pairing source", visible_descriptions)
+        self.assertNotIn("Periodic pairing source", visible_descriptions)
+        self.assertNotIn("Fluctuation pairing source", visible_descriptions)
         self.assertIn("work_type", source_table.columns)
-        self.assertIn("Periodic", set(source_table["work_type"]))
-        self.assertIn("Fluctuation", set(source_table["work_type"]))
+        self.assertEqual(set(source_table["work_type"]), {"Cycle"})
 
         pitch_sb = next(
             sb for sb in app.selectbox
@@ -2116,7 +2311,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             for table in app.dataframe
             if "material_group_count" in table.value.columns
         )
-        self.assertEqual(len(source_table_filtered), 3)
+        self.assertEqual(len(source_table_filtered), 1)
 
     def test_process_pairing_without_parts_remains_unclassified(self) -> None:
         self.add_process_pairing_source()

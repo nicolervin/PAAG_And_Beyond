@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+import re
 from collections.abc import Callable
 
 import streamlit as st
@@ -8,21 +10,117 @@ import streamlit as st
 from utils.component_payload import json_safe
 from utils.time_units import time_unit as time_unit_config
 
+_PITCH_NUMBER_PAIR_RE = re.compile(r"^(.*?)(\d+)([^\d]*)$")
+
+
+def _pitch_variants_list(pitch: dict) -> list[str]:
+    raw_variants = pitch.get("model_variants")
+    if isinstance(raw_variants, str):
+        try:
+            raw_variants = json.loads(raw_variants)
+        except ValueError:
+            raw_variants = [raw_variants] if raw_variants.strip() else []
+    if not isinstance(raw_variants, list) or not raw_variants:
+        fallback = str(pitch.get("model_variant") or "All models").strip() or "All models"
+        return [fallback]
+    cleaned = [str(item).strip() for item in raw_variants if str(item).strip()]
+    return cleaned or ["All models"]
+
+
+def _pitch_card_base_width_px(pitch: dict | None) -> int:
+    if not isinstance(pitch, dict):
+        return 240
+    variants = _pitch_variants_list(pitch)
+    return max(240, len(variants) * 165 + 18)
+
+
+def _pitch_pair_metadata(pitch: dict) -> tuple[str, str | None]:
+    raw_number = str(pitch.get("pitch_number") or "").strip()
+    match = _PITCH_NUMBER_PAIR_RE.match(raw_number)
+    if not match:
+        return "south", None
+    prefix, digits, suffix = match.groups()
+    number = int(digits)
+    if number <= 0:
+        return "south", None
+    side = "north" if number % 2 == 1 else "south"
+    odd_number = number if number % 2 == 1 else number - 1
+    normalized_prefix = prefix.strip().casefold()
+    normalized_suffix = suffix.strip().casefold()
+    return side, f"{normalized_prefix}::{odd_number}::{normalized_suffix}"
+
+
+def build_yamazumi_pitch_pairs(
+    pitches: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    paired_columns: list[dict] = []
+    pairs_by_key: dict[str, dict] = {}
+    for raw_pitch in pitches or []:
+        pitch = dict(raw_pitch)
+        side, pair_key = _pitch_pair_metadata(pitch)
+        pair = pairs_by_key.get(pair_key) if pair_key else None
+        if pair is None or pair.get(side) is not None:
+            pair = {
+                "pair_index": len(paired_columns),
+                "pair_key": pair_key,
+                "north": None,
+                "south": None,
+            }
+            paired_columns.append(pair)
+            if pair_key and pair_key not in pairs_by_key:
+                pairs_by_key[pair_key] = pair
+        pair[side] = pitch
+
+    annotated_pitches: list[dict] = []
+    pair_summaries: list[dict] = []
+    for pair_index, pair in enumerate(paired_columns):
+        north_pitch = pair.get("north")
+        south_pitch = pair.get("south")
+        pair_width_px = max(
+            _pitch_card_base_width_px(north_pitch),
+            _pitch_card_base_width_px(south_pitch),
+        )
+        for side in ("north", "south"):
+            side_pitch = pair.get(side)
+            if isinstance(side_pitch, dict):
+                side_pitch["pair_index"] = pair_index
+                side_pitch["pair_side"] = side
+                side_pitch["pair_key"] = pair.get("pair_key")
+                side_pitch["pair_width_px"] = pair_width_px
+                annotated_pitches.append(side_pitch)
+        pair_summaries.append(
+            {
+                "pair_index": pair_index,
+                "pair_key": pair.get("pair_key"),
+                "pair_width_px": pair_width_px,
+                "north_pitch_id": north_pitch.get("id") if isinstance(north_pitch, dict) else None,
+                "north_pitch_number": (
+                    north_pitch.get("pitch_number") if isinstance(north_pitch, dict) else None
+                ),
+                "south_pitch_id": south_pitch.get("id") if isinstance(south_pitch, dict) else None,
+                "south_pitch_number": (
+                    south_pitch.get("pitch_number") if isinstance(south_pitch, dict) else None
+                ),
+            }
+        )
+    return annotated_pitches, pair_summaries
+
+
 
 _HTML = """
 <div class="board">
   <div class="board-actions">
-    <button id="add-pitch" type="button">＋ Add pitch</button>
-    <button id="full-screen" type="button" title="Open the Yamazumi board full screen" aria-pressed="false">Full screen</button>
+    <button id="add-pitch" type="button">＋ Add Pitch</button>
+    <button id="full-screen" type="button" title="Open the Yamazumi board full screen" aria-pressed="false">Full Screen</button>
   </div>
   <div class="board-content">
   <div class="legend" id="legend"></div>
   <div class="unassigned-lane" id="unassigned"></div>
-  <div class="lane-label">North side · odd pitches</div>
+  <div class="lane-label">North Side · Odd Pitches</div>
   <div class="lane north" id="north"></div>
-  <div class="line"><span>Assembly flow →</span></div>
+  <div class="line"><span>Assembly Flow →</span></div>
   <div class="lane south" id="south"></div>
-  <div class="lane-label">South side · even pitches</div>
+  <div class="lane-label">South Side · Even Pitches</div>
   </div>
 </div>
 """
@@ -46,7 +144,8 @@ _CSS = """
 .lane-label { margin:8px 2px 0; font-weight:700; color:var(--st-secondary-text-color); }
 .line { border-top:4px solid #c62828; margin:0; text-align:center; color:#c62828; font-weight:700; }
 .line span { position:relative; top:-13px; padding:0 10px; background:var(--st-background-color); }
-.pitch { position:relative; z-index:1; flex:0 0 240px; display:flex; flex-direction:column; border:1px solid var(--st-border-color); border-radius:9px; background:var(--st-background-color); padding:9px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+.pitch { position:relative; z-index:1; box-sizing:border-box; flex:0 0 240px; min-width:240px; display:flex; flex-direction:column; border:1px solid var(--st-border-color); border-radius:9px; background:var(--st-background-color); padding:9px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+.pitch-placeholder { box-sizing:border-box; flex:0 0 240px; min-width:240px; visibility:hidden; pointer-events:none; }
 .pitch.north .variants { order:1; align-items:flex-end; }
 .pitch.north .pitch-info { order:2; margin-top:6px; }
 .pitch.south .pitch-info { order:1; margin-bottom:6px; }
@@ -74,9 +173,12 @@ _CSS = """
 .stack.takt-scale { min-height:155px; }
 .drop-slot { flex:0 0 8px; min-height:8px; margin:-4px 0; position:relative; z-index:3; }
 .drop-slot.dragover { min-height:14px; flex-basis:14px; margin:-7px 0; background:color-mix(in srgb, var(--st-primary-color) 28%, transparent); outline:2px dashed var(--st-primary-color); }
-.element { position:relative; box-sizing:border-box; min-height:0; padding:5px 31px 5px 6px; border-top:1px solid rgba(0,0,0,.14); font-size:.72rem; cursor:grab; overflow:hidden; }
-.element strong { position:absolute; top:4px; right:31px; margin-left:5px; }
-.element-description { display:block; height:100%; padding-right:30px; overflow:hidden; line-height:1.2; overflow-wrap:anywhere; }
+.element { position:relative; box-sizing:border-box; height:var(--element-height, 34px); flex:0 0 var(--element-height, 34px); min-height:0; padding:5px 38px 5px 6px; border-top:1px solid rgba(0,0,0,.14); font-size:.72rem; cursor:grab; overflow:hidden; transition:min-height .12s ease, box-shadow .12s ease; }
+.board:not(.is-dragging) .element:hover, .board:not(.is-dragging) .element:focus-within { height:auto; flex:0 0 auto; min-height:max(var(--element-height, 34px), 38px); overflow:visible; z-index:5; box-shadow:0 2px 6px rgba(0,0,0,.18); }
+.board:not(.is-dragging) .element.has-criticality:hover, .board:not(.is-dragging) .element.has-criticality:focus-within { min-height:max(var(--element-height, 34px), 52px); padding-bottom:22px; }
+.element strong { position:absolute; top:4px; right:38px; margin-left:5px; white-space:nowrap; }
+.element-description { display:block; height:100%; padding-right:38px; overflow:hidden; line-height:1.2; overflow-wrap:anywhere; }
+.board:not(.is-dragging) .element:hover .element-description, .board:not(.is-dragging) .element:focus-within .element-description { height:auto; overflow:visible; }
 .edit-element { position:absolute; right:3px; bottom:3px; padding:1px 4px; border-color:rgba(0,0,0,.35); color:#111; font-size:.68rem; line-height:1.2; }
 .criticality { position:absolute; left:3px; bottom:3px; z-index:2; display:flex; gap:3px; max-width:calc(100% - 43px); pointer-events:none; }
 .criticality-tag { box-sizing:border-box; padding:1px 4px; border:1px solid currentColor; border-radius:3px; background:#fff; font-weight:900; line-height:1.2; white-space:nowrap; }
@@ -130,7 +232,7 @@ export default function(component) {
       try { elementVariants = JSON.parse(elementVariants) } catch { elementVariants = [elementVariants] }
     }
     if (!Array.isArray(elementVariants) || !elementVariants.length) {
-      elementVariants = [element.model_variant || 'Base']
+      elementVariants = [element.model_variant || 'All models']
     }
     for (const variant of [...new Set(elementVariants)]) {
       grouped[pitch][variant] ||= []
@@ -141,7 +243,7 @@ export default function(component) {
     const card = document.createElement('div')
     card.className = `pitch ${side} ${(pitch.status || '').toLowerCase()}`
     card.dataset.pitch = pitch.id || ''
-    const pitchVariants = pitch.id ? (pitch.model_variants || ['Base']) : [...new Set(Object.keys(grouped.__unassigned__ || {}).concat(['Base']))]
+    const pitchVariants = pitch.id ? (pitch.model_variants || ['All models']) : [...new Set(Object.keys(grouped.__unassigned__ || {}).concat(['All models']))]
     card.style.flexBasis = `${Math.max(240, pitchVariants.length * 165 + 18)}px`
     const pitchMeta = [pitch.pitch_type, pitch.status].filter(Boolean).join(' · ')
     card.innerHTML = `<div class="pitch-info"><div class="pitch-header"><span class="address">${pitch.pitch_number || 'Unassigned'}</span><span class="status">${pitchMeta}</span></div><div class="name">${pitch.pitch_name || ''}</div><div class="pitch-actions"></div></div><div class="variants"></div>`
@@ -171,6 +273,7 @@ export default function(component) {
         slot.ondragleave = () => slot.classList.remove('dragover')
         slot.ondrop = event => {
           event.preventDefault(); event.stopPropagation(); slot.classList.remove('dragover')
+          board.classList.remove('is-dragging')
           setTriggerValue('move', {
             element_id: event.dataTransfer.getData('text/plain'),
             pitch_id: pitch.id || null,
@@ -199,8 +302,7 @@ export default function(component) {
         const elementHeight = hasTakt && pitch.id
           ? Math.max(0, displayTime(item.time_s) / displayTakt * taktPixels)
           : 34
-        el.style.height = `${elementHeight}px`
-        el.style.flex = `0 0 ${elementHeight}px`
+        el.style.setProperty('--element-height', `${elementHeight}px`)
         const criticality = (item.criticality || []).map(tag => {
           const normalized = String(tag).toLowerCase()
           const source = tag === 'CTQ'
@@ -208,12 +310,17 @@ export default function(component) {
             : 'Derived from an active Safety requirement'
           return `<span class="criticality-tag ${normalized}" title="${source}">${escapeHtml(tag)}</span>`
         }).join('')
+        if (criticality) el.classList.add('has-criticality')
         el.innerHTML = `<strong>${formatTime(item.time_s)}</strong><span class="element-description">${item.description}</span>${criticality ? `<span class="criticality">${criticality}</span>` : ''}<button type="button" class="edit-element" title="Edit work element">Edit</button>`
         el.title = `${item.description} · ${formatTime(item.time_s)} · ${item.work_region || 'None'}`
-        el.ondragstart = event => event.dataTransfer.setData('text/plain', item.id)
+        el.ondragstart = event => {
+          board.classList.add('is-dragging')
+          event.dataTransfer.setData('text/plain', item.id)
+        }
+        el.ondragend = () => board.classList.remove('is-dragging')
         el.querySelector('.edit-element').onclick = event => {
           event.preventDefault(); event.stopPropagation()
-          setTriggerValue('edit_element', { element_id: item.id })
+          setTriggerValue('edit_element', { element_id: item.id, model_variant: variant })
         }
         stack.appendChild(el)
         if (side !== 'north') appendDropSlot(logicalIndex + 1)
@@ -226,7 +333,7 @@ export default function(component) {
       const editButton = document.createElement('button')
       editButton.type = 'button'
       editButton.className = 'edit-pitch'
-      editButton.textContent = 'Edit pitch'
+      editButton.textContent = 'Edit Pitch'
       editButton.onclick = event => {
         event.preventDefault(); event.stopPropagation()
         setTriggerValue('edit_pitch', { pitch_id: pitch.id })
@@ -237,13 +344,14 @@ export default function(component) {
       const addButton = document.createElement('button')
       addButton.type = 'button'
       addButton.className = 'add-element'
-      addButton.textContent = '＋ Add element'
+      addButton.textContent = '＋ Add Element'
       addButton.onclick = () => setTriggerValue('add_element', { pitch_id: pitch.id || null, pitch_number: pitch.pitch_number || 'Unassigned' })
       pitchActions.appendChild(addButton)
       card.ondragover = event => { event.preventDefault(); card.classList.add('dragover') }
       card.ondragleave = () => card.classList.remove('dragover')
       card.ondrop = event => {
         event.preventDefault(); card.classList.remove('dragover')
+        board.classList.remove('is-dragging')
         setTriggerValue('move', {
           element_id: event.dataTransfer.getData('text/plain'),
           pitch_id: pitch.id || null,
@@ -256,19 +364,91 @@ export default function(component) {
     }
     return card
   }
+  const makePitchPlaceholder = side => {
+    const placeholder = document.createElement('div')
+    placeholder.className = `pitch-placeholder ${side}`
+    placeholder.setAttribute('aria-hidden', 'true')
+    return placeholder
+  }
   const numberFrom = value => { const found = String(value || '').match(/(\d+)(?!.*\d)/); return found ? Number(found[1]) : 0 }
+  const pairKeyFrom = pitch => {
+    if (pitch && pitch.pair_key) return String(pitch.pair_key)
+    const match = String(pitch.pitch_number || '').trim().match(/^(.*?)(\d+)([^\d]*)$/)
+    if (!match) return null
+    const number = Number(match[2] || 0)
+    if (number <= 0) return null
+    const oddNumber = number % 2 ? number : number - 1
+    const prefix = String(match[1] || '').trim().toLowerCase()
+    const suffix = String(match[3] || '').trim().toLowerCase()
+    return `${prefix}::${oddNumber}::${suffix}`
+  }
+  const applyPairWidth = (pair, widthValue) => {
+    const widthPx = `${Math.max(240, Math.ceil(Number(widthValue) || 240))}px`
+    for (const node of [pair.northNode, pair.southNode]) {
+      node.style.flex = `0 0 ${widthPx}`
+      node.style.flexBasis = widthPx
+      node.style.width = widthPx
+      node.style.minWidth = widthPx
+      node.style.maxWidth = widthPx
+    }
+  }
   if (data.show_unassigned && Object.keys(grouped.__unassigned__ || {}).length) {
     unassigned.appendChild(makePitch({
       id: null,
       pitch_number: 'Unassigned',
-      pitch_name: 'Drop work here',
+      pitch_name: 'Drop Work Here',
       status: 'Active',
-      model_variants: ['Base'],
+      model_variants: ['All models'],
     }, 'unassigned'))
   }
+  const pitchPairs = []
+  const pairsByKey = new Map()
   for (const pitch of (data.pitches || [])) {
-    const lane = numberFrom(pitch.pitch_number) % 2 ? north : south
-    lane.appendChild(makePitch(pitch, lane === north ? 'north' : 'south'))
+    const side = pitch.pair_side === 'north' || pitch.pair_side === 'south'
+      ? pitch.pair_side
+      : (numberFrom(pitch.pitch_number) % 2 ? 'north' : 'south')
+    const pairKey = pairKeyFrom(pitch)
+    let pair = pairKey ? pairsByKey.get(pairKey) : null
+    if (!pair || pair[side]) {
+      pair = { north: null, south: null }
+      pitchPairs.push(pair)
+      if (pairKey && !pairsByKey.has(pairKey)) pairsByKey.set(pairKey, pair)
+    }
+    pair[side] = pitch
+  }
+  const pairedNodes = pitchPairs.map((pair, pairIndex) => {
+    const northNode = pair.north ? makePitch(pair.north, 'north') : makePitchPlaceholder('north')
+    const southNode = pair.south ? makePitch(pair.south, 'south') : makePitchPlaceholder('south')
+    northNode.dataset.pairIndex = String(pairIndex)
+    southNode.dataset.pairIndex = String(pairIndex)
+    const northBasis = Number.parseFloat(northNode.style.flexBasis) || 240
+    const southBasis = Number.parseFloat(southNode.style.flexBasis) || 240
+    const baseWidth = Math.max(
+      northBasis,
+      southBasis,
+      Number(pair.north?.pair_width_px) || 0,
+      Number(pair.south?.pair_width_px) || 0,
+    )
+    const pairEntry = { northNode, southNode, baseWidth }
+    applyPairWidth(pairEntry, baseWidth)
+    north.appendChild(northNode)
+    south.appendChild(southNode)
+    return pairEntry
+  })
+  const alignPairedPitches = () => {
+    for (const pair of pairedNodes) {
+      applyPairWidth(pair, pair.baseWidth)
+      pair.northNode.style.maxWidth = ''
+      pair.southNode.style.maxWidth = ''
+    }
+    const syncedWidths = pairedNodes.map(pair => Math.max(
+      pair.baseWidth,
+      Math.ceil(pair.northNode.getBoundingClientRect().width),
+      Math.ceil(pair.southNode.getBoundingClientRect().width),
+    ))
+    pairedNodes.forEach((pair, index) => {
+      applyPairWidth(pair, syncedWidths[index])
+    })
   }
   const alignLaneBaselines = lane => {
     const pitchInfos = [...lane.querySelectorAll('.pitch-info')]
@@ -296,6 +476,7 @@ export default function(component) {
     lane.appendChild(line)
   }
   const layoutBoard = () => {
+    alignPairedPitches()
     alignLaneBaselines(north)
     alignLaneBaselines(south)
     drawTaktLine(north, 'north')
@@ -306,7 +487,7 @@ export default function(component) {
   }
   const updateFullScreenControl = () => {
     const isFullScreen = isBoardFullScreen()
-    fullScreen.textContent = isFullScreen ? 'Exit full screen' : 'Full screen'
+    fullScreen.textContent = isFullScreen ? 'Exit Full Screen' : 'Full Screen'
     fullScreen.title = isFullScreen
       ? 'Exit the full-screen Yamazumi board'
       : 'Open the Yamazumi board full screen'
@@ -330,8 +511,11 @@ export default function(component) {
   document.addEventListener('fullscreenchange', updateFullScreenControl)
   const resizeObserver = new ResizeObserver(scheduleLayout)
   resizeObserver.observe(board)
+  resizeObserver.observe(north)
+  resizeObserver.observe(south)
   // Normalize bands across all pitches after wrapping has been measured. This
   // gives every stack in a lane one shared baseline beside the assembly flow.
+  layoutBoard()
   scheduleLayout()
   updateFullScreenControl()
   return () => {
@@ -341,8 +525,10 @@ export default function(component) {
 }
 """
 
+_YAMAZUMI_BOARD_HOT_RELOAD_REV = 2
+
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v26",
+    "paag_yamazumi_drag_board_v30",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -370,11 +556,13 @@ def yamazumi_board(
     unit = time_unit_config(time_unit)
     takt_unit = time_unit_config(takt_time_unit)
     safe_elements = json_safe(elements)
+    paired_pitches, pitch_pairs = build_yamazumi_pitch_pairs(pitches)
     return _YAMAZUMI_BOARD(
         key=key,
         data=json_safe(
             {
-                "pitches": pitches,
+                "pitches": paired_pitches,
+                "pitch_pairs": pitch_pairs,
                 "elements": safe_elements,
                 "show_unassigned": any(
                     not element.get("pitch_id") for element in safe_elements

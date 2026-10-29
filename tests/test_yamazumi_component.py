@@ -29,7 +29,68 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v26", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v30", inspect.getsource(board_module))
+        self.assertIn(
+            "setTriggerValue('edit_element', { element_id: item.id, model_variant: variant })",
+            board_module._JS,
+        )
+
+    def test_paired_north_and_south_pitches_share_synchronized_column_widths(self) -> None:
+        self.assertIn(".pitch-placeholder", board_module._CSS)
+        self.assertIn("const pairKeyFrom = pitch =>", board_module._JS)
+        self.assertIn("const oddNumber = number % 2 ? number : number - 1", board_module._JS)
+        self.assertIn("const applyPairWidth = (pair, widthValue) =>", board_module._JS)
+        self.assertIn("const alignPairedPitches = () =>", board_module._JS)
+        self.assertIn("alignPairedPitches()", board_module._JS)
+
+        nexus_pitches = []
+        for idx in range(1, 21):
+            variants = (
+                ["All models", "Pedestal / Riser = Riser"]
+                if idx in {11, 13, 14, 15, 16, 17, 18}
+                else ["All models"]
+            )
+            nexus_pitches.append(
+                {
+                    "id": f"pitch-{idx}",
+                    "area_id": "area-assembly-1",
+                    "pitch_number": f"01-PED-{idx:03d}",
+                    "pitch_name": f"Station {idx}",
+                    "status": "Active",
+                    "model_variants": variants,
+                }
+            )
+        annotated, pairs = board_module.build_yamazumi_pitch_pairs(nexus_pitches)
+        self.assertEqual(len(pairs), 10)
+        by_number = {item["pitch_number"]: item for item in annotated}
+        self.assertEqual(by_number["01-PED-011"]["pair_index"], 5)
+        self.assertEqual(by_number["01-PED-012"]["pair_index"], 5)
+        self.assertEqual(by_number["01-PED-011"]["pair_width_px"], 348)
+        self.assertEqual(by_number["01-PED-012"]["pair_width_px"], 348)
+        self.assertEqual(by_number["01-PED-013"]["pair_index"], 6)
+        self.assertEqual(by_number["01-PED-014"]["pair_index"], 6)
+        self.assertEqual(by_number["01-PED-013"]["pair_width_px"], 348)
+        self.assertEqual(by_number["01-PED-014"]["pair_width_px"], 348)
+
+        suffixed_and_cross_area = [
+            {"id": "p27", "area_id": "a2", "pitch_number": "01-PED-027", "model_variants": ["All models", "Riser"]},
+            {"id": "p27a", "area_id": "da", "pitch_number": "01-PED-027(A)", "model_variants": ["All models"]},
+            {"id": "p28", "area_id": "a2", "pitch_number": "01-PED-028", "model_variants": ["All models"]},
+            {"id": "p35", "area_id": "a2", "pitch_number": "01-PED-035", "model_variants": ["All models"]},
+            {"id": "p36", "area_id": "pack", "pitch_number": "01-PED-036", "model_variants": ["All models"]},
+        ]
+        annotated_extra, extra_pairs = board_module.build_yamazumi_pitch_pairs(suffixed_and_cross_area)
+        extra_by_number = {item["pitch_number"]: item for item in annotated_extra}
+        self.assertEqual(extra_by_number["01-PED-027"]["pair_index"], extra_by_number["01-PED-028"]["pair_index"])
+        self.assertNotEqual(extra_by_number["01-PED-027(A)"]["pair_index"], extra_by_number["01-PED-028"]["pair_index"])
+        self.assertEqual(extra_by_number["01-PED-035"]["pair_index"], extra_by_number["01-PED-036"]["pair_index"])
+        self.assertEqual(len(extra_pairs), 3)
+
+    def test_hovered_work_element_expands_for_readability(self) -> None:
+        self.assertIn("el.style.setProperty('--element-height', `${elementHeight}px`)", board_module._JS)
+        self.assertIn(".board:not(.is-dragging) .element:hover", board_module._CSS)
+        self.assertIn("min-height:max(var(--element-height, 34px), 38px)", board_module._CSS)
+        self.assertIn(".board:not(.is-dragging) .element:hover .element-description", board_module._CSS)
 
     def test_element_flags_are_not_rendered_or_sent_to_card_markup(self) -> None:
         self.assertNotIn(".flags", board_module._CSS)
@@ -44,7 +105,7 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("const fullScreenTarget = document.documentElement", board_module._JS)
         self.assertIn("document.fullscreenElement === fullScreenTarget", board_module._JS)
         self.assertIn("board.classList.toggle('fullscreen-board'", board_module._JS)
-        self.assertIn("'Exit full screen' : 'Full screen'", board_module._JS)
+        self.assertIn("'Exit Full Screen' : 'Full Screen'", board_module._JS)
         self.assertIn("fullScreen.setAttribute('aria-pressed'", board_module._JS)
         self.assertIn("new ResizeObserver(scheduleLayout)", board_module._JS)
         self.assertIn("document.addEventListener('fullscreenchange'", board_module._JS)

@@ -113,7 +113,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertTrue(rows["process_sync_status"].eq("Needs IE review").all())
         self.assertTrue(rows["process_reflected"].astype(bool).all())
 
-    def test_process_part_requirement_source_includes_all_work_types(self) -> None:
+    def test_process_part_requirement_source_includes_cycle_work_only(self) -> None:
         cycle_id = store.add_yamazumi_element(
             self.project_id,
             self.area_id,
@@ -154,13 +154,11 @@ class ProcessPitchVisualTests(unittest.TestCase):
         element_ids = set(rows["id"].astype(str))
 
         self.assertIn(cycle_id, element_ids)
-        self.assertIn(periodic_id, element_ids)
-        self.assertIn(fluctuation_id, element_ids)
+        self.assertNotIn(periodic_id, element_ids)
+        self.assertNotIn(fluctuation_id, element_ids)
         self.assertIn("pitch_id", rows.columns)
         work_types = set(rows["work_type"].dropna())
-        self.assertIn("Cycle", work_types)
-        self.assertIn("Periodic", work_types)
-        self.assertIn("Fluctuation", work_types)
+        self.assertEqual(work_types, {"Cycle"})
 
     def test_summary_rejects_pitch_from_another_scenario(self) -> None:
         other_scenario = store.clone_planning_scenario(
@@ -1326,7 +1324,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         # Pitches were already populated with 6 elements defaulting to work_type='Cycle'
         pitch_data = store.process_pitch_visual_summary(self.project_id, self.scenario_id, self.pitch_id)
         stacks = pitch_data.get("yamazumi_stacks", {})
-        base_stack = stacks.get("Base", [])
+        base_stack = stacks.get("All models", [])
         self.assertGreaterEqual(len(base_stack), 1)
         for elem in base_stack:
             self.assertEqual(elem["motion_color"], "green")

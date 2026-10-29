@@ -179,7 +179,7 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 
 ### `yamazumi_areas`
 
-- **Purpose:** Defines a balancing area inside a planning scenario, normally corresponding to one fishbone section and optionally carrying a takt override.
+- **Purpose:** Defines a balancing area inside a planning scenario, normally corresponding to one fishbone section, and stores its area takt time (`takt_override_s`, initialized to the active planning scenario's `takt_time_s` when created and editable per area) and conveyor configuration (`conveyor_type`, `'1-sided'` or `'2-sided'`, default `'2-sided'`).
 - **Key relationships:** Belongs to `projects` and `planning_scenarios`. Optionally references `assembly_sections`. Parent of `yamazumi_pitches`, `yamazumi_elements`, and `yamazumi_work_regions`.
 - **Scope:** Scenario-specific.
 
