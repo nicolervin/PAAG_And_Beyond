@@ -2097,8 +2097,7 @@ def _render_feedback_tracker_tab(
         else:
             st.caption("No feedback items match the current filters.")
     else:
-        editor_key = "help_hub_feedback_table_editor"
-        apply_pending_table_editor_reset(editor_key)
+        editor_key = apply_pending_table_editor_reset("help_hub_feedback_table_editor")
 
         display_df = fb_df.copy()
         display_df.insert(0, "_delete", False)

@@ -16,7 +16,7 @@ from utils.store import (
     set_last_active_workspace,
 )
 from utils.scope_ui import page_title_with_scope
-from utils.table_ui import selectable_dataframe
+from utils.table_ui import render_audit_history_table, selectable_dataframe
 
 
 @st.dialog("How to use Import/Export Projects", width="large")

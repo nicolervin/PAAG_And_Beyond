@@ -18,10 +18,19 @@ from utils.pfmea_store import (
 from utils.pfmea_ui import render_pfmea_staged_draft_banner, render_pfmea_tab
 from utils.quality_help import (
     CONTROL_PLAN_HELP,
+    CONTROL_PLAN_HELP_SECTIONS,
+    CONTROL_PLAN_QUICK_START,
     EQUIPMENT_HELP,
+    EQUIPMENT_HELP_SECTIONS,
+    EQUIPMENT_QUICK_START,
     PFMEA_HELP_SECTIONS,
     PFMEA_QUICK_START,
+    REQUIREMENTS_HELP_SECTIONS,
+    REQUIREMENTS_QUICK_START,
     REQUIREMENTS_REPOSITORY_HELP,
+    TRACEABILITY_AND_SYNC_HELP,
+    TRACEABILITY_HELP_SECTIONS,
+    TRACEABILITY_QUICK_START,
 )
 from utils.quality_store import (
     accept_quality_upstream_changes,
@@ -36,7 +45,7 @@ from utils.quality_store import (
 from utils.requirements_ui import render_requirements_repository_tab
 from utils.scope_ui import page_title_with_scope
 from utils.store import audit_history, format_eastern_timestamp, planning_scenarios
-from utils.table_ui import guarded_tabs, selectable_dataframe
+from utils.table_ui import guarded_tabs, render_audit_history_table, selectable_dataframe
 from utils.traceability_ui import render_traceability_matrix_tab
 
 
@@ -47,21 +56,47 @@ from utils.traceability_ui import render_traceability_matrix_tab
 )
 def show_quality_page_help() -> None:
     """Show static, read-only instructions for the Quality workflows."""
-    requirements_help_tab, pfmea_help_tab, control_plan_help_tab, equipment_help_tab = st.tabs(
-        ["Requirements repository", "PFMEA", "Control Plan", "Equipment"],
+    (
+        traceability_help_tab,
+        requirements_help_tab,
+        pfmea_help_tab,
+        control_plan_help_tab,
+        equipment_help_tab,
+    ) = st.tabs(
+        [
+            "📊 Traceability & PAAG Sync",
+            "Requirements repository",
+            "PFMEA",
+            "Control Plan",
+            "Equipment",
+        ],
         key="quality_page_help_tabs",
     )
+    with traceability_help_tab:
+        st.markdown(TRACEABILITY_QUICK_START)
+        for section_title, section_content in TRACEABILITY_HELP_SECTIONS:
+            with st.expander(section_title):
+                st.markdown(section_content)
     with requirements_help_tab:
-        st.markdown(REQUIREMENTS_REPOSITORY_HELP)
+        st.markdown(REQUIREMENTS_QUICK_START)
+        for section_title, section_content in REQUIREMENTS_HELP_SECTIONS:
+            with st.expander(section_title):
+                st.markdown(section_content)
     with pfmea_help_tab:
         st.markdown(PFMEA_QUICK_START)
         for section_title, section_content in PFMEA_HELP_SECTIONS:
             with st.expander(section_title):
                 st.markdown(section_content)
     with control_plan_help_tab:
-        st.markdown(CONTROL_PLAN_HELP)
+        st.markdown(CONTROL_PLAN_QUICK_START)
+        for section_title, section_content in CONTROL_PLAN_HELP_SECTIONS:
+            with st.expander(section_title):
+                st.markdown(section_content)
     with equipment_help_tab:
-        st.markdown(EQUIPMENT_HELP)
+        st.markdown(EQUIPMENT_QUICK_START)
+        for section_title, section_content in EQUIPMENT_HELP_SECTIONS:
+            with st.expander(section_title):
+                st.markdown(section_content)
 
     actions = st.container(horizontal=True, horizontal_alignment="right")
     if actions.button(
@@ -107,7 +142,7 @@ def render_quality_history(project_id: str) -> None:
             if history.empty:
                 st.caption("No Quality requirement changes have been recorded yet.")
             else:
-                selectable_dataframe(
+                render_audit_history_table(
                     history.drop(columns=["details"], errors="ignore"),
                     key=f"quality_requirements_history_{project_id}",
                     hide_index=True,
@@ -126,7 +161,7 @@ def render_quality_history(project_id: str) -> None:
             if history.empty:
                 st.caption("No PFMEA changes have been recorded yet.")
             else:
-                selectable_dataframe(
+                render_audit_history_table(
                     history.drop(columns=["details"], errors="ignore"),
                     key=f"pfmea_history_{project_id}",
                     hide_index=True,
@@ -144,7 +179,7 @@ def render_quality_history(project_id: str) -> None:
             if history.empty:
                 st.caption("No Control Plan changes have been recorded yet.")
             else:
-                selectable_dataframe(
+                render_audit_history_table(
                     history.drop(columns=["details"], errors="ignore"),
                     key=f"control_plan_history_{project_id}",
                     hide_index=True,
@@ -179,7 +214,7 @@ def render_quality_history(project_id: str) -> None:
             if history.empty:
                 st.caption("No Equipment changes have been recorded yet.")
             else:
-                selectable_dataframe(
+                render_audit_history_table(
                     history.drop(columns=["details"], errors="ignore"),
                     key=f"quality_equipment_history_{project_id}",
                     hide_index=True,
@@ -580,24 +615,38 @@ def render_upstream_changes_dialog(
         if not upstream_pfmea_mod:
             st.info("No PFMEA entries have upstream differences.")
         else:
+            syncable_pfmea_ids = [
+                str(item["entry_id"])
+                for item in upstream_pfmea_mod
+                if not bool(item.get("paag_incomplete"))
+            ]
             if len(upstream_pfmea_mod) > 1:
                 if st.button(
-                    f"Accept & Sync All PFMEA Entries ({len(upstream_pfmea_mod)})",
+                    f"Accept & Sync All Validated PFMEA Entries ({len(syncable_pfmea_ids)}/{len(upstream_pfmea_mod)})",
                     key=f"btn_sync_all_pfmea_entries_{project_id}",
                     icon=":material/done_all:",
+                    disabled=not syncable_pfmea_ids,
+                    help="Only PAAG steps that are Completed & Validated can be synchronized.",
                 ):
-                    p_ids = [str(item["entry_id"]) for item in upstream_pfmea_mod]
-                    bulk_review_pfmea_sources(project_id, scenario_id, p_ids, editor_name=editor)
-                    st.toast(f"Synchronized {len(p_ids)} PFMEA entries", icon=":material/check_circle:")
+                    bulk_review_pfmea_sources(project_id, scenario_id, syncable_pfmea_ids, editor_name=editor)
+                    st.toast(f"Synchronized {len(syncable_pfmea_ids)} PFMEA entries", icon=":material/check_circle:")
                     st.rerun()
 
             for item in upstream_pfmea_mod:
                 eid = str(item["entry_id"])
+                is_paag_incomplete = bool(item.get("paag_incomplete"))
+                missing_reasons = item.get("paag_missing_reasons") or []
                 with st.container(border=True):
                     st.markdown(
                         f"**PFMEA Failure Mode**: {item['potential_failure_mode']} "
                         f"(Class: `{item['class_code'] or 'None'}`)"
                     )
+                    if is_paag_incomplete:
+                        st.warning(
+                            "⚠️ **PAAG Step Incomplete — Awaiting PAAG Validation:** "
+                            + ("; ".join(missing_reasons) or "Step is not Validated in PAAG")
+                            + ". Complete and validate this step in PAAG before synchronizing."
+                        )
                     diff_parts = []
                     for chg in item.get("changes", []):
                         diff_parts.append(
@@ -631,7 +680,12 @@ def render_upstream_changes_dialog(
                             key=f"sync_p_{eid}",
                             icon=":material/check:",
                             type="secondary",
-                            help="Update baseline snapshot to match current PAAG step",
+                            disabled=is_paag_incomplete,
+                            help=(
+                                "Complete and validate this step in PAAG before accepting upstream changes"
+                                if is_paag_incomplete
+                                else "Update baseline snapshot to match current PAAG step"
+                            ),
                         ):
                             bulk_review_pfmea_sources(project_id, scenario_id, [eid], editor_name=editor)
                             st.toast("Synchronized PFMEA failure mode baseline", icon=":material/check_circle:")

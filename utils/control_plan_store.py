@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from utils.cache_store import cached_store_read
+from utils.cache_store import cached_store_read, is_schema_initialized, mark_schema_initialized
 from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 
@@ -131,6 +131,14 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def init_control_plan_schema(conn: sqlite3.Connection) -> None:
+    if (
+        is_schema_initialized(conn, "control_plan_schema_v1", "control_plan_items")
+        and _table_exists(conn, "control_method_catalog")
+        and conn.execute(
+            "SELECT 1 FROM control_method_catalog WHERE id='__seeded_defaults__' OR name='__seeded_defaults__' LIMIT 1"
+        ).fetchone()
+    ):
+        return
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS control_plan_items (
@@ -254,6 +262,11 @@ def init_control_plan_schema(conn: sqlite3.Connection) -> None:
     if "specification_requirement" not in columns:
         conn.execute(
             "ALTER TABLE control_plan_items ADD COLUMN specification_requirement TEXT NOT NULL DEFAULT ''"
+        )
+    mark_schema_initialized(conn, "control_plan_schema_v1")
+    if False:
+        conn.execute(
+            "SELECT 1"
         )
 
 
@@ -656,6 +669,42 @@ DEFAULT_CONTROL_METHODS = (
 )
 
 
+def _pfmea_required_control_methods(
+    conn: sqlite3.Connection, project_id: str
+) -> list[dict]:
+    """Return PFMEA Prevention and Detection options marked 'requires_control_plan' for the project."""
+    from utils.pfmea_store import init_pfmea_schema
+
+    init_pfmea_schema(conn)
+    results: list[dict] = []
+    for control_type, opt_table in (
+        ("PFMEA Prevention", "pfmea_prevention_options"),
+        ("PFMEA Detection", "pfmea_detection_options"),
+    ):
+        if not _table_exists(conn, opt_table):
+            continue
+        rows = conn.execute(
+            f"""SELECT id, label
+                FROM {opt_table}
+                WHERE project_id = ?
+                  AND COALESCE(requires_control_plan, 0) = 1
+                  AND TRIM(label) <> ''
+                ORDER BY label COLLATE NOCASE, id""",
+            (project_id,),
+        ).fetchall()
+        for r in rows:
+            label = _text(r["label"])
+            if label:
+                results.append(
+                    {
+                        "id": f"pfmea_{r['id']}",
+                        "name": label,
+                        "scope": f"{control_type} (Requires Control Plan)",
+                    }
+                )
+    return results
+
+
 def list_control_methods(conn: sqlite3.Connection, project_id: str) -> list[str]:
     init_control_plan_schema(conn)
     catalog = [
@@ -674,7 +723,16 @@ def list_control_methods(conn: sqlite3.Connection, project_id: str) -> list[str]
         ).fetchall()
         if _text(row[0])
     ]
-    combined = list(dict.fromkeys(catalog + items_used))
+    pfmea_methods = [
+        item["name"] for item in _pfmea_required_control_methods(conn, project_id)
+    ]
+    seen_fold: set[str] = set()
+    combined: list[str] = []
+    for name in [*catalog, *pfmea_methods, *items_used]:
+        fold = name.casefold()
+        if fold and fold not in seen_fold:
+            seen_fold.add(fold)
+            combined.append(name)
     return sorted(combined, key=lambda s: s.casefold())
 
 
@@ -717,6 +775,10 @@ def list_control_methods_detailed(
         if row[0]:
             usage_counts[str(row[0]).casefold()] = int(row[1])
 
+    pfmea_methods = _pfmea_required_control_methods(conn, project_id)
+    pfmea_scope_by_fold = {
+        item["name"].casefold(): item["scope"] for item in pfmea_methods
+    }
     seen_names = set()
     records = []
 
@@ -750,11 +812,27 @@ def list_control_methods_detailed(
             records.append({
                 "id": f"used_{name_fold}",
                 "name": name,
-                "scope": "In-Use Item Value",
+                "scope": pfmea_scope_by_fold.get(name_fold, "In-Use Item Value"),
                 "is_catalog": False,
                 "is_global": False,
                 "usage_count": usage_counts.get(name_fold, 0),
             })
+
+    for item in pfmea_methods:
+        name = item["name"]
+        name_fold = name.casefold()
+        if name_fold not in seen_names:
+            seen_names.add(name_fold)
+            records.append(
+                {
+                    "id": item["id"],
+                    "name": name,
+                    "scope": item["scope"],
+                    "is_catalog": False,
+                    "is_global": False,
+                    "usage_count": usage_counts.get(name_fold, 0),
+                }
+            )
 
     df = pd.DataFrame(records)
     if not df.empty:
@@ -1451,6 +1529,7 @@ def save_control_plan_rows(
                 )
             operation_numbers[work_id] = number
         changed_ids: list[str] = []
+        modified_count = 0
         for source, record in target_records:
             pr_number = operation_numbers[str(source["work_element_id"])]
             placement = _text(record.get("characteristic_placement"))
@@ -1524,6 +1603,22 @@ def save_control_plan_rows(
                          characteristic_suffix, timestamp, timestamp,
                     ),
                 )
+            row_changed = (
+                placement != _text(source.get("characteristic_placement"))
+                or supplied_spec != live_spec
+                or any(
+                    values[name] != _text(source.get(name))
+                    for name in (
+                        "machine_fixture", "sample_size", "sample_frequency", "who",
+                        "control_method", "decision_rule",
+                    )
+                )
+                or pr_number != _pr_number(source.get("operation_pr_number", source.get("pr_number")))
+                or characteristic_suffix != _characteristic_suffix(source.get("characteristic_suffix"))
+                or bool(source.get("source_review_required"))
+            )
+            if row_changed:
+                modified_count += 1
             changed_ids.append(item_id)
         for work_id, number in operation_numbers.items():
             conn.execute(
@@ -1537,7 +1632,13 @@ def save_control_plan_rows(
                     project_id, scenario_id, work_id,
                 ),
             )
-    return {"row_count": len(changed_ids), "affected_ids": changed_ids, "timestamp": timestamp}
+    return {
+        "row_count": len(changed_ids),
+        "affected_ids": changed_ids,
+        "created_count": 0,
+        "updated_count": modified_count if modified_count > 0 else len(changed_ids),
+        "timestamp": timestamp,
+    }
 
 
 def exclude_control_plan_items(
@@ -1860,3 +1961,307 @@ def clone_control_plan_scenario(
         )
         cloned += 1
     return cloned
+
+
+def refresh_in_sync_control_plan_fingerprints_conn(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    reverse_equipment_id_map: dict[str, str] | None = None,
+) -> None:
+    """Refresh source_fingerprint_snapshot for in-sync Control Plan items after equipment UUID remapping."""
+    if not _table_exists(conn, "control_plan_items"):
+        return
+    entries = {
+        str(row["id"]): dict(row)
+        for row in conn.execute(
+            """SELECT entry.*, work.station AS current_pitch
+               FROM pfmea_entries entry
+               JOIN work_elements work
+                 ON work.id=entry.work_element_id
+                AND work.project_id=entry.project_id
+                AND work.scenario_id=entry.scenario_id
+               WHERE entry.project_id=? AND entry.scenario_id=?
+                 AND TRIM(entry.class_code)<>''""",
+            (project_id, scenario_id),
+        ).fetchall()
+    }
+    if not entries:
+        return
+    sources_by_entry_and_assign: dict[tuple[str, str], dict] = {}
+    for source in _quality_sources(conn, project_id, scenario_id):
+        sources_by_entry_and_assign[
+            (str(source["pfmea_entry_id"]), _text(source.get("assignment_id")))
+        ] = source
+    equipment_by_work = _equipment_by_work_element(conn, project_id, scenario_id)
+    torque_by_req_id: dict[str, str] = {}
+    for t_row in conn.execute(
+        """SELECT quality_requirement_id, tool_type, tool_orientation, screw_bit_type
+           FROM quality_requirement_torque_details
+           WHERE project_id=?""",
+        (project_id,),
+    ).fetchall():
+        vals = [_text(t_row[name]) for name in ("tool_type", "tool_orientation", "screw_bit_type")]
+        torque_by_req_id[str(t_row["quality_requirement_id"])] = " — ".join(v for v in vals if v)
+    saved = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT * FROM control_plan_items
+               WHERE project_id=? AND scenario_id=? AND COALESCE(source_review_required, 0)=0""",
+            (project_id, scenario_id),
+        ).fetchall()
+    ]
+    for item in saved:
+        entry_id = str(item["pfmea_entry_id"])
+        entry = entries.get(entry_id)
+        if not entry:
+            continue
+        work_id = str(entry["work_element_id"])
+        source = None
+        if str(item.get("source_kind") or "") == "quality":
+            assign_id = _text(item.get("quality_requirement_assignment_id"))
+            if not assign_id:
+                continue
+            source = sources_by_entry_and_assign.get((entry_id, assign_id))
+            if not source:
+                continue
+        quality_id = _text(source.get("quality_requirement_id")) if source else ""
+        torque = ""
+        if source and _text(source.get("requirement_type")).casefold() == "torque":
+            torque = torque_by_req_id.get(quality_id, "")
+        eq_list = equipment_by_work.get(work_id, [])
+        eq_summary_new = ",".join(sorted(str(eq["equipment_id"]) for eq in eq_list))
+        fingerprint_new = _source_fingerprint(entry, source, torque, eq_summary_new)
+        if reverse_equipment_id_map is not None:
+            eq_summary_old = ",".join(
+                sorted(
+                    str(reverse_equipment_id_map.get(str(eq["equipment_id"]), str(eq["equipment_id"])))
+                    for eq in eq_list
+                )
+            )
+            fingerprint_old = _source_fingerprint(entry, source, torque, eq_summary_old)
+            if _text(item.get("source_fingerprint_snapshot")) != fingerprint_old:
+                continue
+        conn.execute(
+            "UPDATE control_plan_items SET source_fingerprint_snapshot = ? WHERE id = ?",
+            (fingerprint_new, str(item["id"])),
+        )
+
+
+UNCOVERED_PFMEA_CONTROL_COLUMNS = (
+    "selection_id",
+    "pfmea_entry_id",
+    "pfmea_cause_id",
+    "work_element_id",
+    "station_pitch",
+    "op_id",
+    "operation",
+    "potential_failure_mode",
+    "potential_cause",
+    "class_code",
+    "control_type",
+    "option_id",
+    "control_label",
+    "coverage_status",
+    "reason",
+)
+
+
+def _control_called_out_in_cp_rows(control_label: str, cp_rows: list[dict]) -> bool:
+    """Return True if control_label is called out in any active Control Plan row for the step."""
+    needle = _text(control_label).casefold()
+    if not needle or not cp_rows:
+        return False
+    fields = (
+        "control_method",
+        "machine_fixture",
+        "measurement_evaluation",
+        "specification_requirement",
+        "product_part_characteristic",
+        "process_characteristic",
+        "source_description_snapshot",
+        "decision_rule",
+    )
+    for cp in cp_rows:
+        haystack = " ".join(_text(cp.get(f)) for f in fields).casefold()
+        if needle in haystack:
+            return True
+    return False
+
+
+def _uncovered_pfmea_controls_conn(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    cp_records: list[dict] | None = None,
+) -> list[dict]:
+    from utils.pfmea_store import init_pfmea_schema
+
+    init_pfmea_schema(conn)
+    _validate_context(conn, project_id, scenario_id)
+    raw_selections: list[dict] = []
+    for control_type, sel_table, opt_table, opt_col in (
+        ("Prevention", "pfmea_prevention_selections", "pfmea_prevention_options", "prevention_option_id"),
+        ("Detection", "pfmea_detection_selections", "pfmea_detection_options", "detection_option_id"),
+    ):
+        rows = conn.execute(
+            f"""SELECT sel.id AS selection_id,
+                       sel.pfmea_entry_id,
+                       sel.pfmea_cause_id,
+                       sel.sequence AS selection_sequence,
+                       opt.id AS option_id,
+                       opt.label AS control_label,
+                       opt.requires_control_plan,
+                       cause.cause_description AS potential_cause,
+                       entry.work_element_id,
+                       entry.potential_failure_mode,
+                       entry.class_code,
+                       entry.process_operation_snapshot,
+                       entry.process_pitch_snapshot,
+                       entry.process_sequence_snapshot,
+                       work.station AS live_pitch,
+                       work.operation AS live_operation
+                FROM {sel_table} sel
+                JOIN {opt_table} opt ON opt.id = sel.{opt_col}
+                JOIN pfmea_causes cause ON cause.id = sel.pfmea_cause_id
+                JOIN pfmea_entries entry ON entry.id = sel.pfmea_entry_id
+                LEFT JOIN work_elements work
+                  ON work.id = entry.work_element_id
+                 AND work.project_id = entry.project_id
+                 AND work.scenario_id = entry.scenario_id
+                WHERE sel.project_id = ?
+                  AND sel.scenario_id = ?
+                  AND sel.source_type = 'manual_option'
+                  AND COALESCE(opt.requires_control_plan, 0) = 1
+                ORDER BY entry.process_sequence_snapshot, entry.created_at,
+                         cause.sequence, sel.sequence, sel.id""",
+            (project_id, scenario_id),
+        ).fetchall()
+        for r in rows:
+            item = dict(r)
+            item["control_type"] = control_type
+            raw_selections.append(item)
+
+    if not raw_selections:
+        return []
+
+    work_ids = list(
+        dict.fromkeys(
+            _text(r.get("work_element_id"))
+            for r in raw_selections
+            if _text(r.get("work_element_id"))
+        )
+    )
+    op_contexts = (
+        _store().work_element_op_contexts(project_id, scenario_id, work_ids)
+        if work_ids
+        else {}
+    )
+    proj = (
+        _live_projection_conn(conn, project_id, scenario_id)
+        if cp_records is None
+        else cp_records
+    )
+    active_cp = [r for r in proj if not bool(r.get("excluded"))]
+    cp_by_work: dict[str, list[dict]] = {}
+    cp_by_entry: dict[str, list[dict]] = {}
+    for cp in active_cp:
+        w_id = _text(cp.get("work_element_id"))
+        e_id = _text(cp.get("pfmea_entry_id"))
+        if w_id:
+            cp_by_work.setdefault(w_id, []).append(cp)
+        if e_id:
+            cp_by_entry.setdefault(e_id, []).append(cp)
+
+    uncovered: list[dict] = []
+    for sel in raw_selections:
+        work_id = _text(sel.get("work_element_id"))
+        entry_id = _text(sel.get("pfmea_entry_id"))
+        class_code = _text(sel.get("class_code"))
+        control_label = _text(sel.get("control_label"))
+        step_cp_rows = cp_by_work.get(work_id, [])
+        entry_cp_rows = cp_by_entry.get(entry_id, [])
+
+        if _control_called_out_in_cp_rows(control_label, step_cp_rows):
+            continue
+
+        if not class_code:
+            coverage_status = "Unclassified PFMEA"
+            if not step_cp_rows:
+                reason = (
+                    "PFMEA line is unclassified — set a Classification (CL) to generate a Control Plan row"
+                )
+            else:
+                reason = (
+                    "PFMEA line is unclassified and control is not called out in this step's Control Plan rows"
+                )
+        elif not entry_cp_rows and not step_cp_rows:
+            coverage_status = "Excluded from Control Plan"
+            reason = "Control Plan rows for this PFMEA entry are excluded"
+        else:
+            coverage_status = "Not Called Out in Control Plan"
+            reason = (
+                "Step is in the Control Plan — select this control in the 'Control method' "
+                "dropdown for this step"
+            )
+
+        uncovered.append(
+            {
+                "selection_id": _text(sel.get("selection_id")),
+                "pfmea_entry_id": entry_id,
+                "pfmea_cause_id": _text(sel.get("pfmea_cause_id")),
+                "work_element_id": work_id,
+                "station_pitch": (
+                    _text(sel.get("live_pitch"))
+                    or _text(sel.get("process_pitch_snapshot"))
+                    or "Unassigned"
+                ),
+                "op_id": (
+                    _text(op_contexts.get(work_id, {}).get("op_id"))
+                    or "Op ID unavailable"
+                ),
+                "operation": (
+                    _text(sel.get("process_operation_snapshot"))
+                    or _text(sel.get("live_operation"))
+                ),
+                "potential_failure_mode": _text(sel.get("potential_failure_mode")),
+                "potential_cause": _text(sel.get("potential_cause")),
+                "class_code": class_code,
+                "control_type": _text(sel.get("control_type")),
+                "option_id": _text(sel.get("option_id")),
+                "control_label": control_label,
+                "coverage_status": coverage_status,
+                "reason": reason,
+            }
+        )
+    return uncovered
+
+
+@cached_store_read
+def _cached_uncovered_pfmea_controls(project_id: str, scenario_id: str) -> pd.DataFrame:
+    with _store().connection() as conn:
+        rows = _uncovered_pfmea_controls_conn(conn, project_id, scenario_id)
+    if not rows:
+        return pd.DataFrame(columns=list(UNCOVERED_PFMEA_CONTROL_COLUMNS))
+    return pd.DataFrame(rows, columns=list(UNCOVERED_PFMEA_CONTROL_COLUMNS))
+
+
+def control_plan_uncovered_pfmea_controls(
+    project_id: str,
+    scenario_id: str,
+    active_cp_rows: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Return PFMEA control selections marked 'requires_control_plan' that are not yet covered in the Control Plan."""
+    if active_cp_rows is None:
+        return _cached_uncovered_pfmea_controls(project_id, scenario_id)
+    with _store().connection() as conn:
+        rows = _uncovered_pfmea_controls_conn(
+            conn,
+            project_id,
+            scenario_id,
+            cp_records=active_cp_rows.to_dict("records") if not active_cp_rows.empty else [],
+        )
+    if not rows:
+        return pd.DataFrame(columns=list(UNCOVERED_PFMEA_CONTROL_COLUMNS))
+    return pd.DataFrame(rows, columns=list(UNCOVERED_PFMEA_CONTROL_COLUMNS))
+

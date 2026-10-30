@@ -433,6 +433,15 @@ def _remapped_tables(
                 row["section_id"] = id_maps.get("assembly_sections", {}).get(
                     str(source_row["section_id"]), str(source_row["section_id"])
                 )
+            if item.name == "pfmea_entries" and source_row.get("source_pfmea_entry_id") and "source_pfmea_entry_id" in valid_columns:
+                row["source_pfmea_entry_id"] = id_maps.get("pfmea_entries", {}).get(
+                    str(source_row["source_pfmea_entry_id"]), str(source_row["source_pfmea_entry_id"])
+                )
+            if item.name == "control_plan_items" and source_row.get("source_quality_requirement_id_snapshot") and "source_quality_requirement_id_snapshot" in valid_columns:
+                row["source_quality_requirement_id_snapshot"] = id_maps.get("quality_requirements", {}).get(
+                    str(source_row["source_quality_requirement_id_snapshot"]),
+                    str(source_row["source_quality_requirement_id_snapshot"]),
+                )
             if item.name == "layout_shapes":
                 if "pitch_id" in valid_columns and source_row.get("pitch_id") and str(source_row["pitch_id"]) not in id_maps.get("yamazumi_pitches", {}):
                     row["pitch_id"] = None
@@ -572,6 +581,30 @@ def import_project_package(
                 conn, tables, str(source_project["id"]), new_project_id, upload_paths
             )
             _insert_remapped_tables(conn, remapped)
+            if remapped.get("control_plan_items"):
+                from utils.control_plan_store import refresh_in_sync_control_plan_fingerprints_conn
+
+                reverse_eq_map: dict[str, str] = {}
+                for old_eq, new_eq in zip(
+                    tables.get("equipment_assets", []),
+                    remapped.get("equipment_assets", []),
+                ):
+                    old_eq_id = str(old_eq.get("id") or "")
+                    new_eq_id = str(new_eq.get("id") or "")
+                    if old_eq_id and new_eq_id:
+                        reverse_eq_map[new_eq_id] = old_eq_id
+                cp_scenarios = {
+                    str(r.get("scenario_id") or "")
+                    for r in remapped.get("control_plan_items", [])
+                    if str(r.get("scenario_id") or "")
+                }
+                for cp_scenario_id in cp_scenarios:
+                    refresh_in_sync_control_plan_fingerprints_conn(
+                        conn,
+                        new_project_id,
+                        cp_scenario_id,
+                        reverse_equipment_id_map=reverse_eq_map,
+                    )
             timestamp = store.now_iso()
             conflicts = (
                 [{"type": "replace_target", "project_id": replace_project_id,

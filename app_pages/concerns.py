@@ -23,7 +23,7 @@ from utils.table_ui import (
     editable_table_footer,
     editable_table_heading,
     native_selected_rows,
-    selectable_dataframe,
+    render_audit_history_table, selectable_dataframe,
     stage_native_delete_confirmation,
 )
 
@@ -36,7 +36,7 @@ current_editor = (
 if not current_editor and project_id:
     project_row = get_project(project_id) or {}
     current_editor = str(project_row.get("owner", "") or "").strip()
-editor_key = "concerns_editor"
+editor_key = f"concerns_editor_{project_id}"
 pending_delete_key = f"concerns_pending_delete_{project_id}"
 page_title_with_scope("Questions and concerns", scope="project")
 st.caption("Keep unresolved questions, concerns, and cross-functional resolutions visible as the process changes.")
@@ -270,7 +270,7 @@ editable_table_heading("Questions and concerns")
 
 visible_concerns = filter_table(
     concerns,
-    key="concerns_filters",
+    key=f"concerns_filters_{project_id}",
     dropdown_columns=["category", "priority", "status", "owner", "submitted_by"],
     search_columns=["detail", "owner", "comments", "resolution_comments", "submitted_by"],
     labels=column_labels,
@@ -500,7 +500,7 @@ def confirm_concern_delete() -> None:
         ].copy()
         editor_name = current_editor
         try:
-            replace_concerns(project_id, combined_concerns, editor_name=editor_name)
+            concern_save_res = replace_concerns(project_id, combined_concerns, editor_name=editor_name)
         except ValueError as exc:
             st.error(str(exc))
             return
@@ -522,7 +522,7 @@ def confirm_concern_delete() -> None:
                 "Save & Refresh",
                 len(other_edits),
                 editor_name,
-                {"concerns": other_edits, "saved_with_bulk_delete": True},
+                {"concerns": other_edits, "saved_with_bulk_delete": True, "created_count": concern_save_res["created_count"], "updated_count": concern_save_res["updated_count"]},
             )
         st.session_state.pop(pending_delete_key, None)
         request_table_editor_reset(editor_key)
@@ -548,7 +548,7 @@ if footer_actions.save_and_refresh:
         changed_concerns = pending_edit_summaries()
         editor_name = current_editor
         try:
-            replace_concerns(project_id, combined_concerns, editor_name=editor_name)
+            concern_save_res = replace_concerns(project_id, combined_concerns, editor_name=editor_name)
         except ValueError as exc:
             st.error(str(exc))
         else:
@@ -558,7 +558,7 @@ if footer_actions.save_and_refresh:
                 "Save & Refresh",
                 len(changed_concerns),
                 editor_name,
-                {"concerns": changed_concerns},
+                {"concerns": changed_concerns, "created_count": concern_save_res["created_count"], "updated_count": concern_save_res["updated_count"]},
             )
             request_table_editor_reset(editor_key)
             st.toast(
@@ -574,7 +574,7 @@ with st.expander("History", icon=":material/history:"):
     if history.empty:
         st.caption("No Questions and concerns history has been recorded yet.")
     else:
-        selectable_dataframe(
+        render_audit_history_table(
             history.drop(columns=["details"], errors="ignore"),
             key=f"concerns_history_table_{project_id}",
             hide_index=True,

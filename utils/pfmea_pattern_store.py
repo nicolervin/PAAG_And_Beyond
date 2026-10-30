@@ -7,7 +7,11 @@ from uuid import uuid4
 
 import pandas as pd
 
-from utils.cache_store import cached_store_read
+from utils.cache_store import (
+    cached_store_read,
+    is_schema_initialized,
+    mark_schema_initialized,
+)
 from utils.pfmea_store import PFMEA_CLASSIFICATIONS
 from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
@@ -53,6 +57,8 @@ def _sequence(value, default: int) -> int:
 
 def init_pfmea_pattern_schema(conn: sqlite3.Connection) -> None:
     """Create the approved project-wide PFMEA pattern catalog."""
+    if is_schema_initialized(conn, "pfmea_pattern_schema_v1", "pfmea_patterns"):
+        return
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS pfmea_patterns (
@@ -149,6 +155,7 @@ def init_pfmea_pattern_schema(conn: sqlite3.Connection) -> None:
             WHERE detection_option_id IS NOT NULL;
         """
     )
+    mark_schema_initialized(conn, "pfmea_pattern_schema_v1")
 
 
 def _validate_project(conn: sqlite3.Connection, project_id: str) -> None:
@@ -281,7 +288,7 @@ def pfmea_pattern_graph(project_id: str, pattern_id: str) -> dict:
 
 @cached_store_read
 def pfmea_pattern_source_candidates(project_id: str, control_type: str) -> pd.DataFrame:
-    """Return friendly project-wide Quality definitions and manual choices with state."""
+    """Return project-wide manual Prevention/Detection option choices with state."""
     if control_type == "Prevention":
         option_table = "pfmea_prevention_options"
     elif control_type == "Detection":
@@ -290,35 +297,12 @@ def pfmea_pattern_source_candidates(project_id: str, control_type: str) -> pd.Da
         raise ValueError("Control type must be Prevention or Detection.")
     with _store().connection() as conn:
         _validate_project(conn, project_id)
-        requirements = conn.execute(
-            """SELECT id, description, requirement_type, unique_identifier
-               FROM quality_requirements WHERE project_id=?
-               ORDER BY description COLLATE NOCASE, unique_identifier COLLATE NOCASE, id""",
-            (project_id,),
-        ).fetchall()
         options = conn.execute(
             f"""SELECT id, label, active FROM {option_table}
                 WHERE project_id=? ORDER BY active DESC, label COLLATE NOCASE, id""",
             (project_id,),
         ).fetchall()
     rows = [
-        {
-            "source_key": f"quality_requirement:{row['id']}",
-            "source_type": "quality_requirement",
-            "source_id": str(row["id"]),
-            "label": " — ".join(
-                [
-                    "Quality",
-                    _text(row["description"]) or "Unnamed requirement",
-                    _text(row["requirement_type"]) or "Unspecified type",
-                    _text(row["unique_identifier"]) or "No identifier",
-                ]
-            ),
-            "active": True,
-        }
-        for row in requirements
-    ]
-    rows.extend(
         {
             "source_key": f"manual_option:{row['id']}",
             "source_type": "manual_option",
@@ -327,8 +311,11 @@ def pfmea_pattern_source_candidates(project_id: str, control_type: str) -> pd.Da
             "active": bool(row["active"]),
         }
         for row in options
+    ]
+    return pd.DataFrame(
+        rows,
+        columns=["source_key", "source_type", "source_id", "label", "active"],
     )
-    return pd.DataFrame(rows)
 
 
 def _rows(value) -> list[dict]:
@@ -716,24 +703,10 @@ def capture_pfmea_entry_as_pattern(
                 if not target_cause:
                     continue
                 if row["source_type"] == "quality_assignment":
-                    assignment = conn.execute(
-                        """SELECT quality_requirement_id FROM quality_requirement_assignments
-                           WHERE id=? AND project_id=? AND scenario_id=?""",
-                        (
-                            row["quality_requirement_assignment_id"], project_id, scenario_id,
-                        ),
-                    ).fetchone()
-                    if not assignment:
-                        omitted.append(f"Unavailable {control_type} Quality assignment")
-                        continue
-                    source_groups[control_type].append(
-                        {
-                            "pattern_cause_id": target_cause,
-                            "source_type": "quality_requirement",
-                            "source_id": str(assignment["quality_requirement_id"]),
-                            "sequence": row["sequence"],
-                        }
+                    omitted.append(
+                        f"{control_type}: Quality requirement controls are governed in Control Plan and omitted from PFMEA patterns"
                     )
+                    continue
                 else:
                     option = conn.execute(
                         f"SELECT label, active FROM {option_table} WHERE id=? AND project_id=?",

@@ -37,7 +37,7 @@ from utils.table_ui import (
     editable_table_heading,
     native_selected_rows,
     direct_entry_editor_rows,
-    selectable_dataframe,
+    count_table_create_and_edit_rows, render_audit_history_table, selectable_dataframe,
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
 )
@@ -57,13 +57,13 @@ if not project_id:
     st.stop()
 if st.session_state.get("_models_active_project_id") != str(project_id):
     if st.session_state.get("_models_active_project_id") is not None:
-        request_table_editor_reset("model_definitions_editor_v2")
-        request_table_editor_reset("complexity_feature_editor")
-        request_table_editor_reset("complexity_tree_editor")
+        request_table_editor_reset(f"model_definitions_editor_v2_{project_id}")
+        request_table_editor_reset(f"complexity_feature_editor_{project_id}")
+        request_table_editor_reset(f"complexity_tree_editor_{project_id}")
     st.session_state["_models_active_project_id"] = str(project_id)
-model_editor_key = apply_pending_table_editor_reset("model_definitions_editor_v2")
-feature_editor_key = apply_pending_table_editor_reset("complexity_feature_editor")
-tree_editor_key = apply_pending_table_editor_reset("complexity_tree_editor")
+model_editor_key = apply_pending_table_editor_reset(f"model_definitions_editor_v2_{project_id}")
+feature_editor_key = apply_pending_table_editor_reset(f"complexity_feature_editor_{project_id}")
+tree_editor_key = apply_pending_table_editor_reset(f"complexity_tree_editor_{project_id}")
 
 models = project_models(project_id)
 model_undo_key = f"model_information_undo_{project_id}"
@@ -358,7 +358,7 @@ for column in definition_columns:
 models_for_editing = models.reindex(columns=definition_columns)
 visible_models = filter_table(
     models_for_editing,
-    key="model_definition_filters",
+    key=f"model_definition_filters_{project_id}",
     dropdown_columns=["active"],
     search_columns=["model_number", "display_name", "description"],
     labels={"active": "Planning status"},
@@ -549,7 +549,7 @@ if save_requested:
             added_model_rows + edited_model_rows,
             st.session_state.get("current_editor", ""),
             {
-                "model_rows_added": added_model_rows,
+                "model_rows_added": added_model_rows, "created_count": added_model_rows, "updated_count": edited_model_rows,
                 "model_rows_edited": edited_model_rows,
             },
         )
@@ -608,7 +608,7 @@ else:
 
 visible_features = filter_table(
     feature_rows,
-    key="feature_definition_filters",
+    key=f"feature_definition_filters_{project_id}",
     dropdown_columns=["active", "category", "subsystem"],
     search_columns=["category", "subsystem", "name", "allowed_choices", "description"],
     labels={"active": "Planning status", "category": "Category", "subsystem": "Subsystem"},
@@ -899,7 +899,7 @@ if feature_actions.save_and_refresh:
             "Save & Refresh",
             len(changed_features),
             st.session_state.get("current_editor", ""),
-            {"features": changed_features},
+            {"features": changed_features, "created_count": count_table_create_and_edit_rows(feature_rows, merged_features)[0], "updated_count": count_table_create_and_edit_rows(feature_rows, merged_features)[1]},
         )
         request_table_editor_reset(tree_editor_key)
         request_table_editor_reset(feature_editor_key)
@@ -987,7 +987,7 @@ else:
     }
     visible_tree = filter_table(
         tree,
-        key="complexity_tree_filters",
+        key=f"complexity_tree_filters_{project_id}",
         dropdown_columns=active_feature_ids,
         search_columns=["official_model_number", "common_name", *active_feature_ids],
         labels=feature_filter_labels,
@@ -1617,7 +1617,7 @@ with st.expander("History", icon=":material/history:"):
         if models_history.empty:
             st.caption("No model-information history has been recorded yet.")
         else:
-            selectable_dataframe(
+            render_audit_history_table(
                 models_history.drop(columns=["details"], errors="ignore"),
                 key=f"models_history_table_{project_id}",
                 hide_index=True,
@@ -1635,7 +1635,7 @@ with st.expander("History", icon=":material/history:"):
         if features_history.empty:
             st.caption("No feature-definition history has been recorded yet.")
         else:
-            selectable_dataframe(
+            render_audit_history_table(
                 features_history.drop(columns=["details"], errors="ignore"),
                 key=f"features_history_table_{project_id}",
                 hide_index=True,
@@ -1653,7 +1653,7 @@ with st.expander("History", icon=":material/history:"):
         if tree_history.empty:
             st.caption("No complexity-tree history has been recorded yet.")
         else:
-            selectable_dataframe(
+            render_audit_history_table(
                 tree_history.drop(columns=["details"], errors="ignore"),
                 key=f"complexity_tree_history_table_{project_id}",
                 hide_index=True,

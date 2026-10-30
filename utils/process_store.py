@@ -1310,6 +1310,132 @@ def work_element_op_id(project_id: str, scenario_id: str, work_element_id: str) 
         raise ValueError("Choose a Process at a Glance Work Element.")
     return work_element_op_ids(project_id, scenario_id, [normalized_id])[normalized_id]
 
+
+@cached_store_read
+def work_element_validation_contexts(
+    project_id: str,
+    scenario_id: str,
+    work_element_ids: list[str] | None = None,
+) -> dict[str, dict]:
+    """Compute PAAG technical completeness and validation gating status (Option A) per work element."""
+    op_contexts = work_element_op_contexts(project_id, scenario_id, work_element_ids)
+    normalized_ids = list(dict.fromkeys(str(wid).strip() for wid in (work_element_ids or []) if str(wid).strip()))
+    with connection() as conn:
+        if normalized_ids:
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            rows = conn.execute(
+                f"""SELECT id, operation, status
+                    FROM work_elements
+                    WHERE project_id=? AND scenario_id=? AND id IN ({placeholders})""",
+                (project_id, scenario_id, *normalized_ids),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, operation, status
+                   FROM work_elements
+                   WHERE project_id=? AND scenario_id=?""",
+                (project_id, scenario_id),
+            ).fetchall()
+
+        validated_scenario_count = int(
+            conn.execute(
+                """SELECT COUNT(*)
+                   FROM work_elements
+                   WHERE project_id=? AND scenario_id=? AND COALESCE(status, 'Draft')='Validated'""",
+                (project_id, scenario_id),
+            ).fetchone()[0]
+        )
+        yamazumi_scenario_count = int(
+            conn.execute(
+                """SELECT COUNT(*)
+                   FROM yamazumi_elements y
+                   JOIN yamazumi_areas a ON a.id=y.area_id
+                   WHERE y.project_id=? AND a.scenario_id=?""",
+                (project_id, scenario_id),
+            ).fetchone()[0]
+        )
+
+        unclassified_counts: dict[str, int] = {}
+        if normalized_ids:
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            part_rows = conn.execute(
+                f"""SELECT group_row.work_element_id, COUNT(*) AS cnt
+                    FROM process_part_options option
+                    JOIN process_part_groups group_row ON group_row.id=option.group_id
+                    JOIN parts part
+                      ON part.id=option.part_id AND part.project_id=group_row.project_id
+                    LEFT JOIN part_scenario_activity activity
+                      ON activity.project_id=group_row.project_id
+                     AND activity.scenario_id=group_row.scenario_id
+                     AND activity.part_id=option.part_id
+                    WHERE group_row.project_id=? AND group_row.scenario_id=?
+                      AND COALESCE(activity.active, 1)=1
+                      AND COALESCE(TRIM(option.handling_type), '')=''
+                      AND group_row.work_element_id IN ({placeholders})
+                    GROUP BY group_row.work_element_id""",
+                (project_id, scenario_id, *normalized_ids),
+            ).fetchall()
+        else:
+            part_rows = conn.execute(
+                """SELECT group_row.work_element_id, COUNT(*) AS cnt
+                   FROM process_part_options option
+                   JOIN process_part_groups group_row ON group_row.id=option.group_id
+                   JOIN parts part
+                     ON part.id=option.part_id AND part.project_id=group_row.project_id
+                   LEFT JOIN part_scenario_activity activity
+                     ON activity.project_id=group_row.project_id
+                    AND activity.scenario_id=group_row.scenario_id
+                    AND activity.part_id=option.part_id
+                   WHERE group_row.project_id=? AND group_row.scenario_id=?
+                     AND COALESCE(activity.active, 1)=1
+                     AND COALESCE(TRIM(option.handling_type), '')=''
+                   GROUP BY group_row.work_element_id""",
+                (project_id, scenario_id),
+            ).fetchall()
+        for prow in part_rows:
+            unclassified_counts[str(prow["work_element_id"])] = int(prow["cnt"] or 0)
+
+    result: dict[str, dict] = {}
+    for row in rows:
+        wid = str(row["id"])
+        op_ctx = op_contexts.get(wid) or {}
+        op_id = str(op_ctx.get("op_id") or "")
+        op_complete = bool(op_ctx.get("complete"))
+        has_operation = bool(str(row["operation"] or "").strip())
+        unclassified_cnt = int(unclassified_counts.get(wid, 0))
+        technically_complete = bool(op_complete and has_operation and unclassified_cnt == 0)
+        status_val = str(row["status"] or "Draft").strip() or "Draft"
+        is_validated_status = status_val == "Validated"
+        pfmea_eligible = bool(technically_complete and is_validated_status)
+
+        missing_reasons: list[str] = []
+        if not op_complete:
+            missing_reasons.append(f"Incomplete Op ID ({op_id or 'Unassigned'})")
+        if not has_operation:
+            missing_reasons.append("Missing Operation name")
+        if unclassified_cnt > 0:
+            missing_reasons.append(f"{unclassified_cnt} Unclassified part handling(s)")
+        if not is_validated_status:
+            missing_reasons.append(f"PAAG Status is '{status_val}' (must be 'Validated')")
+
+        result[wid] = {
+            "work_element_id": wid,
+            "op_id": op_id,
+            "op_complete": op_complete,
+            "has_operation": has_operation,
+            "unclassified_part_count": unclassified_cnt,
+            "technically_complete": technically_complete,
+            "status": status_val,
+            "is_validated_status": is_validated_status,
+            "pfmea_eligible": pfmea_eligible,
+            "missing_reasons": missing_reasons,
+            "validated_scenario_count": validated_scenario_count,
+            "paag_gate_enforced": bool(
+                is_validated_status or validated_scenario_count > 0 or yamazumi_scenario_count > 0
+            ),
+        }
+    return result
+
 @cached_store_read
 def get_pitch_visual_media(
     project_id: str, scenario_id: str, pitch_id: str
@@ -2417,7 +2543,7 @@ def process_pitch_visual_summary(
                     WHERE review.project_id=? AND review.scenario_id=?
                       AND review.work_element_id IN ({placeholders})
                       AND review.risk_classification IN ('Red', 'Favorable Red', 'Yellow')
-                      AND review.status IN ('Open', 'Pending')""",
+                      AND review.status IN ('Started', 'Open', 'Pending', 'Validation')""",
                 (project_id, scenario_id, *work_ids),
             ).fetchall()
             for er in ergo_rows:
@@ -2656,13 +2782,64 @@ def replace_work_elements(project_id: str, scenario_id: str, edited: pd.DataFram
         records.append((element_id, values))
 
     with connection() as conn:
-        existing_ids = {
-            str(row[0]) for row in conn.execute(
-                "SELECT id FROM work_elements WHERE project_id=? AND scenario_id=?",
+        existing_status_by_id = {
+            str(row[0]): str(row[1] or "Draft")
+            for row in conn.execute(
+                "SELECT id, status FROM work_elements WHERE project_id=? AND scenario_id=?",
                 (project_id, scenario_id),
             ).fetchall()
         }
+        existing_ids = set(existing_status_by_id.keys())
         saved_ids = {element_id for element_id, _ in records}
+        status_idx = fields.index("status")
+        op_idx = fields.index("operation")
+        newly_validated_ids = [
+            element_id
+            for element_id, values in records
+            if str(values[status_idx] or "").strip() == "Validated"
+            and existing_status_by_id.get(element_id) != "Validated"
+        ]
+        if newly_validated_ids:
+            op_ctxs = work_element_op_contexts(project_id, scenario_id, newly_validated_ids)
+            placeholders_nv = ",".join("?" for _ in newly_validated_ids)
+            unc_by_id = {
+                str(r[0]): int(r[1] or 0)
+                for r in conn.execute(
+                    f"""SELECT g.work_element_id, COUNT(*)
+                        FROM process_part_groups g
+                        JOIN process_part_options o ON o.group_id = g.id
+                        LEFT JOIN part_scenario_activity a
+                          ON a.project_id = g.project_id
+                         AND a.scenario_id = g.scenario_id
+                         AND a.part_id = o.part_id
+                        WHERE g.project_id=? AND g.scenario_id=?
+                          AND g.work_element_id IN ({placeholders_nv})
+                          AND COALESCE(a.active, 1) = 1
+                          AND (o.handling_type IS NULL OR TRIM(o.handling_type) = '')
+                        GROUP BY g.work_element_id""",
+                    (project_id, scenario_id, *newly_validated_ids),
+                ).fetchall()
+            }
+            op_name_by_id = {
+                element_id: str(values[op_idx] or "").strip()
+                for element_id, values in records
+            }
+            for nv_id in newly_validated_ids:
+                ctx = op_ctxs.get(nv_id) or {"op_id": "Yamazumi link required", "complete": False}
+                reasons: list[str] = []
+                if not bool(ctx.get("complete")):
+                    reasons.append(f"Op ID is incomplete ({ctx.get('op_id')})")
+                if not op_name_by_id.get(nv_id):
+                    reasons.append("Operation name is blank")
+                if unc_by_id.get(nv_id, 0) > 0:
+                    reasons.append(f"{unc_by_id[nv_id]} paired part handling(s) are still Unclassified")
+                if reasons:
+                    step_label = op_name_by_id.get(nv_id) or nv_id
+                    raise ValueError(
+                        f"Cannot mark PAAG step '{step_label}' as Validated until it is technically complete: "
+                        + "; ".join(reasons)
+                        + "."
+                    )
         assignments = ", ".join(f"{field}=?" for field in fields)
         for element_id, values in records:
             timestamp = now_iso()
@@ -3297,7 +3474,7 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
                             AND work.scenario_id=review.scenario_id
                            WHERE review.project_id=? AND review.scenario_id=?
                              AND review.risk_classification IN ('Red', 'Favorable Red', 'Yellow')
-                             AND review.status IN ('Open', 'Pending')""",
+                             AND review.status IN ('Started', 'Open', 'Pending', 'Validation')""",
                         (project_id, scenario_id),
                     ).fetchone()[0]
                 )
@@ -3372,7 +3549,7 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
         }
 
 
-__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'acknowledge_materials_upstream_changes', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'unlink_part_from_process_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
+__domain_exports__ = ['_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'acknowledge_materials_upstream_changes', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'unlink_part_from_process_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'work_element_validation_contexts', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

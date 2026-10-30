@@ -66,6 +66,7 @@ from utils.table_ui import (
     render_select_all_control,
     resolve_editor_selected_rows,
     stage_native_delete_confirmation,
+    render_audit_history_table,
     selectable_dataframe,
     table_has_unsaved_changes,
 )
@@ -85,12 +86,12 @@ st.caption("Build the Fishbone framework first, then place approved Parts Catalo
 if not project_id or not scenario_id:
     st.stop()
 pool_editor_key = f"parts_fishbone_pool_v3_{project_id}_{scenario_id}"
-assignment_editor_key = f"fishbone_assignment_editor_{scenario_id}"
+assignment_editor_key = f"fishbone_assignment_editor_{project_id}_{scenario_id}"
 if not st.session_state.get(f"_concise_section_labels_v2_{scenario_id}"):
     st.session_state[f"_concise_section_labels_v2_{scenario_id}"] = True
-    request_table_editor_reset("assembly_framework_editor")
+    request_table_editor_reset(f"assembly_framework_editor_{project_id}")
     request_table_editor_reset(assignment_editor_key)
-framework_editor_key = apply_pending_table_editor_reset("assembly_framework_editor")
+framework_editor_key = apply_pending_table_editor_reset(f"assembly_framework_editor_{project_id}")
 assignment_editor_key = apply_pending_table_editor_reset(assignment_editor_key)
 pool_editor_key = apply_pending_table_editor_reset(pool_editor_key)
 
@@ -400,2151 +401,2192 @@ fishbone_tab, assign_parts_tab = guarded_tabs(
     key=f"fishbone_main_tabs_{project_id}",
 )
 
-with assign_parts_tab:
-    st.subheader("Place Parts into Fishbone")
-    place_parts_bar = st.container(
-        horizontal=True,
-        vertical_alignment="center",
-        horizontal_alignment="right",
-    )
-    placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
-    trigger_pool_save, trigger_pool_discard = register_unsaved_source(
-        f"fishbone_pool_{project_id}_{scenario_id}",
-        editor_key=pool_editor_key,
-    )
-    undo_last_placement = place_parts_bar.button(
-        "Undo last edit",
-        icon=":material/undo:",
-        disabled=not can_undo_last_table_edit(pool_editor_key, ignored_columns=()),
-        help="Revert the most recent cell or selection edit in the placement table.",
-        key="undo_last_part_placement_edit",
-    )
-    if undo_last_placement:
-        if undo_last_table_edit(pool_editor_key):
-            st.toast(
-                last_table_undo_redo_message(
-                    pool_editor_key,
-                    default="Reverted the last placement table edit",
-                ),
-                icon=":material/undo:",
-            )
-            st.rerun()
-    redo_last_placement = place_parts_bar.button(
-        "Redo last edit",
-        icon=":material/redo:",
-        disabled=not can_redo_last_table_edit(pool_editor_key, ignored_columns=()),
-        help="Reapply the most recently undone cell or selection edit in the placement table.",
-        key="redo_last_part_placement_edit",
-    )
-    if redo_last_placement:
-        if redo_last_table_edit(pool_editor_key):
-            st.toast(
-                last_table_undo_redo_message(
-                    pool_editor_key,
-                    default="Reapplied the last undone placement table edit",
-                ),
-                icon=":material/redo:",
-            )
-            st.rerun()
-    undo_placement = place_parts_bar.button(
-        "Discard all edits",
-        icon=":material/restart_alt:",
-        disabled=assignment_undo_key not in st.session_state and not placement_has_unsaved,
-        help=(
-            "Discard all current unsaved selections or quantities."
-            if placement_has_unsaved
-            else "Undo the last part placement or additional-use staging."
-        ),
-        key="undo_part_placement",
-    )
-    if undo_placement or trigger_pool_discard:
-        if placement_has_unsaved or trigger_pool_discard:
-            request_table_editor_reset(pool_editor_key)
-            st.toast("Discarded the unsaved placement table edits", icon=":material/undo:")
-        else:
-            undo_state = st.session_state.pop(assignment_undo_key)
-            restore_fishbone_assignment_snapshot(project_id, undo_state["assignments"])
-            st.session_state[pending_use_key] = undo_state.get("pending_use_ids", [])
-            request_table_editor_reset(pool_editor_key)
-            request_table_editor_reset(assignment_editor_key)
-            st.toast("Undid the last part placement change", icon=":material/undo:")
-        st.rerun()
-    if parts.empty:
-        st.info("Add or import parts in the Parts Catalog before building the Fishbone framework.")
-    elif active_sections.empty:
-        st.info("Create and activate a Fishbone section in Framework Set Up before placing parts.")
-    else:
-        pending_use_ids = {
-            str(part_id) for part_id in st.session_state.get(pending_use_key, [])
-            if str(part_id) in set(parts["id"].astype(str))
-        }
-        placed_by_part = {}
-        if not assignments.empty:
-            for part_id, uses in assignments.groupby("part_id", sort=False):
-                section_names = list(dict.fromkeys(uses["section_name"].astype(str)))
-                section_summary = ", ".join(section_names)
-                placed_by_part[str(part_id)] = f"{len(uses)} use{'s' if len(uses) != 1 else ''} · {section_summary}"
-
-        part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
-
-        def resolve_part_meta(pid_val, pnum_val, fallback_qty, catalog_idx: int):
-            pid = str(pid_val)
-            pnum = str(pnum_val or "").strip()
-            info = master_info_by_part_id.get(pid) or master_info_by_pnum.get(pnum)
-            if info:
-                return info["order"], info["level"], info["quantity"]
-            try:
-                fqty = float(fallback_qty) if fallback_qty is not None and float(fallback_qty) > 0 else 1.0
-            except (ValueError, TypeError):
-                fqty = 1.0
-            return 1_000_000 + catalog_idx, "—", fqty
-
-        meta_results = [
-            resolve_part_meta(pid, pnum, qty, i)
-            for i, (pid, pnum, qty) in enumerate(
-                zip(part_pool["id"], part_pool["part_number"], part_pool["quantity"])
-            )
-        ]
-        part_pool["_master_order"] = [m[0] for m in meta_results]
-        part_pool["level"] = [m[1] for m in meta_results]
-        part_pool["quantity"] = [m[2] for m in meta_results]
-        part_pool = part_pool.sort_values(by=["_master_order", "part_number"], ascending=[True, True]).reset_index(drop=True)
-
-        part_pool["feature_applicability"] = [
-            feature_applicability(pid, m_app)
-            for pid, m_app in zip(part_pool["id"], part_pool["model_applicability"])
-        ]
-        part_pool["fishbone_section"] = part_pool["id"].map(placed_by_part).fillna("Not placed")
-        part_pool.loc[
-            part_pool["id"].astype(str).isin(pending_use_ids), "fishbone_section"
-        ] = "Ready for another use"
-        pool_controls = st.container(horizontal=True)
-        placement_filter_key = f"fishbone_placement_filters_{project_id}"
-        placement_filters = pool_controls.multiselect(
-            "Show",
-            ["Not placed", "Ready for another use", "Placed"],
-            default=["Not placed"],
-            placeholder="All placement states",
-            key=placement_filter_key,
+if assign_parts_tab.open:
+    with assign_parts_tab:
+        st.subheader("Place Parts into Fishbone")
+        place_parts_bar = st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            horizontal_alignment="right",
         )
-        part_search = pool_controls.text_input("Search parts", placeholder="Part number or part name")
-        pool_feature_options = sorted(
-            {label for labels in feature_labels_by_part.values() for label in labels}, key=str.casefold
+        placement_has_unsaved = has_unsaved_table_changes(pool_editor_key)
+        trigger_pool_save, trigger_pool_discard = register_unsaved_source(
+            f"fishbone_pool_{project_id}_{scenario_id}",
+            editor_key=pool_editor_key,
         )
-        selected_pool_features = pool_controls.multiselect(
-            "Features",
-            options=pool_feature_options,
-            placeholder="All feature configurations",
-            key=f"fishbone_pool_features_{project_id}",
+        undo_last_placement = place_parts_bar.button(
+            "Undo last edit",
+            icon=":material/undo:",
+            disabled=not can_undo_last_table_edit(pool_editor_key, ignored_columns=()),
+            help="Revert the most recent cell or selection edit in the placement table.",
+            key="undo_last_part_placement_edit",
         )
-        visible_parts = part_pool.copy()
-        if placement_filters:
-            placement_state = visible_parts["fishbone_section"].where(
-                visible_parts["fishbone_section"].isin(["Not placed", "Ready for another use"]),
-                "Placed",
-            )
-            visible_parts = visible_parts[placement_state.isin(placement_filters)]
-        if part_search:
-            searchable = visible_parts[["part_number", "description", "level"]].fillna("").astype(str).agg(" ".join, axis=1)
-            visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
-        if selected_pool_features:
-            _sel_pool_feat_set = set(selected_pool_features)
-            visible_parts = visible_parts[
-                [
-                    f_app == "All models"
-                    or bool(_sel_pool_feat_set & set(feature_labels_by_part.get(str(pid), [])))
-                    for pid, f_app in zip(visible_parts["id"], visible_parts["feature_applicability"])
-                ]
-            ]
-
-        pool_key = pool_editor_key
-        pool_signature_key = f"parts_fishbone_pool_signature_{project_id}"
-        pool_signature = (
-            tuple(placement_filters),
-            part_search.strip().casefold(),
-            tuple(selected_pool_features),
-            tuple(visible_parts["id"].astype(str)),
-        )
-        if st.session_state.get(pool_signature_key) != pool_signature:
-            st.session_state[pool_signature_key] = pool_signature
-            st.session_state.pop(pool_key, None)
-            st.session_state.pop(f"_select_all_{logical_table_editor_key(pool_key)}", None)
-
-        visible_parts = visible_parts.copy()
-        visible_parts["place"] = False
-        visible_parts = prepare_editor_selection_column(
-            visible_parts, editor_key=pool_key, column="place"
-        )
-        visible_parts["edit_part"] = ":material/edit: Edit part"
-        visible_parts["models_familiar"] = visible_parts["feature_applicability"]
-
-        def open_pool_part() -> None:
-            click = st.session_state.get("fishbone_pool_edit_part")
-            if not click or not 0 <= click["row"] < len(visible_parts):
-                return
-            row = visible_parts.iloc[click["row"]]
-            st.session_state[f"parts_selected_id_{project_id}"] = str(row["id"])
-            st.session_state["part_catalog_filters_keyword"] = str(row["part_number"])
-            st.session_state["part_catalog_filters_source"] = []
-            st.session_state["part_catalog_filters_revision"] = []
-            st.session_state["part_catalog_filters_model_applicability"] = []
-            st.session_state[f"fishbone_open_pool_part_{project_id}"] = True
-
-        edited_pool = st.data_editor(
-            visible_parts,
-            key=pool_key,
-            hide_index=True,
-            height=330,
-            disabled=["id", "_master_order", "part_number", "level", "description", "revision", "model_applicability", "models_familiar", "fishbone_section"],
-            column_order=["place", "edit_part", "part_number", "level", "description", "quantity", "revision", "models_familiar", "fishbone_section"],
-            column_config={
-                "id": None,
-                "_master_order": None,
-                "place": st.column_config.CheckboxColumn(
-                    "Place?",
-                    pinned=True,
-                    help="Check one or more rows to enable the appropriate placement button below.",
-                ),
-                "edit_part": st.column_config.ButtonColumn(
-                    "Select",
-                    pinned=True,
-                    type="tertiary",
-                    on_click=open_pool_part,
-                    key="fishbone_pool_edit_part",
-                    help="Open this exact catalog part in the Parts Catalog to edit its models, details, and photos.",
-                ),
-                "part_number": st.column_config.TextColumn("Part number", pinned=True),
-                "level": st.column_config.TextColumn(
-                    "Level",
-                    width="small",
-                    help="BOM hierarchy level from the Model Tree master list (e.g. L1, L2, L3).",
-                ),
-                "description": st.column_config.TextColumn("Part Name", width="large"),
-                "quantity": st.column_config.NumberColumn(
-                    "Fishbone quantity", step=0.01, format="%g",
-                    help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
-                ),
-                "model_applicability": None,
-                "models_familiar": st.column_config.TextColumn("Feature applicability", width="medium"),
-                "fishbone_section": st.column_config.TextColumn("Fishbone uses", width="large"),
-            },
-        )
-        if st.session_state.pop(f"fishbone_open_pool_part_{project_id}", False):
-            st.switch_page("app_pages/parts.py")
-        selected_parts = resolve_editor_selected_rows(
-            visible_parts, edited_pool, editor_key=pool_key, column="place"
-        )
-        selected_part_ids = selected_parts["id"].astype(str).tolist()
-        selected_quantities = {
-            str(row["id"]): float(row["quantity"])
-            for _, row in selected_parts.iterrows()
-        }
-        placed_part_ids = set(assignments["part_id"].astype(str)) if not assignments.empty else set()
-        selected_unplaced_ids = [part_id for part_id in selected_part_ids if part_id not in placed_part_ids]
-        selected_additional_use_ids = [part_id for part_id in selected_part_ids if part_id in pending_use_ids]
-        placement_row = st.container(horizontal=True, vertical_alignment="bottom")
-        render_select_all_control(
-            placement_row,
-            editor_key=pool_key,
-            selectable_count=len(visible_parts),
-            selected_count=len(selected_parts),
-            key_prefix=f"fishbone_pool_select_{project_id}_{scenario_id}",
-            column="place",
-        )
-        target_section_id = placement_row.selectbox(
-            "Place selected parts in",
-            options=active_sections["id"].astype(str).tolist(),
-            format_func=lambda section_id: section_option_labels.get(section_id, section_id),
-        )
-        use_description_key = f"fishbone_new_use_description_{project_id}"
-        clear_use_description_key = f"fishbone_clear_use_description_{project_id}"
-        if st.session_state.pop(clear_use_description_key, False):
-            st.session_state.pop(use_description_key, None)
-        use_description = placement_row.text_input(
-            "Use / installation location",
-            placeholder="Example: Door hinge — upper left",
-            help="Describe this occurrence so repeated uses of the same part are easy to distinguish.",
-            key=use_description_key,
-        )
-        place_btn = placement_row.button(
-            "Place selected parts",
-            type="primary",
-            icon=":material/arrow_downward:",
-            disabled=not (selected_unplaced_ids or selected_additional_use_ids),
-            help="Places first-time parts and staged additional uses with the correct behavior automatically.",
-        )
-        if place_btn or (trigger_pool_save and (selected_unplaced_ids or selected_additional_use_ids)):
-            try:
-                st.session_state[assignment_undo_key] = current_assignment_undo
-                count = 0
-                if selected_unplaced_ids:
-                    count += assign_parts_to_section(
-                        project_id,
-                        selected_unplaced_ids,
-                        target_section_id,
-                        use_description,
-                        quantities_by_part={part_id: selected_quantities[part_id] for part_id in selected_unplaced_ids},
-                    )
-                if selected_additional_use_ids:
-                    count += assign_parts_to_section(
-                        project_id,
-                        selected_additional_use_ids,
-                        target_section_id,
-                        use_description,
-                        allow_additional_use=True,
-                        quantities_by_part={part_id: selected_quantities[part_id] for part_id in selected_additional_use_ids},
-                    )
-                selected_part_details = {
-                    str(row["id"]): row for _, row in selected_parts.iterrows()
-                }
-                placed_part_uses = [
-                    {
-                        "part_id": part_id,
-                        "part_number": audit_text(
-                            selected_part_details[part_id].get("part_number")
-                        ),
-                        "section_id": str(target_section_id),
-                        "section_name": section_name_by_id[target_section_id],
-                        "additional_use": part_id in selected_additional_use_ids,
-                    }
-                    for part_id in [*selected_unplaced_ids, *selected_additional_use_ids]
-                ]
-                record_audit_event(
-                    project_id,
-                    "Fishbone part assignments",
-                    "Place selected parts",
-                    count,
-                    st.session_state.get("current_editor", ""),
-                    {
-                        "placed_part_uses": placed_part_uses,
-                        "first_uses_added": len(selected_unplaced_ids),
-                        "additional_uses_added": len(selected_additional_use_ids),
-                    },
-                )
-                pending_use_ids.difference_update(selected_additional_use_ids)
-                st.session_state[pending_use_key] = sorted(pending_use_ids)
-                request_table_editor_reset(pool_editor_key)
-                place_breakdown: list[str] = []
-                if selected_unplaced_ids:
-                    place_breakdown.append(f"{len(selected_unplaced_ids)} first-time")
-                if selected_additional_use_ids:
-                    place_breakdown.append(f"{len(selected_additional_use_ids)} additional")
+        if undo_last_placement:
+            if undo_last_table_edit(pool_editor_key):
                 st.toast(
-                    f"Placed {count} part use(s) in {section_name_by_id[target_section_id]}"
-                    + (f" ({', '.join(place_breakdown)})" if place_breakdown else ""),
-                    icon=":material/check_circle:",
-                )
-                st.session_state[clear_use_description_key] = True
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-        st.caption(
-            "Place selected parts automatically handles both first-time parts and additional uses staged from Assigned Parts."
-        )
-
-
-    st.subheader("Assigned Parts")
-    assignments_have_unsaved = table_has_unsaved_changes(
-        assignment_editor_key, native_row_selection=True
-    )
-    refresh_part_placement = False
-    selected_assignment_rows = assignments.iloc[0:0].copy()
-    if assignments.empty:
-        st.caption("Assigned parts will appear here for ordering within each Fishbone section.")
-    else:
-        full_assignment_editor = assignments.copy()
-
-        def _format_pits_sync_status(row: pd.Series) -> str:
-            status = str(row.get("pits_sync_status") or "")
-            updated_at = row.get("pits_quantity_updated_at")
-            if status == "In sync" and updated_at and pd.notna(updated_at):
-                try:
-                    dt = pd.to_datetime(updated_at, errors="coerce", utc=True)
-                    if pd.notna(dt):
-                        dt = dt.tz_convert("America/New_York")
-                        return f"Updated from PITS on {dt.strftime('%b %d, %Y')}"
-                except Exception:
-                    pass
-            return status
-        full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_option_labels)
-        full_assignment_editor["model_applicability"] = [
-            feature_applicability(pid, m_app)
-            for pid, m_app in zip(
-                full_assignment_editor["part_id"],
-                full_assignment_editor["model_applicability"],
-            )
-        ]
-        full_assignment_editor["pits_sync_status"] = [
-            _format_pits_sync_status(row)
-            for row in full_assignment_editor.to_dict(orient="records")
-        ]
-        assignment_editor = filter_table(
-            full_assignment_editor,
-            key="fishbone_assignment_filters",
-            dropdown_columns=["section", "revision", "model_applicability"],
-            search_columns=["section", "part_number", "description", "use_description", "revision", "model_applicability", "notes"],
-            labels={"section": "Fishbone section", "model_applicability": "Feature applicability"},
-            reset_widget_keys=[assignment_editor_key],
-            multi_value_columns=["model_applicability"],
-            universal_values={"model_applicability": ["All", "All models", ""]},
-        )
-        assignment_editor["edit_part"] = ":material/edit: Edit part"
-        assignment_editor["add_use"] = ":material/content_copy: Add use"
-
-        def open_assigned_part() -> None:
-            click = st.session_state.get("fishbone_assignment_edit_part")
-            if not click or not 0 <= click["row"] < len(assignment_editor):
-                return
-            part_id = str(assignment_editor.iloc[click["row"]]["part_id"])
-            part_number = str(assignment_editor.iloc[click["row"]]["part_number"])
-            st.session_state[f"parts_selected_id_{project_id}"] = part_id
-            st.session_state["part_catalog_filters_keyword"] = part_number
-            st.session_state["part_catalog_filters_source"] = []
-            st.session_state["part_catalog_filters_revision"] = []
-            st.session_state["part_catalog_filters_model_applicability"] = []
-            # Navigation triggers a rerun, so defer it until the callback has finished.
-            st.session_state[f"fishbone_open_part_{project_id}"] = True
-
-        def add_assigned_part_use() -> None:
-            click = st.session_state.get("fishbone_assignment_add_use")
-            if not click or not 0 <= click["row"] < len(assignment_editor):
-                return
-            row = assignment_editor.iloc[click["row"]]
-            staged_ids = set(st.session_state.get(f"fishbone_pending_additional_uses_{project_id}", []))
-            staged_ids.add(str(row["part_id"]))
-            st.session_state[assignment_undo_key] = current_assignment_undo
-            st.session_state[f"fishbone_pending_additional_uses_{project_id}"] = sorted(staged_ids)
-            st.session_state[f"fishbone_placement_filters_{project_id}"] = ["Ready for another use"]
-            st.toast("Part returned to Place Parts into Fishbone and is ready to place again.", icon=":material/arrow_upward:")
-
-        edited_assignments = st.data_editor(
-            assignment_editor,
-            key=assignment_editor_key,
-            hide_index=True,
-            num_rows="delete",
-            height=430,
-            disabled=[
-                "id", "part_id", "part_number", "description", "revision",
-                "model_applicability", "pits_sync_status", "updated_at",
-            ],
-            column_order=[
-                "edit_part", "add_use", "section", "part_number", "description",
-                "quantity", "pits_sync_status", "model_applicability", "revision",
-                "use_description", "notes", "sequence",
-            ],
-            column_config={
-                "id": None,
-                "project_id": None,
-                "part_id": None,
-                "section_id": None,
-                "section_name": None,
-                "edit_part": st.column_config.ButtonColumn(
-                    "Select",
-                    pinned=True,
-                    width="small",
-                    type="tertiary",
-                    on_click=open_assigned_part,
-                    key="fishbone_assignment_edit_part",
-                    help="Open this exact part in the Parts Catalog to edit its catalog details and photos.",
-                ),
-                "add_use": st.column_config.ButtonColumn(
-                    "Another Fishbone use",
-                    pinned=True,
-                    width=110,
-                    type="tertiary",
-                    on_click=add_assigned_part_use,
-                    key="fishbone_assignment_add_use",
-                    help="Return this catalog part to Section 2 so its additional use can be placed deliberately.",
-                ),
-                "section": st.column_config.SelectboxColumn(
-                    "Fishbone section",
-                    options=[
-                        section_option_labels[str(section_id)]
-                        for section_id in active_sections["id"].astype(str)
-                    ],
-                    required=True,
-                    pinned=True,
-                    width=130,
-                ),
-                "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d"),
-                "part_number": st.column_config.TextColumn("Part number", width=105, pinned=True),
-                "description": st.column_config.TextColumn("Part Name", width=140, pinned=True),
-                "use_description": st.column_config.TextColumn(
-                    "Use / installation location",
-                    width="large",
-                    help="What this occurrence does or where it is installed.",
-                ),
-                "quantity": st.column_config.NumberColumn(
-                    "Fishbone quantity",
-                    step=0.01,
-                    format="%g",
-                    help="For PITS BOM uses, quantity is maintained in PITS and updated automatically on import.",
-                ),
-                "pits_sync_status": st.column_config.TextColumn(
-                    "PITS status",
-                    width="medium",
-                    help=(
-                        "Shows whether this approved Fishbone use matches its linked PITS BOM occurrence. "
-                        "PITS imports automatically update approved quantities."
+                    last_table_undo_redo_message(
+                        pool_editor_key,
+                        default="Reverted the last placement table edit",
                     ),
-                ),
-                "pits_quantity_updated_at": None,
-                "model_applicability": st.column_config.TextColumn("Feature applicability", width="medium"),
-                "notes": st.column_config.TextColumn("IE notes", width="large"),
-                "updated_at": None,
-            },
+                    icon=":material/undo:",
+                )
+                st.rerun()
+        redo_last_placement = place_parts_bar.button(
+            "Redo last edit",
+            icon=":material/redo:",
+            disabled=not can_redo_last_table_edit(pool_editor_key, ignored_columns=()),
+            help="Reapply the most recently undone cell or selection edit in the placement table.",
+            key="redo_last_part_placement_edit",
         )
-        assignment_actions = editable_table_footer(
-            editor_key=assignment_editor_key,
-            key_prefix="fishbone_assignments",
-            undo_available=assignment_undo_key in st.session_state,
-            native_row_selection=True,
+        if redo_last_placement:
+            if redo_last_table_edit(pool_editor_key):
+                st.toast(
+                    last_table_undo_redo_message(
+                        pool_editor_key,
+                        default="Reapplied the last undone placement table edit",
+                    ),
+                    icon=":material/redo:",
+                )
+                st.rerun()
+        undo_placement = place_parts_bar.button(
+            "Discard all edits",
+            icon=":material/restart_alt:",
+            disabled=assignment_undo_key not in st.session_state and not placement_has_unsaved,
+            help=(
+                "Discard all current unsaved selections or quantities."
+                if placement_has_unsaved
+                else "Undo the last part placement or additional-use staging."
+            ),
+            key="undo_part_placement",
         )
-        refresh_part_placement = assignment_actions.save_and_refresh
-        if assignment_actions.undo:
-            if assignments_have_unsaved:
-                request_table_editor_reset(assignment_editor_key)
-                st.toast("Discarded the unsaved assigned-parts edits", icon=":material/undo:")
+        if undo_placement or trigger_pool_discard:
+            if placement_has_unsaved or trigger_pool_discard:
+                request_table_editor_reset(pool_editor_key)
+                st.toast("Discarded the unsaved placement table edits", icon=":material/undo:")
             else:
                 undo_state = st.session_state.pop(assignment_undo_key)
                 restore_fishbone_assignment_snapshot(project_id, undo_state["assignments"])
                 st.session_state[pending_use_key] = undo_state.get("pending_use_ids", [])
+                request_table_editor_reset(pool_editor_key)
                 request_table_editor_reset(assignment_editor_key)
-                st.toast("Undid the last assigned-parts change", icon=":material/undo:")
+                st.toast("Undid the last part placement change", icon=":material/undo:")
             st.rerun()
-        if st.session_state.pop(f"fishbone_open_part_{project_id}", False):
-            st.switch_page("app_pages/parts.py")
-        selected_assignment_rows = native_selected_rows(
-            assignment_editor, editor_key=assignment_editor_key
-        )
-        request_assignment_delete = not selected_assignment_rows.empty
-        if request_assignment_delete:
-            if table_has_unsaved_changes(
-                assignment_editor_key, native_row_selection=True
-            ):
-                st.warning("Save or undo other assigned-part edits before deleting selected uses.")
-            else:
-                st.session_state[f"fishbone_assignments_pending_delete_{project_id}"] = (
-                    selected_assignment_rows["id"].astype(str).tolist()
-                )
-                stage_native_delete_confirmation(assignment_editor_key)
+        if parts.empty:
+            st.info("Add or import parts in the Parts Catalog before building the Fishbone framework.")
+        elif active_sections.empty:
+            st.info("Create and activate a Fishbone section in Framework Set Up before placing parts.")
+        else:
+            pending_use_ids = {
+                str(part_id) for part_id in st.session_state.get(pending_use_key, [])
+                if str(part_id) in set(parts["id"].astype(str))
+            }
+            placed_by_part = {}
+            if not assignments.empty:
+                for part_id, uses in assignments.groupby("part_id", sort=False):
+                    section_names = list(dict.fromkeys(uses["section_name"].astype(str)))
+                    section_summary = ", ".join(section_names)
+                    placed_by_part[str(part_id)] = f"{len(uses)} use{'s' if len(uses) != 1 else ''} · {section_summary}"
 
-        @st.dialog("Delete selected Fishbone uses?", dismissible=False)
-        def confirm_assignment_delete() -> None:
-            pending_key = f"fishbone_assignments_pending_delete_{project_id}"
-            pending_ids = st.session_state.get(pending_key, [])
-            assembly_impact = fishbone_assignment_assembly_impact(project_id, pending_ids)
-            st.warning(
-                f"Delete {len(pending_ids)} selected Fishbone use(s)? Parts Catalog records and other "
-                "uses will remain."
-            )
-            if not assembly_impact.empty:
-                st.markdown(
-                    f"**{len(assembly_impact)} assembly mini-BOM component row(s) will also be deleted:**"
-                )
-                for assembly_number, rows in assembly_impact.groupby("assembly_number", sort=False):
-                    st.write(f"- {assembly_number}: {len(rows)} component row(s)")
-            actions = st.container(horizontal=True)
-            if actions.button("Cancel", key=f"cancel_fishbone_assignment_delete_{project_id}"):
-                st.session_state.pop(pending_key, None)
-                request_table_editor_reset(assignment_editor_key)
-                st.rerun()
-            if actions.button(
-                "Delete Fishbone uses",
-                type="primary",
-                icon=":material/delete:",
-                key=f"destructive_confirm_fishbone_assignment_delete_{project_id}",
-            ):
+            part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
+
+            def resolve_part_meta(pid_val, pnum_val, fallback_qty, catalog_idx: int):
+                pid = str(pid_val)
+                pnum = str(pnum_val or "").strip()
+                info = master_info_by_part_id.get(pid) or master_info_by_pnum.get(pnum)
+                if info:
+                    return info["order"], info["level"], info["quantity"]
                 try:
-                    count = delete_fishbone_part_assignments(project_id, pending_ids)
+                    fqty = float(fallback_qty) if fallback_qty is not None and float(fallback_qty) > 0 else 1.0
+                except (ValueError, TypeError):
+                    fqty = 1.0
+                return 1_000_000 + catalog_idx, "—", fqty
+
+            meta_results = [
+                resolve_part_meta(pid, pnum, qty, i)
+                for i, (pid, pnum, qty) in enumerate(
+                    zip(part_pool["id"], part_pool["part_number"], part_pool["quantity"])
+                )
+            ]
+            part_pool["_master_order"] = [m[0] for m in meta_results]
+            part_pool["level"] = [m[1] for m in meta_results]
+            part_pool["quantity"] = [m[2] for m in meta_results]
+            part_pool = part_pool.sort_values(by=["_master_order", "part_number"], ascending=[True, True]).reset_index(drop=True)
+
+            part_pool["feature_applicability"] = [
+                feature_applicability(pid, m_app)
+                for pid, m_app in zip(part_pool["id"], part_pool["model_applicability"])
+            ]
+            part_pool["fishbone_section"] = part_pool["id"].map(placed_by_part).fillna("Not placed")
+            part_pool.loc[
+                part_pool["id"].astype(str).isin(pending_use_ids), "fishbone_section"
+            ] = "Ready for another use"
+            pool_controls = st.container(horizontal=True)
+            placement_filter_key = f"fishbone_placement_filters_{project_id}"
+            placement_filters = pool_controls.multiselect(
+                "Show",
+                ["Not placed", "Ready for another use", "Placed"],
+                default=["Not placed"],
+                placeholder="All placement states",
+                key=placement_filter_key,
+            )
+            part_search = pool_controls.text_input("Search parts", placeholder="Part number or part name")
+            pool_feature_options = sorted(
+                {label for labels in feature_labels_by_part.values() for label in labels}, key=str.casefold
+            )
+            selected_pool_features = pool_controls.multiselect(
+                "Features",
+                options=pool_feature_options,
+                placeholder="All feature configurations",
+                key=f"fishbone_pool_features_{project_id}",
+            )
+            visible_parts = part_pool.copy()
+            if placement_filters:
+                placement_state = visible_parts["fishbone_section"].where(
+                    visible_parts["fishbone_section"].isin(["Not placed", "Ready for another use"]),
+                    "Placed",
+                )
+                visible_parts = visible_parts[placement_state.isin(placement_filters)]
+            if part_search:
+                searchable = visible_parts[["part_number", "description", "level"]].fillna("").astype(str).agg(" ".join, axis=1)
+                visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
+            if selected_pool_features:
+                _sel_pool_feat_set = set(selected_pool_features)
+                visible_parts = visible_parts[
+                    [
+                        f_app == "All models"
+                        or bool(_sel_pool_feat_set & set(feature_labels_by_part.get(str(pid), [])))
+                        for pid, f_app in zip(visible_parts["id"], visible_parts["feature_applicability"])
+                    ]
+                ]
+
+            pool_key = pool_editor_key
+            pool_signature_key = f"parts_fishbone_pool_signature_{project_id}"
+            pool_signature = (
+                tuple(placement_filters),
+                part_search.strip().casefold(),
+                tuple(selected_pool_features),
+                tuple(visible_parts["id"].astype(str)),
+            )
+            if st.session_state.get(pool_signature_key) != pool_signature:
+                st.session_state[pool_signature_key] = pool_signature
+                st.session_state.pop(pool_key, None)
+                st.session_state.pop(f"_select_all_{logical_table_editor_key(pool_key)}", None)
+
+            visible_parts = visible_parts.copy()
+            visible_parts["place"] = False
+            visible_parts = prepare_editor_selection_column(
+                visible_parts, editor_key=pool_key, column="place"
+            )
+            visible_parts["edit_part"] = ":material/edit: Edit part"
+            visible_parts["models_familiar"] = visible_parts["feature_applicability"]
+
+            def open_pool_part() -> None:
+                click = st.session_state.get("fishbone_pool_edit_part")
+                if not click or not 0 <= click["row"] < len(visible_parts):
+                    return
+                row = visible_parts.iloc[click["row"]]
+                st.session_state[f"parts_selected_id_{project_id}"] = str(row["id"])
+                st.session_state[f"part_catalog_filters_{project_id}_keyword"] = str(row["part_number"])
+                st.session_state["part_catalog_filters_keyword"] = str(row["part_number"])
+                st.session_state["part_catalog_filters_source"] = []
+                st.session_state["part_catalog_filters_revision"] = []
+                st.session_state["part_catalog_filters_model_applicability"] = []
+                st.session_state[f"fishbone_open_pool_part_{project_id}"] = True
+
+            edited_pool = st.data_editor(
+                visible_parts,
+                key=pool_key,
+                hide_index=True,
+                height=330,
+                disabled=["id", "_master_order", "part_number", "level", "description", "revision", "model_applicability", "models_familiar", "fishbone_section"],
+                column_order=["place", "edit_part", "part_number", "level", "description", "quantity", "revision", "models_familiar", "fishbone_section"],
+                column_config={
+                    "id": None,
+                    "_master_order": None,
+                    "place": st.column_config.CheckboxColumn(
+                        "Place?",
+                        pinned=True,
+                        help="Check one or more rows to enable the appropriate placement button below.",
+                    ),
+                    "edit_part": st.column_config.ButtonColumn(
+                        "Select",
+                        pinned=True,
+                        type="tertiary",
+                        on_click=open_pool_part,
+                        key="fishbone_pool_edit_part",
+                        help="Open this exact catalog part in the Parts Catalog to edit its models, details, and photos.",
+                    ),
+                    "part_number": st.column_config.TextColumn("Part number", pinned=True),
+                    "level": st.column_config.TextColumn(
+                        "Level",
+                        width="small",
+                        help="BOM hierarchy level from the Model Tree master list (e.g. L1, L2, L3).",
+                    ),
+                    "description": st.column_config.TextColumn("Part Name", width="large"),
+                    "quantity": st.column_config.NumberColumn(
+                        "Fishbone quantity", step=0.01, format="%g",
+                        help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
+                    ),
+                    "model_applicability": None,
+                    "models_familiar": st.column_config.TextColumn("Feature applicability", width="medium"),
+                    "fishbone_section": st.column_config.TextColumn("Fishbone uses", width="large"),
+                },
+            )
+            if st.session_state.pop(f"fishbone_open_pool_part_{project_id}", False):
+                st.switch_page("app_pages/parts.py")
+            selected_parts = resolve_editor_selected_rows(
+                visible_parts, edited_pool, editor_key=pool_key, column="place"
+            )
+            selected_part_ids = selected_parts["id"].astype(str).tolist()
+            selected_quantities = {
+                str(row["id"]): float(row["quantity"])
+                for _, row in selected_parts.iterrows()
+            }
+            placed_part_ids = set(assignments["part_id"].astype(str)) if not assignments.empty else set()
+            selected_unplaced_ids = [part_id for part_id in selected_part_ids if part_id not in placed_part_ids]
+            selected_additional_use_ids = [part_id for part_id in selected_part_ids if part_id in pending_use_ids]
+            if trigger_pool_save and not (selected_unplaced_ids or selected_additional_use_ids):
+                base_qty_by_id = {
+                    str(row["id"]): float(row["quantity"])
+                    for _, row in visible_parts.iterrows()
+                }
+                edited_qty_rows = edited_pool.loc[
+                    edited_pool.apply(
+                        lambda r: abs(
+                            float(r["quantity"])
+                            - base_qty_by_id.get(str(r["id"]), float(r["quantity"]))
+                        )
+                        > 1e-9,
+                        axis=1,
+                    )
+                ]
+                for _, row in edited_qty_rows.iterrows():
+                    pid = str(row["id"])
+                    selected_quantities[pid] = float(row["quantity"])
+                    if pid not in placed_part_ids and pid not in selected_unplaced_ids:
+                        selected_unplaced_ids.append(pid)
+                    elif pid in pending_use_ids and pid not in selected_additional_use_ids:
+                        selected_additional_use_ids.append(pid)
+                if selected_unplaced_ids or selected_additional_use_ids:
+                    selected_parts = edited_pool.loc[
+                        edited_pool["id"]
+                        .astype(str)
+                        .isin([*selected_unplaced_ids, *selected_additional_use_ids])
+                    ]
+            placement_row = st.container(horizontal=True, vertical_alignment="bottom")
+            render_select_all_control(
+                placement_row,
+                editor_key=pool_key,
+                selectable_count=len(visible_parts),
+                selected_count=len(selected_parts),
+                key_prefix=f"fishbone_pool_select_{project_id}_{scenario_id}",
+                column="place",
+            )
+            target_section_id = placement_row.selectbox(
+                "Place selected parts in",
+                options=active_sections["id"].astype(str).tolist(),
+                format_func=lambda section_id: section_option_labels.get(section_id, section_id),
+            )
+            use_description_key = f"fishbone_new_use_description_{project_id}"
+            clear_use_description_key = f"fishbone_clear_use_description_{project_id}"
+            if st.session_state.pop(clear_use_description_key, False):
+                st.session_state.pop(use_description_key, None)
+            use_description = placement_row.text_input(
+                "Use / installation location",
+                placeholder="Example: Door hinge — upper left",
+                help="Describe this occurrence so repeated uses of the same part are easy to distinguish.",
+                key=use_description_key,
+            )
+            place_btn = placement_row.button(
+                "Place selected parts",
+                type="primary",
+                icon=":material/arrow_downward:",
+                disabled=not (selected_unplaced_ids or selected_additional_use_ids),
+                help="Places first-time parts and staged additional uses with the correct behavior automatically.",
+            )
+            if place_btn or (trigger_pool_save and (selected_unplaced_ids or selected_additional_use_ids)):
+                try:
                     st.session_state[assignment_undo_key] = current_assignment_undo
+                    count = 0
+                    if selected_unplaced_ids:
+                        count += assign_parts_to_section(
+                            project_id,
+                            selected_unplaced_ids,
+                            target_section_id,
+                            use_description,
+                            quantities_by_part={part_id: selected_quantities[part_id] for part_id in selected_unplaced_ids},
+                        )
+                    if selected_additional_use_ids:
+                        count += assign_parts_to_section(
+                            project_id,
+                            selected_additional_use_ids,
+                            target_section_id,
+                            use_description,
+                            allow_additional_use=True,
+                            quantities_by_part={part_id: selected_quantities[part_id] for part_id in selected_additional_use_ids},
+                        )
+                    selected_part_details = {
+                        str(row["id"]): row for _, row in selected_parts.iterrows()
+                    }
+                    placed_part_uses = [
+                        {
+                            "part_id": part_id,
+                            "part_number": audit_text(
+                                selected_part_details[part_id].get("part_number")
+                            ),
+                            "section_id": str(target_section_id),
+                            "section_name": section_name_by_id[target_section_id],
+                            "additional_use": part_id in selected_additional_use_ids,
+                        }
+                        for part_id in [*selected_unplaced_ids, *selected_additional_use_ids]
+                    ]
                     record_audit_event(
                         project_id,
                         "Fishbone part assignments",
-                        "Bulk delete",
+                        "Place selected parts",
                         count,
                         st.session_state.get("current_editor", ""),
                         {
-                            "assignment_ids": pending_ids,
-                            "assembly_component_rows_deleted": len(assembly_impact),
-                            "assembly_numbers_affected": (
-                                assembly_impact["assembly_number"].astype(str).drop_duplicates().tolist()
-                                if not assembly_impact.empty else []
-                            ),
+                            "placed_part_uses": placed_part_uses,
+                            "first_uses_added": len(selected_unplaced_ids),
+                            "additional_uses_added": len(selected_additional_use_ids),
                         },
                     )
+                    pending_use_ids.difference_update(selected_additional_use_ids)
+                    st.session_state[pending_use_key] = sorted(pending_use_ids)
+                    request_table_editor_reset(pool_editor_key)
+                    place_breakdown: list[str] = []
+                    if selected_unplaced_ids:
+                        place_breakdown.append(f"{len(selected_unplaced_ids)} first-time")
+                    if selected_additional_use_ids:
+                        place_breakdown.append(f"{len(selected_additional_use_ids)} additional")
+                    st.toast(
+                        f"Placed {count} part use(s) in {section_name_by_id[target_section_id]}"
+                        + (f" ({', '.join(place_breakdown)})" if place_breakdown else ""),
+                        icon=":material/check_circle:",
+                    )
+                    st.session_state[clear_use_description_key] = True
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+            elif trigger_pool_save:
+                request_table_editor_reset(pool_editor_key)
+                st.toast(
+                    "No eligible unplaced or staged parts were selected; cleared pending table edits.",
+                    icon=":material/info:",
+                )
+                st.rerun()
+
+            st.caption(
+                "Place selected parts automatically handles both first-time parts and additional uses staged from Assigned Parts."
+            )
+
+
+        st.subheader("Assigned Parts")
+        assignments_have_unsaved = table_has_unsaved_changes(
+            assignment_editor_key, native_row_selection=True
+        )
+        refresh_part_placement = False
+        selected_assignment_rows = assignments.iloc[0:0].copy()
+        if assignments.empty:
+            st.caption("Assigned parts will appear here for ordering within each Fishbone section.")
+        else:
+            full_assignment_editor = assignments.copy()
+
+            def _format_pits_sync_status(row: pd.Series) -> str:
+                status = str(row.get("pits_sync_status") or "")
+                updated_at = row.get("pits_quantity_updated_at")
+                if status == "In sync" and updated_at and pd.notna(updated_at):
+                    try:
+                        dt = pd.to_datetime(updated_at, errors="coerce", utc=True)
+                        if pd.notna(dt):
+                            dt = dt.tz_convert("America/New_York")
+                            return f"Updated from PITS on {dt.strftime('%b %d, %Y')}"
+                    except Exception:
+                        pass
+                return status
+            full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_option_labels)
+            full_assignment_editor["model_applicability"] = [
+                feature_applicability(pid, m_app)
+                for pid, m_app in zip(
+                    full_assignment_editor["part_id"],
+                    full_assignment_editor["model_applicability"],
+                )
+            ]
+            full_assignment_editor["pits_sync_status"] = [
+                _format_pits_sync_status(row)
+                for row in full_assignment_editor.to_dict(orient="records")
+            ]
+            assignment_editor = filter_table(
+                full_assignment_editor,
+                key=f"fishbone_assignment_filters_{project_id}_{scenario_id}",
+                dropdown_columns=["section", "revision", "model_applicability"],
+                search_columns=["section", "part_number", "description", "use_description", "revision", "model_applicability", "notes"],
+                labels={"section": "Fishbone section", "model_applicability": "Feature applicability"},
+                reset_widget_keys=[assignment_editor_key],
+                multi_value_columns=["model_applicability"],
+                universal_values={"model_applicability": ["All", "All models", ""]},
+            )
+            assignment_editor["edit_part"] = ":material/edit: Edit part"
+            assignment_editor["add_use"] = ":material/content_copy: Add use"
+
+            def open_assigned_part() -> None:
+                click = st.session_state.get("fishbone_assignment_edit_part")
+                if not click or not 0 <= click["row"] < len(assignment_editor):
+                    return
+                part_id = str(assignment_editor.iloc[click["row"]]["part_id"])
+                part_number = str(assignment_editor.iloc[click["row"]]["part_number"])
+                st.session_state[f"parts_selected_id_{project_id}"] = part_id
+                st.session_state[f"part_catalog_filters_{project_id}_keyword"] = part_number
+                st.session_state["part_catalog_filters_keyword"] = part_number
+                st.session_state["part_catalog_filters_source"] = []
+                st.session_state["part_catalog_filters_revision"] = []
+                st.session_state["part_catalog_filters_model_applicability"] = []
+                # Navigation triggers a rerun, so defer it until the callback has finished.
+                st.session_state[f"fishbone_open_part_{project_id}"] = True
+
+            def add_assigned_part_use() -> None:
+                click = st.session_state.get("fishbone_assignment_add_use")
+                if not click or not 0 <= click["row"] < len(assignment_editor):
+                    return
+                row = assignment_editor.iloc[click["row"]]
+                staged_ids = set(st.session_state.get(f"fishbone_pending_additional_uses_{project_id}", []))
+                staged_ids.add(str(row["part_id"]))
+                st.session_state[assignment_undo_key] = current_assignment_undo
+                st.session_state[f"fishbone_pending_additional_uses_{project_id}"] = sorted(staged_ids)
+                st.session_state[f"fishbone_placement_filters_{project_id}"] = ["Ready for another use"]
+                st.toast("Part returned to Place Parts into Fishbone and is ready to place again.", icon=":material/arrow_upward:")
+
+            edited_assignments = st.data_editor(
+                assignment_editor,
+                key=assignment_editor_key,
+                hide_index=True,
+                num_rows="delete",
+                height=430,
+                disabled=[
+                    "id", "part_id", "part_number", "description", "revision",
+                    "model_applicability", "pits_sync_status", "updated_at",
+                ],
+                column_order=[
+                    "edit_part", "add_use", "section", "part_number", "description",
+                    "quantity", "pits_sync_status", "model_applicability", "revision",
+                    "use_description", "notes", "sequence",
+                ],
+                column_config={
+                    "id": None,
+                    "project_id": None,
+                    "part_id": None,
+                    "section_id": None,
+                    "section_name": None,
+                    "edit_part": st.column_config.ButtonColumn(
+                        "Select",
+                        pinned=True,
+                        width="small",
+                        type="tertiary",
+                        on_click=open_assigned_part,
+                        key="fishbone_assignment_edit_part",
+                        help="Open this exact part in the Parts Catalog to edit its catalog details and photos.",
+                    ),
+                    "add_use": st.column_config.ButtonColumn(
+                        "Another Fishbone use",
+                        pinned=True,
+                        width=110,
+                        type="tertiary",
+                        on_click=add_assigned_part_use,
+                        key="fishbone_assignment_add_use",
+                        help="Return this catalog part to Section 2 so its additional use can be placed deliberately.",
+                    ),
+                    "section": st.column_config.SelectboxColumn(
+                        "Fishbone section",
+                        options=[
+                            section_option_labels[str(section_id)]
+                            for section_id in active_sections["id"].astype(str)
+                        ],
+                        required=True,
+                        pinned=True,
+                        width=130,
+                    ),
+                    "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d"),
+                    "part_number": st.column_config.TextColumn("Part number", width=105, pinned=True),
+                    "description": st.column_config.TextColumn("Part Name", width=140, pinned=True),
+                    "use_description": st.column_config.TextColumn(
+                        "Use / installation location",
+                        width="large",
+                        help="What this occurrence does or where it is installed.",
+                    ),
+                    "quantity": st.column_config.NumberColumn(
+                        "Fishbone quantity",
+                        step=0.01,
+                        format="%g",
+                        help="For PITS BOM uses, quantity is maintained in PITS and updated automatically on import.",
+                    ),
+                    "pits_sync_status": st.column_config.TextColumn(
+                        "PITS status",
+                        width="medium",
+                        help=(
+                            "Shows whether this approved Fishbone use matches its linked PITS BOM occurrence. "
+                            "PITS imports automatically update approved quantities."
+                        ),
+                    ),
+                    "pits_quantity_updated_at": None,
+                    "model_applicability": st.column_config.TextColumn("Feature applicability", width="medium"),
+                    "notes": st.column_config.TextColumn("IE notes", width="large"),
+                    "updated_at": None,
+                },
+            )
+            assignment_actions = editable_table_footer(
+                editor_key=assignment_editor_key,
+                key_prefix="fishbone_assignments",
+                undo_available=assignment_undo_key in st.session_state,
+                native_row_selection=True,
+            )
+            refresh_part_placement = assignment_actions.save_and_refresh
+            if assignment_actions.undo:
+                if assignments_have_unsaved:
+                    request_table_editor_reset(assignment_editor_key)
+                    st.toast("Discarded the unsaved assigned-parts edits", icon=":material/undo:")
+                else:
+                    undo_state = st.session_state.pop(assignment_undo_key)
+                    restore_fishbone_assignment_snapshot(project_id, undo_state["assignments"])
+                    st.session_state[pending_use_key] = undo_state.get("pending_use_ids", [])
+                    request_table_editor_reset(assignment_editor_key)
+                    st.toast("Undid the last assigned-parts change", icon=":material/undo:")
+                st.rerun()
+            if st.session_state.pop(f"fishbone_open_part_{project_id}", False):
+                st.switch_page("app_pages/parts.py")
+            selected_assignment_rows = native_selected_rows(
+                assignment_editor, editor_key=assignment_editor_key
+            )
+            request_assignment_delete = not selected_assignment_rows.empty
+            if request_assignment_delete:
+                if table_has_unsaved_changes(
+                    assignment_editor_key, native_row_selection=True
+                ):
+                    st.warning("Save or undo other assigned-part edits before deleting selected uses.")
+                else:
+                    st.session_state[f"fishbone_assignments_pending_delete_{project_id}"] = (
+                        selected_assignment_rows["id"].astype(str).tolist()
+                    )
+                    stage_native_delete_confirmation(assignment_editor_key)
+
+            @st.dialog("Delete selected Fishbone uses?", dismissible=False)
+            def confirm_assignment_delete() -> None:
+                pending_key = f"fishbone_assignments_pending_delete_{project_id}"
+                pending_ids = st.session_state.get(pending_key, [])
+                assembly_impact = fishbone_assignment_assembly_impact(project_id, pending_ids)
+                st.warning(
+                    f"Delete {len(pending_ids)} selected Fishbone use(s)? Parts Catalog records and other "
+                    "uses will remain."
+                )
+                if not assembly_impact.empty:
+                    st.markdown(
+                        f"**{len(assembly_impact)} assembly mini-BOM component row(s) will also be deleted:**"
+                    )
+                    for assembly_number, rows in assembly_impact.groupby("assembly_number", sort=False):
+                        st.write(f"- {assembly_number}: {len(rows)} component row(s)")
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_fishbone_assignment_delete_{project_id}"):
                     st.session_state.pop(pending_key, None)
                     request_table_editor_reset(assignment_editor_key)
+                    st.rerun()
+                if actions.button(
+                    "Delete Fishbone uses",
+                    type="primary",
+                    icon=":material/delete:",
+                    key=f"destructive_confirm_fishbone_assignment_delete_{project_id}",
+                ):
+                    try:
+                        count = delete_fishbone_part_assignments(project_id, pending_ids)
+                        st.session_state[assignment_undo_key] = current_assignment_undo
+                        record_audit_event(
+                            project_id,
+                            "Fishbone part assignments",
+                            "Bulk delete",
+                            count,
+                            st.session_state.get("current_editor", ""),
+                            {
+                                "assignment_ids": pending_ids,
+                                "assembly_component_rows_deleted": len(assembly_impact),
+                                "assembly_numbers_affected": (
+                                    assembly_impact["assembly_number"].astype(str).drop_duplicates().tolist()
+                                    if not assembly_impact.empty else []
+                                ),
+                            },
+                        )
+                        st.session_state.pop(pending_key, None)
+                        request_table_editor_reset(assignment_editor_key)
+                        st.toast(
+                            f"Deleted {count} Fishbone part use(s)"
+                            + (
+                                f" · removed {len(assembly_impact)} assembly component row(s)"
+                                if not assembly_impact.empty
+                                else ""
+                            ),
+                            icon=":material/delete:",
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+
+            if st.session_state.get(f"fishbone_assignments_pending_delete_{project_id}"):
+                confirm_assignment_delete()
+
+            st.caption(
+                "Each row is one use of a catalog part. Edit its location, Fishbone quantity, section, or order, then select Save & Refresh below the table. "
+                "Another use stages the part in Place Parts into Fishbone instead of creating a duplicate here."
+            )
+            assignments_to_save = merge_filtered_edits(
+                full_assignment_editor, assignment_editor, edited_assignments
+            )
+            assignments_to_save = assignments_to_save.drop(
+                columns=["edit_part", "add_use"], errors="ignore"
+            )
+            section_id_by_label = {
+                label: section_id for section_id, label in section_option_labels.items()
+            }
+            assignments_to_save["section_id"] = assignments_to_save["section"].apply(
+                lambda val: section_id_by_label.get(str(val or "").split(" › ")[-1].strip())
+            )
+            if not inactive_assignments.empty:
+                assignments_to_save = pd.concat(
+                    [assignments_to_save, inactive_assignments], ignore_index=True, sort=False
+                )
+            if refresh_part_placement:
+                try:
+                    if not selected_assignment_rows.empty:
+                        raise ValueError("Clear selected rows before saving assigned-part edits.")
+                    previous_assignments_by_id = {
+                        str(row["id"]): row for _, row in all_assignments.iterrows()
+                    }
+                    added_assignment_ids = []
+                    edited_assignment_ids = []
+                    for _, row in assignments_to_save.iterrows():
+                        assignment_id = (
+                            "" if pd.isna(row.get("id")) else str(row.get("id")).strip()
+                        )
+                        previous = previous_assignments_by_id.get(assignment_id)
+                        if not assignment_id or previous is None:
+                            added_assignment_ids.append(assignment_id)
+                            continue
+                        assignment_changed = any(
+                            audit_text(row.get(field)) != audit_text(previous.get(field))
+                            for field in ["section_id", "use_description", "notes"]
+                        ) or audit_int(row.get("sequence")) != audit_int(
+                            previous.get("sequence")
+                        ) or not decimal_values_equal(
+                            row.get("quantity"), previous.get("quantity")
+                        )
+                        if assignment_changed:
+                            edited_assignment_ids.append(assignment_id)
+                    count = replace_fishbone_part_assignments(project_id, assignments_to_save)
+                    record_audit_event(
+                        project_id,
+                        "Fishbone part assignments",
+                        "Save & Refresh",
+                        len(added_assignment_ids) + len(edited_assignment_ids),
+                        st.session_state.get("current_editor", ""),
+                        {
+                            "created_count": len(added_assignment_ids),
+                            "updated_count": len(edited_assignment_ids),
+                            "assignments_added": len(added_assignment_ids),
+                            "assignments_edited": len(edited_assignment_ids),
+                            "assignment_ids_added": added_assignment_ids,
+                            "assignment_ids_edited": edited_assignment_ids,
+                        },
+                    )
+                    st.session_state[assignment_undo_key] = current_assignment_undo
+                    request_table_editor_reset(assignment_editor_key)
+                    assign_save_details: list[str] = []
+                    if added_assignment_ids:
+                        assign_save_details.append(f"{len(added_assignment_ids)} added")
+                    if edited_assignment_ids:
+                        assign_save_details.append(f"{len(edited_assignment_ids)} updated")
                     st.toast(
-                        f"Deleted {count} Fishbone part use(s)"
-                        + (
-                            f" · removed {len(assembly_impact)} assembly component row(s)"
-                            if not assembly_impact.empty
-                            else ""
-                        ),
-                        icon=":material/delete:",
+                        f"Saved {count} Fishbone part assignment(s)"
+                        + (f" ({', '.join(assign_save_details)})" if assign_save_details else ""),
+                        icon=":material/check_circle:",
                     )
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
 
-        if st.session_state.get(f"fishbone_assignments_pending_delete_{project_id}"):
-            confirm_assignment_delete()
 
-        st.caption(
-            "Each row is one use of a catalog part. Edit its location, Fishbone quantity, section, or order, then select Save & Refresh below the table. "
-            "Another use stages the part in Place Parts into Fishbone instead of creating a duplicate here."
-        )
-        assignments_to_save = merge_filtered_edits(
-            full_assignment_editor, assignment_editor, edited_assignments
-        )
-        assignments_to_save = assignments_to_save.drop(
-            columns=["edit_part", "add_use"], errors="ignore"
-        )
-        section_id_by_label = {
-            label: section_id for section_id, label in section_option_labels.items()
-        }
-        assignments_to_save["section_id"] = assignments_to_save["section"].apply(
-            lambda val: section_id_by_label.get(str(val or "").split(" › ")[-1].strip())
-        )
-        if not inactive_assignments.empty:
-            assignments_to_save = pd.concat(
-                [assignments_to_save, inactive_assignments], ignore_index=True, sort=False
+
+
+if fishbone_tab.open:
+    with fishbone_tab:
+        if sections.empty:
+            st.info("No Fishbone sections created yet. Use **➕ Add Section** above or in the canvas toolbar to create your first Assembly section.")
+        if True:
+            visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections.copy()
+            records = {str(r["id"]): r for r in visible_sections.to_dict(orient="records")} if not visible_sections.empty else {}
+
+            # Connections from database
+            connections_df = assembly_section_connections(project_id)
+
+            # Canvas draft management
+            canvas_draft_key = f"fishbone_canvas_draft_{project_id}"
+            persistent_conn_nodes_key = f"fishbone_conn_nodes_{project_id}"
+            persistent_conn_nodes = st.session_state.setdefault(persistent_conn_nodes_key, {})
+            draft = st.session_state.setdefault(
+                canvas_draft_key,
+                {
+                    "positions": {},
+                    "connections": [],
+                    "deleted_connections": set(),
+                    "connection_nodes": {},
+                    "new_assignments": [],
+                    "updated_assignments": [],
+                    "deleted_assignments": set(),
+                },
             )
-        if refresh_part_placement:
-            try:
-                if not selected_assignment_rows.empty:
-                    raise ValueError("Clear selected rows before saving assigned-part edits.")
-                previous_assignments_by_id = {
-                    str(row["id"]): row for _, row in all_assignments.iterrows()
-                }
-                added_assignment_ids = []
-                edited_assignment_ids = []
-                for _, row in assignments_to_save.iterrows():
-                    assignment_id = (
-                        "" if pd.isna(row.get("id")) else str(row.get("id")).strip()
-                    )
-                    previous = previous_assignments_by_id.get(assignment_id)
-                    if not assignment_id or previous is None:
-                        added_assignment_ids.append(assignment_id)
-                        continue
-                    assignment_changed = any(
-                        audit_text(row.get(field)) != audit_text(previous.get(field))
-                        for field in ["section_id", "use_description", "notes"]
-                    ) or audit_int(row.get("sequence")) != audit_int(
-                        previous.get("sequence")
-                    ) or not decimal_values_equal(
-                        row.get("quantity"), previous.get("quantity")
-                    )
-                    if assignment_changed:
-                        edited_assignment_ids.append(assignment_id)
-                count = replace_fishbone_part_assignments(project_id, assignments_to_save)
-                record_audit_event(
-                    project_id,
-                    "Fishbone part assignments",
-                    "Save & Refresh",
-                    len(added_assignment_ids) + len(edited_assignment_ids),
-                    st.session_state.get("current_editor", ""),
-                    {
-                        "assignments_added": len(added_assignment_ids),
-                        "assignments_edited": len(edited_assignment_ids),
-                        "assignment_ids_added": added_assignment_ids,
-                        "assignment_ids_edited": edited_assignment_ids,
-                    },
-                )
-                st.session_state[assignment_undo_key] = current_assignment_undo
-                request_table_editor_reset(assignment_editor_key)
-                assign_save_details: list[str] = []
-                if added_assignment_ids:
-                    assign_save_details.append(f"{len(added_assignment_ids)} added")
-                if edited_assignment_ids:
-                    assign_save_details.append(f"{len(edited_assignment_ids)} updated")
-                st.toast(
-                    f"Saved {count} Fishbone part assignment(s)"
-                    + (f" ({', '.join(assign_save_details)})" if assign_save_details else ""),
-                    icon=":material/check_circle:",
-                )
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+            if "updated_assignments" not in draft:
+                draft["updated_assignments"] = []
+            if "connection_nodes" not in draft:
+                draft["connection_nodes"] = {}
 
-
-
-
-with fishbone_tab:
-    if sections.empty:
-        st.info("No Fishbone sections created yet. Use **➕ Add Section** above or in the canvas toolbar to create your first Assembly section.")
-    if True:
-        visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections.copy()
-        records = {str(r["id"]): r for r in visible_sections.to_dict(orient="records")} if not visible_sections.empty else {}
-
-        # Connections from database
-        connections_df = assembly_section_connections(project_id)
-
-        # Canvas draft management
-        canvas_draft_key = f"fishbone_canvas_draft_{project_id}"
-        persistent_conn_nodes_key = f"fishbone_conn_nodes_{project_id}"
-        persistent_conn_nodes = st.session_state.setdefault(persistent_conn_nodes_key, {})
-        draft = st.session_state.setdefault(
-            canvas_draft_key,
-            {
-                "positions": {},
-                "connections": [],
-                "deleted_connections": set(),
-                "connection_nodes": {},
-                "new_assignments": [],
-                "updated_assignments": [],
-                "deleted_assignments": set(),
-            },
-        )
-        if "updated_assignments" not in draft:
-            draft["updated_assignments"] = []
-        if "connection_nodes" not in draft:
-            draft["connection_nodes"] = {}
-
-        canvas_key = f"interactive_fishbone_{project_id}"
-        canvas_state = st.session_state.get(canvas_key)
-        if canvas_state is not None:
-            if p := getattr(canvas_state, "create_section", None):
-                try:
-                    delattr(canvas_state, "create_section")
-                except (AttributeError, TypeError):
-                    pass
-                sec_name = str(p.get("name") or "").strip()
-                raw_sec_type = str(p.get("section_type") or "Assembly")
-                sec_type = "Support Operations" if raw_sec_type == "Support Operations" else "Assembly"
-                parent_id = p.get("parent_id") or None
-                gx = p.get("grid_x")
-                gy = p.get("grid_y")
-                if sec_name:
+            canvas_key = f"interactive_fishbone_{project_id}"
+            canvas_state = st.session_state.get(canvas_key)
+            if canvas_state is not None:
+                if p := getattr(canvas_state, "create_section", None):
                     try:
-                        st.session_state[framework_undo_key] = current_plan_snapshot
-                        new_sec_id = add_assembly_section(
-                            project_id,
-                            sec_name,
-                            sec_type,
-                            parent_id,
-                            "",
-                            grid_x=int(gx) if gx is not None else None,
-                            grid_y=int(gy) if gy is not None else None,
-                        )
-                        if parent_id and sec_type in {"Assembly", "Support Operations"}:
-                            save_assembly_section_connection(
+                        delattr(canvas_state, "create_section")
+                    except (AttributeError, TypeError):
+                        pass
+                    sec_name = str(p.get("name") or "").strip()
+                    raw_sec_type = str(p.get("section_type") or "Assembly")
+                    sec_type = "Support Operations" if raw_sec_type == "Support Operations" else "Assembly"
+                    parent_id = p.get("parent_id") or None
+                    gx = p.get("grid_x")
+                    gy = p.get("grid_y")
+                    if sec_name:
+                        try:
+                            st.session_state[framework_undo_key] = current_plan_snapshot
+                            new_sec_id = add_assembly_section(
                                 project_id,
-                                new_sec_id,
+                                sec_name,
+                                sec_type,
                                 parent_id,
-                                connection_type="subassembly",
-                                sequence=10,
-                                editor_name=st.session_state.get("current_editor", ""),
+                                "",
+                                grid_x=int(gx) if gx is not None else None,
+                                grid_y=int(gy) if gy is not None else None,
                             )
-                        area_summary = yamazumi_area_creation_summary(project_id, new_sec_id)
-                        created_areas = list(area_summary.get("created", []))
-                        area_conflicts = list(area_summary.get("conflicts", []))
-                        record_audit_event(
-                            project_id,
-                            "Fishbone framework",
-                            "Add section from canvas",
-                            1,
-                            st.session_state.get("current_editor", ""),
-                            {
-                                "framework_section_added": {
-                                    "section_id": new_sec_id,
-                                    "section_name": sec_name,
-                                    "section_type": sec_type,
-                                    "grid_x": gx,
-                                    "grid_y": gy,
+                            if parent_id and sec_type in {"Assembly", "Support Operations"}:
+                                save_assembly_section_connection(
+                                    project_id,
+                                    new_sec_id,
+                                    parent_id,
+                                    connection_type="subassembly",
+                                    sequence=10,
+                                    editor_name=st.session_state.get("current_editor", ""),
+                                )
+                            area_summary = yamazumi_area_creation_summary(project_id, new_sec_id)
+                            created_areas = list(area_summary.get("created", []))
+                            area_conflicts = list(area_summary.get("conflicts", []))
+                            record_audit_event(
+                                project_id,
+                                "Fishbone framework",
+                                "Add section from canvas",
+                                1,
+                                st.session_state.get("current_editor", ""),
+                                {
+                                    "framework_section_added": {
+                                        "section_id": new_sec_id,
+                                        "section_name": sec_name,
+                                        "section_type": sec_type,
+                                        "grid_x": gx,
+                                        "grid_y": gy,
+                                    },
+                                    "automatic_yamazumi_areas": created_areas,
+                                    "yamazumi_area_conflicts": area_conflicts,
                                 },
-                                "automatic_yamazumi_areas": created_areas,
-                                "yamazumi_area_conflicts": area_conflicts,
-                            },
-                        )
-                        request_table_editor_reset(framework_editor_key)
-                        st.toast(
-                            f"Created {sec_type} '{sec_name}'"
-                            + (
-                                f" · auto-created {len(created_areas)} Yamazumi area(s)"
-                                if created_areas
-                                else ""
-                            ),
-                            icon=":material/check_circle:",
-                        )
-                        st.rerun()
-                    except ValueError as exc:
-                        st.error(str(exc))
-            if p := getattr(canvas_state, "move_node", None):
-                try:
-                    delattr(canvas_state, "move_node")
-                except (AttributeError, TypeError):
-                    pass
-                if sec_id := p.get("section_id"):
-                    draft["positions"][sec_id] = (p.get("grid_x"), p.get("grid_y"))
-            if p := getattr(canvas_state, "auto_arrange", None):
-                try:
-                    delattr(canvas_state, "auto_arrange")
-                except (AttributeError, TypeError):
-                    pass
-                if pos_map := p.get("positions"):
-                    draft["positions"].update(pos_map)
-            if p := getattr(canvas_state, "create_connection", None):
-                try:
-                    delattr(canvas_state, "create_connection")
-                except (AttributeError, TypeError):
-                    pass
-                f_id = p.get("from_section_id")
-                t_id = p.get("to_section_id")
-                c_type = p.get("connection_type", "subassembly")
-                from_node = p.get("from_node")
-                to_node = p.get("to_node")
-                if f_id and t_id and f_id != t_id:
-                    if not any(
-                        dc["from_section_id"] == f_id and dc["to_section_id"] == t_id
-                        for dc in draft["connections"]
-                    ):
-                        draft["connections"].append({
-                            "from_section_id": f_id,
-                            "to_section_id": t_id,
-                            "connection_type": c_type,
-                            "sequence": 10,
-                            "from_node": from_node,
-                            "to_node": to_node,
-                        })
-                    if from_node or to_node:
-                        nodes_dict = {"from_node": from_node, "to_node": to_node}
+                            )
+                            request_table_editor_reset(framework_editor_key)
+                            st.toast(
+                                f"Created {sec_type} '{sec_name}'"
+                                + (
+                                    f" · auto-created {len(created_areas)} Yamazumi area(s)"
+                                    if created_areas
+                                    else ""
+                                ),
+                                icon=":material/check_circle:",
+                            )
+                            st.rerun()
+                        except ValueError as exc:
+                            st.error(str(exc))
+                if p := getattr(canvas_state, "move_node", None):
+                    try:
+                        delattr(canvas_state, "move_node")
+                    except (AttributeError, TypeError):
+                        pass
+                    if sec_id := p.get("section_id"):
+                        draft["positions"][sec_id] = (p.get("grid_x"), p.get("grid_y"))
+                if p := getattr(canvas_state, "auto_arrange", None):
+                    try:
+                        delattr(canvas_state, "auto_arrange")
+                    except (AttributeError, TypeError):
+                        pass
+                    if pos_map := p.get("positions"):
+                        draft["positions"].update(pos_map)
+                if p := getattr(canvas_state, "create_connection", None):
+                    try:
+                        delattr(canvas_state, "create_connection")
+                    except (AttributeError, TypeError):
+                        pass
+                    f_id = p.get("from_section_id")
+                    t_id = p.get("to_section_id")
+                    c_type = p.get("connection_type", "subassembly")
+                    from_node = p.get("from_node")
+                    to_node = p.get("to_node")
+                    if f_id and t_id and f_id != t_id:
+                        if not any(
+                            dc["from_section_id"] == f_id and dc["to_section_id"] == t_id
+                            for dc in draft["connections"]
+                        ):
+                            draft["connections"].append({
+                                "from_section_id": f_id,
+                                "to_section_id": t_id,
+                                "connection_type": c_type,
+                                "sequence": 10,
+                                "from_node": from_node,
+                                "to_node": to_node,
+                            })
+                        if from_node or to_node:
+                            nodes_dict = {"from_node": from_node, "to_node": to_node}
+                            draft["connection_nodes"][f"{f_id}->{t_id}"] = nodes_dict
+                            persistent_conn_nodes[f"{f_id}->{t_id}"] = nodes_dict
+                if p := getattr(canvas_state, "move_connection", None):
+                    try:
+                        delattr(canvas_state, "move_connection")
+                    except (AttributeError, TypeError):
+                        pass
+                    cid = str(p.get("connection_id") or "").strip()
+                    f_id = str(p.get("from_section_id") or "").strip()
+                    new_t_id = str(p.get("to_section_id") or "").strip()
+                    old_t_id = str(p.get("old_to_section_id") or "").strip()
+                    c_type = str(p.get("connection_type") or "subassembly").strip()
+                    from_node = p.get("from_node")
+                    to_node = p.get("to_node")
+                    if cid and not cid.startswith("draft_") and not cid.startswith("init_"):
+                        draft["deleted_connections"].add(cid)
+                    draft["connections"] = [
+                        dc for dc in draft["connections"]
+                        if not (dc.get("from_section_id") == f_id and dc.get("to_section_id") == old_t_id)
+                    ]
+                    if f_id and new_t_id and f_id != new_t_id:
+                        if not any(
+                            dc["from_section_id"] == f_id and dc["to_section_id"] == new_t_id
+                            for dc in draft["connections"]
+                        ):
+                            draft["connections"].append({
+                                "from_section_id": f_id,
+                                "to_section_id": new_t_id,
+                                "connection_type": c_type,
+                                "sequence": 10,
+                                "from_node": from_node,
+                                "to_node": to_node,
+                            })
+                        if from_node or to_node:
+                            nodes_dict = {"from_node": from_node, "to_node": to_node}
+                            draft["connection_nodes"][f"{f_id}->{new_t_id}"] = nodes_dict
+                            persistent_conn_nodes[f"{f_id}->{new_t_id}"] = nodes_dict
+                            if cid:
+                                draft["connection_nodes"][cid] = nodes_dict
+                                persistent_conn_nodes[cid] = nodes_dict
+                if p := getattr(canvas_state, "update_connection_nodes", None):
+                    try:
+                        delattr(canvas_state, "update_connection_nodes")
+                    except (AttributeError, TypeError):
+                        pass
+                    cid = str(p.get("connection_id") or "").strip()
+                    f_id = str(p.get("from_section_id") or "").strip()
+                    t_id = str(p.get("to_section_id") or "").strip()
+                    from_node = p.get("from_node")
+                    to_node = p.get("to_node")
+                    existing = (
+                        draft.get("connection_nodes", {}).get(f"{f_id}->{t_id}")
+                        or draft.get("connection_nodes", {}).get(cid)
+                        or persistent_conn_nodes.get(f"{f_id}->{t_id}")
+                        or persistent_conn_nodes.get(cid)
+                        or {}
+                    )
+                    final_from = from_node or existing.get("from_node")
+                    final_to = to_node or existing.get("to_node")
+                    nodes_dict = {"from_node": final_from, "to_node": final_to}
+                    if f_id and t_id:
                         draft["connection_nodes"][f"{f_id}->{t_id}"] = nodes_dict
                         persistent_conn_nodes[f"{f_id}->{t_id}"] = nodes_dict
-            if p := getattr(canvas_state, "move_connection", None):
-                try:
-                    delattr(canvas_state, "move_connection")
-                except (AttributeError, TypeError):
-                    pass
-                cid = str(p.get("connection_id") or "").strip()
-                f_id = str(p.get("from_section_id") or "").strip()
-                new_t_id = str(p.get("to_section_id") or "").strip()
-                old_t_id = str(p.get("old_to_section_id") or "").strip()
-                c_type = str(p.get("connection_type") or "subassembly").strip()
-                from_node = p.get("from_node")
-                to_node = p.get("to_node")
-                if cid and not cid.startswith("draft_") and not cid.startswith("init_"):
-                    draft["deleted_connections"].add(cid)
-                draft["connections"] = [
-                    dc for dc in draft["connections"]
-                    if not (dc.get("from_section_id") == f_id and dc.get("to_section_id") == old_t_id)
-                ]
-                if f_id and new_t_id and f_id != new_t_id:
-                    if not any(
-                        dc["from_section_id"] == f_id and dc["to_section_id"] == new_t_id
-                        for dc in draft["connections"]
-                    ):
-                        draft["connections"].append({
-                            "from_section_id": f_id,
-                            "to_section_id": new_t_id,
-                            "connection_type": c_type,
-                            "sequence": 10,
-                            "from_node": from_node,
-                            "to_node": to_node,
-                        })
-                    if from_node or to_node:
-                        nodes_dict = {"from_node": from_node, "to_node": to_node}
-                        draft["connection_nodes"][f"{f_id}->{new_t_id}"] = nodes_dict
-                        persistent_conn_nodes[f"{f_id}->{new_t_id}"] = nodes_dict
-                        if cid:
-                            draft["connection_nodes"][cid] = nodes_dict
-                            persistent_conn_nodes[cid] = nodes_dict
-            if p := getattr(canvas_state, "update_connection_nodes", None):
-                try:
-                    delattr(canvas_state, "update_connection_nodes")
-                except (AttributeError, TypeError):
-                    pass
-                cid = str(p.get("connection_id") or "").strip()
-                f_id = str(p.get("from_section_id") or "").strip()
-                t_id = str(p.get("to_section_id") or "").strip()
-                from_node = p.get("from_node")
-                to_node = p.get("to_node")
-                existing = (
-                    draft.get("connection_nodes", {}).get(f"{f_id}->{t_id}")
-                    or draft.get("connection_nodes", {}).get(cid)
-                    or persistent_conn_nodes.get(f"{f_id}->{t_id}")
-                    or persistent_conn_nodes.get(cid)
-                    or {}
-                )
-                final_from = from_node or existing.get("from_node")
-                final_to = to_node or existing.get("to_node")
-                nodes_dict = {"from_node": final_from, "to_node": final_to}
-                if f_id and t_id:
-                    draft["connection_nodes"][f"{f_id}->{t_id}"] = nodes_dict
-                    persistent_conn_nodes[f"{f_id}->{t_id}"] = nodes_dict
-                if cid:
-                    draft["connection_nodes"][cid] = nodes_dict
-                    persistent_conn_nodes[cid] = nodes_dict
-                for dc in draft.get("connections", []):
-                    if (dc.get("from_section_id") == f_id and dc.get("to_section_id") == t_id) or (cid and cid.startswith("draft_")):
-                        if final_from:
-                            dc["from_node"] = final_from
-                        if final_to:
-                            dc["to_node"] = final_to
-                st.toast("Updated arrow snap position", icon=":material/near_me:")
-            if p := getattr(canvas_state, "delete_connection", None):
-                try:
-                    delattr(canvas_state, "delete_connection")
-                except (AttributeError, TypeError):
-                    pass
-                if cid := p.get("connection_id"):
-                    cid_str = str(cid).strip()
-                    if not cid_str.startswith("draft_") and not cid_str.startswith("init_"):
-                        draft["deleted_connections"].add(cid_str)
-                    else:
-                        draft["connections"] = [
-                            dc for idx, dc in enumerate(draft["connections"])
-                            if f"draft_{idx}" != cid_str
-                        ]
-            if p := getattr(canvas_state, "delete_section_request", None):
-                if sid := p.get("section_id"):
-                    st.session_state[f"pending_interactive_delete_section_{project_id}"] = str(sid)
-                try:
-                    delattr(canvas_state, "delete_section_request")
-                except (AttributeError, TypeError):
-                    pass
-            if getattr(canvas_state, "clear_fishbone_request", None):
-                st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
-                try:
-                    delattr(canvas_state, "clear_fishbone_request")
-                except (AttributeError, TypeError):
-                    pass
-            if p := getattr(canvas_state, "drop_part", None):
-                try:
-                    delattr(canvas_state, "drop_part")
-                except (AttributeError, TypeError):
-                    pass
-                pid = p.get("part_id")
-                sid = p.get("section_id")
-                if pid and sid:
-                    already_in_sec = any(
-                        str(a["part_id"]) == str(pid) and str(a["section_id"]) == str(sid)
-                        and str(a["id"]) not in draft["deleted_assignments"]
-                        for _, a in assignments.iterrows()
-                    ) or any(
-                        str(na.get("part_id")) == str(pid) and str(na.get("section_id")) == str(sid)
-                        for na in draft.get("new_assignments", [])
-                    )
-                    if not already_in_sec:
-                        draft["new_assignments"].append({
-                            "part_id": str(pid),
-                            "section_id": str(sid),
-                            "quantity": float(p.get("quantity") or 1.0),
-                            "use_description": str(p.get("use_description") or ""),
-                        })
-            if p := getattr(canvas_state, "drop_assembly", None):
-                try:
-                    delattr(canvas_state, "drop_assembly")
-                except (AttributeError, TypeError):
-                    pass
-                asm_pid = p.get("assembly_part_id")
-                built_sid = p.get("built_section_id")
-                inst_sid = p.get("installed_section_id")
-                include_children = bool(p.get("include_children", True))
-                dest_sid = inst_sid or built_sid
-                if asm_pid:
-                    if include_children and built_sid and inst_sid:
-                        tree = pits_bom_model_tree(project_id)
-                        matched_node = next(
-                            (
-                                n
-                                for n in tree.get("nodes", [])
-                                if str(n.get("part_id")) == str(asm_pid)
-                                or str(n.get("child_part_id")) == str(asm_pid)
-                                or str(n.get("part_number")) == str(asm_pid)
-                            ),
-                            None,
-                        )
-                        child_nodes = matched_node.get("children", []) if matched_node else []
-                        seen_child_pids = set()
-                        for c in child_nodes:
-                            if _is_source_code_8_node(c):
-                                continue
-                            c_pid = str(c.get("part_id") or c.get("child_part_id") or "").strip()
-                            if not c_pid or c_pid in seen_child_pids:
-                                continue
-                            seen_child_pids.add(c_pid)
-                            already_in_built = any(
-                                str(a["part_id"]) == c_pid and str(a["section_id"]) == str(built_sid)
-                                and str(a["id"]) not in draft["deleted_assignments"]
-                                for _, a in assignments.iterrows()
-                            ) or any(
-                                str(na.get("part_id")) == c_pid and str(na.get("section_id")) == str(built_sid)
-                                for na in draft.get("new_assignments", [])
-                            )
-                            if not already_in_built:
-                                draft["new_assignments"].append({
-                                    "part_id": c_pid,
-                                    "section_id": str(built_sid),
-                                    "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
-                                    "use_description": "Built subcomponent",
-                                })
-                    if dest_sid:
-                        already_in_dest = any(
-                            str(a["part_id"]) == str(asm_pid) and str(a["section_id"]) == str(dest_sid)
+                    if cid:
+                        draft["connection_nodes"][cid] = nodes_dict
+                        persistent_conn_nodes[cid] = nodes_dict
+                    for dc in draft.get("connections", []):
+                        if (dc.get("from_section_id") == f_id and dc.get("to_section_id") == t_id) or (cid and cid.startswith("draft_")):
+                            if final_from:
+                                dc["from_node"] = final_from
+                            if final_to:
+                                dc["to_node"] = final_to
+                    st.toast("Updated arrow snap position", icon=":material/near_me:")
+                if p := getattr(canvas_state, "delete_connection", None):
+                    try:
+                        delattr(canvas_state, "delete_connection")
+                    except (AttributeError, TypeError):
+                        pass
+                    if cid := p.get("connection_id"):
+                        cid_str = str(cid).strip()
+                        if not cid_str.startswith("draft_") and not cid_str.startswith("init_"):
+                            draft["deleted_connections"].add(cid_str)
+                        else:
+                            draft["connections"] = [
+                                dc for idx, dc in enumerate(draft["connections"])
+                                if f"draft_{idx}" != cid_str
+                            ]
+                if p := getattr(canvas_state, "delete_section_request", None):
+                    if sid := p.get("section_id"):
+                        st.session_state[f"pending_interactive_delete_section_{project_id}"] = str(sid)
+                    try:
+                        delattr(canvas_state, "delete_section_request")
+                    except (AttributeError, TypeError):
+                        pass
+                if getattr(canvas_state, "clear_fishbone_request", None):
+                    st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_state, "clear_fishbone_request")
+                    except (AttributeError, TypeError):
+                        pass
+                if p := getattr(canvas_state, "drop_part", None):
+                    try:
+                        delattr(canvas_state, "drop_part")
+                    except (AttributeError, TypeError):
+                        pass
+                    pid = p.get("part_id")
+                    sid = p.get("section_id")
+                    if pid and sid:
+                        already_in_sec = any(
+                            str(a["part_id"]) == str(pid) and str(a["section_id"]) == str(sid)
                             and str(a["id"]) not in draft["deleted_assignments"]
                             for _, a in assignments.iterrows()
                         ) or any(
-                            str(na.get("part_id")) == str(asm_pid) and str(na.get("section_id")) == str(dest_sid)
+                            str(na.get("part_id")) == str(pid) and str(na.get("section_id")) == str(sid)
                             for na in draft.get("new_assignments", [])
                         )
-                        if not already_in_dest:
+                        if not already_in_sec:
                             draft["new_assignments"].append({
-                                "part_id": str(asm_pid),
-                                "section_id": str(dest_sid),
-                                "quantity": 1.0,
-                                "use_description": "Installed assembly" if include_children else "Assembly group part",
+                                "part_id": str(pid),
+                                "section_id": str(sid),
+                                "quantity": float(p.get("quantity") or 1.0),
+                                "use_description": str(p.get("use_description") or ""),
                             })
-            if p := getattr(canvas_state, "remove_part", None):
-                try:
-                    delattr(canvas_state, "remove_part")
-                except (AttributeError, TypeError):
-                    pass
-                if aid := p.get("assignment_id"):
-                    draft["deleted_assignments"].add(aid)
-                for a_item in p.get("assignment_ids", []):
-                    if a_item:
-                        draft["deleted_assignments"].add(a_item)
-                pid = p.get("part_id")
-                sec_id = p.get("section_id")
-                if pid:
-                    draft["new_assignments"] = [
-                        na for na in draft["new_assignments"]
-                        if not (str(na.get("part_id")) == str(pid) and (sec_id is None or str(na.get("section_id")) == str(sec_id)))
-                    ]
-            if p := getattr(canvas_state, "replicate_part_uses", None):
-                try:
-                    delattr(canvas_state, "replicate_part_uses")
-                except (AttributeError, TypeError):
-                    pass
-                pid = str(p.get("part_id") or "").strip()
-                pnum = str(p.get("part_number") or "Part").strip()
-                include_children = bool(p.get("include_children", False))
-                section_uses = p.get("section_uses") or []
-                if pid:
-                    desired_by_sec = {}
-                    for su in section_uses:
-                        s_id = str(su.get("section_id") or "").strip()
-                        if s_id and s_id in records:
-                            try:
-                                q_val = float(su.get("quantity") or 1.0)
-                            except (ValueError, TypeError):
-                                q_val = 1.0
-                            desired_by_sec[s_id] = {
-                                "section_id": s_id,
-                                "quantity": max(0.01, q_val),
-                                "use_description": str(su.get("use_description") or "").strip(),
-                            }
+                if p := getattr(canvas_state, "drop_assembly", None):
+                    try:
+                        delattr(canvas_state, "drop_assembly")
+                    except (AttributeError, TypeError):
+                        pass
+                    asm_pid = p.get("assembly_part_id")
+                    built_sid = p.get("built_section_id")
+                    inst_sid = p.get("installed_section_id")
+                    include_children = bool(p.get("include_children", True))
+                    dest_sid = inst_sid or built_sid
+                    if asm_pid:
+                        if include_children and built_sid and inst_sid:
+                            tree = pits_bom_model_tree(project_id)
+                            matched_node = next(
+                                (
+                                    n
+                                    for n in tree.get("nodes", [])
+                                    if str(n.get("part_id")) == str(asm_pid)
+                                    or str(n.get("child_part_id")) == str(asm_pid)
+                                    or str(n.get("part_number")) == str(asm_pid)
+                                ),
+                                None,
+                            )
+                            child_nodes = matched_node.get("children", []) if matched_node else []
+                            seen_child_pids = set()
+                            for c in child_nodes:
+                                if _is_source_code_8_node(c):
+                                    continue
+                                c_pid = str(c.get("part_id") or c.get("child_part_id") or "").strip()
+                                if not c_pid or c_pid in seen_child_pids:
+                                    continue
+                                seen_child_pids.add(c_pid)
+                                already_in_built = any(
+                                    str(a["part_id"]) == c_pid and str(a["section_id"]) == str(built_sid)
+                                    and str(a["id"]) not in draft["deleted_assignments"]
+                                    for _, a in assignments.iterrows()
+                                ) or any(
+                                    str(na.get("part_id")) == c_pid and str(na.get("section_id")) == str(built_sid)
+                                    for na in draft.get("new_assignments", [])
+                                )
+                                if not already_in_built:
+                                    draft["new_assignments"].append({
+                                        "part_id": c_pid,
+                                        "section_id": str(built_sid),
+                                        "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
+                                        "use_description": "Built subcomponent",
+                                    })
+                        if dest_sid:
+                            already_in_dest = any(
+                                str(a["part_id"]) == str(asm_pid) and str(a["section_id"]) == str(dest_sid)
+                                and str(a["id"]) not in draft["deleted_assignments"]
+                                for _, a in assignments.iterrows()
+                            ) or any(
+                                str(na.get("part_id")) == str(asm_pid) and str(na.get("section_id")) == str(dest_sid)
+                                for na in draft.get("new_assignments", [])
+                            )
+                            if not already_in_dest:
+                                draft["new_assignments"].append({
+                                    "part_id": str(asm_pid),
+                                    "section_id": str(dest_sid),
+                                    "quantity": 1.0,
+                                    "use_description": "Installed assembly" if include_children else "Assembly group part",
+                                })
+                if p := getattr(canvas_state, "remove_part", None):
+                    try:
+                        delattr(canvas_state, "remove_part")
+                    except (AttributeError, TypeError):
+                        pass
+                    if aid := p.get("assignment_id"):
+                        draft["deleted_assignments"].add(aid)
+                    for a_item in p.get("assignment_ids", []):
+                        if a_item:
+                            draft["deleted_assignments"].add(a_item)
+                    pid = p.get("part_id")
+                    sec_id = p.get("section_id")
+                    if pid:
+                        draft["new_assignments"] = [
+                            na for na in draft["new_assignments"]
+                            if not (str(na.get("part_id")) == str(pid) and (sec_id is None or str(na.get("section_id")) == str(sec_id)))
+                        ]
+                if p := getattr(canvas_state, "replicate_part_uses", None):
+                    try:
+                        delattr(canvas_state, "replicate_part_uses")
+                    except (AttributeError, TypeError):
+                        pass
+                    pid = str(p.get("part_id") or "").strip()
+                    pnum = str(p.get("part_number") or "Part").strip()
+                    include_children = bool(p.get("include_children", False))
+                    section_uses = p.get("section_uses") or []
+                    if pid:
+                        desired_by_sec = {}
+                        for su in section_uses:
+                            s_id = str(su.get("section_id") or "").strip()
+                            if s_id and s_id in records:
+                                try:
+                                    q_val = float(su.get("quantity") or 1.0)
+                                except (ValueError, TypeError):
+                                    q_val = 1.0
+                                desired_by_sec[s_id] = {
+                                    "section_id": s_id,
+                                    "quantity": max(0.01, q_val),
+                                    "use_description": str(su.get("use_description") or "").strip(),
+                                }
 
-                    staged_map = {
-                        str(ua.get("assignment_id")): ua
-                        for ua in draft.get("updated_assignments", [])
-                        if ua.get("assignment_id")
-                    }
-                    existing_db_by_sec: dict[str, list[str]] = {}
-                    for _, a_row in assignments.iterrows():
-                        if str(a_row["part_id"]) != pid:
-                            continue
-                        aid_str = str(a_row["id"])
-                        eff_sec = str(staged_map[aid_str].get("section_id") or a_row["section_id"]) if aid_str in staged_map else str(a_row["section_id"])
-                        existing_db_by_sec.setdefault(eff_sec, []).append(aid_str)
+                        staged_map = {
+                            str(ua.get("assignment_id")): ua
+                            for ua in draft.get("updated_assignments", [])
+                            if ua.get("assignment_id")
+                        }
+                        existing_db_by_sec: dict[str, list[str]] = {}
+                        for _, a_row in assignments.iterrows():
+                            if str(a_row["part_id"]) != pid:
+                                continue
+                            aid_str = str(a_row["id"])
+                            eff_sec = str(staged_map[aid_str].get("section_id") or a_row["section_id"]) if aid_str in staged_map else str(a_row["section_id"])
+                            existing_db_by_sec.setdefault(eff_sec, []).append(aid_str)
 
-                    handled_secs = set()
-                    for s_id, aid_list in existing_db_by_sec.items():
-                        if s_id in desired_by_sec:
-                            handled_secs.add(s_id)
-                            target_info = desired_by_sec[s_id]
-                            primary_aid = aid_list[0]
-                            draft["deleted_assignments"].discard(primary_aid)
-                            for extra_aid in aid_list[1:]:
-                                draft["deleted_assignments"].add(extra_aid)
-                            if primary_aid in staged_map:
-                                staged_map[primary_aid]["quantity"] = target_info["quantity"]
-                                staged_map[primary_aid]["use_description"] = target_info["use_description"]
+                        handled_secs = set()
+                        for s_id, aid_list in existing_db_by_sec.items():
+                            if s_id in desired_by_sec:
+                                handled_secs.add(s_id)
+                                target_info = desired_by_sec[s_id]
+                                primary_aid = aid_list[0]
+                                draft["deleted_assignments"].discard(primary_aid)
+                                for extra_aid in aid_list[1:]:
+                                    draft["deleted_assignments"].add(extra_aid)
+                                if primary_aid in staged_map:
+                                    staged_map[primary_aid]["quantity"] = target_info["quantity"]
+                                    staged_map[primary_aid]["use_description"] = target_info["use_description"]
+                                else:
+                                    draft.setdefault("updated_assignments", []).append({
+                                        "assignment_id": primary_aid,
+                                        "section_id": s_id,
+                                        "step_number": 1,
+                                        "quantity": target_info["quantity"],
+                                        "use_description": target_info["use_description"],
+                                    })
                             else:
-                                draft.setdefault("updated_assignments", []).append({
-                                    "assignment_id": primary_aid,
+                                for aid_to_del in aid_list:
+                                    draft["deleted_assignments"].add(aid_to_del)
+
+                        kept_new_assignments = []
+                        for na in draft.get("new_assignments", []):
+                            if str(na.get("part_id")) != pid:
+                                kept_new_assignments.append(na)
+                                continue
+                            na_sec = str(na.get("section_id") or "")
+                            if na_sec in desired_by_sec and na_sec not in handled_secs:
+                                handled_secs.add(na_sec)
+                                na["quantity"] = desired_by_sec[na_sec]["quantity"]
+                                na["use_description"] = desired_by_sec[na_sec]["use_description"]
+                                kept_new_assignments.append(na)
+                        draft["new_assignments"] = kept_new_assignments
+
+                        newly_added_secs = []
+                        for s_id, target_info in desired_by_sec.items():
+                            if s_id not in handled_secs:
+                                draft["new_assignments"].append({
+                                    "part_id": pid,
                                     "section_id": s_id,
                                     "step_number": 1,
                                     "quantity": target_info["quantity"],
                                     "use_description": target_info["use_description"],
                                 })
-                        else:
-                            for aid_to_del in aid_list:
-                                draft["deleted_assignments"].add(aid_to_del)
+                                newly_added_secs.append(s_id)
 
-                    kept_new_assignments = []
-                    for na in draft.get("new_assignments", []):
-                        if str(na.get("part_id")) != pid:
-                            kept_new_assignments.append(na)
-                            continue
-                        na_sec = str(na.get("section_id") or "")
-                        if na_sec in desired_by_sec and na_sec not in handled_secs:
-                            handled_secs.add(na_sec)
-                            na["quantity"] = desired_by_sec[na_sec]["quantity"]
-                            na["use_description"] = desired_by_sec[na_sec]["use_description"]
-                            kept_new_assignments.append(na)
-                    draft["new_assignments"] = kept_new_assignments
+                        if include_children and newly_added_secs:
+                            bom_tree_rep = pits_bom_model_tree(project_id)
+                            bom_nodes_rep = bom_tree_rep.get("nodes", []) if bom_tree_rep else []
+                            child_entries = []
+                            for bnode in bom_nodes_rep:
+                                b_pid = str(bnode.get("part_id") or bnode.get("child_part_id") or "").strip()
+                                b_pn = str(bnode.get("part_number") or "").strip().upper()
+                                if b_pid == pid or (pnum and b_pn == pnum.upper()):
+                                    child_entries = bnode.get("children", [])
+                                    break
+                            for ch in child_entries:
+                                if _is_source_code_8_node(ch):
+                                    continue
+                                c_pid = str(ch.get("part_id") or ch.get("child_part_id") or "").strip()
+                                if not c_pid:
+                                    c_pn = str(ch.get("part_number") or "").strip()
+                                    if c_pn and not parts.empty:
+                                        m_rows = parts.loc[parts["part_number"].astype(str).str.strip() == c_pn]
+                                        if not m_rows.empty:
+                                            c_pid = str(m_rows.iloc[0]["id"])
+                                if not c_pid:
+                                    continue
+                                c_qty = float(ch.get("quantity") or ch.get("proposed_quantity") or 1.0)
+                                for target_s_id in newly_added_secs:
+                                    already_in_sec = any(
+                                        str(ar["part_id"]) == c_pid
+                                        and str(ar["section_id"]) == target_s_id
+                                        and str(ar["id"]) not in draft["deleted_assignments"]
+                                        for _, ar in assignments.iterrows()
+                                    ) or any(
+                                        str(na.get("part_id")) == c_pid and str(na.get("section_id")) == target_s_id
+                                        for na in draft["new_assignments"]
+                                    )
+                                    if not already_in_sec:
+                                        draft["new_assignments"].append({
+                                            "part_id": c_pid,
+                                            "section_id": target_s_id,
+                                            "step_number": 1,
+                                            "quantity": c_qty,
+                                            "use_description": f"Sub-component of {pnum}",
+                                        })
 
-                    newly_added_secs = []
-                    for s_id, target_info in desired_by_sec.items():
-                        if s_id not in handled_secs:
-                            draft["new_assignments"].append({
-                                "part_id": pid,
-                                "section_id": s_id,
-                                "step_number": 1,
-                                "quantity": target_info["quantity"],
-                                "use_description": target_info["use_description"],
-                            })
-                            newly_added_secs.append(s_id)
-
-                    if include_children and newly_added_secs:
-                        bom_tree_rep = pits_bom_model_tree(project_id)
-                        bom_nodes_rep = bom_tree_rep.get("nodes", []) if bom_tree_rep else []
-                        child_entries = []
-                        for bnode in bom_nodes_rep:
-                            b_pid = str(bnode.get("part_id") or bnode.get("child_part_id") or "").strip()
-                            b_pn = str(bnode.get("part_number") or "").strip().upper()
-                            if b_pid == pid or (pnum and b_pn == pnum.upper()):
-                                child_entries = bnode.get("children", [])
-                                break
-                        for ch in child_entries:
-                            if _is_source_code_8_node(ch):
-                                continue
-                            c_pid = str(ch.get("part_id") or ch.get("child_part_id") or "").strip()
-                            if not c_pid:
-                                c_pn = str(ch.get("part_number") or "").strip()
-                                if c_pn and not parts.empty:
-                                    m_rows = parts.loc[parts["part_number"].astype(str).str.strip() == c_pn]
-                                    if not m_rows.empty:
-                                        c_pid = str(m_rows.iloc[0]["id"])
-                            if not c_pid:
-                                continue
-                            c_qty = float(ch.get("quantity") or ch.get("proposed_quantity") or 1.0)
-                            for target_s_id in newly_added_secs:
-                                already_in_sec = any(
-                                    str(ar["part_id"]) == c_pid
-                                    and str(ar["section_id"]) == target_s_id
-                                    and str(ar["id"]) not in draft["deleted_assignments"]
-                                    for _, ar in assignments.iterrows()
-                                ) or any(
-                                    str(na.get("part_id")) == c_pid and str(na.get("section_id")) == target_s_id
-                                    for na in draft["new_assignments"]
-                                )
-                                if not already_in_sec:
-                                    draft["new_assignments"].append({
-                                        "part_id": c_pid,
-                                        "section_id": target_s_id,
-                                        "step_number": 1,
-                                        "quantity": c_qty,
-                                        "use_description": f"Sub-component of {pnum}",
-                                    })
-
-                    sec_count = len(desired_by_sec)
-                    st.toast(
-                        f"Staged {pnum} across {sec_count} section(s). Click 'Save & Refresh' to persist.",
-                        icon=":material/content_copy:",
-                    )
-                    st.rerun()
-            if p := getattr(canvas_state, "move_part_assignment", None):
-                try:
-                    delattr(canvas_state, "move_part_assignment")
-                except (AttributeError, TypeError):
-                    pass
-                aid = p.get("assignment_id")
-                aids = p.get("assignment_ids") or ([aid] if aid else [])
-                from_sid = p.get("from_section_id")
-                to_sid = p.get("to_section_id")
-                pid = p.get("part_id")
-                ordered_aids = p.get("ordered_assignment_ids") or []
-                editor = st.session_state.get("current_editor", "")
-
-                if to_sid and to_sid == from_sid:
-                    if ordered_aids:
-                        reorder_fishbone_part_assignments(
-                            project_id, from_sid, ordered_aids, editor_name=editor
+                        sec_count = len(desired_by_sec)
+                        st.toast(
+                            f"Staged {pnum} across {sec_count} section(s). Click 'Save & Refresh' to persist.",
+                            icon=":material/content_copy:",
                         )
-                        sec_name = section_name_by_id.get(from_sid, "section")
-                        st.toast(f"Reordered parts in {sec_name}", icon=":material/reorder:")
                         st.rerun()
-                elif to_sid and to_sid != from_sid:
-                    moved_draft = False
-                    for na in draft.get("new_assignments", []):
-                        if str(na.get("part_id")) == str(pid) and (from_sid is None or str(na.get("section_id")) == str(from_sid)):
-                            na["section_id"] = to_sid
-                            moved_draft = True
-                    moved_db_count = 0
-                    for item_aid in aids:
-                        if item_aid and not str(item_aid).startswith("draft_"):
-                            try:
-                                move_fishbone_part_assignment(project_id, item_aid, to_sid)
-                                moved_db_count += 1
-                            except ValueError as err:
-                                st.error(str(err))
-                    if moved_db_count > 0:
+                if p := getattr(canvas_state, "move_part_assignment", None):
+                    try:
+                        delattr(canvas_state, "move_part_assignment")
+                    except (AttributeError, TypeError):
+                        pass
+                    aid = p.get("assignment_id")
+                    aids = p.get("assignment_ids") or ([aid] if aid else [])
+                    from_sid = p.get("from_section_id")
+                    to_sid = p.get("to_section_id")
+                    pid = p.get("part_id")
+                    ordered_aids = p.get("ordered_assignment_ids") or []
+                    editor = st.session_state.get("current_editor", "")
+
+                    if to_sid and to_sid == from_sid:
                         if ordered_aids:
                             reorder_fishbone_part_assignments(
-                                project_id, to_sid, ordered_aids, editor_name=editor
+                                project_id, from_sid, ordered_aids, editor_name=editor
                             )
-                        target_name = section_name_by_id.get(to_sid, "section")
-                        st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
-                        record_audit_event(
-                            project_id,
-                            "Fishbone uses",
-                            "Move fishbone use",
-                            moved_db_count,
-                            editor,
-                            {
-                                "assignment_ids": aids,
-                                "from_section_id": from_sid,
-                                "to_section_id": to_sid,
-                                "ordered_assignment_ids": ordered_aids,
-                            },
-                        )
-                        st.rerun()
-                    elif moved_draft:
-                        target_name = section_name_by_id.get(to_sid, "section")
-                        st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
-                        st.rerun()
+                            sec_name = section_name_by_id.get(from_sid, "section")
+                            st.toast(f"Reordered parts in {sec_name}", icon=":material/reorder:")
+                            st.rerun()
+                    elif to_sid and to_sid != from_sid:
+                        moved_draft = False
+                        for na in draft.get("new_assignments", []):
+                            if str(na.get("part_id")) == str(pid) and (from_sid is None or str(na.get("section_id")) == str(from_sid)):
+                                na["section_id"] = to_sid
+                                moved_draft = True
+                        moved_db_count = 0
+                        for item_aid in aids:
+                            if item_aid and not str(item_aid).startswith("draft_"):
+                                try:
+                                    move_fishbone_part_assignment(project_id, item_aid, to_sid)
+                                    moved_db_count += 1
+                                except ValueError as err:
+                                    st.error(str(err))
+                        if moved_db_count > 0:
+                            if ordered_aids:
+                                reorder_fishbone_part_assignments(
+                                    project_id, to_sid, ordered_aids, editor_name=editor
+                                )
+                            target_name = section_name_by_id.get(to_sid, "section")
+                            st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
+                            record_audit_event(
+                                project_id,
+                                "Fishbone uses",
+                                "Move fishbone use",
+                                moved_db_count,
+                                editor,
+                                {
+                                    "assignment_ids": aids,
+                                    "from_section_id": from_sid,
+                                    "to_section_id": to_sid,
+                                    "ordered_assignment_ids": ordered_aids,
+                                },
+                            )
+                            st.rerun()
+                        elif moved_draft:
+                            target_name = section_name_by_id.get(to_sid, "section")
+                            st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
+                            st.rerun()
 
-        image_path_by_part = (
-            all_catalog_parts.set_index(all_catalog_parts["id"].astype(str))["image_path"].to_dict()
-            if not all_catalog_parts.empty and "image_path" in all_catalog_parts.columns
-            else {}
-        )
-        visual_feature_options = sorted(
-            {label for labels in feature_labels_by_part.values() for label in labels},
-            key=str.casefold,
-        )
-        visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
-        selected_visual_features = visual_controls.multiselect(
-            "View fishbone for features",
-            options=visual_feature_options,
-            placeholder="All feature configurations · complete fishbone",
-            key=f"fishbone_visual_features_{project_id}",
-            help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
-        )
-        if visual_controls.button(
-            "Edit parts & photos",
-            icon=":material/edit:",
-            key="fishbone_edit_parts_visual",
-            help="Open the Parts Catalog to edit part details or add more photos.",
-        ):
-            st.switch_page("app_pages/parts.py")
-
-        # Effective assignments (DB minus deleted plus draft new)
-        effective_assigned_part_ids = (
-            {
-                str(p_id)
-                for a_id, p_id in zip(assignments["id"], assignments["part_id"])
-                if str(a_id) not in draft["deleted_assignments"]
-            }
-            if not assignments.empty
-            else set()
-        )
-        for na in draft["new_assignments"]:
-            effective_assigned_part_ids.add(str(na["part_id"]))
-
-        # Build Parts Palette items (Parts Catalog + BOM tree assembly hierarchy)
-        bom_tree = pits_bom_model_tree(project_id)
-        bom_nodes = bom_tree.get("nodes", []) if bom_tree else []
-
-        part_desc_lookup: dict[str, str] = {}
-        part_num_by_id: dict[str, str] = {}
-        if not parts.empty:
-            for p_id_val, p_num_val, p_desc_val in zip(
-                parts["id"], parts["part_number"], parts["description"]
+            image_path_by_part = (
+                all_catalog_parts.set_index(all_catalog_parts["id"].astype(str))["image_path"].to_dict()
+                if not all_catalog_parts.empty and "image_path" in all_catalog_parts.columns
+                else {}
+            )
+            visual_feature_options = sorted(
+                {label for labels in feature_labels_by_part.values() for label in labels},
+                key=str.casefold,
+            )
+            visual_controls = st.container(horizontal=True, vertical_alignment="bottom")
+            selected_visual_features = visual_controls.multiselect(
+                "View fishbone for features",
+                options=visual_feature_options,
+                placeholder="All feature configurations · complete fishbone",
+                key=f"fishbone_visual_features_{project_id}",
+                help="Feature views include parts tagged to any selected choice plus parts tagged All models.",
+            )
+            if visual_controls.button(
+                "Edit parts & photos",
+                icon=":material/edit:",
+                key="fishbone_edit_parts_visual",
+                help="Open the Parts Catalog to edit part details or add more photos.",
             ):
-                p_id = str(p_id_val or "").strip()
-                p_num_raw = str(p_num_val or "").strip()
-                p_num = p_num_raw.upper()
-                p_desc = str(p_desc_val or "").strip()
-                if p_id:
-                    part_num_by_id[p_id] = p_num_raw
-                if p_id and p_desc:
-                    part_desc_lookup[p_id] = p_desc
-                if p_num and p_desc:
-                    part_desc_lookup[p_num] = p_desc
+                st.switch_page("app_pages/parts.py")
 
-        for bn in bom_nodes:
-            b_id = str(bn.get("part_id") or bn.get("child_part_id") or "").strip()
-            b_num = str(bn.get("part_number") or "").strip().upper()
-            b_desc = str(bn.get("description") or bn.get("part_name") or "").strip()
-            if b_id and b_desc and b_id not in part_desc_lookup:
-                part_desc_lookup[b_id] = b_desc
-            if b_num and b_desc and b_num not in part_desc_lookup:
-                part_desc_lookup[b_num] = b_desc
-            for bc in bn.get("children", []):
-                bc_id = str(bc.get("part_id") or bc.get("child_part_id") or "").strip()
-                bc_num = str(bc.get("part_number") or "").strip().upper()
-                bc_desc = str(bc.get("description") or bc.get("part_name") or "").strip()
-                if bc_id and bc_desc and bc_id not in part_desc_lookup:
-                    part_desc_lookup[bc_id] = bc_desc
-                if bc_num and bc_desc and bc_num not in part_desc_lookup:
-                    part_desc_lookup[bc_num] = bc_desc
+            # Effective assignments (DB minus deleted plus draft new)
+            effective_assigned_part_ids = (
+                {
+                    str(p_id)
+                    for a_id, p_id in zip(assignments["id"], assignments["part_id"])
+                    if str(a_id) not in draft["deleted_assignments"]
+                }
+                if not assignments.empty
+                else set()
+            )
+            for na in draft["new_assignments"]:
+                effective_assigned_part_ids.add(str(na["part_id"]))
 
-        asm_children_by_pid = {}
-        asm_children_by_pn = {}
-        for node in bom_nodes:
-            np_id = str(node.get("part_id") or node.get("child_part_id") or "").strip()
-            np_pn = str(node.get("part_number") or "").strip().upper()
-            children = [
-                c for c in node.get("children", []) if not _is_source_code_8_node(c)
-            ]
-            if children:
-                ch_map = {}
-                for c in children:
-                    c_pid = str(c.get("part_id") or c.get("child_part_id") or "").strip()
-                    c_pn = str(c.get("part_number") or "").strip()
-                    key = c_pid or c_pn
-                    if not key:
+            # Build Parts Palette items (Parts Catalog + BOM tree assembly hierarchy)
+            bom_tree = pits_bom_model_tree(project_id)
+            bom_nodes = bom_tree.get("nodes", []) if bom_tree else []
+
+            part_desc_lookup: dict[str, str] = {}
+            part_num_by_id: dict[str, str] = {}
+            if not parts.empty:
+                for p_id_val, p_num_val, p_desc_val in zip(
+                    parts["id"], parts["part_number"], parts["description"]
+                ):
+                    p_id = str(p_id_val or "").strip()
+                    p_num_raw = str(p_num_val or "").strip()
+                    p_num = p_num_raw.upper()
+                    p_desc = str(p_desc_val or "").strip()
+                    if p_id:
+                        part_num_by_id[p_id] = p_num_raw
+                    if p_id and p_desc:
+                        part_desc_lookup[p_id] = p_desc
+                    if p_num and p_desc:
+                        part_desc_lookup[p_num] = p_desc
+
+            for bn in bom_nodes:
+                b_id = str(bn.get("part_id") or bn.get("child_part_id") or "").strip()
+                b_num = str(bn.get("part_number") or "").strip().upper()
+                b_desc = str(bn.get("description") or bn.get("part_name") or "").strip()
+                if b_id and b_desc and b_id not in part_desc_lookup:
+                    part_desc_lookup[b_id] = b_desc
+                if b_num and b_desc and b_num not in part_desc_lookup:
+                    part_desc_lookup[b_num] = b_desc
+                for bc in bn.get("children", []):
+                    bc_id = str(bc.get("part_id") or bc.get("child_part_id") or "").strip()
+                    bc_num = str(bc.get("part_number") or "").strip().upper()
+                    bc_desc = str(bc.get("description") or bc.get("part_name") or "").strip()
+                    if bc_id and bc_desc and bc_id not in part_desc_lookup:
+                        part_desc_lookup[bc_id] = bc_desc
+                    if bc_num and bc_desc and bc_num not in part_desc_lookup:
+                        part_desc_lookup[bc_num] = bc_desc
+
+            asm_children_by_pid = {}
+            asm_children_by_pn = {}
+            for node in bom_nodes:
+                np_id = str(node.get("part_id") or node.get("child_part_id") or "").strip()
+                np_pn = str(node.get("part_number") or "").strip().upper()
+                children = [
+                    c for c in node.get("children", []) if not _is_source_code_8_node(c)
+                ]
+                if children:
+                    ch_map = {}
+                    for c in children:
+                        c_pid = str(c.get("part_id") or c.get("child_part_id") or "").strip()
+                        c_pn = str(c.get("part_number") or "").strip()
+                        key = c_pid or c_pn
+                        if not key:
+                            continue
+                        c_qty = float(c.get("quantity") or c.get("proposed_quantity") or 1.0)
+                        c_desc = str(c.get("description") or c.get("part_name") or "").strip() or part_desc_lookup.get(c_pid) or part_desc_lookup.get(c_pn.upper()) or ""
+                        if key in ch_map:
+                            ch_map[key]["quantity"] += c_qty
+                            if not ch_map[key]["description"] and c_desc:
+                                ch_map[key]["description"] = c_desc
+                        else:
+                            ch_map[key] = {
+                                "part_id": c_pid,
+                                "part_number": c_pn,
+                                "description": c_desc,
+                                "quantity": c_qty,
+                            }
+                    ch_records = list(ch_map.values())
+                    if np_id:
+                        asm_children_by_pid[np_id] = ch_records
+                    if np_pn:
+                        asm_children_by_pn[np_pn] = ch_records
+
+            palette_items = []
+            seen_pids = set()
+            seen_pns = set()
+
+            if not parts.empty:
+                for pid_val, pn_val, raw_qty, desc_val in zip(
+                    parts["id"],
+                    parts["part_number"],
+                    parts["quantity"],
+                    parts["description"],
+                ):
+                    pid = str(pid_val)
+                    pn = str(pn_val or "").strip()
+                    if not pid or pid in seen_pids:
                         continue
-                    c_qty = float(c.get("quantity") or c.get("proposed_quantity") or 1.0)
-                    c_desc = str(c.get("description") or c.get("part_name") or "").strip() or part_desc_lookup.get(c_pid) or part_desc_lookup.get(c_pn.upper()) or ""
-                    if key in ch_map:
-                        ch_map[key]["quantity"] += c_qty
-                        if not ch_map[key]["description"] and c_desc:
-                            ch_map[key]["description"] = c_desc
-                    else:
-                        ch_map[key] = {
-                            "part_id": c_pid,
-                            "part_number": c_pn,
-                            "description": c_desc,
-                            "quantity": c_qty,
-                        }
-                ch_records = list(ch_map.values())
-                if np_id:
-                    asm_children_by_pid[np_id] = ch_records
-                if np_pn:
-                    asm_children_by_pn[np_pn] = ch_records
+                    seen_pids.add(pid)
+                    if pn:
+                        seen_pns.add(pn)
 
-        palette_items = []
-        seen_pids = set()
-        seen_pns = set()
+                    ch_list = asm_children_by_pid.get(pid) or asm_children_by_pn.get(pn.upper(), [])
+                    is_asm = len(ch_list) > 0
+                    try:
+                        qty = float(raw_qty) if raw_qty is not None and float(raw_qty) > 0 else 1.0
+                    except (ValueError, TypeError):
+                        qty = 1.0
 
-        if not parts.empty:
-            for pid_val, pn_val, raw_qty, desc_val in zip(
-                parts["id"],
-                parts["part_number"],
-                parts["quantity"],
-                parts["description"],
-            ):
-                pid = str(pid_val)
-                pn = str(pn_val or "").strip()
-                if not pid or pid in seen_pids:
+                    p_desc = str(desc_val or "").strip() or part_desc_lookup.get(pid) or part_desc_lookup.get(pn.upper()) or ""
+                    palette_items.append({
+                        "part_id": pid,
+                        "part_number": pn or "—",
+                        "description": p_desc,
+                        "quantity": qty,
+                        "is_assembly": is_asm,
+                        "child_count": len(ch_list),
+                        "child_parts": ch_list,
+                        "image": part_thumbnail(image_path_by_part.get(pid, "")),
+                        "placed": pid in effective_assigned_part_ids,
+                    })
+
+            for node in bom_nodes:
+                if _is_source_code_8_node(node):
                     continue
-                seen_pids.add(pid)
-                if pn:
-                    seen_pns.add(pn)
-
-                ch_list = asm_children_by_pid.get(pid) or asm_children_by_pn.get(pn.upper(), [])
-                is_asm = len(ch_list) > 0
-                try:
-                    qty = float(raw_qty) if raw_qty is not None and float(raw_qty) > 0 else 1.0
-                except (ValueError, TypeError):
-                    qty = 1.0
-
-                p_desc = str(desc_val or "").strip() or part_desc_lookup.get(pid) or part_desc_lookup.get(pn.upper()) or ""
-                palette_items.append({
-                    "part_id": pid,
-                    "part_number": pn or "—",
-                    "description": p_desc,
-                    "quantity": qty,
-                    "is_assembly": is_asm,
-                    "child_count": len(ch_list),
-                    "child_parts": ch_list,
-                    "image": part_thumbnail(image_path_by_part.get(pid, "")),
-                    "placed": pid in effective_assigned_part_ids,
-                })
-
-        for node in bom_nodes:
-            if _is_source_code_8_node(node):
-                continue
-            np_id = str(node.get("part_id") or node.get("child_part_id") or "")
-            np_pn = str(node.get("part_number") or "").strip()
-            if (
-                not np_id
-                or np_id not in placeable_part_ids
-                or np_id in seen_pids
-                or (np_pn and np_pn in seen_pns)
-            ):
-                continue
-            seen_pids.add(np_id)
-            if np_pn:
-                seen_pns.add(np_pn)
-            ch_list = [
-                c for c in node.get("children", []) if not _is_source_code_8_node(c)
-            ]
-            is_asm = len(ch_list) > 0
-            n_desc = str(node.get("description") or node.get("part_name") or "").strip() or part_desc_lookup.get(np_id) or part_desc_lookup.get(np_pn.upper()) or ""
-            palette_items.append({
-                "part_id": np_id,
-                "part_number": np_pn or "—",
-                "description": n_desc,
-                "quantity": float(node.get("quantity") or node.get("proposed_quantity") or 1.0),
-                "is_assembly": is_asm,
-                "child_count": len(ch_list),
-                "child_parts": [
-                    {
-                        "part_id": str(c.get("part_id") or c.get("child_part_id") or ""),
-                        "part_number": str(c.get("part_number") or ""),
-                        "description": str(c.get("description") or c.get("part_name") or "").strip() or part_desc_lookup.get(str(c.get("part_id") or c.get("child_part_id") or "").strip()) or part_desc_lookup.get(str(c.get("part_number") or "").strip().upper()) or "",
-                        "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
-                    }
-                    for c in ch_list
-                ],
-                "image": part_thumbnail(image_path_by_part.get(np_id, "")),
-                "placed": np_id in effective_assigned_part_ids,
-            })
-
-        def get_palette_sort_key(item):
-            pid = item["part_id"]
-            pnum = item["part_number"]
-            info = master_info_by_part_id.get(pid) or master_info_by_pnum.get(pnum)
-            order = info["order"] if info else 1_000_000
-            return (order, pnum.casefold())
-
-        palette_items.sort(key=get_palette_sort_key)
-
-        # Visual Placed Parts
-        staged_updates_by_aid = {
-            ua["assignment_id"]: ua
-            for ua in draft.get("updated_assignments", [])
-            if ua.get("assignment_id")
-        }
-        visual_parts = []
-        if not assignments.empty:
-            for (
-                aid_val,
-                part_id_val,
-                section_id_val,
-                m_app_val,
-                qty_val,
-                use_desc_val,
-                sec_name_val,
-                pnum_val,
-                desc_val,
-                seq_val,
-            ) in zip(
-                assignments["id"],
-                assignments["part_id"],
-                assignments["section_id"],
-                assignments["model_applicability"],
-                assignments["quantity"],
-                assignments["use_description"],
-                assignments["section_name"],
-                assignments["part_number"],
-                assignments["description"],
-                assignments["sequence"],
-            ):
-                aid = str(aid_val)
-                if aid in draft["deleted_assignments"]:
-                    continue
-                part_id = str(part_id_val)
-                section_id = str(section_id_val)
-                staged = staged_updates_by_aid.get(aid)
-                current_sec_id = staged.get("section_id") if staged and staged.get("section_id") else section_id
-                if current_sec_id not in records:
-                    continue
-                applicability_label = feature_applicability(part_id, m_app_val)
+                np_id = str(node.get("part_id") or node.get("child_part_id") or "")
+                np_pn = str(node.get("part_number") or "").strip()
                 if (
-                    selected_visual_features
-                    and applicability_label != "All models"
-                    and not set(selected_visual_features) & set(feature_labels_by_part.get(part_id, []))
+                    not np_id
+                    or np_id not in placeable_part_ids
+                    or np_id in seen_pids
+                    or (np_pn and np_pn in seen_pns)
                 ):
                     continue
-                eff_qty = float(staged["quantity"]) if staged and staged.get("quantity") is not None else float(qty_val or 0)
-                eff_use_desc = str(staged["use_description"]) if staged and staged.get("use_description") is not None else str(use_desc_val or "")
+                seen_pids.add(np_id)
+                if np_pn:
+                    seen_pns.add(np_pn)
+                ch_list = [
+                    c for c in node.get("children", []) if not _is_source_code_8_node(c)
+                ]
+                is_asm = len(ch_list) > 0
+                n_desc = str(node.get("description") or node.get("part_name") or "").strip() or part_desc_lookup.get(np_id) or part_desc_lookup.get(np_pn.upper()) or ""
+                palette_items.append({
+                    "part_id": np_id,
+                    "part_number": np_pn or "—",
+                    "description": n_desc,
+                    "quantity": float(node.get("quantity") or node.get("proposed_quantity") or 1.0),
+                    "is_assembly": is_asm,
+                    "child_count": len(ch_list),
+                    "child_parts": [
+                        {
+                            "part_id": str(c.get("part_id") or c.get("child_part_id") or ""),
+                            "part_number": str(c.get("part_number") or ""),
+                            "description": str(c.get("description") or c.get("part_name") or "").strip() or part_desc_lookup.get(str(c.get("part_id") or c.get("child_part_id") or "").strip()) or part_desc_lookup.get(str(c.get("part_number") or "").strip().upper()) or "",
+                            "quantity": float(c.get("quantity") or c.get("proposed_quantity") or 1.0),
+                        }
+                        for c in ch_list
+                    ],
+                    "image": part_thumbnail(image_path_by_part.get(np_id, "")),
+                    "placed": np_id in effective_assigned_part_ids,
+                })
+
+            def get_palette_sort_key(item):
+                pid = item["part_id"]
+                pnum = item["part_number"]
+                info = master_info_by_part_id.get(pid) or master_info_by_pnum.get(pnum)
+                order = info["order"] if info else 1_000_000
+                return (order, pnum.casefold())
+
+            palette_items.sort(key=get_palette_sort_key)
+
+            # Visual Placed Parts
+            staged_updates_by_aid = {
+                ua["assignment_id"]: ua
+                for ua in draft.get("updated_assignments", [])
+                if ua.get("assignment_id")
+            }
+            visual_parts = []
+            if not assignments.empty:
+                for (
+                    aid_val,
+                    part_id_val,
+                    section_id_val,
+                    m_app_val,
+                    qty_val,
+                    use_desc_val,
+                    sec_name_val,
+                    pnum_val,
+                    desc_val,
+                    seq_val,
+                ) in zip(
+                    assignments["id"],
+                    assignments["part_id"],
+                    assignments["section_id"],
+                    assignments["model_applicability"],
+                    assignments["quantity"],
+                    assignments["use_description"],
+                    assignments["section_name"],
+                    assignments["part_number"],
+                    assignments["description"],
+                    assignments["sequence"],
+                ):
+                    aid = str(aid_val)
+                    if aid in draft["deleted_assignments"]:
+                        continue
+                    part_id = str(part_id_val)
+                    section_id = str(section_id_val)
+                    staged = staged_updates_by_aid.get(aid)
+                    current_sec_id = staged.get("section_id") if staged and staged.get("section_id") else section_id
+                    if current_sec_id not in records:
+                        continue
+                    applicability_label = feature_applicability(part_id, m_app_val)
+                    if (
+                        selected_visual_features
+                        and applicability_label != "All models"
+                        and not set(selected_visual_features) & set(feature_labels_by_part.get(part_id, []))
+                    ):
+                        continue
+                    eff_qty = float(staged["quantity"]) if staged and staged.get("quantity") is not None else float(qty_val or 0)
+                    eff_use_desc = str(staged["use_description"]) if staged and staged.get("use_description") is not None else str(use_desc_val or "")
+                    visual_parts.append({
+                        "id": aid,
+                        "part_id": part_id,
+                        "section_id": current_sec_id,
+                        "section_name": str(records.get(current_sec_id, {}).get("name") or sec_name_val),
+                        "part_number": str(pnum_val or ""),
+                        "description": str(desc_val or ""),
+                        "use_description": eff_use_desc,
+                        "quantity": eff_qty,
+                        "models": applicability_label,
+                        "image": part_thumbnail(image_path_by_part.get(part_id, "")),
+                        "sequence": int(staged.get("sequence") if staged and staged.get("sequence") is not None else (seq_val or 10)),
+                    })
+            for idx, na in enumerate(draft["new_assignments"]):
+                na_pid = str(na["part_id"])
+                pn = part_num_by_id.get(na_pid) or "—"
+                p_desc = part_desc_lookup.get(na_pid) or "—"
+                sec_name = records.get(na["section_id"], {}).get("name", "Section")
                 visual_parts.append({
-                    "id": aid,
-                    "part_id": part_id,
-                    "section_id": current_sec_id,
-                    "section_name": str(records.get(current_sec_id, {}).get("name") or sec_name_val),
-                    "part_number": str(pnum_val or ""),
-                    "description": str(desc_val or ""),
-                    "use_description": eff_use_desc,
-                    "quantity": eff_qty,
-                    "models": applicability_label,
-                    "image": part_thumbnail(image_path_by_part.get(part_id, "")),
-                    "sequence": int(staged.get("sequence") if staged and staged.get("sequence") is not None else (seq_val or 10)),
-                })
-        for idx, na in enumerate(draft["new_assignments"]):
-            na_pid = str(na["part_id"])
-            pn = part_num_by_id.get(na_pid) or "—"
-            p_desc = part_desc_lookup.get(na_pid) or "—"
-            sec_name = records.get(na["section_id"], {}).get("name", "Section")
-            visual_parts.append({
-                "id": f"draft_a_{idx}",
-                "part_id": na["part_id"],
-                "section_id": na["section_id"],
-                "section_name": sec_name,
-                "part_number": pn,
-                "description": p_desc,
-                "use_description": na.get("use_description", ""),
-                "quantity": float(na.get("quantity") or 1.0),
-                "models": "All models",
-                "image": part_thumbnail(image_path_by_part.get(na["part_id"], "")),
-                "sequence": int(na.get("sequence") or (1000 + idx * 10)),
-            })
-
-        visual_parts_count_by_sec: dict[str, int] = {}
-        for vp in visual_parts:
-            s_id = vp["section_id"]
-            visual_parts_count_by_sec[s_id] = visual_parts_count_by_sec.get(s_id, 0) + 1
-
-        # Node rows with grid coordinates and op prefix
-        node_rows = []
-        all_sections_list = []
-        if not visible_sections.empty:
-            for r_id, r_name, r_type, r_parent, r_seq, r_gx, r_gy in zip(
-                visible_sections["id"],
-                visible_sections["name"],
-                visible_sections["section_type"],
-                visible_sections["parent_id"],
-                visible_sections["sequence"],
-                visible_sections["grid_x"],
-                visible_sections["grid_y"],
-            ):
-                sec_id = str(r_id)
-                parent_str = str(r_parent) if pd.notna(r_parent) else None
-                all_sections_list.append({
-                    "id": sec_id,
-                    "name": str(r_name),
-                    "type": str(r_type),
-                    "parent_id": parent_str,
-                })
-                gx = draft["positions"].get(sec_id, (r_gx, None))[0] if sec_id in draft["positions"] else r_gx
-                gy = draft["positions"].get(sec_id, (None, r_gy))[1] if sec_id in draft["positions"] else r_gy
-                gx = int(gx) if gx is not None and pd.notna(gx) else None
-                gy = int(gy) if gy is not None and pd.notna(gy) else None
-                node_rows.append({
-                    "id": sec_id,
-                    "name": str(r_name),
-                    "type": "Support Operations" if str(r_type) == "Support Operations" else "Assembly",
-                    "order": int(r_seq),
-                    "parent_id": parent_str,
-                    "grid_x": gx,
-                    "grid_y": gy,
-                    "op_prefix": "",
-                    "parts": visual_parts_count_by_sec.get(sec_id, 0),
+                    "id": f"draft_a_{idx}",
+                    "part_id": na["part_id"],
+                    "section_id": na["section_id"],
+                    "section_name": sec_name,
+                    "part_number": pn,
+                    "description": p_desc,
+                    "use_description": na.get("use_description", ""),
+                    "quantity": float(na.get("quantity") or 1.0),
+                    "models": "All models",
+                    "image": part_thumbnail(image_path_by_part.get(na["part_id"], "")),
+                    "sequence": int(na.get("sequence") or (1000 + idx * 10)),
                 })
 
-        # Connection rows
-        def _get_nodes_for_conn(cid, from_id, to_id):
-            d = draft.get("connection_nodes", {}).get(cid) or draft.get("connection_nodes", {}).get(f"{from_id}->{to_id}")
-            if not d:
-                d = persistent_conn_nodes.get(cid) or persistent_conn_nodes.get(f"{from_id}->{to_id}") or {}
-            return d.get("from_node"), d.get("to_node")
+            visual_parts_count_by_sec: dict[str, int] = {}
+            for vp in visual_parts:
+                s_id = vp["section_id"]
+                visual_parts_count_by_sec[s_id] = visual_parts_count_by_sec.get(s_id, 0) + 1
 
-        conn_rows = []
-        if not connections_df.empty:
-            for c_id, c_from, c_to, c_type, c_seq in zip(
-                connections_df["id"],
-                connections_df["from_section_id"],
-                connections_df["to_section_id"],
-                connections_df["connection_type"],
-                connections_df["sequence"],
-            ):
-                cid = str(c_id)
-                if cid in draft["deleted_connections"]:
-                    continue
-                f_id = str(c_from)
-                t_id = str(c_to)
-                fn, tn = _get_nodes_for_conn(cid, f_id, t_id)
-                conn_rows.append({
-                    "id": cid,
-                    "from_section_id": f_id,
-                    "to_section_id": t_id,
-                    "connection_type": str(c_type),
-                    "sequence": int(c_seq),
-                    "from_node": fn,
-                    "to_node": tn,
-                })
-        else:
-            for sec_id, row in records.items():
-                pid = normalized_parent_id(row.get("parent_id"))
-                if pid and pid in records:
-                    cid = f"init_{sec_id}_{pid}"
-                    fn, tn = _get_nodes_for_conn(cid, sec_id, pid)
+            # Node rows with grid coordinates and op prefix
+            node_rows = []
+            all_sections_list = []
+            if not visible_sections.empty:
+                for r_id, r_name, r_type, r_parent, r_seq, r_gx, r_gy in zip(
+                    visible_sections["id"],
+                    visible_sections["name"],
+                    visible_sections["section_type"],
+                    visible_sections["parent_id"],
+                    visible_sections["sequence"],
+                    visible_sections["grid_x"],
+                    visible_sections["grid_y"],
+                ):
+                    sec_id = str(r_id)
+                    parent_str = str(r_parent) if pd.notna(r_parent) else None
+                    all_sections_list.append({
+                        "id": sec_id,
+                        "name": str(r_name),
+                        "type": str(r_type),
+                        "parent_id": parent_str,
+                    })
+                    gx = draft["positions"].get(sec_id, (r_gx, None))[0] if sec_id in draft["positions"] else r_gx
+                    gy = draft["positions"].get(sec_id, (None, r_gy))[1] if sec_id in draft["positions"] else r_gy
+                    gx = int(gx) if gx is not None and pd.notna(gx) else None
+                    gy = int(gy) if gy is not None and pd.notna(gy) else None
+                    node_rows.append({
+                        "id": sec_id,
+                        "name": str(r_name),
+                        "type": "Support Operations" if str(r_type) == "Support Operations" else "Assembly",
+                        "order": int(r_seq),
+                        "parent_id": parent_str,
+                        "grid_x": gx,
+                        "grid_y": gy,
+                        "op_prefix": "",
+                        "parts": visual_parts_count_by_sec.get(sec_id, 0),
+                    })
+
+            # Connection rows
+            def _get_nodes_for_conn(cid, from_id, to_id):
+                d = draft.get("connection_nodes", {}).get(cid) or draft.get("connection_nodes", {}).get(f"{from_id}->{to_id}")
+                if not d:
+                    d = persistent_conn_nodes.get(cid) or persistent_conn_nodes.get(f"{from_id}->{to_id}") or {}
+                return d.get("from_node"), d.get("to_node")
+
+            conn_rows = []
+            if not connections_df.empty:
+                for c_id, c_from, c_to, c_type, c_seq in zip(
+                    connections_df["id"],
+                    connections_df["from_section_id"],
+                    connections_df["to_section_id"],
+                    connections_df["connection_type"],
+                    connections_df["sequence"],
+                ):
+                    cid = str(c_id)
+                    if cid in draft["deleted_connections"]:
+                        continue
+                    f_id = str(c_from)
+                    t_id = str(c_to)
+                    fn, tn = _get_nodes_for_conn(cid, f_id, t_id)
                     conn_rows.append({
                         "id": cid,
-                        "from_section_id": sec_id,
-                        "to_section_id": pid,
-                        "connection_type": "subassembly",
+                        "from_section_id": f_id,
+                        "to_section_id": t_id,
+                        "connection_type": str(c_type),
+                        "sequence": int(c_seq),
+                        "from_node": fn,
+                        "to_node": tn,
+                    })
+            else:
+                for sec_id, row in records.items():
+                    pid = normalized_parent_id(row.get("parent_id"))
+                    if pid and pid in records:
+                        cid = f"init_{sec_id}_{pid}"
+                        fn, tn = _get_nodes_for_conn(cid, sec_id, pid)
+                        conn_rows.append({
+                            "id": cid,
+                            "from_section_id": sec_id,
+                            "to_section_id": pid,
+                            "connection_type": "subassembly",
+                            "sequence": 10,
+                            "from_node": fn,
+                            "to_node": tn,
+                        })
+                main_sec_ids = [
+                    str(r_id)
+                    for r_id, r_type, r_parent in zip(
+                        visible_sections["id"],
+                        visible_sections["section_type"],
+                        visible_sections["parent_id"],
+                    )
+                    if r_type in {"Assembly", "Main spine"} and not normalized_parent_id(r_parent)
+                ] if not visible_sections.empty else []
+                for left_id, right_id in zip(main_sec_ids, main_sec_ids[1:]):
+                    cid = f"init_{left_id}_{right_id}"
+                    fn, tn = _get_nodes_for_conn(cid, left_id, right_id)
+                    conn_rows.append({
+                        "id": cid,
+                        "from_section_id": left_id,
+                        "to_section_id": right_id,
+                        "connection_type": "series",
                         "sequence": 10,
                         "from_node": fn,
                         "to_node": tn,
                     })
-            main_sec_ids = [
-                str(r_id)
-                for r_id, r_type, r_parent in zip(
-                    visible_sections["id"],
-                    visible_sections["section_type"],
-                    visible_sections["parent_id"],
-                )
-                if r_type in {"Assembly", "Main spine"} and not normalized_parent_id(r_parent)
-            ] if not visible_sections.empty else []
-            for left_id, right_id in zip(main_sec_ids, main_sec_ids[1:]):
-                cid = f"init_{left_id}_{right_id}"
-                fn, tn = _get_nodes_for_conn(cid, left_id, right_id)
+            for idx, dc in enumerate(draft["connections"]):
+                cid = f"draft_{idx}"
+                f_id = dc["from_section_id"]
+                t_id = dc["to_section_id"]
+                fn = dc.get("from_node")
+                tn = dc.get("to_node")
+                if not fn or not tn:
+                    dfn, dtn = _get_nodes_for_conn(cid, f_id, t_id)
+                    fn = fn or dfn
+                    tn = tn or dtn
                 conn_rows.append({
                     "id": cid,
-                    "from_section_id": left_id,
-                    "to_section_id": right_id,
-                    "connection_type": "series",
-                    "sequence": 10,
+                    "from_section_id": f_id,
+                    "to_section_id": t_id,
+                    "connection_type": dc["connection_type"],
+                    "sequence": dc.get("sequence", 10),
                     "from_node": fn,
                     "to_node": tn,
                 })
-        for idx, dc in enumerate(draft["connections"]):
-            cid = f"draft_{idx}"
-            f_id = dc["from_section_id"]
-            t_id = dc["to_section_id"]
-            fn = dc.get("from_node")
-            tn = dc.get("to_node")
-            if not fn or not tn:
-                dfn, dtn = _get_nodes_for_conn(cid, f_id, t_id)
-                fn = fn or dfn
-                tn = tn or dtn
-            conn_rows.append({
-                "id": cid,
-                "from_section_id": f_id,
-                "to_section_id": t_id,
-                "connection_type": dc["connection_type"],
-                "sequence": dc.get("sequence", 10),
-                "from_node": fn,
-                "to_node": tn,
-            })
 
-        # Render Interactive Fishbone Canvas Builder
-        @st.dialog("Delete Fishbone section?", dismissible=False)
-        def confirm_interactive_section_delete() -> None:
-            interactive_delete_key = f"pending_interactive_delete_section_{project_id}"
-            pending_sec_id = str(st.session_state.get(interactive_delete_key, ""))
-            if not pending_sec_id:
-                return
+            # Render Interactive Fishbone Canvas Builder
+            @st.dialog("Delete Fishbone section?", dismissible=False)
+            def confirm_interactive_section_delete() -> None:
+                interactive_delete_key = f"pending_interactive_delete_section_{project_id}"
+                pending_sec_id = str(st.session_state.get(interactive_delete_key, ""))
+                if not pending_sec_id:
+                    return
 
-            sec_info = visible_sections.loc[visible_sections["id"].astype(str) == pending_sec_id]
-            sec_name = str(sec_info.iloc[0]["name"]) if not sec_info.empty else "Section"
-            sec_type = str(sec_info.iloc[0]["section_type"]) if not sec_info.empty else ""
+                sec_info = visible_sections.loc[visible_sections["id"].astype(str) == pending_sec_id]
+                sec_name = str(sec_info.iloc[0]["name"]) if not sec_info.empty else "Section"
+                sec_type = str(sec_info.iloc[0]["section_type"]) if not sec_info.empty else ""
 
-            try:
-                impact = assembly_section_delete_impact(project_id, [pending_sec_id])
-            except ValueError as exc:
-                st.error(str(exc))
-                if st.button("Close", key=f"close_err_delete_{pending_sec_id}"):
-                    st.session_state.pop(interactive_delete_key, None)
-                    st.rerun()
-                return
-
-            st.markdown(f"#### Are you sure you want to delete **{sec_name}**?")
-            child_count = impact.get("descendant_section_count", 0)
-            if sec_type or child_count:
-                child_note = (
-                    f" · Will also delete **{child_count}** child section(s): {', '.join(impact['section_names'][1:])}"
-                    if child_count else ""
-                )
-                st.caption(f"Type: **{sec_type}**{child_note}")
-
-            st.markdown("##### Downstream Processes & Content Affected")
-            m1, m2 = st.columns(2)
-            with m1:
-                st.markdown(f"- 📦 **{impact['fishbone_use_count']}** placed part assignment(s)")
-                st.markdown(f"- 🔗 **{impact.get('connection_count', 0)}** flow connection line(s)")
-                st.markdown(f"- ⏱️ **{impact['yamazumi_area_count']}** Yamazumi area(s)")
-            with m2:
-                st.markdown(f"- 📋 **{impact['process_link_count']}** Process at a Glance requirement(s)")
-                st.markdown(f"- ⚙️ **{impact['assembly_reference_count']}** Assembly reference(s)")
-                st.markdown(f"- 🗂️ **{impact['category_reference_count']}** Assembly category reference(s)")
-
-            if impact["pits_bom_approved_occurrence_count"]:
-                st.error(
-                    f"⚠️ **{impact['pits_bom_approved_occurrence_count']}** approved PITS BOM occurrence(s) must be detached in Import/Export Projects before this section can be deleted."
-                )
-
-            replacement_sections = visible_sections.loc[
-                ~visible_sections["id"].astype(str).isin(impact["section_ids"])
-            ].copy()
-            has_replacements = not replacement_sections.empty
-            replacement_options = replacement_sections["id"].astype(str).tolist()
-            replacement_labels = {
-                str(rid): str(rname)
-                for rid, rname in zip(
-                    replacement_sections["id"],
-                    replacement_sections["name"],
-                )
-            }
-
-            st.divider()
-            st.markdown("##### Content Resolution")
-
-            options = []
-            if has_replacements:
-                options.append("rehome")
-            options.append("delete_all")
-
-            format_labels = {
-                "rehome": "Re-home content to another section (preserves parts & merges Yamazumi work)",
-                "delete_all": "Delete it all and its downstream content (unassigns parts, deletes areas & connections)",
-            }
-
-            mode = st.radio(
-                "Select action:",
-                options=options,
-                format_func=lambda x: format_labels.get(x, x),
-                index=0,
-                key=f"radio_interactive_delete_mode_{pending_sec_id}",
-                label_visibility="collapsed",
-            )
-
-            target_section_id = None
-            target_is_valid = True
-
-            if mode == "rehome":
-                st.info(
-                    "Parts assigned to this section will be moved to the chosen destination section. "
-                    "Flow connection lines will be re-routed, and Yamazumi work elements/pitches will be merged into the destination area."
-                )
-                target_section_id = st.selectbox(
-                    "Choose destination Fishbone section:",
-                    options=replacement_options,
-                    index=0 if replacement_options else None,
-                    format_func=lambda v: replacement_labels.get(v, v),
-                    key=f"select_interactive_target_sec_{pending_sec_id}",
-                )
-                if target_section_id:
-                    try:
-                        validation = assembly_section_delete_target_validation(
-                            project_id, [pending_sec_id], str(target_section_id), scenario_id
-                        )
-                        target_is_valid = bool(validation.get("valid", True))
-                        if not target_is_valid:
-                            st.error(str(validation.get("message", "Invalid destination section.")))
-                    except ValueError as val_err:
-                        target_is_valid = False
-                        st.error(str(val_err))
-                else:
-                    target_is_valid = False
-            else:
-                st.warning(
-                    "⚠️ **Delete all & downstream content:** Placed parts in this section will be unassigned and returned to the parts palette. "
-                    "All flow connections, Yamazumi areas, pitches, work elements, and process links for this section will be permanently deleted."
-                )
-
-            actions = st.container(horizontal=True)
-            if actions.button("Cancel", key=f"cancel_interactive_sec_del_{pending_sec_id}"):
-                st.session_state.pop(interactive_delete_key, None)
-                st.rerun()
-
-            can_confirm = (
-                not impact["pits_bom_approved_occurrence_count"]
-                and (target_is_valid if mode == "rehome" else True)
-            )
-            confirm_btn_text = "Delete & Re-home" if mode == "rehome" else "Delete All Content"
-            if actions.button(
-                confirm_btn_text,
-                type="primary",
-                icon=":material/delete:",
-                disabled=not can_confirm,
-                key=f"destructive_confirm_interactive_sec_delete_{pending_sec_id}",
-            ):
                 try:
-                    # Clean up staged canvas draft for deleted sections
-                    affected_set = set(impact["section_ids"])
-                    draft_obj = st.session_state.get(canvas_draft_key, {})
-                    if draft_obj:
-                        draft_obj["positions"] = {
-                            k: v for k, v in draft_obj.get("positions", {}).items()
-                            if k not in affected_set
-                        }
-                        draft_obj["connections"] = [
-                            c for c in draft_obj.get("connections", [])
-                            if c.get("from_section_id") not in affected_set
-                            and c.get("to_section_id") not in affected_set
-                        ]
-                        draft_obj["new_assignments"] = [
-                            a for a in draft_obj.get("new_assignments", [])
-                            if a.get("section_id") not in affected_set
-                        ]
-
-                    current_plan_snapshot = fishbone_plan_snapshot(project_id)
-                    deleted = delete_assembly_sections(
-                        project_id=project_id,
-                        section_ids=[pending_sec_id],
-                        target_section_id=str(target_section_id) if mode == "rehome" else None,
-                        active_scenario_id=scenario_id,
-                        rehome_parts=(mode == "rehome"),
-                        cascade_delete_content=(mode == "delete_all"),
-                    )
-
-                    st.session_state[framework_undo_key] = current_plan_snapshot
-                    record_audit_event(
-                        project_id,
-                        "Fishbone framework",
-                        "Delete section",
-                        deleted["affected_section_count"],
-                        st.session_state.get("current_editor", ""),
-                        {
-                            "deleted_section": sec_name,
-                            "affected_sections": deleted["section_names"],
-                            "resolution_mode": mode,
-                            "target_section": replacement_labels.get(str(target_section_id), "") if target_section_id else None,
-                            "impact": impact,
-                        },
-                    )
-
-                    st.session_state.pop(interactive_delete_key, None)
-                    request_table_editor_reset(pool_editor_key)
-                    request_table_editor_reset(assignment_editor_key)
-                    request_table_editor_reset(framework_editor_key)
-
-                    dest_label = replacement_labels.get(str(target_section_id), "")
-                    toast_msg = (
-                        f"Deleted '{sec_name}' and re-homed content to {dest_label}"
-                        if mode == "rehome"
-                        else f"Deleted '{sec_name}' and unassigned all content"
-                    )
-                    st.toast(toast_msg, icon=":material/delete:")
-                    st.rerun()
+                    impact = assembly_section_delete_impact(project_id, [pending_sec_id])
                 except ValueError as exc:
                     st.error(str(exc))
+                    if st.button("Close", key=f"close_err_delete_{pending_sec_id}"):
+                        st.session_state.pop(interactive_delete_key, None)
+                        st.rerun()
+                    return
 
-        @st.dialog("Clear Interactive Fishbone?", width="large", dismissible=False)
-        def confirm_interactive_fishbone_clear() -> None:
-            clear_dialog_key = f"pending_interactive_clear_fishbone_{project_id}"
-            if not st.session_state.get(clear_dialog_key):
-                return
+                st.markdown(f"#### Are you sure you want to delete **{sec_name}**?")
+                child_count = impact.get("descendant_section_count", 0)
+                if sec_type or child_count:
+                    child_note = (
+                        f" · Will also delete **{child_count}** child section(s): {', '.join(impact['section_names'][1:])}"
+                        if child_count else ""
+                    )
+                    st.caption(f"Type: **{sec_type}**{child_note}")
 
-            all_sec_ids = visible_sections["id"].astype(str).tolist() if not visible_sections.empty else []
-            sec_labels = {
-                str(r["id"]): str(r["name"])
-                for _, r in visible_sections.iterrows()
-            } if not visible_sections.empty else {}
+                st.markdown("##### Downstream Processes & Content Affected")
+                m1, m2 = st.columns(2)
+                with m1:
+                    st.markdown(f"- 📦 **{impact['fishbone_use_count']}** placed part assignment(s)")
+                    st.markdown(f"- 🔗 **{impact.get('connection_count', 0)}** flow connection line(s)")
+                    st.markdown(f"- ⏱️ **{impact['yamazumi_area_count']}** Yamazumi area(s)")
+                with m2:
+                    st.markdown(f"- 📋 **{impact['process_link_count']}** Process at a Glance requirement(s)")
+                    st.markdown(f"- ⚙️ **{impact['assembly_reference_count']}** Assembly reference(s)")
+                    st.markdown(f"- 🗂️ **{impact['category_reference_count']}** Assembly category reference(s)")
 
-            placed_sec_ids: set[str] = set()
-            if not assignments.empty:
-                placed_sec_ids.update(
-                    str(a["section_id"])
-                    for _, a in assignments.iterrows()
-                    if str(a["id"]) not in draft.get("deleted_assignments", set())
+                if impact["pits_bom_approved_occurrence_count"]:
+                    st.error(
+                        f"⚠️ **{impact['pits_bom_approved_occurrence_count']}** approved PITS BOM occurrence(s) must be detached in Import/Export Projects before this section can be deleted."
+                    )
+
+                replacement_sections = visible_sections.loc[
+                    ~visible_sections["id"].astype(str).isin(impact["section_ids"])
+                ].copy()
+                has_replacements = not replacement_sections.empty
+                replacement_options = replacement_sections["id"].astype(str).tolist()
+                replacement_labels = {
+                    str(rid): str(rname)
+                    for rid, rname in zip(
+                        replacement_sections["id"],
+                        replacement_sections["name"],
+                    )
+                }
+
+                st.divider()
+                st.markdown("##### Content Resolution")
+
+                options = []
+                if has_replacements:
+                    options.append("rehome")
+                options.append("delete_all")
+
+                format_labels = {
+                    "rehome": "Re-home content to another section (preserves parts & merges Yamazumi work)",
+                    "delete_all": "Delete it all and its downstream content (unassigns parts, deletes areas & connections)",
+                }
+
+                mode = st.radio(
+                    "Select action:",
+                    options=options,
+                    format_func=lambda x: format_labels.get(x, x),
+                    index=0,
+                    key=f"radio_interactive_delete_mode_{pending_sec_id}",
+                    label_visibility="collapsed",
                 )
-            for na in draft.get("new_assignments", []):
-                if na.get("section_id"):
-                    placed_sec_ids.add(str(na["section_id"]))
 
-            empty_sec_ids = [sid for sid in all_sec_ids if sid not in placed_sec_ids]
-            total_placed_parts = len(visual_parts)
-            total_sections = len(all_sec_ids)
-            total_connections = len(conn_rows)
+                target_section_id = None
+                target_is_valid = True
 
-            overall_impact = None
-            if all_sec_ids:
-                try:
-                    overall_impact = assembly_section_delete_impact(project_id, all_sec_ids)
-                except ValueError:
-                    overall_impact = None
-
-            st.markdown("#### Choose how to clear the Interactive Fishbone")
-            st.caption(
-                "Catalog parts are never deleted from the Parts Catalog — clearing parts only unassigns their Fishbone placements so they return to the Parts Palette."
-            )
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"- 📦 **{total_placed_parts}** placed part assignment(s) on canvas")
-                st.markdown(f"- 🟦 **{total_sections}** Fishbone section(s) ({len(empty_sec_ids)} empty)")
-                st.markdown(f"- 🔗 **{total_connections}** flow connection line(s)")
-            with col2:
-                yam_cnt = int(overall_impact.get("yamazumi_area_count", 0)) if overall_impact else 0
-                proc_cnt = int(overall_impact.get("process_link_count", 0)) if overall_impact else 0
-                asm_cnt = int(overall_impact.get("assembly_reference_count", 0)) if overall_impact else 0
-                st.markdown(f"- 📊 **{yam_cnt}** linked Yamazumi area(s)")
-                st.markdown(f"- 📋 **{proc_cnt}** Process at a Glance part requirement(s)")
-                st.markdown(f"- ⚙️ **{asm_cnt}** Assembly reference(s)")
-
-            st.divider()
-            clear_options = ["clear_parts", "delete_sections", "both"]
-            clear_labels = {
-                "clear_parts": "Clear parts back to Parts Palette only (keeps all sections, connections & Yamazumi areas)",
-                "delete_sections": "Delete Fishbone sections (choose empty sections or specific/all sections)",
-                "both": "Do both — Clear all parts back to Parts Palette and delete all Fishbone sections",
-            }
-            chosen_action = st.radio(
-                "Clear action",
-                options=clear_options,
-                format_func=lambda x: clear_labels.get(x, x),
-                index=0,
-                key=f"radio_clear_fishbone_mode_{project_id}",
-            )
-
-            selected_sec_ids: list[str] = []
-            effective_mode = chosen_action
-            if chosen_action == "clear_parts":
-                st.warning(
-                    f"⚠️ **Downstream effect:** All **{total_placed_parts}** placed part assignment(s) (including unsaved canvas placements) will be unassigned and returned to the **Parts Palette**. "
-                    "Any Process at a Glance part consumption links or approved PITS BOM occurrences tied to those placements will be detached (`Needs review`). "
-                    "All Fishbone sections, flow connections, and Yamazumi areas will remain intact."
-                )
-            elif chosen_action == "delete_sections":
-                sec_scope = st.radio(
-                    "Which sections should be deleted?",
-                    options=["empty_only", "selected_sections"],
-                    format_func=lambda v: (
-                        f"Delete empty sections only ({len(empty_sec_ids)} section(s) with no placed parts)"
-                        if v == "empty_only"
-                        else f"Delete selected / all sections (returns any parts in deleted sections to Parts Palette)"
-                    ),
-                    index=0 if empty_sec_ids else 1,
-                    key=f"radio_clear_fishbone_sec_scope_{project_id}",
-                )
-                if sec_scope == "empty_only":
-                    effective_mode = "delete_empty_sections"
-                    selected_sec_ids = empty_sec_ids
-                    if empty_sec_ids:
-                        empty_names = ", ".join(sec_labels.get(sid, sid) for sid in empty_sec_ids[:8])
-                        if len(empty_sec_ids) > 8:
-                            empty_names += f", +{len(empty_sec_ids) - 8} more"
-                        st.warning(
-                            f"⚠️ **Downstream effect:** Deletes **{len(empty_sec_ids)}** empty Fishbone section(s) ({empty_names}), "
-                            "along with their flow connections and linked Yamazumi areas. Sections that currently have placed parts will be preserved."
-                        )
+                if mode == "rehome":
+                    st.info(
+                        "Parts assigned to this section will be moved to the chosen destination section. "
+                        "Flow connection lines will be re-routed, and Yamazumi work elements/pitches will be merged into the destination area."
+                    )
+                    target_section_id = st.selectbox(
+                        "Choose destination Fishbone section:",
+                        options=replacement_options,
+                        index=0 if replacement_options else None,
+                        format_func=lambda v: replacement_labels.get(v, v),
+                        key=f"select_interactive_target_sec_{pending_sec_id}",
+                    )
+                    if target_section_id:
+                        try:
+                            validation = assembly_section_delete_target_validation(
+                                project_id, [pending_sec_id], str(target_section_id), scenario_id
+                            )
+                            target_is_valid = bool(validation.get("valid", True))
+                            if not target_is_valid:
+                                st.error(str(validation.get("message", "Invalid destination section.")))
+                        except ValueError as val_err:
+                            target_is_valid = False
+                            st.error(str(val_err))
                     else:
-                        st.info("There are currently no empty Fishbone sections on the canvas.")
+                        target_is_valid = False
                 else:
-                    effective_mode = "delete_sections"
-                    selected_sec_ids = st.multiselect(
-                        "Sections to delete",
-                        options=all_sec_ids,
-                        default=all_sec_ids,
-                        format_func=lambda sid: sec_labels.get(sid, sid),
-                        key=f"multiselect_clear_fishbone_secs_{project_id}",
-                    )
                     st.warning(
-                        f"⚠️ **Downstream effect:** Permanently deletes **{len(selected_sec_ids)}** selected Fishbone section(s) (and any child subassembly sections), "
-                        "their flow connections, linked Yamazumi areas, pitches, work elements, and Process at a Glance section links. "
-                        "Any parts placed in those sections will be unassigned and returned to the **Parts Palette**."
+                        "⚠️ **Delete all & downstream content:** Placed parts in this section will be unassigned and returned to the parts palette. "
+                        "All flow connections, Yamazumi areas, pitches, work elements, and process links for this section will be permanently deleted."
                     )
-            else:
-                effective_mode = "both"
-                st.warning(
-                    f"⚠️ **Downstream effect:** Resets the entire Interactive Fishbone canvas. "
-                    f"All **{total_placed_parts}** placed part assignment(s) will be unassigned and returned to the **Parts Palette**, "
-                    f"and all **{total_sections}** Fishbone section(s), **{total_connections}** flow connection(s), "
-                    f"and **{int(overall_impact.get('yamazumi_area_count', 0)) if overall_impact else 0}** linked Yamazumi area(s) (with their pitches, work elements, and process links) will be permanently deleted."
+
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_interactive_sec_del_{pending_sec_id}"):
+                    st.session_state.pop(interactive_delete_key, None)
+                    st.rerun()
+
+                can_confirm = (
+                    not impact["pits_bom_approved_occurrence_count"]
+                    and (target_is_valid if mode == "rehome" else True)
                 )
-
-            can_submit = True
-            if chosen_action == "clear_parts" and total_placed_parts == 0 and not draft.get("new_assignments"):
-                can_submit = False
-            elif chosen_action == "delete_sections" and not selected_sec_ids:
-                can_submit = False
-            elif chosen_action == "both" and total_placed_parts == 0 and total_sections == 0:
-                can_submit = False
-
-            btn_label_map = {
-                "clear_parts": "Delete Part Placements (Return to Palette)",
-                "delete_sections": "Delete Selected Sections",
-                "both": "Delete All Parts & Sections",
-            }
-            actions = st.container(horizontal=True)
-            if actions.button("Cancel", key=f"cancel_clear_fishbone_{project_id}"):
-                st.session_state.pop(clear_dialog_key, None)
-                st.rerun()
-            if actions.button(
-                btn_label_map.get(chosen_action, "Delete"),
-                type="primary",
-                icon=":material/delete:",
-                disabled=not can_submit,
-                key=f"destructive_confirm_clear_fishbone_{project_id}",
-            ):
-                try:
-                    st.session_state[framework_undo_key] = current_plan_snapshot
-                    st.session_state[assignment_undo_key] = current_assignment_undo
-                    result = clear_interactive_fishbone(
-                        project_id=project_id,
-                        mode=effective_mode,
-                        section_ids=selected_sec_ids if effective_mode == "delete_sections" else None,
-                        editor_name=st.session_state.get("current_editor", ""),
-                    )
-                    draft_obj = st.session_state.get(canvas_draft_key, {})
-                    if effective_mode == "clear_parts":
+                confirm_btn_text = "Delete & Re-home" if mode == "rehome" else "Delete All Content"
+                if actions.button(
+                    confirm_btn_text,
+                    type="primary",
+                    icon=":material/delete:",
+                    disabled=not can_confirm,
+                    key=f"destructive_confirm_interactive_sec_delete_{pending_sec_id}",
+                ):
+                    try:
+                        # Clean up staged canvas draft for deleted sections
+                        affected_set = set(impact["section_ids"])
+                        draft_obj = st.session_state.get(canvas_draft_key, {})
                         if draft_obj:
-                            draft_obj["new_assignments"] = []
-                            draft_obj["updated_assignments"] = []
-                            draft_obj["deleted_assignments"] = set()
-                    elif effective_mode == "both":
-                        st.session_state.pop(canvas_draft_key, None)
-                    else:
-                        deleted_set = set(result.get("deleted_section_ids", []))
-                        if draft_obj and deleted_set:
                             draft_obj["positions"] = {
                                 k: v for k, v in draft_obj.get("positions", {}).items()
-                                if k not in deleted_set
+                                if k not in affected_set
                             }
                             draft_obj["connections"] = [
                                 c for c in draft_obj.get("connections", [])
-                                if c.get("from_section_id") not in deleted_set
-                                and c.get("to_section_id") not in deleted_set
+                                if c.get("from_section_id") not in affected_set
+                                and c.get("to_section_id") not in affected_set
                             ]
                             draft_obj["new_assignments"] = [
                                 a for a in draft_obj.get("new_assignments", [])
-                                if a.get("section_id") not in deleted_set
-                            ]
-                            draft_obj["updated_assignments"] = [
-                                a for a in draft_obj.get("updated_assignments", [])
-                                if a.get("section_id") not in deleted_set
+                                if a.get("section_id") not in affected_set
                             ]
 
+                        current_plan_snapshot = fishbone_plan_snapshot(project_id)
+                        deleted = delete_assembly_sections(
+                            project_id=project_id,
+                            section_ids=[pending_sec_id],
+                            target_section_id=str(target_section_id) if mode == "rehome" else None,
+                            active_scenario_id=scenario_id,
+                            rehome_parts=(mode == "rehome"),
+                            cascade_delete_content=(mode == "delete_all"),
+                        )
+
+                        st.session_state[framework_undo_key] = current_plan_snapshot
+                        record_audit_event(
+                            project_id,
+                            "Fishbone framework",
+                            "Delete section",
+                            deleted["affected_section_count"],
+                            st.session_state.get("current_editor", ""),
+                            {
+                                "deleted_section": sec_name,
+                                "affected_sections": deleted["section_names"],
+                                "resolution_mode": mode,
+                                "target_section": replacement_labels.get(str(target_section_id), "") if target_section_id else None,
+                                "impact": impact,
+                            },
+                        )
+
+                        st.session_state.pop(interactive_delete_key, None)
+                        request_table_editor_reset(pool_editor_key)
+                        request_table_editor_reset(assignment_editor_key)
+                        request_table_editor_reset(framework_editor_key)
+
+                        dest_label = replacement_labels.get(str(target_section_id), "")
+                        toast_msg = (
+                            f"Deleted '{sec_name}' and re-homed content to {dest_label}"
+                            if mode == "rehome"
+                            else f"Deleted '{sec_name}' and unassigned all content"
+                        )
+                        st.toast(toast_msg, icon=":material/delete:")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+
+            @st.dialog("Clear Interactive Fishbone?", width="large", dismissible=False)
+            def confirm_interactive_fishbone_clear() -> None:
+                clear_dialog_key = f"pending_interactive_clear_fishbone_{project_id}"
+                if not st.session_state.get(clear_dialog_key):
+                    return
+
+                all_sec_ids = visible_sections["id"].astype(str).tolist() if not visible_sections.empty else []
+                sec_labels = {
+                    str(r["id"]): str(r["name"])
+                    for _, r in visible_sections.iterrows()
+                } if not visible_sections.empty else {}
+
+                placed_sec_ids: set[str] = set()
+                if not assignments.empty:
+                    placed_sec_ids.update(
+                        str(a["section_id"])
+                        for _, a in assignments.iterrows()
+                        if str(a["id"]) not in draft.get("deleted_assignments", set())
+                    )
+                for na in draft.get("new_assignments", []):
+                    if na.get("section_id"):
+                        placed_sec_ids.add(str(na["section_id"]))
+
+                empty_sec_ids = [sid for sid in all_sec_ids if sid not in placed_sec_ids]
+                total_placed_parts = len(visual_parts)
+                total_sections = len(all_sec_ids)
+                total_connections = len(conn_rows)
+
+                overall_impact = None
+                if all_sec_ids:
+                    try:
+                        overall_impact = assembly_section_delete_impact(project_id, all_sec_ids)
+                    except ValueError:
+                        overall_impact = None
+
+                st.markdown("#### Choose how to clear the Interactive Fishbone")
+                st.caption(
+                    "Catalog parts are never deleted from the Parts Catalog — clearing parts only unassigns their Fishbone placements so they return to the Parts Palette."
+                )
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"- 📦 **{total_placed_parts}** placed part assignment(s) on canvas")
+                    st.markdown(f"- 🟦 **{total_sections}** Fishbone section(s) ({len(empty_sec_ids)} empty)")
+                    st.markdown(f"- 🔗 **{total_connections}** flow connection line(s)")
+                with col2:
+                    yam_cnt = int(overall_impact.get("yamazumi_area_count", 0)) if overall_impact else 0
+                    proc_cnt = int(overall_impact.get("process_link_count", 0)) if overall_impact else 0
+                    asm_cnt = int(overall_impact.get("assembly_reference_count", 0)) if overall_impact else 0
+                    st.markdown(f"- 📊 **{yam_cnt}** linked Yamazumi area(s)")
+                    st.markdown(f"- 📋 **{proc_cnt}** Process at a Glance part requirement(s)")
+                    st.markdown(f"- ⚙️ **{asm_cnt}** Assembly reference(s)")
+
+                st.divider()
+                clear_options = ["clear_parts", "delete_sections", "both"]
+                clear_labels = {
+                    "clear_parts": "Clear parts back to Parts Palette only (keeps all sections, connections & Yamazumi areas)",
+                    "delete_sections": "Delete Fishbone sections (choose empty sections or specific/all sections)",
+                    "both": "Do both — Clear all parts back to Parts Palette and delete all Fishbone sections",
+                }
+                chosen_action = st.radio(
+                    "Clear action",
+                    options=clear_options,
+                    format_func=lambda x: clear_labels.get(x, x),
+                    index=0,
+                    key=f"radio_clear_fishbone_mode_{project_id}",
+                )
+
+                selected_sec_ids: list[str] = []
+                effective_mode = chosen_action
+                if chosen_action == "clear_parts":
+                    st.warning(
+                        f"⚠️ **Downstream effect:** All **{total_placed_parts}** placed part assignment(s) (including unsaved canvas placements) will be unassigned and returned to the **Parts Palette**. "
+                        "Any Process at a Glance part consumption links or approved PITS BOM occurrences tied to those placements will be detached (`Needs review`). "
+                        "All Fishbone sections, flow connections, and Yamazumi areas will remain intact."
+                    )
+                elif chosen_action == "delete_sections":
+                    sec_scope = st.radio(
+                        "Which sections should be deleted?",
+                        options=["empty_only", "selected_sections"],
+                        format_func=lambda v: (
+                            f"Delete empty sections only ({len(empty_sec_ids)} section(s) with no placed parts)"
+                            if v == "empty_only"
+                            else f"Delete selected / all sections (returns any parts in deleted sections to Parts Palette)"
+                        ),
+                        index=0 if empty_sec_ids else 1,
+                        key=f"radio_clear_fishbone_sec_scope_{project_id}",
+                    )
+                    if sec_scope == "empty_only":
+                        effective_mode = "delete_empty_sections"
+                        selected_sec_ids = empty_sec_ids
+                        if empty_sec_ids:
+                            empty_names = ", ".join(sec_labels.get(sid, sid) for sid in empty_sec_ids[:8])
+                            if len(empty_sec_ids) > 8:
+                                empty_names += f", +{len(empty_sec_ids) - 8} more"
+                            st.warning(
+                                f"⚠️ **Downstream effect:** Deletes **{len(empty_sec_ids)}** empty Fishbone section(s) ({empty_names}), "
+                                "along with their flow connections and linked Yamazumi areas. Sections that currently have placed parts will be preserved."
+                            )
+                        else:
+                            st.info("There are currently no empty Fishbone sections on the canvas.")
+                    else:
+                        effective_mode = "delete_sections"
+                        selected_sec_ids = st.multiselect(
+                            "Sections to delete",
+                            options=all_sec_ids,
+                            default=all_sec_ids,
+                            format_func=lambda sid: sec_labels.get(sid, sid),
+                            key=f"multiselect_clear_fishbone_secs_{project_id}",
+                        )
+                        st.warning(
+                            f"⚠️ **Downstream effect:** Permanently deletes **{len(selected_sec_ids)}** selected Fishbone section(s) (and any child subassembly sections), "
+                            "their flow connections, linked Yamazumi areas, pitches, work elements, and Process at a Glance section links. "
+                            "Any parts placed in those sections will be unassigned and returned to the **Parts Palette**."
+                        )
+                else:
+                    effective_mode = "both"
+                    st.warning(
+                        f"⚠️ **Downstream effect:** Resets the entire Interactive Fishbone canvas. "
+                        f"All **{total_placed_parts}** placed part assignment(s) will be unassigned and returned to the **Parts Palette**, "
+                        f"and all **{total_sections}** Fishbone section(s), **{total_connections}** flow connection(s), "
+                        f"and **{int(overall_impact.get('yamazumi_area_count', 0)) if overall_impact else 0}** linked Yamazumi area(s) (with their pitches, work elements, and process links) will be permanently deleted."
+                    )
+
+                can_submit = True
+                if chosen_action == "clear_parts" and total_placed_parts == 0 and not draft.get("new_assignments"):
+                    can_submit = False
+                elif chosen_action == "delete_sections" and not selected_sec_ids:
+                    can_submit = False
+                elif chosen_action == "both" and total_placed_parts == 0 and total_sections == 0:
+                    can_submit = False
+
+                btn_label_map = {
+                    "clear_parts": "Delete Part Placements (Return to Palette)",
+                    "delete_sections": "Delete Selected Sections",
+                    "both": "Delete All Parts & Sections",
+                }
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_clear_fishbone_{project_id}"):
                     st.session_state.pop(clear_dialog_key, None)
+                    st.rerun()
+                if actions.button(
+                    btn_label_map.get(chosen_action, "Delete"),
+                    type="primary",
+                    icon=":material/delete:",
+                    disabled=not can_submit,
+                    key=f"destructive_confirm_clear_fishbone_{project_id}",
+                ):
+                    try:
+                        st.session_state[framework_undo_key] = current_plan_snapshot
+                        st.session_state[assignment_undo_key] = current_assignment_undo
+                        result = clear_interactive_fishbone(
+                            project_id=project_id,
+                            mode=effective_mode,
+                            section_ids=selected_sec_ids if effective_mode == "delete_sections" else None,
+                            editor_name=st.session_state.get("current_editor", ""),
+                        )
+                        draft_obj = st.session_state.get(canvas_draft_key, {})
+                        if effective_mode == "clear_parts":
+                            if draft_obj:
+                                draft_obj["new_assignments"] = []
+                                draft_obj["updated_assignments"] = []
+                                draft_obj["deleted_assignments"] = set()
+                        elif effective_mode == "both":
+                            st.session_state.pop(canvas_draft_key, None)
+                        else:
+                            deleted_set = set(result.get("deleted_section_ids", []))
+                            if draft_obj and deleted_set:
+                                draft_obj["positions"] = {
+                                    k: v for k, v in draft_obj.get("positions", {}).items()
+                                    if k not in deleted_set
+                                }
+                                draft_obj["connections"] = [
+                                    c for c in draft_obj.get("connections", [])
+                                    if c.get("from_section_id") not in deleted_set
+                                    and c.get("to_section_id") not in deleted_set
+                                ]
+                                draft_obj["new_assignments"] = [
+                                    a for a in draft_obj.get("new_assignments", [])
+                                    if a.get("section_id") not in deleted_set
+                                ]
+                                draft_obj["updated_assignments"] = [
+                                    a for a in draft_obj.get("updated_assignments", [])
+                                    if a.get("section_id") not in deleted_set
+                                ]
+
+                        st.session_state.pop(clear_dialog_key, None)
+                        request_table_editor_reset(pool_editor_key)
+                        request_table_editor_reset(assignment_editor_key)
+                        request_table_editor_reset(framework_editor_key)
+                        st.toast(
+                            f"Cleared {result['parts_cleared']} part placement(s) and deleted {result['sections_deleted']} section(s)",
+                            icon=":material/delete:",
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+
+            canvas_output = interactive_fishbone(
+                sections=node_rows,
+                connections=conn_rows,
+                parts=visual_parts,
+                palette_items=palette_items,
+                all_sections=all_sections_list,
+                key=canvas_key,
+            )
+            if canvas_output:
+                if p := getattr(canvas_output, "delete_section_request", None):
+                    if sid := p.get("section_id"):
+                        st.session_state[f"pending_interactive_delete_section_{project_id}"] = str(sid)
+                        try:
+                            delattr(canvas_output, "delete_section_request")
+                        except (AttributeError, TypeError):
+                            pass
+                        st.rerun()
+                if getattr(canvas_output, "clear_fishbone_request", None):
+                    st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_output, "clear_fishbone_request")
+                    except (AttributeError, TypeError):
+                        pass
+                    st.rerun()
+
+            interactive_delete_key = f"pending_interactive_delete_section_{project_id}"
+            if st.session_state.get(interactive_delete_key):
+                confirm_interactive_section_delete()
+
+            interactive_clear_key = f"pending_interactive_clear_fishbone_{project_id}"
+            if st.session_state.get(interactive_clear_key):
+                confirm_interactive_fishbone_clear()
+
+            has_canvas_draft = bool(
+                draft["positions"]
+                or draft["connections"]
+                or draft["deleted_connections"]
+                or draft.get("connection_nodes")
+                or draft["new_assignments"]
+                or draft.get("updated_assignments")
+                or draft["deleted_assignments"]
+            )
+            if has_canvas_draft:
+                total_actions = (
+                    len(draft["positions"])
+                    + len(draft["connections"])
+                    + len(draft["deleted_connections"])
+                    + len(draft.get("connection_nodes", {}))
+                    + len(draft["new_assignments"])
+                    + len(draft.get("updated_assignments", []))
+                    + len(draft["deleted_assignments"])
+                )
+                st.info(
+                    f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh below to commit."
+                )
+
+            canvas_actions = editable_table_footer(
+                editor_key=f"fishbone_canvas_footer_{project_id}",
+                key_prefix=f"fishbone_canvas_{project_id}",
+                additional_unsaved_changes=has_canvas_draft,
+            )
+            if canvas_actions.undo:
+                if has_canvas_draft:
+                    st.session_state.pop(canvas_draft_key, None)
+                    st.toast("Discarded canvas draft changes", icon=":material/undo:")
+                    st.rerun()
+                elif framework_undo_key in st.session_state:
+                    restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
+                    st.toast("Restored Fishbone framework to previous saved state", icon=":material/undo:")
+                    st.rerun()
+
+            if canvas_actions.save_and_refresh:
+                try:
+                    st.session_state[framework_undo_key] = current_plan_snapshot
+                    save_fishbone_canvas_draft(
+                        project_id=project_id,
+                        positions=draft["positions"] if draft["positions"] else None,
+                        connections=draft["connections"] if draft["connections"] else None,
+                        deleted_connection_ids=list(draft["deleted_connections"]) if draft["deleted_connections"] else None,
+                        new_assignments=draft["new_assignments"] if draft["new_assignments"] else None,
+                        updated_assignments=draft.get("updated_assignments") if draft.get("updated_assignments") else None,
+                        deleted_assignment_ids=list(draft["deleted_assignments"]) if draft["deleted_assignments"] else None,
+                        editor_name=st.session_state.get("current_editor", ""),
+                    )
+                    if draft.get("connection_nodes"):
+                        persistent_conn_nodes.update(draft["connection_nodes"])
+                    st.session_state.pop(canvas_draft_key, None)
                     request_table_editor_reset(pool_editor_key)
                     request_table_editor_reset(assignment_editor_key)
                     request_table_editor_reset(framework_editor_key)
+                    canvas_save_parts: list[str] = []
+                    if draft.get("positions"):
+                        canvas_save_parts.append(f"{len(draft['positions'])} node position(s)")
+                    if draft.get("connections") or draft.get("deleted_connections"):
+                        conn_changes = len(draft.get("connections") or []) + len(draft.get("deleted_connections") or [])
+                        canvas_save_parts.append(f"{conn_changes} connection change(s)")
+                    part_changes = (
+                        len(draft.get("new_assignments") or [])
+                        + len(draft.get("updated_assignments") or {})
+                        + len(draft.get("deleted_assignments") or [])
+                    )
+                    if part_changes:
+                        canvas_save_parts.append(f"{part_changes} part placement change(s)")
                     st.toast(
-                        f"Cleared {result['parts_cleared']} part placement(s) and deleted {result['sections_deleted']} section(s)",
-                        icon=":material/delete:",
+                        "Saved Fishbone canvas changes"
+                        + (f" ({', '.join(canvas_save_parts)})" if canvas_save_parts else ""),
+                        icon=":material/check_circle:",
                     )
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
 
-        canvas_output = interactive_fishbone(
-            sections=node_rows,
-            connections=conn_rows,
-            parts=visual_parts,
-            palette_items=palette_items,
-            all_sections=all_sections_list,
-            key=canvas_key,
-        )
-        if canvas_output:
-            if p := getattr(canvas_output, "delete_section_request", None):
-                if sid := p.get("section_id"):
-                    st.session_state[f"pending_interactive_delete_section_{project_id}"] = str(sid)
-                    try:
-                        delattr(canvas_output, "delete_section_request")
-                    except (AttributeError, TypeError):
-                        pass
-                    st.rerun()
-            if getattr(canvas_output, "clear_fishbone_request", None):
-                st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
-                try:
-                    delattr(canvas_output, "clear_fishbone_request")
-                except (AttributeError, TypeError):
-                    pass
-                st.rerun()
-
-        interactive_delete_key = f"pending_interactive_delete_section_{project_id}"
-        if st.session_state.get(interactive_delete_key):
-            confirm_interactive_section_delete()
-
-        interactive_clear_key = f"pending_interactive_clear_fishbone_{project_id}"
-        if st.session_state.get(interactive_clear_key):
-            confirm_interactive_fishbone_clear()
-
-        has_canvas_draft = bool(
-            draft["positions"]
-            or draft["connections"]
-            or draft["deleted_connections"]
-            or draft.get("connection_nodes")
-            or draft["new_assignments"]
-            or draft.get("updated_assignments")
-            or draft["deleted_assignments"]
-        )
-        if has_canvas_draft:
-            total_actions = (
-                len(draft["positions"])
-                + len(draft["connections"])
-                + len(draft["deleted_connections"])
-                + len(draft.get("connection_nodes", {}))
-                + len(draft["new_assignments"])
-                + len(draft.get("updated_assignments", []))
-                + len(draft["deleted_assignments"])
-            )
-            st.info(
-                f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh below to commit."
-            )
-
-        canvas_actions = editable_table_footer(
-            editor_key=f"fishbone_canvas_footer_{project_id}",
-            key_prefix=f"fishbone_canvas_{project_id}",
-            additional_unsaved_changes=has_canvas_draft,
-        )
-        if canvas_actions.undo:
-            if has_canvas_draft:
-                st.session_state.pop(canvas_draft_key, None)
-                st.toast("Discarded canvas draft changes", icon=":material/undo:")
-                st.rerun()
-            elif framework_undo_key in st.session_state:
-                restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
-                st.toast("Restored Fishbone framework to previous saved state", icon=":material/undo:")
-                st.rerun()
-
-        if canvas_actions.save_and_refresh:
-            try:
-                st.session_state[framework_undo_key] = current_plan_snapshot
-                save_fishbone_canvas_draft(
-                    project_id=project_id,
-                    positions=draft["positions"] if draft["positions"] else None,
-                    connections=draft["connections"] if draft["connections"] else None,
-                    deleted_connection_ids=list(draft["deleted_connections"]) if draft["deleted_connections"] else None,
-                    new_assignments=draft["new_assignments"] if draft["new_assignments"] else None,
-                    updated_assignments=draft.get("updated_assignments") if draft.get("updated_assignments") else None,
-                    deleted_assignment_ids=list(draft["deleted_assignments"]) if draft["deleted_assignments"] else None,
-                    editor_name=st.session_state.get("current_editor", ""),
+            # Stacked Layout: Collapsible Table Editors
+            st.divider()
+            with st.expander("Framework Sections Table", expanded=False):
+                st.caption(
+                    "Framework sections establish product assembly order and subassembly feeding relationships."
                 )
-                if draft.get("connection_nodes"):
-                    persistent_conn_nodes.update(draft["connection_nodes"])
-                st.session_state.pop(canvas_draft_key, None)
-                request_table_editor_reset(pool_editor_key)
-                request_table_editor_reset(assignment_editor_key)
-                request_table_editor_reset(framework_editor_key)
-                canvas_save_parts: list[str] = []
-                if draft.get("positions"):
-                    canvas_save_parts.append(f"{len(draft['positions'])} node position(s)")
-                if draft.get("connections") or draft.get("deleted_connections"):
-                    conn_changes = len(draft.get("connections") or []) + len(draft.get("deleted_connections") or [])
-                    canvas_save_parts.append(f"{conn_changes} connection change(s)")
-                part_changes = (
-                    len(draft.get("new_assignments") or [])
-                    + len(draft.get("updated_assignments") or {})
-                    + len(draft.get("deleted_assignments") or [])
-                )
-                if part_changes:
-                    canvas_save_parts.append(f"{part_changes} part placement change(s)")
-                st.toast(
-                    "Saved Fishbone canvas changes"
-                    + (f" ({', '.join(canvas_save_parts)})" if canvas_save_parts else ""),
-                    icon=":material/check_circle:",
-                )
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+                sec_cols = [c for c in ["name", "section_type", "sequence", "active"] if c in visible_sections.columns]
+                display_sections = visible_sections[sec_cols].copy() if not visible_sections.empty else pd.DataFrame(columns=["name", "section_type", "sequence", "active"])
+                st.dataframe(display_sections, width="stretch", hide_index=True)
 
-        # Stacked Layout: Collapsible Table Editors
-        st.divider()
-        with st.expander("Framework Sections Table", expanded=False):
-            st.caption(
-                "Framework sections establish product assembly order and subassembly feeding relationships."
-            )
-            sec_cols = [c for c in ["name", "section_type", "sequence", "active"] if c in visible_sections.columns]
-            display_sections = visible_sections[sec_cols].copy() if not visible_sections.empty else pd.DataFrame(columns=["name", "section_type", "sequence", "active"])
-            st.dataframe(display_sections, width="stretch", hide_index=True)
-
-        with st.expander("Parts Placement Table", expanded=False):
-            st.caption("Parts placed into Fishbone assembly sections and subassemblies.")
-            if not assignments.empty:
-                display_cols = ["section_name", "part_number", "description", "quantity", "use_description"]
-                display_assignments = assignments[
-                    [c for c in display_cols if c in assignments.columns]
-                ].copy()
-                st.dataframe(
-                    display_assignments,
-                    width="stretch",
-                    hide_index=True,
-                )
-            else:
-                st.info("No parts placed yet.")
+            with st.expander("Parts Placement Table", expanded=False):
+                st.caption("Parts placed into Fishbone assembly sections and subassemblies.")
+                if not assignments.empty:
+                    display_cols = ["section_name", "part_number", "description", "quantity", "use_description"]
+                    display_assignments = assignments[
+                        [c for c in display_cols if c in assignments.columns]
+                    ].copy()
+                    st.dataframe(
+                        display_assignments,
+                        width="stretch",
+                        hide_index=True,
+                    )
+                else:
+                    st.info("No parts placed yet.")
 
 
 
@@ -2690,7 +2732,7 @@ def _render_framework_maintenance():
         full_framework = framework.copy()
         framework = filter_table(
             full_framework,
-            key="assembly_framework_filters",
+            key=f"assembly_framework_filters_{project_id}",
             dropdown_columns=["section_type", "parent_assembly", "active"],
             search_columns=["hierarchy", "name", "parent_assembly", "description"],
             labels={"section_type": "Fishbone section type", "parent_assembly": "Parent assembly", "active": "Active status"},
@@ -2834,7 +2876,7 @@ def _render_framework_maintenance():
         framework_delete_key = f"fishbone_framework_pending_delete_{project_id}"
         if not selected_framework_rows.empty:
             if table_has_unsaved_changes(
-                "assembly_framework_editor", native_row_selection=True
+                framework_editor_key, native_row_selection=True
             ):
                 st.warning("Save or undo other Fishbone framework edits before deleting sections.")
             else:
@@ -2930,7 +2972,7 @@ def _render_framework_maintenance():
                 "Cancel", key=f"cancel_fishbone_framework_delete_{project_id}"
             ):
                 st.session_state.pop(framework_delete_key, None)
-                request_table_editor_reset("assembly_framework_editor")
+                request_table_editor_reset(framework_editor_key)
                 st.rerun()
             if actions.button(
                 "Delete sections",
@@ -2959,7 +3001,7 @@ def _render_framework_maintenance():
                         deleted,
                     )
                     st.session_state.pop(framework_delete_key, None)
-                    request_table_editor_reset("assembly_framework_editor")
+                    request_table_editor_reset(framework_editor_key)
                     st.toast(
                         f"Deleted {deleted['affected_section_count']} Fishbone section(s)"
                         + (
@@ -3078,6 +3120,8 @@ def _render_framework_maintenance():
                     len(framework_changes),
                     st.session_state.get("current_editor", ""),
                     {
+                        "created_count": 0,
+                        "updated_count": len(framework_changes),
                         "framework_sections_changed": framework_changes,
                         "new_section_order": [
                             {
@@ -3102,9 +3146,10 @@ def _render_framework_maintenance():
                 st.error(str(exc))
 
 
-with assign_parts_tab:
-    with st.expander("🛠️ Advanced Section Configuration & Maintenance", expanded=False):
-        _render_framework_maintenance()
+if assign_parts_tab.open:
+    with assign_parts_tab:
+        with st.expander("🛠️ Advanced Section Configuration & Maintenance", expanded=False):
+            _render_framework_maintenance()
 
 
 with st.expander("History", icon=":material/history:"):

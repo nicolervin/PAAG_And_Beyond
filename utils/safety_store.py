@@ -380,7 +380,7 @@ def safety_requirement_history(
     df = pd.DataFrame(rows)
     if not df.empty and "created_at" in df.columns:
         df["created_at"] = df["created_at"].map(to_eastern_iso)
-    return df
+    return _db_core.enrich_audit_history_dataframe(df)
 
 def acknowledge_safety_upstream_changes(
     project_id: str,

@@ -303,6 +303,11 @@ def _resolve_editor_instance_key(key: str) -> str:
     """Resolve a logical or versioned editor key to its active session-state key."""
     key_str = str(key)
     if _EDITOR_INSTANCE_MARKER in key_str:
+        if key_str in st.session_state:
+            return key_str
+        for existing_key in list(st.session_state.keys()):
+            if str(existing_key).startswith(f"{key_str}_"):
+                return str(existing_key)
         return key_str
     if key_str in st.session_state:
         return key_str
@@ -884,6 +889,25 @@ def _wrap_data_editor(data, *args, **kwargs):
         dict.__setitem__(state_obj_before, "deleted_rows", deepcopy(last_raw["deleted_rows"]))
 
     display_df = _apply_seed_to_dataframe(data, seed) if has_seed else data
+    raw_before = (
+        _normalize_editor_state(state_obj_before)
+        if isinstance(state_obj_before, dict)
+        else _empty_editor_state()
+    )
+    has_raw_before = _editor_state_has_changes(raw_before)
+    frozen_key = f"_table_editor_frozen_base_{key}"
+    if not has_raw_before:
+        st.session_state[frozen_key] = display_df.copy()
+    else:
+        frozen_df = st.session_state.get(frozen_key)
+        if (
+            isinstance(frozen_df, pd.DataFrame)
+            and len(frozen_df) == len(display_df)
+            and list(frozen_df.columns) == list(display_df.columns)
+        ):
+            display_df = frozen_df.copy()
+        else:
+            st.session_state[frozen_key] = display_df.copy()
     result_df = _ORIG_DATA_EDITOR(display_df, *args, **kwargs)
 
     state_obj = st.session_state.get(key)
@@ -986,6 +1010,7 @@ def apply_pending_table_editor_reset(key: str) -> str:
         st.session_state.pop(previous_key, None)
         st.session_state.pop(f"_table_undo_mutated_obj_id_{previous_key}", None)
         st.session_state.pop(f"_table_undo_last_raw_{previous_key}", None)
+        st.session_state.pop(f"_table_editor_frozen_base_{previous_key}", None)
         suffixed_keys = [
             existing_key
             for existing_key in list(st.session_state.keys())
@@ -995,6 +1020,7 @@ def apply_pending_table_editor_reset(key: str) -> str:
             st.session_state.pop(suffixed_key, None)
             st.session_state.pop(f"_table_undo_mutated_obj_id_{suffixed_key}", None)
             st.session_state.pop(f"_table_undo_last_raw_{suffixed_key}", None)
+            st.session_state.pop(f"_table_editor_frozen_base_{suffixed_key}", None)
         if is_undo_reset:
             st.session_state[f"_just_undid_last_edit_{logical_key}"] = True
         else:

@@ -14,6 +14,7 @@ from utils.control_plan_store import (
     control_plan_projection,
     control_plan_relink_candidates,
     control_plan_review_items,
+    control_plan_uncovered_pfmea_controls,
     delete_custom_control_method,
     exclude_control_plan_projection_keys,
     list_control_methods,
@@ -81,6 +82,8 @@ def _audit(project_id: str, action: str, result: dict, scenario_id: str) -> None
             "affected_ids": result.get("affected_ids", []),
             "store_timestamp": result.get("timestamp", ""),
             "process_numbering_version": PROCESS_NUMBERING_VERSION,
+            **({"created_count": int(result["created_count"])} if "created_count" in result else {}),
+            **({"updated_count": int(result["updated_count"])} if "updated_count" in result else {}),
         },
     )
 
@@ -466,6 +469,8 @@ def _persist_control_plan_draft(pending: dict) -> None:
                 "affected_ids": result.get("affected_ids", []),
                 "store_timestamp": result.get("timestamp", ""),
                 "process_numbering_version": PROCESS_NUMBERING_VERSION,
+            **({"created_count": int(result["created_count"])} if "created_count" in result else {}),
+            **({"updated_count": int(result["updated_count"])} if "updated_count" in result else {}),
                 "renumbered_by_op_id": True,
                 "renumbered_operation_count": renumbered_operation_count,
             },
@@ -764,6 +769,50 @@ def _confirm_delete_control_method(
                     st.error(str(exc))
 
 
+def _render_pfmea_coverage_flag(
+    project_id: str,
+    scenario_id: str,
+    active_cp_rows: pd.DataFrame | None = None,
+    container=None,
+) -> None:
+    """Render a warning banner when PFMEA controls marked 'Requires Control Plan' are missing from the Control Plan."""
+    try:
+        uncovered = control_plan_uncovered_pfmea_controls(
+            project_id, scenario_id, active_cp_rows=active_cp_rows
+        )
+    except Exception:
+        return
+    if uncovered.empty:
+        return
+    target = container if container is not None else st
+    count = len(uncovered)
+    step_count = int(uncovered["work_element_id"].nunique())
+    target.warning(
+        f"⚠️ **PFMEA Control Coverage Flag**: {count} critical PFMEA control selection(s) across "
+        f"{step_count} Process step(s) are marked **Requires Control Plan** in PFMEA "
+        "but are not yet called out in the Control Plan."
+    )
+    with target.expander(
+        f"View Uncovered PFMEA Controls ({count})",
+        expanded=False,
+        icon=":material/fact_check:",
+    ):
+        display_df = pd.DataFrame(
+            {
+                "Station / Pitch": uncovered["station_pitch"],
+                "Op ID": uncovered["op_id"],
+                "Process Operation": uncovered["operation"],
+                "PFMEA Failure Mode": uncovered["potential_failure_mode"],
+                "Potential Cause": uncovered["potential_cause"],
+                "PFMEA CL": uncovered["class_code"].replace("", "Unclassified"),
+                "Control Type": uncovered["control_type"],
+                "PFMEA Control": uncovered["control_label"],
+                "Action Needed": uncovered["reason"],
+            }
+        )
+        st.dataframe(display_df, hide_index=True, width="stretch")
+
+
 def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> None:
     """Render the editable Characteristics table peer view."""
     source = control_plan_projection(project_id, scenario_id)
@@ -772,6 +821,7 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
             "Classify a PFMEA entry to create a Control Plan line. Published Quality controls "
             "selected in that PFMEA entry create separate characteristic lines."
         )
+        _render_pfmea_coverage_flag(project_id, scenario_id)
         _render_review_area(project_id, scenario_id)
         return
     persisted_active = source.loc[~source["excluded"].fillna(False)].copy()
@@ -805,6 +855,7 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
     active["characteristic_type_filter"] = [
         _characteristic_type_label(val) for val in active["characteristic_placement"]
     ]
+    coverage_banner = st.container()
     editable_table_heading("Control Plan characteristics")
     visible = filter_table(
         active,
@@ -841,6 +892,9 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
     )
     complete = merge_filtered_edits(
         active, editor_rows, edited_for_merge, id_column="projection_key"
+    )
+    _render_pfmea_coverage_flag(
+        project_id, scenario_id, active_cp_rows=complete, container=coverage_banner
     )
     pr_number_edited = any(
         "pr_number" in (changes or {})
@@ -1335,7 +1389,9 @@ def render_control_plan_tab(project_id: str, scenario_id: str, scenario_name: st
         ["Characteristics table", "Process flow map"],
         key=f"control_plan_subtabs_{project_id}_{scenario_id}",
     )
-    with characteristics_tab:
-        _render_control_plan_characteristics(project_id, scenario_id)
-    with flow_tab:
-        _render_control_plan_flow(project_id, scenario_id)
+    if characteristics_tab.open:
+        with characteristics_tab:
+            _render_control_plan_characteristics(project_id, scenario_id)
+    elif flow_tab.open:
+        with flow_tab:
+            _render_control_plan_flow(project_id, scenario_id)

@@ -5,6 +5,7 @@ from utils.scope_ui import page_title_with_scope
 from utils.store import (
     RECYCLE_BIN_RETENTION_DAYS,
     audit_history,
+    detect_recycle_bin_restore_conflicts,
     list_recycle_bin_items,
     permanently_delete_recycle_bin_items,
     projects,
@@ -20,6 +21,7 @@ from utils.table_ui import (
     prepare_editor_selection_column,
     render_select_all_control,
     resolve_editor_selected_rows,
+    render_audit_history_table,
     selectable_dataframe,
 )
 
@@ -50,6 +52,7 @@ with col_scope:
 include_all_projects = selected_scope != "Current project" or not project_id
 editor_key = f"recycle_bin_table_editor_{'all' if include_all_projects else project_id}"
 pending_perm_delete_key = f"recycle_bin_pending_perm_delete_{'all' if include_all_projects else project_id}"
+pending_restore_conflicts_key = f"recycle_bin_pending_restore_conflicts_{'all' if include_all_projects else project_id}"
 
 editor_key = apply_pending_table_editor_reset(editor_key)
 
@@ -206,6 +209,13 @@ else:
 
     if restore_clicked and selected_ids:
         try:
+            detected_conflicts = detect_recycle_bin_restore_conflicts(selected_ids)
+            if detected_conflicts:
+                st.session_state[pending_restore_conflicts_key] = {
+                    "selected_ids": list(selected_ids),
+                    "conflicts": detected_conflicts,
+                }
+                st.rerun()
             result = restore_recycle_bin_items(
                 selected_ids,
                 editor_name=current_editor or "Collaborator",
@@ -227,6 +237,120 @@ else:
         st.session_state[pending_perm_delete_key] = selected_rows[
             ["id", "entity_type", "entity_label", "project_name", "scenario_name", "summary_text"]
         ].to_dict("records")
+
+
+@st.dialog("Resolve Restore Conflicts", width="large")
+def confirm_restore_conflicts_dialog() -> None:
+    payload = st.session_state.get(pending_restore_conflicts_key) or {}
+    pending_ids = payload.get("selected_ids") or []
+    conflicts = payload.get("conflicts") or []
+    if not pending_ids or not conflicts:
+        st.session_state.pop(pending_restore_conflicts_key, None)
+        st.rerun()
+        return
+
+    st.warning(
+        f"**{len(conflicts)} conflict(s)** were found between the Recycle Bin item(s) you selected and "
+        "currently active records. Choose how you want to handle each older (Recycle Bin) and newer (active) item before restoring.",
+        icon=":material/warning:",
+    )
+
+    resolutions: dict[str, dict[str, str]] = {}
+    for idx, conflict in enumerate(conflicts):
+        cid = str(conflict["conflict_id"])
+        rename_col = str(conflict.get("rename_column") or "")
+        can_rename = bool(conflict.get("can_rename"))
+        col_label = rename_col.replace("_", " ").title() if rename_col else "Identifier"
+
+        with st.container(border=True):
+            st.markdown(
+                f"#### {idx + 1}. {conflict.get('entity_type')}: `{conflict.get('older_value')}` "
+                f"*(Conflict on {col_label})*"
+            )
+            col_old, col_new = st.columns(2)
+            with col_old:
+                st.markdown("**Older Item (In Recycle Bin)**")
+                st.caption(f"Summary: {conflict.get('older_summary')}")
+                st.caption(
+                    f"Deleted: {conflict.get('older_deleted_at') or '—'} "
+                    f"by {conflict.get('older_deleted_by') or '—'}"
+                )
+            with col_new:
+                st.markdown("**Newer Item (Currently Active)**")
+                st.caption(f"Summary: {conflict.get('newer_summary')}")
+                st.caption(f"Last updated: {conflict.get('newer_updated_at') or '—'}")
+
+            if can_rename:
+                action_options = {
+                    "rename_older": f"Keep Both — Rename the Older (Restored) item's {col_label}",
+                    "rename_newer": f"Keep Both — Rename the Newer (Active) item's {col_label}",
+                    "replace_newer": "Replace Newer with Older (Moves active item to Recycle Bin)",
+                    "skip": "Keep Newer / Skip restoring this item",
+                }
+            else:
+                action_options = {
+                    "replace_newer": "Replace Newer with Older (Moves active item to Recycle Bin)",
+                    "skip": "Keep Newer / Skip restoring this item",
+                }
+
+            chosen_action = st.radio(
+                "Resolution action",
+                options=list(action_options.keys()),
+                format_func=lambda k, opts=action_options: opts[k],
+                key=f"rb_conflict_action_{cid}",
+            )
+            new_name_val = ""
+            if chosen_action == "rename_older":
+                new_name_val = st.text_input(
+                    f"New {col_label} for Older (Restored) item",
+                    value=str(conflict.get("suggested_older_name") or ""),
+                    key=f"rb_conflict_new_older_{cid}",
+                ).strip()
+            elif chosen_action == "rename_newer":
+                new_name_val = st.text_input(
+                    f"New {col_label} for Newer (Active) item",
+                    value=str(conflict.get("suggested_newer_name") or ""),
+                    key=f"rb_conflict_new_newer_{cid}",
+                ).strip()
+
+            resolutions[cid] = {
+                "action": chosen_action,
+                "new_name": new_name_val,
+            }
+
+    c_apply, c_cancel = st.columns(2)
+    with c_apply:
+        if st.button(
+            "Confirm & Apply Restore",
+            type="primary",
+            icon=":material/restore_from_trash:",
+            width="stretch",
+            key="rb_confirm_conflict_restore_btn",
+        ):
+            try:
+                result = restore_recycle_bin_items(
+                    pending_ids,
+                    editor_name=current_editor or "Collaborator",
+                    conflict_resolutions=resolutions,
+                )
+                st.session_state.pop(pending_restore_conflicts_key, None)
+                live_projects = projects()
+                if live_projects and not st.session_state.get("project_id"):
+                    st.session_state["project_id"] = str(live_projects[0]["id"])
+                request_table_editor_reset(editor_key)
+                msg_parts = [f"Restored {result.get('restored_count', 0)} item(s)"]
+                if result.get("replaced_count"):
+                    msg_parts.append(f"moved {result['replaced_count']} replaced active item(s) to Recycle Bin")
+                if result.get("skipped_count"):
+                    msg_parts.append(f"skipped {result['skipped_count']} item(s)")
+                st.toast(", ".join(msg_parts) + ".", icon=":material/restore_from_trash:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    with c_cancel:
+        if st.button("Cancel", width="stretch", key="rb_cancel_conflict_restore_btn"):
+            st.session_state.pop(pending_restore_conflicts_key, None)
+            st.rerun()
 
 
 @st.dialog("Confirm permanent deletion")
@@ -276,7 +400,9 @@ def confirm_permanent_delete_dialog() -> None:
             st.rerun()
 
 
-if st.session_state.get(pending_perm_delete_key):
+if st.session_state.get(pending_restore_conflicts_key):
+    confirm_restore_conflicts_dialog()
+elif st.session_state.get(pending_perm_delete_key):
     confirm_permanent_delete_dialog()
 
 if project_id:
@@ -285,7 +411,7 @@ if project_id:
         if history.empty:
             st.caption("No Recycle Bin restore or permanent-purge history has been recorded for this project yet.")
         else:
-            selectable_dataframe(
+            render_audit_history_table(
                 history.drop(columns=["details"], errors="ignore"),
                 key=f"recycle_bin_history_table_{project_id}",
                 hide_index=True,

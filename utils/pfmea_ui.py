@@ -16,7 +16,10 @@ from utils.cache_store import (
     is_scenario_task_completed,
     mark_scenario_task_completed,
 )
-from utils.control_plan_store import control_plan_pfmea_delete_impact
+from utils.control_plan_store import (
+    control_plan_pfmea_delete_impact,
+    control_plan_uncovered_pfmea_controls,
+)
 
 from utils.pfmea_store import (
     PFMEA_CLASSIFICATIONS,
@@ -77,6 +80,7 @@ from utils.table_ui import (
     editable_table_heading,
     guarded_tabs,
     native_selected_rows,
+    register_unsaved_source,
     selectable_dataframe,
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
@@ -489,6 +493,7 @@ def _stage_pfmea_process_selection(
                 dtype="object",
             )
     st.session_state[draft_key] = merged
+    st.session_state.pop(f"{draft_key}_live", None)
     if pending_changes and not st.session_state.get(PENDING_PROCESS_CHANGE_KEY):
         st.session_state[PENDING_PROCESS_CHANGE_KEY] = {
             "project_id": project_id,
@@ -1055,13 +1060,19 @@ def _resulting_rpn_preview(actions: pd.DataFrame) -> pd.DataFrame:
 
 
 def _audit(project_id: str, action: str, result: dict, details: dict) -> None:
+    audit_details = dict(details)
+    audit_details["store_timestamp"] = result.get("timestamp", "")
+    if "created_count" in result and "created_count" not in audit_details:
+        audit_details["created_count"] = int(result["created_count"])
+    if "updated_count" in result and "updated_count" not in audit_details:
+        audit_details["updated_count"] = int(result["updated_count"])
     record_audit_event(
         project_id,
         "PFMEA",
         action,
         int(result.get("row_count", 0)),
         st.session_state.get("current_editor", ""),
-        details | {"store_timestamp": result.get("timestamp", "")},
+        audit_details,
     )
 
 
@@ -1515,8 +1526,13 @@ def _confirm_control_option_delete() -> None:
 def _render_control_catalog(project_id: str, control_type: str) -> None:
     raw = pfmea_control_options(project_id, control_type)
     columns = {
-        "id": "string", "label": "string", "active": "bool",
-        "selection_count": "int64", "created_at": "string", "updated_at": "string",
+        "id": "string",
+        "label": "string",
+        "requires_control_plan": "bool",
+        "active": "bool",
+        "selection_count": "int64",
+        "created_at": "string",
+        "updated_at": "string",
     }
     stored = _frame(raw, columns)
     logical_key = f"pfmea_{control_type.casefold()}_options_editor_{project_id}"
@@ -1524,9 +1540,13 @@ def _render_control_catalog(project_id: str, control_type: str) -> None:
     visible = filter_table(
         stored,
         key=f"pfmea_{control_type.casefold()}_options_filters_{project_id}",
-        dropdown_columns=["active"],
+        dropdown_columns=["active", "requires_control_plan"],
         search_columns=["label"],
-        labels={"label": "Label", "active": "Active"},
+        labels={
+            "label": "Label",
+            "active": "Active",
+            "requires_control_plan": "Requires Control Plan",
+        },
         reset_widget_keys=[editor_key],
     )
     editor_rows = direct_entry_editor_rows(
@@ -1537,16 +1557,24 @@ def _render_control_catalog(project_id: str, control_type: str) -> None:
     )
     new_option_rows = editor_rows["id"].fillna("").astype(str).str.strip().eq("")
     editor_rows.loc[new_option_rows, "active"] = True
+    editor_rows.loc[new_option_rows, "requires_control_plan"] = False
     edited = st.data_editor(
         editor_rows,
         key=editor_key,
         num_rows="dynamic",
         hide_index=True,
-        column_order=["label", "active", "selection_count"],
+        column_order=["label", "requires_control_plan", "active", "selection_count"],
         disabled=["selection_count"],
         column_config={
             "id": None, "created_at": None, "updated_at": None,
             "label": st.column_config.TextColumn("Label", required=True),
+            "requires_control_plan": st.column_config.CheckboxColumn(
+                "Requires Control Plan",
+                help=(
+                    "Flag PFMEA lines using this control when the step or control is not "
+                    "called out in the Control Plan (e.g., gauges, fixtures, measurements)."
+                ),
+            ),
             "active": st.column_config.CheckboxColumn(
                 "Active", help="Inactive options stay on saved PFMEA Causes but cannot be newly selected."
             ),
@@ -1565,7 +1593,9 @@ def _render_control_catalog(project_id: str, control_type: str) -> None:
     if footer.save_and_refresh:
         try:
             result = save_pfmea_control_option_rows(
-                project_id, control_type, complete[["id", "label", "active"]]
+                project_id,
+                control_type,
+                complete[["id", "label", "active", "requires_control_plan"]],
             )
             _audit(project_id, f"Save {control_type} control options", result, {"scope": "project-wide"})
             request_table_editor_reset(editor_key)
@@ -1575,7 +1605,9 @@ def _render_control_catalog(project_id: str, control_type: str) -> None:
             st.error(str(exc))
     st.download_button(
         "Export filtered rows",
-        data=lambda: dataframe_to_excel(visible[["label", "active", "selection_count"]]),
+        data=lambda: dataframe_to_excel(
+            visible[["label", "requires_control_plan", "active", "selection_count"]]
+        ),
         file_name=f"pfmea_{control_type.casefold()}_options.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"pfmea_{control_type.casefold()}_options_export_{project_id}",
@@ -1601,11 +1633,11 @@ def _render_control_catalogs(project_id: str) -> None:
     det_raw = pfmea_control_options(project_id, "Detection")
 
     prev_df = _frame(prev_raw, {
-        "id": "string", "label": "string", "active": "bool",
+        "id": "string", "label": "string", "requires_control_plan": "bool", "active": "bool",
         "selection_count": "int64", "created_at": "string", "updated_at": "string",
     })
     det_df = _frame(det_raw, {
-        "id": "string", "label": "string", "active": "bool",
+        "id": "string", "label": "string", "requires_control_plan": "bool", "active": "bool",
         "selection_count": "int64", "created_at": "string", "updated_at": "string",
     })
 
@@ -1630,7 +1662,9 @@ def _render_control_catalogs(project_id: str) -> None:
 
         with st.container(border=True):
             st.markdown("**➕ Quick-Add Custom Control Option**")
-            col_type, col_text, col_btn = st.columns([1, 2, 1])
+            col_type, col_text, col_req, col_btn = st.columns(
+                [1, 2, 1.2, 1], vertical_alignment="bottom"
+            )
             add_type = col_type.selectbox(
                 "Control Type",
                 options=["Prevention", "Detection"],
@@ -1640,6 +1674,15 @@ def _render_control_catalogs(project_id: str) -> None:
                 "Option Description",
                 placeholder="e.g., Torque Wrench Calibrated Verification",
                 key=f"pfmea_overview_add_label_{project_id}",
+            )
+            add_req_cp = col_req.checkbox(
+                "Requires Control Plan",
+                value=False,
+                help=(
+                    "Flag PFMEA lines using this control when the step or control is not "
+                    "called out in the Control Plan (e.g., gauges, fixtures, measurements)."
+                ),
+                key=f"pfmea_overview_add_req_cp_{project_id}",
             )
             if col_btn.button(
                 "Add Option",
@@ -1653,6 +1696,7 @@ def _render_control_catalogs(project_id: str) -> None:
                         project_id,
                         add_type,
                         add_label.strip(),
+                        requires_control_plan=bool(add_req_cp),
                     )
                     st.toast(f"Added manual {add_type.casefold()} option!", icon=":material/check_circle:")
                     st.rerun()
@@ -1675,9 +1719,12 @@ def _render_control_catalogs(project_id: str) -> None:
                 if prev_df.empty:
                     st.info("No manual prevention controls entered yet.")
                 else:
-                    disp_prev = prev_df[["label", "active", "selection_count"]].rename(
+                    disp_prev = prev_df[
+                        ["label", "requires_control_plan", "active", "selection_count"]
+                    ].rename(
                         columns={
                             "label": "Prevention Control Description",
+                            "requires_control_plan": "Requires Control Plan",
                             "active": "Active",
                             "selection_count": "PFMEA Line Uses",
                         }
@@ -1686,6 +1733,7 @@ def _render_control_catalogs(project_id: str) -> None:
                         disp_prev,
                         hide_index=True,
                         column_config={
+                            "Requires Control Plan": st.column_config.CheckboxColumn("Requires Control Plan"),
                             "Active": st.column_config.CheckboxColumn("Active"),
                             "PFMEA Line Uses": st.column_config.NumberColumn("Line Uses"),
                         },
@@ -1696,9 +1744,12 @@ def _render_control_catalogs(project_id: str) -> None:
                 if det_df.empty:
                     st.info("No manual detection controls entered yet.")
                 else:
-                    disp_det = det_df[["label", "active", "selection_count"]].rename(
+                    disp_det = det_df[
+                        ["label", "requires_control_plan", "active", "selection_count"]
+                    ].rename(
                         columns={
                             "label": "Detection Control Description",
+                            "requires_control_plan": "Requires Control Plan",
                             "active": "Active",
                             "selection_count": "PFMEA Line Uses",
                         }
@@ -1707,6 +1758,7 @@ def _render_control_catalogs(project_id: str) -> None:
                         disp_det,
                         hide_index=True,
                         column_config={
+                            "Requires Control Plan": st.column_config.CheckboxColumn("Requires Control Plan"),
                             "Active": st.column_config.CheckboxColumn("Active"),
                             "PFMEA Line Uses": st.column_config.NumberColumn("Line Uses"),
                         },
@@ -2385,12 +2437,21 @@ def _render_control_selection_panel(
                 ),
             )
             with st.expander(f"➕ Create custom manual {control_type.casefold()} option", expanded=False):
-                c_col1, c_col2 = st.columns([3, 1])
+                c_col1, c_col2, c_col3 = st.columns([3, 1.4, 1], vertical_alignment="bottom")
                 new_opt_val = c_col1.text_input(
                     f"New manual {control_type.casefold()} option description",
                     key=f"pfmea_inline_add_{control_type.casefold()}_{project_id}_{scenario_id}_{target_key}",
                 )
-                if c_col2.button(
+                new_opt_req_cp = c_col2.checkbox(
+                    "Requires Control Plan",
+                    value=False,
+                    help=(
+                        "Flag PFMEA lines using this control if the step or control is not "
+                        "called out in the Control Plan (e.g., gauges, fixtures, measurements)."
+                    ),
+                    key=f"pfmea_inline_req_cp_{control_type.casefold()}_{project_id}_{scenario_id}_{target_key}",
+                )
+                if c_col3.button(
                     "Save Option",
                     icon=":material/add:",
                     disabled=not new_opt_val.strip(),
@@ -2401,6 +2462,7 @@ def _render_control_selection_panel(
                             project_id,
                             control_type,
                             new_opt_val.strip(),
+                            requires_control_plan=bool(new_opt_req_cp),
                         )
                         st.toast(f"Added manual {control_type.casefold()} option!", icon=":material/check_circle:")
                         st.rerun()
@@ -2736,6 +2798,19 @@ def _render_pfmea_staging_bar(
         )
 
         step_by_id = {str(row["id"]): row for _, row in steps.iterrows()}
+        if "pfmea_eligible" in steps.columns:
+            eligible_step_ids = [
+                str(row["id"])
+                for _, row in steps.iterrows()
+                if bool(row.get("pfmea_eligible"))
+            ]
+            ineligible_count = len(steps) - len(eligible_step_ids)
+            if ineligible_count > 0:
+                st.caption(
+                    f"🔒 **PAAG Validation Gate:** {len(eligible_step_ids)} of {len(steps)} PAAG step(s) are **Completed & Validated** and available for PFMEA staging ({ineligible_count} incomplete/unvalidated step(s) hidden)."
+                )
+        else:
+            eligible_step_ids = list(step_by_id)
 
         if staging_mode == "⚡ Pattern Quick-Apply":
             if patterns_df.empty:
@@ -2777,7 +2852,7 @@ def _render_pfmea_staging_bar(
             if apply_mode == "Single Step":
                 selected_step_id = st.selectbox(
                     "Target Process Step",
-                    options=list(step_by_id),
+                    options=eligible_step_ids,
                     format_func=lambda wid: _process_step_option_label(step_by_id.get(wid, {})),
                     key=f"pfmea_quick_apply_step_{project_id}_{scenario_id}",
                 )
@@ -2790,11 +2865,11 @@ def _render_pfmea_staging_bar(
                     key=f"pfmea_quick_apply_all_steps_{project_id}_{scenario_id}",
                 )
                 if select_all:
-                    target_step_ids = list(step_by_id)
+                    target_step_ids = list(eligible_step_ids)
                 else:
                     target_step_ids = multi_col2.multiselect(
                         "Target Process Steps",
-                        options=list(step_by_id),
+                        options=eligible_step_ids,
                         format_func=lambda wid: _process_step_option_label(step_by_id.get(wid, {})),
                         key=f"pfmea_quick_apply_multi_steps_{project_id}_{scenario_id}",
                     )
@@ -2807,7 +2882,9 @@ def _render_pfmea_staging_bar(
                 key=f"pfmea_quick_apply_btn_{project_id}_{scenario_id}",
             ):
                 stored = _frame(pfmea_flat_rows(project_id, scenario_id), PFMEA_FLAT_COLUMNS)
-                existing_draft = st.session_state.get(draft_key)
+                existing_draft = st.session_state.get(f"{draft_key}_live")
+                if not isinstance(existing_draft, pd.DataFrame):
+                    existing_draft = st.session_state.get(draft_key)
                 current_draft = (
                     _frame(existing_draft, PFMEA_FLAT_COLUMNS)
                     if isinstance(existing_draft, pd.DataFrame)
@@ -2828,6 +2905,7 @@ def _render_pfmea_staging_bar(
                     staged_df = pd.DataFrame(new_rows)
                     combined_df = pd.concat([current_draft, staged_df], ignore_index=True)
                     st.session_state[draft_key] = _deduplicate_pfmea_draft_rows(combined_df)
+                    st.session_state.pop(f"{draft_key}_live", None)
                     _clear_control_clipboard(project_id, scenario_id)
                     request_table_editor_reset(editor_key)
 
@@ -2848,10 +2926,10 @@ def _render_pfmea_staging_bar(
         else:
             selected_steps = st.multiselect(
                 "Select Process Functions for Blank Lines",
-                options=list(step_by_id),
+                options=eligible_step_ids,
                 format_func=lambda wid: _process_step_option_label(step_by_id.get(wid, {})),
                 key=f"pfmea_blank_line_steps_{project_id}_{scenario_id}",
-                help="Choose one or multiple Process Functions to stage empty PFMEA lines.",
+                help="Choose one or multiple Completed & Validated Process Functions to stage empty PFMEA lines.",
             )
             if st.button(
                 "Stage Blank PFMEA Line(s)",
@@ -2861,7 +2939,9 @@ def _render_pfmea_staging_bar(
                 key=f"pfmea_blank_line_btn_{project_id}_{scenario_id}",
             ):
                 stored = _frame(pfmea_flat_rows(project_id, scenario_id), PFMEA_FLAT_COLUMNS)
-                existing_draft = st.session_state.get(draft_key)
+                existing_draft = st.session_state.get(f"{draft_key}_live")
+                if not isinstance(existing_draft, pd.DataFrame):
+                    existing_draft = st.session_state.get(draft_key)
                 current_draft = (
                     _frame(existing_draft, PFMEA_FLAT_COLUMNS)
                     if isinstance(existing_draft, pd.DataFrame)
@@ -2874,6 +2954,7 @@ def _render_pfmea_staging_bar(
                 staged_df = pd.DataFrame(blank_rows)
                 combined_df = pd.concat([current_draft, staged_df], ignore_index=True)
                 st.session_state[draft_key] = _deduplicate_pfmea_draft_rows(combined_df)
+                st.session_state.pop(f"{draft_key}_live", None)
                 _clear_control_clipboard(project_id, scenario_id)
                 request_table_editor_reset(editor_key)
 
@@ -3316,6 +3397,7 @@ def _render_pattern_manager(
         cause_payload: list[dict] = []
         action_payload: list[dict] = []
         source_payload: dict[str, list[dict]] = {"Prevention": [], "Detection": []}
+        causes_sub_dirty = False
         for index, cause_text in enumerate(current_causes):
             existing_cause = cause_rows[index] if index < len(cause_rows) else {}
             draft_cause_id = _plain_text(existing_cause.get("id")) or f"draft-cause-{index}"
@@ -3332,6 +3414,11 @@ def _render_pattern_manager(
                 existing_actions = actions_by_cause.get(
                     _plain_text(existing_cause.get("id")), []
                 )
+                saved_action_lines = [
+                    _plain_text(row.get("recommended_action"))
+                    for row in existing_actions
+                    if _plain_text(row.get("recommended_action"))
+                ]
                 action_lines = st.text_area(
                     "Recommended Actions — one per line",
                     value="\n".join(
@@ -3339,7 +3426,10 @@ def _render_pattern_manager(
                     ),
                     key=f"pfmea_pattern_actions_{project_id}_{widget_scope}_{index}",
                 )
-                for action_index, action_text in enumerate(_manager_lines(action_lines)):
+                current_action_lines = _manager_lines(action_lines)
+                if current_action_lines != saved_action_lines:
+                    causes_sub_dirty = True
+                for action_index, action_text in enumerate(current_action_lines):
                     existing_action = (
                         existing_actions[action_index]
                         if action_index < len(existing_actions) else {}
@@ -3386,6 +3476,8 @@ def _render_pattern_manager(
                             f"{widget_scope}_{index}"
                         ),
                     )
+                    if list(selected_sources) != list(existing_keys):
+                        causes_sub_dirty = True
                     existing_by_key = {
                         _source_key_from_pattern_row(row): row for row in existing_sources
                     }
@@ -3402,24 +3494,51 @@ def _render_pattern_manager(
                             }
                         )
 
+        saved_effects = [
+            _plain_text(row.get("effect_description"))
+            for row in effect_rows
+            if _plain_text(row.get("effect_description"))
+        ]
+        saved_causes = [
+            _plain_text(row.get("cause_description"))
+            for row in cause_rows
+            if _plain_text(row.get("cause_description"))
+        ]
+        pattern_dirty = (
+            _plain_text(label) != _plain_text(header.get("label"))
+            or _plain_text(notes) != _plain_text(header.get("notes"))
+            or _plain_text(failure_mode) != _plain_text(header.get("potential_failure_mode"))
+            or _plain_text(class_code) != _plain_text(header.get("class_code"))
+            or bool(active) != bool(header.get("active", True))
+            or current_effects != saved_effects
+            or current_causes != saved_causes
+            or causes_sub_dirty
+        )
+        trigger_pattern_save, trigger_pattern_discard = register_unsaved_source(
+            f"pfmea_pattern_manager_{project_id}_{widget_scope}",
+            additional_unsaved=pattern_dirty,
+        )
+
         st.caption("Pattern changes are stored only when Save & Refresh is selected.")
         actions = st.container(horizontal=True, horizontal_alignment="right")
-        if actions.button(
+        discard_pattern_clicked = actions.button(
             "Discard all edits",
             icon=":material/undo:",
             key=f"pfmea_pattern_undo_{project_id}_{widget_scope}",
-        ):
+        )
+        if discard_pattern_clicked or trigger_pattern_discard:
             for key in list(st.session_state):
                 if str(key).startswith("pfmea_pattern_") and str(project_id) in str(key):
                     if key != f"pfmea_pattern_manager_selection_{project_id}":
                         st.session_state.pop(key, None)
             st.rerun()
-        if actions.button(
+        save_pattern_clicked = actions.button(
             "Save & Refresh",
             icon=":material/save:",
             type="primary",
             key=f"pfmea_pattern_save_{project_id}_{widget_scope}",
-        ):
+        )
+        if save_pattern_clicked or trigger_pattern_save:
             try:
                 if not _plain_text(st.session_state.get("current_editor")):
                     raise ValueError("Enter Current editor before saving PFMEA patterns.")
@@ -3692,6 +3811,15 @@ def _render_flat_pfmea_table(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     stored = _frame(pfmea_flat_rows(project_id, scenario_id), PFMEA_FLAT_COLUMNS)
     draft_key = f"pfmea_flat_draft_{project_id}_{scenario_id}"
+    live_draft_key = f"{draft_key}_live"
+    logical_key = f"pfmea_flat_editor_{project_id}_{scenario_id}"
+    editor_key = apply_pending_table_editor_reset(logical_key)
+    if (
+        editor_key not in st.session_state
+        and not isinstance(st.session_state.get(draft_key), pd.DataFrame)
+        and isinstance(st.session_state.get(live_draft_key), pd.DataFrame)
+    ):
+        st.session_state[draft_key] = st.session_state.get(live_draft_key)
     draft = st.session_state.get(draft_key)
     rows = (
         _deduplicate_pfmea_draft_rows(_frame(draft, PFMEA_FLAT_COLUMNS))
@@ -3710,8 +3838,6 @@ def _render_flat_pfmea_table(
         )
         rows.loc[rows["classification"].isin(invalid_classes), "classification"] = ""
 
-    logical_key = f"pfmea_flat_editor_{project_id}_{scenario_id}"
-    editor_key = apply_pending_table_editor_reset(logical_key)
     editable_table_heading("PFMEA line items")
     visible = filter_table(
         rows,
@@ -3744,7 +3870,27 @@ def _render_flat_pfmea_table(
         sort_columns=["item_number", "potential_failure_mode", "potential_effects", "potential_causes"],
         labels={"item_number": "Item #", "potential_failure_mode": "Potential Failure Mode"},
     )
-    process_options = list(step_by_id)
+    eligible_step_ids = [
+        wid for wid, srow in step_by_id.items() if bool(srow.get("pfmea_eligible", True))
+    ]
+    existing_step_ids = {
+        str(wid).strip()
+        for wid in (
+            editor_rows["work_element_id"].tolist()
+            if "work_element_id" in editor_rows.columns
+            else []
+        )
+        if str(wid).strip() in step_by_id
+    }
+    process_options = [
+        wid
+        for wid in step_by_id
+        if wid in eligible_step_ids or wid in existing_step_ids
+    ]
+    if len(eligible_step_ids) < len(step_by_id):
+        st.caption(
+            f"🔒 **PAAG Validation Gate:** Only Completed & Validated PAAG steps ({len(eligible_step_ids)}/{len(step_by_id)}) can be selected for new PFMEA failure modes."
+        )
     editor_rows = _prepare_pfmea_process_columns(editor_rows, step_by_id)
     rating_help = (
         "Choose a whole-number rating from 1 through 10. This module does not define "
@@ -3926,6 +4072,7 @@ def _render_flat_pfmea_table(
     )
     if shared_conflicts:
         st.session_state[draft_key] = complete
+        st.session_state.pop(live_draft_key, None)
         st.session_state[
             _pfmea_copy_state_key("shared_edit_error", project_id, scenario_id)
         ] = shared_conflicts
@@ -3943,13 +4090,18 @@ def _render_flat_pfmea_table(
         _clear_control_clipboard(project_id, scenario_id)
     if process_selection_changed:
         st.session_state[draft_key] = complete
+        st.session_state.pop(live_draft_key, None)
         if reassignment_attempted:
             st.session_state[f"{draft_key}_locked_notice"] = True
         _clear_control_clipboard(project_id, scenario_id)
         request_table_editor_reset(editor_key)
         st.rerun()
-    if table_has_unsaved_changes(editor_key, native_row_selection=True):
-        st.session_state[draft_key] = complete.copy()
+    if table_has_unsaved_changes(editor_key, native_row_selection=True) or isinstance(
+        st.session_state.get(draft_key), pd.DataFrame
+    ):
+        st.session_state[live_draft_key] = complete.copy()
+    else:
+        st.session_state.pop(live_draft_key, None)
 
     footer = editable_table_footer(
         editor_key=editor_key,
@@ -3959,6 +4111,7 @@ def _render_flat_pfmea_table(
     )
     if footer.undo:
         st.session_state.pop(draft_key, None)
+        st.session_state.pop(live_draft_key, None)
         _clear_control_picker_state(project_id, scenario_id)
         _clear_pfmea_copy_state(project_id, scenario_id)
         _undo(editor_key, "Discarded the unsaved PFMEA line-item and control edits")
@@ -4026,6 +4179,7 @@ def _render_flat_pfmea_table(
         ):
             try:
                 st.session_state[draft_key] = _stable_recalculated_draft(rows, complete)
+                st.session_state.pop(live_draft_key, None)
                 _clear_control_clipboard(project_id, scenario_id)
                 request_table_editor_reset(editor_key)
                 st.rerun()
@@ -4263,6 +4417,7 @@ def _render_flat_pfmea_table(
                     {"scenario_id": scenario_id, "record_type": "PFMEA line items"},
                 )
                 st.session_state.pop(draft_key, None)
+                st.session_state.pop(live_draft_key, None)
                 _clear_control_picker_state(project_id, scenario_id)
                 _clear_pfmea_copy_state(project_id, scenario_id)
                 request_table_editor_reset(editor_key)
@@ -4272,6 +4427,7 @@ def _render_flat_pfmea_table(
                 # Retain the complete current editor output across later reruns.
                 # Validation errors must not discard a new or edited PFMEA row.
                 st.session_state[draft_key] = complete.copy()
+                st.session_state[live_draft_key] = complete.copy()
                 st.error(str(exc))
 
     selected = native_selected_rows(editor_rows, editor_key=editor_key)
@@ -4325,6 +4481,42 @@ def _render_flat_pfmea_table(
     return stored, complete
 
 
+def _render_pfmea_control_plan_coverage_banner(project_id: str, scenario_id: str) -> None:
+    """Render a warning banner when PFMEA controls marked 'Requires Control Plan' are missing from the Control Plan."""
+    try:
+        uncovered = control_plan_uncovered_pfmea_controls(project_id, scenario_id)
+    except Exception:
+        return
+    if uncovered.empty:
+        return
+    count = len(uncovered)
+    step_count = int(uncovered["work_element_id"].nunique())
+    st.warning(
+        f"⚠️ **Control Plan Coverage Flag**: {count} critical PFMEA control selection(s) across "
+        f"{step_count} Process step(s) are marked **Requires Control Plan** in the catalog "
+        "but are not yet called out in the Control Plan."
+    )
+    with st.expander(
+        f"View PFMEA Controls Missing from Control Plan ({count})",
+        expanded=False,
+        icon=":material/fact_check:",
+    ):
+        display_df = pd.DataFrame(
+            {
+                "Item #": uncovered["station_pitch"],
+                "Op ID": uncovered["op_id"],
+                "Process Operation": uncovered["operation"],
+                "Failure Mode": uncovered["potential_failure_mode"],
+                "Potential Cause": uncovered["potential_cause"],
+                "CL": uncovered["class_code"].replace("", "Unclassified"),
+                "Control Type": uncovered["control_type"],
+                "Critical Control": uncovered["control_label"],
+                "Action Needed": uncovered["reason"],
+            }
+        )
+        st.dataframe(display_df, hide_index=True, width="stretch")
+
+
 def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> None:
     current_clipboard_key = _control_clipboard_key(project_id, scenario_id)
     for key in list(st.session_state):
@@ -4375,6 +4567,7 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         st.info("Add a Process at a Glance step in this scenario before creating PFMEA entries.")
         return
     _render_pfmea_staging_bar(project_id, scenario_id, steps)
+    _render_pfmea_control_plan_coverage_banner(project_id, scenario_id)
 
     with st.container(border=True):
         st.caption(
@@ -4432,18 +4625,32 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
         )
         selected_entry = entry_by_id[entry_id]
         if bool(selected_entry.get("upstream_changes")):
-            st.warning(
-                "Process changes need review. Current Process at a Glance data differs from "
-                "the reviewed PFMEA evidence; saved PFMEA values were not replaced."
-            )
-            if st.button(
-                "Review current sources",
-                icon=":material/fact_check:",
-                key=f"pfmea_review_sources_{project_id}_{scenario_id}_{entry_id}",
-            ):
-                st.session_state[PENDING_REVIEW_KEY] = {
-                    "project_id": project_id, "scenario_id": scenario_id, "entry_id": entry_id
-                }
+            if bool(selected_entry.get("paag_incomplete")):
+                reasons_str = "; ".join(selected_entry.get("paag_missing_reasons") or []) or "Step is not Validated in PAAG"
+                st.warning(
+                    f"⚠️ **PAAG Step Incomplete — Awaiting PAAG Validation:** {reasons_str}. "
+                    "Complete and validate this step in Process at a Glance before synchronizing the PFMEA baseline."
+                )
+                st.button(
+                    "Review current sources",
+                    icon=":material/fact_check:",
+                    disabled=True,
+                    help="Complete and validate this step in PAAG before synchronizing.",
+                    key=f"pfmea_review_sources_{project_id}_{scenario_id}_{entry_id}",
+                )
+            else:
+                st.warning(
+                    "Process changes need review. Current Process at a Glance data differs from "
+                    "the reviewed PFMEA evidence; saved PFMEA values were not replaced."
+                )
+                if st.button(
+                    "Review current sources",
+                    icon=":material/fact_check:",
+                    key=f"pfmea_review_sources_{project_id}_{scenario_id}_{entry_id}",
+                ):
+                    st.session_state[PENDING_REVIEW_KEY] = {
+                        "project_id": project_id, "scenario_id": scenario_id, "entry_id": entry_id
+                    }
 
     if st.session_state.get(PENDING_DELETE_KEY):
         _confirm_pfmea_delete()
@@ -4462,7 +4669,10 @@ def render_pfmea_tab(project_id: str, scenario_id: str, scenario_name: str) -> N
 def save_staged_pfmea_draft(project_id: str, scenario_id: str) -> dict[str, Any]:
     """Saves any staged flat PFMEA draft for the given project and scenario to the database."""
     draft_key = f"pfmea_flat_draft_{project_id}_{scenario_id}"
-    draft = st.session_state.get(draft_key)
+    live_draft_key = f"{draft_key}_live"
+    draft = st.session_state.get(live_draft_key)
+    if not isinstance(draft, pd.DataFrame):
+        draft = st.session_state.get(draft_key)
     if not isinstance(draft, pd.DataFrame):
         return {}
 
@@ -4479,6 +4689,7 @@ def save_staged_pfmea_draft(project_id: str, scenario_id: str) -> dict[str, Any]
         {"scenario_id": scenario_id, "record_type": "PFMEA line items"},
     )
     st.session_state.pop(draft_key, None)
+    st.session_state.pop(live_draft_key, None)
     _clear_control_picker_state(project_id, scenario_id)
     _clear_pfmea_copy_state(project_id, scenario_id)
     request_table_editor_reset(f"pfmea_flat_editor_{project_id}_{scenario_id}")
@@ -4489,6 +4700,7 @@ def discard_staged_pfmea_draft(project_id: str, scenario_id: str) -> None:
     """Discards staged in-flight PFMEA edits in session state."""
     draft_key = f"pfmea_flat_draft_{project_id}_{scenario_id}"
     st.session_state.pop(draft_key, None)
+    st.session_state.pop(f"{draft_key}_live", None)
     _clear_control_picker_state(project_id, scenario_id)
     _clear_pfmea_copy_state(project_id, scenario_id)
     request_table_editor_reset(f"pfmea_flat_editor_{project_id}_{scenario_id}")
@@ -4501,7 +4713,9 @@ def render_pfmea_staged_draft_banner(project_id: str, scenario_id: str) -> bool:
     Returns True if a draft banner was rendered, False otherwise.
     """
     draft_key = f"pfmea_flat_draft_{project_id}_{scenario_id}"
-    draft = st.session_state.get(draft_key)
+    draft = st.session_state.get(f"{draft_key}_live")
+    if not isinstance(draft, pd.DataFrame):
+        draft = st.session_state.get(draft_key)
     if not isinstance(draft, pd.DataFrame):
         return False
 

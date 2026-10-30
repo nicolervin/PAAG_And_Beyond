@@ -134,6 +134,7 @@ def save_ergonomic_hazard_option_rows(project_id: str, edited: pd.DataFrame) -> 
             )
         created_ids: list[str] = []
         updated_ids: list[str] = []
+        modified_ids: list[str] = []
         try:
             for row, label in zip(rows, labels):
                 option_id = str(row.get("id") or "").strip()
@@ -151,6 +152,12 @@ def save_ergonomic_hazard_option_rows(project_id: str, edited: pd.DataFrame) -> 
                         (label, active, timestamp, option_id, project_id),
                     )
                     updated_ids.append(option_id)
+                    ex_opt = existing[option_id]
+                    if (
+                        str(ex_opt.get("label") or "").strip() != label
+                        or (1 if bool(ex_opt.get("active", 1)) else 0) != active
+                    ):
+                        modified_ids.append(option_id)
                 else:
                     option_id = str(uuid4())
                     conn.execute(
@@ -168,6 +175,7 @@ def save_ergonomic_hazard_option_rows(project_id: str, edited: pd.DataFrame) -> 
         "row_count": len(created_ids) + len(updated_ids),
         "created_ids": created_ids,
         "updated_ids": updated_ids,
+        "modified_ids": modified_ids,
         "timestamp": timestamp,
     }
 
@@ -426,7 +434,7 @@ def ergonomics_review_audit_history(
     df = pd.DataFrame(rows)
     if not df.empty and "created_at" in df.columns:
         df["created_at"] = df["created_at"].map(to_eastern_iso)
-    return df
+    return _db_core.enrich_audit_history_dataframe(df)
 
 def _ergonomics_review_has_real_content(values: dict) -> bool:
     """Return whether a review contains content beyond an untouched placeholder."""
@@ -714,6 +722,7 @@ def save_ergonomics_review_rows(
 
         created_ids: list[str] = []
         updated_ids: list[str] = []
+        modified_ids: list[str] = []
         for row in rows_to_save:
             review_id = row["id"]
             existing = existing_rows.get(review_id)
@@ -786,6 +795,8 @@ def save_ergonomics_review_rows(
                     ),
                 )
                 updated_ids.append(review_id)
+                if row_modified:
+                    modified_ids.append(review_id)
             else:
                 ack_at = (
                     timestamp
@@ -859,6 +870,7 @@ def save_ergonomics_review_rows(
         "row_count": len(rows_to_save),
         "created_ids": created_ids,
         "updated_ids": updated_ids,
+        "modified_ids": modified_ids,
         "discarded_ids": sorted(discard_ids),
         "merges": merge_audit,
         "timestamp": timestamp,

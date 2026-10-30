@@ -118,11 +118,14 @@ from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
+    guarded_tabs,
     native_selected_rows,
     prepare_editor_selection_column,
     render_select_all_control,
     required_field_errors,
     resolve_editor_selected_rows,
+    count_table_create_and_edit_rows,
+    render_audit_history_table,
     selectable_dataframe,
     selected_rows_action_bar,
     selected_dataframe_rows,
@@ -2343,7 +2346,21 @@ with setup_columns[1].expander("Define Work Regions", icon=":material/category:"
                 project_id, area_id, region_records_from(combined_regions)
             )
             record_audit_event(
-                project_id, "Yamazumi work regions", "Save & Refresh", count,
+                project_id,
+                "Yamazumi work regions",
+                "Save & Refresh",
+                count,
+                created_count=count_table_create_and_edit_rows(
+                    region_rows,
+                    combined_regions,
+                    compare_columns=["name", "description", "active"],
+                )[0],
+                updated_count=count_table_create_and_edit_rows(
+                    region_rows,
+                    combined_regions,
+                    compare_columns=["name", "description", "active"],
+                )[1],
+                editor_name=
                 st.session_state.get("current_editor", ""),
             )
             request_table_editor_reset(region_editor_key)
@@ -3722,8 +3739,9 @@ def confirm_interactive_element_delete() -> None:
 
 
 st.markdown('<div id="yamazumi-board-section"></div>', unsafe_allow_html=True)
-interactive_yamazumi_tab, yamazumi_tables_tab = st.tabs(
-    ["Interactive Yamazumi", "Yamazumi Tables"]
+interactive_yamazumi_tab, yamazumi_tables_tab = guarded_tabs(
+    ["Interactive Yamazumi", "Yamazumi Tables"],
+    key=f"yamazumi_main_tabs_{project_id}_{scenario_id}",
 )
 
 with interactive_yamazumi_tab:
@@ -4574,7 +4592,38 @@ with yamazumi_tables_tab:
                 "Save & Refresh",
                 count,
                 st.session_state.get("current_editor", ""),
-                {"area_id": pitch_save_scope, "feed_relationship_changes": feed_changes},
+                {
+                    "area_id": pitch_save_scope,
+                    "feed_relationship_changes": feed_changes,
+                    "created_count": count_table_create_and_edit_rows(
+                        before_pitch_rows,
+                        to_save,
+                        compare_columns=[
+                            "area_id",
+                            "pitch_number",
+                            "pitch_name",
+                            "pitch_type",
+                            "status",
+                            "feeds_into_pitch_id",
+                            "model_variants",
+                            "sequence",
+                        ],
+                    )[0],
+                    "updated_count": count_table_create_and_edit_rows(
+                        before_pitch_rows,
+                        to_save,
+                        compare_columns=[
+                            "area_id",
+                            "pitch_number",
+                            "pitch_name",
+                            "pitch_type",
+                            "status",
+                            "feeds_into_pitch_id",
+                            "model_variants",
+                            "sequence",
+                        ],
+                    )[1],
+                },
             )
             for _, row in after_pitch_rows.iterrows():
                 _clear_edit_pitch_widget_state(row.get("id"))
@@ -4949,7 +4998,32 @@ with yamazumi_tables_tab:
             to_save = to_save.drop(columns=["selected", "pitch"], errors="ignore")
             to_save = element_times_to_seconds(to_save)
             count = replace_yamazumi_elements(project_id, element_save_scope, to_save)
-            record_audit_event(project_id, "Yamazumi elements", "Save & Refresh", count, st.session_state.get("current_editor", ""))
+            _elem_created_cnt, _elem_updated_cnt = count_table_create_and_edit_rows(
+                element_table_source,
+                to_save,
+                compare_columns=[
+                    "area_id",
+                    "pitch_id",
+                    "model_variants",
+                    "work_type",
+                    "description",
+                    "time_s",
+                    "work_region",
+                    "sequence",
+                ],
+            )
+            record_audit_event(
+                project_id,
+                "Yamazumi elements",
+                "Save & Refresh",
+                count,
+                st.session_state.get("current_editor", ""),
+                {
+                    "area_id": element_save_scope,
+                    "created_count": _elem_created_cnt,
+                    "updated_count": _elem_updated_cnt,
+                },
+            )
             st.toast(
                 f"Saved {count} Yamazumi work element(s)",
                 icon=":material/check_circle:",
@@ -5109,7 +5183,12 @@ def confirm_pitch_bulk_delete() -> None:
                     "Save & Refresh",
                     int(pending.get("element_edit_count") or 0),
                     editor_name,
-                    {"area_id": element_save_scope, "saved_with_pitch_delete": True},
+                    {
+                        "area_id": element_save_scope,
+                        "saved_with_pitch_delete": True,
+                        "created_count": 0,
+                        "updated_count": int(pending.get("element_edit_count") or 0),
+                    },
                 )
             selected_ids = {str(row["id"]) for row in selected_rows}
             pitch_save_rows = prepared_pitch_rows(
@@ -5123,7 +5202,12 @@ def confirm_pitch_bulk_delete() -> None:
                     "Save & Refresh",
                     int(pending.get("pitch_edit_count") or 0),
                     editor_name,
-                    {"area_id": pitch_save_scope, "saved_with_bulk_delete": True},
+                    {
+                        "area_id": pitch_save_scope,
+                        "saved_with_bulk_delete": True,
+                        "created_count": 0,
+                        "updated_count": int(pending.get("pitch_edit_count") or 0),
+                    },
                 )
             moved_count = sum(
                 int(row.get("assigned_element_count") or 0)
@@ -5238,7 +5322,12 @@ def confirm_element_bulk_delete() -> None:
                     "Save & Refresh",
                     int(pending.get("element_edit_count") or 0),
                     editor_name,
-                    {"area_id": element_save_scope, "saved_with_bulk_delete": True},
+                    {
+                        "area_id": element_save_scope,
+                        "saved_with_bulk_delete": True,
+                        "created_count": 0,
+                        "updated_count": int(pending.get("element_edit_count") or 0),
+                    },
                 )
             if pending.get("other_pitch_edits"):
                 pitch_save_rows = prepared_pitch_rows(
@@ -5251,7 +5340,12 @@ def confirm_element_bulk_delete() -> None:
                     "Save & Refresh",
                     int(pending.get("pitch_edit_count") or 0),
                     editor_name,
-                    {"area_id": pitch_save_scope, "saved_with_element_delete": True},
+                    {
+                        "area_id": pitch_save_scope,
+                        "saved_with_element_delete": True,
+                        "created_count": 0,
+                        "updated_count": int(pending.get("pitch_edit_count") or 0),
+                    },
                 )
             record_audit_event(
                 project_id,

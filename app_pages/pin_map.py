@@ -23,7 +23,7 @@ from utils.store import (
     get_planning_scenario,
     pin_map_for_scenario,
 )
-from utils.table_ui import dataframe_to_excel, selectable_dataframe
+from utils.table_ui import dataframe_to_excel, render_audit_history_table, selectable_dataframe
 from utils.time_units import format_seconds
 
 
@@ -776,7 +776,7 @@ with st.expander("History", icon=":material/history:"):
     if history_df.empty:
         st.caption("No layout or Pin Map canvas history recorded yet.")
     else:
-        selectable_dataframe(
+        render_audit_history_table(
             history_df.drop(columns=["details"], errors="ignore"),
             key=f"pin_map_layout_audit_history_{project_id}",
             hide_index=True,
