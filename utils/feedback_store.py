@@ -9,7 +9,7 @@ from uuid import uuid4
 import pandas as pd
 
 from utils import db_core as _db_core
-from utils.cache_store import cached_store_read
+from utils.cache_store import cached_store_read, is_schema_initialized, mark_schema_initialized
 from utils.recycle_bin_store import (
     capture_deletion_to_recycle_bin,
     safe_unlink_upload_path,
@@ -77,6 +77,9 @@ GLOBAL_SEARCH_COLUMNS: list[str] = [
 
 def init_feedback_schema(conn: sqlite3.Connection) -> None:
     """Create the app-wide app_feedback table and indexes if absent, migrating legacy status constraints."""
+    if is_schema_initialized(conn, "feedback_schema_v1", "app_feedback"):
+        return
+    """Create the app-wide app_feedback table and indexes if absent, migrating legacy status constraints."""
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS app_feedback (
@@ -111,6 +114,7 @@ def init_feedback_schema(conn: sqlite3.Connection) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='app_feedback'"
     ).fetchone()
     ddl_sql = str(ddl_row[0] or "") if ddl_row else ""
+    mark_schema_initialized(conn, "feedback_schema_v1")
     if ddl_sql and "Unable to complete" not in ddl_sql:
         conn.executescript(
             """

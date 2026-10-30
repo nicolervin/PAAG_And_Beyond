@@ -23,6 +23,7 @@ from uuid import uuid4
 
 import pandas as pd
 import os
+import shutil
 import threading as _threading
 from utils.cache_store import (
     bump_write_epoch,
@@ -51,7 +52,7 @@ from utils.time_units import display_to_seconds, normalize_time_unit
 from utils.control_plan_store import clone_control_plan_scenario, init_control_plan_schema
 
 from utils.equipment_store import clone_equipment_scenario, init_equipment_schema
-from utils.layout_store import init_layout_schema
+from utils.layout_store import clone_layout_scenario_layers, init_layout_schema
 
 from utils.yamazumi_naming import (
     format_yamazumi_pitch_address,
@@ -1380,6 +1381,26 @@ def _backfill_missing_ergonomics_reviews(conn: sqlite3.Connection) -> int:
         )
     return len(missing)
 
+
+def duplicate_scenario_upload_file(raw_path: object, prefix: str = "clone") -> str:
+    """Duplicate a scenario-owned upload file so deleting it in one scenario does not affect others."""
+    raw = str(raw_path or "").strip()
+    if not raw or raw.lower().startswith(("http://", "https://", "data:")):
+        return raw
+    try:
+        resolved = resolve_upload_path(raw, UPLOAD_DIR)
+        if not resolved.is_file():
+            return raw
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        suffix = resolved.suffix
+        dest = UPLOAD_DIR / f"{prefix}_{uuid4().hex}{suffix}"
+        shutil.copy2(resolved, dest)
+        schedule_gcs_sync(DB_PATH, UPLOAD_DIR)
+        return str(dest)
+    except OSError:
+        return raw
+
+
 def _clone_ergonomics_reviews(
     conn: sqlite3.Connection,
     project_id: str,
@@ -1491,6 +1512,18 @@ def _clone_ergonomics_reviews(
                 ),
             )
         for media in media_by_review.get(source_review_id, []):
+            cloned_file_path = duplicate_scenario_upload_file(
+                media["file_path"], prefix="ergo_media"
+            )
+            raw_orig_path = str(media["original_file_path"] or "").strip()
+            if not raw_orig_path:
+                cloned_orig_path = ""
+            elif raw_orig_path == str(media["file_path"] or "").strip():
+                cloned_orig_path = cloned_file_path
+            else:
+                cloned_orig_path = duplicate_scenario_upload_file(
+                    raw_orig_path, prefix="ergo_media_orig"
+                )
             conn.execute(
                 """INSERT INTO ergonomics_visual_media
                    (id, project_id, scenario_id, review_id,
@@ -1504,8 +1537,8 @@ def _clone_ergonomics_reviews(
                     new_scenario_id,
                     cloned_review_id,
                     media["media_type"],
-                    media["file_path"],
-                    media["original_file_path"],
+                    cloned_file_path,
+                    cloned_orig_path,
                     media["annotations_json"],
                     media["caption"],
                     media["sequence"],
@@ -1669,10 +1702,24 @@ def clone_process_visual_media_scenario(
                 continue
         new_media_id = str(uuid4())
         media_id_map[old_id] = new_media_id
+        cloned_file_path = duplicate_scenario_upload_file(
+            item.get("file_path"), prefix="process_media"
+        )
+        raw_orig_path = str(item.get("original_file_path") or "").strip()
+        if not raw_orig_path:
+            cloned_orig_path = ""
+        elif raw_orig_path == str(item.get("file_path") or "").strip():
+            cloned_orig_path = cloned_file_path
+        else:
+            cloned_orig_path = duplicate_scenario_upload_file(
+                raw_orig_path, prefix="process_media_orig"
+            )
         item.update(
             id=new_media_id,
             scenario_id=new_scenario_id,
             pitch_id=new_pitch_id,
+            file_path=cloned_file_path,
+            original_file_path=cloned_orig_path,
             updated_at=timestamp,
         )
         columns = list(item)
@@ -3460,6 +3507,366 @@ def execute(sql: str, params: tuple = ()) -> None:
         conn.execute(sql, params)
 
 
+AUDIT_HISTORY_EXPANSION_COLUMNS: tuple[str, ...] = (
+    "create_new_rows",
+    "create_new_user",
+    "create_new_at",
+    "edit_existing_rows",
+    "edit_existing_user",
+    "edit_existing_at",
+)
+
+_DELETE_OR_NON_MUTATION_AUDIT_PREFIXES: tuple[str, ...] = (
+    "delete",
+    "deleted",
+    "remove",
+    "removed",
+    "clear",
+    "cleared",
+    "unlink",
+    "unlinked",
+    "purge",
+    "purged",
+    "detach",
+    "detached",
+    "archive",
+    "archived",
+    "retire",
+    "retired",
+    "export",
+)
+
+_DELETE_OR_NON_MUTATION_AUDIT_TOKENS: frozenset[str] = frozenset(
+    {
+        "delete",
+        "deleted",
+        "remove",
+        "removed",
+        "clear",
+        "cleared",
+        "unlink",
+        "unlinked",
+        "purge",
+        "purged",
+        "detach",
+        "detached",
+        "retire",
+        "retired",
+        "export",
+    }
+)
+
+_CREATE_AUDIT_ACTION_PREFIXES: tuple[str, ...] = (
+    "create",
+    "created",
+    "add",
+    "added",
+    "new",
+    "insert",
+    "inserted",
+    "clone",
+    "cloned",
+    "duplicate",
+    "duplicated",
+    "import",
+    "imported",
+    "generate",
+    "generated",
+    "seed",
+    "seeded",
+    "initialize",
+    "initialized",
+    "restore",
+    "restored",
+    "upload",
+    "uploaded",
+    "copy",
+    "copied",
+    "split",
+    "quick add",
+    "bulk add",
+    "place new",
+)
+
+_CREATE_AUDIT_ACTION_TOKENS: frozenset[str] = frozenset(
+    {
+        "create",
+        "created",
+        "add",
+        "added",
+        "new",
+        "insert",
+        "inserted",
+        "clone",
+        "cloned",
+        "duplicate",
+        "duplicated",
+        "import",
+        "imported",
+        "generate",
+        "generated",
+        "seed",
+        "seeded",
+        "initialize",
+        "initialized",
+        "restore",
+        "restored",
+    }
+)
+
+_EDIT_AUDIT_ACTION_PREFIXES: tuple[str, ...] = (
+    "update",
+    "updated",
+    "edit",
+    "edited",
+    "table update",
+    "save",
+    "saved",
+    "sync",
+    "synced",
+    "refresh",
+    "refreshed",
+    "rename",
+    "renamed",
+    "move",
+    "moved",
+    "reorder",
+    "reordered",
+    "reparent",
+    "reparented",
+    "assign",
+    "assigned",
+    "link",
+    "linked",
+    "set",
+    "acknowledge",
+    "acknowledged",
+    "complete",
+    "completed",
+    "reopen",
+    "reopened",
+    "resolve",
+    "resolved",
+    "align",
+    "aligned",
+    "merge",
+    "merged",
+    "apply",
+    "applied",
+    "modify",
+    "modified",
+    "place part",
+)
+
+
+def _is_delete_or_non_mutation_audit_action(action: object) -> bool:
+    action_lower = str(action or "").strip().lower()
+    if not action_lower:
+        return True
+    if action_lower.startswith(_DELETE_OR_NON_MUTATION_AUDIT_PREFIXES):
+        return True
+    tokens = set(
+        action_lower.replace("/", " ")
+        .replace("-", " ")
+        .replace("_", " ")
+        .replace("(", " ")
+        .replace(")", " ")
+        .split()
+    )
+    return bool(tokens & _DELETE_OR_NON_MUTATION_AUDIT_TOKENS)
+
+
+def _parse_audit_details_dict(details: object) -> dict:
+    if isinstance(details, dict):
+        return details
+    if isinstance(details, str):
+        text = details.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, TypeError):
+                return {}
+    return {}
+
+
+def _classify_audit_action(
+    action: object,
+    details: dict | None = None,
+    row_count: object = 0,
+) -> tuple[str, int]:
+    """Return ('create_new' | 'edit_existing' | 'none', count) for one audit event."""
+    parsed_details = _parse_audit_details_dict(details)
+    try:
+        fallback_count = max(0, int(row_count or 0))
+    except (TypeError, ValueError):
+        fallback_count = 0
+
+    explicit_section = str(parsed_details.get("audit_section") or "").strip().lower()
+    if explicit_section == "create_new":
+        try:
+            cnt = int(
+                parsed_details.get("create_new_rows")
+                or parsed_details.get("created_count")
+                or fallback_count
+            )
+        except (TypeError, ValueError):
+            cnt = fallback_count
+        return ("create_new", max(0, cnt)) if cnt > 0 else ("none", 0)
+    if explicit_section == "edit_existing":
+        try:
+            cnt = int(
+                parsed_details.get("edit_existing_rows")
+                or parsed_details.get("updated_count")
+                or fallback_count
+            )
+        except (TypeError, ValueError):
+            cnt = fallback_count
+        return ("edit_existing", max(0, cnt)) if cnt > 0 else ("none", 0)
+    if explicit_section == "none":
+        return ("none", 0)
+
+    if _is_delete_or_non_mutation_audit_action(action):
+        return ("none", 0)
+
+    if "create_new_rows" in parsed_details or "edit_existing_rows" in parsed_details:
+        try:
+            cn = max(0, int(parsed_details.get("create_new_rows") or 0))
+        except (TypeError, ValueError):
+            cn = 0
+        try:
+            ee = max(0, int(parsed_details.get("edit_existing_rows") or 0))
+        except (TypeError, ValueError):
+            ee = 0
+        if cn > 0 and ee == 0:
+            return ("create_new", cn)
+        if ee > 0 and cn == 0:
+            return ("edit_existing", ee)
+        if cn == 0 and ee == 0:
+            return ("none", 0)
+
+    if "created_count" in parsed_details or "updated_count" in parsed_details:
+        try:
+            cn = max(0, int(parsed_details.get("created_count") or 0))
+        except (TypeError, ValueError):
+            cn = 0
+        try:
+            ee = max(0, int(parsed_details.get("updated_count") or 0))
+        except (TypeError, ValueError):
+            ee = 0
+        if cn > 0 and ee == 0:
+            return ("create_new", cn)
+        if ee > 0 and cn == 0:
+            return ("edit_existing", ee)
+        if cn == 0 and ee == 0:
+            return ("none", 0)
+
+    has_c_ids = "created_ids" in parsed_details or "added_ids" in parsed_details
+    has_u_ids = "updated_ids" in parsed_details
+    if has_c_ids or has_u_ids:
+        c_ids = (
+            parsed_details.get("created_ids")
+            if "created_ids" in parsed_details
+            else parsed_details.get("added_ids")
+        )
+        u_ids = parsed_details.get("updated_ids")
+        cn = len(c_ids) if isinstance(c_ids, (list, tuple, set)) else 0
+        ee = len(u_ids) if isinstance(u_ids, (list, tuple, set)) else 0
+        if cn > 0 and ee == 0:
+            return ("create_new", cn)
+        if ee > 0 and cn == 0:
+            return ("edit_existing", ee)
+        if cn == 0 and ee == 0 and has_c_ids and has_u_ids:
+            return ("none", 0)
+
+    if fallback_count <= 0:
+        return ("none", 0)
+
+    action_lower = str(action or "").strip().lower()
+    if action_lower.startswith(_CREATE_AUDIT_ACTION_PREFIXES):
+        return ("create_new", fallback_count)
+    if action_lower.startswith(_EDIT_AUDIT_ACTION_PREFIXES):
+        return ("edit_existing", fallback_count)
+    tokens = set(
+        action_lower.replace("/", " ")
+        .replace("-", " ")
+        .replace("_", " ")
+        .replace("(", " ")
+        .replace(")", " ")
+        .split()
+    )
+    if tokens & _CREATE_AUDIT_ACTION_TOKENS:
+        return ("create_new", fallback_count)
+    return ("edit_existing", fallback_count)
+
+
+def enrich_audit_history_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Populate Create New and Edit Existing columns so each row has at most one section filled."""
+    if df is None:
+        return pd.DataFrame(
+            columns=["action", "row_count", "editor_name", "details", "created_at", *AUDIT_HISTORY_EXPANSION_COLUMNS]
+        )
+    out = df.copy()
+    if out.empty:
+        for col in AUDIT_HISTORY_EXPANSION_COLUMNS:
+            if col not in out.columns:
+                out[col] = pd.Series(dtype="object")
+        return out
+
+    create_rows_vals: list[str] = []
+    create_user_vals: list[str] = []
+    create_at_vals: list[str] = []
+    edit_rows_vals: list[str] = []
+    edit_user_vals: list[str] = []
+    edit_at_vals: list[str] = []
+
+    records = out.to_dict(orient="records")
+    for rec in records:
+        action_val = rec.get("action", rec.get("Action", ""))
+        row_count_val = rec.get("row_count", rec.get("Rows", rec.get("Count", 0)))
+        editor_val = str(rec.get("editor_name", rec.get("Editor", "")) or "").strip()
+        created_at_val = rec.get("created_at", rec.get("When", ""))
+        details_dict = _parse_audit_details_dict(rec.get("details"))
+
+        section, count = _classify_audit_action(action_val, details_dict, row_count_val)
+        if section == "create_new" and count > 0:
+            user_str = str(details_dict.get("create_new_user") or editor_val).strip()
+            when_raw = details_dict.get("create_new_at") or created_at_val
+            when_str = format_eastern_timestamp(when_raw)
+            create_rows_vals.append(str(count))
+            create_user_vals.append(user_str)
+            create_at_vals.append(when_str)
+            edit_rows_vals.append("")
+            edit_user_vals.append("")
+            edit_at_vals.append("")
+        elif section == "edit_existing" and count > 0:
+            user_str = str(details_dict.get("edit_existing_user") or editor_val).strip()
+            when_raw = details_dict.get("edit_existing_at") or created_at_val
+            when_str = format_eastern_timestamp(when_raw)
+            create_rows_vals.append("")
+            create_user_vals.append("")
+            create_at_vals.append("")
+            edit_rows_vals.append(str(count))
+            edit_user_vals.append(user_str)
+            edit_at_vals.append(when_str)
+        else:
+            create_rows_vals.append("")
+            create_user_vals.append("")
+            create_at_vals.append("")
+            edit_rows_vals.append("")
+            edit_user_vals.append("")
+            edit_at_vals.append("")
+
+    out["create_new_rows"] = create_rows_vals
+    out["create_new_user"] = create_user_vals
+    out["create_new_at"] = create_at_vals
+    out["edit_existing_rows"] = edit_rows_vals
+    out["edit_existing_user"] = edit_user_vals
+    out["edit_existing_at"] = edit_at_vals
+    return out
+
+
 def record_audit_event(
     project_id: str,
     table_name: str,
@@ -3468,22 +3875,131 @@ def record_audit_event(
     editor_name: str = "",
     details: dict | None = None,
     *,
+    created_count: int | None = None,
+    updated_count: int | None = None,
     _conn: sqlite3.Connection | None = None,
 ) -> None:
-    """Record a concise, project-scoped history entry for a persisted table action."""
+    """Record a concise, project-scoped history entry for a persisted table action.
+
+    When a single save both creates new row(s) and edits existing row(s), two
+    separate history rows are recorded so Create New and Edit Existing never
+    share the same row of history.
+    """
     sql = (
         """INSERT INTO audit_log
            (id, project_id, table_name, action, row_count, editor_name, details, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
     )
-    params = (
-        str(uuid4()), project_id, table_name, action, int(row_count), editor_name.strip(),
-        json.dumps(details or {}, ensure_ascii=False), now_iso(),
-    )
-    if _conn is not None:
-        _conn.execute(sql, params)
+    editor = str(editor_name or "").strip()
+    base_details = dict(details) if isinstance(details, dict) else {}
+    timestamp = now_iso()
+
+    def _insert_one(entry_row_count: int, entry_details: dict, entry_ts: str) -> None:
+        params = (
+            str(uuid4()),
+            project_id,
+            table_name,
+            action,
+            int(entry_row_count),
+            editor,
+            json.dumps(entry_details, ensure_ascii=False),
+            entry_ts,
+        )
+        if _conn is not None:
+            _conn.execute(sql, params)
+        else:
+            execute(sql, params)
+
+    is_non_mutation = _is_delete_or_non_mutation_audit_action(action)
+    has_explicit_counts = False
+    c_count = 0
+    u_count = 0
+
+    if not is_non_mutation:
+        if created_count is not None or updated_count is not None:
+            c_count = max(0, int(created_count or 0))
+            u_count = max(0, int(updated_count or 0))
+            has_explicit_counts = True
+        elif "created_count" in base_details or "updated_count" in base_details:
+            try:
+                c_count = max(0, int(base_details.get("created_count") or 0))
+            except (TypeError, ValueError):
+                c_count = 0
+            try:
+                u_count = max(0, int(base_details.get("updated_count") or 0))
+            except (TypeError, ValueError):
+                u_count = 0
+            has_explicit_counts = True
+        elif (
+            ("created_ids" in base_details or "added_ids" in base_details)
+            and "updated_ids" in base_details
+        ):
+            c_ids = (
+                base_details.get("created_ids")
+                if "created_ids" in base_details
+                else base_details.get("added_ids")
+            )
+            u_ids = base_details.get("updated_ids")
+            c_count = len(c_ids) if isinstance(c_ids, (list, tuple, set)) else 0
+            u_count = len(u_ids) if isinstance(u_ids, (list, tuple, set)) else 0
+            has_explicit_counts = True
+
+    if has_explicit_counts and c_count > 0 and u_count > 0:
+        edit_details = dict(base_details)
+        edit_details["audit_section"] = "edit_existing"
+        edit_details["edit_existing_rows"] = int(u_count)
+        edit_details["edit_existing_user"] = editor
+        edit_details["edit_existing_at"] = timestamp
+        edit_details.pop("create_new_rows", None)
+        edit_details.pop("create_new_user", None)
+        edit_details.pop("create_new_at", None)
+        _insert_one(int(u_count), edit_details, timestamp)
+
+        create_details = dict(base_details)
+        create_details["audit_section"] = "create_new"
+        create_details["create_new_rows"] = int(c_count)
+        create_details["create_new_user"] = editor
+        create_details["create_new_at"] = timestamp
+        create_details.pop("edit_existing_rows", None)
+        create_details.pop("edit_existing_user", None)
+        create_details.pop("edit_existing_at", None)
+        _insert_one(int(c_count), create_details, timestamp)
+        return
+
+    entry_details = dict(base_details)
+    if has_explicit_counts:
+        if c_count > 0 and u_count == 0:
+            entry_details["audit_section"] = "create_new"
+            entry_details["create_new_rows"] = int(c_count)
+            entry_details["create_new_user"] = editor
+            entry_details["create_new_at"] = timestamp
+            effective_row_count = int(c_count)
+        elif u_count > 0 and c_count == 0:
+            entry_details["audit_section"] = "edit_existing"
+            entry_details["edit_existing_rows"] = int(u_count)
+            entry_details["edit_existing_user"] = editor
+            entry_details["edit_existing_at"] = timestamp
+            effective_row_count = int(u_count)
+        else:
+            entry_details["audit_section"] = "none"
+            effective_row_count = int(row_count)
     else:
-        execute(sql, params)
+        section, classified_count = _classify_audit_action(action, entry_details, row_count)
+        if section == "create_new" and classified_count > 0:
+            entry_details["audit_section"] = "create_new"
+            entry_details["create_new_rows"] = int(classified_count)
+            entry_details["create_new_user"] = editor
+            entry_details["create_new_at"] = timestamp
+        elif section == "edit_existing" and classified_count > 0:
+            entry_details["audit_section"] = "edit_existing"
+            entry_details["edit_existing_rows"] = int(classified_count)
+            entry_details["edit_existing_user"] = editor
+            entry_details["edit_existing_at"] = timestamp
+        else:
+            entry_details["audit_section"] = "none"
+        effective_row_count = int(row_count)
+
+    _insert_one(effective_row_count, entry_details, timestamp)
 
 
 @cached_store_read
@@ -3493,20 +4009,20 @@ def audit_history(project_id: str, table_name: str | None = None, limit: int = 1
         rows = query(
             """SELECT action, row_count, editor_name, details, created_at
                FROM audit_log WHERE project_id=? AND table_name=?
-               ORDER BY datetime(created_at) DESC, created_at DESC LIMIT ?""",
+               ORDER BY datetime(created_at) DESC, created_at DESC, rowid DESC LIMIT ?""",
             (project_id, table_name, int(limit)),
         )
     else:
         rows = query(
             """SELECT table_name, action, row_count, editor_name, details, created_at
                FROM audit_log WHERE project_id=?
-               ORDER BY datetime(created_at) DESC, created_at DESC LIMIT ?""",
+               ORDER BY datetime(created_at) DESC, created_at DESC, rowid DESC LIMIT ?""",
             (project_id, int(limit)),
         )
     df = pd.DataFrame(rows)
     if not df.empty and "created_at" in df.columns:
         df["created_at"] = df["created_at"].map(to_eastern_iso)
-    return df
+    return enrich_audit_history_dataframe(df)
 
 
 def backup_database(target_path: str | Path) -> Path:

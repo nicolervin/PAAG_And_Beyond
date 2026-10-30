@@ -6,6 +6,7 @@ import streamlit as st
 
 from utils.time_units import TIME_UNITS, display_to_seconds, seconds_to_display, time_unit
 from utils.split_workspace import build_page_url
+from utils.table_ui import has_active_unsaved_changes, request_unsaved_state_change
 from utils.store import (
     clone_planning_scenario,
     next_scenario_revision_label,
@@ -55,6 +56,22 @@ def _activate_scenario(selector_key: str) -> None:
     if not selected_id:
         return
     prev_id = str(st.session_state.get("scenario_id") or "")
+    project_id = st.session_state.get("project_id")
+    if str(selected_id) != prev_id and prev_id and has_active_unsaved_changes():
+        st.session_state[selector_key] = prev_id
+        target_label = "selected scenario"
+        if project_id:
+            scenarios = planning_scenarios(str(project_id))
+            matched = next((s for s in scenarios if str(s.get("id")) == str(selected_id)), None)
+            if matched:
+                target_label = scenario_option_label(matched)
+        request_unsaved_state_change(
+            {"_pending_unsaved_scenario_switch": str(selected_id)},
+            label=target_label,
+            nav_kind="scenario",
+            clear_unsaved_tracking=True,
+        )
+        return
     sync_active_scenario_state(str(selected_id))
     project_id = st.session_state.get("project_id")
     if str(selected_id) != prev_id and project_id:

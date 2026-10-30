@@ -18,6 +18,7 @@ from utils.table_ui import (
     finalize_unsaved_tracking,
     has_active_unsaved_changes,
     request_unsaved_page_navigation,
+    request_unsaved_state_change,
 )
 from utils.help_hub import (
     open_universal_help_dialog,
@@ -321,11 +322,36 @@ recycle_bin_page = st.Page(
     url_path="recycle_bin",
 )
 unlisted_pages = [
-    st.Page("app_pages/functional_equipment.py", title="Equipment", url_path="Equipment"),
-    st.Page("app_pages/functional_ergonomics.py", title="Ergonomics", url_path="Ergonomics"),
-    st.Page("app_pages/functional_quality.py", title="Quality", url_path="Quality"),
-    st.Page("app_pages/functional_materials.py", title="Materials", url_path="Materials"),
-    st.Page("app_pages/functional_safety.py", title="Safety", url_path="Safety"),
+    st.Page(
+        "app_pages/functional_equipment.py",
+        title="Equipment",
+        icon=":material/precision_manufacturing:",
+        url_path="Equipment",
+    ),
+    st.Page(
+        "app_pages/functional_ergonomics.py",
+        title="Ergonomics",
+        icon=":material/accessibility_new:",
+        url_path="Ergonomics",
+    ),
+    st.Page(
+        "app_pages/functional_quality.py",
+        title="Quality",
+        icon=":material/verified:",
+        url_path="Quality",
+    ),
+    st.Page(
+        "app_pages/functional_materials.py",
+        title="Materials",
+        icon=":material/inventory_2:",
+        url_path="Materials",
+    ),
+    st.Page(
+        "app_pages/functional_safety.py",
+        title="Safety",
+        icon=":material/health_and_safety:",
+        url_path="Safety",
+    ),
     recycle_bin_page,
 ]
 navigation = st.navigation(
@@ -343,6 +369,19 @@ all_registered_pages = [
 ]
 all_registered_pages.extend(unlisted_pages)
 
+_ALIAS_TO_CANONICAL_URL_PATH = {
+    "Equipment": "functional_equipment",
+    "Ergonomics": "functional_ergonomics",
+    "Quality": "functional_quality",
+    "Materials": "functional_materials",
+    "Safety": "functional_safety",
+}
+
+
+def _canonical_workspace_page_key(url_path: str) -> str:
+    raw = str(url_path or "").strip()
+    return _ALIAS_TO_CANONICAL_URL_PATH.get(raw, raw)
+
 
 def _workspace_page_key(app_page) -> str:
     return app_page.url_path or "__default__"
@@ -351,17 +390,18 @@ def _workspace_page_key(app_page) -> str:
 page_by_url_path = {
     _workspace_page_key(app_page): app_page for app_page in all_registered_pages
 }
-active_page_key = _workspace_page_key(navigation)
-prev_url_path = st.session_state.get("current_url_path")
+raw_active_page_key = _workspace_page_key(navigation)
+active_page_key = _canonical_workspace_page_key(raw_active_page_key)
+prev_url_path = _canonical_workspace_page_key(st.session_state.get("current_url_path") or "")
 st.session_state["current_url_path"] = active_page_key
 
-pending_navigation = str(
+pending_navigation = _canonical_workspace_page_key(
     st.session_state.pop("split_workspace_pending_navigation", "") or ""
 )
 if pending_navigation and pending_navigation in page_by_url_path and pending_navigation != active_page_key:
     st.switch_page(page_by_url_path[pending_navigation])
 
-qp_page = st.query_params.get("page")
+qp_page = _canonical_workspace_page_key(st.query_params.get("page") or "")
 if (
     qp_page
     and qp_page in page_by_url_path
@@ -397,10 +437,14 @@ split_navigation_key = "split_workspace_navigation"
 split_divider_key = "split_workspace_divider"
 split_orientation_key = "split_workspace_orientation"
 
-secondary_url_path = str(st.session_state.get(split_secondary_key) or "")
+secondary_url_path = _canonical_workspace_page_key(
+    st.session_state.get(split_secondary_key) or ""
+)
 if secondary_url_path not in page_by_url_path or secondary_url_path == active_page_key:
     secondary_url_path = ""
     st.session_state.pop(split_secondary_key, None)
+else:
+    st.session_state[split_secondary_key] = secondary_url_path
 secondary_page = page_by_url_path.get(secondary_url_path)
 
 
@@ -442,7 +486,7 @@ navigation_sections = [
 
 def _handle_split_navigation_from(nav_key: str) -> None:
     event = component_event(nav_key, "navigate")
-    target = str(event.get("url_path") or "")
+    target = _canonical_workspace_page_key(event.get("url_path") or "")
     if target not in page_by_url_path:
         return
     if target == active_page_key:
@@ -454,14 +498,14 @@ def _handle_split_navigation_from(nav_key: str) -> None:
             label=str(getattr(target_page, "title", "") or target),
         )
         return
-    if target == str(st.session_state.get(split_secondary_key) or ""):
+    if target == _canonical_workspace_page_key(st.session_state.get(split_secondary_key) or ""):
         st.session_state.pop(split_secondary_key, None)
     st.session_state["split_workspace_pending_navigation"] = target
 
 
 def _handle_split_open_from(nav_key: str) -> None:
     event = component_event(nav_key, "split")
-    target = str(event.get("url_path") or "")
+    target = _canonical_workspace_page_key(event.get("url_path") or "")
     if target not in page_by_url_path:
         return
     if target == active_page_key:
@@ -521,7 +565,33 @@ with st.sidebar:
         )
         if st.session_state.get("global_project") not in project_by_name:
             st.session_state.pop("global_project", None)
-        selected_name = st.selectbox("Active project", list(project_by_name), index=list(project_by_name).index(current_name), key="global_project")
+        pending_proj_name = st.session_state.pop("_pending_unsaved_project_name", None)
+        if pending_proj_name in project_by_name:
+            st.session_state["global_project"] = pending_proj_name
+        if st.session_state.get("global_project") not in project_by_name:
+            st.session_state.pop("global_project", None)
+
+        def _on_global_project_change(prev_label: str, proj_map: dict[str, str]) -> None:
+            chosen_name = str(st.session_state.get("global_project") or "")
+            chosen_pid = proj_map.get(chosen_name)
+            if chosen_pid and str(chosen_pid) != str(st.session_state.get("project_id") or ""):
+                if has_active_unsaved_changes():
+                    st.session_state["global_project"] = prev_label
+                    request_unsaved_state_change(
+                        {"_pending_unsaved_project_name": chosen_name},
+                        label=chosen_name,
+                        nav_kind="project",
+                        clear_unsaved_tracking=True,
+                    )
+
+        selected_name = st.selectbox(
+            "Active project",
+            list(project_by_name),
+            index=list(project_by_name).index(current_name),
+            key="global_project",
+            on_change=_on_global_project_change,
+            args=(current_name, project_by_name),
+        )
         selected_project_id = project_by_name[selected_name]
         if selected_project_id != st.session_state.project_id:
             clear_unsaved_tracking_state()
@@ -710,6 +780,13 @@ if active_page_key != "parts" and secondary_url_path != "parts":
     st.session_state.pop("_parts_page_mounted_token", None)
 
 begin_unsaved_tracking(page_by_url_path, split_secondary_key=split_secondary_key)
+if st.session_state.get("_pending_unsaved_project_name"):
+    st.rerun()
+pending_scen_switch = st.session_state.pop("_pending_unsaved_scenario_switch", None)
+if pending_scen_switch:
+    sync_active_scenario_state(str(pending_scen_switch))
+    set_last_active_workspace(st.session_state.get("project_id"), str(pending_scen_switch))
+    st.rerun()
 
 if secondary_page is None:
     _run_workspace_page(navigation)

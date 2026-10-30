@@ -46,6 +46,11 @@ class EquipmentPageTests(unittest.TestCase):
         self.assertIn(":material/fact_check: Needs vs. Placements Audit", tab_labels)
         self.assertIn(":material/category: Equipment Types", tab_labels)
         self.assertIn("Equipment Catalog & Placements", [item.value for item in app.subheader])
+        app.session_state[f"equipment_main_tabs_{self.project_id}"] = (
+            ":material/conveyor_belt: Conveyor Zones & Line Sizing"
+        )
+        app.run(timeout=30)
+        self.assertEqual([], list(app.exception))
         metric_labels = [m.label for m in app.metric]
         self.assertIn("Total Conveyor Length", metric_labels)
         self.assertIn("Line Pitch Footprint", metric_labels)
@@ -171,6 +176,9 @@ class EquipmentPageTests(unittest.TestCase):
         app.session_state["project_id"] = self.project_id
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "Equipment page tester"
+        app.session_state[f"equipment_main_tabs_{self.project_id}"] = (
+            ":material/conveyor_belt: Conveyor Zones & Line Sizing"
+        )
         app.session_state[unit_key] = "Feet (ft)"
         app.run(timeout=30)
         self.assertEqual([], list(app.exception))

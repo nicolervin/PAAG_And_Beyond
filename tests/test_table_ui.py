@@ -602,6 +602,110 @@ class UnifiedEditorSelectionTests(unittest.TestCase):
         self.assertEqual(effective["edited_rows"], {0: {"name": "Updated First"}})
         self.assertTrue(session_state.get("_select_all_my_editor"))
 
+    def test_wrap_data_editor_freezes_base_dataframe_during_active_edits(self) -> None:
+        session_state: dict[str, object] = {}
+        initial_df = pd.DataFrame(
+            {
+                "id": ["row-1", "row-2"],
+                "pitch_type": ["Pitch", "Pitch"],
+            }
+        )
+        mutated_df = pd.DataFrame(
+            {
+                "id": ["row-1", "row-2"],
+                "pitch_type": ["Waterspider", "Pitch"],
+            }
+        )
+        captured_inputs: list[pd.DataFrame] = []
+
+        def fake_orig_editor(df: pd.DataFrame, *_args, **kwargs):
+            captured_inputs.append(df.copy())
+            k = kwargs.get("key")
+            if k and k not in session_state:
+                session_state[k] = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
+            return df.copy()
+
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_filters, "_ORIG_DATA_EDITOR", side_effect=fake_orig_editor),
+        ):
+            key0 = table_filters.apply_pending_table_editor_reset("yamazumi_pitch_editor")
+            # Initial render with no active edits stores frozen base
+            table_filters._wrap_data_editor(initial_df, key=key0)
+            self.assertEqual(captured_inputs[-1]["pitch_type"].tolist(), ["Pitch", "Pitch"])
+
+            # Simulate user editing row 0 and page code mutating the input DataFrame on rerun
+            session_state[key0] = {
+                "edited_rows": {0: {"pitch_type": "Waterspider"}},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+            table_filters._wrap_data_editor(mutated_df, key=key0)
+            # Base DataFrame passed to _ORIG_DATA_EDITOR must remain frozen to prevent (0, 0) focus reset
+            self.assertEqual(captured_inputs[-1]["pitch_type"].tolist(), ["Pitch", "Pitch"])
+
+            # After explicit reset, the new DataFrame becomes the fresh base
+            table_filters.request_table_editor_reset(key0)
+            key1 = table_filters.apply_pending_table_editor_reset(key0)
+            table_filters._wrap_data_editor(mutated_df, key=key1)
+            self.assertEqual(captured_inputs[-1]["pitch_type"].tolist(), ["Waterspider", "Pitch"])
+
+    def test_direct_entry_editor_rows_keeps_caption_mounted_when_unlocked_and_locked(self) -> None:
+        df = pd.DataFrame({"id": ["r1"], "name": ["Alpha"]})
+        unlocked_controls = Mock()
+        unlocked_controls.selectbox.return_value = ""
+        unlocked_controls.toggle.return_value = False
+        with (
+            patch.object(table_ui.st, "session_state", {"test_editor": {}}),
+            patch.object(table_ui.st, "container", return_value=unlocked_controls),
+        ):
+            table_ui.direct_entry_editor_rows(
+                df,
+                editor_key="test_editor",
+                sort_columns=["name"],
+            )
+        unlocked_controls.caption.assert_called_once()
+
+        locked_controls = Mock()
+        locked_controls.selectbox.return_value = ""
+        locked_controls.toggle.return_value = False
+        with (
+            patch.object(
+                table_ui.st,
+                "session_state",
+                {"test_editor": {"edited_rows": {0: {"name": "Beta"}}}},
+            ),
+            patch.object(table_ui.st, "container", return_value=locked_controls),
+        ):
+            table_ui.direct_entry_editor_rows(
+                df,
+                editor_key="test_editor",
+                sort_columns=["name"],
+            )
+        locked_controls.caption.assert_called_once()
+
+    def test_request_unsaved_state_change_completes_when_clean(self) -> None:
+        session_state: dict[str, object] = {
+            "active_model": "model-1",
+            "stale_key": "remove-me",
+        }
+        with (
+            patch.object(table_ui.st, "session_state", session_state),
+            patch.object(table_ui.st, "rerun"),
+        ):
+            table_ui.request_unsaved_state_change(
+                {"active_model": "model-2"},
+                label="Model 2",
+                nav_kind="model",
+                clear_keys=["stale_key"],
+                clear_unsaved_tracking=True,
+            )
+            self.assertIn("_pending_unsaved_nav", session_state)
+            table_ui.finalize_unsaved_tracking({})
+        self.assertEqual(session_state.get("active_model"), "model-2")
+        self.assertNotIn("stale_key", session_state)
+        self.assertNotIn("_pending_unsaved_nav", session_state)
+
 
 if __name__ == "__main__":
     unittest.main()

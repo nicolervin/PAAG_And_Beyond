@@ -937,6 +937,149 @@ class ControlPlanStoreTests(unittest.TestCase):
         self.assertIn("Migrated Global Method", methods)
 
 
+    def test_requires_control_plan_flag_and_uncovered_pfmea_controls(self) -> None:
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation,
+                    description, updated_at)
+                   VALUES ('wheel-work', ?, ?, 25, '01-WA1-001',
+                           'assemble metal chrome to rubber wheels',
+                           'assemble metal chrome to rubber wheels', ?)""",
+                (self.project_id, self.scenario_id, timestamp),
+            )
+        wheel_entry_id = pfmea_store.save_pfmea_entry_rows(
+            self.project_id,
+            self.scenario_id,
+            "wheel-work",
+            pd.DataFrame(
+                [
+                    {
+                        "id": "",
+                        "potential_failure_mode": "Wheel length out of spec",
+                        "class_code": "",
+                    }
+                ]
+            ),
+        )["created_ids"][0]
+        wheel_cause_id = pfmea_store.save_pfmea_cause_rows(
+            self.project_id,
+            self.scenario_id,
+            wheel_entry_id,
+            pd.DataFrame(
+                [{"id": "", "cause_description": "Improper seating", "occurrence": 3}]
+            ),
+        )["created_ids"][0]
+
+        # Default options have requires_control_plan = False
+        det_options = pfmea_store.pfmea_control_options(self.project_id, "Detection")
+        if not det_options.empty:
+            self.assertTrue(
+                all(not bool(v) for v in det_options["requires_control_plan"].tolist())
+            )
+
+        # Add a critical fixture control (requires_control_plan=True) and a visual check (False)
+        fixture_opt_id = pfmea_store.add_pfmea_control_option(
+            self.project_id,
+            "Detection",
+            "Fixture to check Car body length",
+            requires_control_plan=True,
+        )
+        visual_opt_id = pfmea_store.add_pfmea_control_option(
+            self.project_id,
+            "Detection",
+            "Visual Check",
+            requires_control_plan=False,
+        )
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO pfmea_detection_selections
+                   (id, project_id, scenario_id, pfmea_entry_id, pfmea_cause_id,
+                    source_type, detection_option_id, source_updated_at_snapshot,
+                    sequence, created_at, updated_at)
+                   VALUES ('det-sel-1', ?, ?, ?, ?, 'manual_option', ?, ?, 10, ?, ?),
+                          ('det-sel-2', ?, ?, ?, ?, 'manual_option', ?, ?, 20, ?, ?)""",
+                (
+                    self.project_id,
+                    self.scenario_id,
+                    wheel_entry_id,
+                    wheel_cause_id,
+                    fixture_opt_id,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    self.project_id,
+                    self.scenario_id,
+                    wheel_entry_id,
+                    wheel_cause_id,
+                    visual_opt_id,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        uncovered = control_plan_store.control_plan_uncovered_pfmea_controls(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(len(uncovered), 1)
+        self.assertEqual(
+            uncovered.iloc[0]["control_label"], "Fixture to check Car body length"
+        )
+        self.assertEqual(uncovered.iloc[0]["coverage_status"], "Unclassified PFMEA")
+
+        # Classify the PFMEA row so it generates a Control Plan row, but hasn't called out the fixture yet
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE pfmea_entries SET class_code='KPC' WHERE id=?",
+                (wheel_entry_id,),
+            )
+
+        uncovered_classified = control_plan_store.control_plan_uncovered_pfmea_controls(
+            self.project_id, self.scenario_id
+        )
+        self.assertEqual(len(uncovered_classified), 1)
+        self.assertEqual(
+            uncovered_classified.iloc[0]["coverage_status"],
+            "Not Called Out in Control Plan",
+        )
+
+        # Only PFMEA controls marked requires_control_plan=True appear in Control Plan's Control method dropdown
+        cp_methods = control_plan_store.list_control_methods(self.conn, self.project_id)
+        self.assertIn("Fixture to check Car body length", cp_methods)
+        self.assertNotIn("Visual Check", cp_methods)
+
+        detailed_methods = control_plan_store.list_control_methods_detailed(
+            self.conn, self.project_id
+        )
+        fixture_method_row = detailed_methods[
+            detailed_methods["name"] == "Fixture to check Car body length"
+        ].iloc[0]
+        self.assertEqual(
+            fixture_method_row["scope"], "PFMEA Detection (Requires Control Plan)"
+        )
+        self.assertFalse(bool(fixture_method_row["is_catalog"]))
+
+        # Select the PFMEA control in the step's Control Plan 'control_method' dropdown -> coverage flag clears
+        projection = control_plan_store.control_plan_projection(
+            self.project_id, self.scenario_id
+        )
+        wheel_mask = projection["work_element_id"] == "wheel-work"
+        projection.loc[wheel_mask, "control_method"] = (
+            "Fixture to check Car body length"
+        )
+        control_plan_store.save_control_plan_rows(
+            self.project_id, self.scenario_id, projection
+        )
+
+        uncovered_after = control_plan_store.control_plan_uncovered_pfmea_controls(
+            self.project_id, self.scenario_id
+        )
+        self.assertTrue(uncovered_after.empty)
+
+
 if __name__ == "__main__":
     unittest.main()
 

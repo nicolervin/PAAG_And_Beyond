@@ -13,7 +13,11 @@ from uuid import uuid4
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from utils.cache_store import cached_store_read
+from utils.cache_store import (
+    cached_store_read,
+    is_schema_initialized,
+    mark_schema_initialized,
+)
 from utils.recycle_bin_store import capture_deletion_to_recycle_bin, safe_unlink_upload_path
 
 SUPPORTED_LAYOUT_EXTENSIONS: tuple[str, ...] = (
@@ -116,6 +120,8 @@ def format_dimension(inches: float, unit: str = "feet") -> str:
 
 def init_layout_schema(conn: sqlite3.Connection) -> None:
     """Initialize database tables for 2D plant floor plan layouts, layers, and shapes."""
+    if is_schema_initialized(conn, "layout_schema_v1", "layout_custom_stencils"):
+        return
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS layout_plans (
@@ -253,6 +259,7 @@ def init_layout_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_layout_shapes_layer ON layout_shapes(revision_id, layer_id, z_index)"
     )
+    mark_schema_initialized(conn, "layout_schema_v1")
 
 
 # --- Layout Plan Operations ---
@@ -3396,6 +3403,104 @@ def delete_layout_custom_stencil(
     return True
 
 
+def clone_layout_scenario_layers(
+    conn: sqlite3.Connection,
+    project_id: str,
+    source_scenario_id: str,
+    target_scenario_id: str,
+    pitch_id_map: dict[str, str],
+    timestamp: str,
+) -> int:
+    """Clone scenario-scoped layout layers and their shapes across all project layout revisions."""
+    source_layers = conn.execute(
+        """SELECT l.*
+           FROM layout_layers l
+           JOIN layout_revisions r ON r.id = l.revision_id
+           JOIN layout_plans p ON p.id = r.layout_id
+           WHERE p.project_id = ? AND l.scenario_id = ?
+           ORDER BY l.z_index, l.created_at, l.id""",
+        (project_id, source_scenario_id),
+    ).fetchall()
+    if not source_layers:
+        return 0
+
+    layer_id_map: dict[str, str] = {}
+    for raw_layer in source_layers:
+        layer = dict(raw_layer)
+        old_layer_id = str(layer["id"])
+        new_layer_id = str(uuid4())
+        layer_id_map[old_layer_id] = new_layer_id
+        layer.update(
+            id=new_layer_id,
+            scenario_id=target_scenario_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        columns = list(layer)
+        conn.execute(
+            f"INSERT INTO layout_layers ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            tuple(layer[col] for col in columns),
+        )
+
+    placeholders = ",".join("?" for _ in layer_id_map)
+    source_shapes = conn.execute(
+        f"""SELECT * FROM layout_shapes
+            WHERE layer_id IN ({placeholders})
+            ORDER BY z_index, created_at, id""",
+        tuple(layer_id_map.keys()),
+    ).fetchall()
+    if source_shapes:
+        shape_id_map: dict[str, str] = {}
+        group_id_map: dict[str, str] = {}
+        for raw_shape in source_shapes:
+            old_shape_id = str(raw_shape["id"])
+            shape_id_map[old_shape_id] = str(uuid4())
+            old_group_id = _text(raw_shape["group_id"]) if "group_id" in raw_shape.keys() else ""
+            if old_group_id and old_group_id not in group_id_map:
+                group_id_map[old_group_id] = str(uuid4())
+
+        deferred_links: list[tuple[str | None, str | None, str]] = []
+        for raw_shape in source_shapes:
+            shape = dict(raw_shape)
+            old_shape_id = str(shape["id"])
+            new_shape_id = shape_id_map[old_shape_id]
+            old_layer_id = _text(shape.get("layer_id"))
+            old_pitch_id = _text(shape.get("pitch_id"))
+            old_group_id = _text(shape.get("group_id"))
+            old_source_shape_id = _text(shape.get("source_shape_id"))
+            old_target_shape_id = _text(shape.get("target_shape_id"))
+            new_source_shape_id = (
+                shape_id_map.get(old_source_shape_id, old_source_shape_id) if old_source_shape_id else None
+            )
+            new_target_shape_id = (
+                shape_id_map.get(old_target_shape_id, old_target_shape_id) if old_target_shape_id else None
+            )
+            if new_source_shape_id or new_target_shape_id:
+                deferred_links.append((new_source_shape_id, new_target_shape_id, new_shape_id))
+            shape.update(
+                id=new_shape_id,
+                layer_id=layer_id_map.get(old_layer_id),
+                pitch_id=pitch_id_map.get(old_pitch_id, old_pitch_id) if old_pitch_id else None,
+                group_id=group_id_map.get(old_group_id, "") if old_group_id else "",
+                source_shape_id=None,
+                target_shape_id=None,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            columns = list(shape)
+            conn.execute(
+                f"INSERT INTO layout_shapes ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                tuple(shape[col] for col in columns),
+            )
+        for new_source_shape_id, new_target_shape_id, new_shape_id in deferred_links:
+            conn.execute(
+                "UPDATE layout_shapes SET source_shape_id = ?, target_shape_id = ? WHERE id = ?",
+                (new_source_shape_id, new_target_shape_id, new_shape_id),
+            )
+
+    return len(layer_id_map)
+
+
 __domain_exports__ = [
     "LAYOUT_UNITS",
     "UNIT_TO_INCHES",
@@ -3404,6 +3509,7 @@ __domain_exports__ = [
     "from_canonical_inches",
     "format_dimension",
     "init_layout_schema",
+    "clone_layout_scenario_layers",
     "list_layouts",
     "get_layout",
     "create_layout",

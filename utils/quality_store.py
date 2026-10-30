@@ -21,7 +21,9 @@ import pandas as pd
 from utils.cache_store import (
     cached_store_read,
     is_scenario_task_completed,
+    is_schema_initialized,
     mark_scenario_task_completed,
+    mark_schema_initialized,
 )
 from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
@@ -64,121 +66,129 @@ TORQUE_TOOL_ORIENTATIONS = ["Fixtured", "Pistol", "In-line", "Right angle"]
 
 def init_quality_schema(conn: sqlite3.Connection) -> None:
     """Create the approved Quality tables and their lookup indexes safely."""
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS quality_requirements (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            requirement_type TEXT NOT NULL,
-            description TEXT NOT NULL,
-            unique_identifier TEXT NOT NULL COLLATE NOCASE,
-            pass_fail INTEGER NOT NULL DEFAULT 0 CHECK (pass_fail IN (0, 1)),
-            target_value REAL,
-            tolerances TEXT NOT NULL DEFAULT '',
-            unit TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(project_id, unique_identifier)
-        );
-        CREATE TABLE IF NOT EXISTS quality_requirement_assignments (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
-            quality_requirement_id TEXT NOT NULL
-                REFERENCES quality_requirements(id) ON DELETE RESTRICT,
-            requirement_type TEXT NOT NULL,
-            description TEXT NOT NULL,
-            unique_identifier TEXT NOT NULL,
-            pass_fail INTEGER NOT NULL DEFAULT 0 CHECK (pass_fail IN (0, 1)),
-            target_value REAL,
-            tolerances TEXT NOT NULL DEFAULT '',
-            unit TEXT NOT NULL DEFAULT '',
-            process_operation_snapshot TEXT NOT NULL DEFAULT '',
-            process_description_snapshot TEXT NOT NULL DEFAULT '',
-            station_pitch_snapshot TEXT NOT NULL DEFAULT '',
-            unlinked_at TEXT NOT NULL DEFAULT '',
-            source_updated_at TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(work_element_id, quality_requirement_id)
-        );
-        CREATE TABLE IF NOT EXISTS quality_requirement_torque_details (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            quality_requirement_id TEXT NOT NULL UNIQUE
-                REFERENCES quality_requirements(id) ON DELETE RESTRICT,
-            tool_type TEXT NOT NULL
-                CHECK (tool_type IN ('Air tool', 'Electric clutch tool', 'DC tool')),
-            tool_orientation TEXT NOT NULL
-                CHECK (tool_orientation IN ('Fixtured', 'Pistol', 'In-line', 'Right angle')),
-            screw_bit_type TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(project_id, quality_requirement_id)
-        );
-        CREATE TABLE IF NOT EXISTS quality_requirement_types (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            label TEXT NOT NULL,
-            units_available TEXT NOT NULL DEFAULT '',
-            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_requirement_type_label
-            ON quality_requirement_types(project_id, label COLLATE NOCASE);
-        CREATE INDEX IF NOT EXISTS idx_quality_requirements_project
-            ON quality_requirements(project_id, unique_identifier);
-        CREATE INDEX IF NOT EXISTS idx_quality_assignments_scenario
-            ON quality_requirement_assignments(project_id, scenario_id, work_element_id);
-        CREATE INDEX IF NOT EXISTS idx_quality_assignments_requirement
-            ON quality_requirement_assignments(project_id, quality_requirement_id);
-        CREATE INDEX IF NOT EXISTS idx_quality_torque_details_requirement
-            ON quality_requirement_torque_details(project_id, quality_requirement_id);
-        """
-    )
-    type_cols = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(quality_requirement_types)").fetchall()
-    }
-    if "units_available" not in type_cols:
-        conn.execute("ALTER TABLE quality_requirement_types ADD COLUMN units_available TEXT NOT NULL DEFAULT ''")
-        conn.execute("UPDATE quality_requirement_types SET units_available='inch;mm;mil' WHERE LOWER(TRIM(label))='dimensional'")
-        conn.execute("UPDATE quality_requirement_types SET units_available='in-lbs;ft-lbs;N·m' WHERE LOWER(TRIM(label))='torque'")
+    if not is_schema_initialized(conn, "quality_schema_v1", "quality_requirement_assignments"):
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS quality_requirements (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                requirement_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                unique_identifier TEXT NOT NULL COLLATE NOCASE,
+                pass_fail INTEGER NOT NULL DEFAULT 0 CHECK (pass_fail IN (0, 1)),
+                target_value REAL,
+                tolerances TEXT NOT NULL DEFAULT '',
+                unit TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, unique_identifier)
+            );
+            CREATE TABLE IF NOT EXISTS quality_requirement_assignments (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                quality_requirement_id TEXT NOT NULL
+                    REFERENCES quality_requirements(id) ON DELETE RESTRICT,
+                requirement_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                unique_identifier TEXT NOT NULL,
+                pass_fail INTEGER NOT NULL DEFAULT 0 CHECK (pass_fail IN (0, 1)),
+                target_value REAL,
+                tolerances TEXT NOT NULL DEFAULT '',
+                unit TEXT NOT NULL DEFAULT '',
+                process_operation_snapshot TEXT NOT NULL DEFAULT '',
+                process_description_snapshot TEXT NOT NULL DEFAULT '',
+                station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                unlinked_at TEXT NOT NULL DEFAULT '',
+                source_updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(work_element_id, quality_requirement_id)
+            );
+            CREATE TABLE IF NOT EXISTS quality_requirement_torque_details (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                quality_requirement_id TEXT NOT NULL UNIQUE
+                    REFERENCES quality_requirements(id) ON DELETE RESTRICT,
+                tool_type TEXT NOT NULL
+                    CHECK (tool_type IN ('Air tool', 'Electric clutch tool', 'DC tool')),
+                tool_orientation TEXT NOT NULL
+                    CHECK (tool_orientation IN ('Fixtured', 'Pistol', 'In-line', 'Right angle')),
+                screw_bit_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, quality_requirement_id)
+            );
+            CREATE TABLE IF NOT EXISTS quality_requirement_types (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                units_available TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_requirement_type_label
+                ON quality_requirement_types(project_id, label COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_quality_requirements_project
+                ON quality_requirements(project_id, unique_identifier);
+            CREATE INDEX IF NOT EXISTS idx_quality_assignments_scenario
+                ON quality_requirement_assignments(project_id, scenario_id, work_element_id);
+            CREATE INDEX IF NOT EXISTS idx_quality_assignments_requirement
+                ON quality_requirement_assignments(project_id, quality_requirement_id);
+            CREATE INDEX IF NOT EXISTS idx_quality_torque_details_requirement
+                ON quality_requirement_torque_details(project_id, quality_requirement_id);
+            """
+        )
+        type_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(quality_requirement_types)").fetchall()
+        }
+        if "units_available" not in type_cols:
+            conn.execute("ALTER TABLE quality_requirement_types ADD COLUMN units_available TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE quality_requirement_types SET units_available='inch;mm;mil' WHERE LOWER(TRIM(label))='dimensional'")
+            conn.execute("UPDATE quality_requirement_types SET units_available='in-lbs;ft-lbs;N·m' WHERE LOWER(TRIM(label))='torque'")
 
-    assignment_info = conn.execute("PRAGMA table_info(quality_requirement_assignments)").fetchall()
-    assignment_cols = {row["name"] for row in assignment_info}
-    if "process_operation_snapshot" not in assignment_cols:
-        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN process_operation_snapshot TEXT NOT NULL DEFAULT ''")
-    if "process_description_snapshot" not in assignment_cols:
-        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN process_description_snapshot TEXT NOT NULL DEFAULT ''")
-    if "station_pitch_snapshot" not in assignment_cols:
-        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN station_pitch_snapshot TEXT NOT NULL DEFAULT ''")
-    if "unlinked_at" not in assignment_cols:
-        conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN unlinked_at TEXT NOT NULL DEFAULT ''")
+        assignment_info = conn.execute("PRAGMA table_info(quality_requirement_assignments)").fetchall()
+        assignment_cols = {row["name"] for row in assignment_info}
+        if "process_operation_snapshot" not in assignment_cols:
+            conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN process_operation_snapshot TEXT NOT NULL DEFAULT ''")
+        if "process_description_snapshot" not in assignment_cols:
+            conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN process_description_snapshot TEXT NOT NULL DEFAULT ''")
+        if "station_pitch_snapshot" not in assignment_cols:
+            conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN station_pitch_snapshot TEXT NOT NULL DEFAULT ''")
+        if "unlinked_at" not in assignment_cols:
+            conn.execute("ALTER TABLE quality_requirement_assignments ADD COLUMN unlinked_at TEXT NOT NULL DEFAULT ''")
 
-    work_col_notnull = any(
-        row["name"] == "work_element_id" and int(row["notnull"] or 0) == 1
-        for row in assignment_info
-    )
-    fk_rows = conn.execute("PRAGMA foreign_key_list(quality_requirement_assignments)").fetchall()
-    work_fk_cascade = any(
-        str(fk["table"]) == "work_elements" and str(fk["on_delete"]).upper() != "SET NULL"
-        for fk in fk_rows
-    )
-    if work_col_notnull or work_fk_cascade:
-        _upgrade_quality_assignments_schema(conn)
+        work_col_notnull = any(
+            row["name"] == "work_element_id" and int(row["notnull"] or 0) == 1
+            for row in assignment_info
+        )
+        fk_rows = conn.execute("PRAGMA foreign_key_list(quality_requirement_assignments)").fetchall()
+        work_fk_cascade = any(
+            str(fk["table"]) == "work_elements" and str(fk["on_delete"]).upper() != "SET NULL"
+            for fk in fk_rows
+        )
+        if work_col_notnull or work_fk_cascade:
+            _upgrade_quality_assignments_schema(conn)
 
-    # Backfill snapshots for existing linked assignments where snapshots are currently blank
-    conn.execute(
-        """UPDATE quality_requirement_assignments
-           SET process_operation_snapshot = COALESCE((SELECT we.operation FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), ''),
-               process_description_snapshot = COALESCE((SELECT we.description FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), ''),
-               station_pitch_snapshot = COALESCE((SELECT we.station FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), '')
-           WHERE work_element_id IS NOT NULL AND work_element_id != ''
-             AND process_operation_snapshot = '' AND station_pitch_snapshot = ''"""
-    )
+        # Backfill snapshots for existing linked assignments where snapshots are currently blank
+        if conn.execute(
+            """SELECT 1 FROM quality_requirement_assignments
+               WHERE work_element_id IS NOT NULL AND work_element_id != ''
+                 AND process_operation_snapshot = '' AND station_pitch_snapshot = ''
+               LIMIT 1"""
+        ).fetchone():
+            conn.execute(
+                """UPDATE quality_requirement_assignments
+                   SET process_operation_snapshot = COALESCE((SELECT we.operation FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), ''),
+                       process_description_snapshot = COALESCE((SELECT we.description FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), ''),
+                       station_pitch_snapshot = COALESCE((SELECT we.station FROM work_elements we WHERE we.id = quality_requirement_assignments.work_element_id), '')
+                   WHERE work_element_id IS NOT NULL AND work_element_id != ''
+                     AND process_operation_snapshot = '' AND station_pitch_snapshot = ''"""
+            )
+        mark_schema_initialized(conn, "quality_schema_v1")
 
     project_rows = conn.execute("SELECT id FROM projects").fetchall()
     for project_row in project_rows:
@@ -2019,9 +2029,13 @@ def clone_quality_requirement_assignments(
     ).fetchall()
     for source_row in rows:
         row = dict(source_row)
-        new_work_element_id = process_id_map.get(str(row["work_element_id"]))
-        if not new_work_element_id:
-            continue
+        raw_work_element_id = str(row.get("work_element_id") or "").strip()
+        if raw_work_element_id:
+            new_work_element_id = process_id_map.get(raw_work_element_id)
+            if not new_work_element_id:
+                continue
+        else:
+            new_work_element_id = None
         old_assignment_id = str(row["id"])
         new_assignment_id = str(uuid4())
         if assignment_id_map is not None:

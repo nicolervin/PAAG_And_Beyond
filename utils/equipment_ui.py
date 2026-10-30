@@ -76,7 +76,10 @@ from utils.table_ui import (
     editable_table_heading,
     guarded_tabs,
     native_selected_rows,
+    register_unsaved_source,
     required_field_errors,
+    required_field_errors,
+    render_audit_history_table,
     selectable_dataframe,
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
@@ -185,7 +188,12 @@ def render_equipment_history(project_id: str, *, key_prefix: str) -> None:
         )
 
 
-def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = True) -> None:
+def render_equipment_type_manager(
+    project_id: str,
+    *,
+    wrap_in_expander: bool = True,
+    key_prefix: str = "equipment_types",
+) -> None:
     """Render the project-wide controlled Equipment Type catalog."""
     def _render_type_content() -> None:
         st.caption(
@@ -193,13 +201,13 @@ def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = T
             "into Handheld Tools, Station/Pitch Equipment, and Capital Equipment. "
             "Functional Review applicability controls which charts appear on each review page."
         )
-        logical_key = f"equipment_types_editor_{project_id}"
+        logical_key = f"{key_prefix}_editor_{project_id}"
         editor_key = apply_pending_table_editor_reset(logical_key)
-        pending_key = f"equipment_types_pending_delete_{project_id}"
+        pending_key = f"{key_prefix}_pending_delete_{project_id}"
         saved = equipment_types(project_id)
         visible = filter_table(
             saved,
-            key=f"equipment_types_filters_{project_id}",
+            key=f"{key_prefix}_filters_{project_id}",
             dropdown_columns=["tier", "functional_areas"],
             multi_value_columns=["functional_areas"],
             search_columns=["label", "tier", "functional_areas"],
@@ -254,11 +262,11 @@ def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = T
             file_name="equipment_types_filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             icon=":material/download:",
-            key=f"equipment_types_export_{project_id}",
+            key=f"{key_prefix}_export_{project_id}",
         )
         footer = editable_table_footer(
             editor_key=editor_key,
-            key_prefix=f"equipment_types_{project_id}",
+            key_prefix=f"{key_prefix}_{project_id}",
             native_row_selection=True,
         )
         selected = native_selected_rows(rows, editor_key=editor_key)
@@ -281,7 +289,7 @@ def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = T
             for item in pending:
                 st.write(f"- {item['label']}")
             actions = st.container(horizontal=True)
-            if actions.button("Cancel", key=f"cancel_equipment_type_delete_{project_id}"):
+            if actions.button("Cancel", key=f"cancel_{key_prefix}_delete_{project_id}"):
                 st.session_state.pop(pending_key, None)
                 request_table_editor_reset(editor_key)
                 st.rerun()
@@ -289,7 +297,7 @@ def render_equipment_type_manager(project_id: str, *, wrap_in_expander: bool = T
                 "Delete Equipment Types",
                 type="primary",
                 icon=":material/delete:",
-                key=f"destructive_confirm_equipment_type_delete_{project_id}",
+                key=f"destructive_confirm_{key_prefix}_delete_{project_id}",
             ):
                 try:
                     result = delete_equipment_types(
@@ -796,6 +804,47 @@ def _render_equipment_detail(
                 except ValueError as exc:
                     st.error(str(exc))
 
+            placement_unsaved = (
+                str(selected_pitch or "") != _text(placement["pitch_id"])
+                or list(selected_work) != list(valid_defaults)
+                or bool(mark_pitch_blocked)
+            )
+            trigger_place_save, trigger_place_discard = register_unsaved_source(
+                f"equipment_placement_{project_id}_{scenario_id}_{selected_id}",
+                additional_unsaved=placement_unsaved,
+            )
+            if trigger_place_discard:
+                st.session_state.pop(f"equipment_detail_pitch_{project_id}_{scenario_id}_{selected_id}", None)
+                st.session_state.pop(
+                    f"equipment_detail_process_{project_id}_{scenario_id}_{selected_id}_{selected_pitch or 'none'}",
+                    None,
+                )
+                st.session_state.pop(
+                    f"equipment_block_pitch_{project_id}_{scenario_id}_{selected_id}_{selected_pitch}",
+                    None,
+                )
+                st.toast("Discarded unsaved equipment placement changes", icon=":material/undo:")
+                st.rerun()
+            if trigger_place_save:
+                try:
+                    result = save_equipment_placement(
+                        project_id,
+                        scenario_id,
+                        selected_id,
+                        str(selected_pitch or ""),
+                        list(selected_work),
+                        _editor_name(),
+                        mark_pitch_blocked=mark_pitch_blocked,
+                    )
+                    st.toast(
+                        "Saved the equipment placement"
+                        if result["row_count"] else "Equipment placement is already up to date",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
         if _text(asset["equipment_type"]).casefold() == "torque tool":
             st.divider()
             st.subheader("Linked Torque requirements")
@@ -815,6 +864,32 @@ def _render_equipment_detail(
                 key=f"equipment_torque_links_{project_id}_{selected_id}",
                 help="One installed Torque tool may serve several saved Torque Quality requirements.",
             )
+            default_torque_reqs = [
+                value for value in equipment_torque_requirement_ids(project_id, selected_id)
+                if value in requirement_labels
+            ]
+            torque_unsaved = list(selected_requirements) != list(default_torque_reqs)
+            trigger_torque_save, trigger_torque_discard = register_unsaved_source(
+                f"equipment_torque_links_{project_id}_{selected_id}",
+                additional_unsaved=torque_unsaved,
+            )
+            if trigger_torque_discard:
+                st.session_state.pop(f"equipment_torque_links_{project_id}_{selected_id}", None)
+                st.toast("Discarded unsaved Torque requirement link changes", icon=":material/undo:")
+                st.rerun()
+            if trigger_torque_save:
+                try:
+                    result = save_equipment_torque_requirements(
+                        project_id, selected_id, list(selected_requirements), _editor_name()
+                    )
+                    st.toast(
+                        "Saved linked Torque requirements"
+                        if result["row_count"] else "Linked Torque requirements are already up to date",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
             if selected_requirements:
                 specification = (
                     equipment_torque_published_specifications(
@@ -1359,7 +1434,11 @@ def render_torque_requirement_specifications(project_id: str) -> None:
 
 
 def render_equipment_needs_vs_placements_matrix(
-    project_id: str, scenario_id: str | None, *, wrap_in_expander: bool = True
+    project_id: str,
+    scenario_id: str | None,
+    *,
+    wrap_in_expander: bool = True,
+    key_prefix: str = "equipment_matrix",
 ) -> None:
     """Render the unified Equipment Needs vs Placements Audit Matrix table."""
     def _render_matrix_content() -> None:
@@ -1388,12 +1467,12 @@ def render_equipment_needs_vs_placements_matrix(
         status_filter = filter_col1.selectbox(
             "Filter by Coverage Status",
             options=["All", "Missing Equipment Only", "Satisfied Only"],
-            key=f"equipment_matrix_status_filter_{project_id}_{scenario_id}",
+            key=f"{key_prefix}_status_filter_{project_id}_{scenario_id}",
         )
         source_filter = filter_col2.selectbox(
             "Filter by Source Stage",
             options=["All", "Drawing Requirement Only", "PFMEA Control Only"],
-            key=f"equipment_matrix_source_filter_{project_id}_{scenario_id}",
+            key=f"{key_prefix}_source_filter_{project_id}_{scenario_id}",
         )
 
         filtered = matrix.copy()
@@ -1409,7 +1488,7 @@ def render_equipment_needs_vs_placements_matrix(
 
         st.dataframe(
             filtered,
-            key=f"equipment_matrix_table_{project_id}_{scenario_id}",
+            key=f"{key_prefix}_table_{project_id}_{scenario_id}",
             hide_index=True,
             column_order=[
                 "op_id", "pitch_station", "operation", "source_stage",
@@ -1495,7 +1574,11 @@ def render_functional_equipment_tab(
         _render_mismatch_review(project_id, scenario_id, functional_area, linked_assets)
         if functional_area == "Quality":
             render_torque_requirement_specifications(project_id)
-            render_equipment_needs_vs_placements_matrix(project_id, scenario_id)
+            render_equipment_needs_vs_placements_matrix(
+                project_id,
+                scenario_id,
+                key_prefix=f"{functional_area.lower()}_equipment_matrix",
+            )
     if render_history:
         render_equipment_history(
             project_id, key_prefix=f"{functional_area.lower()}_equipment"
@@ -1823,7 +1906,80 @@ def render_conveyor_line_sizing(project_id: str, scenario_id: str | None) -> Non
             key=f"zone_notes_{project_id}_{scenario_id}",
         )
 
+        default_zone_name = str(current_zone.get("name") or "")
+        default_zone_seq = int(current_zone.get("sequence") or (len(zones) + 1))
+        default_zone_pids = [pid for pid in assigned_pids if pid in pitch_options]
+        default_zone_orient = (
+            default_orient
+            if default_orient in UNIT_ORIENTATION_OPTIONS
+            else list(UNIT_ORIENTATION_OPTIONS)[0]
+        )
+        zone_form_dirty = (
+            str(zone_name) != default_zone_name
+            or int(zone_seq) != default_zone_seq
+            or [str(p) for p in selected_pitch_ids] != [str(p) for p in default_zone_pids]
+            or round(float(conveyor_h), 2) != round(float(val_h), 2)
+            or round(float(conveyor_w), 2) != round(float(val_w), 2)
+            or str(unit_orient) != str(default_zone_orient)
+            or round(float(pitch_len), 2) != round(float(val_p), 2)
+            or int(helper_pitches) != int(current_zone.get("helper_pitch_count") or 0)
+            or int(growth_pitches) != int(current_zone.get("growth_pitch_count") or 0)
+            or str(zone_notes) != str(current_zone.get("notes") or "")
+            or uploaded_file is not None
+        )
+        trigger_zone_save, trigger_zone_discard = register_unsaved_source(
+            f"conveyor_zone_form_{project_id}_{scenario_id}_{zone_tag}",
+            additional_unsaved=zone_form_dirty,
+        )
+        if trigger_zone_discard:
+            for z_key in (
+                f"zone_name_input_{project_id}_{scenario_id}",
+                f"zone_seq_input_{project_id}_{scenario_id}",
+                f"zone_pitches_multiselect_{project_id}_{scenario_id}_{curr_zid or 'new'}",
+                f"zone_h_{project_id}_{scenario_id}_{zone_tag}_{unit_str}",
+                f"zone_w_{project_id}_{scenario_id}_{zone_tag}_{unit_str}",
+                f"zone_orient_{project_id}_{scenario_id}",
+                f"zone_img_upload_{project_id}_{scenario_id}_{selected_zone_label}",
+                f"zone_clip_paste_{project_id}_{scenario_id}_{selected_zone_label}",
+                f"zone_pitch_len_{project_id}_{scenario_id}_{zone_tag}_{unit_str}",
+                f"zone_helpers_{project_id}_{scenario_id}",
+                f"zone_growth_{project_id}_{scenario_id}",
+                f"zone_notes_{project_id}_{scenario_id}",
+            ):
+                st.session_state.pop(z_key, None)
+            st.toast("Discarded unsaved Conveyor Zone changes", icon=":material/undo:")
+            st.rerun()
+
         btn_c1, btn_c2 = st.columns(2)
+        if trigger_zone_save:
+            try:
+                save_h_in = round(float(conveyor_h) * 12.0, 2) if is_feet else round(float(conveyor_h), 2)
+                save_w_in = round(float(conveyor_w) * 12.0, 2) if is_feet else round(float(conveyor_w), 2)
+                save_p_in = round(float(pitch_len) * 12.0, 2) if is_feet else round(float(pitch_len), 2)
+                zone_data = {
+                    "id": current_zone.get("id"),
+                    "name": zone_name,
+                    "sequence": int(zone_seq),
+                    "pitch_ids": [str(pid) for pid in selected_pitch_ids],
+                    "conveyor_height_in": float(save_h_in),
+                    "conveyor_width_in": float(save_w_in),
+                    "unit_orientation": str(unit_orient),
+                    "standard_pitch_length_in": float(save_p_in),
+                    "helper_pitch_count": int(helper_pitches),
+                    "growth_pitch_count": int(growth_pitches),
+                    "monument_length_in": 0.0,
+                    "notes": zone_notes,
+                }
+                res = save_conveyor_zone(project_id, scenario_id, zone_data, _editor_name())
+                saved_id = str(res.get("id") or current_zone.get("id"))
+                if uploaded_file and saved_id:
+                    set_conveyor_zone_image(
+                        project_id, scenario_id, saved_id, uploaded_file, _editor_name()
+                    )
+                st.toast("Saved Conveyor Zone", icon=":material/check_circle:")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
         if btn_c1.button(
             "Save Conveyor Zone",
             type="primary",
@@ -2319,167 +2475,180 @@ def render_equipment_overview(
         key=f"equipment_main_tabs_{project_id}",
     )
 
-    with tab1:
-        editable_table_heading("Equipment Catalog & Placements")
-        st.caption(
-            "Unified collation of all project equipment across Handheld Tools, Station/Pitch Equipment, "
-            "and Capital Equipment. Assign Station / Pitch and link Process Functions in the details drawer below."
-        )
-        saved = all_assets.copy()
-        visible = filter_table(
-            saved,
-            key=f"equipment_overview_filters_{project_id}",
-            dropdown_columns=["equipment_tier", "equipment_type", "functional_areas", "pitch_number"],
-            multi_value_columns=["functional_areas"],
-            search_columns=["name", "equipment_tier", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
-            labels={
-                "equipment_tier": "Tier",
-                "equipment_type": "Equipment Type",
-                "functional_areas": "Functional Reviews",
-                "pitch_number": "Station / Pitch",
-            },
-        )
-        display = visible.copy()
-        if not display.empty:
-            display["station_pitch"] = [
-                f"{_text(num) or 'Unassigned'} — {_text(nm)}"
-                if _text(nm)
-                else (_text(num) or "Unassigned")
-                for num, nm in zip(
-                    display.get("pitch_number", []),
-                    display.get("pitch_name", []),
-                )
-            ]
-            display["functional_areas_display"] = [", ".join(values) for values in display["functional_areas"]]
-            display["image"] = ["Attached" if _text(value) else "None" for value in display["image_path"]]
-        else:
-            display["station_pitch"] = pd.Series(dtype="string")
-            display["functional_areas_display"] = pd.Series(dtype="string")
-            display["image"] = pd.Series(dtype="string")
+    if tab1.open:
+        with tab1:
+            editable_table_heading("Equipment Catalog & Placements")
+            st.caption(
+                "Unified collation of all project equipment across Handheld Tools, Station/Pitch Equipment, "
+                "and Capital Equipment. Assign Station / Pitch and link Process Functions in the details drawer below."
+            )
+            saved = all_assets.copy()
+            visible = filter_table(
+                saved,
+                key=f"equipment_overview_filters_{project_id}",
+                dropdown_columns=["equipment_tier", "equipment_type", "functional_areas", "pitch_number"],
+                multi_value_columns=["functional_areas"],
+                search_columns=["name", "equipment_tier", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
+                labels={
+                    "equipment_tier": "Tier",
+                    "equipment_type": "Equipment Type",
+                    "functional_areas": "Functional Reviews",
+                    "pitch_number": "Station / Pitch",
+                },
+            )
+            display = visible.copy()
+            if not display.empty:
+                display["station_pitch"] = [
+                    f"{_text(num) or 'Unassigned'} — {_text(nm)}"
+                    if _text(nm)
+                    else (_text(num) or "Unassigned")
+                    for num, nm in zip(
+                        display.get("pitch_number", []),
+                        display.get("pitch_name", []),
+                    )
+                ]
+                display["functional_areas_display"] = [", ".join(values) for values in display["functional_areas"]]
+                display["image"] = ["Attached" if _text(value) else "None" for value in display["image_path"]]
+            else:
+                display["station_pitch"] = pd.Series(dtype="string")
+                display["functional_areas_display"] = pd.Series(dtype="string")
+                display["image"] = pd.Series(dtype="string")
 
-        editor_key = apply_pending_table_editor_reset(f"equipment_overview_editor_{project_id}")
-        pending_key = f"equipment_overview_pending_delete_{project_id}"
-        st.data_editor(
-            display,
-            key=editor_key,
-            num_rows="delete",
-            hide_index=True,
-            disabled=list(display.columns),
-            column_order=[
-                "name", "equipment_tier", "equipment_type", "description", "manufacturer", "model",
-                "station_pitch", "functional_areas_display", "notes", "image",
-                "process_link_count", "torque_requirement_count",
-            ],
-            column_config={
-                column: None
-                for column in display.columns
-                if column not in {
+            editor_key = apply_pending_table_editor_reset(f"equipment_overview_editor_{project_id}")
+            pending_key = f"equipment_overview_pending_delete_{project_id}"
+            st.data_editor(
+                display,
+                key=editor_key,
+                num_rows="delete",
+                hide_index=True,
+                disabled=list(display.columns),
+                column_order=[
                     "name", "equipment_tier", "equipment_type", "description", "manufacturer", "model",
                     "station_pitch", "functional_areas_display", "notes", "image",
                     "process_link_count", "torque_requirement_count",
-                }
-            } | {
-                "name": "Equipment name",
-                "equipment_tier": "Tier",
-                "equipment_type": "Equipment Type",
-                "description": "Description",
-                "manufacturer": "Manufacturer",
-                "model": "Model",
-                "station_pitch": "Station / Pitch",
-                "functional_areas_display": "Functional Reviews",
-                "notes": "Notes",
-                "image": "Primary image",
-                "process_link_count": "Process links",
-                "torque_requirement_count": "Torque requirements",
-            },
-            height=430,
-            width="stretch",
-        )
-        st.download_button(
-            "Export filtered rows",
-            lambda: dataframe_to_excel(_equipment_export(visible), sheet_name="Project Equipment"),
-            file_name="project_equipment_filtered.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            icon=":material/download:",
-            key=f"equipment_overview_export_{project_id}",
-        )
-        selected = native_selected_rows(display, editor_key=editor_key)
-        if not selected.empty:
-            st.session_state[pending_key] = [
-                {"id": _text(row["id"]), "name": _text(row["name"])}
-                for _, row in selected.iterrows()
-            ]
-            stage_native_delete_confirmation(editor_key)
+                ],
+                column_config={
+                    column: None
+                    for column in display.columns
+                    if column not in {
+                        "name", "equipment_tier", "equipment_type", "description", "manufacturer", "model",
+                        "station_pitch", "functional_areas_display", "notes", "image",
+                        "process_link_count", "torque_requirement_count",
+                    }
+                } | {
+                    "name": "Equipment name",
+                    "equipment_tier": "Tier",
+                    "equipment_type": "Equipment Type",
+                    "description": "Description",
+                    "manufacturer": "Manufacturer",
+                    "model": "Model",
+                    "station_pitch": "Station / Pitch",
+                    "functional_areas_display": "Functional Reviews",
+                    "notes": "Notes",
+                    "image": "Primary image",
+                    "process_link_count": "Process links",
+                    "torque_requirement_count": "Torque requirements",
+                },
+                height=430,
+                width="stretch",
+            )
+            st.download_button(
+                "Export filtered rows",
+                lambda: dataframe_to_excel(_equipment_export(visible), sheet_name="Project Equipment"),
+                file_name="project_equipment_filtered.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                icon=":material/download:",
+                key=f"equipment_overview_export_{project_id}",
+            )
+            selected = native_selected_rows(display, editor_key=editor_key)
+            if not selected.empty:
+                st.session_state[pending_key] = [
+                    {"id": _text(row["id"]), "name": _text(row["name"])}
+                    for _, row in selected.iterrows()
+                ]
+                stage_native_delete_confirmation(editor_key)
 
-        @st.dialog("Permanently delete selected equipment?", dismissible=False)
-        def confirm_delete() -> None:
-            pending = list(st.session_state.get(pending_key) or [])
-            try:
-                impact = equipment_deletion_impact(
-                    project_id, [item["id"] for item in pending]
-                )
-            except ValueError as exc:
-                st.error(str(exc))
-                return
-            st.warning(
-                "This permanently deletes the shared equipment records from every Functional "
-                "Review and removes their placements, Process links, Torque links, and owned image."
-            )
-            for item in pending:
-                st.write(f"- {item['name']}")
-            st.caption(
-                f"{impact['function_links']} Functional Review link(s), "
-                f"{impact['placements']} placement(s), {impact['process_links']} Process link(s), "
-                f"{impact['torque_links']} Torque link(s), and {impact['image_files']} image file(s) are affected."
-            )
-            actions = st.container(horizontal=True)
-            if actions.button("Cancel", key=f"cancel_equipment_delete_{project_id}"):
-                st.session_state.pop(pending_key, None)
-                request_table_editor_reset(editor_key)
-                st.rerun()
-            if actions.button(
-                "Delete equipment",
-                type="primary",
-                icon=":material/delete:",
-                key=f"destructive_confirm_equipment_delete_{project_id}",
-            ):
+            @st.dialog("Permanently delete selected equipment?", dismissible=False)
+            def confirm_delete() -> None:
+                pending = list(st.session_state.get(pending_key) or [])
                 try:
-                    result = delete_equipment_assets(
-                        project_id, [item["id"] for item in pending], _editor_name()
+                    impact = equipment_deletion_impact(
+                        project_id, [item["id"] for item in pending]
                     )
-                    st.session_state.pop(pending_key, None)
-                    request_table_editor_reset(editor_key)
-                    st.toast(
-                        f"Deleted {result['row_count']} equipment record(s)",
-                        icon=":material/delete:",
-                    )
-                    st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
+                    return
+                st.warning(
+                    "This permanently deletes the shared equipment records from every Functional "
+                    "Review and removes their placements, Process links, Torque links, and owned image."
+                )
+                for item in pending:
+                    st.write(f"- {item['name']}")
+                st.caption(
+                    f"{impact['function_links']} Functional Review link(s), "
+                    f"{impact['placements']} placement(s), {impact['process_links']} Process link(s), "
+                    f"{impact['torque_links']} Torque link(s), and {impact['image_files']} image file(s) are affected."
+                )
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_equipment_delete_{project_id}"):
+                    st.session_state.pop(pending_key, None)
+                    request_table_editor_reset(editor_key)
+                    st.rerun()
+                if actions.button(
+                    "Delete equipment",
+                    type="primary",
+                    icon=":material/delete:",
+                    key=f"destructive_confirm_equipment_delete_{project_id}",
+                ):
+                    try:
+                        result = delete_equipment_assets(
+                            project_id, [item["id"] for item in pending], _editor_name()
+                        )
+                        st.session_state.pop(pending_key, None)
+                        request_table_editor_reset(editor_key)
+                        st.toast(
+                            f"Deleted {result['row_count']} equipment record(s)",
+                            icon=":material/delete:",
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
 
-        if st.session_state.get(pending_key):
-            confirm_delete()
-        _render_equipment_detail(
-            project_id,
-            scenario_id,
-            "Project",
-            saved,
-        )
-        _render_mismatch_review(
-            project_id,
-            scenario_id,
-            "Project",
-            saved,
-        )
+            if st.session_state.get(pending_key):
+                confirm_delete()
+            _render_equipment_detail(
+                project_id,
+                scenario_id,
+                "Project",
+                saved,
+            )
+            _render_mismatch_review(
+                project_id,
+                scenario_id,
+                "Project",
+                saved,
+            )
 
-    with tab2:
-        render_conveyor_line_sizing(project_id, scenario_id)
+    elif tab2.open:
+        with tab2:
+            render_conveyor_line_sizing(project_id, scenario_id)
 
-    with tab3:
-        render_equipment_needs_vs_placements_matrix(project_id, scenario_id, wrap_in_expander=False)
+    elif tab3.open:
+        with tab3:
+            render_equipment_needs_vs_placements_matrix(
+                project_id,
+                scenario_id,
+                wrap_in_expander=False,
+                key_prefix="equipment_overview_matrix",
+            )
 
-    with tab4:
-        render_equipment_type_manager(project_id, wrap_in_expander=False)
+    elif tab4.open:
+        with tab4:
+            render_equipment_type_manager(
+                project_id,
+                wrap_in_expander=False,
+                key_prefix="equipment_overview_types",
+            )
 
     st.divider()
     render_equipment_history(project_id, key_prefix="equipment_overview")

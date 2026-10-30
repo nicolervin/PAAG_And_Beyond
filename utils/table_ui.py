@@ -78,11 +78,269 @@ def decimal_values_equal(
     )
 
 
+def _is_audit_history_dataframe(data: object, key: str) -> bool:
+    """Return True when a DataFrame represents an audit history table."""
+    if not isinstance(data, pd.DataFrame):
+        return False
+    cols = set(data.columns)
+    if "create_new_rows" in cols or "edit_existing_rows" in cols:
+        return True
+    if (
+        "action" in cols
+        and ("editor_name" in cols or "actor" in cols)
+        and ("created_at" in cols or "timestamp" in cols)
+    ):
+        return True
+    return "history" in str(key or "").lower() and "action" in cols
+
+
 def selectable_dataframe(data, *, key: str, **kwargs):
     """Render a read-only table with native multi-row selection and select-all."""
+    skip_history_wrapper = bool(kwargs.pop("_from_audit_history_table", False))
+    if not skip_history_wrapper and _is_audit_history_dataframe(data, key):
+        return render_audit_history_table(data, key=key, **kwargs)
     kwargs.setdefault("on_select", "rerun")
     kwargs.setdefault("selection_mode", "multi-row")
     return st.dataframe(data, key=key, **kwargs)
+
+
+def _audit_cell_values_equal(left: object, right: object) -> bool:
+    """Compare two cell values for audit change detection across editor types."""
+    left_empty = left is None or (isinstance(left, float) and math.isnan(left)) or (not isinstance(left, (list, dict, tuple, set)) and pd.isna(left))
+    right_empty = right is None or (isinstance(right, float) and math.isnan(right)) or (not isinstance(right, (list, dict, tuple, set)) and pd.isna(right))
+    if left_empty and right_empty:
+        return True
+    if isinstance(left, str) and left.strip() == "" and right_empty:
+        return True
+    if isinstance(right, str) and right.strip() == "" and left_empty:
+        return True
+    if left_empty or right_empty:
+        return False
+    if isinstance(left, bool) or isinstance(right, bool):
+        return bool(left) == bool(right)
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return decimal_values_equal(left, right)
+    return str(left).strip() == str(right).strip()
+
+
+def _normalize_audit_row_id(raw_id: object) -> str | None:
+    """Normalize a table row ID (UUID string or positive int) for audit diffing."""
+    if raw_id is None or (not isinstance(raw_id, (list, dict, tuple, set)) and pd.isna(raw_id)):
+        return None
+    text = str(raw_id).strip()
+    if not text or text.lower() in {"none", "nan", "<na>", "null"}:
+        return None
+    try:
+        numeric = float(text)
+        if numeric <= 0:
+            return None
+        if numeric.is_integer():
+            return str(int(numeric))
+    except (TypeError, ValueError):
+        pass
+    return text
+
+
+def count_table_create_and_edit_rows(
+    original_df: pd.DataFrame | None,
+    edited_df: pd.DataFrame | Sequence[dict[str, object]] | None,
+    *,
+    id_column: str = "id",
+    compare_columns: Iterable[str] | None = None,
+    ignore_columns: Iterable[str] = ("selected", "updated_at", "created_at"),
+    non_empty_columns: Iterable[str] | None = None,
+) -> tuple[int, int]:
+    """Count (created_count, updated_count) between an original DataFrame and edited rows."""
+    if edited_df is None:
+        return 0, 0
+    edited = edited_df if isinstance(edited_df, pd.DataFrame) else pd.DataFrame(list(edited_df))
+    if edited.empty:
+        return 0, 0
+    ignored = {str(col) for col in ignore_columns} | {id_column}
+    orig_by_id: dict[str, pd.Series] = {}
+    if original_df is not None and not original_df.empty and id_column in original_df.columns:
+        for _, orig_row in original_df.iterrows():
+            rid = _normalize_audit_row_id(orig_row.get(id_column))
+            if rid is not None:
+                orig_by_id[rid] = orig_row
+
+    if compare_columns is not None:
+        compare_cols = [str(col) for col in compare_columns if str(col) in edited.columns and str(col) not in ignored]
+    else:
+        compare_cols = [col for col in edited.columns if col not in ignored]
+    check_non_empty = list(non_empty_columns) if non_empty_columns is not None else compare_cols
+
+    created_count = 0
+    updated_count = 0
+    for _, row in edited.iterrows():
+        has_content = False
+        for col in check_non_empty:
+            if col not in row.index:
+                continue
+            val = row.get(col)
+            if val is None or (not isinstance(val, (list, dict, tuple, set)) and pd.isna(val)):
+                continue
+            if isinstance(val, bool):
+                if val:
+                    has_content = True
+                    break
+                continue
+            if isinstance(val, (list, tuple, set, dict)):
+                if len(val) > 0:
+                    has_content = True
+                    break
+                continue
+            if str(val).strip() != "":
+                has_content = True
+                break
+        if not has_content and non_empty_columns is not None:
+            continue
+
+        raw_id = row.get(id_column) if id_column in row.index else None
+        row_id = _normalize_audit_row_id(raw_id)
+
+        if row_id is None or row_id not in orig_by_id:
+            if has_content or non_empty_columns is None:
+                created_count += 1
+        else:
+            orig_row = orig_by_id[row_id]
+            changed = any(
+                col in orig_row.index and not _audit_cell_values_equal(row.get(col), orig_row.get(col))
+                for col in compare_cols
+            )
+            if changed:
+                updated_count += 1
+    return created_count, updated_count
+
+
+def render_audit_history_table(
+    history_df: pd.DataFrame | None,
+    *,
+    key: str,
+    leading_columns: Sequence[tuple[str, str]] = (),
+    action_column: str = "action",
+    action_label: str = "Action",
+    count_column: str = "row_count",
+    count_label: str = "Rows",
+    actor_column: str = "editor_name",
+    actor_label: str = "Editor",
+    time_column: str = "created_at",
+    time_label: str = "When",
+    empty_caption: str | None = None,
+    height: int | None = None,
+    hide_index: bool = True,
+    column_config: dict[str, object] | None = None,
+    **kwargs,
+):
+    """Render a section's audit history table with an expandable Create New / Edit Existing toggle."""
+    if history_df is None or history_df.empty:
+        if empty_caption:
+            st.caption(empty_caption)
+        return None
+
+    from utils.db_core import AUDIT_HISTORY_EXPANSION_COLUMNS, enrich_audit_history_dataframe
+
+    working_df = history_df.copy()
+    if not all(col in working_df.columns for col in AUDIT_HISTORY_EXPANSION_COLUMNS):
+        working_df = enrich_audit_history_dataframe(working_df)
+
+    caller_cfg = dict(column_config) if isinstance(column_config, dict) else {}
+
+    resolved_leading: list[tuple[str, str]] = list(leading_columns)
+    if not resolved_leading:
+        for cand_col, default_lbl in (
+            ("workflow", "Workflow"),
+            ("table_name", "Workflow"),
+            ("Section", "Section"),
+        ):
+            if cand_col in working_df.columns:
+                lbl = caller_cfg.get(cand_col)
+                resolved_leading.append(
+                    (cand_col, lbl if isinstance(lbl, str) and lbl else default_lbl)
+                )
+                break
+
+    if actor_column not in working_df.columns:
+        for fallback_actor in ("editor_name", "actor", "Editor"):
+            if fallback_actor in working_df.columns:
+                actor_column = fallback_actor
+                break
+
+    if isinstance(caller_cfg.get(action_column), str):
+        action_label = str(caller_cfg[action_column])
+    if isinstance(caller_cfg.get(count_column), str):
+        count_label = str(caller_cfg[count_column])
+    if isinstance(caller_cfg.get(actor_column), str):
+        actor_label = str(caller_cfg[actor_column])
+
+    expanded_state_key = f"_audit_history_expanded_{key}"
+    is_expanded = bool(st.session_state.get(expanded_state_key, False))
+
+    _, toggle_col = st.columns([5.8, 2.2])
+    with toggle_col:
+        toggle_label = (
+            ":material/unfold_less: Hide Create / Edit Details"
+            if is_expanded
+            else ":material/unfold_more: Create New / Edit Existing"
+        )
+        if st.button(
+            toggle_label,
+            key=f"{key}_toggle_expand",
+            width="stretch",
+            help="Show or hide the Create New and Edit Existing user and timestamp columns.",
+        ):
+            is_expanded = not is_expanded
+            st.session_state[expanded_state_key] = is_expanded
+
+    selected_columns: list[str] = []
+    resolved_column_config: dict[str, object] = {}
+
+    for src_col, label in resolved_leading:
+        if src_col in working_df.columns:
+            selected_columns.append(src_col)
+            resolved_column_config[src_col] = caller_cfg.get(src_col) or label
+
+    time_col_cfg = caller_cfg.get(time_column) or st.column_config.DatetimeColumn(
+        time_label, format="MMM DD, YYYY HH:mm", timezone="America/New_York"
+    )
+    base_columns = [
+        (action_column, caller_cfg.get(action_column) or action_label),
+        (count_column, caller_cfg.get(count_column) or count_label),
+        (actor_column, caller_cfg.get(actor_column) or actor_label),
+        (time_column, time_col_cfg),
+    ]
+    for src_col, col_cfg in base_columns:
+        if src_col in working_df.columns:
+            selected_columns.append(src_col)
+            resolved_column_config[src_col] = col_cfg
+
+    if is_expanded:
+        expansion_specs = [
+            ("create_new_rows", "Create New (Rows)"),
+            ("create_new_user", "Create New (User)"),
+            ("create_new_at", "Create New (When)"),
+            ("edit_existing_rows", "Edit Existing (Rows)"),
+            ("edit_existing_user", "Edit Existing (User)"),
+            ("edit_existing_at", "Edit Existing (When)"),
+        ]
+        for src_col, label in expansion_specs:
+            if src_col not in working_df.columns:
+                working_df[src_col] = ""
+            selected_columns.append(src_col)
+            resolved_column_config[src_col] = st.column_config.TextColumn(label)
+
+    dataframe_kwargs: dict[str, object] = dict(kwargs)
+    dataframe_kwargs["hide_index"] = hide_index
+    dataframe_kwargs["column_config"] = resolved_column_config
+    if height is not None:
+        dataframe_kwargs["height"] = height
+
+    return selectable_dataframe(
+        working_df[selected_columns],
+        key=key,
+        _from_audit_history_table=True,
+        **dataframe_kwargs,
+    )
 
 
 def selected_dataframe_rows(
@@ -183,8 +441,12 @@ def direct_entry_editor_rows(
         disabled=controls_locked or not sort_column,
         help="Turn on to reverse the selected sort order.",
     )
-    if controls_locked:
-        controls.caption("Save, undo, or clear selected rows before changing the sort.")
+    if True:
+        controls.caption(
+            "Save, undo, or clear selected rows before changing the sort."
+            if controls_locked
+            else "Choose the saved-row order before editing or pasting new rows."
+        )
     if not sort_column:
         return dataframe.reset_index(drop=True)
     sort_values = dataframe[sort_column]
@@ -976,6 +1238,25 @@ def _has_blocking_save_dialog_state() -> bool:
     return False
 
 
+def request_unsaved_state_change(
+    state_updates: dict[str, object],
+    *,
+    label: str,
+    nav_kind: str = "selection",
+    clear_keys: Sequence[str] | None = None,
+    clear_unsaved_tracking: bool = False,
+) -> None:
+    """Intercept a context/selector switch and queue the Unsaved Changes dialog."""
+    st.session_state[_PENDING_UNSAVED_NAV_KEY] = {
+        "kind": "state_change",
+        "state_updates": dict(state_updates),
+        "clear_keys": [str(k) for k in (clear_keys or [])],
+        "clear_unsaved_tracking": bool(clear_unsaved_tracking),
+        "label": str(label),
+        "nav_kind": str(nav_kind or "selection"),
+    }
+
+
 def _complete_pending_unsaved_nav(
     page_by_url_path: dict[str, object],
     *,
@@ -1004,6 +1285,20 @@ def _complete_pending_unsaved_nav(
             st.session_state[tab_key] = target
             gen_key = f"_guarded_tab_gen_{tab_key}"
             st.session_state[gen_key] = int(st.session_state.get(gen_key, 0) or 0) + 1
+            st.session_state[gen_key] = int(st.session_state.get(gen_key, 0) or 0) + 1
+            st.session_state.pop(_UNSAVED_SOURCES_KEY, None)
+    elif kind == "state_change":
+        state_updates = pending.get("state_updates")
+        if isinstance(state_updates, dict):
+            for k, v in state_updates.items():
+                st.session_state[str(k)] = v
+        clear_keys = pending.get("clear_keys")
+        if isinstance(clear_keys, list):
+            for k in clear_keys:
+                st.session_state.pop(str(k), None)
+        if pending.get("clear_unsaved_tracking"):
+            clear_unsaved_tracking_state()
+        else:
             st.session_state.pop(_UNSAVED_SOURCES_KEY, None)
 
 
@@ -1040,7 +1335,8 @@ def _unsaved_changes_navigation_dialog(pending: dict[str, object]) -> None:
     target_label = str(
         pending.get("label") or pending.get("target") or "the selected view"
     )
-    nav_kind = "sub-tab" if pending.get("kind") == "subtab" else "tab"
+    default_nav_kind = "sub-tab" if pending.get("kind") == "subtab" else "tab"
+    nav_kind = str(pending.get("nav_kind") or default_nav_kind)
     st.warning(
         f"You have unsaved changes on this page. What would you like to do before leaving for the **{target_label}** {nav_kind}?",
         icon=":material/warning:",

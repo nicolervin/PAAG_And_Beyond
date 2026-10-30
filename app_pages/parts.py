@@ -66,7 +66,7 @@ from utils.table_ui import (
     render_select_all_control,
     required_field_errors,
     resolve_editor_selected_rows,
-    selectable_dataframe,
+    count_table_create_and_edit_rows, render_audit_history_table, selectable_dataframe,
     selected_rows_action_bar,
     stage_native_delete_confirmation,
     standard_details_column_config,
@@ -969,6 +969,7 @@ if qp_part_id or qp_part_number:
         st.session_state[selected_part_key] = matched_id
         # Pre-fill keyword filter so the table displays this queried part
         filter_kw = matched_pnum or qp_part_number
+        st.session_state[f"part_catalog_filters_{project_id}_keyword"] = filter_kw
         st.session_state["part_catalog_filters_keyword"] = filter_kw
         # Clear conflicting dropdown filters so the part is guaranteed visible
         for filter_column in [
@@ -977,6 +978,7 @@ if qp_part_id or qp_part_number:
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
             "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "created_at", "updated_at",
         ]:
+            st.session_state.pop(f"part_catalog_filters_{project_id}_{filter_column}", None)
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.session_state["parts_scroll_to_details"] = True
 
@@ -1006,7 +1008,7 @@ with filter_expander:
     )
     parts_for_editing = filter_table(
         parts_for_editing,
-        key="part_catalog_filters",
+        key=f"part_catalog_filters_{project_id}",
         dropdown_columns=[
             "active", "source", "design_maturity", "subsystem", "source_code", "make_buy",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
@@ -1072,6 +1074,7 @@ with filter_expander:
         if harvest_added_rows_into_draft(pre_filter_added_rows) or True:
             st.session_state.pop(parts_editor_key, None)
             request_table_editor_reset(parts_editor_key)
+        st.session_state.pop(f"part_catalog_filters_{project_id}_keyword", None)
         st.session_state.pop("part_catalog_filters_keyword", None)
         for filter_column in [
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
@@ -1079,6 +1082,7 @@ with filter_expander:
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
             "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "created_at", "updated_at",
         ]:
+            st.session_state.pop(f"part_catalog_filters_{project_id}_{filter_column}", None)
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.rerun()
 
@@ -1481,13 +1485,13 @@ if request_delete_bulk_parts:
     ):
         st.warning("Save or undo other table edits before deleting selected parts.")
     else:
-        st.session_state.parts_pending_bulk_delete = selected_saved_parts["id"].astype(str).tolist()
+        st.session_state[f"parts_pending_bulk_delete_{project_id}"] = selected_saved_parts["id"].astype(str).tolist()
         stage_native_delete_confirmation(parts_editor_key)
 
 
 @st.dialog("Delete selected parts?", dismissible=False)
 def confirm_bulk_part_delete() -> None:
-    pending_ids = st.session_state.get("parts_pending_bulk_delete", [])
+    pending_ids = st.session_state.get(f"parts_pending_bulk_delete_{project_id}", [])
     try:
         impact = part_delete_impact(project_id, pending_ids)
     except ValueError as exc:
@@ -1503,7 +1507,7 @@ def confirm_bulk_part_delete() -> None:
     )
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key="cancel_bulk_part_delete"):
-        st.session_state.pop("parts_pending_bulk_delete", None)
+        st.session_state.pop(f"parts_pending_bulk_delete_{project_id}", None)
         request_table_editor_reset(parts_editor_key)
         st.rerun()
     if actions.button(
@@ -1523,7 +1527,7 @@ def confirm_bulk_part_delete() -> None:
             project_id, "Parts", "Bulk delete", len(deleted_labels),
             st.session_state.get("current_editor", ""), {"part_numbers": deleted_labels},
         )
-        st.session_state.pop("parts_pending_bulk_delete", None)
+        st.session_state.pop(f"parts_pending_bulk_delete_{project_id}", None)
         request_table_editor_reset(parts_editor_key)
         del_part_details: list[str] = []
         if impact.get("fishbone_uses", 0):
@@ -1539,7 +1543,7 @@ def confirm_bulk_part_delete() -> None:
         st.rerun()
 
 
-if st.session_state.get("parts_pending_bulk_delete"):
+if st.session_state.get(f"parts_pending_bulk_delete_{project_id}"):
     confirm_bulk_part_delete()
 
 if save_part_table:
@@ -1670,7 +1674,7 @@ if save_part_table:
                     }
                 )
         audit_details = {
-            "scenario_id": scenario_id,
+            "scenario_id": scenario_id, "created_count": int(new_row_mask.sum()), "updated_count": int(count_table_create_and_edit_rows(parts_full_for_editing, edited_parts)[1]),
             "catalog_field_changes": field_changes,
         }
         if parts_view_has_unsaved_changes:
@@ -1742,7 +1746,7 @@ def render_parts_history() -> None:
         if history.empty:
             st.caption("No standardized Parts Catalog changes have been recorded yet.")
         else:
-            selectable_dataframe(
+            render_audit_history_table(
                 history.drop(columns=["details"], errors="ignore"),
                 key=f"parts_history_table_{project_id}",
                 hide_index=True,

@@ -151,6 +151,7 @@ _SCOPE_WRITE_EPOCHS: dict[str, int] = {
     "scenario": 0,
 }
 _SCENARIO_MIGRATION_GUARD: set[tuple[Any, ...]] = set()
+_INITIALIZED_SCHEMAS: set[tuple[Any, ...]] = set()
 
 # Scenario-scoped and operational tables whose modifications do not alter
 # project-wide Product Architecture, Parts Catalog, Models, or Fishbone structure.
@@ -178,26 +179,21 @@ SCENARIO_ONLY_TABLES: frozenset[str] = frozenset(
         "pfmea_entries",
         "pfmea_effects",
         "pfmea_causes",
-        "pfmea_controls",
+        "pfmea_prevention_selections",
+        "pfmea_detection_selections",
         "pfmea_risk_rows",
         "pfmea_actions",
-        "pfmea_failure_effects",
-        "pfmea_failure_causes",
-        "pfmea_prevention_controls",
-        "pfmea_detection_controls",
-        "pfmea_recommended_actions",
         "control_plan_items",
-        "control_plan_entries",
-        "control_plan_characteristics",
+        "control_plan_characteristic_controls",
         "equipment_placements",
         "equipment_process_links",
         "conveyor_zones",
-        "layout_plans",
-        "layout_revisions",
         "layout_layers",
         "layout_shapes",
-        "layout_section_pitch_standards",
-        "layout_custom_stencils",
+        "layout_pitch_waypoints",
+        "layout_aisles",
+        "layout_auto_flow_links",
+        "layout_shape_libraries",
         "audit_log",
         "table_view_preferences",
     }
@@ -243,11 +239,64 @@ def clear_all_caches() -> None:
     bump_write_epoch()
     with _EPOCH_LOCK:
         _SCENARIO_MIGRATION_GUARD.clear()
+        _INITIALIZED_SCHEMAS.clear()
     _FALLBACK_DATA_CACHE.clear()
     try:
         get_data_cache().clear()
     except Exception:
         pass
+
+
+def _conn_db_identifier(conn: sqlite3.Connection) -> tuple[Any, ...]:
+    """Return a lightweight identity tuple for the database backing ``conn``."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        db_file = str(row[2] or "").strip() if row and len(row) > 2 else ""
+    except Exception:
+        db_file = ""
+    if db_file:
+        try:
+            resolved = str(Path(db_file).resolve())
+        except OSError:
+            resolved = db_file
+        return ("file", resolved)
+    return ("mem", id(conn))
+
+
+def is_schema_initialized(
+    conn: sqlite3.Connection,
+    schema_key: str,
+    sentinel_table: str | None = None,
+) -> bool:
+    """Return True if ``schema_key`` has already been initialized for ``conn``'s database."""
+    db_id = _conn_db_identifier(conn)
+    cache_entry = (db_id, str(schema_key))
+    with _EPOCH_LOCK:
+        if cache_entry not in _INITIALIZED_SCHEMAS:
+            return False
+    if sentinel_table:
+        try:
+            exists = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (str(sentinel_table),),
+                ).fetchone()
+                is not None
+            )
+        except Exception:
+            exists = False
+        if not exists:
+            with _EPOCH_LOCK:
+                _INITIALIZED_SCHEMAS.discard(cache_entry)
+            return False
+    return True
+
+
+def mark_schema_initialized(conn: sqlite3.Connection, schema_key: str) -> None:
+    """Record that ``schema_key`` has completed schema initialization for ``conn``'s database."""
+    db_id = _conn_db_identifier(conn)
+    with _EPOCH_LOCK:
+        _INITIALIZED_SCHEMAS.add((db_id, str(schema_key)))
 
 
 def _file_stat_signature(path: Path) -> tuple[int, int]:

@@ -676,6 +676,14 @@ def clone_planning_scenario(
                 process_id_map,
                 timestamp,
             )
+            clone_layout_scenario_layers(
+                conn,
+                project_id,
+                source_scenario_id,
+                new_scenario_id,
+                pitch_id_map,
+                timestamp,
+            )
 
             source_mat_groups = conn.execute(
                 """SELECT * FROM work_element_material_groups
@@ -748,7 +756,8 @@ def save_planning_scenario_rows(
     workflow so their scenario-owned planning data is preserved.
     """
     existing = planning_scenarios(project_id, include_archived=True)
-    existing_ids = {str(row["id"]) for row in existing}
+    existing_by_id = {str(row["id"]): dict(row) for row in existing}
+    existing_ids = set(existing_by_id.keys())
     if source_scenario_id not in existing_ids:
         raise ValueError("The source scenario no longer exists.")
 
@@ -793,14 +802,26 @@ def save_planning_scenario_rows(
         )
 
     updated_count = 0
+    modified_count = 0
     created_ids: list[str] = []
     with connection() as conn:
         for record in cleaned:
             if record["id"]:
+                prev = existing_by_id.get(str(record["id"]), {})
+                row_changed = (
+                    str(prev.get("name") or "").strip() != record["name"]
+                    or str(prev.get("revision_label") or "").strip() != record["revision_label"]
+                    or str(prev.get("status") or "Working").strip().title() != record["status"]
+                    or abs(float(prev.get("takt_time_s") or 0.0) - float(record["takt_time_s"])) > 1e-9
+                    or normalize_time_unit(prev.get("takt_time_unit", "seconds")) != record["takt_time_unit"]
+                    or str(prev.get("change_summary") or "").strip() != record["change_summary"]
+                )
                 update_planning_scenario(
                     project_id, str(record["id"]), record, _conn=conn
                 )
                 updated_count += 1
+                if row_changed:
+                    modified_count += 1
                 continue
             new_id = clone_planning_scenario(
                 project_id,
@@ -819,6 +840,7 @@ def save_planning_scenario_rows(
 
     return {
         "updated_count": updated_count,
+        "modified_count": modified_count,
         "created_ids": created_ids,
         "saved_count": len(cleaned),
     }
@@ -1021,6 +1043,8 @@ def replace_concerns(project_id: str, edited: pd.DataFrame, editor_name: str = "
                     )
         conn.execute("DELETE FROM concerns WHERE project_id = ?", (project_id,))
         timestamp = now_iso()
+        created_count = 0
+        updated_count = 0
         for r in validated_rows:
             row_id = r["id"]
             if row_id and row_id in existing_by_id:
@@ -1066,11 +1090,11 @@ def replace_concerns(project_id: str, edited: pd.DataFrame, editor_name: str = "
                     r["resolution_comments"],
                     submitted_by_val,
                 )
-                updated_at_val = (
-                    timestamp
-                    if curr_comparable != prev_comparable
-                    else str(prev.get("updated_at") or timestamp)
-                )
+                if curr_comparable != prev_comparable:
+                    updated_at_val = timestamp
+                    updated_count += 1
+                else:
+                    updated_at_val = str(prev.get("updated_at") or timestamp)
             else:
                 row_id = row_id or str(uuid4())
                 submitted_by_val = r["submitted_by"] or str(editor_name or "").strip()
@@ -1079,6 +1103,7 @@ def replace_concerns(project_id: str, edited: pd.DataFrame, editor_name: str = "
                 subject_val = r["subject"] or r["detail"]
                 created_at_val = r["created_at"] or timestamp
                 updated_at_val = timestamp
+                created_count += 1
 
             values = [
                 r["category"],
@@ -1097,6 +1122,11 @@ def replace_concerns(project_id: str, edited: pd.DataFrame, editor_name: str = "
                 f"INSERT INTO concerns (id, project_id, {', '.join(fields)}, created_at, updated_at) VALUES ({', '.join(['?'] * (len(fields) + 4))})",
                 (row_id, project_id, *values, created_at_val, updated_at_val),
             )
+    return {
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "saved_count": len(validated_rows),
+    }
 
 
 def _legacy_replace_concerns_unused(project_id: str, edited: pd.DataFrame) -> None:

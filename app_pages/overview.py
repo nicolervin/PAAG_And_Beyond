@@ -9,7 +9,7 @@ from utils.table_filters import apply_pending_table_editor_reset, filter_table, 
 from utils.table_ui import (
     dataframe_to_excel, drop_untouched_new_rows, editable_table_footer,
     editable_table_heading,
-    native_selected_rows, required_field_errors, selectable_dataframe,
+    native_selected_rows, render_audit_history_table, required_field_errors, selectable_dataframe,
     direct_entry_editor_rows, standard_details_column_config,
 )
 from utils.store import (
@@ -849,7 +849,7 @@ if scenario:
                     {
                         "source_scenario_id": str(scenario_id),
                         "created_scenario_ids": result["created_ids"],
-                        "updated_count": result["updated_count"],
+                        "created_count": len(result["created_ids"]), "updated_count": int(result.get("modified_count", result["updated_count"])),
                         "active_scenario_name": str(active_scenario_values.get("name") or ""),
                         "active_scenario_changed_fields": active_scenario_changed_fields,
                     },
@@ -915,7 +915,7 @@ with st.expander("History", icon=":material/history:"):
         if project_history.empty:
             st.caption("No project history has been recorded yet.")
         else:
-            selectable_dataframe(
+            render_audit_history_table(
                 project_history.drop(columns=["details"], errors="ignore"),
                 key=f"overview_project_history_{project_id}",
                 hide_index=True,
@@ -933,7 +933,7 @@ with st.expander("History", icon=":material/history:"):
         if scenario_history.empty:
             st.caption("No planning-scenario history has been recorded yet.")
         else:
-            selectable_dataframe(
+            render_audit_history_table(
                 scenario_history.drop(columns=["details"], errors="ignore"),
                 key=f"overview_scenario_history_{project_id}",
                 hide_index=True,

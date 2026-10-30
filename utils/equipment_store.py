@@ -13,7 +13,9 @@ from PIL import Image
 from utils.cache_store import (
     cached_store_read,
     is_scenario_task_completed,
+    is_schema_initialized,
     mark_scenario_task_completed,
+    mark_schema_initialized,
 )
 from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
@@ -118,153 +120,158 @@ def _require_editor(editor_name: str) -> str:
 
 def init_equipment_schema(conn: sqlite3.Connection) -> None:
     """Create the approved Equipment tables and seed each project once."""
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS equipment_types (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            label TEXT NOT NULL COLLATE NOCASE,
-            tier TEXT NOT NULL DEFAULT 'Handheld Tools',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(project_id, label)
-        );
-        CREATE TABLE IF NOT EXISTS equipment_type_function_links (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            equipment_type_id TEXT NOT NULL REFERENCES equipment_types(id) ON DELETE CASCADE,
-            functional_area TEXT NOT NULL
-                CHECK(functional_area IN ('Quality', 'Ergonomics', 'Safety', 'Materials', 'Assembly')),
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(equipment_type_id, functional_area)
-        );
-        CREATE TABLE IF NOT EXISTS equipment_assets (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            equipment_type_id TEXT NOT NULL REFERENCES equipment_types(id) ON DELETE RESTRICT,
-            name TEXT NOT NULL COLLATE NOCASE,
-            description TEXT NOT NULL DEFAULT '',
-            manufacturer TEXT NOT NULL DEFAULT '',
-            model TEXT NOT NULL DEFAULT '',
-            notes TEXT NOT NULL DEFAULT '',
-            image_path TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(project_id, name)
-        );
-        CREATE TABLE IF NOT EXISTS equipment_function_links (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            equipment_id TEXT NOT NULL REFERENCES equipment_assets(id) ON DELETE CASCADE,
-            functional_area TEXT NOT NULL
-                CHECK(functional_area IN ('Quality', 'Ergonomics', 'Safety', 'Materials', 'Assembly')),
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(equipment_id, functional_area)
-        );
-        CREATE TABLE IF NOT EXISTS equipment_placements (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            equipment_id TEXT NOT NULL REFERENCES equipment_assets(id) ON DELETE CASCADE,
-            pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(scenario_id, equipment_id)
-        );
-        CREATE TABLE IF NOT EXISTS equipment_process_links (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            placement_id TEXT NOT NULL REFERENCES equipment_placements(id) ON DELETE CASCADE,
-            work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
-            process_operation_snapshot TEXT NOT NULL DEFAULT '',
-            process_description_snapshot TEXT NOT NULL DEFAULT '',
-            station_pitch_snapshot TEXT NOT NULL DEFAULT '',
-            unlinked_at TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(placement_id, work_element_id)
-        );
-        CREATE TABLE IF NOT EXISTS equipment_torque_requirement_links (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            equipment_id TEXT NOT NULL REFERENCES equipment_assets(id) ON DELETE CASCADE,
-            quality_requirement_id TEXT NOT NULL
-                REFERENCES quality_requirements(id) ON DELETE RESTRICT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(equipment_id, quality_requirement_id)
-        );
-        CREATE TABLE IF NOT EXISTS conveyor_zones (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
-            sequence INTEGER NOT NULL DEFAULT 10,
-            start_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
-            end_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
-            conveyor_height_in REAL,
-            conveyor_width_in REAL,
-            unit_orientation TEXT NOT NULL DEFAULT '',
-            orientation_image_path TEXT NOT NULL DEFAULT '',
-            standard_pitch_length_in REAL DEFAULT 120.0,
-            helper_pitch_count INTEGER DEFAULT 0,
-            growth_pitch_count INTEGER DEFAULT 0,
-            monument_length_in REAL DEFAULT 0.0,
-            notes TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_equipment_types_project
-            ON equipment_types(project_id, label);
-        CREATE INDEX IF NOT EXISTS idx_equipment_assets_project
-            ON equipment_assets(project_id, name);
-        CREATE INDEX IF NOT EXISTS idx_equipment_function_area
-            ON equipment_function_links(project_id, functional_area, equipment_id);
-        CREATE INDEX IF NOT EXISTS idx_equipment_placements_scenario
-            ON equipment_placements(project_id, scenario_id, equipment_id);
-        CREATE INDEX IF NOT EXISTS idx_equipment_process_links_work
-            ON equipment_process_links(project_id, scenario_id, work_element_id);
-        CREATE INDEX IF NOT EXISTS idx_equipment_torque_links_requirement
-            ON equipment_torque_requirement_links(project_id, quality_requirement_id);
-        CREATE INDEX IF NOT EXISTS idx_conveyor_zones_scenario
-            ON conveyor_zones(project_id, scenario_id, sequence);
-        """
-    )
-    # Check and upgrade equipment_types if tier column is missing
-    cursor = conn.execute("PRAGMA table_info(equipment_types)")
-    type_cols = [row[1] for row in cursor.fetchall()]
-    if "tier" not in type_cols:
-        conn.execute("ALTER TABLE equipment_types ADD COLUMN tier TEXT NOT NULL DEFAULT 'Handheld Tools'")
-        conn.execute(
-            """UPDATE equipment_types
-               SET tier = 'Capital Equipment'
-               WHERE label IN ('Conveyor', 'Automation cell', 'Robot')"""
+    if not is_schema_initialized(conn, "equipment_schema_v1", "equipment_process_links"):
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS equipment_types (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                label TEXT NOT NULL COLLATE NOCASE,
+                tier TEXT NOT NULL DEFAULT 'Handheld Tools',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, label)
+            );
+            CREATE TABLE IF NOT EXISTS equipment_type_function_links (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                equipment_type_id TEXT NOT NULL REFERENCES equipment_types(id) ON DELETE CASCADE,
+                functional_area TEXT NOT NULL
+                    CHECK(functional_area IN ('Quality', 'Ergonomics', 'Safety', 'Materials', 'Assembly')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(equipment_type_id, functional_area)
+            );
+            CREATE TABLE IF NOT EXISTS equipment_assets (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                equipment_type_id TEXT NOT NULL REFERENCES equipment_types(id) ON DELETE RESTRICT,
+                name TEXT NOT NULL COLLATE NOCASE,
+                description TEXT NOT NULL DEFAULT '',
+                manufacturer TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                image_path TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS equipment_function_links (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                equipment_id TEXT NOT NULL REFERENCES equipment_assets(id) ON DELETE CASCADE,
+                functional_area TEXT NOT NULL
+                    CHECK(functional_area IN ('Quality', 'Ergonomics', 'Safety', 'Materials', 'Assembly')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(equipment_id, functional_area)
+            );
+            CREATE TABLE IF NOT EXISTS equipment_placements (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                equipment_id TEXT NOT NULL REFERENCES equipment_assets(id) ON DELETE CASCADE,
+                pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(scenario_id, equipment_id)
+            );
+            CREATE TABLE IF NOT EXISTS equipment_process_links (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                placement_id TEXT NOT NULL REFERENCES equipment_placements(id) ON DELETE CASCADE,
+                work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                process_operation_snapshot TEXT NOT NULL DEFAULT '',
+                process_description_snapshot TEXT NOT NULL DEFAULT '',
+                station_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                unlinked_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(placement_id, work_element_id)
+            );
+            CREATE TABLE IF NOT EXISTS equipment_torque_requirement_links (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                equipment_id TEXT NOT NULL REFERENCES equipment_assets(id) ON DELETE CASCADE,
+                quality_requirement_id TEXT NOT NULL
+                    REFERENCES quality_requirements(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(equipment_id, quality_requirement_id)
+            );
+            CREATE TABLE IF NOT EXISTS conveyor_zones (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                sequence INTEGER NOT NULL DEFAULT 10,
+                start_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+                end_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+                conveyor_height_in REAL,
+                conveyor_width_in REAL,
+                unit_orientation TEXT NOT NULL DEFAULT '',
+                orientation_image_path TEXT NOT NULL DEFAULT '',
+                standard_pitch_length_in REAL DEFAULT 120.0,
+                helper_pitch_count INTEGER DEFAULT 0,
+                growth_pitch_count INTEGER DEFAULT 0,
+                monument_length_in REAL DEFAULT 0.0,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_equipment_types_project
+                ON equipment_types(project_id, label);
+            CREATE INDEX IF NOT EXISTS idx_equipment_assets_project
+                ON equipment_assets(project_id, name);
+            CREATE INDEX IF NOT EXISTS idx_equipment_function_area
+                ON equipment_function_links(project_id, functional_area, equipment_id);
+            CREATE INDEX IF NOT EXISTS idx_equipment_placements_scenario
+                ON equipment_placements(project_id, scenario_id, equipment_id);
+            CREATE INDEX IF NOT EXISTS idx_equipment_process_links_work
+                ON equipment_process_links(project_id, scenario_id, work_element_id);
+            CREATE INDEX IF NOT EXISTS idx_equipment_torque_links_requirement
+                ON equipment_torque_requirement_links(project_id, quality_requirement_id);
+            CREATE INDEX IF NOT EXISTS idx_conveyor_zones_scenario
+                ON conveyor_zones(project_id, scenario_id, sequence);
+            """
         )
-        conn.execute(
-            """UPDATE equipment_types
-               SET tier = 'Station/Pitch Equipment'
-               WHERE label IN ('Vision equipment', 'Test equipment', 'Poka-Yoke / Fixture equipment',
-                               'Dimensional measurement equipment', 'Scan/Compare equipment',
-                               'Platform', 'Pit', 'Operator Lift', 'Ergo Lift Assists')"""
-        )
+        # Check and upgrade equipment_types if tier column is missing
+        cursor = conn.execute("PRAGMA table_info(equipment_types)")
+        type_cols = [row[1] for row in cursor.fetchall()]
+        if "tier" not in type_cols:
+            conn.execute("ALTER TABLE equipment_types ADD COLUMN tier TEXT NOT NULL DEFAULT 'Handheld Tools'")
+            conn.execute(
+                """UPDATE equipment_types
+                   SET tier = 'Capital Equipment'
+                   WHERE label IN ('Conveyor', 'Automation cell', 'Robot')"""
+            )
+            conn.execute(
+                """UPDATE equipment_types
+                   SET tier = 'Station/Pitch Equipment'
+                   WHERE label IN ('Vision equipment', 'Test equipment', 'Poka-Yoke / Fixture equipment',
+                                   'Dimensional measurement equipment', 'Scan/Compare equipment',
+                                   'Platform', 'Pit', 'Operator Lift', 'Ergo Lift Assists')"""
+            )
 
-    # Check and upgrade yamazumi_pitches for platform and pit ergonomics
-    cursor = conn.execute("PRAGMA table_info(yamazumi_pitches)")
-    pitch_cols = [row[1] for row in cursor.fetchall()]
-    if "platform_height_in" not in pitch_cols:
-        conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN platform_height_in REAL DEFAULT 0.0")
-    if "pit_depth_in" not in pitch_cols:
-        conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN pit_depth_in REAL DEFAULT 0.0")
-    if "conveyor_zone_id" not in pitch_cols:
-        conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN conveyor_zone_id TEXT REFERENCES conveyor_zones(id) ON DELETE SET NULL")
+        # Check and upgrade yamazumi_pitches for platform and pit ergonomics
+        cursor = conn.execute("PRAGMA table_info(yamazumi_pitches)")
+        pitch_cols = [row[1] for row in cursor.fetchall()]
+        if "platform_height_in" not in pitch_cols:
+            conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN platform_height_in REAL DEFAULT 0.0")
+        if "pit_depth_in" not in pitch_cols:
+            conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN pit_depth_in REAL DEFAULT 0.0")
+        if "conveyor_zone_id" not in pitch_cols:
+            conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN conveyor_zone_id TEXT REFERENCES conveyor_zones(id) ON DELETE SET NULL")
 
-    _ensure_equipment_process_links_schema(conn)
+        _ensure_equipment_process_links_schema(conn)
+        mark_schema_initialized(conn, "equipment_schema_v1")
 
     for project in conn.execute("SELECT id FROM projects").fetchall():
-        _ensure_default_equipment_types(conn, str(project["id"]))
+        pid = str(project["id"])
+        if not is_scenario_task_completed("ensure_default_equipment_types", pid, ""):
+            _ensure_default_equipment_types(conn, pid)
+            mark_scenario_task_completed("ensure_default_equipment_types", pid, "")
 
 
 def _ensure_equipment_process_links_schema(conn: sqlite3.Connection) -> None:
@@ -334,14 +341,20 @@ def _ensure_equipment_process_links_schema(conn: sqlite3.Connection) -> None:
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
 
-    conn.execute(
-        """UPDATE equipment_process_links
-           SET process_operation_snapshot = COALESCE((SELECT we.operation FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), ''),
-               process_description_snapshot = COALESCE((SELECT we.description FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), ''),
-               station_pitch_snapshot = COALESCE((SELECT we.station FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), '')
+    if conn.execute(
+        """SELECT 1 FROM equipment_process_links
            WHERE work_element_id IS NOT NULL AND work_element_id != ''
-             AND process_operation_snapshot = '' AND station_pitch_snapshot = ''"""
-    )
+             AND process_operation_snapshot = '' AND station_pitch_snapshot = ''
+           LIMIT 1"""
+    ).fetchone():
+        conn.execute(
+            """UPDATE equipment_process_links
+               SET process_operation_snapshot = COALESCE((SELECT we.operation FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), ''),
+                   process_description_snapshot = COALESCE((SELECT we.description FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), ''),
+                   station_pitch_snapshot = COALESCE((SELECT we.station FROM work_elements we WHERE we.id = equipment_process_links.work_element_id), '')
+               WHERE work_element_id IS NOT NULL AND work_element_id != ''
+                 AND process_operation_snapshot = '' AND station_pitch_snapshot = ''"""
+        )
 
 
 def _ensure_default_equipment_types(conn: sqlite3.Connection, project_id: str) -> None:
@@ -822,7 +835,8 @@ def save_function_equipment_rows(
                         (str(uuid4()), project_id, scenario_id, asset_id, pitch_id, timestamp, timestamp),
                     )
                     changed_ids.append(asset_id)
-        changed_count = len(set(created_ids + changed_ids))
+        updated_only_ids = [cid for cid in dict.fromkeys(changed_ids) if cid not in created_ids]
+        changed_count = len(set(created_ids + updated_only_ids))
         if changed_count:
             store.record_audit_event(
                 project_id, "Equipment assets", "Save & Refresh", changed_count, editor,
@@ -830,12 +844,12 @@ def save_function_equipment_rows(
                     "functional_area": functional_area,
                     "scenario_id": scenario_id or "",
                     "created_ids": created_ids,
-                    "updated_ids": list(dict.fromkeys(changed_ids)),
+                    "updated_ids": updated_only_ids,
                     "store_timestamp": timestamp,
                 },
                 _conn=conn,
             )
-    return {"row_count": changed_count, "created_ids": created_ids, "updated_ids": list(dict.fromkeys(changed_ids)), "timestamp": timestamp}
+    return {"row_count": changed_count, "created_ids": created_ids, "updated_ids": updated_only_ids, "timestamp": timestamp}
 
 
 def attach_equipment_to_function(
@@ -1870,6 +1884,12 @@ def clone_equipment_scenario(
         old_end = _text(zone["end_pitch_id"])
         new_start = pitch_id_map.get(old_start) if old_start else None
         new_end = pitch_id_map.get(old_end) if old_end else None
+        store = _store_module()
+        cloned_orientation_image = (
+            store.duplicate_scenario_upload_file(zone["orientation_image_path"], prefix="conveyor_zone")
+            if hasattr(store, "duplicate_scenario_upload_file")
+            else zone["orientation_image_path"]
+        )
 
         conn.execute(
             """INSERT INTO conveyor_zones
@@ -1881,7 +1901,7 @@ def clone_equipment_scenario(
             (
                 new_zid, project_id, target_scenario_id, zone["name"], zone["sequence"],
                 new_start, new_end, zone["conveyor_height_in"], zone["conveyor_width_in"],
-                zone["unit_orientation"], zone["orientation_image_path"],
+                zone["unit_orientation"], cloned_orientation_image,
                 zone["standard_pitch_length_in"], zone["helper_pitch_count"],
                 zone["growth_pitch_count"], zone["monument_length_in"], zone["notes"],
                 timestamp, timestamp,
