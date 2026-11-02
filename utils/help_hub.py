@@ -204,6 +204,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Edit catalog attributes**: Update descriptions, factory nicknames, make/buy, part code, weight, and engineering owners, then click **Save & Refresh**.",
+            "**Link model variants (`Variant group`)**: Use the **Variant group** multiselect dropdown (populated with active part numbers from the Parts Catalog) to manually tie peer model-variant parts together. Manual links are symmetric/transitive across the variant family and merge with automatic center base-code matches.",
             "**Select rows for bulk actions or deletion**: Check the **Select** column (or click **Select all**) to apply bulk feature applicability changes or click **Delete selected (N)**.",
             "**Freeze / Pin columns**: Use the **Freeze left columns** selector above the Parts Catalog table to pin `Part number`, `Factory nickname`, or any other columns while scrolling horizontally.",
             "**Attach & annotate photos**: Upload or paste (`Ctrl+V`) part photos and use **Annotate / Add Shapes** to draw editable vector arrows, boxes, and callouts.",
@@ -226,7 +227,8 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Build Section Flow**: Create assembly sections and connect them (`series`, `parallel`, `subassembly`) on the visual Fishbone diagram.",
-            "**Assign Parts to Sections**: Place catalog parts into sections with step numbers, quantities, and use descriptions.",
+            "**Assign Parts & Split Quantities**: Place catalog parts into sections with step numbers, quantities, and use descriptions, or click the `+` button on any part card to replicate the part across multiple sections or split its quantity (`+ Split card` / `Split qty evenly`) into multiple separate cards within the same section.",
+            "**Stack Model Variants on Canvas**: Parts linked via **Variant group** (or sharing a center base drawing code) stack into a single card with a purple `N×` badge and `1/N` variant indicator in the same section. You can drag a part card directly onto another part card on the Interactive Fishbone canvas (including multiple split-quantity cards of the same part number for different model variants) to stack and tie them as model variants, or click the `N×` badge on a stacked card to open the **Edit Model Variant Ties** modal and disconnect or add variants.",
             "**Manufacturing Assemblies & Grid**: Group parts into subassemblies/kits (`ASM`) and map them across product models.",
         ],
         "connections": (
@@ -271,10 +273,10 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Manage Process steps**: Edit sequence, pitch (`station`), description, cycle time, resource type (`Human`, `Cobots`, `Automation`), and workstation heights.",
-            "**Select lines for Edit, Bulk Pitch, or Delete**: Check the **Select** column (or click **Select all**) in **Process at a Glance by pitch** to open **Edit line** (and click **Save PAAG Element**), apply a bulk pitch update, or click **Delete selected (N)**.",
+            "**Select lines for Edit, Move, or Unlink**: Check the **Select** column (or click **Select all**) in **Process at a Glance by Pitch** to open **Edit line** (and click **Save PAAG Element**), click **Move selected (N)** to choose a destination pitch address from the dropdown dialog, or click **Unlink selected (N)**.",
             "**Deterministic Op IDs**: Operation IDs (e.g. `M1S1b.01-ML1-004.4`) are formatted from Pitch Address + Flow Prefix + Sequence.",
-            "**Parts Consumed or Handled (`Handle` vs `Consume`)**: Pair Fishbone parts with PAAG elements, classify whether each part is **Consumed** or **Handled**, and use **Unlink this part from the PAAG element** on any individual part card if needed.",
-            "**Pitch Visual Aids**: Upload or paste images, videos, CAD renders, or links for each pitch and tag relevant Process steps. Hover over Yamazumi step badge numbers on the PAAG Slide Viewer to inspect step details or click the **Step # ↗** / **Open in Yamazumi ↗** links to jump directly to that section and work element on the Yamazumi tab.",
+            "**Parts Consumed or Handled (`Handle` vs `Consume`)**: Pair Fishbone parts with PAAG elements, choose the **Selection rule** (`Use all`, `Model choice`, or `Optional` — when `Model choice` is selected, check **Model variant** on each part card that is one of the operator's model-choice alternatives), classify whether each part is **Consumed** or **Handled** (when **Consume** is selected, enter the consumed **Quantity** directly next to **Handling type**; when **Handle** is selected, **Quantity** is disabled; `Consume` allowance is evaluated per overlapping model/feature variant so a placement consumed on one model variant can also be consumed on a mutually exclusive model variant, while the **Consumed parts** table populates parts consumed across all Fishbone sections/areas in the scenario so they can be handled in downstream areas), and use **Unlink this part from the PAAG element** on any individual part card if needed.",
+            "**Pitch Visual Aids**: Upload or paste images, videos, CAD renders, or links—or pull a photo directly from the **Parts Catalog** sub-tab—for each pitch and tag relevant Process steps. Hover over Yamazumi step badge numbers on the PAAG Slide Viewer to inspect step details or click the **Step # ↗** / **Open in Yamazumi ↗** links to jump directly to that section and work element on the Yamazumi tab.",
         ],
         "connections": (
             "Drives the **Pin Map** and anchors all **Functional Reviews** (Equipment, Ergonomics, Quality, Materials, Safety)."
@@ -487,6 +489,16 @@ GLOSSARY_TERMS: list[dict[str, str]] = [
         "definition": (
             "A logical zone of assembly flow (Main Line, Subassembly, or Parallel branch) on the Fishbone diagram "
             "where parts and manufacturing assemblies are placed."
+        ),
+    },
+    {
+        "term": "Variant Group",
+        "category": "Product Structure",
+        "definition": (
+            "Peer model-variant part numbers linked to a part in the Parts Catalog (either automatically via matching "
+            "center base drawing code such as `308D3205P001` / `308D3205P002`, or manually via the **Variant group** "
+            "multiselect column or dragging one part card onto another on the Interactive Fishbone). Tied variants "
+            "placed in the same Fishbone section stack together into a single `1/N` card."
         ),
     },
     {

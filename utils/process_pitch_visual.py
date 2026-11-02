@@ -639,11 +639,18 @@ def render_pitch_canvas(
         else:
             # Derive aggregated parts from elements
             seen_parts: dict[str, dict] = {}
-            for el in elements_list:
+            for el_idx, el in enumerate(elements_list):
+                el_wid = str(el.get("work_element_id") or el.get("id") or f"step_{el_idx}")
                 for p in el.get("parts", []):
                     p_num = str(p.get("part_number") or "").strip()
                     if not p_num:
                         continue
+                    is_mv = bool(p.get("is_model_variant"))
+                    mc_gid = (
+                        str(p.get("model_choice_group_id") or p.get("group_id") or el_wid)
+                        if is_mv
+                        else ""
+                    )
                     if p_num not in seen_parts:
                         seen_parts[p_num] = {
                             "part_number": p_num,
@@ -652,9 +659,14 @@ def render_pitch_canvas(
                             "image_path": p.get("image_path") or "",
                             "quantity": float(p.get("quantity") or 1.0),
                             "handling_types": set(),
+                            "is_model_variant": is_mv,
+                            "model_choice_group_id": mc_gid,
                         }
                     else:
                         seen_parts[p_num]["quantity"] += float(p.get("quantity") or 1.0)
+                        if is_mv and not seen_parts[p_num].get("is_model_variant"):
+                            seen_parts[p_num]["is_model_variant"] = True
+                            seen_parts[p_num]["model_choice_group_id"] = mc_gid
             parts = list(seen_parts.values())
 
     if yamazumi_stacks is None:
@@ -752,7 +764,7 @@ def render_pitch_canvas(
         t_name = _text(tool.get("name") or "Tool")
         t_type = _text(tool.get("type_name") or "")
         t_tier = _text(tool.get("tier") or tool.get("equipment_tier") or "")
-        t_summary = _text(tool.get("summary_line") or f"{t_name} ({t_type})" if t_type else t_name)
+        t_summary = _text(tool.get("summary_line") or (f"{t_name} ({t_type})" if t_type and t_type.lower() != "tool" else t_name))
         is_ppe = tool.get("is_ppe", False)
         ppe_badge = '<span class="badge-ppe">PPE</span> ' if is_ppe else ''
         tier_badge = f'<span class="badge-tier" style="font-size:0.68rem;background:#e2e8f0;color:#334155;padding:1px 4px;border-radius:3px;margin-right:4px;">{t_tier}</span> ' if t_tier else ''
@@ -805,45 +817,100 @@ def render_pitch_canvas(
             element_by_wid[desc_key] = el
         step_urls_by_num[s_num] = _yamazumi_step_url(pitch, linked_elem=el)
 
-    # Ensure every Yamazumi stack element has a sequential step number even if unlinked
+    # Restart step numbering at 1 for each Yamazumi stack column on the pitch
     if yamazumi_stacks:
-        cur_idx = len(all_pitch_elements) + 1
+        assigned_stack_keys: set[str] = set()
         for v_data in yamazumi_stacks.values():
             v_els = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
+            stack_step_idx = 0
             for e in v_els:
                 if not isinstance(e, dict):
                     continue
+                stack_step_idx += 1
+                assigned_num = stack_step_idx
                 e_wid = str(e.get("work_element_id") or e.get("process_element_id") or "").strip()
                 e_id = str(e.get("id") or "").strip()
                 e_desc_key = f"desc::{str(e.get('description') or e.get('yamazumi_description') or '').strip().casefold()}"
-                existing_step = (
-                    (step_num_by_wid.get(e_wid) if e_wid else None)
-                    or (step_num_by_wid.get(e_id) if e_id else None)
-                    or (step_num_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
+                linked_for_step = (
+                    (element_by_wid.get(e_wid) if e_wid else None)
+                    or (element_by_wid.get(e_id) if e_id else None)
+                    or (element_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
                 )
-                if not existing_step:
-                    assigned_num = cur_idx
-                    cur_idx += 1
-                    if e_wid:
-                        step_num_by_wid[e_wid] = assigned_num
-                    if e_id:
-                        step_num_by_wid[e_id] = assigned_num
-                    if e_desc_key != "desc::":
-                        step_num_by_wid[e_desc_key] = assigned_num
-                    step_urls_by_num[assigned_num] = _yamazumi_step_url(pitch, yamazumi_elem=e)
-                else:
-                    linked_for_step = (
-                        (element_by_wid.get(e_wid) if e_wid else None)
-                        or (element_by_wid.get(e_id) if e_id else None)
-                        or (element_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
-                    )
-                    step_urls_by_num[existing_step] = _yamazumi_step_url(
+                if e_wid and e_wid not in assigned_stack_keys:
+                    step_num_by_wid[e_wid] = assigned_num
+                    assigned_stack_keys.add(e_wid)
+                if e_id and e_id not in assigned_stack_keys:
+                    step_num_by_wid[e_id] = assigned_num
+                    assigned_stack_keys.add(e_id)
+                if e_desc_key != "desc::" and e_desc_key not in assigned_stack_keys:
+                    step_num_by_wid[e_desc_key] = assigned_num
+                    assigned_stack_keys.add(e_desc_key)
+                if assigned_num not in step_urls_by_num or linked_for_step is not None:
+                    step_urls_by_num[assigned_num] = _yamazumi_step_url(
                         pitch, yamazumi_elem=e, linked_elem=linked_for_step
                     )
 
     # 2. BUILD LEFT COLUMN: PARTS TABLE
+    def _part_mc_group_key(part_dict: dict) -> str:
+        if not bool(part_dict.get("is_model_variant")):
+            return ""
+        return str(
+            part_dict.get("model_choice_group_id")
+            or part_dict.get("group_id")
+            or part_dict.get("work_element_id")
+            or "__model_choice__"
+        ).strip()
+
+    ordered_parts: list[dict] = []
+    seen_mc_keys: set[str] = set()
+    for p_item in parts:
+        mc_k = _part_mc_group_key(p_item)
+        if not mc_k:
+            ordered_parts.append(p_item)
+        elif mc_k not in seen_mc_keys:
+            seen_mc_keys.add(mc_k)
+            for peer in parts:
+                if _part_mc_group_key(peer) == mc_k:
+                    ordered_parts.append(peer)
+
+    has_model_choice_parts = bool(seen_mc_keys)
+    parts_title_legend_html = (
+        '<div class="parts-mc-legend" title="Purple outline indicates Model Choice variant parts for a step">'
+        '<span class="swatch-mc-outline" aria-hidden="true"></span>'
+        '<span>Model Choice</span>'
+        '</div>'
+        if has_model_choice_parts
+        else ""
+    )
+
     part_rows_html: list[str] = []
-    for part in parts:
+    for idx, part in enumerate(ordered_parts):
+        mc_key = _part_mc_group_key(part)
+        prev_mc_key = _part_mc_group_key(ordered_parts[idx - 1]) if idx > 0 else ""
+        next_mc_key = (
+            _part_mc_group_key(ordered_parts[idx + 1])
+            if idx + 1 < len(ordered_parts)
+            else ""
+        )
+        is_mc = bool(mc_key)
+        is_mc_first = is_mc and (mc_key != prev_mc_key)
+        is_mc_last = is_mc and (mc_key != next_mc_key)
+
+        if is_mc_first:
+            if prev_mc_key:
+                part_rows_html.append(
+                    '<tr class="model-choice-spacer-row" aria-hidden="true"><td colspan="5"></td></tr>'
+                )
+            part_rows_html.append(
+                f"""
+                <tr class="model-choice-label-row" data-model-choice-group="{_text(mc_key)}">
+                  <td colspan="5" class="model-choice-label-cell">
+                    <span class="model-choice-outline-label">Model Choice</span>
+                  </td>
+                </tr>
+                """
+            )
+
         p_num = _text(part.get("part_number") or "Part")
         p_desc = _text(part.get("description") or part.get("part_name") or "")
         p_nick = _text(part.get("factory_nickname") or "")
@@ -879,9 +946,18 @@ def render_pitch_canvas(
             part, pitch=pitch, step_urls_by_num=step_urls_by_num
         )
 
+        row_classes = ["part-row"]
+        if is_mc:
+            row_classes.append("model-choice-row")
+            if is_mc_first:
+                row_classes.append("model-choice-first")
+            if is_mc_last:
+                row_classes.append("model-choice-last")
+        mc_data_attr = f' data-model-choice-group="{_text(mc_key)}"' if is_mc else ""
+
         part_rows_html.append(
             f"""
-            <tr class="part-row" data-part-num="{p_num}">
+            <tr class="{' '.join(row_classes)}" data-part-num="{p_num}"{mc_data_attr}>
               <td class="col-thumb">{img_tag}</td>
               <td class="col-pnum">
                 <div class="part-pnum-container">
@@ -927,23 +1003,37 @@ def render_pitch_canvas(
     # Map visual media to tagged step numbers
     media_step_numbers_map: dict[str, list[int]] = {}
     all_tagged_step_nums: set[int] = set()
+    all_tagged_wids: set[str] = set()
 
     for m_item in (visual_media or []):
         m_id = str(m_item.get("id") or "")
         tagged_steps: list[int] = []
         for t in m_item.get("tagged_work_elements", []):
             t_wid = str(t.get("work_element_id") or "").strip()
+            if t_wid:
+                all_tagged_wids.add(t_wid)
             if t_wid in step_num_by_wid:
                 tagged_steps.append(step_num_by_wid[t_wid])
-        if not tagged_steps:
-            for t_wid in m_item.get("tagged_work_element_ids", []):
-                t_clean = str(t_wid).strip()
-                if t_clean in step_num_by_wid:
-                    tagged_steps.append(step_num_by_wid[t_clean])
+        for t_wid in m_item.get("tagged_work_element_ids", []):
+            t_clean = str(t_wid).strip()
+            if t_clean:
+                all_tagged_wids.add(t_clean)
+            if not tagged_steps and t_clean in step_num_by_wid:
+                tagged_steps.append(step_num_by_wid[t_clean])
         tagged_steps = sorted(list(set(tagged_steps)))
         if m_id:
             media_step_numbers_map[m_id] = tagged_steps
         all_tagged_step_nums.update(tagged_steps)
+
+    any_stack_wid_tagged = any(
+        (
+            str(el.get("work_element_id") or el.get("process_element_id") or "").strip() in all_tagged_wids
+            or str(el.get("id") or "").strip() in all_tagged_wids
+        )
+        for vd in yamazumi_stacks.values()
+        for el in (vd.get("elements", []) if isinstance(vd, dict) else (vd if isinstance(vd, list) else []))
+        if isinstance(el, dict)
+    )
 
     variant_columns_html: list[str] = []
     max_variant_time = 0.0
@@ -1032,18 +1122,17 @@ def render_pitch_canvas(
             e_wid = str(e.get("work_element_id") or e.get("process_element_id") or "").strip()
             e_id = str(e.get("id") or "").strip()
             e_desc_key = f"desc::{str(e.get('description') or e.get('yamazumi_description') or '').strip().casefold()}"
-            step_num = (
-                (step_num_by_wid.get(e_wid, 0) if e_wid else 0)
-                or (step_num_by_wid.get(e_id, 0) if e_id else 0)
-                or (step_num_by_wid.get(e_desc_key, 0) if e_desc_key != "desc::" else 0)
-            )
+            step_num = idx_e + 1
             linked_el = (
                 (element_by_wid.get(e_wid) if e_wid else None)
                 or (element_by_wid.get(e_id) if e_id else None)
                 or (element_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
             )
 
-            has_media = step_num > 0 and step_num in all_tagged_step_nums
+            if any_stack_wid_tagged:
+                has_media = (bool(e_wid) and e_wid in all_tagged_wids) or (bool(e_id) and e_id in all_tagged_wids)
+            else:
+                has_media = step_num > 0 and step_num in all_tagged_step_nums
             if step_num > 0:
                 step_popover_html = _step_popover_content(
                     step_num=step_num,
@@ -1504,20 +1593,21 @@ def render_pitch_canvas(
       /* Main Content Split */
       .slide-body {{
         flex: 1 1 auto;
-        min-height: 0;
+        min-height: auto;
         display: grid;
         grid-template-columns: minmax(0, 37fr) minmax(0, 63fr);
         gap: 12px;
+        align-items: stretch;
         overflow: visible;
       }}
       .left-col {{
         display: flex;
         flex-direction: column;
         gap: 8px;
-        min-height: 0;
+        min-height: auto;
         min-width: 0;
         max-width: 100%;
-        height: 100%;
+        height: auto;
         box-sizing: border-box;
         overflow: visible;
         position: relative;
@@ -1538,13 +1628,20 @@ def render_pitch_canvas(
         border: 1px solid #e2e8f0;
         border-radius: 6px;
         background: #fdfdfe;
-        padding: 4px 8px;
+        padding: 5px 8px;
         display: flex;
         flex-direction: column;
-        min-height: 0;
+        flex: 0 0 auto;
+        min-height: auto;
         min-width: 0;
         max-width: 100%;
         box-sizing: border-box;
+      }}
+      .tools-panel {{
+        flex: 0 0 auto;
+        min-height: 54px;
+        padding: 6px 10px;
+        overflow: visible;
       }}
       .panel-title-bar {{
         display: flex;
@@ -1575,18 +1672,18 @@ def render_pitch_canvas(
       }}
       .tools-list {{
         margin: 0;
-        padding-left: 16px;
-        font-size: 0.78rem;
+        padding-left: 18px;
+        font-size: 0.80rem;
         color: #1e293b;
-        max-height: 64px;
-        overflow-y: auto;
+        max-height: none;
+        overflow: visible;
       }}
       .tool-item {{
-        margin-bottom: 3px;
+        margin-bottom: 4px;
         white-space: normal;
         overflow-wrap: anywhere;
         word-break: break-word;
-        line-height: 1.25;
+        line-height: 1.35;
       }}
       .badge-ppe {{
         background: #e0f2fe;
@@ -1631,6 +1728,76 @@ def render_pitch_canvas(
       }}
       .parts-table tr.part-row:hover {{
         background-color: #f1f5f9;
+      }}
+      .parts-mc-legend {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.65rem;
+        font-weight: 800;
+        color: #6d28d9;
+        background: #f3e8ff;
+        border: 1.5px solid #7c3aed;
+        border-radius: 4px;
+        padding: 1px 6px;
+        text-transform: none;
+        letter-spacing: 0.01em;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }}
+      .swatch-mc-outline {{
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border: 2px solid #7c3aed;
+        background: #faf5ff;
+        border-radius: 2px;
+        box-sizing: border-box;
+      }}
+      .parts-table tr.model-choice-spacer-row td {{
+        height: 4px;
+        padding: 0 !important;
+        border: none !important;
+        background: transparent !important;
+      }}
+      .parts-table tr.model-choice-label-row td.model-choice-label-cell {{
+        padding: 1px 6px !important;
+        background: #f3e8ff !important;
+        border-top: 2px solid #7c3aed !important;
+        border-left: 2px solid #7c3aed !important;
+        border-right: 2px solid #7c3aed !important;
+        border-bottom: 1px solid #ddd6fe !important;
+        line-height: 1.1;
+        text-align: left;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }}
+      .model-choice-outline-label {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.62rem;
+        font-weight: 800;
+        color: #6d28d9;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }}
+      .parts-table tr.part-row.model-choice-row {{
+        background-color: #faf5ff;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }}
+      .parts-table tr.part-row.model-choice-row:hover {{
+        background-color: #f3e8ff;
+      }}
+      .parts-table tr.part-row.model-choice-row td:first-child {{
+        border-left: 2px solid #7c3aed !important;
+      }}
+      .parts-table tr.part-row.model-choice-row td:last-child {{
+        border-right: 2px solid #7c3aed !important;
+      }}
+      .parts-table tr.part-row.model-choice-row.model-choice-last td {{
+        border-bottom: 2px solid #7c3aed !important;
       }}
       .part-info-trigger:hover .part-popover,
       .part-info-trigger.popover-active .part-popover {{
@@ -2979,7 +3146,7 @@ def render_pitch_canvas(
       .paag-slide.presentation-active .pitch-center-title {{ font-size: 1.75rem; }}
       .paag-slide.presentation-active .doc-control-box {{ font-size: 0.85rem; }}
       .paag-slide.presentation-active .panel-title-bar {{ font-size: 0.92rem; }}
-      .paag-slide.presentation-active .tools-list {{ font-size: 0.9rem; max-height: 85px; }}
+      .paag-slide.presentation-active .tools-list {{ font-size: 0.92rem; max-height: none; }}
       .paag-slide.presentation-active .parts-table {{ font-size: 0.88rem; }}
       .paag-slide.presentation-active .parts-table th {{ font-size: 0.82rem; }}
       .paag-slide.presentation-active .col-thumb {{ width: 62px; min-width: 62px; }}
@@ -3171,7 +3338,7 @@ def render_pitch_canvas(
         <!-- Left Column -->
         <aside class="left-col">
           <!-- Tools & PPE -->
-          <div class="panel-section">
+          <div class="panel-section tools-panel">
             <div class="panel-title-bar">
               <span>Tools &amp; PPE Required</span>
             </div>
@@ -3182,6 +3349,7 @@ def render_pitch_canvas(
           <div class="panel-section parts-panel">
             <div class="panel-title-bar">
               <span>Parts</span>
+              {parts_title_legend_html}
             </div>
             {parts_section_html}
           </div>
@@ -3901,3 +4069,5 @@ def render_printable_paag_deck(
 </body>
 </html>"""
 
+
+_PROCESS_PITCH_VISUAL_REV_20261102 = 3

@@ -1,11 +1,26 @@
 import base64
 import hashlib
+import importlib as _importlib
 import json
 from pathlib import Path
+import sys as _sys
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
+if "utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "_TABLE_UI_REV_20261102"):
+    _importlib.reload(_sys.modules["utils.table_ui"])
+if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 6:
+    if "utils.assembly_store" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.assembly_store"])
+    _importlib.reload(_sys.modules["utils.process_store"])
+    if "utils.store" in _sys.modules and hasattr(_sys.modules["utils.store"], "_refresh_domain_modules"):
+        _sys.modules["utils.store"]._refresh_domain_modules()
+    if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
+        _sys.modules["utils.cache_store"].get_data_cache().clear()
+if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 3:
+    _importlib.reload(_sys.modules["utils.process_pitch_visual"])
 
 from utils.fishbone_ui import section_breadcrumb_labels
 from utils.media_cache import cached_image_bytes, cached_image_data_url
@@ -29,6 +44,8 @@ from utils.store import (
     set_process_part_option_handling_type,
     process_pitch_visual_summary,
     process_readiness_metrics,
+    complexity_features,
+    part_feature_rules,
     project_models,
     project_table,
     reconcile_yamazumi_to_process,
@@ -44,6 +61,8 @@ from utils.store import (
     yamazumi_context_for_process,
     yamazumi_elements_for_section,
     yamazumi_pitches_for_scenario,
+    catalog_part_photos_for_pitch,
+    copy_part_photo_to_pitch_visual_media,
     delete_pitch_visual_media,
     get_pitch_visual_media,
     save_pitch_visual_media,
@@ -96,6 +115,238 @@ from utils.table_ui import (
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
 )
+
+
+def _inject_disabled_consumed_placement_options_script() -> None:
+    st.html(
+        """
+        <div style="display:none;" aria-hidden="true"></div>
+        <script>
+        (function() {
+            const DISABLED_MARKERS = [
+                "Unavailable for Consume — allowance fully used"
+            ];
+            const OPTION_SELECTOR = '[role="option"], [data-baseweb="menu"] li';
+            const STYLE_ID = "paag-disabled-placement-options-style";
+            const CSS_TEXT = [
+                '[role="option"][data-paag-disabled-option="true"],',
+                '[data-baseweb="menu"] li[data-paag-disabled-option="true"] {',
+                '    opacity: 0.42 !important;',
+                '    color: #8a8f98 !important;',
+                '    cursor: not-allowed !important;',
+                '    user-select: none !important;',
+                '    background: transparent !important;',
+                '    background-color: transparent !important;',
+                '}',
+                '[role="option"][data-paag-disabled-option="true"] [data-item-hl],',
+                '[role="option"][data-paag-disabled-option="true"] *,',
+                '[data-baseweb="menu"] li[data-paag-disabled-option="true"] * {',
+                '    color: #8a8f98 !important;',
+                '    cursor: not-allowed !important;',
+                '    background: transparent !important;',
+                '    background-color: transparent !important;',
+                '}'
+            ].join(" ");
+
+            if (document.head) {
+                let styleEl = document.getElementById(STYLE_ID);
+                if (!styleEl) {
+                    styleEl = document.createElement("style");
+                    styleEl.id = STYLE_ID;
+                    document.head.appendChild(styleEl);
+                }
+                if (styleEl.textContent !== CSS_TEXT) {
+                    styleEl.textContent = CSS_TEXT;
+                }
+            }
+
+            function isOptionTextDisabled(text) {
+                if (!text) return false;
+                for (let i = 0; i < DISABLED_MARKERS.length; i++) {
+                    if (text.indexOf(DISABLED_MARKERS[i]) !== -1) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            function markOptionDisabled(opt, disabled) {
+                if (disabled) {
+                    if (opt.getAttribute("data-paag-disabled-option") !== "true") {
+                        opt.setAttribute("data-paag-disabled-option", "true");
+                    }
+                    if (opt.getAttribute("aria-disabled") !== "true") {
+                        opt.setAttribute("aria-disabled", "true");
+                    }
+                    opt.removeAttribute("data-hovered");
+                    opt.removeAttribute("data-focused");
+                } else if (opt.getAttribute("data-paag-disabled-option") === "true") {
+                    opt.removeAttribute("data-paag-disabled-option");
+                    opt.removeAttribute("aria-disabled");
+                }
+            }
+
+            function syncDisabledPlacementOptions() {
+                const options = document.querySelectorAll(OPTION_SELECTOR);
+                options.forEach(function(opt) {
+                    markOptionDisabled(opt, isOptionTextDisabled(opt.textContent || ""));
+                });
+            }
+
+            window.__paagSyncDisabledPlacementOptions = syncDisabledPlacementOptions;
+
+            if (!window.__paagDisabledPlacementObserverV2Installed) {
+                window.__paagDisabledPlacementObserverV2Installed = true;
+
+                const resolveDisabledOption = function(target) {
+                    if (!target || !target.closest) return null;
+                    const opt = target.closest(OPTION_SELECTOR);
+                    if (!opt) return null;
+                    const disabled =
+                        opt.getAttribute("data-paag-disabled-option") === "true" ||
+                        isOptionTextDisabled(opt.textContent || "");
+                    markOptionDisabled(opt, disabled);
+                    return disabled ? opt : null;
+                };
+
+                const blockPressOnDisabledOption = function(event) {
+                    const opt = resolveDisabledOption(event.target);
+                    if (opt) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (event.stopImmediatePropagation) {
+                            event.stopImmediatePropagation();
+                        }
+                    }
+                };
+
+                const blockHoverOnDisabledOption = function(event) {
+                    const opt = resolveDisabledOption(event.target);
+                    if (opt) {
+                        event.stopPropagation();
+                        if (event.stopImmediatePropagation) {
+                            event.stopImmediatePropagation();
+                        }
+                    }
+                };
+
+                [
+                    "pointerdown",
+                    "mousedown",
+                    "pointerup",
+                    "mouseup",
+                    "click",
+                    "dblclick",
+                    "touchstart",
+                    "touchend"
+                ].forEach(function(evtName) {
+                    window.addEventListener(evtName, blockPressOnDisabledOption, true);
+                });
+
+                [
+                    "pointerenter",
+                    "pointerover",
+                    "pointermove",
+                    "mouseenter",
+                    "mouseover",
+                    "mousemove"
+                ].forEach(function(evtName) {
+                    window.addEventListener(evtName, blockHoverOnDisabledOption, true);
+                });
+
+                window.addEventListener("keydown", function(event) {
+                    if (window.__paagSyncDisabledPlacementOptions) {
+                        window.__paagSyncDisabledPlacementOptions();
+                    }
+                    if (event.key === "Enter" || event.key === "Tab") {
+                        let activeOpt = document.querySelector(
+                            '[role="option"][data-focused="true"][data-paag-disabled-option="true"], ' +
+                            '[role="option"][data-hovered="true"][data-paag-disabled-option="true"], ' +
+                            '[role="option"][aria-selected="true"][data-paag-disabled-option="true"]'
+                        );
+                        if (!activeOpt && document.activeElement) {
+                            const activeId = document.activeElement.getAttribute("aria-activedescendant");
+                            if (activeId) {
+                                const descEl = document.getElementById(activeId);
+                                if (descEl && isOptionTextDisabled(descEl.textContent || "")) {
+                                    activeOpt = descEl;
+                                }
+                            }
+                        }
+                        if (activeOpt) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (event.stopImmediatePropagation) {
+                                event.stopImmediatePropagation();
+                            }
+                        }
+                    }
+                }, true);
+
+                const observer = new MutationObserver(function() {
+                    if (window.__paagSyncDisabledPlacementOptions) {
+                        window.__paagSyncDisabledPlacementOptions();
+                    }
+                });
+                if (document.body) {
+                    observer.observe(document.body, {
+                        childList: true,
+                        subtree: true,
+                        characterData: true
+                    });
+                }
+            }
+
+            syncDisabledPlacementOptions();
+        })();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
+def _part_has_model_variants(
+    part_id: str,
+    placements_df: pd.DataFrame,
+    *,
+    fallback_model_applicability: object = None,
+    feature_rule_part_ids: set[str] | None = None,
+) -> bool:
+    pid = str(part_id or "").strip()
+    if not pid:
+        return False
+    if feature_rule_part_ids and pid in feature_rule_part_ids:
+        return True
+    if not placements_df.empty and "part_id" in placements_df.columns:
+        part_rows = placements_df.loc[placements_df["part_id"].astype(str) == pid]
+        for _, prow in part_rows.iterrows():
+            vg = (
+                ""
+                if pd.isna(prow.get("variant_group"))
+                else str(prow.get("variant_group") or "").strip()
+            )
+            if vg:
+                return True
+            m_app = (
+                ""
+                if pd.isna(prow.get("model_applicability"))
+                else str(prow.get("model_applicability") or "").strip()
+            )
+            if m_app.casefold() not in {"", "all", "all models", "base"}:
+                return True
+            try:
+                if int(prow.get("step_number") or 1) > 1:
+                    return True
+            except (TypeError, ValueError):
+                pass
+    if fallback_model_applicability is not None and not pd.isna(
+        fallback_model_applicability
+    ):
+        fb_app = str(fallback_model_applicability or "").strip()
+        if fb_app.casefold() not in {"", "all", "all models", "base"}:
+            return True
+    return False
+
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 process_editor_key = f"process_editor_{scenario_id}"
@@ -286,6 +537,34 @@ model_labels = {
     for _, row in models.iterrows()
 }
 model_numbers_by_label = {label: number for number, label in model_labels.items()}
+_active_features = complexity_features(project_id)
+feature_variant_options: list[str] = []
+feature_variant_aliases: dict[str, str] = {
+    "all": "All models",
+    "all models": "All models",
+    "base": "All models",
+}
+if not _active_features.empty:
+    for _, _frow in _active_features.iterrows():
+        if not bool(_frow.get("active", 1)):
+            continue
+        _fname = str(_frow.get("name") or "").strip()
+        if not _fname:
+            continue
+        _fcat = str(_frow.get("category") or "").strip()
+        for _choice in json.loads(str(_frow.get("allowed_values") or "[]")):
+            _choice_str = str(_choice or "").strip()
+            if _choice_str:
+                _short_feat = f"{_fname} = {_choice_str}"
+                feature_variant_options.append(_short_feat)
+                feature_variant_aliases[_short_feat.casefold()] = _short_feat
+                if _fcat:
+                    feature_variant_aliases[
+                        f"{_fcat} · {_fname} = {_choice_str}".casefold()
+                    ] = _short_feat
+process_model_options = list(
+    dict.fromkeys(["All models", *feature_variant_options])
+)
 
 
 def close_presentation_mode_dialog() -> None:
@@ -1289,7 +1568,7 @@ with tab_plan:
             help="Open Parts Catalog in a separate browser window to cross-reference parts",
         )
     st.caption(
-        "The selected fishbone section controls both lists. Use **Choose one** for alternatives such "
+        "The selected fishbone section controls both lists. Use **Model choice** for alternatives such "
         "as black or silver versions of the same panel."
     )
     if not section_ids:
@@ -1385,24 +1664,14 @@ with tab_plan:
             ),
         ]
 
-        section_placements = fishbone_part_assignments(project_id, scenario_id)
-        if not section_placements.empty:
-            section_placements = section_placements.loc[
-                section_placements["section_id"].astype(str) == section_id
+        all_placements = fishbone_part_assignments(project_id, scenario_id)
+        if not all_placements.empty:
+            section_placements = all_placements.loc[
+                all_placements["section_id"].astype(str) == section_id
             ].copy()
-        section_has_fishbone_parts = not section_placements.empty
-        if section_placements.empty:
-            available_parts = section_placements.copy()
         else:
-            available_parts = (
-                section_placements.sort_values(["part_number", "sequence", "id"])
-                .drop_duplicates(subset=["part_id"], keep="first")
-                .copy()
-            )
-            placement_counts = section_placements.groupby("part_id").size()
-            available_parts["fishbone_use_count"] = (
-                available_parts["part_id"].map(placement_counts).astype(int)
-            )
+            section_placements = all_placements.copy()
+        section_has_fishbone_parts = not section_placements.empty
 
         consumed_part_ids: set[str] = set()
         handled_part_ids: set[str] = set()
@@ -1414,6 +1683,46 @@ with tab_plan:
                     consumed_part_ids.add(opt_pid)
                 elif htype == "Handle":
                     handled_part_ids.add(opt_pid)
+
+        candidate_placements = (
+            all_placements.loc[
+                (all_placements["section_id"].astype(str) == section_id)
+                | (all_placements["part_id"].astype(str).isin(consumed_part_ids))
+            ].copy()
+            if not all_placements.empty
+            else all_placements.copy()
+        )
+        if candidate_placements.empty:
+            available_parts = candidate_placements.copy()
+        else:
+            candidate_placements["_in_section_rank"] = (
+                candidate_placements["section_id"].astype(str) != str(section_id)
+            ).astype(int)
+            available_parts = (
+                candidate_placements.sort_values(
+                    ["_in_section_rank", "part_number", "sequence", "id"]
+                )
+                .drop_duplicates(subset=["part_id"], keep="first")
+                .drop(columns=["_in_section_rank"])
+                .copy()
+            )
+            section_placement_counts = (
+                section_placements.groupby("part_id").size()
+                if not section_placements.empty
+                else pd.Series(dtype=int)
+            )
+            all_placement_counts = (
+                all_placements.groupby("part_id").size()
+                if not all_placements.empty
+                else pd.Series(dtype=int)
+            )
+            available_parts["fishbone_use_count"] = (
+                available_parts["part_id"]
+                .map(section_placement_counts)
+                .fillna(available_parts["part_id"].map(all_placement_counts))
+                .fillna(0)
+                .astype(int)
+            )
 
         def _calc_part_handling(part_id_val: object) -> str:
             pid = str(part_id_val)
@@ -1446,17 +1755,19 @@ with tab_plan:
                         pairing_search, regex=False
                     )
             yamazumi_rows = yamazumi_rows.loc[yam_mask].copy()
-        if pairing_search and not section_placements.empty:
-            placement_mask = pd.Series(False, index=section_placements.index)
+        if pairing_search and not candidate_placements.empty:
+            placement_mask = pd.Series(False, index=candidate_placements.index)
             search_cols = ["part_number", "description", "use_description", "model_applicability"]
-            if "factory_nickname" in section_placements.columns:
+            if "factory_nickname" in candidate_placements.columns:
                 search_cols.append("factory_nickname")
+            if "section_name" in candidate_placements.columns:
+                search_cols.append("section_name")
             for column in search_cols:
-                placement_mask |= section_placements[column].fillna("").astype(str).str.casefold().str.contains(
+                placement_mask |= candidate_placements[column].fillna("").astype(str).str.casefold().str.contains(
                     pairing_search, regex=False
                 )
             matching_part_ids = set(
-                section_placements.loc[placement_mask, "part_id"].astype(str)
+                candidate_placements.loc[placement_mask, "part_id"].astype(str)
             )
             available_parts = available_parts.loc[
                 available_parts["part_id"].astype(str).isin(matching_part_ids)
@@ -1802,7 +2113,7 @@ with tab_plan:
 
             st.markdown("##### Consumed parts")
             if consumed_parts.empty:
-                if not section_has_fishbone_parts:
+                if not section_has_fishbone_parts and not section_has_available_fishbone_parts:
                     st.info("No catalog parts are placed in this fishbone section.")
                 elif has_active_part_filters and section_has_available_fishbone_parts:
                     st.info("No consumed fishbone parts match these filters.")
@@ -2237,14 +2548,33 @@ with tab_plan:
             selected_description = str(selected_yamazumi.iloc[0]["description"])
             pair_controls = st.container(border=True)
             pair_controls.markdown(f"**Selected work:** {selected_description}")
+            pairing_rule_key = (
+                f"process_pairing_rule_{scenario_id}_{section_id}_"
+                f"{selected_yamazumi_id}"
+            )
+            if st.session_state.get(pairing_rule_key) == "Choose one":
+                st.session_state[pairing_rule_key] = "Model choice"
+            selection_rule = pair_controls.selectbox(
+                "Selection rule",
+                ["Use all", "Model choice", "Optional"],
+                key=pairing_rule_key,
+            )
             handling_types_by_part: dict[str, str] = {}
             fishbone_assignment_ids_by_part: dict[str, str | None] = {}
+            quantities_by_part: dict[str, float | None] = {}
+            model_variants_by_part: dict[str, bool] = {}
             selected_pairing_details: list[dict] = []
             if not selected_parts.empty:
                 pair_controls.markdown("##### Classify selected parts")
                 pair_controls.caption(
                     "Each selected part needs a handling type and an exact "
                     "Use / installation location before it can be paired."
+                )
+                _pfr_df = part_feature_rules(project_id)
+                feature_rule_pids = (
+                    set(_pfr_df["part_id"].astype(str))
+                    if not _pfr_df.empty and "part_id" in _pfr_df.columns
+                    else set()
                 )
                 for _, selected_part in selected_parts.iterrows():
                     selected_part_id = str(selected_part["part_id"])
@@ -2254,17 +2584,57 @@ with tab_plan:
                         "" if pd.isna(raw_part_name) else str(raw_part_name or "")
                     )
                     placement_options = process_part_placement_options(
-                        project_id, scenario_id, section_id, selected_part_id
+                        project_id,
+                        scenario_id,
+                        section_id,
+                        selected_part_id,
+                        work_element_id=selected_process_id,
+                        yamazumi_element_id=selected_yamazumi_id,
                     )
+                    in_current_section = (
+                        not section_placements.empty
+                        and selected_part_id
+                        in set(section_placements["part_id"].astype(str))
+                    )
+                    default_handling_idx = 0 if in_current_section else 1
                     with pair_controls.container(border=True):
                         st.markdown(
                             f"**{selected_part_number}**"
                             + (f" — {selected_part_name}" if selected_part_name else "")
                         )
-                        handling_type = st.selectbox(
+                        mv_key = (
+                            f"process_pairing_model_variant_{scenario_id}_{section_id}_"
+                            f"{selected_yamazumi_id}_{selected_part_id}"
+                        )
+                        if selection_rule == "Model choice":
+                            default_is_mv = _part_has_model_variants(
+                                selected_part_id,
+                                all_placements,
+                                fallback_model_applicability=selected_part.get(
+                                    "model_applicability"
+                                ),
+                                feature_rule_part_ids=feature_rule_pids,
+                            )
+                            is_model_variant = st.checkbox(
+                                "Model variant",
+                                value=default_is_mv,
+                                help=(
+                                    "Check if this part is one of the model-choice alternatives "
+                                    "the operator chooses between on this step."
+                                ),
+                                key=mv_key,
+                            )
+                            model_variants_by_part[selected_part_id] = bool(
+                                is_model_variant
+                            )
+                        else:
+                            st.session_state.pop(mv_key, None)
+                            model_variants_by_part[selected_part_id] = False
+                        ht_col, qty_col = st.columns([2, 1])
+                        handling_type = ht_col.selectbox(
                             "Handling type",
                             ["Consume", "Handle"],
-                            index=0,
+                            index=default_handling_idx,
                             help=(
                                 "Consume means one unit is removed from its container and placed "
                                 "on the line for the first time. Handle means that same Fishbone "
@@ -2275,8 +2645,28 @@ with tab_plan:
                                 f"{selected_yamazumi_id}_{selected_part_id}"
                             ),
                         )
+                        part_quantity = qty_col.number_input(
+                            "Quantity",
+                            min_value=0.01,
+                            value=1.0,
+                            step=1.0,
+                            disabled=(handling_type != "Consume"),
+                            help=(
+                                "Enter the quantity of parts consumed."
+                                if handling_type == "Consume"
+                                else "Quantity is only available when Handling type is Consume."
+                            ),
+                            key=(
+                                f"process_pairing_quantity_{scenario_id}_{section_id}_"
+                                f"{selected_yamazumi_id}_{selected_part_id}"
+                            ),
+                        )
                         handling_types_by_part[selected_part_id] = handling_type
+                        quantities_by_part[selected_part_id] = (
+                            float(part_quantity) if handling_type == "Consume" else None
+                        )
                         placement_labels: dict[str, str] = {}
+                        disabled_placement_ids: set[str] = set()
                         for _, placement in placement_options.iterrows():
                             assignment_id = str(placement["fishbone_assignment_id"])
                             raw_use_description = placement.get("use_description")
@@ -2286,6 +2676,18 @@ with tab_plan:
                                 or not str(raw_use_description or "").strip()
                                 else str(raw_use_description).strip()
                             )
+                            placement_sec_id = str(placement.get("section_id") or "")
+                            placement_sec_name = str(
+                                placement.get("section_name") or ""
+                            ).strip()
+                            if (
+                                placement_sec_id
+                                and placement_sec_id != str(section_id)
+                                and placement_sec_name
+                            ):
+                                use_description = (
+                                    f"{placement_sec_name} ({use_description})"
+                                )
                             quantity_label = format_clean_number(
                                 placement["fishbone_quantity"]
                             )
@@ -2293,11 +2695,14 @@ with tab_plan:
                                 placement["remaining_consume_allowance"]
                             )
                             if handling_type == "Consume":
+                                can_consume_placement = bool(placement["can_consume"])
                                 availability = (
                                     f"Remaining Consume allowance {remaining_label}"
-                                    if bool(placement["can_consume"])
+                                    if can_consume_placement
                                     else "Unavailable for Consume — allowance fully used"
                                 )
+                                if not can_consume_placement:
+                                    disabled_placement_ids.add(assignment_id)
                             else:
                                 availability = (
                                     "Available for Handle"
@@ -2313,7 +2718,16 @@ with tab_plan:
                             f"process_pairing_location_{scenario_id}_{section_id}_"
                             f"{selected_yamazumi_id}_{selected_part_id}"
                         )
-                        if len(placement_ids) == 1:
+                        if (
+                            placement_key in st.session_state
+                            and str(st.session_state.get(placement_key) or "")
+                            in disabled_placement_ids
+                        ):
+                            st.session_state[placement_key] = None
+                        if (
+                            len(placement_ids) == 1
+                            and placement_ids[0] not in disabled_placement_ids
+                        ):
                             selected_assignment_id = st.selectbox(
                                 "Use / installation location",
                                 placement_ids,
@@ -2342,6 +2756,12 @@ with tab_plan:
                                 ),
                                 key=placement_key,
                             )
+                        if (
+                            selected_assignment_id
+                            and str(selected_assignment_id) in disabled_placement_ids
+                        ):
+                            selected_assignment_id = None
+                        _inject_disabled_consumed_placement_options_script()
                         fishbone_assignment_ids_by_part[selected_part_id] = (
                             str(selected_assignment_id) if selected_assignment_id else None
                         )
@@ -2350,6 +2770,10 @@ with tab_plan:
                                 "part_id": selected_part_id,
                                 "part_number": selected_part_number,
                                 "handling_type": handling_type,
+                                "quantity": quantities_by_part.get(selected_part_id),
+                                "is_model_variant": model_variants_by_part.get(
+                                    selected_part_id, False
+                                ),
                                 "fishbone_assignment_id": (
                                     str(selected_assignment_id)
                                     if selected_assignment_id
@@ -2412,12 +2836,32 @@ with tab_plan:
                 except Exception:
                     pass
 
+            all_assets_df = equipment_assets(project_id, scenario_id)
             default_cat_idx = 0
             if existing_tool:
+                matched_cat = False
                 for idx, cat in enumerate(tool_categories):
                     if cat.casefold() == existing_tool.casefold():
                         default_cat_idx = idx
+                        matched_cat = True
                         break
+                if not matched_cat and not all_assets_df.empty:
+                    for _, a_row in all_assets_df.iterrows():
+                        a_name = str(a_row.get("name") or "").strip()
+                        a_model = str(a_row.get("model") or "").strip()
+                        a_label = f"{a_name} ({a_model})" if a_model else a_name
+                        if existing_tool.casefold() in {a_name.casefold(), a_label.casefold()}:
+                            eq_cat = str(a_row.get("equipment_type") or "").strip()
+                            for idx, cat in enumerate(tool_categories):
+                                if cat.casefold() == eq_cat.casefold():
+                                    default_cat_idx = idx
+                                    matched_cat = True
+                                    break
+                            if matched_cat:
+                                break
+                if not matched_cat:
+                    tool_categories.append(existing_tool)
+                    default_cat_idx = len(tool_categories) - 1
 
             selected_tool_category = tool_c1.selectbox(
                 "Tool category",
@@ -2430,7 +2874,6 @@ with tab_plan:
             final_tool = ""
             selected_equipment_id = None
             if selected_tool_category != "(No tool required)":
-                all_assets_df = equipment_assets(project_id, scenario_id)
                 cat_assets = pd.DataFrame()
                 if not all_assets_df.empty and "equipment_type" in all_assets_df.columns:
                     cat_assets = all_assets_df[
@@ -2447,7 +2890,7 @@ with tab_plan:
                         asset_id_map[a_label] = (str(a_row["id"]), a_name)
                 
                 default_asset_idx = 0
-                if existing_tool and existing_tool != selected_tool_category:
+                if existing_tool and existing_tool.casefold() != selected_tool_category.casefold():
                     for idx, ch in enumerate(asset_choices):
                         if existing_tool.casefold() in ch.casefold():
                             default_asset_idx = idx
@@ -2497,21 +2940,50 @@ with tab_plan:
             else:
                 res_c2.caption("Standard manual operator performing work.")
 
-            selection_rule = pair_controls.selectbox(
-                "Selection rule",
-                ["Use all", "Choose one", "Optional"],
-                key=(
-                    f"process_pairing_rule_{scenario_id}_{section_id}_"
-                    f"{selected_yamazumi_id}"
-                ),
-            )
+            if (
+                str(final_tool or "").strip() != str(existing_tool or "").strip()
+                or str(resource_type or "Human").strip() != str(existing_res_type or "Human").strip()
+                or str(resource_detail or "").strip() != str(existing_res_detail or "").strip()
+            ):
+                if not selected_process_id and selected_yamazumi_id:
+                    reconcile_yamazumi_to_process(
+                        project_id, scenario_id, [selected_yamazumi_id]
+                    )
+                    selected_process_id = process_element_id_for_yamazumi(
+                        project_id, scenario_id, selected_yamazumi_id
+                    )
+                if selected_process_id:
+                    update_work_element_tool_and_resource(
+                        project_id,
+                        scenario_id,
+                        selected_process_id,
+                        tool=final_tool,
+                        resource_type=resource_type,
+                        resource_detail=resource_detail,
+                    )
+                    if selected_equipment_id and selected_pitch_id:
+                        try:
+                            save_equipment_placement(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                equipment_id=selected_equipment_id,
+                                pitch_id=str(selected_pitch_id),
+                                work_element_ids=[selected_process_id],
+                                editor_name=st.session_state.get("current_editor", ""),
+                            )
+                        except Exception:
+                            pass
+
             is_handle_operation = any(
                 ht == "Handle" for ht in handling_types_by_part.values()
             )
 
             part_labels = []
+            variant_part_labels = []
+            non_variant_part_labels = []
             if not selected_parts.empty:
                 for _, r in selected_parts.iterrows():
+                    r_pid = str(r.get("part_id") or "")
                     p_desc = (
                         ""
                         if pd.isna(r.get("description"))
@@ -2522,15 +2994,28 @@ with tab_plan:
                         if pd.isna(r.get("part_number"))
                         else str(r.get("part_number") or "").strip()
                     )
-                    part_labels.append(p_desc or p_num)
-            part_labels = [p for p in part_labels if p]
+                    lbl = p_desc or p_num
+                    if lbl:
+                        part_labels.append(lbl)
+                        if model_variants_by_part.get(r_pid, False):
+                            variant_part_labels.append(lbl)
+                        else:
+                            non_variant_part_labels.append(lbl)
 
-            if selection_rule == "Choose one":
-                auto_name = (
-                    " / ".join(part_labels)
-                    if part_labels
-                    else (selected_description or "Part option")
-                )
+            if selection_rule in {"Model choice", "Choose one"}:
+                if variant_part_labels and non_variant_part_labels:
+                    auto_name = (
+                        f"{' / '.join(variant_part_labels)}, "
+                        f"{', '.join(non_variant_part_labels)}"
+                    )
+                elif variant_part_labels:
+                    auto_name = " / ".join(variant_part_labels)
+                else:
+                    auto_name = (
+                        " / ".join(part_labels)
+                        if part_labels
+                        else (selected_description or "Part option")
+                    )
             elif selection_rule == "Optional":
                 auto_name = (
                     f"Optional: {', '.join(part_labels)}"
@@ -2580,16 +3065,6 @@ with tab_plan:
                             f"{selected_yamazumi_id}"
                         ),
                     )
-                quantity = form_row.number_input(
-                    "Quantity",
-                    min_value=0.01,
-                    value=1.0,
-                    step=1.0,
-                    key=(
-                        f"process_pairing_quantity_{scenario_id}_{section_id}_"
-                        f"{selected_yamazumi_id}"
-                    ),
-                )
                 notes = st.text_input(
                     "Part requirement notes",
                     placeholder="Model choice, installation intent, or other IE guidance",
@@ -2642,6 +3117,8 @@ with tab_plan:
                         scenario_id,
                         section_id,
                         selected_pairing_details,
+                        work_element_id=selected_process_id,
+                        yamazumi_element_id=selected_yamazumi_id,
                     )
                     reconcile_yamazumi_to_process(
                         project_id, scenario_id, [selected_yamazumi_id]
@@ -2688,6 +3165,14 @@ with tab_plan:
                         final_group_name = f"{base_candidate} ({counter})"
                         counter += 1
 
+                    consumed_quantities = [
+                        float(q)
+                        for q in quantities_by_part.values()
+                        if q is not None and float(q) > 0
+                    ]
+                    group_quantity = (
+                        consumed_quantities[0] if consumed_quantities else 1.0
+                    )
                     save_process_part_group(
                         project_id,
                         scenario_id,
@@ -2696,13 +3181,15 @@ with tab_plan:
                         None,
                         final_group_name,
                         selection_rule,
-                        quantity,
+                        group_quantity,
                         selected_parts["part_id"].astype(str).tolist(),
                         notes,
                         handling_types_by_part=handling_types_by_part,
                         fishbone_assignment_ids_by_part=(
                             fishbone_assignment_ids_by_part
                         ),
+                        quantities_by_part=quantities_by_part,
+                        model_variants_by_part=model_variants_by_part,
                     )
                     st.session_state.pop(excluded_create_parts_key, None)
                     request_table_editor_reset(work_source_key)
@@ -2959,8 +3446,30 @@ with tab_plan:
         pairing_summary: dict[str, list[str]] = {}
         handling_summary: dict[str, set[str]] = {}
         for group in process_part_groups(project_id, scenario_id, active_only=True):
-            option_numbers = [str(option["part_number"]) for option in group["options"]]
-            suffix = " / ".join(option_numbers) if group["selection_rule"] == "Choose one" else ", ".join(option_numbers)
+            if group["selection_rule"] in {"Model choice", "Choose one"}:
+                variant_nums = [
+                    str(option["part_number"])
+                    for option in group["options"]
+                    if option.get("is_model_variant", True)
+                ]
+                non_variant_nums = [
+                    str(option["part_number"])
+                    for option in group["options"]
+                    if not option.get("is_model_variant", True)
+                ]
+                if variant_nums and non_variant_nums:
+                    suffix = f"{' / '.join(variant_nums)}, {', '.join(non_variant_nums)}"
+                elif variant_nums:
+                    suffix = " / ".join(variant_nums)
+                else:
+                    suffix = " / ".join(
+                        str(option["part_number"]) for option in group["options"]
+                    )
+            else:
+                option_numbers = [
+                    str(option["part_number"]) for option in group["options"]
+                ]
+                suffix = ", ".join(option_numbers)
             work_element_id = str(group["work_element_id"])
             pairing_summary.setdefault(work_element_id, []).append(
                 f"{group['name']}: {suffix}"
@@ -3007,6 +3516,35 @@ with tab_plan:
             elements["pitch_name"] = process_ids.map(
                 yamazumi_context["pitch_name"].fillna("").astype(str)
             ).fillna("")
+            if "pitch_number" in yamazumi_context.columns:
+                yamazumi_pitches = (
+                    process_ids.map(
+                        yamazumi_context["pitch_number"].fillna("").astype(str)
+                    )
+                    .fillna("")
+                    .str.strip()
+                )
+                elements["station"] = yamazumi_pitches.where(
+                    yamazumi_pitches.ne(""),
+                    elements["station"].fillna("").astype(str),
+                )
+            if "yamazumi_model_applicability" in yamazumi_context.columns:
+                linked_mask = process_ids.isin(yamazumi_context.index)
+                yamazumi_models = (
+                    process_ids.map(
+                        yamazumi_context["yamazumi_model_applicability"]
+                        .fillna("")
+                        .astype(str)
+                    )
+                    .fillna("")
+                    .str.strip()
+                )
+                elements["model_applicability"] = yamazumi_models.where(
+                    linked_mask
+                    & yamazumi_models.ne("")
+                    & yamazumi_models.str.casefold().ne("all"),
+                    elements["model_applicability"].fillna("All").astype(str),
+                )
             yamazumi_descriptions = process_ids.map(
                 yamazumi_context["yamazumi_description"].fillna("").astype(str)
             ).fillna("")
@@ -3035,12 +3573,17 @@ with tab_plan:
             dtype="object",
         )
 
+        def _normalize_element_features(raw_value: object) -> list[str]:
+            normalized: list[str] = []
+            for token in (split_filter_values(raw_value) or ["All models"]):
+                mapped = feature_variant_aliases.get(str(token).strip().casefold())
+                if mapped and mapped not in normalized:
+                    normalized.append(mapped)
+            return normalized or ["All models"]
+
         elements["model_applicability"] = pd.Series(
             [
-                [
-                    "All models" if model.casefold() in {"all", "all models"} else model_labels.get(model, model)
-                    for model in (split_filter_values(value) or ["All"])
-                ]
+                _normalize_element_features(value)
                 for value in elements["model_applicability"]
             ],
             index=elements.index,
@@ -3050,12 +3593,13 @@ with tab_plan:
 
     elements["selected"] = pd.Series(False, index=elements.index, dtype="bool")
 
-    editable_table_heading("Process at a Glance by pitch")
-    st.caption("Complete and review ordered work elements by pitch, station, and model applicability.")
+    editable_table_heading("Process at a Glance by Pitch")
+    st.caption("Complete and review ordered work elements by pitch and feature applicability.")
     visible_elements = filter_table(
         elements,
         key=f"process_filters_{scenario_id}",
         dropdown_columns=["station", "resource", "handling", "model_applicability"],
+        labels={"station": "Pitch", "model_applicability": "Feature"},
         search_columns=[
             "op_id", "work_element", "pitch_name", "description", "station", "resource", "assigned_parts", "output_assembly_number",
             "output_assembly_name", "tool", "quality_requirement", "ergo_requirement", "location",
@@ -3082,6 +3626,7 @@ with tab_plan:
         disabled=[
             "id",
             "op_id",
+            "station",
             "pitch_name",
             "work_element",
             "resource",
@@ -3100,8 +3645,8 @@ with tab_plan:
                 pinned=True,
                 width="small",
                 help=(
-                    "Select one or more lines to edit with Edit line, apply a bulk "
-                    "pitch update, or delete."
+                    "Select one or more lines to edit with Edit line, move to a "
+                    "destination pitch, or delete."
                 ),
             ),
             "op_id": st.column_config.TextColumn(
@@ -3115,10 +3660,10 @@ with tab_plan:
                 ),
             ),
             "sequence": st.column_config.NumberColumn("Seq.", min_value=0, step=10),
-            "station": None,
-            "pitch_name": st.column_config.TextColumn(
-                "Pitch Name", pinned=True, width=110
+            "station": st.column_config.TextColumn(
+                "Pitch", pinned=True, width=110
             ),
+            "pitch_name": None,
             "work_element": st.column_config.TextColumn(
                 "Work Element", required=True, pinned=True, width=180
             ),
@@ -3169,7 +3714,7 @@ with tab_plan:
             ),
             "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
             "model_applicability": st.column_config.MultiselectColumn(
-                "Models", options=["All models", *model_labels.values()]
+                "Feature", options=process_model_options
             ),
         },
     )
@@ -3309,33 +3854,93 @@ with tab_plan:
         selected_count=len(selected),
         key_prefix=f"process_select_{scenario_id}",
     )
-    bulk_station = bulk.text_input("Pitch for selected", key=f"process_bulk_pitch_{scenario_id}")
-    apply_bulk = bulk.button(
-        f"Apply to selected ({len(selected)})",
+    move_selected = bulk.button(
+        f"Move selected ({len(selected)})",
         type="primary",
-        icon=":material/checklist:",
+        icon=":material/drive_file_move:",
         disabled=selected.empty,
+        key=f"process_move_selected_{scenario_id}",
+        help="Move the selected work element line(s) to a destination pitch address.",
     )
     delete_selected = bulk.button(
-        f"Delete selected ({len(selected)})",
-        icon=":material/delete:",
+        f"Unlink selected ({len(selected)})",
+        icon=":material/link_off:",
         disabled=selected.empty,
         key=f"destructive_process_delete_selected_{scenario_id}",
-        help="Delete the selected work element line(s) from this Process at a Glance plan.",
+        help="Unlink the selected work element line(s) from this Process at a Glance plan without deleting the Yamazumi work element.",
     )
     request_bulk_delete = bool(delete_selected or not native_selected.empty)
 
-    if apply_bulk:
+    if move_selected:
         if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
-            st.warning("Save or undo other edits before applying a bulk change.")
-        elif not bulk_station.strip():
-            st.warning("Enter a pitch to apply.")
+            st.warning("Save or undo other edits before moving selected steps.")
         else:
+            st.session_state[f"process_pending_move_{scenario_id}"] = (
+                selected["id"].astype(str).tolist()
+            )
+
+    @st.dialog("Move selected Process steps")
+    def confirm_process_move() -> None:
+        pending_move_key = f"process_pending_move_{scenario_id}"
+        pending_move_ids = st.session_state.get(pending_move_key, [])
+        if not pending_move_ids:
+            st.session_state.pop(pending_move_key, None)
+            request_table_editor_reset(process_editor_key)
+            st.rerun()
+
+        scenario_pitches_df = yamazumi_pitches_for_scenario(project_id, scenario_id)
+        move_pitch_options: list[str] = []
+        move_pitch_labels: dict[str, str] = {}
+        if not scenario_pitches_df.empty:
+            for _, p_row in scenario_pitches_df.iterrows():
+                p_num = str(p_row.get("pitch_number") or "").strip()
+                if not p_num or p_num in move_pitch_labels:
+                    continue
+                p_name = str(p_row.get("pitch_name") or "").strip()
+                move_pitch_options.append(p_num)
+                move_pitch_labels[p_num] = f"{p_num} — {p_name}" if p_name else p_num
+        if not elements.empty and "station" in elements.columns:
+            for raw_st in elements["station"].dropna().astype(str):
+                clean_st = raw_st.strip()
+                if clean_st and clean_st not in move_pitch_labels:
+                    move_pitch_options.append(clean_st)
+                    move_pitch_labels[clean_st] = clean_st
+
+        st.markdown(
+            f"**Select a destination pitch for {len(pending_move_ids)} selected Process step(s):**"
+        )
+        if not move_pitch_options:
+            st.info("No pitches are defined in this scenario yet.")
+            if st.button("Close", key=f"cancel_process_move_empty_{scenario_id}"):
+                st.session_state.pop(pending_move_key, None)
+                st.rerun()
+            return
+
+        dest_pitch = st.selectbox(
+            "Destination pitch address",
+            options=move_pitch_options,
+            index=None,
+            placeholder="Select or type a destination pitch address...",
+            format_func=lambda val: move_pitch_labels.get(val, val),
+            key=f"process_move_dest_pitch_{scenario_id}",
+        )
+        move_actions = st.container(horizontal=True)
+        if move_actions.button("Cancel", key=f"cancel_process_move_{scenario_id}"):
+            st.session_state.pop(pending_move_key, None)
+            st.session_state.pop(f"process_move_dest_pitch_{scenario_id}", None)
+            st.rerun()
+        if move_actions.button(
+            "Move steps",
+            type="primary",
+            icon=":material/drive_file_move:",
+            disabled=not bool(str(dest_pitch or "").strip()),
+            key=f"confirm_process_move_{scenario_id}",
+        ):
+            clean_dest = str(dest_pitch or "").strip()
             updated = elements.copy()
-            selected_ids = set(selected["id"].astype(str))
+            selected_ids = set(str(i) for i in pending_move_ids)
             mask = updated["id"].astype(str).isin(selected_ids)
-            if bulk_station.strip():
-                updated.loc[mask, "station"] = bulk_station.strip()
+            updated.loc[mask, "station"] = clean_dest
             updated["model_applicability"] = updated["model_applicability"].apply(
                 lambda assigned: ", ".join(
                     "All" if label == "All models" else model_numbers_by_label.get(label, label)
@@ -3347,27 +3952,32 @@ with tab_plan:
             record_audit_event(
                 project_id,
                 "Process plan",
-                "Apply pitch bulk update",
+                "Move steps to pitch",
                 len(selected_ids),
                 st.session_state.get("current_editor", ""),
-                {"scenario_id": scenario_id, "pitch": bulk_station},
+                {"scenario_id": scenario_id, "pitch": clean_dest},
             )
+            st.session_state.pop(pending_move_key, None)
+            st.session_state.pop(f"process_move_dest_pitch_{scenario_id}", None)
             request_table_editor_reset(process_editor_key)
             if impact.get("quality_count", 0) > 0 or impact.get("pfmea_count", 0) > 0:
                 st.toast(
-                    f"Updated pitch to {bulk_station.strip()} for {len(selected_ids)} step(s) · {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) flagged for review.",
+                    f"Moved {len(selected_ids)} step(s) to pitch {clean_dest} · {impact['quality_count']} Quality spec(s) & {impact['pfmea_count']} PFMEA item(s) flagged for review.",
                     icon=":material/info:",
                 )
             else:
                 st.toast(
-                    f"Updated pitch to {bulk_station.strip()} for {len(selected_ids)} step(s)",
+                    f"Moved {len(selected_ids)} step(s) to pitch {clean_dest}",
                     icon=":material/check_circle:",
                 )
             st.rerun()
 
+    if st.session_state.get(f"process_pending_move_{scenario_id}"):
+        confirm_process_move()
+
     if request_bulk_delete:
         if table_has_unsaved_changes(process_editor_key, native_row_selection=True):
-            st.warning("Save or undo other edits before deleting selected steps.")
+            st.warning("Save or undo other edits before unlinking selected steps.")
         else:
             delete_target = selected if not selected.empty else native_selected
             st.session_state[f"process_pending_delete_{scenario_id}"] = (
@@ -3376,7 +3986,7 @@ with tab_plan:
             stage_native_delete_confirmation(process_editor_key)
 
 
-    @st.dialog("Delete selected Process steps?", dismissible=False)
+    @st.dialog("Unlink selected Process steps?", dismissible=False)
     def confirm_process_delete() -> None:
         pending_key = f"process_pending_delete_{scenario_id}"
         pending_ids = st.session_state.get(pending_key, [])
@@ -3390,14 +4000,17 @@ with tab_plan:
         count_steps = len(pending_ids)
 
         st.markdown(
-            f"**Are you sure you want to delete {count_steps} Process step(s)?**"
+            f"**Are you sure you want to unlink {count_steps} Process step(s) from Process at a Glance?**"
+        )
+        st.caption(
+            "This only unlinks the step(s) from Process at a Glance; the underlying Yamazumi work element(s) will not be deleted."
         )
 
         if has_impact:
             st.error(
                 "⚠️ **Downstream Engineering Data Impact Detected**\n\n"
                 "Industrial Engineers cannot directly delete Quality or PFMEA records. "
-                "Deleting these process steps will unlink downstream records and preserve their snapshots for "
+                "Unlinking these process steps will unlink downstream records and preserve their snapshots for "
                 "Quality Engineering review and reconciliation in the Quality workspace."
             )
 
@@ -3413,16 +4026,16 @@ with tab_plan:
                 st.caption(f"Affected Operations: {', '.join(impact['operations_affected'])}")
 
             ack = st.checkbox(
-                "I acknowledge that deleting these steps unlinks downstream Quality, PFMEA, and Equipment "
+                "I acknowledge that unlinking these steps unlinks downstream Quality, PFMEA, and Equipment "
                 "records and notifies the Quality team for reconciliation.",
                 value=False,
                 key=f"ack_process_delete_{scenario_id}",
             )
-            delete_label = "Delete steps & Notify Quality"
+            delete_label = "Unlink steps & Notify Quality"
             delete_disabled = not ack
         else:
             st.info("No downstream Quality requirements, PFMEA failure modes, or Equipment links are associated with these steps.")
-            delete_label = "Delete steps"
+            delete_label = "Unlink steps"
             delete_disabled = False
 
         actions = st.container(horizontal=True)
@@ -3434,7 +4047,7 @@ with tab_plan:
         if actions.button(
             delete_label,
             type="primary",
-            icon=":material/delete:",
+            icon=":material/link_off:",
             disabled=delete_disabled,
             key=f"destructive_confirm_process_delete_{scenario_id}",
         ):
@@ -3722,6 +4335,8 @@ with tab_plan:
         selected_edit_part_ids: list[str] = []
         edit_handling_types_by_part: dict[str, str] = {}
         edit_assignment_ids_by_part: dict[str, str | None] = {}
+        edit_quantities_by_part: dict[str, float | None] = {}
+        edit_model_variants_by_part: dict[str, bool] = {}
         edit_pairing_details: list[dict] = []
         edit_selection_rule = "Use all"
         edit_is_handle_op = False
@@ -3764,12 +4379,46 @@ with tab_plan:
                     if not all_fb_placements.empty
                     else pd.DataFrame()
                 )
+                in_edit_sec_part_ids = (
+                    set(sec_placements["part_id"].astype(str))
+                    if not sec_placements.empty
+                    else set()
+                )
+                edit_consumed_part_ids: set[str] = set()
+                for g_row in process_part_groups(
+                    project_id, scenario_id, active_only=True
+                ):
+                    for opt_row in g_row.get("options", []):
+                        if (
+                            str(opt_row.get("handling_type") or "")
+                            .strip()
+                            .capitalize()
+                            == "Consume"
+                        ):
+                            edit_consumed_part_ids.add(str(opt_row.get("part_id")))
+                edit_candidates = (
+                    all_fb_placements.loc[
+                        (all_fb_placements["section_id"].astype(str) == str(edit_sec_id))
+                        | (
+                            all_fb_placements["part_id"]
+                            .astype(str)
+                            .isin(edit_consumed_part_ids)
+                        )
+                    ].copy()
+                    if not all_fb_placements.empty
+                    else pd.DataFrame()
+                )
                 part_label_map: dict[str, str] = {}
                 part_number_map: dict[str, str] = {}
                 part_desc_map: dict[str, str] = {}
-                if not sec_placements.empty:
+                if not edit_candidates.empty:
+                    edit_candidates["_in_sec_rank"] = (
+                        edit_candidates["section_id"].astype(str) != str(edit_sec_id)
+                    ).astype(int)
                     dedup_parts = (
-                        sec_placements.sort_values(["part_number", "sequence", "id"])
+                        edit_candidates.sort_values(
+                            ["_in_sec_rank", "part_number", "sequence", "id"]
+                        )
                         .drop_duplicates(subset=["part_id"], keep="first")
                     )
                     for _, p_row in dedup_parts.iterrows():
@@ -3837,6 +4486,44 @@ with tab_plan:
                         key=edit_ms_key,
                     )
 
+                rule_options = ["Use all", "Model choice", "Optional"]
+                raw_orig_rule = (
+                    str(active_group.get("selection_rule") or "Use all")
+                    if active_group
+                    else "Use all"
+                )
+                orig_rule = (
+                    "Model choice" if raw_orig_rule == "Choose one" else raw_orig_rule
+                )
+                default_rule_idx = (
+                    rule_options.index(orig_rule)
+                    if orig_rule in rule_options
+                    else 0
+                )
+                edit_rule_key = f"edit_line_rule_{scenario_id}_{target_id}_{req_mode}"
+                if st.session_state.get(edit_rule_key) == "Choose one":
+                    st.session_state[edit_rule_key] = "Model choice"
+                edit_selection_rule = st.selectbox(
+                    "Selection rule",
+                    options=rule_options,
+                    index=default_rule_idx,
+                    key=edit_rule_key,
+                )
+
+                preview_edit_models = st.session_state.get(
+                    f"edit_line_models_{scenario_id}_{target_id}"
+                )
+                preview_target_variants = (
+                    tuple(str(m) for m in preview_edit_models)
+                    if isinstance(preview_edit_models, list) and preview_edit_models
+                    else None
+                )
+                _edit_pfr_df = part_feature_rules(project_id)
+                edit_feature_rule_pids = (
+                    set(_edit_pfr_df["part_id"].astype(str))
+                    if not _edit_pfr_df.empty and "part_id" in _edit_pfr_df.columns
+                    else set()
+                )
                 for pid in selected_edit_part_ids:
                     pnum = part_number_map.get(pid, pid)
                     pdesc = part_desc_map.get(pid, "")
@@ -3847,16 +4534,55 @@ with tab_plan:
                         edit_sec_id,
                         pid,
                         exclude_group_id=editing_group_id,
+                        work_element_id=target_id,
+                        target_variants=preview_target_variants,
                     )
                     with st.container(border=True):
                         st.markdown(
                             f"**{pnum}**" + (f" — {pdesc}" if pdesc else "")
                         )
+                        mv_key = (
+                            f"edit_line_mv_{scenario_id}_{target_id}_"
+                            f"{req_mode}_{edit_sec_id}_{pid}"
+                        )
+                        if edit_selection_rule == "Model choice":
+                            if existing_opt and orig_rule == "Model choice":
+                                default_is_mv = bool(
+                                    existing_opt.get("is_model_variant")
+                                )
+                            else:
+                                default_is_mv = _part_has_model_variants(
+                                    pid,
+                                    all_fb_placements,
+                                    fallback_model_applicability=existing_opt.get(
+                                        "model_applicability"
+                                    ),
+                                    feature_rule_part_ids=edit_feature_rule_pids,
+                                )
+                            is_mv_val = st.checkbox(
+                                "Model variant",
+                                value=default_is_mv,
+                                help=(
+                                    "Check if this part is one of the model-choice alternatives "
+                                    "the operator chooses between on this step."
+                                ),
+                                key=mv_key,
+                            )
+                            edit_model_variants_by_part[pid] = bool(is_mv_val)
+                        else:
+                            st.session_state.pop(mv_key, None)
+                            edit_model_variants_by_part[pid] = False
                         existing_ht = str(
-                            existing_opt.get("handling_type") or "Consume"
+                            existing_opt.get("handling_type")
+                            or (
+                                "Consume"
+                                if pid in in_edit_sec_part_ids
+                                else "Handle"
+                            )
                         ).strip()
                         default_ht_idx = 1 if existing_ht == "Handle" else 0
-                        ht_val = st.selectbox(
+                        ht_col, qty_col = st.columns([2, 1])
+                        ht_val = ht_col.selectbox(
                             "Handling type",
                             options=["Consume", "Handle"],
                             index=default_ht_idx,
@@ -3865,9 +4591,35 @@ with tab_plan:
                                 f"{req_mode}_{edit_sec_id}_{pid}"
                             ),
                         )
+                        existing_part_qty = (
+                            existing_opt.get("quantity")
+                            if existing_opt and existing_opt.get("quantity") is not None
+                            else (active_group.get("quantity") if active_group else 1.0)
+                        )
+                        default_part_qty = max(float(existing_part_qty or 1.0), 0.01)
+                        part_qty_val = qty_col.number_input(
+                            "Quantity",
+                            min_value=0.01,
+                            value=default_part_qty,
+                            step=1.0,
+                            disabled=(ht_val != "Consume"),
+                            help=(
+                                "Enter the quantity of parts consumed."
+                                if ht_val == "Consume"
+                                else "Quantity is only available when Handling type is Consume."
+                            ),
+                            key=(
+                                f"edit_line_qty_{scenario_id}_{target_id}_"
+                                f"{req_mode}_{edit_sec_id}_{pid}"
+                            ),
+                        )
                         edit_handling_types_by_part[pid] = ht_val
+                        edit_quantities_by_part[pid] = (
+                            float(part_qty_val) if ht_val == "Consume" else None
+                        )
 
                         pl_labels: dict[str, str] = {}
+                        disabled_pl_ids: set[str] = set()
                         for _, pl_row in p_options.iterrows():
                             aid = str(pl_row["fishbone_assignment_id"])
                             raw_use = pl_row.get("use_description")
@@ -3876,16 +4628,27 @@ with tab_plan:
                                 if pd.isna(raw_use) or not str(raw_use or "").strip()
                                 else str(raw_use).strip()
                             )
+                            pl_sec_id = str(pl_row.get("section_id") or "")
+                            pl_sec_name = str(pl_row.get("section_name") or "").strip()
+                            if (
+                                pl_sec_id
+                                and pl_sec_id != str(edit_sec_id)
+                                and pl_sec_name
+                            ):
+                                use_desc = f"{pl_sec_name} ({use_desc})"
                             qty_lbl = format_clean_number(pl_row["fishbone_quantity"])
                             rem_lbl = format_clean_number(
                                 pl_row["remaining_consume_allowance"]
                             )
                             if ht_val == "Consume":
+                                can_consume_pl = bool(pl_row["can_consume"])
                                 avail_lbl = (
                                     f"Remaining Consume allowance {rem_lbl}"
-                                    if bool(pl_row["can_consume"])
+                                    if can_consume_pl
                                     else "Unavailable for Consume — allowance fully used"
                                 )
+                                if not can_consume_pl:
+                                    disabled_pl_ids.add(aid)
                             else:
                                 avail_lbl = (
                                     "Available for Handle"
@@ -3903,7 +4666,13 @@ with tab_plan:
                         existing_aid = str(
                             existing_opt.get("fishbone_assignment_id") or ""
                         ).strip()
-                        if len(pl_ids) == 1:
+                        if (
+                            pl_key in st.session_state
+                            and str(st.session_state.get(pl_key) or "")
+                            in disabled_pl_ids
+                        ):
+                            st.session_state[pl_key] = None
+                        if len(pl_ids) == 1 and pl_ids[0] not in disabled_pl_ids:
                             chosen_aid = st.selectbox(
                                 "Use / installation location",
                                 options=pl_ids,
@@ -3917,6 +4686,7 @@ with tab_plan:
                             default_pl_idx = (
                                 pl_ids.index(existing_aid)
                                 if existing_aid in pl_ids
+                                and existing_aid not in disabled_pl_ids
                                 else None
                             )
                             chosen_aid = st.selectbox(
@@ -3929,6 +4699,9 @@ with tab_plan:
                                 ),
                                 key=pl_key,
                             )
+                        if chosen_aid and str(chosen_aid) in disabled_pl_ids:
+                            chosen_aid = None
+                        _inject_disabled_consumed_placement_options_script()
                         edit_assignment_ids_by_part[pid] = (
                             str(chosen_aid) if chosen_aid else None
                         )
@@ -3938,6 +4711,10 @@ with tab_plan:
                                 "part_id": pid,
                                 "part_number": pnum,
                                 "handling_type": ht_val,
+                                "quantity": edit_quantities_by_part.get(pid),
+                                "is_model_variant": edit_model_variants_by_part.get(
+                                    pid, False
+                                ),
                                 "fishbone_assignment_id": (
                                     str(chosen_aid) if chosen_aid else None
                                 ),
@@ -3968,51 +4745,49 @@ with tab_plan:
                                 st.session_state[f"_pending_remove_{edit_ms_key}"] = str(pid)
                                 st.rerun()
 
-                rule_options = ["Use all", "Choose one", "Optional"]
-                orig_rule = (
-                    str(active_group.get("selection_rule") or "Use all")
-                    if active_group
-                    else "Use all"
-                )
-                default_rule_idx = (
-                    rule_options.index(orig_rule)
-                    if orig_rule in rule_options
-                    else 0
-                )
-                rule_col, qty_col = st.columns([2, 1])
-                edit_selection_rule = rule_col.selectbox(
-                    "Selection rule",
-                    options=rule_options,
-                    index=default_rule_idx,
-                    key=f"edit_line_rule_{scenario_id}_{target_id}_{req_mode}",
-                )
-                default_qty = (
-                    float(active_group.get("quantity") or 1.0)
-                    if active_group
-                    else 1.0
-                )
-                edit_quantity = qty_col.number_input(
-                    "Quantity",
-                    min_value=0.01,
-                    value=max(default_qty, 0.01),
-                    step=1.0,
-                    key=f"edit_line_qty_{scenario_id}_{target_id}_{req_mode}",
+                consumed_edit_quantities = [
+                    float(q)
+                    for q in edit_quantities_by_part.values()
+                    if q is not None and float(q) > 0
+                ]
+                edit_quantity = (
+                    consumed_edit_quantities[0]
+                    if consumed_edit_quantities
+                    else (
+                        float(active_group.get("quantity") or 1.0)
+                        if active_group
+                        else 1.0
+                    )
                 )
 
                 edit_is_handle_op = any(
                     ht == "Handle" for ht in edit_handling_types_by_part.values()
                 )
-                edit_part_labels = [
-                    part_desc_map.get(pid) or part_number_map.get(pid, "")
-                    for pid in selected_edit_part_ids
-                ]
-                edit_part_labels = [lbl for lbl in edit_part_labels if lbl]
-                if edit_selection_rule == "Choose one":
-                    edit_auto_name = (
-                        " / ".join(edit_part_labels)
-                        if edit_part_labels
-                        else (line_work_element or "Part option")
-                    )
+                edit_part_labels = []
+                edit_variant_labels = []
+                edit_non_variant_labels = []
+                for pid in selected_edit_part_ids:
+                    lbl = part_desc_map.get(pid) or part_number_map.get(pid, "")
+                    if lbl:
+                        edit_part_labels.append(lbl)
+                        if edit_model_variants_by_part.get(pid, False):
+                            edit_variant_labels.append(lbl)
+                        else:
+                            edit_non_variant_labels.append(lbl)
+                if edit_selection_rule in {"Model choice", "Choose one"}:
+                    if edit_variant_labels and edit_non_variant_labels:
+                        edit_auto_name = (
+                            f"{' / '.join(edit_variant_labels)}, "
+                            f"{', '.join(edit_non_variant_labels)}"
+                        )
+                    elif edit_variant_labels:
+                        edit_auto_name = " / ".join(edit_variant_labels)
+                    else:
+                        edit_auto_name = (
+                            " / ".join(edit_part_labels)
+                            if edit_part_labels
+                            else (line_work_element or "Part option")
+                        )
                 elif edit_selection_rule == "Optional":
                     edit_auto_name = (
                         f"Optional: {', '.join(edit_part_labels)}"
@@ -4222,7 +4997,7 @@ with tab_plan:
         else:
             res_c2.caption("Standard manual operator performing work.")
 
-        model_options = ["All models", *model_labels.values()]
+        model_options = list(process_model_options)
         raw_models = line_row.get("model_applicability")
         current_models = (
             [m for m in raw_models if m in model_options]
@@ -4232,7 +5007,7 @@ with tab_plan:
         if not current_models:
             current_models = ["All models"]
         edit_models = st.multiselect(
-            "Models",
+            "Feature",
             options=model_options,
             default=current_models,
             key=f"edit_line_models_{scenario_id}_{target_id}",
@@ -4322,6 +5097,10 @@ with tab_plan:
                         edit_sec_id,
                         edit_pairing_details,
                         exclude_group_id=editing_group_id,
+                        work_element_id=target_id,
+                        target_variants=tuple(
+                            str(m) for m in (edit_models or ["All models"])
+                        ),
                     )
 
                 updated_elements = elements.copy()
@@ -4381,6 +5160,8 @@ with tab_plan:
                         edit_notes,
                         handling_types_by_part=edit_handling_types_by_part,
                         fishbone_assignment_ids_by_part=edit_assignment_ids_by_part,
+                        quantities_by_part=edit_quantities_by_part,
+                        model_variants_by_part=edit_model_variants_by_part,
                     )
                     record_audit_event(
                         project_id,
@@ -4917,7 +5698,7 @@ with tab_slides:
 
                 # Upload / Paste / Link Visual Aid Container
                 with st.container(border=True):
-                    vis_tab_file, vis_tab_link = st.tabs(["Upload / Clipboard", "Web Link / URL"])
+                    vis_tab_file, vis_tab_link, vis_tab_parts = st.tabs(["Upload / Clipboard", "Web Link / URL", "Parts Catalog"])
                     with vis_tab_file:
                         up_col1, up_col2 = st.columns([1.5, 1])
                         with up_col1:
@@ -5145,6 +5926,156 @@ with tab_slides:
                                         },
                                     )
                                     st.toast("Web link visual aid saved!", icon=":material/check_circle:")
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(str(exc))
+
+                    with vis_tab_parts:
+                        catalog_photo_parts = catalog_part_photos_for_pitch(
+                            project_id, scenario_id, selected_pitch_id
+                        )
+                        if not catalog_photo_parts:
+                            st.info(
+                                "No photos found in the Parts Catalog yet. Upload or paste part photos in the **Parts Catalog** module to pull them into PAAG slides."
+                            )
+                        else:
+                            pitch_only_parts = [
+                                item for item in catalog_photo_parts if item.get("on_pitch")
+                            ]
+                            filtered_catalog_parts = catalog_photo_parts
+                            if pitch_only_parts and len(pitch_only_parts) < len(catalog_photo_parts):
+                                scope_choice = st.radio(
+                                    "Parts Catalog scope",
+                                    ["All Parts Catalog with photos", "Parts on this pitch only"],
+                                    horizontal=True,
+                                    key=f"radio_part_photo_scope_{selected_pitch_id}",
+                                )
+                                if scope_choice == "Parts on this pitch only":
+                                    filtered_catalog_parts = pitch_only_parts
+
+                            part_by_id = {
+                                item["part_id"]: item for item in filtered_catalog_parts
+                            }
+                            part_option_ids = list(part_by_id.keys())
+
+                            def _format_catalog_part_option(pid: str) -> str:
+                                p_item = part_by_id.get(pid, {})
+                                p_num = str(p_item.get("part_number") or "").strip()
+                                p_desc = str(
+                                    p_item.get("description")
+                                    or p_item.get("factory_nickname")
+                                    or ""
+                                ).strip()
+                                prefix = "📌 [On this pitch] " if p_item.get("on_pitch") else ""
+                                view_cnt = len(p_item.get("views") or [])
+                                view_suffix = f" ({view_cnt} photos)" if view_cnt > 1 else ""
+                                return (
+                                    f"{prefix}{p_num} — {p_desc}{view_suffix}"
+                                    if p_desc
+                                    else f"{prefix}{p_num}{view_suffix}"
+                                )
+
+                            pc_col1, pc_col2 = st.columns([1.5, 1])
+                            with pc_col1:
+                                selected_catalog_part_id = st.selectbox(
+                                    "Select part from Parts Catalog",
+                                    options=part_option_ids,
+                                    format_func=_format_catalog_part_option,
+                                    key=f"select_catalog_part_visual_{selected_pitch_id}",
+                                    help="Choose any part in the Parts Catalog that has a primary or supplemental photo.",
+                                )
+                                active_part_item = part_by_id.get(selected_catalog_part_id, {})
+                                part_views = active_part_item.get("views") or []
+                                view_by_id = {v["view_id"]: v for v in part_views}
+                                if len(part_views) > 1:
+                                    selected_view_id = st.selectbox(
+                                        "Part photo view",
+                                        options=list(view_by_id.keys()),
+                                        format_func=lambda vid: view_by_id.get(vid, {}).get("view_label", vid),
+                                        key=f"select_catalog_part_view_{selected_pitch_id}_{selected_catalog_part_id}",
+                                        help="Choose between the Primary Image and any Additional views stored on this part.",
+                                    )
+                                else:
+                                    selected_view_id = part_views[0]["view_id"] if part_views else ""
+                                    if part_views:
+                                        st.caption(f"Photo source: **{part_views[0].get('view_label', 'Primary Image')}**")
+
+                                active_view = view_by_id.get(selected_view_id, part_views[0] if part_views else {})
+                                default_part_caption = str(active_view.get("caption") or "").strip()
+                                part_aid_caption = st.text_input(
+                                    "Caption / Yellow Callout Note",
+                                    value=default_part_caption,
+                                    key=f"input_part_cap_visual_{selected_pitch_id}_{selected_catalog_part_id}_{selected_view_id}",
+                                    placeholder="e.g. Verify part orientation and mating surface before fastening",
+                                )
+                                preview_path = str(active_view.get("image_path") or "").strip()
+                                if preview_path:
+                                    if preview_path.startswith(("http://", "https://")):
+                                        st.image(preview_path, width=180)
+                                    else:
+                                        st.image(
+                                            cached_image_bytes(preview_path, max_dim=360) or preview_path,
+                                            width=180,
+                                        )
+
+                            with pc_col2:
+                                default_linked_tags = [
+                                    wid
+                                    for wid in (active_part_item.get("linked_work_element_ids") or [])
+                                    if wid in tag_dict_elem
+                                ]
+                                part_tagged_ids = st.multiselect(
+                                    "Tag to Work Elements",
+                                    options=list(tag_dict_elem.keys()),
+                                    default=default_linked_tags,
+                                    format_func=lambda tid: tag_dict_elem.get(tid, tid),
+                                    key=f"select_part_tags_visual_{selected_pitch_id}_{selected_catalog_part_id}",
+                                    help="Tags link this Parts Catalog photo to specific PAAG work elements on this pitch.",
+                                )
+                                part_seq_val = st.number_input(
+                                    "Sequence Order",
+                                    min_value=1,
+                                    value=10,
+                                    step=5,
+                                    key=f"input_part_seq_visual_{selected_pitch_id}",
+                                )
+
+                            if st.button(
+                                "Add Part Photo as Visual Aid",
+                                icon=":material/add_photo_alternate:",
+                                type="primary",
+                                key=f"btn_add_part_visual_{selected_pitch_id}",
+                            ):
+                                try:
+                                    saved_media = copy_part_photo_to_pitch_visual_media(
+                                        project_id=project_id,
+                                        scenario_id=scenario_id,
+                                        pitch_id=selected_pitch_id,
+                                        part_id=selected_catalog_part_id,
+                                        view_id=selected_view_id,
+                                        caption=part_aid_caption,
+                                        tagged_work_element_ids=part_tagged_ids or [],
+                                        sequence=int(part_seq_val or 10),
+                                        current_editor=st.session_state.get("current_editor", ""),
+                                    )
+                                    record_audit_event(
+                                        project_id,
+                                        "Process",
+                                        "Pull part photo as visual aid",
+                                        1,
+                                        st.session_state.get("current_editor", ""),
+                                        {
+                                            "pitch_id": selected_pitch_id,
+                                            "part_id": selected_catalog_part_id,
+                                            "part_number": active_part_item.get("part_number", ""),
+                                            "view_id": selected_view_id,
+                                            "caption": saved_media.get("caption", ""),
+                                        },
+                                    )
+                                    st.toast(
+                                        f"Added photo for {active_part_item.get('part_number', 'part')} as visual aid!",
+                                        icon=":material/check_circle:",
+                                    )
                                     st.rerun()
                                 except Exception as exc:
                                     st.error(str(exc))

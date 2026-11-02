@@ -4308,7 +4308,7 @@ with yamazumi_tables_tab:
         pitch_editor_rows,
         key=pitch_editor_key,
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="add",
         height=280,
         disabled=pitch_disabled_cols,
         column_order=pitch_column_order,
@@ -4322,7 +4322,7 @@ with yamazumi_tables_tab:
         if "selected" in edited_pitches.columns
         else pd.Series(False, index=edited_pitches.index, dtype="bool")
     )
-    pitch_editor_state = st.session_state.get(pitch_editor_key, {}) or {}
+    pitch_editor_state = get_effective_table_editor_state(pitch_editor_key)
     for raw_pos, row_changes in (pitch_editor_state.get("edited_rows") or {}).items():
         try:
             pos = int(raw_pos)
@@ -4727,7 +4727,7 @@ with yamazumi_tables_tab:
         element_editor_rows,
         key=element_editor_key,
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="add",
         height=420,
         disabled=element_disabled_cols,
         column_order=element_column_order,
@@ -4741,7 +4741,7 @@ with yamazumi_tables_tab:
         if "selected" in edited_elements.columns
         else pd.Series(False, index=edited_elements.index, dtype="bool")
     )
-    element_editor_state = st.session_state.get(element_editor_key, {}) or {}
+    element_editor_state = get_effective_table_editor_state(element_editor_key)
     for raw_pos, row_changes in (element_editor_state.get("edited_rows") or {}).items():
         try:
             pos = int(raw_pos)

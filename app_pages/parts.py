@@ -36,6 +36,7 @@ from utils.store import (
     project_table,
     promote_part_image_to_primary,
     record_audit_event,
+    resolve_project_variant_groups,
     save_table_view_preference,
     set_part_image,
     set_part_image_url,
@@ -95,19 +96,28 @@ PINNED_PARTS_COLUMNS = ("view_details", "part_number", "description")
 LEGACY_PARTS_COLUMN_ORDER_PREFIX = [
     "view_details", "active", "photo_status", "part_number", "description",
 ]
-PREVIOUS_DEFAULT_PARTS_COLUMN_ORDER = [
-    "view_details", "part_number", "description", "active", "photo_status",
-    "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
-    "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
-    "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
-    "applicability_status", "notes", "source", "updated_display",
-]
+PREVIOUS_DEFAULT_PARTS_COLUMN_ORDERS = (
+    [
+        "view_details", "part_number", "description", "active", "photo_status",
+        "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
+        "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
+        "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
+        "applicability_status", "notes", "source", "updated_display",
+    ],
+    [
+        "view_details", "part_number", "description", "active", "photo_status",
+        "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
+        "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
+        "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
+        "applicability_status", "notes", "source", "created_display", "updated_display",
+    ],
+)
 DEFAULT_PARTS_COLUMN_ORDER = [
     "view_details", "part_number", "description", "active", "photo_status",
     "weight_lb", "subsystem", "design_maturity", "factory_nickname", "design_engineer",
     "ppm", "buyer_gcl", "pmqe_aqe", "ame_tooling_engineer", "part_code",
     "pits_tracker_number", "source_code", "make_buy", "feature_applicability",
-    "applicability_status", "notes", "source", "created_display", "updated_display",
+    "variant_group", "applicability_status", "notes", "source", "created_display", "updated_display",
 ]
 PARTS_COLUMN_LABELS = {
     "view_details": "Details", "active": "Active", "photo_status": "Photo status",
@@ -118,6 +128,7 @@ PARTS_COLUMN_LABELS = {
     "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
     "pits_tracker_number": "PITS ID", "source_code": "Source Code",
     "make_buy": "Make vs Buy", "feature_applicability": "Feature",
+    "variant_group": "Variant group",
     "applicability_status": "Applicability status", "notes": "Notes",
     "source": "Source", "created_display": "Created", "updated_display": "Updated",
 }
@@ -126,7 +137,7 @@ PARTS_COLUMN_LABELS = {
 project_id = st.session_state.get("project_id")
 scenario_id = st.session_state.get("scenario_id")
 parts_base_editor_key = apply_pending_table_editor_reset(
-    f"parts_catalog_editor_v9_{scenario_id}"
+    f"parts_catalog_editor_v10_{scenario_id}"
 )
 parts_editor_key = parts_base_editor_key
 parts_draft_key = f"parts_catalog_draft_{project_id}_{scenario_id}"
@@ -182,9 +193,9 @@ saved_parts_column_order = [
     *(col for col in PINNED_PARTS_COLUMNS if col in saved_parts_column_order),
     *(col for col in saved_parts_column_order if col not in PINNED_PARTS_COLUMNS),
 ]
-if saved_parts_column_order == PREVIOUS_DEFAULT_PARTS_COLUMN_ORDER:
+if saved_parts_column_order in PREVIOUS_DEFAULT_PARTS_COLUMN_ORDERS:
     saved_parts_column_order = DEFAULT_PARTS_COLUMN_ORDER.copy()
-current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v5"
+current_mount_token = f"{project_id}_{scenario_id}_{editor_view_scope}_v7"
 if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state["_parts_page_mounted_token"] = current_mount_token
     st.session_state[parts_view_draft_key] = saved_parts_column_order.copy()
@@ -198,7 +209,7 @@ if st.session_state.get("_parts_page_mounted_token") != current_mount_token:
     st.session_state.pop(parts_editor_baseline_draft_key, None)
     request_table_editor_reset(parts_base_editor_key)
     parts_base_editor_key = apply_pending_table_editor_reset(
-        f"parts_catalog_editor_v9_{scenario_id}"
+        f"parts_catalog_editor_v10_{scenario_id}"
     )
     parts_editor_key = parts_base_editor_key
 pending_view_reset = st.session_state.pop(parts_view_pending_key, None)
@@ -218,7 +229,7 @@ else:
     elif normalized_view_draft != current_view_draft:
         st.session_state[parts_view_draft_key] = normalized_view_draft
 
-parts = project_table("parts", project_id, "created_at ASC, rowid ASC")
+parts = project_table("parts", project_id, "created_at ASC, rowid ASC", scenario_id=scenario_id)
 models = project_models(project_id)
 features = complexity_features(project_id)
 active_features = features.loc[features["active"].fillna(1).astype(bool)].copy() if not features.empty else features
@@ -488,6 +499,9 @@ parts_for_editing["active"] = pd.Series(
     index=parts_for_editing.index,
     dtype=bool,
 )
+variant_groups_by_pn = resolve_project_variant_groups(
+    parts, activity_by_part=activity_by_part
+)
 parts_for_editing["feature_applicability"] = (
     pd.Series(dtype="object")
     if parts_for_editing.empty
@@ -495,6 +509,14 @@ parts_for_editing["feature_applicability"] = (
         rules_by_part.get(pid, [])
         or (["All models"] if str(m_app or "").strip().casefold() in {"all", "all models"} else [])
         for pid, m_app in zip(_part_id_strs, _model_app_vals)
+    ]
+)
+parts_for_editing["variant_group"] = (
+    pd.Series(dtype="object")
+    if parts_for_editing.empty
+    else [
+        list(variant_groups_by_pn.get(str(pn or "").strip(), []))
+        for pn in parts_for_editing["part_number"]
     ]
 )
 parts_for_editing["applicability_status"] = (
@@ -552,6 +574,12 @@ active_parts_df = (
     if not parts_for_editing.empty
     else parts_for_editing
 )
+_active_pns = (
+    set(active_parts_df["part_number"].dropna().astype(str).str.strip())
+    if not active_parts_df.empty
+    else set()
+)
+variant_part_options = sorted((p for p in _active_pns if p), key=str.upper)
 active_parts_count = int(len(active_parts_df))
 inactive_parts_count = max(0, total_catalog_parts - active_parts_count)
 active_parts_icon = "🟢" if active_parts_count > 0 else "🟡"
@@ -768,6 +796,11 @@ def _build_draft_added_part_row(raw_row: dict[str, object]) -> dict[str, object]
         feature_list = []
     if not feature_list:
         feature_list = ["All models"]
+    raw_variants = raw_row.get("variant_group")
+    if isinstance(raw_variants, (list, tuple, set)):
+        variant_list = [str(item).strip() for item in raw_variants if not _is_blank_cell(item)]
+    else:
+        variant_list = []
     raw_active = raw_row.get("active")
     is_active = True if _is_blank_cell(raw_active) else bool(raw_active)
     raw_weight = raw_row.get("weight_lb")
@@ -809,6 +842,7 @@ def _build_draft_added_part_row(raw_row: dict[str, object]) -> dict[str, object]
         "assembly_number": "",
         "active": is_active,
         "feature_applicability": feature_list,
+        "variant_group": variant_list,
         "applicability_status": "; ".join(feature_list),
         "view_details": ":material/visibility: View",
         "photo_status": "❌ Missing",
@@ -975,7 +1009,7 @@ if qp_part_id or qp_part_number:
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
-            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "created_at", "updated_at",
+            "make_buy", "pits_tracker_number", "feature_applicability", "variant_group", "notes", "source", "created_at", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.session_state["parts_scroll_to_details"] = True
@@ -1010,13 +1044,13 @@ with filter_expander:
         dropdown_columns=[
             "active", "source", "design_maturity", "subsystem", "source_code", "make_buy",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
-            "pmqe_aqe", "ame_tooling_engineer", "part_code", "photo_status", "applicability_status",
+            "pmqe_aqe", "ame_tooling_engineer", "part_code", "photo_status", "applicability_status", "variant_group",
         ],
         search_columns=[
             "part_number", "description", "subsystem", "design_maturity", "factory_nickname",
             "design_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
             "ame_tooling_engineer", "part_code", "pits_tracker_number",
-            "source_code", "make_buy", "photo_status", "applicability_status",
+            "source_code", "make_buy", "photo_status", "applicability_status", "variant_group",
             "notes", "source",
         ],
         labels={
@@ -1038,9 +1072,10 @@ with filter_expander:
             "technology_engineer": "Technology Engineer",
             "pits_tracker_number": "PITS ID",
             "applicability_status": "Feature",
+            "variant_group": "Variant group",
         },
         reset_widget_keys=[parts_editor_key],
-        multi_value_columns=["feature_applicability"],
+        multi_value_columns=["feature_applicability", "variant_group"],
         keyword_container=keyword_filter_slot,
     )
     if parts_editor_key not in st.session_state and not was_table_editor_undo_reset(parts_editor_key):
@@ -1077,7 +1112,7 @@ with filter_expander:
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
-            "make_buy", "pits_tracker_number", "feature_applicability", "notes", "source", "created_at", "updated_at",
+            "make_buy", "pits_tracker_number", "feature_applicability", "variant_group", "notes", "source", "created_at", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
         st.rerun()
@@ -1091,7 +1126,7 @@ candidate_sort_columns = [
     "subsystem", "design_maturity",
     "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
     "pmqe_aqe", "ame_tooling_engineer", "part_code", "pits_tracker_number",
-    "source_code", "make_buy", "feature_applicability",
+    "source_code", "make_buy", "feature_applicability", "variant_group",
     "applicability_status", "notes", "source", "created_at", "updated_at",
 ]
 sort_column_display_map = {
@@ -1117,6 +1152,7 @@ with sort_controls_slot:
             "buyer_gcl": "Buyer / GCL", "pmqe_aqe": "PMQE / AQE",
             "ame_tooling_engineer": "AME / Tooling Engineer", "part_code": "Part Code",
             "feature_applicability": "Feature",
+            "variant_group": "Variant group",
             "applicability_status": "Applicability status",
             "created_at": "Created", "updated_at": "Updated",
         },
@@ -1308,6 +1344,16 @@ edited_parts = st.data_editor(
             width="large",
             default=["All models"],
         ),
+        "variant_group": st.column_config.MultiselectColumn(
+            "Variant group",
+            options=variant_part_options,
+            help=(
+                "Assign active catalog part numbers that are model variants for this part. "
+                "Tying Part A to Part B automatically links both parts, and variant parts in "
+                "the same Fishbone section stack together."
+            ),
+            width="medium",
+        ),
         "applicability_status": None,
         "notes": st.column_config.TextColumn("Notes", width="large"),
         "source": st.column_config.TextColumn("Source", default=""),
@@ -1345,7 +1391,7 @@ export_columns = [
     "active", "part_number", "description", "subsystem", "design_maturity", "factory_nickname",
     "design_engineer", "ppm", "buyer_gcl", "pmqe_aqe",
     "ame_tooling_engineer", "part_code", "pits_tracker_number",
-    "source_code", "make_buy", "feature_applicability",
+    "source_code", "make_buy", "feature_applicability", "variant_group",
     "photo_status", "notes", "source", "created_at", "updated_at",
 ]
 def _build_filtered_parts_export() -> bytes:
@@ -1588,8 +1634,30 @@ if save_part_table:
                 return ["All models"]
             return cleaned
 
+        def _normalize_row_variant_group(row: pd.Series) -> list[str]:
+            raw_val = row.get("variant_group")
+            if isinstance(raw_val, (list, tuple, set)):
+                cleaned = [str(item).strip() for item in raw_val if not _is_blank_cell(item)]
+            elif isinstance(raw_val, str) and raw_val.strip():
+                cleaned = [item.strip() for item in raw_val.split(",") if item.strip()]
+            else:
+                cleaned = []
+            self_pn = "" if _is_blank_cell(row.get("part_number")) else str(row.get("part_number")).strip().casefold()
+            deduped: list[str] = []
+            seen_lower: set[str] = set()
+            for item in cleaned:
+                low = item.casefold()
+                if not item or low == self_pn or low in seen_lower:
+                    continue
+                seen_lower.add(low)
+                deduped.append(item)
+            return deduped
+
         edited_parts["feature_applicability"] = edited_parts.apply(
             _normalize_row_feature_applicability, axis=1
+        )
+        edited_parts["variant_group"] = edited_parts.apply(
+            _normalize_row_variant_group, axis=1
         )
         validation_errors = required_field_errors(edited_parts, {"part_number": "Part number"})
         if validation_errors:
@@ -1661,6 +1729,15 @@ if save_part_table:
                         "old_value": None if previous is None else old_value,
                         "new_value": new_value,
                     }
+            new_variants = row.get("variant_group") if isinstance(row.get("variant_group"), list) else []
+            new_variants_str = ", ".join(sorted(str(v).strip() for v in new_variants if str(v).strip()))
+            old_pn = str((previous or {}).get("part_number") or row.get("part_number") or "").strip()
+            old_variants_str = ", ".join(sorted(variant_groups_by_pn.get(old_pn, []))) if previous is not None else ""
+            if (previous is None and new_variants_str) or (previous is not None and new_variants_str != old_variants_str):
+                changed_fields["Variant group"] = {
+                    "old_value": None if previous is None else old_variants_str,
+                    "new_value": new_variants_str,
+                }
             if changed_fields:
                 field_changes.append(
                     {
@@ -2714,6 +2791,10 @@ with details_col.container(border=True):
     st.markdown(
         f"**Feature applicability:** "
         f"{assembly_grid_applicability_status(str(part['id']), part['model_applicability'])}"
+    )
+    _part_variants_display = ", ".join(variant_groups_by_pn.get(str(part.get("part_number") or "").strip(), []))
+    st.markdown(
+        f"**Variant group:** {_part_variants_display or '—'}"
     )
     col_meta1, col_meta2 = st.columns(2)
     with col_meta1:

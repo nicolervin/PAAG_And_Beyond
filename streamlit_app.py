@@ -19,6 +19,22 @@ from utils.table_ui import (
     has_active_unsaved_changes,
     request_unsaved_page_navigation,
 )
+import importlib as _importlib
+import sys as _sys
+
+if "utils.store" in _sys.modules and not hasattr(_sys.modules["utils.store"], "link_part_variants"):
+    for _mod_name in (
+        "utils.db_core",
+        "utils.model_part_store",
+        "utils.fishbone_store",
+        "utils.fishbone_visual",
+        "utils.help_hub",
+        "utils.store",
+    ):
+        if _mod_name in _sys.modules:
+            _importlib.reload(_sys.modules[_mod_name])
+    _sys.modules["utils.store"].init_db()
+
 from utils.help_hub import (
     open_universal_help_dialog,
     render_floating_help_button,

@@ -565,9 +565,13 @@ def standard_details_column_config(
     )
 
 
+_TABLE_UI_REV_20261102 = 1
+
+
 def selected_rows_action_bar(
     *,
     parent=None,
+    gap: str | None = "small",
 ):
     """Return an uncluttered, right-aligned row for selected-table actions."""
     host = parent if parent is not None else st
@@ -575,7 +579,7 @@ def selected_rows_action_bar(
         horizontal=True,
         vertical_alignment="center",
         horizontal_alignment="right",
-        gap=None,
+        gap=gap,
     )
 
 

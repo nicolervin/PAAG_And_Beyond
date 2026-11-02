@@ -496,6 +496,8 @@ def rename_yamazumi_variants(
                         "new_variants": normalized,
                     }
                 )
+        if element_changes:
+            _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
     if not element_changes and not pitch_changes:
         mark_scenario_task_completed(task_key, project_id, scenario_id)
     return {
@@ -2558,6 +2560,7 @@ def update_yamazumi_element(
                     timestamp,
                 ),
             )
+            _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
             return new_element_id
         conn.execute(
             """UPDATE yamazumi_elements
@@ -2579,6 +2582,7 @@ def update_yamazumi_element(
                 area_id,
             ),
         )
+        _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
     return str(element_id)
 
 def _yamazumi_element_delete_impact(
@@ -3767,6 +3771,7 @@ def replace_yamazumi_elements(project_id: str, area_id: str | list[str], edited:
                 entity_label=label,
             ):
                 conn.execute(f"DELETE FROM yamazumi_elements WHERE id IN ({placeholders})", tuple(removed))
+        _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
     return len(records)
 
 def move_yamazumi_element(
@@ -3824,6 +3829,7 @@ def move_yamazumi_element(
                WHERE id=? AND project_id=?""",
             (pitch_id or None, timestamp, element_id, project_id),
         )
+        _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
     return enabled_variants
 
 def save_yamazumi_stack_draft(
@@ -4007,6 +4013,7 @@ def save_yamazumi_stack_draft(
                 )
             changed_element_ids.append(element_id)
 
+        _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
         affected_stacks = []
         for stack_key in affected_stack_ids:
             pitch = pitches.get(stack_key)
