@@ -9,6 +9,8 @@ from utils.recycle_bin_store import capture_deletion_to_recycle_bin
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
+_YAMAZUMI_STORE_REV_20261103 = 1
+
 @cached_store_read
 def yamazumi_areas(project_id: str, scenario_id: str) -> pd.DataFrame:
     rows = query(
@@ -136,7 +138,30 @@ def yamazumi_elements(project_id: str, area_id: str) -> pd.DataFrame:
 def yamazumi_pitches_for_scenario(project_id: str, scenario_id: str) -> pd.DataFrame:
     """Load pitch addresses across every Yamazumi area in one scenario."""
     rows = pd.DataFrame(query(
-        """SELECT p.*, a.name AS area_name, a.section_id, s.name AS section_name
+        """SELECT p.*, a.name AS area_name, a.section_id, s.name AS section_name,
+                  (
+                      SELECT COUNT(*)
+                      FROM yamazumi_elements ye
+                      WHERE ye.project_id = p.project_id
+                        AND ye.pitch_id = p.id
+                  ) + (
+                      SELECT COUNT(*)
+                      FROM work_elements we
+                      WHERE we.project_id = p.project_id
+                        AND we.scenario_id = a.scenario_id
+                        AND TRIM(COALESCE(p.pitch_number, '')) != ''
+                        AND (
+                            LOWER(TRIM(COALESCE(we.station, ''))) = LOWER(TRIM(p.pitch_number))
+                            OR LOWER(TRIM(COALESCE(we.station, ''))) LIKE LOWER(TRIM(p.pitch_number)) || ' —%'
+                            OR LOWER(TRIM(COALESCE(we.station, ''))) LIKE LOWER(TRIM(p.pitch_number)) || ' -%'
+                        )
+                        AND we.id NOT IN (
+                            SELECT COALESCE(ye2.process_element_id, '')
+                            FROM yamazumi_elements ye2
+                            WHERE ye2.project_id = p.project_id
+                              AND ye2.pitch_id = p.id
+                        )
+                  ) AS element_count
            FROM yamazumi_pitches p
            JOIN yamazumi_areas a ON a.id=p.area_id
            LEFT JOIN assembly_sections s ON s.id=a.section_id
@@ -160,6 +185,7 @@ def yamazumi_pitches_for_scenario(project_id: str, scenario_id: str) -> pd.DataF
             "area_name": pd.Series(dtype="string"),
             "section_id": pd.Series(dtype="string"),
             "section_name": pd.Series(dtype="string"),
+            "element_count": pd.Series(dtype="Int64"),
         })
     return rows
 
@@ -3936,6 +3962,10 @@ def save_yamazumi_stack_draft(
             for position, element_id in enumerate(normalized.get(stack_key, []), start=1):
                 desired[element_id] = (pitch_id, position * 10)
 
+        def _vkey(value: object) -> str:
+            key = str(value or "").strip().casefold()
+            return "all models" if key in {"base", "all", "all models"} else key
+
         enabled_variants: dict[str, list[str]] = {}
         for stack_key in affected_stack_ids:
             if stack_key == UNASSIGNED_STACK_ID or stack_key not in pitches:
@@ -3944,7 +3974,7 @@ def save_yamazumi_stack_draft(
             destination_variants = parse_yamazumi_model_variants(
                 destination["model_variants"], fallback=None
             )
-            dest_keys = {v.casefold() for v in destination_variants}
+            dest_keys = {_vkey(v) for v in destination_variants}
             required_variants = parse_yamazumi_model_variants(
                 [
                     variant
@@ -3958,7 +3988,7 @@ def save_yamazumi_stack_draft(
             )
             missing_variants = [
                 variant for variant in required_variants
-                if variant.casefold() not in dest_keys
+                if _vkey(variant) not in dest_keys
             ]
             if missing_variants:
                 _require_yamazumi_feed_target_for_pitch_write(

@@ -839,10 +839,13 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("<div><strong>Section:</strong> Main</div>", html)
 
     def test_fishbone_section_filtering_in_viewer_and_print_dialog(self) -> None:
-        # Create a second section and pitch
+        # Create a second section with one populated pitch and one empty pitch (no work elements)
         sec2_id = store.add_assembly_section(self.project_id, "Subassembly Front", "Subassembly", self.section_id, "")
         area2_id = str(uuid4())
         pitch2_id = str(uuid4())
+        empty_pitch_id = str(uuid4())
+        we2_id = str(uuid4())
+        ye2_id = str(uuid4())
         timestamp = store.now_iso()
         with store.connection() as conn:
             conn.execute(
@@ -857,6 +860,24 @@ class ProcessPitchVisualTests(unittest.TestCase):
                    VALUES (?, ?, ?, '02-FR-001', 'Front subassembly pitch', ?)""",
                 (pitch2_id, self.project_id, area2_id, timestamp),
             )
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                   VALUES (?, ?, ?, '02-FR-002', 'Empty subassembly pitch', ?)""",
+                (empty_pitch_id, self.project_id, area2_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, model_applicability, updated_at)
+                   VALUES (?, ?, ?, 99, '02-FR-001', 'Install front bracket', 'All', ?)""",
+                (we2_id, self.project_id, self.scenario_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, process_element_id, sequence, description, time_s, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 1, 'Install front bracket', 12.0, ?)""",
+                (ye2_id, self.project_id, area2_id, pitch2_id, we2_id, timestamp),
+            )
 
         app = AppTest.from_file(
             str(store.ROOT / "app_pages/process.py"), default_timeout=30
@@ -864,6 +885,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         app.session_state["project_id"] = self.project_id
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "Section test"
+        app.session_state["paag_tab"] = "PAAG Slides"
         app.session_state["selected_pitch_id"] = self.pitch_id
         app.session_state["pitch_page_num"] = 1
         app.run(timeout=30)
@@ -874,6 +896,12 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertTrue(any("All Fishbone Sections" in opt for opt in sec_selectbox.options))
         self.assertTrue(any("Main" in opt for opt in sec_selectbox.options))
         self.assertTrue(any("Subassembly Front" in opt for opt in sec_selectbox.options))
+
+        # Verify Pitch dropdown only populates pitches that contain work elements
+        pitch_selectbox = next(s for s in app.selectbox if s.label == "Pitch" and "pitch_active_select" in str(s.key))
+        self.assertTrue(any("01-SW1-051" in opt for opt in pitch_selectbox.options))
+        self.assertTrue(any("02-FR-001" in opt for opt in pitch_selectbox.options))
+        self.assertFalse(any("02-FR-002" in opt for opt in pitch_selectbox.options))
 
         # Click Print to open export dialog
         print_btn = next(b for b in app.button if b.label == "Print")
@@ -1389,25 +1417,34 @@ class ProcessPitchVisualTests(unittest.TestCase):
             },
         }
         html = render_pitch_canvas(pitch_data, [], scenario_name="Test Plan")
-        self.assertIn("Yamazumi Pitch Stack", html)
+        self.assertIn("<span>Yamazumi</span>", html)
+        self.assertNotIn("Yamazumi Pitch Stack", html)
         self.assertIn("40s", html)
         self.assertIn("Takt 60s", html)
         self.assertIn("67% util", html)
 
-        # Extract all block heights in the rendered stack
+        # Extract all block heights and track height in the rendered stack
         block_heights = [int(m) for m in re.findall(r'class="stack-block[^"]*"[^>]*style="height:(\d+)px"', html)]
+        track_heights = [int(m) for m in re.findall(r'class="stack-track"\s+style="height:(\d+)px', html)]
         self.assertEqual(len(block_heights), 8)
-        # Verify the sum of all 8 blocks never exceeds the 175px track height
-        self.assertLessEqual(sum(block_heights), 175)
+        self.assertEqual(len(track_heights), 1)
+        # Every block must be tall enough to read clearly (>= 26px) and fit inside the dynamically expanded track height
+        self.assertGreaterEqual(min(block_heights), 26)
+        self.assertLessEqual(sum(block_heights), track_heights[0])
 
         # Check no scrolling on parts panel and check bottom-left anchoring of stack-panel
         self.assertIn(".parts-panel", html)
         self.assertNotIn("parts-panel {\n        flex: 1 1 0;\n        overflow-y: auto;", html)
         self.assertIn("margin-top: auto", html)
 
-        # Also test extreme element count (15 elements)
+        # Also test extreme element count (15 elements) with proportional cycle-time scaling
         many_elements = [
-            {"id": f"m{i}", "yamazumi_description": f"Small step {i}", "time_s": 3.0, "work_type": "Cycle"}
+            {
+                "id": f"m{i}",
+                "yamazumi_description": f"Readable work element step {i}",
+                "time_s": 3.0 if i <= 5 else (6.0 if i <= 10 else 9.0),
+                "work_type": "Cycle",
+            }
             for i in range(1, 16)
         ]
         pitch_data_many = {
@@ -1415,15 +1452,21 @@ class ProcessPitchVisualTests(unittest.TestCase):
             "scenario_takt_s": 60.0,
             "yamazumi_stacks": {
                 "Base": {
-                    "total_time_s": 45.0,
+                    "total_time_s": 90.0,
                     "elements": many_elements,
                 }
             },
         }
         html_many = render_pitch_canvas(pitch_data_many, [], scenario_name="Test Plan")
         many_heights = [int(m) for m in re.findall(r'class="stack-block[^"]*"[^>]*style="height:(\d+)px"', html_many)]
+        many_track_heights = [int(m) for m in re.findall(r'class="stack-track"\s+style="height:(\d+)px', html_many)]
         self.assertEqual(len(many_heights), 15)
-        self.assertLessEqual(sum(many_heights), 175)
+        self.assertEqual(len(many_track_heights), 1)
+        self.assertGreaterEqual(min(many_heights), 26)
+        self.assertLessEqual(sum(many_heights), many_track_heights[0])
+        # Verify proportional cycle-time scaling (9s > 6s > 3s)
+        self.assertGreater(many_heights[6], many_heights[0])
+        self.assertGreater(many_heights[12], many_heights[6])
 
     def test_small_screen_text_wrapping_in_parts_and_yamazumi_boxes(self) -> None:
         pitch_data = {
@@ -1475,6 +1518,13 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("./yamazumi?", html)
         self.assertNotIn('<span class="takt-label">', html)
         self.assertIn('title="Takt: 20s"', html)
+
+    def test_image_annotator_part_photo_overlay_resolves_data_url(self) -> None:
+        from utils.image_annotator import _JS
+
+        self.assertIn("const cachedImg = getCachedShapeImage(s.dataUrl || s.data_url || s);", _JS)
+        self.assertIn("? (shapeOrUrl.dataUrl || shapeOrUrl.data_url || \"\")", _JS)
+        self.assertNotIn("const cachedImg = getCachedShapeImage(s);", _JS)
 
 
 if __name__ == "__main__":

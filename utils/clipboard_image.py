@@ -155,11 +155,17 @@ export default function(component) {
     }
   }
 
-  target.onpaste = (event) => {
+  const handlePaste = (event) => {
     event.preventDefault()
     const items = Array.from(event.clipboardData?.items || [])
     const imageItem = items.find((item) => item.type.startsWith("image/"))
     sendImage(imageItem?.getAsFile(), "Screenshot")
+  }
+
+  target.onpaste = handlePaste
+  parentElement.onpaste = (event) => {
+    if (event.target === target) return
+    handlePaste(event)
   }
 
   button.onclick = async () => {
@@ -189,7 +195,8 @@ _CLIPBOARD_IMAGE = st.components.v2.component(
 )
 
 
-def clipboard_image(*, key: str):
+def clipboard_image(*, key: str, button_label: str | None = None):
+    _ = button_label
     try:
         return _CLIPBOARD_IMAGE(key=key, on_image_change=lambda: None, height="content")
     except Exception:

@@ -14,6 +14,7 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 
+from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.layout_canvas import layout_canvas, layout_image_data_url
 from utils.layout_store import (
     IMPERIAL_LAYOUT_UNITS,
@@ -64,6 +65,8 @@ from utils.layout_store import (
 from utils.scope_ui import section_heading_with_scope
 from utils.store import assembly_sections, audit_history, format_eastern_timestamp
 from utils.table_ui import editable_table_footer, selectable_dataframe
+
+_LAYOUT_UI_HOT_RELOAD_REV = 2
 
 SHAPE_TYPES: list[str] = [
     "rectangle",
@@ -615,22 +618,35 @@ def _create_revision_dialog(
         )
     elif input_mode == "Paste screenshot from clipboard":
         st.caption(
-            "Click inside the paste box below and press **Ctrl+V** (or Cmd+V) to paste a screenshot."
+            "Click **📋 Paste screenshot**, **📷 Take photo**, or click inside the dashed paste box and press **Ctrl+V** (or Cmd+V)."
         )
-        try:
-            from utils.clipboard_image import clipboard_image
+        paste_result = clipboard_image(
+            key="rev_clipboard_paste",
+        )
+        raw_payload = getattr(paste_result, "image", None) if paste_result else None
+        if raw_payload:
+            try:
+                st.session_state["rev_pasted_clipboard_image"] = decode_clipboard_image(raw_payload)
+            except ValueError as exc:
+                st.error(str(exc))
 
-            paste_result = clipboard_image(
-                key="rev_clipboard_paste",
-                button_label="Paste image from clipboard",
-            )
-            if paste_result and getattr(paste_result, "image", None):
-                image_file = paste_result.image
-                st.success("Screenshot captured from clipboard!")
-        except Exception:
-            st.info(
-                "Clipboard paste component unavailable; please use Upload drawing file instead."
-            )
+        stored_pasted = st.session_state.get("rev_pasted_clipboard_image")
+        if isinstance(stored_pasted, dict) and stored_pasted.get("bytes"):
+            image_file = as_uploaded_file(stored_pasted)
+            c_msg, c_clr = st.columns([4, 1], vertical_alignment="center")
+            with c_msg:
+                st.success(
+                    f"Screenshot captured from clipboard ({stored_pasted.get('name', 'clipboard-screenshot.png')})."
+                )
+            with c_clr:
+                if st.button(
+                    "Clear",
+                    key="btn_clear_rev_clipboard_image",
+                    icon=":material/close:",
+                    width="stretch",
+                ):
+                    st.session_state.pop("rev_pasted_clipboard_image", None)
+                    st.rerun(scope="fragment")
     else:
         st.info(
             ":material/grid_4x4: Creates a clean, high-resolution architectural grid scaled to your exact real-world dimensions—ideal for Lucidchart-style top-down line layout when a CAD image is not needed."
@@ -707,7 +723,7 @@ def _create_revision_dialog(
                 current_h = float(st.session_state.get("rev_scale_h", default_h))
                 st.session_state["rev_scale_w"] = current_h
                 st.session_state["rev_scale_h"] = current_w
-                st.rerun()
+                st.rerun(scope="fragment")
 
         # Load oriented base image to support cropping and preview
         if image_file:
@@ -742,7 +758,7 @@ def _create_revision_dialog(
                         st.session_state["rev_crop_top"] = round((bbox[1] / uncropped_img.height) * 100.0, 1)
                         st.session_state["rev_crop_right"] = round(((uncropped_img.width - bbox[2]) / uncropped_img.width) * 100.0, 1)
                         st.session_state["rev_crop_bottom"] = round(((uncropped_img.height - bbox[3]) / uncropped_img.height) * 100.0, 1)
-                        st.rerun()
+                        st.rerun(scope="fragment")
             with c_btn2:
                 if st.button(
                     "↺ Reset crop",
@@ -754,7 +770,7 @@ def _create_revision_dialog(
                     st.session_state["rev_crop_top"] = 0.0
                     st.session_state["rev_crop_right"] = 0.0
                     st.session_state["rev_crop_bottom"] = 0.0
-                    st.rerun()
+                    st.rerun(scope="fragment")
 
         crop_l = float(st.session_state.get("rev_crop_left", 0.0))
         crop_r = float(st.session_state.get("rev_crop_right", 0.0))
@@ -950,6 +966,7 @@ def _create_revision_dialog(
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("Cancel", width="stretch", key="cancel_new_rev"):
+            st.session_state.pop("rev_pasted_clipboard_image", None)
             st.session_state.pop("rev_crop_left", None)
             st.session_state.pop("rev_crop_top", None)
             st.session_state.pop("rev_crop_right", None)
@@ -1007,6 +1024,7 @@ def _create_revision_dialog(
                         cad_file=rev_cad_file,
                         cad_web_url=rev_cad_url,
                     )
+                st.session_state.pop("rev_pasted_clipboard_image", None)
                 st.session_state.pop("rev_crop_left", None)
                 st.session_state.pop("rev_crop_top", None)
                 st.session_state.pop("rev_crop_right", None)
@@ -2001,6 +2019,7 @@ def render_layouts_tab(
     if pending_dlg == "section_standards":
         _section_standards_dialog(project_id, active_layout_id, unit, effective_editor)
     elif pending_dlg == "cad_revisions":
+        st.session_state.pop("rev_pasted_clipboard_image", None)
         _create_revision_dialog(
             project_id,
             current_layout,

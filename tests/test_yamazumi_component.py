@@ -29,7 +29,7 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v30", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v34", inspect.getsource(board_module))
         self.assertIn(
             "setTriggerValue('edit_element', { element_id: item.id, model_variant: variant })",
             board_module._JS,
@@ -112,6 +112,47 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("document.removeEventListener('fullscreenchange'", board_module._JS)
         self.assertIn("resizeObserver.disconnect()", board_module._JS)
 
+    def test_full_screen_collapses_sidebar_and_restores_prior_expanded_state(self) -> None:
+        self.assertIn('[data-testid="stSidebar"]', board_module._JS)
+        self.assertIn("getAttribute('aria-expanded') === 'true'", board_module._JS)
+        self.assertIn('[data-testid="stSidebarCollapseButton"] button', board_module._JS)
+        self.assertIn('button[data-testid="stExpandSidebarButton"]', board_module._JS)
+        self.assertIn("window.__paagYamazumiSidebarWasExpanded = isSidebarExpanded()", board_module._JS)
+        self.assertIn("collapseSidebarIfExpanded()", board_module._JS)
+        self.assertIn("if (shouldRestoreSidebar)", board_module._JS)
+        self.assertIn("expandSidebarIfCollapsed()", board_module._JS)
+
+    def test_full_screen_zoom_and_pan_controls(self) -> None:
+        self.assertIn('id="fullscreen-zoom-controls"', board_module._HTML)
+        self.assertIn('id="zoom-out"', board_module._HTML)
+        self.assertIn('id="zoom-in"', board_module._HTML)
+        self.assertIn('id="fit-view"', board_module._HTML)
+        self.assertIn('id="zoom-reset"', board_module._HTML)
+        self.assertIn('id="board-zoom-stage"', board_module._HTML)
+        self.assertIn(".board.fullscreen-board .fullscreen-zoom-controls", board_module._CSS)
+        self.assertIn("const setZoomScale = (nextScale, anchor = null) =>", board_module._JS)
+        self.assertIn("const fitBoardView = () =>", board_module._JS)
+        self.assertIn("board.addEventListener('wheel', handleBoardWheel, { passive: false })", board_module._JS)
+        self.assertIn("board.removeEventListener('wheel', handleBoardWheel)", board_module._JS)
+        self.assertIn("const delta = event.deltaY < 0 ? 1.12 : 0.89", board_module._JS)
+        self.assertIn("boardContent.style.transform = `scale(${activeScale})`", board_module._JS)
+        self.assertIn("(stackRect.bottom - laneRect.top) / activeScale - taktPixels", board_module._JS)
+        self.assertIn("(stackRect.top - laneRect.top) / activeScale + taktPixels", board_module._JS)
+
+    def test_full_screen_fixed_top_toolbar_options(self) -> None:
+        self.assertIn('id="board-toolbar-title"', board_module._HTML)
+        self.assertIn('id="add-pitch"', board_module._HTML)
+        self.assertIn('id="scale-mode-toggle"', board_module._HTML)
+        self.assertIn('id="scale-to-scale"', board_module._HTML)
+        self.assertIn('id="scale-readable"', board_module._HTML)
+        self.assertIn('id="print-board"', board_module._HTML)
+        self.assertIn('id="full-screen"', board_module._HTML)
+        self.assertIn(".board.fullscreen-board .board-actions { position:fixed; top:0; left:0; right:0;", board_module._CSS)
+        self.assertIn("const setBoardScaleMode = (nextMode, { notify = true } = {}) =>", board_module._JS)
+        self.assertIn("setTriggerValue('scale_mode', { scale_mode: isReadableMode ? 'readable' : 'to_scale' })", board_module._JS)
+        self.assertIn("const printYamazumiBoard = () =>", board_module._JS)
+        self.assertIn("printBtn.onclick = printYamazumiBoard", board_module._JS)
+
     def test_dialog_actions_keep_document_full_screen(self) -> None:
         for trigger_name in ("add_pitch", "add_element", "edit_pitch", "edit_element"):
             self.assertIn(
@@ -146,16 +187,30 @@ class YamazumiComponentTests(unittest.TestCase):
             "Number.isFinite(Number(data.takt)) && Number(data.takt) > 0",
             board_module._JS,
         )
-        self.assertIn("if (pitch.id && hasTakt) stack.classList.add('takt-scale')", board_module._JS)
+        self.assertIn("if (pitch.id && hasTakt && !isReadableMode) stack.classList.add('takt-scale')", board_module._JS)
         self.assertIn("drawTaktLine(north, 'north')", board_module._JS)
+
+    def test_readable_mode_expands_work_elements_and_hides_takt_line(self) -> None:
+        self.assertIn("let isReadableMode = String(data.scale_mode || 'to_scale') === 'readable'", board_module._JS)
+        self.assertIn("board.classList.toggle('readable-mode', isReadableMode)", board_module._JS)
+        self.assertIn("if (!hasTakt || isReadableMode) return", board_module._JS)
+        self.assertIn(".board.readable-mode .element", board_module._CSS)
+        self.assertIn(".board.readable-mode .element-description", board_module._CSS)
+        self.assertIn('id="scale-notice"', board_module._HTML)
         self.assertIn("drawTaktLine(south, 'south')", board_module._JS)
         self.assertIn("lane.scrollWidth - 4", board_module._JS)
         self.assertIn("Math.max(0, displayTime(item.time_s)", board_module._JS)
         self.assertNotIn("Math.max(34, displayTime(item.time_s)", board_module._JS)
+        self.assertIn(".variants { display:flex; align-items:stretch; gap:6px; overflow:visible; }", board_module._CSS)
+        self.assertNotIn(".variants { display:flex; align-items:flex-start; gap:6px; overflow-x:auto; }", board_module._CSS)
+        self.assertIn("const equalizePitchFrames = () =>", board_module._JS)
+        self.assertIn("equalizePitchFrames()", board_module._JS)
+        self.assertIn("for (const element of allStacks) element.style.minHeight = `${maxStackHeight}px`", board_module._JS)
+        self.assertIn("element.style.minHeight = `${maxPitchHeight}px`", board_module._JS)
 
     def test_unassigned_and_invalid_takt_do_not_receive_a_takt_line(self) -> None:
-        self.assertIn("if (!hasTakt) return", board_module._JS)
-        self.assertIn("if (pitch.id && hasTakt)", board_module._JS)
+        self.assertIn("if (!hasTakt || isReadableMode) return", board_module._JS)
+        self.assertIn("if (pitch.id && hasTakt && !isReadableMode)", board_module._JS)
         self.assertNotIn("drawTaktLine(unassigned", board_module._JS)
         self.assertIn(": 34", board_module._JS)
 
@@ -231,6 +286,38 @@ class YamazumiComponentTests(unittest.TestCase):
                 **callbacks,
             )
             self.assertTrue(mount.call_args.kwargs["data"]["show_unassigned"])
+
+    def test_moved_element_variants_merge_into_destination_pitch_variants(self) -> None:
+        pitches = [
+            {
+                "id": "pitch-1",
+                "area_id": "area-1",
+                "pitch_number": "01-PED-001",
+                "pitch_name": "Station 1",
+                "status": "Active",
+                "model_variants": ["All models"],
+            }
+        ]
+        elements = [
+            {
+                "id": "el-1",
+                "pitch_id": "pitch-1",
+                "model_variant": "Pedestal / Riser = Riser",
+                "model_variants": ["Pedestal / Riser = Riser"],
+            }
+        ]
+        merged = board_module.merge_yamazumi_pitch_variants(pitches, elements)
+        self.assertEqual(
+            merged[0]["model_variants"],
+            ["All models", "Pedestal / Riser = Riser"],
+        )
+        annotated, _ = board_module.build_yamazumi_pitch_pairs(pitches, elements)
+        self.assertEqual(
+            annotated[0]["model_variants"],
+            ["All models", "Pedestal / Riser = Riser"],
+        )
+        self.assertEqual(annotated[0]["pair_width_px"], 348)
+        self.assertIn("Object.keys(grouped[pitch.id] || {})", board_module._JS)
 
 
 if __name__ == "__main__":

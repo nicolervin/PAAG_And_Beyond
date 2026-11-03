@@ -135,10 +135,10 @@ from utils.table_ui import (
 )
 import utils.yamazumi_board as _yamazumi_board_mod
 
-if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 2:
+if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 20:
     _importlib.reload(_yamazumi_board_mod)
 
-from utils.yamazumi_board import yamazumi_board
+from utils.yamazumi_board import merge_yamazumi_pitch_variants, yamazumi_board
 from utils.yamazumi_order import (
     _natural_key,
     filter_yamazumi_pitches_for_board,
@@ -1386,6 +1386,37 @@ area_labels = {
     str(row["id"]): str(row["name"])
     for _, row in areas.iterrows()
 }
+scenario_pitches_for_default = yamazumi_pitches_for_scenario(project_id, scenario_id)
+scenario_elements_for_default = yamazumi_elements_for_scenario(project_id, scenario_id)
+areas_with_pitches = (
+    set(scenario_pitches_for_default["area_id"].dropna().astype(str))
+    if not scenario_pitches_for_default.empty
+    and "area_id" in scenario_pitches_for_default.columns
+    else set()
+)
+areas_with_elements = (
+    set(scenario_elements_for_default["area_id"].dropna().astype(str))
+    if not scenario_elements_for_default.empty
+    and "area_id" in scenario_elements_for_default.columns
+    else set()
+)
+populated_area_ids = [
+    aid
+    for aid in area_labels
+    if aid in areas_with_pitches and aid in areas_with_elements
+]
+if not populated_area_ids:
+    populated_area_ids = [
+        aid
+        for aid in area_labels
+        if aid in areas_with_elements or aid in areas_with_pitches
+    ]
+default_area_id = (
+    populated_area_ids[0] if populated_area_ids else next(iter(area_labels))
+)
+area_default_initialized_key = (
+    f"yamazumi_area_populated_default_v1_{scenario_id}"
+)
 area_widget_key = f"yamazumi_area_multiselect_{scenario_id}"
 area_last_synced_key = f"yamazumi_area_last_synced_{scenario_id}"
 pending_area_selector_key = f"yamazumi_pending_area_{scenario_id}"
@@ -1417,7 +1448,7 @@ if any(
         if not sec_matches.empty:
             matched_qp_area_id = str(sec_matches.iloc[0]["id"])
     if not matched_qp_area_id and (qp_pitch_id or qp_pitch_number):
-        scen_pitches = yamazumi_pitches_for_scenario(project_id, scenario_id)
+        scen_pitches = scenario_pitches_for_default
         if not scen_pitches.empty:
             if qp_pitch_id:
                 p_matches = scen_pitches.loc[
@@ -1448,19 +1479,33 @@ if any(
 if pending_area_id in area_labels:
     st.session_state[area_selector_key] = [pending_area_id]
     st.session_state[area_widget_key] = [pending_area_id]
+    st.session_state[area_default_initialized_key] = True
 elif area_selector_key in st.session_state:
     stored_areas = st.session_state.get(area_selector_key)
     if isinstance(stored_areas, str):
         normalized_areas = (
-            [stored_areas] if stored_areas in area_labels else [next(iter(area_labels))]
+            [stored_areas] if stored_areas in area_labels else [default_area_id]
         )
+        st.session_state[area_default_initialized_key] = True
     elif isinstance(stored_areas, (list, tuple, set)):
         valid_stored = [str(v) for v in stored_areas if str(v) in area_labels]
         normalized_areas = (
-            valid_stored if valid_stored else [next(iter(area_labels))]
+            valid_stored if valid_stored else [default_area_id]
         )
+        if (
+            populated_area_ids
+            and not any(aid in populated_area_ids for aid in normalized_areas)
+            and (
+                area_widget_key not in st.session_state
+                or not st.session_state.get(area_default_initialized_key)
+            )
+        ):
+            normalized_areas = [default_area_id]
+            st.session_state[area_widget_key] = list(normalized_areas)
     else:
-        normalized_areas = [next(iter(area_labels))]
+        normalized_areas = [default_area_id]
+    if populated_area_ids:
+        st.session_state[area_default_initialized_key] = True
     if (
         area_widget_key not in st.session_state
         or isinstance(stored_areas, str)
@@ -1468,6 +1513,11 @@ elif area_selector_key in st.session_state:
     ):
         st.session_state[area_widget_key] = list(normalized_areas)
     st.session_state[area_selector_key] = list(normalized_areas)
+else:
+    st.session_state[area_selector_key] = [default_area_id]
+    st.session_state[area_widget_key] = [default_area_id]
+    if populated_area_ids:
+        st.session_state[area_default_initialized_key] = True
 if area_widget_key in st.session_state:
     valid_widget_areas = [
         str(v)
@@ -1475,14 +1525,14 @@ if area_widget_key in st.session_state:
         if str(v) in area_labels
     ]
     st.session_state[area_widget_key] = (
-        valid_widget_areas if valid_widget_areas else [next(iter(area_labels))]
+        valid_widget_areas if valid_widget_areas else [default_area_id]
     )
 with top_controls_slot:
     settings_controls = st.container(horizontal=True, vertical_alignment="bottom")
     selected_areas = settings_controls.multiselect(
         "Yamazumi Area",
         options=list(area_labels),
-        default=None if area_widget_key in st.session_state else [next(iter(area_labels))],
+        default=None if area_widget_key in st.session_state else [default_area_id],
         format_func=lambda value: area_labels[value],
         key=area_widget_key,
     )
@@ -1545,19 +1595,16 @@ with top_controls_slot:
     takt_widget_key = f"yamazumi_takt_{scenario_id}_{area_id}_{takt_time_unit}"
     takt_db_sync_key = f"yamazumi_takt_db_synced_{scenario_id}_{area_id}_{takt_time_unit}"
     expected_display_takt = float(seconds_to_display(area_takt, takt_time_unit))
-    if (
-        takt_widget_key not in st.session_state
-        or st.session_state.get(takt_db_sync_key) != expected_display_takt
-    ):
-        st.session_state[takt_widget_key] = expected_display_takt
-        st.session_state[takt_db_sync_key] = expected_display_takt
+    st.session_state[takt_widget_key] = expected_display_takt
+    st.session_state[takt_db_sync_key] = expected_display_takt
 
     takt_time = settings_controls.number_input(
         f"Yamazumi Takt Time ({takt_config.label.title()})",
         min_value=0.0,
         step=min(float(takt_config.step), 0.01),
         format=f"%.{takt_config.decimals}f",
-        help="Enter an area-specific takt or use the active planning scenario's target takt.",
+        disabled=True,
+        help="Read-only area takt time. Use the Yamazumi Area table on the Yamazumi Tables tab to adjust Area Takt Time.",
         key=takt_widget_key,
     )
     selected_time_unit = yamazumi_time_unit
@@ -1575,34 +1622,14 @@ with top_controls_slot:
         )
 
     selected_time_unit = normalize_time_unit(selected_time_unit)
-    entered_takt_s = (
-        display_to_seconds(takt_time, takt_time_unit)
-        if takt_time else default_takt
-    )
-    submitted_takt_override = entered_takt_s
-    stored_takt_overrides = [
-        default_takt
-        if val is None or pd.isna(val)
-        else float(val)
-        for val in selected_areas_df["takt_override_s"].tolist()
-    ]
-    takt_changed = any(
-        not math.isclose(submitted_takt_override, stored, rel_tol=1e-9, abs_tol=1e-9)
-        for stored in stored_takt_overrides
-    )
+    submitted_takt_override = area_takt
+    takt_changed = False
     settings_changed = (
         selected_time_unit != yamazumi_time_unit
         or takt_changed
         or linked_section != current_section_id
     )
-    save_settings = settings_controls.button(
-        "Save & Refresh",
-        type="primary",
-        icon=":material/save:",
-        disabled=not settings_changed,
-        key=f"save_yamazumi_settings_{scenario_id}_{area_id}",
-    )
-if save_settings:
+if settings_changed:
     try:
         time_unit_changed = selected_time_unit != yamazumi_time_unit
         if time_unit_changed:
@@ -2563,6 +2590,15 @@ def handle_edit_element_request() -> None:
             st.session_state[edit_element_dialog_key] = str(request["element_id"])
 
 
+def handle_scale_mode_change() -> None:
+    request = _board_trigger("scale_mode")
+    requested_mode = str(request.get("scale_mode") or "").strip().lower()
+    if requested_mode in {"readable", "to_scale"}:
+        st.session_state[
+            f"yamazumi_board_scale_mode_{project_id}_{scenario_id}"
+        ] = "Readable" if requested_mode == "readable" else "To Scale"
+
+
 @st.dialog("Add Pitch")
 def add_pitch_dialog() -> None:
     st.caption("The new address will appear on the north/top or south/bottom side based on its ending number.")
@@ -2749,10 +2785,24 @@ def edit_pitch_dialog() -> None:
         if isinstance(restored, dict) and str(restored.get("id")) == str(pitch_id)
         else {}
     )
+    draft_element_variants = [
+        variant
+        for elem in (board_elements if "board_elements" in globals() else [])
+        if str(elem.get("pitch_id") or "").strip() == str(pitch_id)
+        for variant in (elem.get("model_variants") or [])
+        if str(variant).strip()
+    ]
     current_variants = list(
-        restored_values.get("model_variants")
-        or current.get("model_variants")
-        or ["All models"]
+        dict.fromkeys(
+            [
+                *(
+                    restored_values.get("model_variants")
+                    or current.get("model_variants")
+                    or ["All models"]
+                ),
+                *draft_element_variants,
+            ]
+        )
     )
     source_sig_key = f"edit_pitch_source_sig_{pitch_id}"
     source_sig = (
@@ -2761,7 +2811,7 @@ def edit_pitch_dialog() -> None:
         str(current.get("status") or "Active"),
         str(current.get("pitch_type") or "Pitch").title(),
         str(current.get("feeds_into_pitch_id") or "").strip(),
-        tuple(str(v) for v in (current.get("model_variants") or ["All models"])),
+        tuple(str(v) for v in current_variants),
     )
     if restored_values or st.session_state.get(source_sig_key) != source_sig:
         _clear_edit_pitch_widget_state(pitch_id, clear_sig=False)
@@ -3747,7 +3797,24 @@ interactive_yamazumi_tab, yamazumi_tables_tab = guarded_tabs(
 with interactive_yamazumi_tab:
     board_heading, board_filter = st.columns([3, 2], vertical_alignment="bottom")
     with board_heading:
-        st.subheader("Interactive Balancing Board")
+        heading_row = st.container(horizontal=True, vertical_alignment="center")
+        heading_row.subheader("Interactive Yamazumi")
+        board_scale_mode = (
+            heading_row.segmented_control(
+                "Board display scale",
+                options=["To Scale", "Readable"],
+                default="To Scale",
+                label_visibility="collapsed",
+                key=f"yamazumi_board_scale_mode_{project_id}_{scenario_id}",
+                help=(
+                    "Choose 'To Scale' to size work elements proportionally to their cycle time "
+                    "against the red takt time line, or 'Readable' to expand work elements so "
+                    "their full text is readable (not scaled to time)."
+                ),
+            )
+            or "To Scale"
+        )
+        board_readable_mode = board_scale_mode == "Readable"
     with board_filter:
         included_board_pitch_types = st.multiselect(
             "Pitch Types Shown",
@@ -3764,6 +3831,11 @@ with interactive_yamazumi_tab:
     if len(defined_variant_options) == 1:
         st.info(
             "Only All models is available. Add active feature definitions and allowed choices on Model Definitions to create additional Yamazumi variants."
+        )
+    if board_readable_mode:
+        st.info(
+            "Readable mode active: work elements are not scaled to cycle time and the red takt time line is hidden so work element text is expanded and readable.",
+            icon=":material/visibility:",
         )
     st.caption(
         "Pitch stacks follow Op ID pitch-address order, with Subassembly and Kitter "
@@ -3799,19 +3871,41 @@ with interactive_yamazumi_tab:
         ordered_board_pitches,
         included_board_pitch_types,
     )
-    yamazumi_board(
+    board_print_btn_key = f"yamazumi_board_{project_id}_{scenario_id}_{area_id}_print_btn"
+    board_print_pending_key = f"yamazumi_board_{project_id}_{scenario_id}_{area_id}_print_pending"
+    board_print_counter_key = f"yamazumi_board_{project_id}_{scenario_id}_{area_id}_print_counter"
+    board_print_requested = bool(st.session_state.get(board_print_btn_key)) or bool(
+        st.session_state.pop(board_print_pending_key, False)
+    )
+    if board_print_requested:
+        st.session_state[board_print_counter_key] = (
+            int(st.session_state.get(board_print_counter_key, 0) or 0) + 1
+        )
+    board_print_token = (
+        int(st.session_state.get(board_print_counter_key, 0) or 0)
+        if board_print_requested
+        else 0
+    )
+    board_pitches_records = merge_yamazumi_pitch_variants(
         board_pitches.to_dict("records"),
+        board_elements,
+    )
+    yamazumi_board(
+        board_pitches_records,
         board_elements,
         variants,
         takt,
         time_unit=yamazumi_time_unit,
         takt_time_unit=takt_time_unit,
+        scale_mode="readable" if board_readable_mode else "to_scale",
+        print_request_token=board_print_token,
         key=board_key,
         on_move=handle_yamazumi_move,
         on_add_pitch=handle_add_pitch_request,
         on_add_element=handle_add_element_request,
         on_edit_pitch=handle_edit_pitch_request,
         on_edit_element=handle_edit_element_request,
+        on_scale_mode=handle_scale_mode_change,
     )
     if draft_error := st.session_state.pop(board_draft_error_key, None):
         st.error(str(draft_error))
@@ -3819,7 +3913,14 @@ with interactive_yamazumi_tab:
         editor_key=f"yamazumi_board_footer_{project_id}_{scenario_id}_{area_id}",
         key_prefix=f"yamazumi_board_{project_id}_{scenario_id}_{area_id}",
         additional_unsaved_changes=has_board_draft,
+        additional_action_label="Print",
+        additional_action_icon=":material/print:",
+        additional_action_key=board_print_btn_key,
+        additional_action_help="Choose whether to print all pitches or only pitches containing work elements across pages in readable mode.",
     )
+    if board_actions.additional_action and not board_print_requested:
+        st.session_state[board_print_pending_key] = True
+        st.rerun()
     if board_actions.undo:
         st.session_state.pop(board_draft_key, None)
         st.session_state.pop(board_draft_error_key, None)

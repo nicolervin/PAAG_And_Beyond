@@ -58,6 +58,19 @@ from utils.table_filters import (
     split_filter_values,
     undo_last_table_edit,
 )
+import importlib
+import utils.fishbone_visual as _fishbone_visual_mod
+
+import utils.fishbone_store as _fishbone_store_mod
+import utils.store as _store_mod
+
+if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 2:
+    _fishbone_store_mod = importlib.reload(_fishbone_store_mod)
+    _store_mod = importlib.reload(_store_mod)
+    add_assembly_section = _store_mod.add_assembly_section
+
+if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 6:
+    _fishbone_visual_mod = importlib.reload(_fishbone_visual_mod)
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
     decimal_values_equal,
@@ -2482,6 +2495,24 @@ if fishbone_tab.open:
                         "op_prefix": "",
                         "parts": visual_parts_count_by_sec.get(sec_id, 0),
                     })
+
+            if not sections.empty:
+                existing_sec_ids = {str(s["id"]) for s in all_sections_list}
+                for r_id, r_name, r_type, r_parent in zip(
+                    sections["id"],
+                    sections["name"],
+                    sections["section_type"],
+                    sections["parent_id"],
+                ):
+                    sid_str = str(r_id)
+                    if sid_str not in existing_sec_ids:
+                        all_sections_list.append({
+                            "id": sid_str,
+                            "name": str(r_name),
+                            "type": str(r_type),
+                            "parent_id": str(r_parent) if pd.notna(r_parent) else None,
+                            "inactive": True,
+                        })
 
             # Connection rows
             def _get_nodes_for_conn(cid, from_id, to_id):

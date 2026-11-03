@@ -1742,7 +1742,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app.session_state[f"yamazumi_area_{self.scenario_id}"] = area_id
 
         with (
-            patch("utils.yamazumi_board.yamazumi_board", return_value=None),
+            patch("utils.yamazumi_board.yamazumi_board", return_value=None) as board,
             patch("utils.table_ui.table_has_unsaved_changes", return_value=True),
         ):
             app.run(timeout=30)
@@ -1751,28 +1751,32 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 for widget in app.number_input
                 if widget.label.startswith("Yamazumi Takt Time")
             )
-            takt_input.set_value(60.0).run(timeout=30)
+            self.assertTrue(takt_input.disabled)
+            self.assertEqual(takt_input.value, 90.0)
             save = next(
                 button
                 for button in app.button
                 if button.key
                 == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
             )
-            self.assertFalse(save.disabled)
-            try:
-                save.click().run(timeout=30)
-            except AttributeError as exc:
-                if "children" not in str(exc):
-                    raise
+            self.assertTrue(save.disabled)
+            self.assertEqual(board.call_args.kwargs["scale_mode"], "to_scale")
 
-        self.assertIsNone(
-            store.query(
-                "SELECT takt_override_s FROM yamazumi_areas WHERE id=?",
-                (area_id,),
-            )[0]["takt_override_s"]
-        )
-        history = store.audit_history(self.project_id, "Yamazumi", limit=1)
-        self.assertIn('"takt_override_s"', str(history.iloc[0]["details"]))
+            scale_toggle = next(
+                widget
+                for widget in app.segmented_control
+                if widget.label == "Board display scale"
+            )
+            self.assertEqual(list(scale_toggle.options), ["To Scale", "Readable"])
+            scale_toggle.set_value("Readable").run(timeout=30)
+            self.assertEqual(board.call_args.kwargs["scale_mode"], "readable")
+            self.assertTrue(
+                any(
+                    "not scaled" in info.value.lower()
+                    for info in app.info
+                )
+            )
+        self.assertEqual(list(app.exception), [])
 
     def test_yamazumi_reports_legacy_pitch_address_conflicts_until_corrected(self) -> None:
         first_area_id = store.upsert_yamazumi_area(
