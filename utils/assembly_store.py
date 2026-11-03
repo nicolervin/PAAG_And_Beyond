@@ -17,7 +17,7 @@ ASSEMBLY_SOURCING_DECISIONS = {"Undecided", "Make", "Buy"}
 
 ASSEMBLY_BUFFER_POLICIES = {"None", "WIP buffer", "Safety stock"}
 
-MATERIAL_SELECTION_RULES = {"Choose one", "Use all", "Optional"}
+MATERIAL_SELECTION_RULES = {"Model choice", "Choose one", "Use all", "Optional"}
 
 def _catalog_records(rows) -> list[dict]:
     if isinstance(rows, pd.DataFrame):

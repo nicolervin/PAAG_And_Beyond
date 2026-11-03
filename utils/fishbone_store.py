@@ -1042,7 +1042,7 @@ def fishbone_part_assignments(
     """ if scenario_id else ""
     activity_clause = " AND COALESCE(activity.active, 1)=1" if scenario_id else ""
     params = (scenario_id, project_id) if scenario_id else (project_id,)
-    return pd.DataFrame(query(
+    frame = pd.DataFrame(query(
         f"""SELECT a.id, a.project_id, a.part_id, a.section_id,
                   COALESCE(a.step_number, 1) AS step_number, a.sequence, a.quantity,
                   a.use_description, a.notes, a.pits_sync_status, a.pits_quantity_updated_at,
@@ -1054,9 +1054,32 @@ def fishbone_part_assignments(
            JOIN assembly_sections s ON s.id = a.section_id
            {activity_join}
            WHERE a.project_id = ?{activity_clause}
-           ORDER BY s.sequence, a.step_number, a.sequence, p.part_number""",
+           ORDER BY s.sequence, a.sequence, a.step_number, p.part_number""",
         params,
     ))
+    if not frame.empty:
+        from utils.model_part_store import (
+            _project_part_activity_map,
+            resolve_project_variant_groups,
+        )
+        part_rows = query(
+            "SELECT id, part_number, variant_part_numbers_json FROM parts WHERE project_id=?",
+            (project_id,),
+        )
+        activity_map = _project_part_activity_map(project_id, scenario_id)
+        variant_groups_by_pn = resolve_project_variant_groups(
+            part_rows, activity_by_part=activity_map
+        )
+        frame["variant_group"] = (
+            frame["part_number"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .map(lambda pn: ", ".join(variant_groups_by_pn.get(pn, [])))
+        )
+    else:
+        frame["variant_group"] = pd.Series(dtype="string")
+    return frame
 
 def search_parts_and_fishbone(
     project_id: str, search_text: str, scenario_id: str | None = None
@@ -1295,6 +1318,45 @@ def reorder_fishbone_part_assignments(
             updated_count,
             editor_name,
             {"section_id": section_id, "ordered_assignment_ids": ordered_assignment_ids},
+        )
+    return updated_count
+
+
+def set_fishbone_assignments_stack_group(
+    project_id: str,
+    assignment_ids: list[str],
+    stack_group: int,
+    *,
+    editor_name: str = "",
+) -> int:
+    """Update step_number (used as canvas stack group ID when > 1) on fishbone_part_assignments."""
+    clean_ids = [
+        str(aid).strip()
+        for aid in dict.fromkeys(assignment_ids)
+        if str(aid or "").strip() and not str(aid).strip().startswith("draft_")
+    ]
+    if not clean_ids:
+        return 0
+    timestamp = now_iso()
+    step_val = max(1, int(stack_group or 1))
+    updated_count = 0
+    with connection() as conn:
+        for aid_str in clean_ids:
+            cur = conn.execute(
+                """UPDATE fishbone_part_assignments
+                   SET step_number = ?, updated_at = ?
+                   WHERE id = ? AND project_id = ?""",
+                (step_val, timestamp, aid_str, project_id),
+            )
+            updated_count += cur.rowcount
+    if updated_count > 0:
+        record_audit_event(
+            project_id,
+            "Fishbone uses",
+            "Stack fishbone uses" if step_val > 1 else "Unstack fishbone uses",
+            updated_count,
+            editor_name,
+            {"assignment_ids": clean_ids, "stack_group": step_val},
         )
     return updated_count
 
@@ -2323,6 +2385,7 @@ def save_fishbone_canvas_draft(
     new_assignments: list[dict] | None = None,
     updated_assignments: list[dict] | None = None,
     deleted_assignment_ids: list[str] | None = None,
+    variant_links: list[list[str]] | None = None,
     editor_name: str = "",
 ) -> dict[str, int]:
     """Atomically commit canvas positions, connections, and part assignments from a visual edit draft."""
@@ -2333,6 +2396,7 @@ def save_fishbone_canvas_draft(
     assignments_saved = 0
     assignments_updated = 0
     assignments_deleted = 0
+    variant_links_saved = 0
     with connection() as conn:
         if positions:
             for section_id, coords in positions.items():
@@ -2431,11 +2495,20 @@ def save_fishbone_canvas_draft(
                 use_desc = str(a.get("use_description") or "").strip()
                 if pid and sid:
                     aid = str(a.get("id") or uuid4())
+                    raw_seq = a.get("sequence")
+                    if raw_seq is not None:
+                        seq_val = int(raw_seq)
+                    else:
+                        max_seq_row = conn.execute(
+                            "SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM fishbone_part_assignments WHERE project_id = ? AND section_id = ?",
+                            (project_id, sid),
+                        ).fetchone()
+                        seq_val = int(max_seq_row["max_seq"] if max_seq_row else 0) + 10
                     conn.execute(
                         """INSERT INTO fishbone_part_assignments (
                                id, project_id, part_id, section_id, step_number, sequence, quantity, use_description, updated_at
                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (aid, project_id, pid, sid, int(a.get("step_number") or 1), int(a.get("sequence") or 10), qty, use_desc, timestamp),
+                        (aid, project_id, pid, sid, int(a.get("step_number") or 1), seq_val, qty, use_desc, timestamp),
                     )
                     assignments_saved += 1
         if deleted_assignment_ids:
@@ -2454,7 +2527,26 @@ def save_fishbone_canvas_draft(
                         (aid, project_id),
                     )
                     assignments_deleted += 1
-        total_changes = positions_saved + conns_saved + conns_deleted + assignments_saved + assignments_updated + assignments_deleted
+        if variant_links:
+            from utils.model_part_store import link_part_variants
+            for pair in variant_links:
+                if isinstance(pair, (list, tuple, set)) and len(pair) >= 2:
+                    link_part_variants(
+                        project_id,
+                        list(pair),
+                        editor_name=str(editor_name or "").strip(),
+                        _conn=conn,
+                    )
+                    variant_links_saved += 1
+        total_changes = (
+            positions_saved
+            + conns_saved
+            + conns_deleted
+            + assignments_saved
+            + assignments_updated
+            + assignments_deleted
+            + variant_links_saved
+        )
         record_audit_event(
             project_id,
             "Fishbone framework",
@@ -2468,6 +2560,7 @@ def save_fishbone_canvas_draft(
                 "assignments_saved": assignments_saved,
                 "assignments_updated": assignments_updated,
                 "assignments_deleted": assignments_deleted,
+                "variant_links_saved": variant_links_saved,
             },
             _conn=conn,
         )
@@ -2478,6 +2571,7 @@ def save_fishbone_canvas_draft(
         "assignments_saved": assignments_saved,
         "assignments_updated": assignments_updated,
         "assignments_deleted": assignments_deleted,
+        "variant_links_saved": variant_links_saved,
     }
 
 
@@ -2722,7 +2816,7 @@ def clear_interactive_fishbone(
         "process_groups_deleted": process_groups_deleted,
     }
 
-__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft', 'clear_interactive_fishbone']
+__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'set_fishbone_assignments_stack_group', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft', 'clear_interactive_fishbone']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

@@ -183,7 +183,29 @@ _HTML = """
           </div>
         </div>
       </div>
-      <div class="fishbone-hint">Drag blocks to arrange · Drag circle handle or edge snap nodes to connect · Drag either end of arrow to snap to any node on the section · Click arrow or × to edit/delete</div>
+      <!-- Edit Model Variant Ties Modal -->
+      <div id="variant-ties-modal" class="canvas-modal" hidden>
+        <div class="modal-card part-uses-modal-card">
+          <h4 id="variant-ties-title">Edit Model Variant Ties</h4>
+          <p id="variant-ties-desc">Uncheck any part below to disconnect it from this model variant stack, or add another part to this variant group:</p>
+          <div class="part-uses-quick-bar">
+            <span id="variant-ties-summary-badge" class="part-uses-badge" style="color:#4f46e5; background:rgba(79, 70, 229, 0.12);">2 parts tied</span>
+            <div class="part-uses-quick-actions">
+              <button id="btn-variant-ties-untie-all" type="button" class="btn-quick-action" title="Disconnect all parts in this stack into separate cards">Untie all</button>
+            </div>
+          </div>
+          <div id="variant-ties-list" class="part-uses-list"></div>
+          <div class="variant-ties-add-bar">
+            <select id="variant-ties-add-select" class="modal-select" style="flex:1; min-width:0; padding:6px 8px; font-size:.82rem;"></select>
+            <button id="btn-variant-ties-add-part" type="button" class="btn-quick-action" style="padding:6px 10px; font-weight:700; color:#4f46e5; border-color:#6366f1;">+ Tie Part</button>
+          </div>
+          <div class="modal-buttons">
+            <button id="btn-variant-ties-confirm" type="button" class="btn-modal btn-primary">Apply Variant Ties</button>
+            <button id="btn-variant-ties-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="fishbone-hint">Drag blocks to arrange · Drag part onto another part to stack as model variants (click N× badge to edit variant ties) · Drag circle handle or edge snap nodes to connect · Click arrow or × to edit/delete</div>
     </div>
   </div>
 </div>
@@ -271,10 +293,11 @@ _CSS = """
 .part-card { cursor: grab; user-select: none; }
 .part-card > rect { transition: stroke-width .12s ease, filter .12s ease; }
 .part-card:hover > rect { stroke-width: 2.5; stroke: var(--st-primary-color); filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .2)); }
+.part-card.part-card-stack-target > rect { stroke: #4f46e5 !important; stroke-width: 3px !important; stroke-dasharray: 4 2; filter: drop-shadow(0 0 8px rgba(79, 70, 229, 0.65)); }
 .part-cluster { user-select: none; }
 .cascade-badge { cursor: pointer; }
-.cascade-badge rect { transition: fill .12s ease; }
-.cascade-badge:hover rect { fill: #3730a3; }
+.cascade-badge rect { transition: fill .12s ease, transform .12s ease; }
+.cascade-badge:hover rect { fill: #312e81; }
 .part-remove-btn { cursor: pointer; opacity: 0; transition: opacity .12s ease; }
 .part-card:hover .part-remove-btn { opacity: 0.95; }
 .part-remove-btn:hover { opacity: 1; }
@@ -333,13 +356,32 @@ _CSS = """
 .part-use-row-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .part-use-check-label { display: flex; align-items: center; gap: 8px; font-size: .85rem; font-weight: 600; color: var(--st-text-color); cursor: pointer; flex: 1; min-width: 0; }
 .part-use-sec-type { font-size: .72rem; font-weight: 500; color: var(--st-secondary-text-color); background: var(--st-secondary-background-color); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
-.part-use-controls { display: flex; align-items: center; gap: 8px; padding-left: 24px; }
+.part-use-header-actions { display: flex; align-items: center; gap: 6px; }
+.btn-split-sec-use { padding: 2px 7px; font-size: .72rem; font-weight: 700; border: 1px solid #0284c7; border-radius: 4px; background: rgba(2, 132, 199, 0.1); color: #0284c7; cursor: pointer; white-space: nowrap; }
+.btn-split-sec-use:hover { background: #0284c7; color: white; }
+.btn-split-sec-use[hidden] { display: none !important; }
+.part-use-cards-list { display: flex; flex-direction: column; gap: 5px; padding-left: 24px; }
+.part-use-cards-list[hidden] { display: none !important; }
+.part-use-controls { display: flex; align-items: center; gap: 8px; }
 .part-use-controls[hidden] { display: none !important; }
+.part-use-card-index { font-size: .72rem; font-weight: 700; color: #0284c7; background: rgba(2, 132, 199, 0.12); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.part-use-card-index[hidden] { display: none !important; }
+.btn-remove-sec-card { padding: 2px 6px; font-size: .78rem; font-weight: 700; border: 1px solid rgba(239, 68, 68, 0.45); border-radius: 4px; background: rgba(239, 68, 68, 0.08); color: #ef4444; cursor: pointer; line-height: 1; }
+.btn-remove-sec-card:hover { background: #ef4444; color: white; }
+.btn-remove-sec-card[hidden] { display: none !important; }
 .part-use-qty-wrap { display: flex; align-items: center; gap: 4px; font-size: .78rem; color: var(--st-secondary-text-color); font-weight: 600; }
 .part-use-qty-input { width: 68px; padding: 4px 6px; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); font-size: .82rem; font-weight: 600; }
 .part-use-note-input { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid var(--st-border-color); border-radius: 5px; background: var(--st-background-color); color: var(--st-text-color); font-size: .8rem; }
 .part-uses-children-toggle { display: flex; align-items: center; gap: 8px; font-size: .82rem; font-weight: 600; color: var(--st-text-color); padding: 8px 10px; border-radius: 8px; background: rgba(79, 70, 229, 0.08); border: 1px solid rgba(79, 70, 229, 0.25); cursor: pointer; }
 .part-uses-children-toggle[hidden] { display: none !important; }
+.variant-ties-add-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--st-secondary-background-color); border: 1px solid var(--st-border-color); border-radius: 8px; }
+.variant-tie-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--st-border-color); transition: background .12s ease; }
+.variant-tie-row:last-child { border-bottom: none; }
+.variant-tie-row.active-tie { background: rgba(79, 70, 229, 0.06); }
+.variant-tie-row.untied-row { background: rgba(239, 68, 68, 0.05); opacity: 0.82; }
+.variant-tie-status-pill { font-size: .72rem; font-weight: 700; padding: 2px 7px; border-radius: 999px; white-space: nowrap; cursor: pointer; user-select: none; }
+.variant-tie-status-pill.tied { background: rgba(79, 70, 229, 0.14); color: #4f46e5; border: 1px solid rgba(79, 70, 229, 0.3); }
+.variant-tie-status-pill.untied { background: rgba(217, 119, 6, 0.15); color: #d97706; border: 1px solid rgba(217, 119, 6, 0.35); }
 
 /* Start and End Arrow Handles */
 .conn-arrow-handle { cursor: grab; opacity: 0.88; transition: r .12s ease, fill .12s ease, opacity .12s ease; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.3)); }
@@ -725,6 +767,17 @@ export default function renderFishbone(component) {
   const btnPartUsesConfirm = parentElement.querySelector("#btn-part-uses-confirm")
   const btnPartUsesCancel = parentElement.querySelector("#btn-part-uses-cancel")
 
+  const variantTiesModal = parentElement.querySelector("#variant-ties-modal")
+  const variantTiesTitle = parentElement.querySelector("#variant-ties-title")
+  const variantTiesDesc = parentElement.querySelector("#variant-ties-desc")
+  const variantTiesSummaryBadge = parentElement.querySelector("#variant-ties-summary-badge")
+  const btnVariantTiesUntieAll = parentElement.querySelector("#btn-variant-ties-untie-all")
+  const variantTiesList = parentElement.querySelector("#variant-ties-list")
+  const variantTiesAddSelect = parentElement.querySelector("#variant-ties-add-select")
+  const btnVariantTiesAddPart = parentElement.querySelector("#btn-variant-ties-add-part")
+  const btnVariantTiesConfirm = parentElement.querySelector("#btn-variant-ties-confirm")
+  const btnVariantTiesCancel = parentElement.querySelector("#btn-variant-ties-cancel")
+
   if (!shell || !viewport || !svg || !world || !data) return
 
   const storageKey = (data && data.component_key) ? data.component_key : "fishbone_default"
@@ -773,22 +826,36 @@ export default function renderFishbone(component) {
 
   const dataSignature = `${sections.map(s => `${s.id}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}:${p.quantity}:${p.use_description || ''}`).join("|")}::${paletteItems.length}`
 
-  // Track which sections each part_id is placed in
+  // Track which sections each part_id is placed in (and individual cards/uses per section)
   const partSectionsMap = new Map()
+  const partTotalUsesMap = new Map()
   parts.forEach((p) => {
     if (!p.part_id || !p.section_id) return
+    partTotalUsesMap.set(p.part_id, (partTotalUsesMap.get(p.part_id) || 0) + 1)
     if (!partSectionsMap.has(p.part_id)) partSectionsMap.set(p.part_id, new Map())
     const secMap = partSectionsMap.get(p.part_id)
+    const pQty = Number(p.quantity) || 1
+    const pNote = p.use_description || ""
     if (secMap.has(p.section_id)) {
       const entry = secMap.get(p.section_id)
-      entry.quantity = (Number(entry.quantity) || 0) + (Number(p.quantity) || 1)
-      if (p.use_description && !entry.use_description) entry.use_description = p.use_description
+      entry.quantity = (Number(entry.quantity) || 0) + pQty
+      if (pNote && !entry.use_description) entry.use_description = pNote
       entry.assignment_ids.push(p.id)
+      entry.uses.push({
+        assignment_id: p.id,
+        quantity: pQty,
+        use_description: pNote
+      })
     } else {
       secMap.set(p.section_id, {
-        quantity: Number(p.quantity) || 1,
-        use_description: p.use_description || "",
-        assignment_ids: [p.id]
+        quantity: pQty,
+        use_description: pNote,
+        assignment_ids: [p.id],
+        uses: [{
+          assignment_id: p.id,
+          quantity: pQty,
+          use_description: pNote
+        }]
       })
     }
   })
@@ -977,12 +1044,12 @@ export default function renderFishbone(component) {
       : (Number(targetPart.quantity) > 0 ? Number(targetPart.quantity) : 1)
 
     if (partUsesTitle) {
-      partUsesTitle.textContent = `Replicate / Manage Uses: ${partNumber}`
+      partUsesTitle.textContent = `Replicate / Split Uses: ${partNumber}`
     }
     if (partUsesDesc) {
       partUsesDesc.textContent = partDesc
-        ? `${partDesc} — Check every Fishbone section where this item is used and set the quantity per section:`
-        : `Check every Fishbone section where this item is used and set the quantity per section:`
+        ? `${partDesc} — Check every Fishbone section where this item is used, or click "+ Split card" on a section to display multiple cards of this part in the same section:`
+        : `Check every Fishbone section where this item is used, or click "+ Split card" on a section to display multiple cards of this part in the same section:`
     }
 
     const sortedSections = [...allSections].sort((a, b) => {
@@ -998,21 +1065,46 @@ export default function renderFishbone(component) {
     partUsesSectionsList.replaceChildren()
     const rowRecords = []
 
+    function getActiveCardEntries() {
+      const list = []
+      rowRecords.forEach(r => {
+        if (r.checkbox.checked) {
+          r.cardEntries.forEach(ce => list.push({ rowRecord: r, cardEntry: ce }))
+        }
+      })
+      return list
+    }
+
     function updateSummaryBadge() {
       const checkedRows = rowRecords.filter(r => r.checkbox.checked)
-      const count = checkedRows.length
-      const totalQty = checkedRows.reduce((acc, r) => acc + (parseFloat(r.qtyInput.value) || 0), 0)
+      const secCount = checkedRows.length
+      const activeCards = getActiveCardEntries()
+      const cardCount = activeCards.length
+      const totalQty = activeCards.reduce((acc, item) => acc + (parseFloat(item.cardEntry.qtyInput.value) || 0), 0)
       const roundedTotal = Math.round(totalQty * 1000) / 1000
       if (partUsesSummaryBadge) {
-        partUsesSummaryBadge.textContent = `Used in ${count} section${count === 1 ? "" : "s"} · Total Qty: ${roundedTotal}`
+        if (cardCount !== secCount) {
+          partUsesSummaryBadge.textContent = `Used in ${secCount} section${secCount === 1 ? "" : "s"} (${cardCount} cards) · Total Qty: ${roundedTotal}`
+        } else {
+          partUsesSummaryBadge.textContent = `Used in ${secCount} section${secCount === 1 ? "" : "s"} · Total Qty: ${roundedTotal}`
+        }
       }
     }
 
     sortedSections.forEach(sec => {
       const existingUse = secMap.get(sec.id)
       const isChecked = Boolean(existingUse) || Boolean(currentSection && sec.id === currentSection.id)
-      const initialQty = existingUse ? existingUse.quantity : defaultCatalogQty
-      const initialNote = existingUse ? (existingUse.use_description || "") : ""
+      const initialUses = (existingUse && Array.isArray(existingUse.uses) && existingUse.uses.length > 0)
+        ? existingUse.uses.map(u => ({
+            assignmentId: u.assignment_id || null,
+            quantity: Number(u.quantity) || 1,
+            useDescription: u.use_description || ""
+          }))
+        : [{
+            assignmentId: null,
+            quantity: existingUse ? existingUse.quantity : defaultCatalogQty,
+            useDescription: existingUse ? (existingUse.use_description || "") : ""
+          }]
 
       const row = document.createElement("div")
       row.className = `part-use-row${isChecked ? " active-use" : ""}`
@@ -1034,67 +1126,178 @@ export default function renderFishbone(component) {
       checkLabel.appendChild(nameSpan)
       header.appendChild(checkLabel)
 
+      const headerActions = document.createElement("div")
+      headerActions.className = "part-use-header-actions"
+
+      const splitBtn = document.createElement("button")
+      splitBtn.type = "button"
+      splitBtn.className = "btn-split-sec-use"
+      splitBtn.textContent = "+ Split card"
+      splitBtn.title = "Split quantity into another separate card in this section"
+      splitBtn.hidden = !isChecked
+      headerActions.appendChild(splitBtn)
+
       const typeBadge = document.createElement("span")
       typeBadge.className = "part-use-sec-type"
       typeBadge.textContent = (sec.type === "Main spine" || sec.type === "Subassembly") ? "Assembly" : (sec.type || "Assembly")
-      header.appendChild(typeBadge)
+      headerActions.appendChild(typeBadge)
+      header.appendChild(headerActions)
 
-      const controls = document.createElement("div")
-      controls.className = "part-use-controls"
-      controls.hidden = !isChecked
+      const cardsList = document.createElement("div")
+      cardsList.className = "part-use-cards-list"
+      cardsList.hidden = !isChecked
 
-      const qtyWrap = document.createElement("label")
-      qtyWrap.className = "part-use-qty-wrap"
-      const qtySpan = document.createElement("span")
-      qtySpan.textContent = "Qty:"
-      const qtyInput = document.createElement("input")
-      qtyInput.type = "number"
-      qtyInput.className = "part-use-qty-input"
-      qtyInput.step = "any"
-      qtyInput.min = "0.01"
-      qtyInput.value = String(initialQty)
-      qtyInput.oninput = updateSummaryBadge
-      qtyWrap.appendChild(qtySpan)
-      qtyWrap.appendChild(qtyInput)
+      const cardEntries = []
+      const rowRecord = {
+        sectionId: sec.id,
+        sectionName: sec.name,
+        checkbox,
+        cardsList,
+        splitBtn,
+        cardEntries,
+        addCardEntry: null
+      }
 
-      const noteInput = document.createElement("input")
-      noteInput.type = "text"
-      noteInput.className = "part-use-note-input"
-      noteInput.placeholder = "Location / note (e.g. Front LH/RH, Rear)..."
-      noteInput.value = initialNote
+      function refreshCardIndices() {
+        const multi = cardEntries.length > 1
+        cardEntries.forEach((ce, idx) => {
+          ce.cardIndexBadge.hidden = !multi
+          ce.cardIndexBadge.textContent = `Card #${idx + 1}`
+          ce.removeBtn.hidden = !multi
+        })
+      }
 
-      controls.appendChild(qtyWrap)
-      controls.appendChild(noteInput)
+      function addCardEntry(useObj) {
+        const controls = document.createElement("div")
+        controls.className = "part-use-controls"
+
+        const cardIndexBadge = document.createElement("span")
+        cardIndexBadge.className = "part-use-card-index"
+        cardIndexBadge.hidden = true
+
+        const qtyWrap = document.createElement("label")
+        qtyWrap.className = "part-use-qty-wrap"
+        const qtySpan = document.createElement("span")
+        qtySpan.textContent = "Qty:"
+        const qtyInput = document.createElement("input")
+        qtyInput.type = "number"
+        qtyInput.className = "part-use-qty-input"
+        qtyInput.step = "any"
+        qtyInput.min = "0.01"
+        qtyInput.value = String(useObj.quantity !== undefined ? useObj.quantity : 1)
+        qtyInput.oninput = updateSummaryBadge
+        qtyWrap.appendChild(qtySpan)
+        qtyWrap.appendChild(qtyInput)
+
+        const noteInput = document.createElement("input")
+        noteInput.type = "text"
+        noteInput.className = "part-use-note-input"
+        noteInput.placeholder = "Location / note (e.g. Front LH/RH, Rear)..."
+        noteInput.value = useObj.useDescription || ""
+
+        const removeBtn = document.createElement("button")
+        removeBtn.type = "button"
+        removeBtn.className = "btn-remove-sec-card"
+        removeBtn.textContent = "×"
+        removeBtn.title = "Remove this split card and merge its quantity back"
+        removeBtn.hidden = true
+
+        const entryRecord = {
+          assignmentId: useObj.assignmentId || null,
+          controlsEl: controls,
+          cardIndexBadge,
+          qtyInput,
+          noteInput,
+          removeBtn
+        }
+
+        removeBtn.onclick = (e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          if (cardEntries.length <= 1) return
+          const idx = cardEntries.indexOf(entryRecord)
+          if (idx === -1) return
+          const removedQty = parseFloat(qtyInput.value) || 0
+          cardEntries.splice(idx, 1)
+          controls.remove()
+          const targetNeighbor = cardEntries[Math.max(0, idx - 1)]
+          if (targetNeighbor && removedQty > 0) {
+            const neighborQty = parseFloat(targetNeighbor.qtyInput.value) || 0
+            targetNeighbor.qtyInput.value = String(Math.round((neighborQty + removedQty) * 10000) / 10000)
+          }
+          refreshCardIndices()
+          updateSummaryBadge()
+        }
+
+        controls.appendChild(cardIndexBadge)
+        controls.appendChild(qtyWrap)
+        controls.appendChild(noteInput)
+        controls.appendChild(removeBtn)
+        cardsList.appendChild(controls)
+
+        cardEntries.push(entryRecord)
+        refreshCardIndices()
+        return entryRecord
+      }
+
+      rowRecord.addCardEntry = addCardEntry
+      initialUses.forEach(u => addCardEntry(u))
+
+      splitBtn.onclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (!checkbox.checked) {
+          checkbox.checked = true
+          cardsList.hidden = false
+          splitBtn.hidden = false
+          row.classList.add("active-use")
+        }
+        const lastEntry = cardEntries[cardEntries.length - 1]
+        const currQty = lastEntry ? (parseFloat(lastEntry.qtyInput.value) || 1) : 1
+        let newCardQty = 1
+        if (lastEntry && currQty > 1) {
+          let firstHalf
+          if (Number.isInteger(currQty)) {
+            firstHalf = Math.ceil(currQty / 2)
+            newCardQty = Math.floor(currQty / 2)
+          } else {
+            firstHalf = Math.round((currQty / 2) * 10000) / 10000
+            newCardQty = Math.round((currQty - firstHalf) * 10000) / 10000
+          }
+          lastEntry.qtyInput.value = String(firstHalf)
+        }
+        addCardEntry({
+          assignmentId: null,
+          quantity: newCardQty > 0 ? newCardQty : 1,
+          useDescription: ""
+        })
+        updateSummaryBadge()
+      }
 
       checkbox.onchange = () => {
         const on = checkbox.checked
-        controls.hidden = !on
+        cardsList.hidden = !on
+        splitBtn.hidden = !on
         row.classList.toggle("active-use", on)
         updateSummaryBadge()
       }
 
       row.appendChild(header)
-      row.appendChild(controls)
+      row.appendChild(cardsList)
       partUsesSectionsList.appendChild(row)
 
-      rowRecords.push({
-        sectionId: sec.id,
-        sectionName: sec.name,
-        checkbox,
-        qtyInput,
-        noteInput
-      })
+      rowRecords.push(rowRecord)
     })
 
     updateSummaryBadge()
 
     if (btnPartUsesSameQty) {
       btnPartUsesSameQty.onclick = () => {
-        const checkedRows = rowRecords.filter(r => r.checkbox.checked)
-        if (checkedRows.length === 0) return
-        const refQty = parseFloat(checkedRows[0].qtyInput.value) || defaultCatalogQty || 1
-        checkedRows.forEach(r => {
-          r.qtyInput.value = String(refQty)
+        const activeCards = getActiveCardEntries()
+        if (activeCards.length === 0) return
+        const refQty = parseFloat(activeCards[0].cardEntry.qtyInput.value) || defaultCatalogQty || 1
+        activeCards.forEach(item => {
+          item.cardEntry.qtyInput.value = String(refQty)
         })
         updateSummaryBadge()
       }
@@ -1104,11 +1307,22 @@ export default function renderFishbone(component) {
       btnPartUsesSplitQty.onclick = () => {
         const checkedRows = rowRecords.filter(r => r.checkbox.checked)
         if (checkedRows.length === 0) return
-        const currentSum = checkedRows.reduce((acc, r) => acc + (parseFloat(r.qtyInput.value) || 0), 0)
+        let activeCards = getActiveCardEntries()
+        // If only 1 section is checked with 1 card, automatically add a 2nd card in that section to split into
+        if (activeCards.length === 1 && checkedRows.length === 1 && checkedRows[0].addCardEntry) {
+          checkedRows[0].addCardEntry({
+            assignmentId: null,
+            quantity: 1,
+            useDescription: ""
+          })
+          activeCards = getActiveCardEntries()
+        }
+        if (activeCards.length === 0) return
+        const currentSum = activeCards.reduce((acc, item) => acc + (parseFloat(item.cardEntry.qtyInput.value) || 0), 0)
         const baseTotal = defaultCatalogQty > 1 ? defaultCatalogQty : (currentSum > 0 ? currentSum : 1)
-        const splitVal = Math.round((baseTotal / checkedRows.length) * 10000) / 10000
-        checkedRows.forEach(r => {
-          r.qtyInput.value = String(splitVal)
+        const splitVal = Math.round((baseTotal / activeCards.length) * 10000) / 10000
+        activeCards.forEach(item => {
+          item.cardEntry.qtyInput.value = String(splitVal)
         })
         updateSummaryBadge()
       }
@@ -1133,16 +1347,19 @@ export default function renderFishbone(component) {
 
     if (btnPartUsesConfirm) {
       btnPartUsesConfirm.onclick = () => {
-        const selectedUses = rowRecords
-          .filter(r => r.checkbox.checked)
-          .map(r => {
-            const q = parseFloat(r.qtyInput.value)
-            return {
+        const selectedUses = []
+        rowRecords.forEach(r => {
+          if (!r.checkbox.checked) return
+          r.cardEntries.forEach(ce => {
+            const q = parseFloat(ce.qtyInput.value)
+            selectedUses.push({
+              assignment_id: ce.assignmentId || null,
               section_id: r.sectionId,
               quantity: (isFinite(q) && q > 0) ? q : 1,
-              use_description: (r.noteInput.value || "").trim()
-            }
+              use_description: (ce.noteInput.value || "").trim()
+            })
           })
+        })
         partUsesModal.hidden = true
         component.setTriggerValue("replicate_part_uses", {
           part_id: partId,
@@ -1160,6 +1377,384 @@ export default function renderFishbone(component) {
   if (partUsesModal) {
     partUsesModal.onclick = (e) => {
       if (e.target === partUsesModal) partUsesModal.hidden = true
+    }
+  }
+
+  // Edit Model Variant Ties Modal Handling (triggered by clicking N× badge)
+  function openVariantTiesModal(cluster, currentSection) {
+    if (!variantTiesModal || !variantTiesList || !cluster || !Array.isArray(cluster.parts)) return
+    const secName = currentSection ? currentSection.name : "Section"
+    const initialItems = []
+    const stackPartNumbersUpper = new Set()
+
+    cluster.parts.forEach((p, idx) => {
+      const pn = String(p.part_number || "").trim()
+      if (!pn) return
+      const key = pn.toUpperCase()
+      stackPartNumbersUpper.add(key)
+      initialItems.push({
+        assignment_id: p.id || "",
+        part_id: p.part_id || "",
+        part_number: pn,
+        description: p.description || "",
+        use_description: p.use_description || "",
+        image: p.image || "",
+        quantity: p.quantity || 1,
+        models: p.models || "All models",
+        in_stack: true,
+        stack_idx: idx,
+        is_added: false,
+      })
+    })
+
+    // Also include any catalog variant peers linked to parts in this stack
+    const seenPeerUpper = new Set(stackPartNumbersUpper)
+    cluster.parts.forEach((p) => {
+      const peers = parseVariantGroup(p.variant_group)
+      peers.forEach((peerUpper) => {
+        if (seenPeerUpper.has(peerUpper)) return
+        seenPeerUpper.add(peerUpper)
+        const palMatch = paletteItems.find(
+          it => String(it.part_number || "").trim().toUpperCase() === peerUpper
+        )
+        const placedMatch = parts.find(
+          it => String(it.part_number || "").trim().toUpperCase() === peerUpper
+        )
+        const ref = placedMatch || palMatch
+        initialItems.push({
+          assignment_id: placedMatch ? (placedMatch.id || "") : "",
+          part_id: ref ? (ref.part_id || "") : "",
+          part_number: ref ? (ref.part_number || peerUpper) : peerUpper,
+          description: ref ? (ref.description || "") : "",
+          use_description: placedMatch ? (placedMatch.use_description || "") : "",
+          image: ref ? (ref.image || "") : "",
+          quantity: ref ? (ref.quantity || 1) : 1,
+          models: (placedMatch && placedMatch.models) ? placedMatch.models : "Catalog variant peer",
+          in_stack: false,
+          stack_idx: -1,
+          is_added: false,
+        })
+      })
+    })
+
+    if (variantTiesTitle) {
+      variantTiesTitle.textContent = `Edit Model Variant Ties (${cluster.parts.length}× stack)`
+    }
+    if (variantTiesDesc) {
+      variantTiesDesc.textContent = `Section "${secName}" — Uncheck any part below to disconnect it from this model variant group so it displays as a separate card:`
+    }
+
+    variantTiesList.replaceChildren()
+    const rowRecords = []
+
+    function updateVariantSummary() {
+      const tiedCount = rowRecords.filter(r => r.checkbox.checked).length
+      const untiedCount = rowRecords.length - tiedCount
+      if (variantTiesSummaryBadge) {
+        if (tiedCount < 2) {
+          variantTiesSummaryBadge.textContent = `All ${rowRecords.length} parts will be untied into separate cards`
+          variantTiesSummaryBadge.style.color = "#d97706"
+          variantTiesSummaryBadge.style.background = "rgba(217, 119, 6, 0.14)"
+        } else if (untiedCount > 0) {
+          variantTiesSummaryBadge.textContent = `${tiedCount} tied · ${untiedCount} to disconnect`
+          variantTiesSummaryBadge.style.color = "#4f46e5"
+          variantTiesSummaryBadge.style.background = "rgba(79, 70, 229, 0.12)"
+        } else {
+          variantTiesSummaryBadge.textContent = `${tiedCount} parts tied in variant group`
+          variantTiesSummaryBadge.style.color = "#4f46e5"
+          variantTiesSummaryBadge.style.background = "rgba(79, 70, 229, 0.12)"
+        }
+      }
+    }
+
+    function populateAddSelect() {
+      if (!variantTiesAddSelect) return
+      variantTiesAddSelect.replaceChildren()
+      const placeholder = document.createElement("option")
+      placeholder.value = ""
+      placeholder.textContent = "Optional: select another part to tie into this variant group..."
+      variantTiesAddSelect.appendChild(placeholder)
+
+      const existingKeys = new Set(rowRecords.map(r => r.partNumber.toUpperCase()))
+      const sectionPartUpper = new Set(
+        parts
+          .filter(p => currentSection && p.section_id === currentSection.id)
+          .map(p => String(p.part_number || "").trim().toUpperCase())
+          .filter(Boolean)
+      )
+
+      const candidates = []
+      const seenCand = new Set()
+      parts.forEach(p => {
+        const pn = String(p.part_number || "").trim()
+        const up = pn.toUpperCase()
+        if (!pn || existingKeys.has(up) || seenCand.has(up)) return
+        seenCand.add(up)
+        candidates.push({
+          part_id: p.part_id || "",
+          part_number: pn,
+          description: p.description || "",
+          image: p.image || "",
+          quantity: p.quantity || 1,
+          models: p.models || "All models",
+          in_current_section: sectionPartUpper.has(up),
+        })
+      })
+      paletteItems.forEach(it => {
+        const pn = String(it.part_number || "").trim()
+        const up = pn.toUpperCase()
+        if (!pn || pn === "—" || existingKeys.has(up) || seenCand.has(up)) return
+        seenCand.add(up)
+        candidates.push({
+          part_id: it.part_id || "",
+          part_number: pn,
+          description: it.description || "",
+          image: it.image || "",
+          quantity: it.quantity || 1,
+          models: "Catalog part",
+          in_current_section: sectionPartUpper.has(up),
+        })
+      })
+
+      candidates.sort((a, b) => {
+        if (a.in_current_section !== b.in_current_section) {
+          return a.in_current_section ? -1 : 1
+        }
+        return a.part_number.localeCompare(b.part_number)
+      })
+
+      candidates.forEach(c => {
+        const opt = document.createElement("option")
+        opt.value = c.part_number
+        const prefix = c.in_current_section ? `[In ${secName}] ` : ""
+        opt.textContent = `${prefix}${c.part_number}${c.description ? ` — ${c.description}` : ""}`
+        opt.dataset.partJson = JSON.stringify(c)
+        variantTiesAddSelect.appendChild(opt)
+      })
+    }
+
+    function appendVariantRow(item) {
+      const row = document.createElement("div")
+      row.className = "variant-tie-row active-tie"
+
+      const leftLabel = document.createElement("label")
+      leftLabel.className = "part-use-check-label"
+      leftLabel.style.gap = "10px"
+
+      const checkbox = document.createElement("input")
+      checkbox.type = "checkbox"
+      checkbox.checked = true
+
+      let thumbEl
+      if (item.image) {
+        thumbEl = document.createElement("img")
+        thumbEl.className = "palette-thumb"
+        thumbEl.style.width = "34px"
+        thumbEl.style.height = "34px"
+        thumbEl.src = item.image
+        thumbEl.alt = item.part_number
+      } else {
+        thumbEl = document.createElement("div")
+        thumbEl.className = "palette-no-thumb"
+        thumbEl.style.width = "34px"
+        thumbEl.style.height = "34px"
+        thumbEl.textContent = "PART"
+      }
+
+      const textCol = document.createElement("div")
+      textCol.style.display = "flex"
+      textCol.style.flexDirection = "column"
+      textCol.style.minWidth = "0"
+      textCol.style.flex = "1"
+      textCol.style.gap = "2px"
+
+      const pnLine = document.createElement("div")
+      pnLine.style.display = "flex"
+      pnLine.style.alignItems = "center"
+      pnLine.style.gap = "6px"
+      const pnStrong = document.createElement("strong")
+      pnStrong.style.fontSize = ".85rem"
+      pnStrong.style.color = "var(--st-primary-color)"
+      pnStrong.textContent = item.part_number
+      pnLine.appendChild(pnStrong)
+
+      if (item.in_stack) {
+        const stackTag = document.createElement("span")
+        stackTag.className = "part-use-sec-type"
+        stackTag.textContent = item.use_description
+          ? `Qty ${item.quantity || 1} · ${item.use_description}`
+          : `Qty ${item.quantity || 1}`
+        pnLine.appendChild(stackTag)
+      } else {
+        const peerTag = document.createElement("span")
+        peerTag.className = "part-use-sec-type"
+        peerTag.textContent = item.is_added ? "Added to group" : "Linked in catalog"
+        pnLine.appendChild(peerTag)
+      }
+
+      const descLine = document.createElement("div")
+      descLine.style.fontSize = ".76rem"
+      descLine.style.color = "var(--st-secondary-text-color)"
+      descLine.style.whiteSpace = "nowrap"
+      descLine.style.overflow = "hidden"
+      descLine.style.textOverflow = "ellipsis"
+      descLine.textContent = `${item.description || "—"}${item.models ? ` · ${item.models}` : ""}`
+
+      textCol.appendChild(pnLine)
+      textCol.appendChild(descLine)
+
+      leftLabel.appendChild(checkbox)
+      leftLabel.appendChild(thumbEl)
+      leftLabel.appendChild(textCol)
+
+      const rightControls = document.createElement("div")
+      rightControls.style.display = "flex"
+      rightControls.style.alignItems = "center"
+      rightControls.style.gap = "6px"
+
+      const statusPill = document.createElement("span")
+      statusPill.className = "variant-tie-status-pill tied"
+      statusPill.textContent = "Tied"
+      statusPill.title = "Click to toggle tie / untie"
+
+      function syncRowVisual() {
+        const on = checkbox.checked
+        row.classList.toggle("active-tie", on)
+        row.classList.toggle("untied-row", !on)
+        statusPill.className = `variant-tie-status-pill ${on ? "tied" : "untied"}`
+        statusPill.textContent = on ? "Tied" : "Untie"
+        updateVariantSummary()
+      }
+
+      checkbox.onchange = syncRowVisual
+      statusPill.onclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        checkbox.checked = !checkbox.checked
+        syncRowVisual()
+      }
+
+      rightControls.appendChild(statusPill)
+      row.appendChild(leftLabel)
+      row.appendChild(rightControls)
+      variantTiesList.appendChild(row)
+
+      rowRecords.push({
+        assignmentId: item.assignment_id || "",
+        partId: item.part_id,
+        partNumber: item.part_number,
+        inStack: Boolean(item.in_stack),
+        isAdded: Boolean(item.is_added),
+        checkbox,
+        syncRowVisual,
+      })
+    }
+
+    initialItems.forEach(item => appendVariantRow(item))
+    updateVariantSummary()
+    populateAddSelect()
+
+    if (btnVariantTiesUntieAll) {
+      btnVariantTiesUntieAll.onclick = () => {
+        rowRecords.forEach(r => {
+          r.checkbox.checked = false
+          r.syncRowVisual()
+        })
+      }
+    }
+
+    if (btnVariantTiesAddPart && variantTiesAddSelect) {
+      btnVariantTiesAddPart.onclick = () => {
+        const selOpt = variantTiesAddSelect.options[variantTiesAddSelect.selectedIndex]
+        if (!selOpt || !selOpt.value) return
+        let parsed = null
+        try {
+          parsed = JSON.parse(selOpt.dataset.partJson || "{}")
+        } catch (e) {}
+        const pn = (parsed && parsed.part_number) ? parsed.part_number : selOpt.value
+        appendVariantRow({
+          assignment_id: (parsed && parsed.assignment_id) || "",
+          part_id: (parsed && parsed.part_id) || "",
+          part_number: pn,
+          description: (parsed && parsed.description) || "",
+          use_description: (parsed && parsed.use_description) || "",
+          image: (parsed && parsed.image) || "",
+          quantity: (parsed && parsed.quantity) || 1,
+          models: "Added to variant group",
+          in_stack: false,
+          stack_idx: -1,
+          is_added: true,
+        })
+        updateVariantSummary()
+        populateAddSelect()
+      }
+    }
+
+    if (btnVariantTiesCancel) {
+      btnVariantTiesCancel.onclick = () => {
+        variantTiesModal.hidden = true
+      }
+    }
+
+    if (btnVariantTiesConfirm) {
+      btnVariantTiesConfirm.onclick = () => {
+        const checkedRecords = rowRecords.filter(r => r.checkbox.checked)
+        const uncheckedRecords = rowRecords.filter(r => !r.checkbox.checked)
+        let untiedPartNumbers = []
+        let keptPartNumbers = []
+        let addedPartNumbers = []
+        let untiedAssignmentIds = []
+        let keptAssignmentIds = []
+        let addedAssignmentIds = []
+
+        if (checkedRecords.length < 2) {
+          // Fewer than 2 cards remain checked -> disconnect all cards in the stack
+          untiedPartNumbers = Array.from(new Set(rowRecords.filter(r => !r.isAdded).map(r => r.partNumber)))
+          keptPartNumbers = []
+          untiedAssignmentIds = rowRecords.filter(r => !r.isAdded && r.assignmentId).map(r => r.assignmentId)
+          keptAssignmentIds = []
+        } else {
+          const checkedUpperSet = new Set(checkedRecords.map(r => r.partNumber.toUpperCase()))
+          untiedPartNumbers = Array.from(
+            new Set(
+              uncheckedRecords
+                .filter(r => !r.isAdded && !checkedUpperSet.has(r.partNumber.toUpperCase()))
+                .map(r => r.partNumber)
+            )
+          )
+          keptPartNumbers = Array.from(new Set(checkedRecords.map(r => r.partNumber)))
+          addedPartNumbers = Array.from(new Set(checkedRecords.filter(r => r.isAdded).map(r => r.partNumber)))
+          untiedAssignmentIds = uncheckedRecords.filter(r => !r.isAdded && r.assignmentId).map(r => r.assignmentId)
+          keptAssignmentIds = checkedRecords.filter(r => r.assignmentId).map(r => r.assignmentId)
+          addedAssignmentIds = checkedRecords.filter(r => r.isAdded && r.assignmentId).map(r => r.assignmentId)
+        }
+
+        variantTiesModal.hidden = true
+        if (
+          untiedPartNumbers.length > 0 ||
+          addedPartNumbers.length > 0 ||
+          untiedAssignmentIds.length > 0 ||
+          addedAssignmentIds.length > 0
+        ) {
+          component.setTriggerValue("unstack_part_variant", {
+            untied_part_numbers: untiedPartNumbers,
+            kept_part_numbers: keptPartNumbers,
+            added_part_numbers: addedPartNumbers,
+            untied_assignment_ids: untiedAssignmentIds,
+            kept_assignment_ids: keptAssignmentIds,
+            added_assignment_ids: addedAssignmentIds,
+            section_id: currentSection ? currentSection.id : null
+          })
+        }
+      }
+    }
+
+    variantTiesModal.hidden = false
+  }
+
+  if (variantTiesModal) {
+    variantTiesModal.onclick = (e) => {
+      if (e.target === variantTiesModal) variantTiesModal.hidden = true
     }
   }
 
@@ -1220,7 +1815,10 @@ export default function renderFishbone(component) {
       const meta = document.createElement("div")
       meta.className = "palette-meta"
       const secCount = partSectionsMap.has(item.part_id) ? partSectionsMap.get(item.part_id).size : 0
-      meta.textContent = secCount > 1 ? `Qty ${item.quantity || 1} · ${secCount} sections` : `Qty ${item.quantity || 1}`
+      const totalUsesCount = partTotalUsesMap.get(item.part_id) || 0
+      meta.textContent = secCount > 1
+        ? `Qty ${item.quantity || 1} · ${secCount} sections`
+        : (totalUsesCount > 1 ? `Qty ${item.quantity || 1} · ${totalUsesCount} cards` : `Qty ${item.quantity || 1}`)
       if (item.is_assembly) {
         const badge = document.createElement("span")
         badge.className = "palette-badge"
@@ -1230,8 +1828,8 @@ export default function renderFishbone(component) {
       const repBtn = document.createElement("button")
       repBtn.type = "button"
       repBtn.className = "palette-replicate-btn"
-      repBtn.title = "Place or replicate across multiple sections"
-      repBtn.textContent = secCount > 0 ? `+ Uses (${secCount})` : "+ Multi-use"
+      repBtn.title = "Place, replicate across sections, or split quantity into multiple cards"
+      repBtn.textContent = totalUsesCount > 0 ? `+ Uses (${totalUsesCount})` : "+ Multi-use"
       repBtn.onclick = (e) => {
         e.stopPropagation()
         e.preventDefault()
@@ -1255,7 +1853,7 @@ export default function renderFishbone(component) {
   paletteUnplacedOnly.onchange = renderPalette
   renderPalette()
 
-  // Helper for clustering similar parts (same base drawing number, differing suffix, segregated by P vs G)
+  // Helper for clustering similar parts (same base drawing number, differing suffix, segregated by P vs G, or manual Variant group)
   function getPartBaseCode(pn) {
     const clean = String(pn || "").trim().toUpperCase()
     // Match base drawing number, followed by P (piece part) or G (group/assembly), followed by sequence/variant
@@ -1266,44 +1864,98 @@ export default function renderFishbone(component) {
     return clean
   }
 
+  function parseVariantGroup(val) {
+    if (!val) return []
+    if (Array.isArray(val)) {
+      return val.map(v => String(v || "").trim().toUpperCase()).filter(Boolean)
+    }
+    return String(val).split(",").map(v => v.trim().toUpperCase()).filter(Boolean)
+  }
+
   function clusterSectionParts(secPartsList, secId) {
     const clusters = []
-    const map = new Map()
+    const stackGroupCounts = new Map()
+    secPartsList.forEach(item => {
+      const sg = Number(item.stack_group || 0) > 1 ? Number(item.stack_group) : 0
+      if (sg > 0) stackGroupCounts.set(sg, (stackGroupCounts.get(sg) || 0) + 1)
+    })
+
     secPartsList.forEach(p => {
       const pNum = String(p.part_number || "").trim().toUpperCase()
       const base = getPartBaseCode(pNum)
-      const clusterKey = `${secId}:${base}`
-      if (!map.has(base)) {
+      const hasResolvedVariantGroup = Array.isArray(p.variant_group)
+      const peers = parseVariantGroup(p.variant_group)
+      const rawStackGroup = Number(p.stack_group || 0) > 1 ? Number(p.stack_group) : 0
+      const activeStackGroup = (rawStackGroup > 0 && (stackGroupCounts.get(rawStackGroup) || 0) >= 2) ? rawStackGroup : 0
+
+      let matchingClusters = []
+      if (activeStackGroup > 0) {
+        matchingClusters = clusters.filter(cl => cl.stackGroups && cl.stackGroups.has(activeStackGroup))
+      } else {
+        matchingClusters = clusters.filter(cl => {
+          // Do NOT merge an unstacked card into an explicit canvas stack group if that stack group already has this part
+          const alreadyHasSamePart = cl.parts.some(item =>
+            (p.part_id && item.part_id === p.part_id) ||
+            (pNum && String(item.part_number || "").trim().toUpperCase() === pNum)
+          )
+          if (alreadyHasSamePart) return false
+          if (cl.stackGroups && cl.stackGroups.size > 0) return false
+          if (!hasResolvedVariantGroup && base && cl.baseCodes.has(base)) return true
+          if (pNum && cl.memberPartNumbers.has(pNum)) return true
+          for (const peer of peers) {
+            if (cl.memberPartNumbers.has(peer)) return true
+          }
+          return false
+        })
+      }
+      let cl
+      if (matchingClusters.length === 0) {
+        const keyToken = activeStackGroup > 0
+          ? `sg_${activeStackGroup}`
+          : ((!hasResolvedVariantGroup || peers.length > 0) ? (base || pNum) : pNum)
+        const sameKeyCount = clusters.filter(c => c.baseKeyToken === keyToken).length
+        const clusterKey = sameKeyCount === 0 ? `${secId}:${keyToken}` : `${secId}:${keyToken}#${sameKeyCount + 1}`
         const activeIdx = (state.clusterActiveIndices && state.clusterActiveIndices.get(clusterKey)) || 0
-        const cl = {
-          baseCode: base,
+        cl = {
+          baseCode: base || pNum,
+          baseKeyToken: keyToken,
           clusterKey: clusterKey,
+          baseCodes: new Set(base ? [base] : []),
+          memberPartNumbers: new Set(),
+          stackGroups: new Set(activeStackGroup > 0 ? [activeStackGroup] : []),
           parts: [],
           activeIdx: activeIdx
         }
-        map.set(base, cl)
         clusters.push(cl)
-      }
-      const cl = map.get(base)
-      // Check if this EXACT part (same part_number or same part_id) is already in the cluster
-      const existing = cl.parts.find(item => 
-        (p.part_id && item.part_id === p.part_id) || 
-        (pNum && String(item.part_number || "").trim().toUpperCase() === pNum)
-      )
-      if (existing) {
-        // Same exact part number/name/photo: DO NOT duplicate! Combine quantity and IDs.
-        existing.quantity = (Number(existing.quantity) || 1) + (Number(p.quantity) || 1)
-        if (!existing.assignment_ids) existing.assignment_ids = [existing.id]
-        if (p.id && !existing.assignment_ids.includes(p.id)) existing.assignment_ids.push(p.id)
-        if (p.models && p.models !== "All models" && existing.models && !existing.models.includes(p.models)) {
-          existing.models = `${existing.models}, ${p.models}`
-        }
       } else {
-        const copy = Object.assign({}, p, {
-          assignment_ids: [p.id]
-        })
-        cl.parts.push(copy)
+        cl = matchingClusters[matchingClusters.length - 1]
+        for (let m = 0; m < matchingClusters.length - 1; m++) {
+          const other = matchingClusters[m]
+          const sharesExplicitGroup = activeStackGroup > 0 && other.stackGroups && other.stackGroups.has(activeStackGroup)
+          const sharesPart = other.parts.some(op =>
+            cl.parts.some(cp =>
+              (op.part_id && cp.part_id === op.part_id) ||
+              (op.part_number && cp.part_number && String(op.part_number).trim().toUpperCase() === String(cp.part_number).trim().toUpperCase())
+            )
+          )
+          if (sharesPart && !sharesExplicitGroup) continue
+          other.baseCodes.forEach(bc => cl.baseCodes.add(bc))
+          other.memberPartNumbers.forEach(mpn => cl.memberPartNumbers.add(mpn))
+          if (other.stackGroups) other.stackGroups.forEach(sg => cl.stackGroups.add(sg))
+          other.parts.forEach(op => cl.parts.push(op))
+          const idx = clusters.indexOf(other)
+          if (idx !== -1) clusters.splice(idx, 1)
+        }
       }
+      if (base) cl.baseCodes.add(base)
+      if (pNum) cl.memberPartNumbers.add(pNum)
+      if (activeStackGroup > 0) cl.stackGroups.add(activeStackGroup)
+      peers.forEach(peer => cl.memberPartNumbers.add(peer))
+
+      const copy = Object.assign({}, p, {
+        assignment_ids: [p.id]
+      })
+      cl.parts.push(copy)
     })
     return clusters
   }
@@ -1314,6 +1966,9 @@ export default function renderFishbone(component) {
     const sid = part.section_id
     if (!partsBySection.has(sid)) partsBySection.set(sid, [])
     partsBySection.get(sid).push(part)
+  })
+  partsBySection.forEach((secList) => {
+    secList.sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0))
   })
 
   // Group sections by connection hierarchy
@@ -1998,9 +2653,11 @@ export default function renderFishbone(component) {
         const card = svgElement("g", {
           class: "part-card",
           "data-part-id": activePart.part_id,
+          "data-part-number": activePart.part_number || "",
           "data-assignment-id": activePart.id,
           style: "cursor: grab;"
         })
+        cluster.cardElem = card
 
         const cardRect = svgElement("rect", {
           x: cardX, y: cardY, width: cardW, height: cardH, rx: 6,
@@ -2035,11 +2692,11 @@ export default function renderFishbone(component) {
         pnText.textContent = pnStr.length > 10 ? `${pnStr.slice(0, 9)}…` : pnStr
         card.appendChild(pnText)
 
-        // Variant badge and suffix counter for cascaded clusters
+        // Variant badge (click to edit model variant ties) and suffix counter for cascaded clusters
         if (hasMultiple) {
           const badgeG = svgElement("g", {
             class: "cascade-badge",
-            title: `Click card to cycle ${cluster.parts.length} variants`
+            title: `Click to edit ${cluster.parts.length} model variant ties`
           })
           badgeG.appendChild(svgElement("rect", {
             x: cardX + 2, y: cardY - 7, width: 32, height: 14, rx: 4,
@@ -2051,6 +2708,10 @@ export default function renderFishbone(component) {
           })
           badgeTxt.textContent = `${cluster.parts.length}×`
           badgeG.appendChild(badgeTxt)
+          badgeG.onclick = (e) => {
+            e.stopPropagation()
+            openVariantTiesModal(cluster, section)
+          }
           card.appendChild(badgeG)
 
           // Suffix indicator at bottom
@@ -2058,24 +2719,47 @@ export default function renderFishbone(component) {
             x: cardX + cardW / 2, y: cardY + 76, "text-anchor": "middle",
             fill: "#6366f1", "font-size": 7.5, "font-weight": 600
           })
-          let suf = pnStr
-          const sufMatch = pnStr.match(/^([A-Z0-9#]+?)[-_\\s]?([PG])[-_\\s]?(\\d{1,5}[A-Z]?|[#X]+)(?:_.*)?$/)
-          if (sufMatch && sufMatch[1].length >= 4) {
-            suf = `${sufMatch[2]}${sufMatch[3]}`
-          } else if (pnStr.length >= 8) {
-            suf = pnStr.slice(8)
+          const distinctPns = new Set(cluster.parts.map(cp => String(cp.part_number || "").trim().toUpperCase()))
+          const qtyVal = activePart.quantity !== undefined && activePart.quantity !== null ? activePart.quantity : 1
+          const noteRaw = String(activePart.use_description || "").trim()
+          if (distinctPns.size < cluster.parts.length) {
+            const noteShort = noteRaw ? `·${noteRaw.length > 5 ? noteRaw.slice(0, 4) + "…" : noteRaw}` : ""
+            sufTxt.textContent = `[${activeIdx + 1}/${cluster.parts.length}] Qty ${qtyVal}${noteShort}`
+          } else {
+            let suf = pnStr
+            const sufMatch = pnStr.match(/^([A-Z0-9#]+?)[-_\\s]?([PG])[-_\\s]?(\\d{1,5}[A-Z]?|[#X]+)(?:_.*)?$/)
+            if (sufMatch && sufMatch[1].length >= 4) {
+              suf = `${sufMatch[2]}${sufMatch[3]}`
+            } else if (pnStr.length >= 8) {
+              suf = pnStr.slice(8)
+            }
+            sufTxt.textContent = `[${activeIdx + 1}/${cluster.parts.length}] ${suf} (${qtyVal})`
           }
-          sufTxt.textContent = `[${activeIdx + 1}/${cluster.parts.length}] ${suf}`
           card.appendChild(sufTxt)
+        } else {
+          const qtyVal = activePart.quantity !== undefined && activePart.quantity !== null ? activePart.quantity : 1
+          const noteRaw = String(activePart.use_description || "").trim()
+          const subLabel = noteRaw
+            ? `Qty ${qtyVal} · ${noteRaw.length > 7 ? noteRaw.slice(0, 6) + "…" : noteRaw}`
+            : `Qty: ${qtyVal}`
+          const qtyTxt = svgElement("text", {
+            x: cardX + cardW / 2, y: cardY + 75.5, "text-anchor": "middle",
+            fill: "var(--st-secondary-text-color)", "font-size": 7.5, "font-weight": 600
+          })
+          qtyTxt.textContent = subLabel
+          card.appendChild(qtyTxt)
         }
 
-        // Multi-section indicator badge (when placed in 2+ sections)
+        // Multi-use indicator badge (when placed in 2+ sections or split into 2+ cards)
         const partSecMap = partSectionsMap.get(activePart.part_id)
         const totalPlacedSections = partSecMap ? partSecMap.size : 1
-        if (totalPlacedSections > 1) {
+        const totalPartUses = partTotalUsesMap.get(activePart.part_id) || 1
+        if (totalPartUses > 1) {
           const multiBadge = svgElement("g", {
             class: "part-multiuse-badge",
-            title: `Used in ${totalPlacedSections} sections — click to manage section uses`
+            title: totalPlacedSections > 1
+              ? `Used in ${totalPlacedSections} sections (${totalPartUses} cards) — click to manage uses`
+              : `Split into ${totalPartUses} cards in this section — click to manage uses`
           })
           multiBadge.appendChild(svgElement("rect", {
             x: cardX + 3, y: cardY + 41, width: 36, height: 13, rx: 3.5,
@@ -2085,7 +2769,7 @@ export default function renderFishbone(component) {
             x: cardX + 21, y: cardY + 50, "text-anchor": "middle",
             fill: "white", "font-size": 7.8, "font-weight": 700
           })
-          multiTxt.textContent = `${totalPlacedSections} uses`
+          multiTxt.textContent = `${totalPartUses} uses`
           multiBadge.appendChild(multiTxt)
           multiBadge.onclick = (e) => {
             e.stopPropagation()
@@ -2095,11 +2779,11 @@ export default function renderFishbone(component) {
         }
 
         // Replicate / Manage Uses (+) Button at bottom-left (where 'uses' badge lives)
-        const repCx = totalPlacedSections > 1 ? (cardX + 47.5) : (cardX + 10.5)
+        const repCx = totalPartUses > 1 ? (cardX + 47.5) : (cardX + 10.5)
         const repCy = cardY + 47.5
         const replicateBtn = svgElement("g", {
           class: "part-replicate-btn",
-          title: `Replicate ${activePart.part_number} to other sections or split quantity`,
+          title: `Replicate ${activePart.part_number} to other sections or split quantity into multiple cards`,
           style: "cursor: pointer;"
         })
         replicateBtn.appendChild(svgElement("circle", {
@@ -2147,7 +2831,7 @@ export default function renderFishbone(component) {
 
         // Mouse Drag to re-order within section or move to another section & Click to cycle variants
         card.onmousedown = (e) => {
-          if (e.target.closest(".part-remove-btn") || e.target.closest(".part-replicate-btn") || e.target.closest(".part-multiuse-badge")) return
+          if (e.target.closest(".part-remove-btn") || e.target.closest(".part-replicate-btn") || e.target.closest(".part-multiuse-badge") || e.target.closest(".cascade-badge")) return
           e.stopPropagation()
           const startMouseX = e.clientX
           const startMouseY = e.clientY
@@ -2187,6 +2871,7 @@ export default function renderFishbone(component) {
               const currY = (moveEvt.clientY - rect.top - state.y) / state.scale
 
               document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+              document.querySelectorAll(".part-card").forEach(c => c.classList.remove("part-card-stack-target"))
               const oldIndicator = ghostLayer.querySelector(".part-insert-indicator")
               if (oldIndicator) oldIndicator.remove()
 
@@ -2201,65 +2886,110 @@ export default function renderFishbone(component) {
                   if (nodeElem) nodeElem.classList.add("section-drop-hover")
                 }
 
-                // Show insertion line between parts if section has clusters
+                // Helper to check if a target cluster can be stacked with the dragged cluster as a model variant
                 const clusters = hoveredSec.partClusters || []
-                if (clusters.length > 0) {
-                  const localX = currX - hoveredSec.sx
-                  let insertLocalX = 0
-                  const gap = 12
+                const localX = currX - hoveredSec.sx
+                const localY = currY - hoveredSec.sy
+                const cardTopY = -hoveredSec.secHeight / 2 + 48
+                const cardBotY = cardTopY + 78
+                const sameSectionSourceIdx = hoveredSec.id === section.id ? clusters.indexOf(cluster) : -1
 
-                  if (localX < clusters[0].midX) {
-                    insertLocalX = clusters[0].cardX - gap / 2
-                  } else if (localX >= clusters[clusters.length - 1].midX) {
-                    const lastCl = clusters[clusters.length - 1]
-                    insertLocalX = lastCl.cardX + lastCl.cardW + gap / 2
-                  } else {
-                    for (let i = 0; i < clusters.length - 1; i++) {
-                      const clA = clusters[i]
-                      const clB = clusters[i + 1]
-                      const splitX = (clA.cardX + clA.cardW + clB.cardX) / 2
-                      if (localX < splitX) {
-                        insertLocalX = splitX
-                        break
+                let stackTargetCluster = null
+                if (localY >= cardTopY + 10 && localY <= cardBotY - 10) {
+                  stackTargetCluster = clusters.find(cl => {
+                    if (cl === cluster) return false
+                    return Math.abs(localX - cl.midX) <= 11
+                  }) || null
+                }
+
+                if (stackTargetCluster && stackTargetCluster.cardElem) {
+                  stackTargetCluster.cardElem.classList.add("part-card-stack-target")
+                  ghostEl.textContent = `${activePart.part_number} · Stack as Variant`
+                } else {
+                  ghostEl.textContent = `${activePart.part_number}${hasMultiple ? ` (+${cluster.parts.length - 1})` : ""}`
+                  // Show insertion line between parts if section has clusters
+                  if (clusters.length > 0) {
+                    const gap = 12
+                    let targetIdx = clusters.length
+                    if (localX < clusters[0].midX) {
+                      targetIdx = 0
+                    } else if (localX >= clusters[clusters.length - 1].midX) {
+                      targetIdx = clusters.length
+                    } else {
+                      for (let i = 0; i < clusters.length - 1; i++) {
+                        if (localX < clusters[i + 1].midX) {
+                          targetIdx = i + 1
+                          break
+                        }
                       }
                     }
+                    if (sameSectionSourceIdx !== -1) {
+                      if (
+                        targetIdx === sameSectionSourceIdx + 1 &&
+                        sameSectionSourceIdx + 1 < clusters.length &&
+                        localX >= clusters[sameSectionSourceIdx + 1].cardX
+                      ) {
+                        targetIdx = sameSectionSourceIdx + 2
+                      } else if (
+                        targetIdx === sameSectionSourceIdx &&
+                        sameSectionSourceIdx - 1 >= 0 &&
+                        localX <= clusters[sameSectionSourceIdx - 1].cardX + clusters[sameSectionSourceIdx - 1].cardW
+                      ) {
+                        targetIdx = sameSectionSourceIdx - 1
+                      }
+                    }
+
+                    let insertLocalX = 0
+                    if (targetIdx <= 0) {
+                      insertLocalX = clusters[0].cardX - gap / 2
+                    } else if (targetIdx >= clusters.length) {
+                      const lastCl = clusters[clusters.length - 1]
+                      insertLocalX = lastCl.cardX + lastCl.cardW + gap / 2
+                    } else {
+                      const clA = clusters[targetIdx - 1]
+                      const clB = clusters[targetIdx]
+                      insertLocalX = (clA.cardX + clA.cardW + clB.cardX) / 2
+                    }
+
+                    const isNoOpSameSlot = sameSectionSourceIdx !== -1 && (targetIdx === sameSectionSourceIdx || targetIdx === sameSectionSourceIdx + 1)
+                    if (!isNoOpSameSlot) {
+                      const worldInsertX = hoveredSec.sx + insertLocalX
+                      const cardY = -hoveredSec.secHeight / 2 + 48
+                      const topY = hoveredSec.sy + cardY - 4
+                      const indicatorH = 86
+
+                      const indicatorG = svgElement("g", { class: "part-insert-indicator", "pointer-events": "none" })
+                      const bar = svgElement("rect", {
+                        x: worldInsertX - 2,
+                        y: topY,
+                        width: 4,
+                        height: indicatorH,
+                        rx: 2,
+                        fill: "#3b82f6",
+                        filter: "drop-shadow(0 0 5px rgba(59, 130, 246, 0.7))"
+                      })
+                      indicatorG.appendChild(bar)
+                      const topDot = svgElement("circle", {
+                        cx: worldInsertX,
+                        cy: topY,
+                        r: 4.5,
+                        fill: "#2563eb",
+                        stroke: "white",
+                        "stroke-width": 1.5
+                      })
+                      indicatorG.appendChild(topDot)
+                      const botDot = svgElement("circle", {
+                        cx: worldInsertX,
+                        cy: topY + indicatorH,
+                        r: 4.5,
+                        fill: "#2563eb",
+                        stroke: "white",
+                        "stroke-width": 1.5
+                      })
+                      indicatorG.appendChild(botDot)
+                      ghostLayer.appendChild(indicatorG)
+                    }
                   }
-
-                  const worldInsertX = hoveredSec.sx + insertLocalX
-                  const cardY = -hoveredSec.secHeight / 2 + 48
-                  const topY = hoveredSec.sy + cardY - 4
-                  const indicatorH = 86
-
-                  const indicatorG = svgElement("g", { class: "part-insert-indicator", "pointer-events": "none" })
-                  const bar = svgElement("rect", {
-                    x: worldInsertX - 2,
-                    y: topY,
-                    width: 4,
-                    height: indicatorH,
-                    rx: 2,
-                    fill: "#3b82f6",
-                    filter: "drop-shadow(0 0 5px rgba(59, 130, 246, 0.7))"
-                  })
-                  indicatorG.appendChild(bar)
-                  const topDot = svgElement("circle", {
-                    cx: worldInsertX,
-                    cy: topY,
-                    r: 4.5,
-                    fill: "#2563eb",
-                    stroke: "white",
-                    "stroke-width": 1.5
-                  })
-                  indicatorG.appendChild(topDot)
-                  const botDot = svgElement("circle", {
-                    cx: worldInsertX,
-                    cy: topY + indicatorH,
-                    r: 4.5,
-                    fill: "#2563eb",
-                    stroke: "white",
-                    "stroke-width": 1.5
-                  })
-                  indicatorG.appendChild(botDot)
-                  ghostLayer.appendChild(indicatorG)
                 }
               }
             }
@@ -2271,6 +3001,7 @@ export default function renderFishbone(component) {
             window.removeEventListener("mouseup", onMouseUp)
             window.removeEventListener("keydown", onKeyDown)
             document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+            document.querySelectorAll(".part-card").forEach(c => c.classList.remove("part-card-stack-target"))
             const oldIndicator = ghostLayer.querySelector(".part-insert-indicator")
             if (oldIndicator) oldIndicator.remove()
             if (ghostEl) {
@@ -2291,31 +3022,164 @@ export default function renderFishbone(component) {
               })
               if (targetSec) {
                 const clusters = targetSec.partClusters || []
-                let targetIdx = clusters.length
                 const localX = currX - targetSec.sx
-                if (clusters.length > 0) {
+                const localY = currY - targetSec.sy
+                const cardTopY = -targetSec.secHeight / 2 + 48
+                const cardBotY = cardTopY + 78
+                const sameSectionSourceIdx = targetSec.id === section.id ? clusters.indexOf(cluster) : -1
+
+                let stackTargetCluster = null
+                if (localY >= cardTopY + 10 && localY <= cardBotY - 10) {
+                  stackTargetCluster = clusters.find(cl => {
+                    if (cl === cluster) return false
+                    return Math.abs(localX - cl.midX) <= 11
+                  }) || null
+                }
+
+                const stackWithPart = stackTargetCluster && stackTargetCluster.parts && stackTargetCluster.parts.length > 0
+                  ? stackTargetCluster.parts[stackTargetCluster.activeIdx || 0] || stackTargetCluster.parts[0]
+                  : null
+                const stackTargetAssignmentIds = []
+                if (stackTargetCluster && Array.isArray(stackTargetCluster.parts)) {
+                  stackTargetCluster.parts.forEach(tp => {
+                    if (tp.assignment_ids && tp.assignment_ids.length > 0) {
+                      tp.assignment_ids.forEach(aid => {
+                        if (aid && !stackTargetAssignmentIds.includes(aid)) stackTargetAssignmentIds.push(aid)
+                      })
+                    } else if (tp.id && !stackTargetAssignmentIds.includes(tp.id)) {
+                      stackTargetAssignmentIds.push(tp.id)
+                    }
+                  })
+                }
+
+                let movingParts = cluster.parts
+                let remainingSourceParts = []
+                let combinedTargetParts = null
+                if (stackTargetCluster) {
+                  const sourceSharesTargetPart = cluster.parts.some(sp =>
+                    stackTargetCluster.parts.some(tp =>
+                      (tp.part_id && sp.part_id && String(tp.part_id) === String(sp.part_id)) ||
+                      (tp.part_number && sp.part_number && String(tp.part_number).trim().toUpperCase() === String(sp.part_number).trim().toUpperCase())
+                    )
+                  )
+                  if (sourceSharesTargetPart) {
+                    movingParts = [activePart]
+                    remainingSourceParts = cluster.parts.filter(sp => sp !== activePart)
+                  }
+                  const partUseCounts = new Map()
+                  const countPart = (item) => {
+                    const key = String(item.part_id || item.part_number || "").trim().toUpperCase()
+                    if (!key) return
+                    partUseCounts.set(key, (partUseCounts.get(key) || 0) + 1)
+                  }
+                  clusters.forEach(cl => {
+                    if (cl !== cluster) cl.parts.forEach(countPart)
+                  })
+                  if (targetSec.id === section.id) {
+                    remainingSourceParts.forEach(countPart)
+                  }
+                  movingParts.forEach(countPart)
+
+                  const rawCombined = [...stackTargetCluster.parts, ...movingParts]
+                  combinedTargetParts = rawCombined.slice().sort((a, b) => {
+                    const keyA = String(a.part_id || a.part_number || "").trim().toUpperCase()
+                    const keyB = String(b.part_id || b.part_number || "").trim().toUpperCase()
+                    const countA = partUseCounts.get(keyA) || 1
+                    const countB = partUseCounts.get(keyB) || 1
+                    return countB - countA
+                  })
+                }
+
+                let targetIdx = clusters.length
+                if (!stackTargetCluster && clusters.length > 0) {
                   if (localX < clusters[0].midX) {
                     targetIdx = 0
                   } else if (localX >= clusters[clusters.length - 1].midX) {
                     targetIdx = clusters.length
                   } else {
                     for (let i = 0; i < clusters.length - 1; i++) {
-                      const clA = clusters[i]
-                      const clB = clusters[i + 1]
-                      const splitX = (clA.cardX + clA.cardW + clB.cardX) / 2
-                      if (localX < splitX) {
+                      if (localX < clusters[i + 1].midX) {
                         targetIdx = i + 1
                         break
                       }
                     }
                   }
+                  if (sameSectionSourceIdx !== -1) {
+                    if (
+                      targetIdx === sameSectionSourceIdx + 1 &&
+                      sameSectionSourceIdx + 1 < clusters.length &&
+                      localX >= clusters[sameSectionSourceIdx + 1].cardX
+                    ) {
+                      targetIdx = sameSectionSourceIdx + 2
+                    } else if (
+                      targetIdx === sameSectionSourceIdx &&
+                      sameSectionSourceIdx - 1 >= 0 &&
+                      localX <= clusters[sameSectionSourceIdx - 1].cardX + clusters[sameSectionSourceIdx - 1].cardW
+                    ) {
+                      targetIdx = sameSectionSourceIdx - 1
+                    }
+                  }
                 }
 
+                const clusterAssignmentIds = []
+                movingParts.forEach(p => {
+                  if (p.assignment_ids && p.assignment_ids.length > 0) {
+                    p.assignment_ids.forEach(aid => {
+                      if (aid && !clusterAssignmentIds.includes(aid)) clusterAssignmentIds.push(aid)
+                    })
+                  } else if (p.id && !clusterAssignmentIds.includes(p.id)) {
+                    clusterAssignmentIds.push(p.id)
+                  }
+                })
+
                 if (targetSec.id === section.id) {
-                  // Reorder within the same section
-                  if (clusters.length > 1) {
-                    const sourceIdx = clusters.indexOf(cluster)
-                    if (sourceIdx !== -1 && targetIdx !== sourceIdx && targetIdx !== sourceIdx + 1) {
+                  // Reorder or stack within the same section
+                  if (clusters.length > 1 || stackWithPart) {
+                    const sourceIdx = sameSectionSourceIdx
+                    if (stackTargetCluster) {
+                      const newClusters = []
+                      let insertAt = 0
+                      clusters.forEach((cl) => {
+                        if (cl === cluster) {
+                          if (remainingSourceParts.length > 0) {
+                            newClusters.push(Object.assign({}, cl, { parts: remainingSourceParts }))
+                          }
+                        } else if (cl === stackTargetCluster) {
+                          insertAt = newClusters.length
+                          newClusters.push(Object.assign({}, cl, { parts: combinedTargetParts }))
+                        } else {
+                          newClusters.push(cl)
+                        }
+                      })
+
+                      const orderedAssignmentIds = []
+                      newClusters.forEach(cl => {
+                        cl.parts.forEach(p => {
+                          if (p.assignment_ids && p.assignment_ids.length > 0) {
+                            p.assignment_ids.forEach(aid => {
+                              if (!orderedAssignmentIds.includes(aid)) orderedAssignmentIds.push(aid)
+                            })
+                          } else if (p.id && !orderedAssignmentIds.includes(p.id)) {
+                            orderedAssignmentIds.push(p.id)
+                          }
+                        })
+                      })
+
+                      component.setTriggerValue("move_part_assignment", {
+                        assignment_id: activePart.id,
+                        assignment_ids: clusterAssignmentIds.length > 0 ? clusterAssignmentIds : (activePart.assignment_ids || [activePart.id]),
+                        part_id: activePart.part_id,
+                        part_number: activePart.part_number,
+                        from_section_id: section.id,
+                        to_section_id: section.id,
+                        target_index: insertAt,
+                        ordered_assignment_ids: orderedAssignmentIds,
+                        stack_with_part_number: stackWithPart ? stackWithPart.part_number : null,
+                        stack_with_part_id: stackWithPart ? stackWithPart.part_id : null,
+                        stack_with_assignment_id: stackWithPart ? stackWithPart.id : null,
+                        stack_with_assignment_ids: stackTargetAssignmentIds,
+                      })
+                    } else if (sourceIdx !== -1 && targetIdx !== sourceIdx && targetIdx !== sourceIdx + 1) {
                       const newClusters = [...clusters]
                       const [movedCluster] = newClusters.splice(sourceIdx, 1)
                       const insertAt = targetIdx > sourceIdx ? targetIdx - 1 : targetIdx
@@ -2336,20 +3200,36 @@ export default function renderFishbone(component) {
 
                       component.setTriggerValue("move_part_assignment", {
                         assignment_id: activePart.id,
-                        assignment_ids: activePart.assignment_ids || [activePart.id],
+                        assignment_ids: clusterAssignmentIds.length > 0 ? clusterAssignmentIds : (activePart.assignment_ids || [activePart.id]),
                         part_id: activePart.part_id,
+                        part_number: activePart.part_number,
                         from_section_id: section.id,
                         to_section_id: section.id,
                         target_index: insertAt,
-                        ordered_assignment_ids: orderedAssignmentIds
+                        ordered_assignment_ids: orderedAssignmentIds,
+                        stack_with_part_number: null,
+                        stack_with_part_id: null,
                       })
                     }
                   }
                 } else {
-                  // Move to another section
-                  const targetClusters = [...clusters]
-                  const insertAt = Math.min(Math.max(0, targetIdx), targetClusters.length)
-                  targetClusters.splice(insertAt, 0, cluster)
+                  // Move to another section (and optionally stack onto target card)
+                  let targetClusters = []
+                  let insertAt = 0
+                  if (stackTargetCluster) {
+                    clusters.forEach((cl) => {
+                      if (cl === stackTargetCluster) {
+                        insertAt = targetClusters.length
+                        targetClusters.push(Object.assign({}, cl, { parts: combinedTargetParts }))
+                      } else {
+                        targetClusters.push(cl)
+                      }
+                    })
+                  } else {
+                    targetClusters = [...clusters]
+                    insertAt = Math.min(Math.max(0, targetIdx), targetClusters.length)
+                    targetClusters.splice(insertAt, 0, Object.assign({}, cluster, { parts: movingParts }))
+                  }
 
                   const orderedTargetAssignmentIds = []
                   targetClusters.forEach(cl => {
@@ -2366,12 +3246,17 @@ export default function renderFishbone(component) {
 
                   component.setTriggerValue("move_part_assignment", {
                     assignment_id: activePart.id,
-                    assignment_ids: activePart.assignment_ids || [activePart.id],
+                    assignment_ids: clusterAssignmentIds.length > 0 ? clusterAssignmentIds : (activePart.assignment_ids || [activePart.id]),
                     part_id: activePart.part_id,
+                    part_number: activePart.part_number,
                     from_section_id: section.id,
                     to_section_id: targetSec.id,
                     target_index: insertAt,
-                    ordered_assignment_ids: orderedTargetAssignmentIds
+                    ordered_assignment_ids: orderedTargetAssignmentIds,
+                    stack_with_part_number: stackWithPart ? stackWithPart.part_number : null,
+                    stack_with_part_id: stackWithPart ? stackWithPart.part_id : null,
+                    stack_with_assignment_id: stackWithPart ? stackWithPart.id : null,
+                    stack_with_assignment_ids: stackTargetAssignmentIds,
                   })
                 }
               }
@@ -2388,10 +3273,11 @@ export default function renderFishbone(component) {
           const onKeyDown = (keyEvt) => {
             if (keyEvt.key === "Escape") {
               state.draggingPart = false
-            window.removeEventListener("mousemove", onMouseMove)
+              window.removeEventListener("mousemove", onMouseMove)
               window.removeEventListener("mouseup", onMouseUp)
               window.removeEventListener("keydown", onKeyDown)
               document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+              document.querySelectorAll(".part-card").forEach(c => c.classList.remove("part-card-stack-target"))
               const oldIndicator = ghostLayer.querySelector(".part-insert-indicator")
               if (oldIndicator) oldIndicator.remove()
               if (ghostEl) {
@@ -2427,8 +3313,11 @@ export default function renderFishbone(component) {
           if (hasMultiple) {
             tooltipNumber.textContent = `${cluster.baseCode} (${cluster.parts.length} variants)`
             tooltipName.textContent = activePart.description || "Similar Part Family"
-            const lines = cluster.parts.map((p, i) => `${i === activeIdx ? "▶ " : "• "}${p.part_number}: ${p.description || ""} (Qty: ${p.quantity})`).join("\\n")
-            tooltipMeta.textContent = `${lines}\n\n💡 Click card to cycle active variant · Drag to re-order or move between sections`
+            const lines = cluster.parts.map((p, i) => {
+              const noteStr = p.use_description ? ` · ${p.use_description}` : ""
+              return `${i === activeIdx ? "▶ " : "• "}${p.part_number}: ${p.description || ""} (Qty: ${p.quantity}${noteStr})`
+            }).join("\\n")
+            tooltipMeta.textContent = `${lines}\n\n💡 Click ${cluster.parts.length}× badge to edit variant ties · Click card to cycle active variant · Drag to move`
           } else {
             tooltipNumber.textContent = activePart.part_number
             tooltipName.textContent = activePart.description || "—"
@@ -2817,6 +3706,7 @@ export default function renderFishbone(component) {
     const currY = (e.clientY - rect.top - state.y) / state.scale
 
     document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+    document.querySelectorAll(".part-card").forEach(c => c.classList.remove("part-card-stack-target"))
 
     const targetSec = sections.find(s => {
       const w = s.secWidth || 220
@@ -2826,11 +3716,27 @@ export default function renderFishbone(component) {
     if (targetSec) {
       const nodeElem = parentElement.querySelector(`[data-section-id="${targetSec.id}"]`)
       if (nodeElem) nodeElem.classList.add("section-drop-hover")
+
+      const clusters = targetSec.partClusters || []
+      const localX = currX - targetSec.sx
+      const localY = currY - targetSec.sy
+      const cardTopY = -targetSec.secHeight / 2 + 48
+      const cardBotY = cardTopY + 78
+      if (localY >= cardTopY - 8 && localY <= cardBotY + 8) {
+        const stackTargetCluster = clusters.find(cl => {
+          const margin = Math.min(18, cl.cardW * 0.22)
+          return localX >= cl.cardX + margin && localX <= cl.cardX + cl.cardW - margin
+        })
+        if (stackTargetCluster && stackTargetCluster.cardElem) {
+          stackTargetCluster.cardElem.classList.add("part-card-stack-target")
+        }
+      }
     }
   }
 
   svg.ondragleave = () => {
     document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+    document.querySelectorAll(".part-card").forEach(c => c.classList.remove("part-card-stack-target"))
   }
 
   svg.ondrop = (e) => {
@@ -2838,6 +3744,7 @@ export default function renderFishbone(component) {
     state.hasUserInteracted = true
     saveFishboneView(storageKey, state)
     document.querySelectorAll(".section-node").forEach(n => n.classList.remove("section-drop-hover"))
+    document.querySelectorAll(".part-card").forEach(c => c.classList.remove("part-card-stack-target"))
     const rawData = e.dataTransfer.getData("application/json")
     if (!rawData) return
     const item = JSON.parse(rawData)
@@ -2852,6 +3759,22 @@ export default function renderFishbone(component) {
       return Math.abs(currX - s.sx) < w / 2 && Math.abs(currY - s.sy) < h / 2
     })
     if (!targetSec) return
+
+    const clusters = targetSec.partClusters || []
+    const localX = currX - targetSec.sx
+    const localY = currY - targetSec.sy
+    const cardTopY = -targetSec.secHeight / 2 + 48
+    const cardBotY = cardTopY + 78
+    let stackTargetCluster = null
+    if (localY >= cardTopY - 8 && localY <= cardBotY + 8) {
+      stackTargetCluster = clusters.find(cl => {
+        const margin = Math.min(18, cl.cardW * 0.22)
+        return localX >= cl.cardX + margin && localX <= cl.cardX + cl.cardW - margin
+      }) || null
+    }
+    const stackWithPart = stackTargetCluster && stackTargetCluster.parts && stackTargetCluster.parts.length > 0
+      ? stackTargetCluster.parts[stackTargetCluster.activeIdx || 0] || stackTargetCluster.parts[0]
+      : null
 
     if (item.is_assembly) {
       const isSupport = targetSec.type === "Support Operations"
@@ -2946,11 +3869,37 @@ export default function renderFishbone(component) {
           useDesc = `Formed in ${targetSec.name}`
         }
       }
+      const orderedAssignmentIds = []
+      const dropStackTargetAids = []
+      if (stackTargetCluster) {
+        clusters.forEach(cl => {
+          cl.parts.forEach(p => {
+            if (p.assignment_ids && p.assignment_ids.length > 0) {
+              p.assignment_ids.forEach(aid => {
+                if (!orderedAssignmentIds.includes(aid)) orderedAssignmentIds.push(aid)
+                if (cl === stackTargetCluster && !dropStackTargetAids.includes(aid)) dropStackTargetAids.push(aid)
+              })
+            } else if (p.id && !orderedAssignmentIds.includes(p.id)) {
+              orderedAssignmentIds.push(p.id)
+              if (cl === stackTargetCluster && !dropStackTargetAids.includes(p.id)) dropStackTargetAids.push(p.id)
+            }
+          })
+          if (cl === stackTargetCluster) {
+            orderedAssignmentIds.push("__dropped__")
+          }
+        })
+      }
       component.setTriggerValue("drop_part", {
         part_id: item.part_id,
+        part_number: item.part_number,
         section_id: targetSec.id,
         quantity: item.quantity || 1,
-        use_description: useDesc
+        use_description: useDesc,
+        ordered_assignment_ids: orderedAssignmentIds,
+        stack_with_part_number: stackWithPart ? stackWithPart.part_number : null,
+        stack_with_part_id: stackWithPart ? stackWithPart.part_id : null,
+        stack_with_assignment_id: stackWithPart ? stackWithPart.id : null,
+        stack_with_assignment_ids: dropStackTargetAids,
       })
     }
   }
@@ -3138,7 +4087,7 @@ export default function renderFishbone(component) {
 """
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v27",
+    "paag_interactive_fishbone_builder_v35",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -3199,6 +4148,7 @@ def interactive_fishbone(
     on_remove_part: Callable[[], None] | None = None,
     on_move_part_assignment: Callable[[], None] | None = None,
     on_replicate_part_uses: Callable[[], None] | None = None,
+    on_unstack_part_variant: Callable[[], None] | None = None,
 ) -> Any:
     """Render the simplified interactive Fishbone builder canvas with simple blocks and direct parent/child flow."""
     kwargs = {
@@ -3242,5 +4192,7 @@ def interactive_fishbone(
         kwargs["on_move_part_assignment_change"] = on_move_part_assignment
     if on_replicate_part_uses:
         kwargs["on_replicate_part_uses_change"] = on_replicate_part_uses
+    if on_unstack_part_variant:
+        kwargs["on_unstack_part_variant_change"] = on_unstack_part_variant
 
     return _FISHBONE_COMPONENT(**kwargs)

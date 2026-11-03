@@ -21,6 +21,7 @@ from utils.store import (
     fishbone_assignment_assembly_impact,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
+    link_part_variants,
     move_fishbone_part_assignment,
     reorder_fishbone_part_assignments,
     part_feature_rules,
@@ -35,6 +36,8 @@ from utils.store import (
     save_assembly_section_connection,
     save_fishbone_canvas_draft,
     save_fishbone_canvas_positions,
+    set_fishbone_assignments_stack_group,
+    unlink_part_variant,
     update_assembly_section_rows,
     yamazumi_area_creation_summary,
     yamazumi_areas,
@@ -96,7 +99,7 @@ assignment_editor_key = apply_pending_table_editor_reset(assignment_editor_key)
 pool_editor_key = apply_pending_table_editor_reset(pool_editor_key)
 
 scenario_active_part_ids = active_part_ids(project_id, scenario_id)
-all_catalog_parts = project_table("parts", project_id, "part_number")
+all_catalog_parts = project_table("parts", project_id, "part_number", scenario_id=scenario_id)
 if not all_catalog_parts.empty:
     active_catalog_parts = all_catalog_parts.loc[
         all_catalog_parts["id"].astype(str).isin(scenario_active_part_ids)
@@ -148,6 +151,16 @@ else:
         scenario_active_part_ids
     )
     assignments = all_assignments.loc[assignment_is_active].copy()
+    if not assignments.empty and not all_catalog_parts.empty and "variant_group" in all_catalog_parts.columns:
+        _vg_by_part_id = dict(
+            zip(
+                all_catalog_parts["id"].astype(str),
+                all_catalog_parts["variant_group"].fillna("").astype(str),
+            )
+        )
+        assignments["variant_group"] = (
+            assignments["part_id"].astype(str).map(_vg_by_part_id).fillna("")
+        )
     inactive_assignments = all_assignments.loc[~assignment_is_active].copy()
 active_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections
 section_name_by_id = dict(zip(sections["id"].astype(str), sections["name"].astype(str))) if not sections.empty else {}
@@ -488,6 +501,10 @@ if assign_parts_tab.open:
                     placed_by_part[str(part_id)] = f"{len(uses)} use{'s' if len(uses) != 1 else ''} · {section_summary}"
 
             part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
+            part_pool["variant_group"] = [
+                ", ".join(vg) if isinstance(vg, (list, tuple)) else str(vg or "")
+                for vg in (parts["variant_group"] if "variant_group" in parts.columns else [""] * len(parts))
+            ]
 
             def resolve_part_meta(pid_val, pnum_val, fallback_qty, catalog_idx: int):
                 pid = str(pid_val)
@@ -547,7 +564,7 @@ if assign_parts_tab.open:
                 )
                 visible_parts = visible_parts[placement_state.isin(placement_filters)]
             if part_search:
-                searchable = visible_parts[["part_number", "description", "level"]].fillna("").astype(str).agg(" ".join, axis=1)
+                searchable = visible_parts[["part_number", "description", "level", "variant_group"]].fillna("").astype(str).agg(" ".join, axis=1)
                 visible_parts = visible_parts[searchable.str.contains(part_search, case=False, regex=False)]
             if selected_pool_features:
                 _sel_pool_feat_set = set(selected_pool_features)
@@ -598,8 +615,8 @@ if assign_parts_tab.open:
                 key=pool_key,
                 hide_index=True,
                 height=330,
-                disabled=["id", "_master_order", "part_number", "level", "description", "revision", "model_applicability", "models_familiar", "fishbone_section"],
-                column_order=["place", "edit_part", "part_number", "level", "description", "quantity", "revision", "models_familiar", "fishbone_section"],
+                disabled=["id", "_master_order", "part_number", "level", "description", "revision", "model_applicability", "models_familiar", "variant_group", "fishbone_section"],
+                column_order=["place", "edit_part", "part_number", "level", "description", "variant_group", "quantity", "revision", "models_familiar", "fishbone_section"],
                 column_config={
                     "id": None,
                     "_master_order": None,
@@ -623,6 +640,11 @@ if assign_parts_tab.open:
                         help="BOM hierarchy level from the Model Tree master list (e.g. L1, L2, L3).",
                     ),
                     "description": st.column_config.TextColumn("Part Name", width="large"),
+                    "variant_group": st.column_config.TextColumn(
+                        "Variant group",
+                        width="medium",
+                        help="Model variant peer part numbers linked to this part (automatic base-code or manual Variant group tie).",
+                    ),
                     "quantity": st.column_config.NumberColumn(
                         "Fishbone quantity", step=0.01, format="%g",
                         help="This quantity applies to the fishbone occurrence being placed; it does not change the master Parts record.",
@@ -821,8 +843,8 @@ if assign_parts_tab.open:
                 full_assignment_editor,
                 key=f"fishbone_assignment_filters_{project_id}_{scenario_id}",
                 dropdown_columns=["section", "revision", "model_applicability"],
-                search_columns=["section", "part_number", "description", "use_description", "revision", "model_applicability", "notes"],
-                labels={"section": "Fishbone section", "model_applicability": "Feature applicability"},
+                search_columns=["section", "part_number", "description", "variant_group", "use_description", "revision", "model_applicability", "notes"],
+                labels={"section": "Fishbone section", "model_applicability": "Feature applicability", "variant_group": "Variant group"},
                 reset_widget_keys=[assignment_editor_key],
                 multi_value_columns=["model_applicability"],
                 universal_values={"model_applicability": ["All", "All models", ""]},
@@ -864,12 +886,12 @@ if assign_parts_tab.open:
                 num_rows="delete",
                 height=430,
                 disabled=[
-                    "id", "part_id", "part_number", "description", "revision",
+                    "id", "part_id", "part_number", "description", "variant_group", "revision",
                     "model_applicability", "pits_sync_status", "updated_at",
                 ],
                 column_order=[
                     "edit_part", "add_use", "section", "part_number", "description",
-                    "quantity", "pits_sync_status", "model_applicability", "revision",
+                    "variant_group", "quantity", "pits_sync_status", "model_applicability", "revision",
                     "use_description", "notes", "sequence",
                 ],
                 column_config={
@@ -909,6 +931,11 @@ if assign_parts_tab.open:
                     "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d"),
                     "part_number": st.column_config.TextColumn("Part number", width=105, pinned=True),
                     "description": st.column_config.TextColumn("Part Name", width=140, pinned=True),
+                    "variant_group": st.column_config.TextColumn(
+                        "Variant group",
+                        width="medium",
+                        help="Model variant peer part numbers linked to this part. Tied variants in the same section stack together on the Interactive Fishbone.",
+                    ),
                     "use_description": st.column_config.TextColumn(
                         "Use / installation location",
                         width="large",
@@ -1138,12 +1165,15 @@ if fishbone_tab.open:
                     "new_assignments": [],
                     "updated_assignments": [],
                     "deleted_assignments": set(),
+                    "variant_links": [],
                 },
             )
             if "updated_assignments" not in draft:
                 draft["updated_assignments"] = []
             if "connection_nodes" not in draft:
                 draft["connection_nodes"] = {}
+            if "variant_links" not in draft:
+                draft["variant_links"] = []
 
             canvas_key = f"interactive_fishbone_{project_id}"
             canvas_state = st.session_state.get(canvas_key)
@@ -1353,6 +1383,132 @@ if fishbone_tab.open:
                         delattr(canvas_state, "clear_fishbone_request")
                     except (AttributeError, TypeError):
                         pass
+                def _apply_ordered_sequences(target_sec_id: str, ordered_list: list) -> bool:
+                    changed = False
+                    if not ordered_list:
+                        return False
+                    new_assigns = draft.get("new_assignments", [])
+                    upd_assigns = draft.get("updated_assignments", [])
+                    upd_by_aid = {
+                        str(ua.get("assignment_id") or ua.get("id") or ""): ua
+                        for ua in upd_assigns
+                        if ua.get("assignment_id") or ua.get("id")
+                    }
+                    for seq_idx, raw_aid in enumerate(ordered_list):
+                        s_aid = str(raw_aid or "").strip()
+                        if not s_aid:
+                            continue
+                        new_seq = (seq_idx + 1) * 10
+                        if s_aid.startswith("draft_a_"):
+                            try:
+                                d_idx = int(s_aid.split("draft_a_", 1)[1])
+                                if 0 <= d_idx < len(new_assigns):
+                                    if new_assigns[d_idx].get("sequence") != new_seq:
+                                        new_assigns[d_idx]["sequence"] = new_seq
+                                        changed = True
+                            except ValueError:
+                                pass
+                        else:
+                            if s_aid in upd_by_aid:
+                                if upd_by_aid[s_aid].get("sequence") != new_seq:
+                                    upd_by_aid[s_aid]["sequence"] = new_seq
+                                    changed = True
+                            if not assignments.empty and "id" in assignments.columns and "sequence" in assignments.columns:
+                                m_mask = assignments["id"].astype(str) == s_aid
+                                if m_mask.any():
+                                    assignments.loc[m_mask, "sequence"] = new_seq
+                    db_updated = reorder_fishbone_part_assignments(
+                        project_id,
+                        target_sec_id,
+                        ordered_list,
+                        editor_name=st.session_state.get("current_editor", ""),
+                    )
+                    return changed or (db_updated > 0)
+
+                def _set_assignment_stack_group(target_aids: list, stack_group: int | None = None) -> int:
+                    clean_aids = [str(x).strip() for x in (target_aids or []) if str(x or "").strip()]
+                    if not clean_aids:
+                        return 1
+                    new_assigns = draft.get("new_assignments", [])
+                    upd_assigns = draft.get("updated_assignments", [])
+                    upd_by_aid = {
+                        str(ua.get("assignment_id") or ua.get("id") or ""): ua
+                        for ua in upd_assigns
+                        if ua.get("assignment_id") or ua.get("id")
+                    }
+                    if stack_group is None:
+                        existing_sg = 0
+                        for s_aid in clean_aids:
+                            if s_aid.startswith("draft_a_"):
+                                try:
+                                    d_idx = int(s_aid.split("draft_a_", 1)[1])
+                                    if 0 <= d_idx < len(new_assigns):
+                                        sg_val = int(new_assigns[d_idx].get("step_number") or 1)
+                                        if sg_val > 1:
+                                            existing_sg = sg_val
+                                            break
+                                except ValueError:
+                                    pass
+                            else:
+                                if s_aid in upd_by_aid and int(upd_by_aid[s_aid].get("step_number") or 1) > 1:
+                                    existing_sg = int(upd_by_aid[s_aid].get("step_number") or 1)
+                                    break
+                                if not assignments.empty and "id" in assignments.columns and "step_number" in assignments.columns:
+                                    m_rows = assignments.loc[assignments["id"].astype(str) == s_aid]
+                                    if not m_rows.empty:
+                                        sg_val = int(m_rows.iloc[0].get("step_number") or 1)
+                                        if sg_val > 1:
+                                            existing_sg = sg_val
+                                            break
+                        if existing_sg > 1:
+                            stack_group = existing_sg
+                        else:
+                            max_sg = 1
+                            if not assignments.empty and "step_number" in assignments.columns:
+                                for sv in assignments["step_number"]:
+                                    try:
+                                        max_sg = max(max_sg, int(sv or 1))
+                                    except (ValueError, TypeError):
+                                        pass
+                            for na in new_assigns:
+                                try:
+                                    max_sg = max(max_sg, int(na.get("step_number") or 1))
+                                except (ValueError, TypeError):
+                                    pass
+                            for ua in upd_assigns:
+                                try:
+                                    max_sg = max(max_sg, int(ua.get("step_number") or 1))
+                                except (ValueError, TypeError):
+                                    pass
+                            stack_group = max_sg + 1
+
+                    target_sg = max(1, int(stack_group))
+                    db_aids = []
+                    for s_aid in clean_aids:
+                        if s_aid.startswith("draft_a_"):
+                            try:
+                                d_idx = int(s_aid.split("draft_a_", 1)[1])
+                                if 0 <= d_idx < len(new_assigns):
+                                    new_assigns[d_idx]["step_number"] = target_sg
+                            except ValueError:
+                                pass
+                        else:
+                            db_aids.append(s_aid)
+                            if s_aid in upd_by_aid:
+                                upd_by_aid[s_aid]["step_number"] = target_sg
+                            if not assignments.empty and "id" in assignments.columns and "step_number" in assignments.columns:
+                                m_mask = assignments["id"].astype(str) == s_aid
+                                if m_mask.any():
+                                    assignments.loc[m_mask, "step_number"] = target_sg
+                    if db_aids:
+                        set_fishbone_assignments_stack_group(
+                            project_id,
+                            db_aids,
+                            target_sg,
+                            editor_name=st.session_state.get("current_editor", ""),
+                        )
+                    return target_sg
+
                 if p := getattr(canvas_state, "drop_part", None):
                     try:
                         delattr(canvas_state, "drop_part")
@@ -1360,22 +1516,73 @@ if fishbone_tab.open:
                         pass
                     pid = p.get("part_id")
                     sid = p.get("section_id")
+                    dropped_pn = str(p.get("part_number") or "").strip()
+                    stack_with_pn = str(p.get("stack_with_part_number") or "").strip()
+                    stack_with_aid = str(p.get("stack_with_assignment_id") or "").strip()
+                    stack_with_aids = [
+                        str(x).strip()
+                        for x in (p.get("stack_with_assignment_ids") or ([stack_with_aid] if stack_with_aid else []))
+                        if str(x or "").strip()
+                    ]
+                    ordered_aids_drop = p.get("ordered_assignment_ids") or []
                     if pid and sid:
-                        already_in_sec = any(
-                            str(a["part_id"]) == str(pid) and str(a["section_id"]) == str(sid)
-                            and str(a["id"]) not in draft["deleted_assignments"]
-                            for _, a in assignments.iterrows()
-                        ) or any(
-                            str(na.get("part_id")) == str(pid) and str(na.get("section_id")) == str(sid)
-                            for na in draft.get("new_assignments", [])
-                        )
-                        if not already_in_sec:
+                        dropped_aid = None
+                        for _, a in assignments.iterrows():
+                            if (
+                                str(a["part_id"]) == str(pid)
+                                and str(a["section_id"]) == str(sid)
+                                and str(a["id"]) not in draft["deleted_assignments"]
+                            ):
+                                dropped_aid = str(a["id"])
+                                break
+                        if not dropped_aid:
+                            for na_idx, na in enumerate(draft.get("new_assignments", [])):
+                                if str(na.get("part_id")) == str(pid) and str(na.get("section_id")) == str(sid):
+                                    dropped_aid = f"draft_a_{na_idx}"
+                                    break
+                        if not dropped_aid:
+                            max_seq_in_sec = 0
+                            for _, a in assignments.iterrows():
+                                if str(a["section_id"]) == str(sid) and str(a["id"]) not in draft["deleted_assignments"]:
+                                    max_seq_in_sec = max(max_seq_in_sec, int(a.get("sequence") or 10))
+                            for na in draft.get("new_assignments", []):
+                                if str(na.get("section_id")) == str(sid):
+                                    max_seq_in_sec = max(max_seq_in_sec, int(na.get("sequence") or 10))
                             draft["new_assignments"].append({
                                 "part_id": str(pid),
                                 "section_id": str(sid),
+                                "step_number": 1,
+                                "sequence": max_seq_in_sec + 10,
                                 "quantity": float(p.get("quantity") or 1.0),
                                 "use_description": str(p.get("use_description") or ""),
                             })
+                            dropped_aid = f"draft_a_{len(draft['new_assignments']) - 1}"
+                        if ordered_aids_drop and dropped_aid:
+                            resolved_ordered = [
+                                dropped_aid if str(x) == "__dropped__" else str(x)
+                                for x in ordered_aids_drop
+                                if x
+                            ]
+                            _apply_ordered_sequences(str(sid), resolved_ordered)
+                        if stack_with_aids and dropped_aid and dropped_aid not in stack_with_aids:
+                            _set_assignment_stack_group([*stack_with_aids, dropped_aid])
+                        if not dropped_pn and not all_catalog_parts.empty:
+                            m_rows = all_catalog_parts.loc[all_catalog_parts["id"].astype(str) == str(pid)]
+                            if not m_rows.empty:
+                                dropped_pn = str(m_rows.iloc[0]["part_number"] or "").strip()
+                        if dropped_pn and stack_with_pn and dropped_pn.upper() != stack_with_pn.upper():
+                            pair = [dropped_pn, stack_with_pn]
+                            if pair not in draft["variant_links"]:
+                                draft["variant_links"].append(pair)
+                            st.toast(
+                                f"Stacked {dropped_pn} with {stack_with_pn} as model variants (staged — click Save & Refresh to commit)",
+                                icon=":material/layers:",
+                            )
+                        elif dropped_pn and stack_with_aids and dropped_aid and dropped_aid not in stack_with_aids:
+                            st.toast(
+                                f"Stacked {dropped_pn} cards as model variants (staged — click Save & Refresh to commit)",
+                                icon=":material/layers:",
+                            )
                 if p := getattr(canvas_state, "drop_assembly", None):
                     try:
                         delattr(canvas_state, "drop_assembly")
@@ -1444,14 +1651,29 @@ if fishbone_tab.open:
                         delattr(canvas_state, "remove_part")
                     except (AttributeError, TypeError):
                         pass
+                    removed_draft_indices = set()
+                    all_aids = []
                     if aid := p.get("assignment_id"):
-                        draft["deleted_assignments"].add(aid)
+                        all_aids.append(str(aid))
                     for a_item in p.get("assignment_ids", []):
-                        if a_item:
-                            draft["deleted_assignments"].add(a_item)
+                        if a_item and str(a_item) not in all_aids:
+                            all_aids.append(str(a_item))
+                    for a_str in all_aids:
+                        if a_str.startswith("draft_a_"):
+                            try:
+                                removed_draft_indices.add(int(a_str.split("draft_a_", 1)[1]))
+                            except ValueError:
+                                pass
+                        else:
+                            draft["deleted_assignments"].add(a_str)
                     pid = p.get("part_id")
                     sec_id = p.get("section_id")
-                    if pid:
+                    if removed_draft_indices:
+                        draft["new_assignments"] = [
+                            na for idx, na in enumerate(draft["new_assignments"])
+                            if idx not in removed_draft_indices
+                        ]
+                    elif pid and not all_aids:
                         draft["new_assignments"] = [
                             na for na in draft["new_assignments"]
                             if not (str(na.get("part_id")) == str(pid) and (sec_id is None or str(na.get("section_id")) == str(sec_id)))
@@ -1466,7 +1688,7 @@ if fishbone_tab.open:
                     include_children = bool(p.get("include_children", False))
                     section_uses = p.get("section_uses") or []
                     if pid:
-                        desired_by_sec = {}
+                        desired_uses_by_sec: dict[str, list[dict]] = {}
                         for su in section_uses:
                             s_id = str(su.get("section_id") or "").strip()
                             if s_id and s_id in records:
@@ -1474,11 +1696,12 @@ if fishbone_tab.open:
                                     q_val = float(su.get("quantity") or 1.0)
                                 except (ValueError, TypeError):
                                     q_val = 1.0
-                                desired_by_sec[s_id] = {
+                                desired_uses_by_sec.setdefault(s_id, []).append({
+                                    "assignment_id": str(su.get("assignment_id") or "").strip() or None,
                                     "section_id": s_id,
                                     "quantity": max(0.01, q_val),
                                     "use_description": str(su.get("use_description") or "").strip(),
-                                }
+                                })
 
                         staged_map = {
                             str(ua.get("assignment_id")): ua
@@ -1486,61 +1709,117 @@ if fishbone_tab.open:
                             if ua.get("assignment_id")
                         }
                         existing_db_by_sec: dict[str, list[str]] = {}
+                        existing_db_step_by_aid: dict[str, int] = {}
+                        previously_active_secs: set[str] = set()
                         for _, a_row in assignments.iterrows():
                             if str(a_row["part_id"]) != pid:
                                 continue
                             aid_str = str(a_row["id"])
                             eff_sec = str(staged_map[aid_str].get("section_id") or a_row["section_id"]) if aid_str in staged_map else str(a_row["section_id"])
+                            eff_step = (
+                                int(staged_map[aid_str].get("step_number") or a_row.get("step_number") or 1)
+                                if aid_str in staged_map and staged_map[aid_str].get("step_number") is not None
+                                else int(a_row.get("step_number") or 1)
+                            )
+                            existing_db_step_by_aid[aid_str] = eff_step
                             existing_db_by_sec.setdefault(eff_sec, []).append(aid_str)
+                            if aid_str not in draft["deleted_assignments"]:
+                                previously_active_secs.add(eff_sec)
 
-                        handled_secs = set()
-                        for s_id, aid_list in existing_db_by_sec.items():
-                            if s_id in desired_by_sec:
-                                handled_secs.add(s_id)
-                                target_info = desired_by_sec[s_id]
-                                primary_aid = aid_list[0]
-                                draft["deleted_assignments"].discard(primary_aid)
-                                for extra_aid in aid_list[1:]:
-                                    draft["deleted_assignments"].add(extra_aid)
-                                if primary_aid in staged_map:
-                                    staged_map[primary_aid]["quantity"] = target_info["quantity"]
-                                    staged_map[primary_aid]["use_description"] = target_info["use_description"]
+                        other_new_assignments = []
+                        existing_draft_by_sec: dict[str, list[dict]] = {}
+                        for na in draft.get("new_assignments", []):
+                            if str(na.get("part_id")) != pid:
+                                other_new_assignments.append(na)
+                            else:
+                                na_sec = str(na.get("section_id") or "")
+                                existing_draft_by_sec.setdefault(na_sec, []).append(na)
+                                if na_sec:
+                                    previously_active_secs.add(na_sec)
+
+                        all_candidate_secs = list(
+                            dict.fromkeys(
+                                list(existing_db_by_sec.keys())
+                                + list(existing_draft_by_sec.keys())
+                                + list(desired_uses_by_sec.keys())
+                            )
+                        )
+                        kept_part_new_assignments = []
+                        newly_added_secs = []
+
+                        for s_id in all_candidate_secs:
+                            db_aids = existing_db_by_sec.get(s_id, [])
+                            draft_nas = existing_draft_by_sec.get(s_id, [])
+                            desired_list = desired_uses_by_sec.get(s_id, [])
+                            if not desired_list:
+                                for aid_to_del in db_aids:
+                                    draft["deleted_assignments"].add(aid_to_del)
+                                continue
+
+                            if s_id not in previously_active_secs:
+                                newly_added_secs.append(s_id)
+
+                            matched_db_count = min(len(desired_list), len(db_aids))
+                            for i in range(matched_db_count):
+                                aid_val = db_aids[i]
+                                target_info = desired_list[i]
+                                draft["deleted_assignments"].discard(aid_val)
+                                if aid_val in staged_map:
+                                    staged_map[aid_val]["quantity"] = target_info["quantity"]
+                                    staged_map[aid_val]["use_description"] = target_info["use_description"]
                                 else:
                                     draft.setdefault("updated_assignments", []).append({
-                                        "assignment_id": primary_aid,
+                                        "assignment_id": aid_val,
                                         "section_id": s_id,
-                                        "step_number": 1,
+                                        "step_number": existing_db_step_by_aid.get(aid_val, 1),
                                         "quantity": target_info["quantity"],
                                         "use_description": target_info["use_description"],
                                     })
-                            else:
-                                for aid_to_del in aid_list:
-                                    draft["deleted_assignments"].add(aid_to_del)
+                            for extra_aid in db_aids[matched_db_count:]:
+                                draft["deleted_assignments"].add(extra_aid)
 
-                        kept_new_assignments = []
-                        for na in draft.get("new_assignments", []):
-                            if str(na.get("part_id")) != pid:
-                                kept_new_assignments.append(na)
-                                continue
-                            na_sec = str(na.get("section_id") or "")
-                            if na_sec in desired_by_sec and na_sec not in handled_secs:
-                                handled_secs.add(na_sec)
-                                na["quantity"] = desired_by_sec[na_sec]["quantity"]
-                                na["use_description"] = desired_by_sec[na_sec]["use_description"]
-                                kept_new_assignments.append(na)
-                        draft["new_assignments"] = kept_new_assignments
+                            rem_desired = desired_list[matched_db_count:]
+                            max_seq_in_sec = 0
+                            for _, a_row in assignments.iterrows():
+                                aid_str = str(a_row["id"])
+                                if aid_str in draft["deleted_assignments"]:
+                                    continue
+                                eff_sec = (
+                                    str(staged_map[aid_str].get("section_id") or a_row["section_id"])
+                                    if aid_str in staged_map
+                                    else str(a_row["section_id"])
+                                )
+                                if eff_sec == s_id:
+                                    eff_seq = (
+                                        int(staged_map[aid_str].get("sequence") or a_row.get("sequence") or 10)
+                                        if aid_str in staged_map and staged_map[aid_str].get("sequence") is not None
+                                        else int(a_row.get("sequence") or 10)
+                                    )
+                                    max_seq_in_sec = max(max_seq_in_sec, eff_seq)
+                            for na_other in other_new_assignments:
+                                if str(na_other.get("section_id") or "") == s_id:
+                                    max_seq_in_sec = max(max_seq_in_sec, int(na_other.get("sequence") or 10))
+                            for na_existing in draft_nas[: len(rem_desired)]:
+                                max_seq_in_sec = max(max_seq_in_sec, int(na_existing.get("sequence") or 10))
 
-                        newly_added_secs = []
-                        for s_id, target_info in desired_by_sec.items():
-                            if s_id not in handled_secs:
-                                draft["new_assignments"].append({
-                                    "part_id": pid,
-                                    "section_id": s_id,
-                                    "step_number": 1,
-                                    "quantity": target_info["quantity"],
-                                    "use_description": target_info["use_description"],
-                                })
-                                newly_added_secs.append(s_id)
+                            for j, target_info in enumerate(rem_desired):
+                                if j < len(draft_nas):
+                                    na_item = draft_nas[j]
+                                    na_item["quantity"] = target_info["quantity"]
+                                    na_item["use_description"] = target_info["use_description"]
+                                    kept_part_new_assignments.append(na_item)
+                                else:
+                                    max_seq_in_sec += 10
+                                    kept_part_new_assignments.append({
+                                        "part_id": pid,
+                                        "section_id": s_id,
+                                        "step_number": 1,
+                                        "sequence": max_seq_in_sec,
+                                        "quantity": target_info["quantity"],
+                                        "use_description": target_info["use_description"],
+                                    })
+
+                        draft["new_assignments"] = other_new_assignments + kept_part_new_assignments
 
                         if include_children and newly_added_secs:
                             bom_tree_rep = pits_bom_model_tree(project_id)
@@ -1584,11 +1863,18 @@ if fishbone_tab.open:
                                             "use_description": f"Sub-component of {pnum}",
                                         })
 
-                        sec_count = len(desired_by_sec)
-                        st.toast(
-                            f"Staged {pnum} across {sec_count} section(s). Click 'Save & Refresh' to persist.",
-                            icon=":material/content_copy:",
-                        )
+                        sec_count = len(desired_uses_by_sec)
+                        total_cards = sum(len(v) for v in desired_uses_by_sec.values())
+                        if total_cards > sec_count:
+                            st.toast(
+                                f"Staged {pnum} across {total_cards} card(s) in {sec_count} section(s). Click 'Save & Refresh' to persist.",
+                                icon=":material/content_copy:",
+                            )
+                        else:
+                            st.toast(
+                                f"Staged {pnum} across {sec_count} section(s). Click 'Save & Refresh' to persist.",
+                                icon=":material/content_copy:",
+                            )
                         st.rerun()
                 if p := getattr(canvas_state, "move_part_assignment", None):
                     try:
@@ -1600,23 +1886,79 @@ if fishbone_tab.open:
                     from_sid = p.get("from_section_id")
                     to_sid = p.get("to_section_id")
                     pid = p.get("part_id")
+                    moved_pn = str(p.get("part_number") or "").strip()
+                    stack_with_pn = str(p.get("stack_with_part_number") or "").strip()
+                    stack_with_aid = str(p.get("stack_with_assignment_id") or "").strip()
+                    stack_with_aids = [
+                        str(x).strip()
+                        for x in (p.get("stack_with_assignment_ids") or ([stack_with_aid] if stack_with_aid else []))
+                        if str(x or "").strip()
+                    ]
                     ordered_aids = p.get("ordered_assignment_ids") or []
                     editor = st.session_state.get("current_editor", "")
 
+                    if not moved_pn and pid and not all_catalog_parts.empty:
+                        m_rows = all_catalog_parts.loc[all_catalog_parts["id"].astype(str) == str(pid)]
+                        if not m_rows.empty:
+                            moved_pn = str(m_rows.iloc[0]["part_number"] or "").strip()
+
+                    stacked_now = False
+                    if stack_with_aids and aids:
+                        _set_assignment_stack_group([*stack_with_aids, *[str(x) for x in aids if x]])
+                        stacked_now = True
+                    if moved_pn and stack_with_pn and moved_pn.upper() != stack_with_pn.upper():
+                        try:
+                            linked_group = link_part_variants(
+                                project_id,
+                                [moved_pn, stack_with_pn],
+                                editor_name=editor,
+                                scenario_id=scenario_id,
+                            )
+                            stacked_now = bool(linked_group) or stacked_now
+                        except ValueError as err:
+                            st.error(str(err))
+
+                    same_pn_stack = bool(moved_pn and stack_with_pn and moved_pn.upper() == stack_with_pn.upper())
                     if to_sid and to_sid == from_sid:
                         if ordered_aids:
-                            reorder_fishbone_part_assignments(
-                                project_id, from_sid, ordered_aids, editor_name=editor
+                            _apply_ordered_sequences(from_sid, ordered_aids)
+                        if stacked_now:
+                            st.toast(
+                                f"Stacked {moved_pn} uses as model variants"
+                                if same_pn_stack
+                                else f"Stacked {moved_pn} with {stack_with_pn} as model variants",
+                                icon=":material/layers:",
                             )
+                            st.rerun()
+                        elif ordered_aids:
                             sec_name = section_name_by_id.get(from_sid, "section")
                             st.toast(f"Reordered parts in {sec_name}", icon=":material/reorder:")
                             st.rerun()
                     elif to_sid and to_sid != from_sid:
                         moved_draft = False
-                        for na in draft.get("new_assignments", []):
-                            if str(na.get("part_id")) == str(pid) and (from_sid is None or str(na.get("section_id")) == str(from_sid)):
-                                na["section_id"] = to_sid
-                                moved_draft = True
+                        draft_indices_to_move = set()
+                        for item_aid in aids:
+                            s_aid = str(item_aid or "")
+                            if s_aid.startswith("draft_a_"):
+                                try:
+                                    draft_indices_to_move.add(int(s_aid.split("draft_a_", 1)[1]))
+                                except ValueError:
+                                    pass
+                        for idx, na in enumerate(draft.get("new_assignments", [])):
+                            if draft_indices_to_move:
+                                if idx in draft_indices_to_move:
+                                    na["section_id"] = to_sid
+                                    moved_draft = True
+                            elif not any(not str(x).startswith("draft_") for x in aids if x):
+                                if str(na.get("part_id")) == str(pid) and (from_sid is None or str(na.get("section_id")) == str(from_sid)):
+                                    na["section_id"] = to_sid
+                                    moved_draft = True
+                        for item_aid in aids:
+                            s_aid = str(item_aid or "").strip()
+                            if s_aid and not s_aid.startswith("draft_"):
+                                for ua in draft.get("updated_assignments", []):
+                                    if str(ua.get("assignment_id") or ua.get("id") or "") == s_aid and ua.get("section_id"):
+                                        ua["section_id"] = to_sid
                         moved_db_count = 0
                         for item_aid in aids:
                             if item_aid and not str(item_aid).startswith("draft_"):
@@ -1627,11 +1969,17 @@ if fishbone_tab.open:
                                     st.error(str(err))
                         if moved_db_count > 0:
                             if ordered_aids:
-                                reorder_fishbone_part_assignments(
-                                    project_id, to_sid, ordered_aids, editor_name=editor
-                                )
+                                _apply_ordered_sequences(to_sid, ordered_aids)
                             target_name = section_name_by_id.get(to_sid, "section")
-                            st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
+                            if stacked_now:
+                                st.toast(
+                                    f"Moved {moved_pn} to {target_name} and stacked uses as model variants"
+                                    if same_pn_stack
+                                    else f"Moved {moved_pn} to {target_name} and stacked with {stack_with_pn} as model variants",
+                                    icon=":material/layers:",
+                                )
+                            else:
+                                st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
                             record_audit_event(
                                 project_id,
                                 "Fishbone uses",
@@ -1643,13 +1991,134 @@ if fishbone_tab.open:
                                     "from_section_id": from_sid,
                                     "to_section_id": to_sid,
                                     "ordered_assignment_ids": ordered_aids,
+                                    "stacked_with_part_number": stack_with_pn or None,
                                 },
                             )
                             st.rerun()
-                        elif moved_draft:
+                        elif moved_draft or stacked_now:
+                            if ordered_aids:
+                                _apply_ordered_sequences(to_sid, ordered_aids)
                             target_name = section_name_by_id.get(to_sid, "section")
-                            st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
+                            if stacked_now:
+                                st.toast(
+                                    f"Moved {moved_pn} to {target_name} and stacked uses as model variants"
+                                    if same_pn_stack
+                                    else f"Moved {moved_pn} to {target_name} and stacked with {stack_with_pn} as model variants",
+                                    icon=":material/layers:",
+                                )
+                            else:
+                                st.toast(f"Moved part to {target_name}", icon=":material/swap_horiz:")
                             st.rerun()
+                if p := getattr(canvas_state, "unstack_part_variant", None):
+                    try:
+                        delattr(canvas_state, "unstack_part_variant")
+                    except (AttributeError, TypeError):
+                        pass
+                    untied_aids = [
+                        str(x).strip()
+                        for x in (p.get("untied_assignment_ids") or [])
+                        if str(x).strip()
+                    ]
+                    kept_aids = [
+                        str(x).strip()
+                        for x in (p.get("kept_assignment_ids") or [])
+                        if str(x).strip()
+                    ]
+                    added_aids = [
+                        str(x).strip()
+                        for x in (p.get("added_assignment_ids") or [])
+                        if str(x).strip()
+                    ]
+                    untied_pns = [
+                        str(x).strip()
+                        for x in (p.get("untied_part_numbers") or [])
+                        if str(x).strip()
+                    ]
+                    single_pn = str(p.get("part_number") or "").strip()
+                    unstack_pid = str(p.get("part_id") or "").strip()
+                    if not single_pn and unstack_pid and not all_catalog_parts.empty:
+                        m_rows = all_catalog_parts.loc[all_catalog_parts["id"].astype(str) == unstack_pid]
+                        if not m_rows.empty:
+                            single_pn = str(m_rows.iloc[0]["part_number"] or "").strip()
+                    if single_pn and single_pn not in untied_pns:
+                        untied_pns.append(single_pn)
+                    kept_pns = [
+                        str(x).strip()
+                        for x in (p.get("kept_part_numbers") or [])
+                        if str(x).strip()
+                    ]
+                    added_pns = [
+                        str(x).strip()
+                        for x in (p.get("added_part_numbers") or [])
+                        if str(x).strip()
+                    ]
+                    editor_val = st.session_state.get("current_editor", "")
+                    stack_group_changed = False
+                    if untied_aids:
+                        _set_assignment_stack_group(untied_aids, 1)
+                        stack_group_changed = True
+                    if len(kept_aids) < 2 and kept_aids:
+                        _set_assignment_stack_group(kept_aids, 1)
+                        stack_group_changed = True
+                    elif len(kept_aids) >= 2 and (untied_aids or added_aids):
+                        _set_assignment_stack_group(kept_aids, None)
+                        stack_group_changed = True
+
+                    distinct_kept_pns = list(dict.fromkeys(kept_pns))
+                    if untied_pns or (added_pns and len(distinct_kept_pns) >= 2) or stack_group_changed:
+                        untied_upper = {u.upper() for u in untied_pns}
+                        if untied_upper:
+                            draft["variant_links"] = [
+                                pair
+                                for pair in draft.get("variant_links", [])
+                                if not (
+                                    isinstance(pair, (list, tuple))
+                                    and any(str(x or "").strip().upper() in untied_upper for x in pair)
+                                )
+                            ]
+                        try:
+                            for u_pn in untied_pns:
+                                unlink_part_variant(
+                                    project_id,
+                                    u_pn,
+                                    editor_name=editor_val,
+                                    scenario_id=scenario_id,
+                                )
+                            if added_pns and len(distinct_kept_pns) >= 2:
+                                link_part_variants(
+                                    project_id,
+                                    distinct_kept_pns,
+                                    editor_name=editor_val,
+                                    scenario_id=scenario_id,
+                                )
+                            if (untied_pns or untied_aids) and (added_pns or added_aids):
+                                st.toast(
+                                    f"Updated model variant ties (disconnected {len(untied_aids) or len(untied_pns)}, linked {len(kept_aids) or len(distinct_kept_pns)} cards)",
+                                    icon=":material/layers:",
+                                )
+                            elif untied_pns:
+                                label = (
+                                    untied_pns[0]
+                                    if len(untied_pns) == 1
+                                    else f"{len(untied_pns)} parts ({', '.join(untied_pns[:3])}{'…' if len(untied_pns) > 3 else ''})"
+                                )
+                                st.toast(
+                                    f"Disconnected {label} from model variant stack",
+                                    icon=":material/link_off:",
+                                )
+                            elif untied_aids:
+                                st.toast(
+                                    f"Disconnected {len(untied_aids)} card(s) from model variant stack",
+                                    icon=":material/link_off:",
+                                )
+                            else:
+                                st.toast(
+                                    f"Linked {len(kept_aids) or len(distinct_kept_pns)} cards in model variant group",
+                                    icon=":material/layers:",
+                                )
+                            st.rerun()
+                        except ValueError as err:
+                            st.error(str(err))
 
             image_path_by_part = (
                 all_catalog_parts.set_index(all_catalog_parts["id"].astype(str))["image_path"].to_dict()
@@ -1695,6 +2164,33 @@ if fishbone_tab.open:
 
             part_desc_lookup: dict[str, str] = {}
             part_num_by_id: dict[str, str] = {}
+            variant_group_by_pn: dict[str, set[str]] = {}
+            if not all_catalog_parts.empty:
+                for p_id_val, p_num_val, p_vg_val in zip(
+                    all_catalog_parts["id"],
+                    all_catalog_parts["part_number"],
+                    all_catalog_parts["variant_group"]
+                    if "variant_group" in all_catalog_parts.columns
+                    else [[] for _ in range(len(all_catalog_parts))],
+                ):
+                    p_id = str(p_id_val or "").strip()
+                    p_num_raw = str(p_num_val or "").strip()
+                    if p_id and p_num_raw:
+                        part_num_by_id[p_id] = p_num_raw
+                    if p_num_raw:
+                        peers = (
+                            [str(x).strip() for x in p_vg_val if str(x).strip()]
+                            if isinstance(p_vg_val, (list, tuple))
+                            else [s.strip() for s in str(p_vg_val or "").split(",") if s.strip()]
+                        )
+                        variant_group_by_pn.setdefault(p_num_raw, set()).update(peers)
+            for pair in draft.get("variant_links", []):
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                    pn_a = str(pair[0] or "").strip()
+                    pn_b = str(pair[1] or "").strip()
+                    if pn_a and pn_b and pn_a.upper() != pn_b.upper():
+                        variant_group_by_pn.setdefault(pn_a, set()).add(pn_b)
+                        variant_group_by_pn.setdefault(pn_b, set()).add(pn_a)
             if not parts.empty:
                 for p_id_val, p_num_val, p_desc_val in zip(
                     parts["id"], parts["part_number"], parts["description"]
@@ -1799,6 +2295,7 @@ if fishbone_tab.open:
                         "child_parts": ch_list,
                         "image": part_thumbnail(image_path_by_part.get(pid, "")),
                         "placed": pid in effective_assigned_part_ids,
+                        "variant_group": sorted(variant_group_by_pn.get(pn, set())),
                     })
 
             for node in bom_nodes:
@@ -1858,6 +2355,7 @@ if fishbone_tab.open:
             }
             visual_parts = []
             if not assignments.empty:
+                step_col = assignments["step_number"] if "step_number" in assignments.columns else [1] * len(assignments)
                 for (
                     aid_val,
                     part_id_val,
@@ -1869,6 +2367,7 @@ if fishbone_tab.open:
                     pnum_val,
                     desc_val,
                     seq_val,
+                    step_num_val,
                 ) in zip(
                     assignments["id"],
                     assignments["part_id"],
@@ -1880,6 +2379,7 @@ if fishbone_tab.open:
                     assignments["part_number"],
                     assignments["description"],
                     assignments["sequence"],
+                    step_col,
                 ):
                     aid = str(aid_val)
                     if aid in draft["deleted_assignments"]:
@@ -1899,24 +2399,30 @@ if fishbone_tab.open:
                         continue
                     eff_qty = float(staged["quantity"]) if staged and staged.get("quantity") is not None else float(qty_val or 0)
                     eff_use_desc = str(staged["use_description"]) if staged and staged.get("use_description") is not None else str(use_desc_val or "")
+                    eff_step_num = int(staged.get("step_number") if staged and staged.get("step_number") is not None else (step_num_val or 1))
+                    pn_clean = str(pnum_val or "").strip()
                     visual_parts.append({
                         "id": aid,
                         "part_id": part_id,
                         "section_id": current_sec_id,
                         "section_name": str(records.get(current_sec_id, {}).get("name") or sec_name_val),
-                        "part_number": str(pnum_val or ""),
+                        "part_number": pn_clean,
                         "description": str(desc_val or ""),
                         "use_description": eff_use_desc,
                         "quantity": eff_qty,
                         "models": applicability_label,
                         "image": part_thumbnail(image_path_by_part.get(part_id, "")),
                         "sequence": int(staged.get("sequence") if staged and staged.get("sequence") is not None else (seq_val or 10)),
+                        "step_number": eff_step_num,
+                        "stack_group": eff_step_num if eff_step_num > 1 else 0,
+                        "variant_group": sorted(variant_group_by_pn.get(pn_clean, set())),
                     })
             for idx, na in enumerate(draft["new_assignments"]):
                 na_pid = str(na["part_id"])
                 pn = part_num_by_id.get(na_pid) or "—"
                 p_desc = part_desc_lookup.get(na_pid) or "—"
                 sec_name = records.get(na["section_id"], {}).get("name", "Section")
+                na_step_num = int(na.get("step_number") or 1)
                 visual_parts.append({
                     "id": f"draft_a_{idx}",
                     "part_id": na["part_id"],
@@ -1929,7 +2435,11 @@ if fishbone_tab.open:
                     "models": "All models",
                     "image": part_thumbnail(image_path_by_part.get(na["part_id"], "")),
                     "sequence": int(na.get("sequence") or (1000 + idx * 10)),
+                    "step_number": na_step_num,
+                    "stack_group": na_step_num if na_step_num > 1 else 0,
+                    "variant_group": sorted(variant_group_by_pn.get(pn, set())),
                 })
+            visual_parts.sort(key=lambda vp: int(vp.get("sequence") or 0))
 
             visual_parts_count_by_sec: dict[str, int] = {}
             for vp in visual_parts:
@@ -2492,6 +3002,7 @@ if fishbone_tab.open:
                 or draft["new_assignments"]
                 or draft.get("updated_assignments")
                 or draft["deleted_assignments"]
+                or draft.get("variant_links")
             )
             if has_canvas_draft:
                 total_actions = (
@@ -2502,6 +3013,7 @@ if fishbone_tab.open:
                     + len(draft["new_assignments"])
                     + len(draft.get("updated_assignments", []))
                     + len(draft["deleted_assignments"])
+                    + len(draft.get("variant_links", []))
                 )
                 st.info(
                     f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh below to commit."
@@ -2533,10 +3045,20 @@ if fishbone_tab.open:
                         new_assignments=draft["new_assignments"] if draft["new_assignments"] else None,
                         updated_assignments=draft.get("updated_assignments") if draft.get("updated_assignments") else None,
                         deleted_assignment_ids=list(draft["deleted_assignments"]) if draft["deleted_assignments"] else None,
+                        variant_links=draft.get("variant_links") if draft.get("variant_links") else None,
                         editor_name=st.session_state.get("current_editor", ""),
                     )
                     if draft.get("connection_nodes"):
                         persistent_conn_nodes.update(draft["connection_nodes"])
+                    if draft.get("variant_links"):
+                        record_audit_event(
+                            project_id,
+                            "Parts",
+                            "Link variant parts from Fishbone",
+                            len(draft["variant_links"]),
+                            st.session_state.get("current_editor", ""),
+                            {"variant_links": draft["variant_links"]},
+                        )
                     st.session_state.pop(canvas_draft_key, None)
                     request_table_editor_reset(pool_editor_key)
                     request_table_editor_reset(assignment_editor_key)
@@ -2554,6 +3076,8 @@ if fishbone_tab.open:
                     )
                     if part_changes:
                         canvas_save_parts.append(f"{part_changes} part placement change(s)")
+                    if draft.get("variant_links"):
+                        canvas_save_parts.append(f"{len(draft['variant_links'])} variant link(s)")
                     st.toast(
                         "Saved Fishbone canvas changes"
                         + (f" ({', '.join(canvas_save_parts)})" if canvas_save_parts else ""),
@@ -2576,7 +3100,7 @@ if fishbone_tab.open:
             with st.expander("Parts Placement Table", expanded=False):
                 st.caption("Parts placed into Fishbone assembly sections and subassemblies.")
                 if not assignments.empty:
-                    display_cols = ["section_name", "part_number", "description", "quantity", "use_description"]
+                    display_cols = ["section_name", "part_number", "description", "variant_group", "quantity", "use_description"]
                     display_assignments = assignments[
                         [c for c in display_cols if c in assignments.columns]
                     ].copy()

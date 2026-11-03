@@ -1,6 +1,7 @@
 """Domain persistence extracted from the historical utils.store module."""
 
 from __future__ import annotations
+from collections.abc import Iterable
 import re
 from typing import Any
 
@@ -15,6 +16,207 @@ PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
 
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
 PART_CODE_VALUES = ("NP", "NPNT", "ASM", "CP", "CP Other")
+
+_PART_BASE_CODE_RE = re.compile(
+    r"^([A-Z0-9#]+?)[-_\s]?([PG])[-_\s]?(\d{1,5}[A-Z]?|[#X]+)(?:_.*)?$",
+    re.IGNORECASE,
+)
+
+
+def get_part_base_code(part_number: object) -> str:
+    """Extract the base drawing/group prefix (e.g. '308D3205-P') for automatic variant matching."""
+    clean = str(part_number or "").strip().upper()
+    if not clean:
+        return ""
+    match = _PART_BASE_CODE_RE.match(clean)
+    if match and len(match.group(1)) >= 4:
+        return f"{match.group(1).upper()}-{match.group(2).upper()}"
+    return clean
+
+
+def _parse_variant_peer_values(value: object) -> list[str]:
+    """Normalize a list, JSON array string, or comma-separated string of part numbers."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        try:
+            if bool(pd.isna(value)):
+                return []
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                raw_items = list(parsed) if isinstance(parsed, list) else []
+            except Exception:
+                raw_items = []
+        else:
+            raw_items = [item.strip() for item in text.split(",")]
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        token = str(item or "").strip()
+        if token and token.upper() not in seen:
+            seen.add(token.upper())
+            cleaned.append(token)
+    return cleaned
+
+
+def resolve_project_variant_groups(
+    rows: Any,
+    *,
+    active_part_ids: set[str] | None = None,
+    activity_by_part: dict[str, bool] | None = None,
+) -> dict[str, list[str]]:
+    """Resolve effective model-variant peer part numbers for all parts in a project.
+
+    Combines automatic center base-code matching (for uncustomized rows) with
+    collaborator-saved ``variant_part_numbers_json`` overrides, enforcing symmetric
+    and transitive peer groups across active project part numbers.
+    Inactive parts are excluded from automatic and resolved variant groups.
+    """
+    if isinstance(rows, pd.DataFrame):
+        records = rows.to_dict("records") if not rows.empty else []
+    elif isinstance(rows, Iterable):
+        records = [dict(r) for r in rows]
+    else:
+        records = []
+    canonical_by_upper: dict[str, str] = {}
+    raw_json_by_pn: dict[str, str] = {}
+    inactive_pns: set[str] = set()
+    for row in records:
+        pn = str(row.get("part_number") or "").strip()
+        if not pn:
+            continue
+        pid = str(row.get("id") or "").strip()
+        is_active = True
+        if active_part_ids is not None:
+            is_active = pid in active_part_ids
+        elif activity_by_part is not None:
+            is_active = bool(activity_by_part.get(pid, True))
+        elif "active" in row and row.get("active") is not None and not pd.isna(row.get("active")):
+            is_active = bool(row.get("active"))
+        if not is_active:
+            inactive_pns.add(pn)
+            continue
+        canonical_by_upper[pn.upper()] = pn
+        raw_json_by_pn[pn] = str(row.get("variant_part_numbers_json") or "").strip()
+
+    all_pns = list(canonical_by_upper.values())
+    if not all_pns:
+        return {pn: [] for pn in inactive_pns}
+
+    base_code_groups: dict[str, list[str]] = {}
+    for pn in all_pns:
+        base = get_part_base_code(pn)
+        if base and base != pn.upper():
+            base_code_groups.setdefault(base, []).append(pn)
+
+    customized_pns: set[str] = set()
+    explicit_peers: dict[str, set[str]] = {}
+    for pn in all_pns:
+        raw_json = raw_json_by_pn.get(pn, "")
+        if raw_json.startswith("["):
+            customized_pns.add(pn)
+            peers: set[str] = set()
+            for token in _parse_variant_peer_values(raw_json):
+                canon = canonical_by_upper.get(token.upper())
+                if canon and canon != pn:
+                    peers.add(canon)
+            explicit_peers[pn] = peers
+
+    adj: dict[str, set[str]] = {pn: set() for pn in all_pns}
+    # 1. Seed automatic base-code edges where neither endpoint explicitly unlinked the other
+    for group_pns in base_code_groups.values():
+        if len(group_pns) < 2:
+            continue
+        for i, u in enumerate(group_pns):
+            for v in group_pns[i + 1 :]:
+                u_custom = u in customized_pns
+                v_custom = v in customized_pns
+                if not u_custom and not v_custom:
+                    adj[u].add(v)
+                    adj[v].add(u)
+                elif u_custom and not v_custom:
+                    if v in explicit_peers.get(u, set()):
+                        adj[u].add(v)
+                        adj[v].add(u)
+                elif v_custom and not u_custom:
+                    if u in explicit_peers.get(v, set()):
+                        adj[u].add(v)
+                        adj[v].add(u)
+
+    # 2. Add explicit custom edges
+    for u, peers in explicit_peers.items():
+        for v in peers:
+            if v in customized_pns:
+                if u in explicit_peers.get(v, set()) and v in explicit_peers.get(u, set()):
+                    adj[u].add(v)
+                    adj[v].add(u)
+            else:
+                adj[u].add(v)
+                adj[v].add(u)
+
+    # 3. Compute connected components so variant groups are symmetric and transitive
+    visited: set[str] = set()
+    result: dict[str, list[str]] = {pn: [] for pn in inactive_pns}
+    for pn in all_pns:
+        if pn in visited:
+            continue
+        comp: list[str] = []
+        queue = [pn]
+        visited.add(pn)
+        while queue:
+            curr = queue.pop()
+            comp.append(curr)
+            for nxt in adj.get(curr, set()):
+                if nxt not in visited:
+                    visited.add(nxt)
+                    queue.append(nxt)
+        comp_sorted = sorted(comp, key=lambda s: s.upper())
+        for member in comp_sorted:
+            result[member] = [peer for peer in comp_sorted if peer != member]
+    return result
+
+
+def _project_part_activity_map(
+    project_id: str,
+    scenario_id: str | None = None,
+    *,
+    _conn: sqlite3.Connection | None = None,
+) -> dict[str, bool]:
+    """Return part_id -> active map for a scenario, or across the project when scenario_id is omitted."""
+    if scenario_id:
+        sql = "SELECT part_id, active FROM part_scenario_activity WHERE project_id=? AND scenario_id=?"
+        params: tuple[Any, ...] = (project_id, scenario_id)
+    else:
+        sql = """SELECT part_id, MIN(active) AS active
+                 FROM part_scenario_activity
+                 WHERE project_id=?
+                 GROUP BY part_id"""
+        params = (project_id,)
+    if _conn is not None:
+        act_rows = _conn.execute(sql, params).fetchall()
+    else:
+        act_rows = query(sql, params)
+    return {str(r["part_id"]): bool(r["active"]) for r in act_rows}
+
+
+def _ensure_parts_variant_column(conn: sqlite3.Connection) -> None:
+    """Ensure the parts.variant_part_numbers_json column exists on an open connection."""
+    part_cols = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(parts)").fetchall()
+    }
+    if "variant_part_numbers_json" not in part_cols:
+        conn.execute(
+            "ALTER TABLE parts ADD COLUMN variant_part_numbers_json TEXT NOT NULL DEFAULT ''"
+        )
 
 
 @cached_store_read
@@ -38,6 +240,7 @@ def _project_catalog_table(
     table: str,
     project_id: str,
     order_by: str = "updated_at DESC",
+    scenario_id: str | None = None,
 ) -> pd.DataFrame:
     frame = pd.DataFrame(
         query(f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order_by}", (project_id,))
@@ -108,6 +311,19 @@ def _project_catalog_table(
         frame["part_code"] = existing_part_code.where(
             existing_part_code.str.strip() != "", derived_part_code
         )
+        activity_map = _project_part_activity_map(project_id, scenario_id)
+        variant_groups_by_pn = resolve_project_variant_groups(
+            frame, activity_by_part=activity_map
+        )
+        frame["variant_group"] = (
+            frame["part_number"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .map(lambda pn: ", ".join(variant_groups_by_pn.get(pn, [])))
+        )
+    elif table == "parts":
+        frame["variant_group"] = pd.Series(dtype="string")
     return frame
 
 
@@ -122,7 +338,7 @@ def project_table(
         raise ValueError("Unsupported table")
     if table == "work_elements":
         return _project_work_elements_table(project_id, order_by=order_by, scenario_id=scenario_id)
-    return _project_catalog_table(table, project_id, order_by=order_by)
+    return _project_catalog_table(table, project_id, order_by=order_by, scenario_id=scenario_id)
 
 @cached_store_read
 def part_scenario_activity(project_id: str, scenario_id: str) -> dict[str, bool]:
@@ -442,6 +658,30 @@ def update_part_rows(
             ).fetchall()
         }
         existing_ids = set(existing_parts)
+        existing_activity = _project_part_activity_map(
+            project_id, scenario_id, _conn=conn
+        )
+        normalized_activity: dict[str, bool] | None = None
+        if scenario_id and activity_by_part is not None:
+            normalized_activity = {
+                str(part_id): bool(active)
+                for part_id, active in activity_by_part.items()
+            }
+            saved_ids = set(edited["id"].fillna("").astype(str))
+            if set(normalized_activity) != saved_ids:
+                raise ValueError("Part activity must be supplied for every saved row.")
+        effective_activity = (
+            normalized_activity
+            if normalized_activity is not None
+            else existing_activity
+        )
+        prev_variants_by_pn = resolve_project_variant_groups(
+            existing_parts.values(), activity_by_part=effective_activity
+        )
+        prev_variants_by_id: dict[str, set[str]] = {
+            pid: set(prev_variants_by_pn.get(clean_text(existing.get("part_number")), []))
+            for pid, existing in existing_parts.items()
+        }
         pits_lookup: dict[str, dict[str, str]] = {}
         for p_row in conn.execute(
             """SELECT pits_id, subsystem,
@@ -460,22 +700,6 @@ def update_part_rows(
                     "subsystem": clean_text(p_row["subsystem"]),
                     "part_code": clean_text(p_row["part_code"]),
                 }
-        existing_activity: dict[str, bool] = {}
-        if scenario_id:
-            for act_row in conn.execute(
-                "SELECT part_id, active FROM part_scenario_activity WHERE project_id=? AND scenario_id=?",
-                (project_id, scenario_id),
-            ).fetchall():
-                existing_activity[str(act_row["part_id"])] = bool(act_row["active"])
-        normalized_activity: dict[str, bool] | None = None
-        if scenario_id and activity_by_part is not None:
-            normalized_activity = {
-                str(part_id): bool(active)
-                for part_id, active in activity_by_part.items()
-            }
-            saved_ids = set(edited["id"].fillna("").astype(str))
-            if set(normalized_activity) != saved_ids:
-                raise ValueError("Part activity must be supplied for every saved row.")
         assembly_applicability = {
             str(r["part_id"]): str(r["model_applicability"] or "")
             for _, r in assembly_catalog_part_applicability(project_id).iterrows()
@@ -722,7 +946,292 @@ def update_part_rows(
                          updated_at=CASE WHEN part_scenario_activity.active != excluded.active THEN excluded.updated_at ELSE part_scenario_activity.updated_at END""",
                     (project_id, scenario_id, part_id, 1 if active else 0, act_updated_at),
                 )
+        if "variant_group" in edited.columns:
+            _ensure_parts_variant_column(conn)
+            current_part_rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT id, part_number, variant_part_numbers_json FROM parts WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+            ]
+            canon_by_upper = {
+                clean_text(r.get("part_number")).upper(): clean_text(r.get("part_number"))
+                for r in current_part_rows
+                if clean_text(r.get("part_number"))
+            }
+            id_by_pn = {
+                clean_text(r.get("part_number")): str(r["id"])
+                for r in current_part_rows
+                if clean_text(r.get("part_number"))
+            }
+            raw_json_by_pn = {
+                clean_text(r.get("part_number")): clean_text(r.get("variant_part_numbers_json"))
+                for r in current_part_rows
+                if clean_text(r.get("part_number"))
+            }
+            baseline_variants = resolve_project_variant_groups(
+                current_part_rows, activity_by_part=effective_activity
+            )
+            adj: dict[str, set[str]] = {
+                pn: set(baseline_variants.get(pn, []))
+                for pn in canon_by_upper.values()
+            }
+            added_edges: set[frozenset[str]] = set()
+            removed_edges: set[frozenset[str]] = set()
+            affected_pns: set[str] = set()
+            for _, row in edited.iterrows():
+                pid = clean_text(row.get("id"))
+                pn = canon_by_upper.get(clean_text(row.get("part_number")).upper(), "")
+                if not pn:
+                    continue
+                is_row_active = bool(effective_activity.get(pid, True))
+                submitted_peers: set[str] = set()
+                if is_row_active:
+                    for token in _parse_variant_peer_values(row.get("variant_group")):
+                        peer_canon = canon_by_upper.get(token.upper())
+                        if peer_canon and peer_canon != pn:
+                            peer_id = id_by_pn.get(peer_canon, "")
+                            if bool(effective_activity.get(peer_id, True)):
+                                submitted_peers.add(peer_canon)
+                if pid not in prev_variants_by_id:
+                    if not submitted_peers:
+                        continue
+                    prev_peers = {
+                        canon_by_upper[p.upper()]
+                        for p in baseline_variants.get(pn, [])
+                        if p.upper() in canon_by_upper and canon_by_upper[p.upper()] != pn
+                    }
+                    row_added = submitted_peers - prev_peers
+                    row_removed: set[str] = set()
+                    row_kept = submitted_peers & prev_peers
+                    if not row_added:
+                        continue
+                else:
+                    prev_peers = {
+                        canon_by_upper[p.upper()]
+                        for p in prev_variants_by_id.get(pid, [])
+                        if p.upper() in canon_by_upper and canon_by_upper[p.upper()] != pn
+                    }
+                    if submitted_peers == prev_peers:
+                        continue
+                    row_added = submitted_peers - prev_peers
+                    row_removed = prev_peers - submitted_peers
+                    row_kept = submitted_peers & prev_peers
+                affected_pns.add(pn)
+                for r_pn in row_removed:
+                    removed_edges.add(frozenset((pn, r_pn)))
+                    affected_pns.add(r_pn)
+                    for k_pn in row_kept:
+                        removed_edges.add(frozenset((k_pn, r_pn)))
+                        affected_pns.add(k_pn)
+                for a_pn in row_added:
+                    added_edges.add(frozenset((pn, a_pn)))
+                    affected_pns.add(a_pn)
+
+            if added_edges or removed_edges:
+                for edge in removed_edges:
+                    if len(edge) == 2:
+                        u, v = tuple(edge)
+                        adj.get(u, set()).discard(v)
+                        adj.get(v, set()).discard(u)
+                for edge in added_edges:
+                    if len(edge) != 2:
+                        continue
+                    u, v = tuple(edge)
+                    # Collect connected components of u and v and merge them
+                    comp: set[str] = set()
+                    queue = [u, v]
+                    while queue:
+                        curr = queue.pop()
+                        if curr in comp:
+                            continue
+                        comp.add(curr)
+                        for nxt in adj.get(curr, set()):
+                            if nxt not in comp:
+                                queue.append(nxt)
+                    affected_pns.update(comp)
+                    for m1 in comp:
+                        for m2 in comp:
+                            if m1 != m2 and frozenset((m1, m2)) not in removed_edges:
+                                adj.setdefault(m1, set()).add(m2)
+                # Ensure transitive closure on remaining graph components touched by edits
+                visited_comp: set[str] = set()
+                for start_pn in list(affected_pns):
+                    if start_pn in visited_comp or start_pn not in adj:
+                        continue
+                    comp_nodes: set[str] = set()
+                    queue = [start_pn]
+                    while queue:
+                        curr = queue.pop()
+                        if curr in comp_nodes:
+                            continue
+                        comp_nodes.add(curr)
+                        for nxt in adj.get(curr, set()):
+                            if nxt not in comp_nodes:
+                                queue.append(nxt)
+                    visited_comp.update(comp_nodes)
+                    affected_pns.update(comp_nodes)
+                    for m1 in comp_nodes:
+                        for m2 in comp_nodes:
+                            if m1 != m2 and frozenset((m1, m2)) not in removed_edges:
+                                adj[m1].add(m2)
+                for target_pn in affected_pns:
+                    target_id = id_by_pn.get(target_pn)
+                    if not target_id:
+                        continue
+                    new_peer_list = sorted(adj.get(target_pn, set()), key=lambda s: s.upper())
+                    new_json = json.dumps(new_peer_list)
+                    if raw_json_by_pn.get(target_pn) != new_json:
+                        conn.execute(
+                            "UPDATE parts SET variant_part_numbers_json=?, updated_at=? WHERE id=? AND project_id=?",
+                            (new_json, timestamp, target_id, project_id),
+                        )
     return len(edited)
+
+
+def link_part_variants(
+    project_id: str,
+    part_numbers: Iterable[str],
+    editor_name: str = "",
+    *,
+    scenario_id: str | None = None,
+    _conn: sqlite3.Connection | None = None,
+) -> list[str]:
+    """Symmetrically and transitively link two or more project catalog parts as model variants."""
+    cleaned_targets = _parse_variant_peer_values(list(part_numbers))
+    if len(cleaned_targets) < 2:
+        raise ValueError("Select at least two part numbers to link as model variants.")
+    timestamp = now_iso()
+    context = nullcontext(_conn) if _conn is not None else connection()
+    with context as conn:
+        _ensure_parts_variant_column(conn)
+        current_part_rows = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, part_number, variant_part_numbers_json FROM parts WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        ]
+        canon_by_upper = {
+            str(r.get("part_number") or "").strip().upper(): str(r.get("part_number") or "").strip()
+            for r in current_part_rows
+            if str(r.get("part_number") or "").strip()
+        }
+        id_by_pn = {
+            str(r.get("part_number") or "").strip(): str(r["id"])
+            for r in current_part_rows
+            if str(r.get("part_number") or "").strip()
+        }
+        matched_pns: list[str] = []
+        for token in cleaned_targets:
+            canon = canon_by_upper.get(token.upper())
+            if canon and canon not in matched_pns:
+                matched_pns.append(canon)
+        if len(matched_pns) < 2:
+            raise ValueError("Both parts must exist in the project Parts Catalog to link as model variants.")
+        activity_map = _project_part_activity_map(
+            project_id, scenario_id, _conn=conn
+        )
+        baseline_variants = resolve_project_variant_groups(
+            current_part_rows, activity_by_part=activity_map
+        )
+        merged_group: set[str] = set(matched_pns)
+        for pn in matched_pns:
+            merged_group.update(baseline_variants.get(pn, []))
+        sorted_group = sorted(merged_group, key=lambda s: s.upper())
+        for member_pn in sorted_group:
+            member_id = id_by_pn.get(member_pn)
+            if not member_id:
+                continue
+            peers = [p for p in sorted_group if p != member_pn]
+            conn.execute(
+                "UPDATE parts SET variant_part_numbers_json=?, updated_at=? WHERE id=? AND project_id=?",
+                (json.dumps(peers), timestamp, member_id, project_id),
+            )
+        record_audit_event(
+            project_id,
+            "Parts",
+            f"Link variant group ({', '.join(sorted_group)})",
+            len(sorted_group),
+            editor_name,
+            {"variant_group": sorted_group},
+            _conn=conn,
+        )
+        return sorted_group
+
+
+def unlink_part_variant(
+    project_id: str,
+    part_number: str,
+    editor_name: str = "",
+    *,
+    scenario_id: str | None = None,
+    _conn: sqlite3.Connection | None = None,
+) -> list[str]:
+    """Symmetrically detach one part number from its current model-variant peer group."""
+    raw_pn = str(part_number or "").strip()
+    if not raw_pn:
+        raise ValueError("A part number is required to disconnect from a variant group.")
+    timestamp = now_iso()
+    context = nullcontext(_conn) if _conn is not None else connection()
+    with context as conn:
+        _ensure_parts_variant_column(conn)
+        current_part_rows = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, part_number, variant_part_numbers_json FROM parts WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        ]
+        canon_by_upper = {
+            str(r.get("part_number") or "").strip().upper(): str(r.get("part_number") or "").strip()
+            for r in current_part_rows
+            if str(r.get("part_number") or "").strip()
+        }
+        id_by_pn = {
+            str(r.get("part_number") or "").strip(): str(r["id"])
+            for r in current_part_rows
+            if str(r.get("part_number") or "").strip()
+        }
+        target_pn = canon_by_upper.get(raw_pn.upper())
+        if not target_pn:
+            raise ValueError(f"Part {raw_pn} was not found in the project Parts Catalog.")
+        activity_map = _project_part_activity_map(
+            project_id, scenario_id, _conn=conn
+        )
+        baseline_variants = resolve_project_variant_groups(
+            current_part_rows, activity_by_part=activity_map
+        )
+        former_peers = sorted(baseline_variants.get(target_pn, []), key=lambda s: s.upper())
+        target_id = id_by_pn.get(target_pn)
+        if target_id:
+            conn.execute(
+                "UPDATE parts SET variant_part_numbers_json=?, updated_at=? WHERE id=? AND project_id=?",
+                ("[]", timestamp, target_id, project_id),
+            )
+        for peer_pn in former_peers:
+            peer_id = id_by_pn.get(peer_pn)
+            if not peer_id:
+                continue
+            remaining = sorted(
+                [p for p in baseline_variants.get(peer_pn, []) if p != target_pn],
+                key=lambda s: s.upper(),
+            )
+            conn.execute(
+                "UPDATE parts SET variant_part_numbers_json=?, updated_at=? WHERE id=? AND project_id=?",
+                (json.dumps(remaining), timestamp, peer_id, project_id),
+            )
+        record_audit_event(
+            project_id,
+            "Parts",
+            f"Unlink variant ({target_pn})",
+            1 + len(former_peers),
+            editor_name,
+            {"unlinked_part": target_pn, "former_peers": former_peers},
+            _conn=conn,
+        )
+        return former_peers
 
 def part_delete_impact(project_id: str, part_ids: list[str]) -> dict:
     normalized = list(dict.fromkeys(
@@ -8926,6 +9435,7 @@ def clear_model_boms(
 
 __domain_exports__ = [
     'pits_catalog_id_resolution', 'PART_SOURCE_CODES', 'PART_MAKE_BUY_VALUES', 'PART_CODE_VALUES',
+    'get_part_base_code', 'resolve_project_variant_groups', 'link_part_variants', 'unlink_part_variant',
     'project_table', 'part_scenario_activity', 'active_part_ids',
     'update_part_scenario_activity', 'normalize_model_applicability',
     '_clean_optional_text', '_validated_part_catalog_fields', 'upsert_part',

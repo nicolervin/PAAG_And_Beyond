@@ -1140,7 +1140,7 @@ def _fetch_part_option_snapshot_inputs(
         f"""SELECT option.id AS option_id,
                    group_row.name AS group_name,
                    group_row.selection_rule,
-                   group_row.quantity,
+                   COALESCE(option.quantity, group_row.quantity) AS quantity,
                    COALESCE(group_row.notes, '') AS group_notes,
                    COALESCE(we.station, '') AS station,
                    COALESCE(
@@ -1786,6 +1786,114 @@ def parse_yamazumi_model_variants(value, fallback: str | None = "Base") -> list[
         return [fallback]
     return variants
 
+def _sync_linked_process_work_elements(
+    conn: sqlite3.Connection,
+    project_id: str | None = None,
+    process_element_ids: list[str] | None = None,
+    timestamp: str | None = None,
+) -> int:
+    """Keep linked work_elements station, cycle_time_s, and model_applicability aligned with yamazumi_elements."""
+    ts = timestamp or now_iso()
+    where_clauses = [
+        "e.process_element_id IS NOT NULL",
+        "TRIM(e.process_element_id) <> ''",
+    ]
+    params: list[object] = []
+    if project_id:
+        where_clauses.append("e.project_id = ?")
+        params.append(project_id)
+    if process_element_ids:
+        cleaned_ids = [
+            str(pid).strip() for pid in process_element_ids if str(pid).strip()
+        ]
+        if not cleaned_ids:
+            return 0
+        placeholders = ",".join("?" for _ in cleaned_ids)
+        where_clauses.append(f"e.process_element_id IN ({placeholders})")
+        params.extend(cleaned_ids)
+    where_sql = " AND ".join(where_clauses)
+    rows = conn.execute(
+        f"""SELECT e.project_id,
+                   a.scenario_id,
+                   e.process_element_id,
+                   e.model_variant,
+                   e.model_variants,
+                   e.time_s,
+                   p.pitch_number,
+                   w.station AS current_station,
+                   w.cycle_time_s AS current_cycle_time_s,
+                   w.model_applicability AS current_model_applicability
+            FROM yamazumi_elements e
+            JOIN yamazumi_areas a ON a.id = e.area_id
+            LEFT JOIN yamazumi_pitches p ON p.id = e.pitch_id
+            JOIN work_elements w
+              ON w.id = e.process_element_id
+             AND w.project_id = e.project_id
+             AND w.scenario_id = a.scenario_id
+            WHERE {where_sql}
+            ORDER BY a.name, p.sequence, e.sequence, e.id""",
+        tuple(params),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    grouped: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        key = (
+            str(row["project_id"]),
+            str(row["scenario_id"]),
+            str(row["process_element_id"]),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    updated_count = 0
+    for (proj_id, scen_id, proc_id), group_rows in grouped.items():
+        first = group_rows[0]
+        station = str(first["pitch_number"] or "Unassigned").strip() or "Unassigned"
+        cycle_time_s = float(first["time_s"] or 0.0)
+        combined_variants: list[str] = []
+        seen_variants: set[str] = set()
+        for r in group_rows:
+            for v in parse_yamazumi_model_variants(
+                r["model_variants"], r["model_variant"]
+            ):
+                vk = v.casefold()
+                if vk not in seen_variants:
+                    seen_variants.add(vk)
+                    combined_variants.append(v)
+        if not combined_variants or any(
+            v.casefold() in {"base", "all", "all models"} for v in combined_variants
+        ):
+            model_applicability = "All"
+        else:
+            model_applicability = ", ".join(combined_variants)
+
+        current_station = str(first["current_station"] or "").strip()
+        current_cycle_time_s = float(first["current_cycle_time_s"] or 0.0)
+        current_model_app = str(first["current_model_applicability"] or "").strip()
+        if (
+            current_station != station
+            or abs(current_cycle_time_s - cycle_time_s) > 1e-9
+            or current_model_app != model_applicability
+        ):
+            conn.execute(
+                """UPDATE work_elements
+                   SET station = ?, cycle_time_s = ?, model_applicability = ?, updated_at = ?
+                   WHERE id = ? AND project_id = ? AND scenario_id = ?""",
+                (
+                    station,
+                    cycle_time_s,
+                    model_applicability,
+                    ts,
+                    proc_id,
+                    proj_id,
+                    scen_id,
+                ),
+            )
+            updated_count += 1
+    return updated_count
+
+
 _THREAD_LOCAL = _threading.local()
 _INITIALIZED_DB_SIGNATURES: set[tuple[str, int, bool]] = set()
 _WAL_CONFIGURED_DB_SIGNATURES: set[tuple[str, int]] = set()
@@ -1983,6 +2091,7 @@ def init_db() -> None:
                 pmqe_aqe TEXT NOT NULL DEFAULT '',
                 ame_tooling_engineer TEXT NOT NULL DEFAULT '',
                 part_code TEXT NOT NULL DEFAULT '',
+                variant_part_numbers_json TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, part_number)
@@ -2432,6 +2541,8 @@ def init_db() -> None:
                     CHECK (handling_type IS NULL OR handling_type IN ('Handle', 'Consume')),
                 fishbone_assignment_id TEXT
                     REFERENCES fishbone_part_assignments(id),
+                quantity REAL,
+                is_model_variant INTEGER NOT NULL DEFAULT 0 CHECK (is_model_variant IN (0, 1)),
                 source_snapshot_json TEXT NOT NULL DEFAULT '',
                 source_acknowledged_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
@@ -2608,6 +2719,7 @@ def init_db() -> None:
             "original_image_path",
             "annotations_json",
             "image_caption",
+            "variant_part_numbers_json",
             "created_at",
         ):
             if column not in part_columns:
@@ -2725,6 +2837,18 @@ def init_db() -> None:
                    ADD COLUMN fishbone_assignment_id TEXT
                    REFERENCES fishbone_part_assignments(id)"""
             )
+        if "quantity" not in process_option_columns:
+            conn.execute(
+                "ALTER TABLE process_part_options ADD COLUMN quantity REAL"
+            )
+            conn.execute(
+                """UPDATE process_part_options
+                   SET quantity = (
+                       SELECT quantity FROM process_part_groups
+                       WHERE process_part_groups.id = process_part_options.group_id
+                   )
+                   WHERE quantity IS NULL AND handling_type = 'Consume'"""
+            )
         if "source_snapshot_json" not in process_option_columns:
             conn.execute(
                 "ALTER TABLE process_part_options ADD COLUMN source_snapshot_json TEXT NOT NULL DEFAULT ''"
@@ -2732,6 +2856,18 @@ def init_db() -> None:
         if "source_acknowledged_at" not in process_option_columns:
             conn.execute(
                 "ALTER TABLE process_part_options ADD COLUMN source_acknowledged_at TEXT NOT NULL DEFAULT ''"
+            )
+        if "is_model_variant" not in process_option_columns:
+            conn.execute(
+                "ALTER TABLE process_part_options ADD COLUMN is_model_variant INTEGER NOT NULL DEFAULT 0 CHECK (is_model_variant IN (0, 1))"
+            )
+            conn.execute(
+                """UPDATE process_part_options
+                   SET is_model_variant = 1
+                   WHERE group_id IN (
+                       SELECT id FROM process_part_groups
+                       WHERE selection_rule IN ('Choose one', 'Model choice')
+                   )"""
             )
         manufacturing_assembly_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(manufacturing_assemblies)").fetchall()
@@ -3491,6 +3627,7 @@ def init_db() -> None:
                 (str(uuid4()), mb_pid, int(cur.rowcount or 0), timestamp),
             )
         _rebase_cross_platform_upload_paths(conn)
+        _sync_linked_process_work_elements(conn, timestamp=timestamp)
 
     if is_cacheable_runtime():
         ident = _db_file_identity(Path(DB_PATH))
@@ -4092,6 +4229,7 @@ import types as _types
 
 _DOMAIN_MODULES: list[_types.ModuleType] = []
 _DOMAIN_EXPORTS: dict[str, list[str]] = {}
+_REGISTERED_ENTRYPOINT_FUNCTIONS: dict[tuple[str, str], object] = {}
 _RUNTIME_REVISION: int = 0
 _SYNCED_REVISION: int = -1
 _STORE_MODULE: _types.ModuleType | None = None
@@ -4120,9 +4258,26 @@ def is_cacheable_runtime() -> bool:
 
 def register_domain_module(module: _types.ModuleType, exports: list[str]) -> None:
     """Register one extracted store and share symbols across store domains."""
-    if module not in _DOMAIN_MODULES:
-        _DOMAIN_MODULES.append(module)
+    _DOMAIN_MODULES[:] = [
+        existing for existing in _DOMAIN_MODULES if existing.__name__ != module.__name__
+    ]
+    _DOMAIN_MODULES.append(module)
     _DOMAIN_EXPORTS[module.__name__] = list(exports)
+    facade = _sys.modules.get("utils.store")
+    baseline = facade.__dict__.get("_FACADE_BASELINE", {}) if facade is not None else {}
+    for export_name in exports:
+        if not hasattr(module, export_name):
+            continue
+        val = getattr(module, export_name)
+        is_monkeypatched = (
+            facade is not None
+            and export_name in facade.__dict__
+            and export_name in baseline
+            and facade.__dict__[export_name] is not baseline[export_name]
+        )
+        if callable(val) and not is_monkeypatched:
+            _REGISTERED_ENTRYPOINT_FUNCTIONS[(module.__name__, export_name)] = val
+    setattr(module, "_DOMAIN_REGISTERED_V2", True)
     bump_runtime_revision()
     sync_store_runtime(force=True)
 
@@ -4133,7 +4288,8 @@ def store_runtime_symbols() -> dict[str, object]:
         for name, value in globals().items()
         if not name.startswith("__")
         and name not in {
-            "_DOMAIN_MODULES", "_DOMAIN_EXPORTS", "_functools", "_importlib",
+            "_DOMAIN_MODULES", "_DOMAIN_EXPORTS", "_REGISTERED_ENTRYPOINT_FUNCTIONS",
+            "_functools", "_importlib",
             "_sys", "_types", "_RUNTIME_REVISION", "_SYNCED_REVISION",
             "_STORE_MODULE", "_THREAD_LOCAL", "_INITIALIZED_DB_SIGNATURES",
             "_WAL_CONFIGURED_DB_SIGNATURES", "_DEFAULT_CONNECTION",
@@ -4145,9 +4301,15 @@ def store_runtime_symbols() -> dict[str, object]:
             symbols[name] = getattr(module, name)
     facade = _sys.modules.get("utils.store")
     if facade is not None:
-        for name in tuple(symbols):
-            if name in facade.__dict__:
-                symbols[name] = facade.__dict__[name]
+        baseline = facade.__dict__.get("_FACADE_BASELINE")
+        if isinstance(baseline, dict):
+            for name in tuple(symbols):
+                if (
+                    name in facade.__dict__
+                    and name in baseline
+                    and facade.__dict__[name] is not baseline[name]
+                ):
+                    symbols[name] = facade.__dict__[name]
     return symbols
 
 
@@ -4166,20 +4328,54 @@ def sync_store_runtime(*, force: bool = False) -> None:
     for module in _DOMAIN_MODULES:
         module.__dict__.update(symbols)
     if facade is not None:
+        baseline = facade.__dict__.setdefault("_FACADE_BASELINE", {})
+        exported = facade.__dict__.setdefault("_EXPORTED", {})
+        for name, val in symbols.items():
+            if (
+                name not in facade.__dict__
+                or name not in baseline
+                or facade.__dict__[name] is baseline[name]
+            ):
+                facade.__dict__[name] = val
+                exported[name] = val
+                baseline[name] = val
+            else:
+                exported[name] = facade.__dict__[name]
         _SYNCED_REVISION = _RUNTIME_REVISION
 
 
 def domain_entrypoint(function):
     """Ensure every domain can also be imported and called directly."""
+    func_name = getattr(function, "__name__", "")
+    mod_name = getattr(function, "__module__", "")
+
     @_functools.wraps(function)
     def wrapped(*args, **kwargs):
         global _STORE_MODULE
-        if _STORE_MODULE is None:
+        facade = _sys.modules.get("utils.store")
+        if _STORE_MODULE is None or facade is None:
             _STORE_MODULE = _importlib.import_module("utils.store")
+            facade = _STORE_MODULE
             sync_store_runtime(force=True)
-        elif _SYNCED_REVISION != _RUNTIME_REVISION:
-            sync_store_runtime()
+        else:
+            refresh_fn = facade.__dict__.get("_ensure_fresh_domain_modules")
+            if callable(refresh_fn):
+                refresh_fn()
+            if _SYNCED_REVISION != _RUNTIME_REVISION:
+                sync_store_runtime()
+        if func_name and mod_name:
+            active_db_core = _sys.modules.get("utils.db_core")
+            reg_map = getattr(
+                active_db_core,
+                "_REGISTERED_ENTRYPOINT_FUNCTIONS",
+                _REGISTERED_ENTRYPOINT_FUNCTIONS,
+            )
+            latest_fn = reg_map.get((mod_name, func_name))
+            if callable(latest_fn) and latest_fn is not wrapped:
+                return latest_fn(*args, **kwargs)
         return function(*args, **kwargs)
+
+    setattr(wrapped, "_is_domain_entrypoint", True)
     return wrapped
 
-__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'YAMAZUMI_CONVEYOR_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'CONCERN_CATEGORIES', 'CONCERN_STATUSES', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', 'build_ergonomics_process_snapshot', 'build_safety_process_snapshot', 'build_materials_process_snapshot', 'format_process_snapshot_diff', '_fetch_work_element_snapshot_inputs', '_fetch_part_option_snapshot_inputs', '_backfill_upstream_process_snapshots', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']
+__store_exports__ = ['ROOT', 'DATA_DIR', 'UPLOAD_DIR', 'DB_PATH', 'HANDLING_TYPES', 'YAMAZUMI_PITCH_TYPES', 'YAMAZUMI_FEEDER_PITCH_TYPES', 'YAMAZUMI_CONVEYOR_TYPES', 'ERGONOMICS_REVIEW_STATUSES', 'ERGONOMICS_RISK_CLASSIFICATIONS', 'CONCERN_CATEGORIES', 'CONCERN_STATUSES', 'EASTERN_TIMEZONE_NAME', 'EASTERN_TIMEZONE', 'now_iso', 'to_eastern_iso', 'format_eastern_timestamp', 'build_ergonomics_process_snapshot', 'build_safety_process_snapshot', 'build_materials_process_snapshot', 'format_process_snapshot_diff', '_fetch_work_element_snapshot_inputs', '_fetch_part_option_snapshot_inputs', '_backfill_upstream_process_snapshots', '_drop_yamazumi_flags_schema', '_upgrade_ergonomics_reviews_work_element_link', '_upgrade_ergonomics_reviews_risk_classification', '_upgrade_ergonomics_reviews_legacy_description', '_upgrade_pfmea_entries_work_element_link', '_upgrade_quality_assignments_work_element_link', '_upgrade_equipment_process_links_work_element_link', '_repair_dangling_legacy_foreign_keys', '_create_started_ergonomics_review', '_create_work_element_with_started_ergonomics_review', '_backfill_missing_ergonomics_reviews', '_clone_ergonomics_reviews', 'clone_process_visual_media_scenario', 'init_process_visual_media_schema', 'init_ergonomics_visual_media_schema', 'parse_yamazumi_model_variants', '_sync_linked_process_work_elements', 'connection', 'ensure_db_initialized', 'init_db', 'query', 'execute', 'record_audit_event', 'audit_history', 'backup_database', 'get_db_connection', 'resolve_upload_path', 'rebase_upload_path_str']
