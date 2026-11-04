@@ -777,6 +777,17 @@ def render_pitch_canvas(
         else '<div class="subtle-empty">No equipment or PPE assigned</div>'
     )
 
+    tie_tool_btn_html = (
+        '<button type="button" class="tie-tool-slide-btn" '
+        'title="Tie a tool to a work element in this pitch" '
+        'onclick="if(window.__paagOpenTieToolDialog){window.__paagOpenTieToolDialog(event);}else{'
+        'var d=(window.parent&&window.parent.document)?window.parent.document:document;'
+        'var b=d.querySelector(\'[class*=st-key-btn_tie_tool_slide_] button\')||d.querySelector(\'[class*=st-key-btn_tools_] button\');'
+        'if(b)b.click();}">+ Tie Tool</button>'
+        if not presentation_mode and not print_format
+        else ""
+    )
+
     # Ergonomic & Conveyor chips
     ergo_badges: list[str] = []
     platform_h = float(pitch.get("platform_height_in") or 0.0)
@@ -1043,9 +1054,61 @@ def render_pitch_canvas(
         if v_time > max_variant_time:
             max_variant_time = v_time
 
-    # Chart height references
-    ref_time = max(max_variant_time, eff_takt_s, 1.0)
-    chart_px_height = 175
+    # Chart height and unified cycle-time scaling references
+    num_variant_cols = max(1, len(yamazumi_stacks))
+    chars_per_line = 38 if num_variant_cols == 1 else (19 if num_variant_cols == 2 else max(12, 38 // num_variant_cols))
+
+    def _elem_min_readable_h(elem_dict: dict[str, Any]) -> int:
+        desc_text = str(elem_dict.get("description") or elem_dict.get("yamazumi_description") or "").strip()
+        clean_len = len(desc_text)
+        est_lines = min(4, max(1, (clean_len + chars_per_line - 1) // chars_per_line))
+        return 26 + (est_lines - 1) * 14
+
+    ref_time = max(max_variant_time * 1.08, eff_takt_s * 1.12, 1.0)
+    px_per_sec = 210.0 / ref_time if ref_time > 0 else 10.0
+
+    for _v_name, _v_data in yamazumi_stacks.items():
+        _v_elems = [
+            e for e in (_v_data.get("elements", []) if isinstance(_v_data, dict) else (_v_data if isinstance(_v_data, list) else []))
+            if isinstance(e, dict)
+        ]
+        for _e in _v_elems:
+            _e_time = float(_e.get("time_s") or 0.0)
+            _min_h = _elem_min_readable_h(_e)
+            if _e_time > 0:
+                px_per_sec = max(px_per_sec, min(18.0, _min_h / max(_e_time, 1.5)))
+
+    stack_allocated_heights: dict[str, list[int]] = {}
+    for _v_name, _v_data in yamazumi_stacks.items():
+        _v_elems = [
+            e for e in (_v_data.get("elements", []) if isinstance(_v_data, dict) else (_v_data if isinstance(_v_data, list) else []))
+            if isinstance(e, dict)
+        ]
+        _v_total_s = sum(float(e.get("time_s") or 0.0) for e in _v_elems)
+        _heights = [
+            max(_elem_min_readable_h(e), int(round(float(e.get("time_s") or 0.0) * px_per_sec)))
+            for e in _v_elems
+        ]
+        stack_allocated_heights[_v_name] = _heights
+        if _v_total_s > 0 and sum(_heights) / _v_total_s > px_per_sec:
+            px_per_sec = sum(_heights) / _v_total_s
+
+    max_stack_px = 0
+    for _v_name, _v_data in yamazumi_stacks.items():
+        _v_elems = [
+            e for e in (_v_data.get("elements", []) if isinstance(_v_data, dict) else (_v_data if isinstance(_v_data, list) else []))
+            if isinstance(e, dict)
+        ]
+        _heights = [
+            max(_elem_min_readable_h(e), int(round(float(e.get("time_s") or 0.0) * px_per_sec)))
+            for e in _v_elems
+        ]
+        stack_allocated_heights[_v_name] = _heights
+        if sum(_heights) > max_stack_px:
+            max_stack_px = sum(_heights)
+
+    takt_px = int(round(eff_takt_s * px_per_sec)) if eff_takt_s > 0 else 0
+    chart_px_height = max(210, max_stack_px + 20, takt_px + 20)
 
     for v_name, v_data in yamazumi_stacks.items():
         v_elements = [
@@ -1053,39 +1116,7 @@ def render_pitch_canvas(
             if isinstance(e, dict)
         ]
         v_total_s = sum(float(e.get("time_s") or 0.0) for e in v_elements)
-        n_elems = len(v_elements)
-
-        # Properly scale element heights to ensure all blocks fit within chart_px_height without clipping
-        allocated_heights: list[int] = []
-        if n_elems > 0:
-            target_stack_h = (
-                int(round(chart_px_height * min(1.0, v_total_s / ref_time)))
-                if ref_time > 0 and v_total_s > 0
-                else min(chart_px_height, n_elems * 24)
-            )
-            target_stack_h = max(target_stack_h, n_elems * 8)
-            target_stack_h = min(target_stack_h, chart_px_height)
-
-            desired_min = 24
-            if n_elems * desired_min > target_stack_h:
-                desired_min = max(7, target_stack_h // n_elems)
-
-            raw_heights = [
-                chart_px_height * (float(e.get("time_s") or 0.0) / ref_time) if ref_time > 0 else (target_stack_h / n_elems)
-                for e in v_elements
-            ]
-            allocated_heights = [max(desired_min, int(round(h))) for h in raw_heights]
-            total_alloc = sum(allocated_heights)
-
-            if total_alloc > chart_px_height and total_alloc > 0:
-                scale_factor = chart_px_height / total_alloc
-                allocated_heights = [max(7, int(h * scale_factor)) for h in allocated_heights]
-                drift = chart_px_height - sum(allocated_heights)
-                if drift != 0 and allocated_heights:
-                    allocated_heights[-1] = max(7, allocated_heights[-1] + drift)
-            elif total_alloc > target_stack_h and target_stack_h >= n_elems * desired_min:
-                scale_factor = target_stack_h / total_alloc
-                allocated_heights = [max(desired_min, int(h * scale_factor)) for h in allocated_heights]
+        allocated_heights = stack_allocated_heights.get(v_name, [])
 
         blocks_html: list[str] = []
         for idx_e, e in enumerate(v_elements):
@@ -1116,8 +1147,8 @@ def render_pitch_canvas(
                 else:
                     type_class = "type-cycle"
 
-            b_height = allocated_heights[idx_e] if idx_e < len(allocated_heights) else (max(16, int(chart_px_height * (e_time / ref_time))) if ref_time > 0 else 16)
-            compact_class = "compact" if b_height < 15 else ("multiline" if b_height >= 36 else "")
+            b_height = allocated_heights[idx_e] if idx_e < len(allocated_heights) else max(26, int(round(e_time * px_per_sec)))
+            compact_class = "compact" if b_height < 20 else "multiline"
 
             e_wid = str(e.get("work_element_id") or e.get("process_element_id") or "").strip()
             e_id = str(e.get("id") or "").strip()
@@ -1173,8 +1204,8 @@ def render_pitch_canvas(
             )
         # Takt line position from bottom (no inline label box to avoid cluttering the bars)
         takt_line_html = ""
-        if eff_takt_s > 0 and ref_time > 0:
-            takt_bottom_px = min(chart_px_height, int(chart_px_height * (eff_takt_s / ref_time)))
+        if eff_takt_s > 0:
+            takt_bottom_px = min(chart_px_height - 10, max(12, takt_px))
             takt_line_html = f'<div class="takt-line" style="bottom:{takt_bottom_px}px" title="Takt: {_clean_number(eff_takt_s)}s"></div>'
 
         # Metrics: variant time, takt time, percent utilized
@@ -1197,7 +1228,7 @@ def render_pitch_canvas(
                 <span class="variant-name">{_text(v_name)}:</span>
                 {metrics_html}
               </div>
-              <div class="stack-track" style="height:{chart_px_height}px">
+              <div class="stack-track" style="height:{chart_px_height}px; min-height:{chart_px_height}px">
                 {takt_line_html}
                 <div class="stack-blocks-wrapper">{"".join(blocks_html)}</div>
               </div>
@@ -1460,7 +1491,7 @@ def render_pitch_canvas(
     return f"""
     <style>
       .paag-slide {{
-        aspect-ratio: 16 / 9;
+        aspect-ratio: auto;
         box-sizing: border-box;
         width: 100%;
         max-width: 100%;
@@ -1657,6 +1688,30 @@ def render_pitch_canvas(
         letter-spacing: 0.03em;
       }}
       .header-page-row {{
+        margin-bottom: 4px;
+      }}
+      .tie-tool-slide-btn {{
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        background: #f0f9ff;
+        color: #0284c7;
+        border: 1px solid #bae6fd;
+        border-radius: 4px;
+        padding: 1px 7px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: none;
+        letter-spacing: 0.01em;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }}
+      .tie-tool-slide-btn:hover {{
+        background: #e0f2fe;
+        border-color: #38bdf8;
+        color: #0369a1;
+      }}
+      .header-page-row-noop {{
         margin-bottom: 4px;
       }}
       .page-badge {{
@@ -2320,6 +2375,60 @@ def render_pitch_canvas(
         line-height: 1.3;
       }}
       /* Mini Yamazumi Stack */
+      .left-col > .panel-section {{
+        position: relative;
+        flex: 0 0 auto;
+        width: 100%;
+        box-sizing: border-box;
+      }}
+      .stack-panel {{
+        margin-top: 0 !important;
+        flex: 0 0 auto;
+        min-height: 0 !important;
+        height: auto !important;
+        padding: 8px 10px;
+        box-sizing: border-box;
+        overflow: visible;
+        position: relative;
+      }}
+      .stacks-container {{
+        min-height: 0 !important;
+        height: auto !important;
+        align-items: stretch;
+        margin-top: 4px;
+      }}
+      .variant-stack-col {{
+        justify-content: space-between !important;
+        gap: 4px;
+      }}
+      .variant-header {{
+        margin-bottom: 4px !important;
+        flex: 0 0 auto;
+        position: relative;
+        z-index: 2;
+      }}
+      .stack-track {{
+        flex: 0 0 auto;
+        width: 100%;
+        box-sizing: border-box;
+      }}
+      .stack-block {{
+        min-height: 0 !important;
+        flex: 0 0 auto;
+      }}
+      .stack-block.compact {{
+        line-height: 1;
+      }}
+      .stack-block.compact .stack-step-trigger {{
+        padding: 0;
+        margin: 0;
+      }}
+      .stack-block.compact .stack-step-badge {{
+        font-size: 0.56rem;
+        padding: 0 2px;
+        line-height: 10px;
+        min-width: 12px;
+      }}
       .stack-panel {{
         margin-top: auto;
         flex: 0 0 auto;
@@ -2503,14 +2612,14 @@ def render_pitch_canvas(
       .stack-block.multiline .block-label {{
         display: -webkit-box;
         -webkit-box-orient: vertical;
-        -webkit-line-clamp: 2;
+        -webkit-line-clamp: 5;
         white-space: normal;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        overflow-wrap: break-word;
-        word-break: normal;
-        line-height: 1.15;
-        max-height: 2.3em;
+        overflow: visible;
+        text-overflow: clip;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.18;
+        max-height: none;
       }}
       .stack-block.multiline .block-right {{
         margin-left: 3px;
@@ -2727,7 +2836,7 @@ def render_pitch_canvas(
       .motion-bar.green {{ background: #35c84a; }}
       .motion-bar.orange {{ background: #ea580c; }}
       .motion-bar.gray {{ background: #64748b; }}
-      .block-label {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }}
+      .block-label {{ white-space: normal; overflow-wrap: anywhere; word-break: break-word; line-height: 1.18; min-width: 0; }}
       .block-time {{ font-weight: 800; flex-shrink: 0; }}
       .takt-line {{
         position: absolute;
@@ -3341,6 +3450,7 @@ def render_pitch_canvas(
           <div class="panel-section tools-panel">
             <div class="panel-title-bar">
               <span>Tools &amp; PPE Required</span>
+              {tie_tool_btn_html}
             </div>
             {tools_section_html}
           </div>
@@ -3357,7 +3467,7 @@ def render_pitch_canvas(
           <!-- Mini Yamazumi Stack -->
           <div class="panel-section stack-panel">
             <div class="panel-title-bar">
-              <span>Yamazumi Pitch Stack</span>
+              <span>Yamazumi</span>
               <div class="yam-legend">
                 <span class="yam-legend-item"><i class="swatch-mini cycle"></i>Cycle</span>
                 <span class="yam-legend-item"><i class="swatch-mini periodic"></i>Periodic</span>
@@ -3433,9 +3543,38 @@ def render_pitch_canvas(
           }});
         }}
 
+        function triggerTieToolDialog(e) {{
+          if (e) {{
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          const doc = (window.parent && window.parent.document) ? window.parent.document : document;
+          const btn = doc.querySelector('[class*="st-key-btn_tie_tool_slide_"] button')
+                   || doc.querySelector('[class*="st-key-btn_tools_"] button');
+          if (btn) {{
+            btn.click();
+          }}
+        }}
+        window.__paagOpenTieToolDialog = triggerTieToolDialog;
+
+        function setupTieToolButton() {{
+          const bindBtn = (btn) => {{
+            if (btn.dataset.tieToolBound === '1') return;
+            btn.dataset.tieToolBound = '1';
+            btn.addEventListener('click', triggerTieToolDialog);
+          }};
+          document.querySelectorAll('.tie-tool-slide-btn').forEach(bindBtn);
+          document.querySelectorAll('*').forEach(el => {{
+            if (el.shadowRoot) {{
+              el.shadowRoot.querySelectorAll('.tie-tool-slide-btn').forEach(bindBtn);
+            }}
+          }});
+        }}
+
         function initSlideInteractions() {{
           setupHoverLinking();
           setupTouchAndViewportPopovers();
+          setupTieToolButton();
         }}
 
         if (document.readyState === 'loading') {{
@@ -4070,4 +4209,4 @@ def render_printable_paag_deck(
 </html>"""
 
 
-_PROCESS_PITCH_VISUAL_REV_20261102 = 3
+_PROCESS_PITCH_VISUAL_REV_20261102 = 7

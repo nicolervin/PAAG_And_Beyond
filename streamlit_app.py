@@ -1,4 +1,35 @@
 import streamlit as st
+import importlib as _importlib
+import sys as _sys
+
+if (
+    ("utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "request_unsaved_state_change"))
+    or ("utils.store" in _sys.modules and not hasattr(_sys.modules["utils.store"], "link_part_variants"))
+    or ("utils.fishbone_store" in _sys.modules and getattr(_sys.modules["utils.fishbone_store"], "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 2)
+):
+    for _mod_name in (
+        "utils.time_units",
+        "utils.gcp_auth",
+        "utils.table_filters",
+        "utils.table_ui",
+        "utils.scope_ui",
+        "utils.split_workspace",
+        "utils.db_core",
+        "utils.cache_store",
+        "utils.audit_store",
+        "utils.model_part_store",
+        "utils.fishbone_store",
+        "utils.fishbone_visual",
+        "utils.yamazumi_store",
+        "utils.process_store",
+        "utils.quality_store",
+        "utils.help_hub",
+        "utils.store",
+    ):
+        if _mod_name in _sys.modules:
+            _importlib.reload(_sys.modules[_mod_name])
+    if "utils.store" in _sys.modules:
+        _sys.modules["utils.store"].init_db()
 
 from streamlit.runtime.scriptrunner import StopException
 

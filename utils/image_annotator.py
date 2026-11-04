@@ -6,13 +6,15 @@ from typing import Any
 
 import streamlit as st
 
+_IMAGE_ANNOTATOR_REV_20261103 = 2
+
 
 _HTML = """
 <div class="annotator-shell" id="annotator-shell">
   <div class="annotator-toolbar">
     <div class="toolbar-row toolbar-row-top">
       <div class="tool-group tools-bar">
-        <button type="button" class="tool-btn active" data-tool="select" title="Select & Move (V)">👆 Select</button>
+        <button type="button" class="tool-btn active" data-tool="select" title="Select, Move & Resize (V)">👆 Select</button>
         <button type="button" class="tool-btn" data-tool="pen" title="Freehand Pen (P)">✏️ Pen</button>
         <button type="button" class="tool-btn" data-tool="arrow" title="Arrow (A)">↗️ Arrow</button>
         <button type="button" class="tool-btn" data-tool="rect" title="Rectangle Box (R)">🔲 Box</button>
@@ -21,6 +23,11 @@ _HTML = """
         <button type="button" class="tool-btn" data-tool="badge" title="Step Badge (B)">🔢 Badge</button>
         <span class="toolbar-label" style="margin-left:4px;">Next #:</span>
         <input type="number" id="next-badge-num" class="toolbar-num-input" value="1" min="1" max="99" />
+      </div>
+      <div class="tool-divider"></div>
+      <div class="tool-group insert-photo-bar">
+        <button type="button" id="btn-add-part-photo" class="action-btn insert-photo-btn" title="Pull and insert a photo from the Parts Catalog onto this visual aid">📦 Part Photo</button>
+        <button type="button" id="btn-paste-photo" class="action-btn insert-photo-btn" title="Paste a photo from your clipboard (or press Ctrl+V)">📋 Paste Photo</button>
       </div>
       <div class="tool-divider"></div>
       <div class="tool-group colors-bar">
@@ -75,6 +82,57 @@ _HTML = """
       <input type="text" id="text-edit-input" placeholder="Type callout note..." />
       <button type="button" id="text-edit-ok">OK</button>
       <button type="button" id="text-edit-cancel">Cancel</button>
+    </div>
+    <div id="part-photo-modal" class="confirm-modal-backdrop" style="display:none;">
+      <div class="confirm-modal-dialog part-photo-dialog" role="dialog" aria-modal="true" aria-labelledby="part-photo-modal-title">
+        <div class="confirm-modal-header">
+          <h4 id="part-photo-modal-title">📦 Insert Photo from Parts Catalog</h4>
+          <button type="button" id="part-photo-modal-close" class="confirm-modal-close" title="Close">✕</button>
+        </div>
+        <p class="confirm-modal-subtitle">Click a part photo below to overlay it onto this visual aid. Once inserted, drag to move or drag its corners to resize.</p>
+        <div class="part-photo-controls">
+          <input type="text" id="part-photo-search" class="part-photo-search" placeholder="Search by part number, description, or view..." />
+          <select id="part-photo-scope" class="toolbar-select">
+            <option value="all">All catalog photos</option>
+            <option value="pitch">On this pitch only</option>
+          </select>
+          <label class="part-photo-label-opt">
+            <input type="checkbox" id="part-photo-show-label" checked />
+            <span>Show part # caption on photo</span>
+          </label>
+        </div>
+        <div id="part-photo-grid" class="part-photo-grid"></div>
+        <div class="confirm-modal-actions">
+          <button type="button" id="part-photo-modal-cancel" class="confirm-btn-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="paste-photo-modal" class="confirm-modal-backdrop" style="display:none;">
+      <div class="confirm-modal-dialog paste-photo-dialog" role="dialog" aria-modal="true" aria-labelledby="paste-photo-modal-title">
+        <div class="confirm-modal-header">
+          <h4 id="paste-photo-modal-title">📋 Paste or Insert Photo</h4>
+          <button type="button" id="paste-photo-modal-close" class="confirm-modal-close" title="Close">✕</button>
+        </div>
+        <p class="confirm-modal-subtitle">Copy an image or screenshot (e.g., <strong>Win+Shift+S</strong>), then press <strong>Ctrl+V</strong> below — or choose an image file from your computer:</p>
+        <div id="paste-photo-dropzone" class="paste-photo-dropzone" tabindex="0">
+          <div class="paste-photo-icon">📋</div>
+          <div class="paste-photo-prompt">Press <strong>Ctrl + V</strong> here to paste from clipboard</div>
+          <div class="paste-photo-sub">Or click a button below to read clipboard / browse an image file</div>
+          <div class="paste-photo-btn-row">
+            <button type="button" id="btn-try-clipboard-read" class="action-btn insert-photo-btn">📋 Read Clipboard Now</button>
+            <label for="paste-photo-file-input" class="action-btn">📁 Choose Image File...</label>
+            <input type="file" id="paste-photo-file-input" accept="image/*" style="display:none;" />
+          </div>
+          <div id="paste-photo-feedback" class="paste-photo-feedback"></div>
+        </div>
+        <div class="part-photo-controls" style="justify-content:flex-start;">
+          <span class="toolbar-label">Optional caption on photo:</span>
+          <input type="text" id="paste-photo-caption" class="part-photo-search" placeholder="e.g. Detail view or part callout (optional)" />
+        </div>
+        <div class="confirm-modal-actions">
+          <button type="button" id="paste-photo-modal-cancel" class="confirm-btn-cancel">Cancel</button>
+        </div>
+      </div>
     </div>
     <div id="delete-confirm-modal" class="confirm-modal-backdrop" style="display:none;">
       <div class="confirm-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
@@ -460,6 +518,169 @@ _CSS = """
   background: #a71919;
   border-color: #a71919;
 }
+.insert-photo-btn {
+  background: #f0f9ff;
+  border-color: #7dd3fc;
+  color: #0369a1;
+  font-weight: 700;
+}
+.insert-photo-btn:hover {
+  background: #e0f2fe;
+  border-color: #0284c7;
+  color: #075985;
+}
+.part-photo-dialog {
+  max-width: 680px;
+  max-height: 490px;
+}
+.paste-photo-dialog {
+  max-width: 520px;
+}
+.part-photo-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.part-photo-search {
+  flex: 1 1 200px;
+  padding: 5px 9px;
+  font-size: 0.8rem;
+  border-radius: 5px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #0f172a;
+}
+.part-photo-label-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+}
+.part-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
+  gap: 10px;
+  max-height: 270px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.part-photo-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #ffffff;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+  text-align: left;
+  padding: 0;
+}
+.part-photo-card:hover {
+  border-color: #0284c7;
+  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.22);
+  transform: translateY(-1px);
+}
+.part-photo-thumb {
+  width: 100%;
+  height: 96px;
+  object-fit: contain;
+  background: #0f172a;
+  border-bottom: 1px solid #e2e8f0;
+}
+.part-photo-meta {
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.part-photo-pnum {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.part-photo-desc {
+  font-size: 0.71rem;
+  color: #475569;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.part-photo-view {
+  font-size: 0.68rem;
+  color: #0284c7;
+  font-weight: 600;
+}
+.part-photo-badge {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #dcfce7;
+  color: #166534;
+  margin-bottom: 2px;
+}
+.part-photo-empty {
+  grid-column: 1 / -1;
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 0.82rem;
+  color: #64748b;
+}
+.paste-photo-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px 16px;
+  border: 2px dashed #38bdf8;
+  border-radius: 8px;
+  background: #f0f9ff;
+  text-align: center;
+  outline: none;
+}
+.paste-photo-dropzone:focus {
+  border-color: #0284c7;
+  background: #e0f2fe;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.2);
+}
+.paste-photo-icon {
+  font-size: 1.6rem;
+}
+.paste-photo-prompt {
+  font-size: 0.88rem;
+  color: #0f172a;
+}
+.paste-photo-sub {
+  font-size: 0.75rem;
+  color: #475569;
+}
+.paste-photo-btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.paste-photo-feedback {
+  font-size: 0.76rem;
+  color: #b91c1c;
+  min-height: 16px;
+  margin-top: 2px;
+}
 .annotator-statusbar {
   display: flex;
   justify-content: space-between;
@@ -505,6 +726,23 @@ export default function(component) {
   const optDescSelected = parentElement.querySelector("#opt-desc-selected");
   const optDescAll = parentElement.querySelector("#opt-desc-all");
   const downstreamText = parentElement.querySelector("#confirm-downstream-text");
+  const addPartPhotoBtn = parentElement.querySelector("#btn-add-part-photo");
+  const pastePhotoBtn = parentElement.querySelector("#btn-paste-photo");
+  const partPhotoModal = parentElement.querySelector("#part-photo-modal");
+  const partPhotoModalClose = parentElement.querySelector("#part-photo-modal-close");
+  const partPhotoModalCancel = parentElement.querySelector("#part-photo-modal-cancel");
+  const partPhotoSearch = parentElement.querySelector("#part-photo-search");
+  const partPhotoScope = parentElement.querySelector("#part-photo-scope");
+  const partPhotoShowLabel = parentElement.querySelector("#part-photo-show-label");
+  const partPhotoGrid = parentElement.querySelector("#part-photo-grid");
+  const pastePhotoModal = parentElement.querySelector("#paste-photo-modal");
+  const pastePhotoModalClose = parentElement.querySelector("#paste-photo-modal-close");
+  const pastePhotoModalCancel = parentElement.querySelector("#paste-photo-modal-cancel");
+  const pastePhotoDropzone = parentElement.querySelector("#paste-photo-dropzone");
+  const tryClipboardReadBtn = parentElement.querySelector("#btn-try-clipboard-read");
+  const pastePhotoFileInput = parentElement.querySelector("#paste-photo-file-input");
+  const pastePhotoFeedback = parentElement.querySelector("#paste-photo-feedback");
+  const pastePhotoCaption = parentElement.querySelector("#paste-photo-caption");
 
   let currentTool = "select";
   let currentColor = "#ef4444";
@@ -516,6 +754,8 @@ export default function(component) {
   let selectedShapeId = null;
   let isDrawing = false;
   let isDragging = false;
+  let isResizing = false;
+  let resizeHandle = null;
   let isCropping = false;
   let cropRect = null;
   let dragStartX = 0;
@@ -528,6 +768,118 @@ export default function(component) {
   let zoomMultiplier = 1.0;
   let canvasDispW = 800;
   let canvasDispH = 500;
+  const imageShapeCache = new Map();
+  const catalogPhotos = Array.isArray(data && data.catalog_photos) ? data.catalog_photos : [];
+
+  function getCachedShapeImage(shapeOrUrl) {
+    const dataUrl = (shapeOrUrl && typeof shapeOrUrl === "object")
+      ? (shapeOrUrl.dataUrl || shapeOrUrl.data_url || "")
+      : shapeOrUrl;
+    if (!dataUrl || typeof dataUrl !== "string") return null;
+    if (imageShapeCache.has(dataUrl)) {
+      return imageShapeCache.get(dataUrl);
+    }
+    const cachedIm = new Image();
+    if (!dataUrl.startsWith("data:")) {
+      cachedIm.crossOrigin = "anonymous";
+    }
+    imageShapeCache.set(dataUrl, cachedIm);
+    cachedIm.onload = () => {
+      render();
+    };
+    cachedIm.src = dataUrl;
+    return cachedIm;
+  }
+
+  function warmShapeImages() {
+    shapes.forEach(s => {
+      if (s && s.type === "image" && (s.dataUrl || s.data_url)) {
+        getCachedShapeImage(s.dataUrl || s.data_url);
+      }
+    });
+  }
+
+  function activateSelectTool() {
+    currentTool = "select";
+    parentElement.querySelectorAll(".tool-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.tool === "select");
+    });
+    canvas.style.cursor = "default";
+  }
+
+  function insertImageOverlay(rawSrcUrl, labelText, sourceTag) {
+    if (!imgLoaded || !rawSrcUrl) return;
+    statusEl.textContent = "Loading photo into annotation canvas...";
+    const loader = new Image();
+    if (!String(rawSrcUrl).startsWith("data:")) {
+      loader.crossOrigin = "anonymous";
+    }
+    loader.onload = () => {
+      const natW = loader.naturalWidth || 240;
+      const natH = loader.naturalHeight || 240;
+      const maxStoredDim = 640;
+      let storeW = natW;
+      let storeH = natH;
+      if (Math.max(natW, natH) > maxStoredDim) {
+        const r = maxStoredDim / Math.max(natW, natH);
+        storeW = Math.max(1, Math.round(natW * r));
+        storeH = Math.max(1, Math.round(natH * r));
+      }
+      let finalDataUrl = rawSrcUrl;
+      try {
+        const normCanvas = document.createElement("canvas");
+        normCanvas.width = storeW;
+        normCanvas.height = storeH;
+        const nctx = normCanvas.getContext("2d");
+        nctx.drawImage(loader, 0, 0, storeW, storeH);
+        finalDataUrl = normCanvas.toDataURL("image/png");
+      } catch (err) {
+        finalDataUrl = rawSrcUrl;
+      }
+      imageShapeCache.set(finalDataUrl, loader);
+      if (rawSrcUrl !== finalDataUrl) {
+        imageShapeCache.set(rawSrcUrl, loader);
+      }
+
+      const workW = getWorkingWidth();
+      const workH = getWorkingHeight();
+      const baseRef = Math.min(workW, workH);
+      const targetMaxDim = Math.max(96, Math.min(Math.round(baseRef * 0.34), Math.round(workW * 0.45), Math.round(workH * 0.45)));
+      const aspect = natW / Math.max(1, natH);
+      let boxW = aspect >= 1 ? targetMaxDim : Math.max(64, Math.round(targetMaxDim * aspect));
+      let boxH = aspect >= 1 ? Math.max(64, Math.round(targetMaxDim / aspect)) : targetMaxDim;
+      boxW = Math.min(workW - 16, boxW);
+      boxH = Math.min(workH - 16, boxH);
+
+      const existingImgs = shapes.filter(s => s && s.type === "image").length;
+      const cascade = (existingImgs % 5) * 22;
+      const startX = Math.max(12, Math.min(workW - boxW - 12, Math.round(workW - boxW - 24 - cascade)));
+      const startY = Math.max(12, Math.min(workH - boxH - 12, 24 + cascade));
+
+      pushUndo();
+      const newShape = {
+        id: `shape_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+        type: "image",
+        x: startX,
+        y: startY,
+        w: boxW,
+        h: boxH,
+        dataUrl: finalDataUrl,
+        label: String(labelText || "").trim(),
+        color: currentColor,
+        strokeWidth: currentStrokeWidth,
+      };
+      shapes.push(newShape);
+      selectedShapeId = newShape.id;
+      activateSelectTool();
+      statusEl.textContent = `Inserted ${sourceTag || "photo"} · Drag to move or drag corners to resize`;
+      render();
+    };
+    loader.onerror = () => {
+      statusEl.textContent = "Could not load the selected photo.";
+    };
+    loader.src = rawSrcUrl;
+  }
 
   function getWorkingWidth() {
     return workingCanvas.width || img.naturalWidth || 800;
@@ -649,7 +1001,7 @@ export default function(component) {
         const [nx2, ny2] = rotPt(s.x2, s.y2);
         s.x1 = nx1; s.y1 = ny1;
         s.x2 = nx2; s.y2 = ny2;
-      } else if (s.type === "rect" || s.type === "circle") {
+      } else if (s.type === "rect" || s.type === "circle" || s.type === "image") {
         const [ax, ay] = rotPt(s.x, s.y);
         const [bx, by] = rotPt(s.x + s.w, s.y + s.h);
         s.x = Math.min(ax, bx);
@@ -747,7 +1099,7 @@ export default function(component) {
 
   function getToolHint(t) {
     switch(t) {
-      case "select": return "Click shape to select · Drag to move · Del to delete";
+      case "select": return "Click shape/photo to select · Drag to move · Drag corners to resize · Del to delete";
       case "crop": return "Click and drag to select crop area, then click ✓ Apply Crop (or Enter)";
       case "arrow": return "Click and drag to point arrow";
       case "rect": return "Click and drag to draw focus box";
@@ -780,6 +1132,7 @@ export default function(component) {
       shapes = [];
       transformOps = [];
     }
+    warmShapeImages();
     selectedShapeId = null;
     cropRect = null;
     syncCropActionButtons();
@@ -818,9 +1171,226 @@ export default function(component) {
       case "text": return shape.text ? `Callout ("${shape.text}")` : "Callout";
       case "badge": return `Step Badge #${shape.badgeNum || 1}`;
       case "pen": return "Freehand Pen stroke";
+      case "image": return shape.label ? `Inset Photo (${shape.label})` : "Inset Photo";
       default: return "shape";
     }
   }
+
+  // Parts Catalog Photo Picker Modal
+  function renderPartPhotoGrid() {
+    while (partPhotoGrid.firstChild) {
+      partPhotoGrid.removeChild(partPhotoGrid.firstChild);
+    }
+    if (!catalogPhotos || catalogPhotos.length === 0) {
+      const emptyEl = document.createElement("div");
+      emptyEl.className = "part-photo-empty";
+      emptyEl.textContent = "No photos found in the Parts Catalog yet. Upload or paste part photos in the Parts Catalog module to pull them into visual aid annotations.";
+      partPhotoGrid.appendChild(emptyEl);
+      return;
+    }
+    const query = (partPhotoSearch.value || "").trim().toLowerCase();
+    const scopeVal = partPhotoScope.value || "all";
+    const filtered = catalogPhotos.filter(item => {
+      if (!item || !item.data_url) return false;
+      if (scopeVal === "pitch" && !item.on_pitch) return false;
+      if (!query) return true;
+      const hay = `${item.part_number || ""} ${item.description || ""} ${item.view_label || ""} ${item.caption || ""}`.toLowerCase();
+      return hay.includes(query);
+    });
+    if (filtered.length === 0) {
+      const emptyEl = document.createElement("div");
+      emptyEl.className = "part-photo-empty";
+      emptyEl.textContent = scopeVal === "pitch"
+        ? "No matching Parts Catalog photos assigned to this pitch. Switch filter to 'All catalog photos' to browse the full catalog."
+        : "No Parts Catalog photos match your search.";
+      partPhotoGrid.appendChild(emptyEl);
+      return;
+    }
+    filtered.forEach(item => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "part-photo-card";
+      card.title = `Insert ${item.part_number || "Part"} (${item.view_label || "Photo"})`;
+
+      const thumb = document.createElement("img");
+      thumb.className = "part-photo-thumb";
+      thumb.src = item.data_url;
+      thumb.alt = item.part_number || "Part photo";
+      card.appendChild(thumb);
+
+      const meta = document.createElement("div");
+      meta.className = "part-photo-meta";
+      if (item.on_pitch) {
+        const badge = document.createElement("span");
+        badge.className = "part-photo-badge";
+        badge.textContent = "📌 On this pitch";
+        meta.appendChild(badge);
+      }
+      const pnum = document.createElement("div");
+      pnum.className = "part-photo-pnum";
+      pnum.textContent = item.part_number || "Part";
+      meta.appendChild(pnum);
+
+      if (item.description) {
+        const desc = document.createElement("div");
+        desc.className = "part-photo-desc";
+        desc.textContent = item.description;
+        meta.appendChild(desc);
+      }
+      if (item.view_label) {
+        const vlbl = document.createElement("div");
+        vlbl.className = "part-photo-view";
+        vlbl.textContent = item.view_label;
+        meta.appendChild(vlbl);
+      }
+      card.appendChild(meta);
+
+      card.onclick = () => {
+        const labelTxt = partPhotoShowLabel.checked ? (item.part_number || "") : "";
+        closePartPhotoModal();
+        insertImageOverlay(
+          item.data_url,
+          labelTxt,
+          `part photo (${item.part_number || "Catalog"})`
+        );
+      };
+      partPhotoGrid.appendChild(card);
+    });
+  }
+
+  function openPartPhotoModal() {
+    const hasPitchPhotos = catalogPhotos.some(item => item && item.on_pitch && item.data_url);
+    partPhotoScope.value = hasPitchPhotos ? "pitch" : "all";
+    partPhotoSearch.value = "";
+    renderPartPhotoGrid();
+    partPhotoModal.style.display = "flex";
+    setTimeout(() => partPhotoSearch.focus(), 50);
+  }
+
+  function closePartPhotoModal() {
+    partPhotoModal.style.display = "none";
+  }
+
+  addPartPhotoBtn.onclick = openPartPhotoModal;
+  partPhotoModalClose.onclick = closePartPhotoModal;
+  partPhotoModalCancel.onclick = closePartPhotoModal;
+  partPhotoSearch.oninput = renderPartPhotoGrid;
+  partPhotoScope.onchange = renderPartPhotoGrid;
+  partPhotoModal.onclick = (e) => {
+    if (e.target === partPhotoModal) closePartPhotoModal();
+  };
+
+  // Clipboard & File Photo Paste Modal
+  function handleImageBlob(blob, sourceTag) {
+    if (!blob) return;
+    const captionTxt = (pastePhotoCaption && pastePhotoCaption.value ? pastePhotoCaption.value : "").trim();
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        closePastePhotoModal();
+        insertImageOverlay(reader.result, captionTxt, sourceTag || "clipboard photo");
+      }
+    };
+    reader.onerror = () => {
+      if (pastePhotoFeedback) {
+        pastePhotoFeedback.textContent = "Could not read image data from clipboard.";
+      }
+    };
+    reader.readAsDataURL(blob);
+  }
+
+  function openPastePhotoModal(feedbackMsg) {
+    if (pastePhotoFeedback) {
+      pastePhotoFeedback.textContent = feedbackMsg || "";
+    }
+    if (pastePhotoCaption) {
+      pastePhotoCaption.value = "";
+    }
+    if (pastePhotoFileInput) {
+      pastePhotoFileInput.value = "";
+    }
+    pastePhotoModal.style.display = "flex";
+    setTimeout(() => {
+      if (pastePhotoDropzone) pastePhotoDropzone.focus();
+    }, 50);
+  }
+
+  function closePastePhotoModal() {
+    pastePhotoModal.style.display = "none";
+  }
+
+  async function tryReadClipboardImage(openModalOnFail) {
+    if (navigator.clipboard && typeof navigator.clipboard.read === "function") {
+      try {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imgType = (item.types || []).find(t => t.startsWith("image/"));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            handleImageBlob(blob, "clipboard photo");
+            return true;
+          }
+        }
+        if (openModalOnFail) {
+          openPastePhotoModal("No image found in clipboard. Copy an image (Win+Shift+S) and press Ctrl+V below, or choose a file.");
+        } else if (pastePhotoFeedback) {
+          pastePhotoFeedback.textContent = "No image found in clipboard. Copy an image first, then press Ctrl+V.";
+        }
+        return false;
+      } catch (err) {
+        if (openModalOnFail) {
+          openPastePhotoModal();
+        } else if (pastePhotoFeedback) {
+          pastePhotoFeedback.textContent = "Browser blocked direct clipboard access — press Ctrl+V on your keyboard instead.";
+        }
+        return false;
+      }
+    }
+    if (openModalOnFail) {
+      openPastePhotoModal();
+    }
+    return false;
+  }
+
+  pastePhotoBtn.onclick = () => {
+    openPastePhotoModal("");
+  };
+  tryClipboardReadBtn.onclick = () => {
+    tryReadClipboardImage(false);
+  };
+  pastePhotoModalClose.onclick = closePastePhotoModal;
+  pastePhotoModalCancel.onclick = closePastePhotoModal;
+  pastePhotoModal.onclick = (e) => {
+    if (e.target === pastePhotoModal) closePastePhotoModal();
+  };
+  pastePhotoFileInput.onchange = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) {
+      handleImageBlob(file, `photo (${file.name})`);
+    }
+  };
+
+  window.addEventListener("paste", (e) => {
+    if (!imgLoaded) return;
+    const activeEl = document.activeElement;
+    if (activeEl === textInput || activeEl === partPhotoSearch) return;
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type && item.type.startsWith("image/")) {
+        const blob = item.getAsFile();
+        if (blob) {
+          e.preventDefault();
+          handleImageBlob(blob, "clipboard photo");
+          return;
+        }
+      }
+    }
+    if (pastePhotoModal.style.display === "flex" && pastePhotoFeedback) {
+      pastePhotoFeedback.textContent = "Clipboard does not contain an image. Copy a screenshot or image first, then press Ctrl+V.";
+    }
+  });
 
   function syncDeleteModalDownstream() {
     if (radioDelSelected.checked && !radioDelSelected.disabled) {
@@ -906,6 +1476,20 @@ export default function(component) {
   // Keyboard shortcuts for Crop Apply/Cancel & Delete
   window.addEventListener("keydown", (e) => {
     if (textOverlay.style.display === "flex") return;
+    if (partPhotoModal.style.display === "flex") {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closePartPhotoModal();
+      }
+      return;
+    }
+    if (pastePhotoModal.style.display === "flex") {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closePastePhotoModal();
+      }
+      return;
+    }
     if (deleteModal.style.display === "flex") {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -922,7 +1506,12 @@ export default function(component) {
     } else if (cropRect && e.key === "Escape") {
       e.preventDefault();
       cancelPendingCrop();
-    } else if ((e.key === "Delete" || e.key === "Backspace") && selectedShapeId && document.activeElement !== nextBadgeInput) {
+    } else if (
+      (e.key === "Delete" || e.key === "Backspace") &&
+      selectedShapeId &&
+      document.activeElement !== nextBadgeInput &&
+      document.activeElement !== partPhotoSearch
+    ) {
       e.preventDefault();
       openDeleteConfirmModal();
     }
@@ -991,6 +1580,7 @@ export default function(component) {
       if (data.initial_badge_number) {
         nextBadgeInput.value = data.initial_badge_number;
       }
+      warmShapeImages();
       rebuildWorkingImage();
       resizeCanvas();
       render();
@@ -1041,6 +1631,27 @@ export default function(component) {
     };
   }
 
+  function findResizeHandle(s, nx, ny) {
+    if (!s || s.type !== "image") return null;
+    const tol = Math.max(12, Math.round(14 / Math.max(0.25, scale)));
+    const xMin = Math.min(s.x, s.x + s.w);
+    const xMax = Math.max(s.x, s.x + s.w);
+    const yMin = Math.min(s.y, s.y + s.h);
+    const yMax = Math.max(s.y, s.y + s.h);
+    const corners = [
+      { id: "nw", x: xMin, y: yMin },
+      { id: "ne", x: xMax, y: yMin },
+      { id: "sw", x: xMin, y: yMax },
+      { id: "se", x: xMax, y: yMax },
+    ];
+    for (const c of corners) {
+      if (Math.hypot(nx - c.x, ny - c.y) <= tol) {
+        return c.id;
+      }
+    }
+    return null;
+  }
+
   // Pointer interactions
   canvas.onpointerdown = (e) => {
     if (!imgLoaded) return;
@@ -1058,8 +1669,23 @@ export default function(component) {
     }
 
     if (currentTool === "select") {
+      if (selectedShapeId) {
+        const currentSel = shapes.find(s => s.id === selectedShapeId);
+        const hId = findResizeHandle(currentSel, pos.natX, pos.natY);
+        if (hId) {
+          pushUndo();
+          isResizing = true;
+          resizeHandle = hId;
+          dragStartX = pos.natX;
+          dragStartY = pos.natY;
+          canvas.style.cursor = (hId === "nw" || hId === "se") ? "nwse-resize" : "nesw-resize";
+          render();
+          return;
+        }
+      }
       const hit = findHitShape(pos.natX, pos.natY);
       if (hit) {
+        pushUndo();
         selectedShapeId = hit.id;
         isDragging = true;
         dragStartX = pos.natX;
@@ -1148,6 +1774,40 @@ export default function(component) {
       return;
     }
 
+    if (isResizing && selectedShapeId) {
+      const dx = pos.natX - dragStartX;
+      const dy = pos.natY - dragStartY;
+      const sel = shapes.find(s => s.id === selectedShapeId);
+      if (sel && sel.type === "image") {
+        const minSize = 28;
+        if (resizeHandle === "se") {
+          sel.w = Math.max(minSize, sel.w + dx);
+          sel.h = Math.max(minSize, sel.h + dy);
+        } else if (resizeHandle === "sw") {
+          const newW = Math.max(minSize, sel.w - dx);
+          sel.x += (sel.w - newW);
+          sel.w = newW;
+          sel.h = Math.max(minSize, sel.h + dy);
+        } else if (resizeHandle === "ne") {
+          sel.w = Math.max(minSize, sel.w + dx);
+          const newH = Math.max(minSize, sel.h - dy);
+          sel.y += (sel.h - newH);
+          sel.h = newH;
+        } else if (resizeHandle === "nw") {
+          const newW = Math.max(minSize, sel.w - dx);
+          const newH = Math.max(minSize, sel.h - dy);
+          sel.x += (sel.w - newW);
+          sel.y += (sel.h - newH);
+          sel.w = newW;
+          sel.h = newH;
+        }
+        dragStartX = pos.natX;
+        dragStartY = pos.natY;
+        render();
+      }
+      return;
+    }
+
     if (isDragging && selectedShapeId) {
       const dx = pos.natX - dragStartX;
       const dy = pos.natY - dragStartY;
@@ -1158,6 +1818,20 @@ export default function(component) {
         dragStartY = pos.natY;
         render();
       }
+      return;
+    }
+
+    if (currentTool === "select" && !isDragging && !isResizing) {
+      if (selectedShapeId) {
+        const currentSel = shapes.find(s => s.id === selectedShapeId);
+        const hId = findResizeHandle(currentSel, pos.natX, pos.natY);
+        if (hId) {
+          canvas.style.cursor = (hId === "nw" || hId === "se") ? "nwse-resize" : "nesw-resize";
+          return;
+        }
+      }
+      const hoverHit = findHitShape(pos.natX, pos.natY);
+      canvas.style.cursor = hoverHit ? "move" : "default";
       return;
     }
 
@@ -1196,10 +1870,16 @@ export default function(component) {
       render();
       return;
     }
+    if (isResizing) {
+      isResizing = false;
+      resizeHandle = null;
+      canvas.style.cursor = currentTool === "select" ? "default" : "crosshair";
+      render();
+      return;
+    }
     if (isDragging) {
       isDragging = false;
       canvas.style.cursor = currentTool === "select" ? "default" : "crosshair";
-      pushUndo();
       return;
     }
     if (isDrawing && activeShape) {
@@ -1216,7 +1896,7 @@ export default function(component) {
     if (s.type === "arrow") {
       s.x1 += dx; s.y1 += dy;
       s.x2 += dx; s.y2 += dy;
-    } else if (s.type === "rect" || s.type === "circle" || s.type === "badge" || s.type === "text") {
+    } else if (s.type === "rect" || s.type === "circle" || s.type === "badge" || s.type === "text" || s.type === "image") {
       s.x += dx; s.y += dy;
     } else if (s.type === "pen") {
       s.points.forEach(p => { p.x += dx; p.y += dy; });
@@ -1229,7 +1909,7 @@ export default function(component) {
       if (s.type === "arrow") {
         const d = distToSegment(nx, ny, s.x1, s.y1, s.x2, s.y2);
         if (d < Math.max(18, s.strokeWidth * 3)) return s;
-      } else if (s.type === "rect") {
+      } else if (s.type === "rect" || s.type === "image") {
         const xMin = Math.min(s.x, s.x + s.w);
         const xMax = Math.max(s.x, s.x + s.w);
         const yMin = Math.min(s.y, s.y + s.h);
@@ -1492,11 +2172,49 @@ export default function(component) {
         }
         targetCtx.stroke();
       }
+    } else if (s.type === "image") {
+      const rx = Math.min(s.x, s.x + s.w) * sc;
+      const ry = Math.min(s.y, s.y + s.h) * sc;
+      const rw = Math.max(1, Math.abs(s.w) * sc);
+      const rh = Math.max(1, Math.abs(s.h) * sc);
+      const cachedImg = getCachedShapeImage(s.dataUrl || s.data_url || s);
+
+      targetCtx.save();
+      targetCtx.shadowColor = "rgba(0, 0, 0, 0.55)";
+      targetCtx.shadowBlur = 8 * sc;
+      targetCtx.fillStyle = "#ffffff";
+      targetCtx.fillRect(rx, ry, rw, rh);
+      targetCtx.shadowBlur = 0;
+
+      if (cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0) {
+        targetCtx.drawImage(cachedImg, rx, ry, rw, rh);
+      } else {
+        targetCtx.fillStyle = "#f8fafc";
+        targetCtx.fillRect(rx, ry, rw, rh);
+      }
+
+      if (s.label) {
+        const lblFontSize = Math.max(11, Math.min(18 * sc, Math.round(rh * 0.14)));
+        const bannerH = Math.min(rh * 0.36, lblFontSize + 8 * sc);
+        const by = ry + rh - bannerH;
+        targetCtx.fillStyle = "rgba(15, 23, 42, 0.86)";
+        targetCtx.fillRect(rx, by, rw, bannerH);
+        targetCtx.fillStyle = "#ffffff";
+        targetCtx.font = `700 ${Math.round(lblFontSize)}px sans-serif`;
+        targetCtx.textAlign = "center";
+        targetCtx.textBaseline = "middle";
+        targetCtx.fillText(String(s.label), rx + rw / 2, by + bannerH / 2, Math.max(8, rw - 8 * sc));
+      }
+
+      targetCtx.strokeStyle = s.color || "#38bdf8";
+      targetCtx.lineWidth = Math.max(2, (s.strokeWidth || 3) * 0.75 * sc);
+      targetCtx.strokeRect(rx, ry, rw, rh);
+      targetCtx.restore();
     }
 
     // Selection highlight
     if (isSelected) {
-      targetCtx.strokeStyle = "#0284c7";
+      targetCtx.strokeStyle = "#38bdf8";
       targetCtx.lineWidth = 1.5;
       targetCtx.setLineDash([4, 4]);
       if (s.type === "badge") {
@@ -1518,6 +2236,26 @@ export default function(component) {
           Math.abs(s.w) * sc + 12,
           Math.abs(s.h) * sc + 12
         );
+      } else if (s.type === "image") {
+        const rx = Math.min(s.x, s.x + s.w) * sc;
+        const ry = Math.min(s.y, s.y + s.h) * sc;
+        const rw = Math.abs(s.w) * sc;
+        const rh = Math.abs(s.h) * sc;
+        targetCtx.strokeRect(rx - 4, ry - 4, rw + 8, rh + 8);
+        targetCtx.setLineDash([]);
+        const hSize = 8;
+        [
+          [rx, ry],
+          [rx + rw, ry],
+          [rx, ry + rh],
+          [rx + rw, ry + rh],
+        ].forEach(([hx, hy]) => {
+          targetCtx.fillStyle = "#38bdf8";
+          targetCtx.fillRect(hx - hSize / 2, hy - hSize / 2, hSize, hSize);
+          targetCtx.strokeStyle = "#ffffff";
+          targetCtx.lineWidth = 1.5;
+          targetCtx.strokeRect(hx - hSize / 2, hy - hSize / 2, hSize, hSize);
+        });
       } else if (s.type === "text") {
         targetCtx.strokeRect(s.x * sc - 4, s.y * sc - 4, (s.boxW || 100) * sc + 8, (s.boxH || 30) * sc + 8);
       }
@@ -1528,7 +2266,7 @@ export default function(component) {
 """
 
 _IMAGE_ANNOTATOR = st.components.v2.component(
-    "paag_image_annotator_v6",
+    "paag_image_annotator_v8",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -1541,6 +2279,7 @@ def image_annotator(
     *,
     key: str,
     initial_badge_number: int = 1,
+    catalog_photos: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Render the in-app interactive image annotation and markup tool."""
     try:
@@ -1550,6 +2289,7 @@ def image_annotator(
                 "image_data_url": image_data_url,
                 "annotations_json": annotations_json,
                 "initial_badge_number": initial_badge_number,
+                "catalog_photos": catalog_photos or [],
             },
             on_save_change=lambda: None,
             width="stretch",

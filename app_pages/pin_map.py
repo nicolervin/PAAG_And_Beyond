@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+import utils.clipboard_image as _clipboard_image_mod
+import utils.layout_ui as _layout_ui_mod
 from utils.fishbone_ui import ordered_yamazumi_area_ids, section_breadcrumb_labels
 from utils.layout_canvas import layout_image_data_url
 from utils.layout_store import (
@@ -15,7 +18,12 @@ from utils.layout_store import (
     get_scenario_pitch_metrics_for_pin_map,
     to_canonical_inches,
 )
-from utils.layout_ui import render_layouts_tab
+
+if getattr(_layout_ui_mod, "_LAYOUT_UI_HOT_RELOAD_REV", None) != 2:
+    importlib.reload(_clipboard_image_mod)
+    _layout_ui_mod = importlib.reload(_layout_ui_mod)
+
+render_layouts_tab = _layout_ui_mod.render_layouts_tab
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     assembly_section_walk_order,

@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 
 if "utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "_TABLE_UI_REV_20261102"):
     _importlib.reload(_sys.modules["utils.table_ui"])
-if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 6:
+if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 8:
     if "utils.assembly_store" in _sys.modules:
         _importlib.reload(_sys.modules["utils.assembly_store"])
     _importlib.reload(_sys.modules["utils.process_store"])
@@ -19,12 +19,21 @@ if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process
         _sys.modules["utils.store"]._refresh_domain_modules()
     if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
         _sys.modules["utils.cache_store"].get_data_cache().clear()
-if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 3:
+if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 7:
     _importlib.reload(_sys.modules["utils.process_pitch_visual"])
+if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 2:
+    _importlib.reload(_sys.modules["utils.image_annotator"])
+if "utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazumi_store"], "_YAMAZUMI_STORE_REV_20261103", 0) < 1:
+    _importlib.reload(_sys.modules["utils.yamazumi_store"])
+    if "utils.store" in _sys.modules and hasattr(_sys.modules["utils.store"], "_refresh_domain_modules"):
+        _sys.modules["utils.store"]._refresh_domain_modules()
+    if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
+        _sys.modules["utils.cache_store"].get_data_cache().clear()
 
 from utils.fishbone_ui import section_breadcrumb_labels
 from utils.media_cache import cached_image_bytes, cached_image_data_url
 from utils.store import (
+    ROOT,
     assign_parts_to_section,
     assembly_section_walk_order,
     audit_history,
@@ -63,6 +72,7 @@ from utils.store import (
     yamazumi_pitches_for_scenario,
     catalog_part_photos_for_pitch,
     copy_part_photo_to_pitch_visual_media,
+    copy_pitch_visual_media,
     delete_pitch_visual_media,
     get_pitch_visual_media,
     save_pitch_visual_media,
@@ -485,7 +495,7 @@ else:
 
 _pm1, _pm2, _pm3, _pm4 = st.columns(4)
 _pm1.metric(
-    "Process steps",
+    "Process Steps",
     _steps_val,
     delta=_steps_delta,
     delta_color=_steps_dcol,
@@ -495,7 +505,7 @@ _pm1.metric(
     ),
 )
 _pm2.metric(
-    "Part consumption coverage",
+    "Part Consumption Coverage",
     _parts_val,
     delta=_parts_delta,
     delta_color=_parts_dcol,
@@ -505,7 +515,7 @@ _pm2.metric(
     ),
 )
 _pm3.metric(
-    "Pitch visual aids",
+    "Pitch Visual Aids",
     _media_val,
     delta=_media_delta,
     delta_color=_media_dcol,
@@ -515,7 +525,7 @@ _pm3.metric(
     ),
 )
 _pm4.metric(
-    "Functional alerts",
+    "Functional Alerts",
     _alerts_val,
     delta=_alerts_delta,
     delta_color=_alerts_dcol,
@@ -1301,9 +1311,294 @@ def alerts_detail_dialog(
                     st.success("✓ No active alerts.")
 
 
-@st.dialog("Tools & Equipment Required", width="medium")
-def tools_detail_dialog(tools: list[dict]) -> None:
-    st.markdown("#### Tools, Equipment & PPE")
+@st.dialog("Tie Tool to Work Element")
+def tie_tool_slide_dialog(
+    project_id: str,
+    scenario_id: str,
+    pitch_id: str,
+    pitch_summary: dict,
+) -> None:
+    st.caption(
+        "Select a work element from this pitch and a tool type to tie that tool to the work element on the PAAG slide and in the Process at a Glance by Pitch table."
+    )
+    pitch_step_records: list[dict] = []
+    seen_we_ids: set[str] = set()
+    seen_yam_ids: set[str] = set()
+
+    for idx, el in enumerate(pitch_summary.get("elements", []) or []):
+        we_id = str(el.get("work_element_id") or el.get("id") or "").strip()
+        yam_id = str(el.get("yamazumi_element_id") or "").strip()
+        if we_id:
+            seen_we_ids.add(we_id)
+        if yam_id:
+            seen_yam_ids.add(yam_id)
+        op_id = str(el.get("op_id") or "").strip()
+        desc = str(
+            el.get("operation") or el.get("yamazumi_description") or "Work Step"
+        ).strip()
+        curr_tool = str(el.get("tool") or "").strip()
+        res_type = str(el.get("resource_type") or "Human").strip()
+        res_detail = str(el.get("resource_detail") or "").strip()
+        op_prefix = (
+            f"{op_id} — "
+            if op_id and op_id != "Yamazumi link required"
+            else ""
+        )
+        tool_suffix = f"  [Current tool: {curr_tool}]" if curr_tool else ""
+        step_key = we_id or f"yam::{yam_id}" or f"idx::{idx}"
+        pitch_step_records.append(
+            {
+                "key": step_key,
+                "work_element_id": we_id,
+                "yamazumi_element_id": yam_id,
+                "description": desc,
+                "tool": curr_tool,
+                "resource_type": res_type,
+                "resource_detail": res_detail,
+                "label": f"Step {idx + 1} · {op_prefix}{desc}{tool_suffix}",
+            }
+        )
+
+    all_we_df = project_table(
+        "work_elements", project_id, "sequence", scenario_id=scenario_id
+    )
+    we_op_ids: dict[str, str] = (
+        work_element_op_ids(
+            project_id, scenario_id, all_we_df["id"].astype(str).tolist()
+        )
+        if not all_we_df.empty and "id" in all_we_df.columns
+        else {}
+    )
+    we_by_id: dict[str, dict] = (
+        {
+            str(row.get("id") or "").strip(): row.to_dict()
+            for _, row in all_we_df.iterrows()
+            if str(row.get("id") or "").strip()
+        }
+        if not all_we_df.empty
+        else {}
+    )
+
+    for yel in pitch_summary.get("yamazumi_elements", []) or []:
+        yam_id = str(yel.get("id") or "").strip()
+        if not yam_id or yam_id in seen_yam_ids:
+            continue
+        if str(yel.get("work_type") or "Cycle").strip().casefold() != "cycle":
+            continue
+        seen_yam_ids.add(yam_id)
+        we_id = str(yel.get("process_element_id") or "").strip()
+        if we_id:
+            seen_we_ids.add(we_id)
+        linked_we = we_by_id.get(we_id, {}) if we_id else {}
+        desc = str(
+            linked_we.get("operation") or yel.get("description") or "Work Step"
+        ).strip()
+        curr_tool = str(linked_we.get("tool") or "").strip()
+        res_type = str(linked_we.get("resource_type") or "Human").strip()
+        res_detail = str(linked_we.get("resource_detail") or "").strip()
+        op_id = str(we_op_ids.get(we_id) or "").strip() if we_id else ""
+        op_prefix = (
+            f"{op_id} — "
+            if op_id and op_id != "Yamazumi link required"
+            else ""
+        )
+        tool_suffix = f"  [Current tool: {curr_tool}]" if curr_tool else ""
+        step_idx = len(pitch_step_records) + 1
+        pitch_step_records.append(
+            {
+                "key": we_id or f"yam::{yam_id}",
+                "work_element_id": we_id,
+                "yamazumi_element_id": yam_id,
+                "description": desc,
+                "tool": curr_tool,
+                "resource_type": res_type,
+                "resource_detail": res_detail,
+                "label": f"Step {step_idx} · {op_prefix}{desc}{tool_suffix}",
+            }
+        )
+
+    pitch_number_str = str(pitch_summary.get("pitch_number") or "").strip()
+    if pitch_number_str and not all_we_df.empty and "station" in all_we_df.columns:
+        for _, w_row in all_we_df.iterrows():
+            we_id = str(w_row.get("id") or "").strip()
+            if not we_id or we_id in seen_we_ids:
+                continue
+            if str(w_row.get("station") or "").strip() != pitch_number_str:
+                continue
+            seen_we_ids.add(we_id)
+            op_id = str(
+                we_op_ids.get(we_id) or w_row.get("op_id") or ""
+            ).strip()
+            desc = str(w_row.get("operation") or "Work Step").strip()
+            curr_tool = str(w_row.get("tool") or "").strip()
+            res_type = str(w_row.get("resource_type") or "Human").strip()
+            res_detail = str(w_row.get("resource_detail") or "").strip()
+            op_prefix = (
+                f"{op_id} — "
+                if op_id and op_id != "Yamazumi link required"
+                else ""
+            )
+            tool_suffix = f"  [Current tool: {curr_tool}]" if curr_tool else ""
+            step_idx = len(pitch_step_records) + 1
+            pitch_step_records.append(
+                {
+                    "key": we_id,
+                    "work_element_id": we_id,
+                    "yamazumi_element_id": str(
+                        w_row.get("yamazumi_element_id") or ""
+                    ).strip(),
+                    "description": desc,
+                    "tool": curr_tool,
+                    "resource_type": res_type,
+                    "resource_detail": res_detail,
+                    "label": f"Step {step_idx} · {op_prefix}{desc}{tool_suffix}",
+                }
+            )
+
+    if not pitch_step_records:
+        st.info(
+            "No work elements are assigned to this pitch yet. Assign work elements in Yamazumi or Process plan first."
+        )
+        return
+
+    step_map = {rec["key"]: rec for rec in pitch_step_records}
+    selected_step_key = st.selectbox(
+        "Work Element",
+        options=list(step_map.keys()),
+        format_func=lambda k: step_map[k]["label"],
+        key=f"slide_tie_tool_step_{scenario_id}_{pitch_id}",
+    )
+    active_rec = step_map[selected_step_key]
+    existing_tool = str(active_rec.get("tool") or "").strip()
+    existing_res_type = str(active_rec.get("resource_type") or "Human").strip()
+    existing_res_detail = str(active_rec.get("resource_detail") or "").strip()
+
+    all_types_df = equipment_types(project_id)
+    type_labels = [
+        str(lbl).strip()
+        for lbl in all_types_df["label"].dropna().unique()
+        if str(lbl).strip()
+    ]
+    for std_tool in [
+        "Handheld equipment",
+        "Torque tool",
+        "Scan/Compare equipment",
+        "Poka-Yoke / Fixture equipment",
+        "Test equipment",
+        "Tape machine",
+        "Platform",
+        "Pit",
+        "Operator Lift",
+        "Ergo Hand Tools",
+        "Ergo Lift Assists",
+    ]:
+        if std_tool not in type_labels:
+            type_labels.append(std_tool)
+    type_labels.sort()
+    tool_categories = ["(No tool required)", *type_labels, "Other tool"]
+
+    default_cat_idx = 0
+    if existing_tool:
+        matched_cat = False
+        for idx, cat in enumerate(tool_categories):
+            if cat.casefold() == existing_tool.casefold():
+                default_cat_idx = idx
+                matched_cat = True
+                break
+        if not matched_cat:
+            default_cat_idx = tool_categories.index("Other tool")
+
+    selected_tool_type = st.selectbox(
+        "Tool Type",
+        options=tool_categories,
+        index=default_cat_idx,
+        key=f"slide_tie_tool_type_{scenario_id}_{pitch_id}_{selected_step_key}",
+    )
+    final_tool = ""
+    if selected_tool_type == "(No tool required)":
+        final_tool = ""
+    elif selected_tool_type == "Other tool":
+        default_custom_tool = (
+            existing_tool
+            if existing_tool
+            and existing_tool.casefold()
+            not in {c.casefold() for c in tool_categories}
+            else ""
+        )
+        final_tool = (
+            st.text_input(
+                "Specify other tool",
+                value=default_custom_tool,
+                placeholder="Enter tool name",
+                key=f"slide_tie_tool_custom_{scenario_id}_{pitch_id}_{selected_step_key}",
+            ).strip()
+            or "Other tool"
+        )
+    else:
+        final_tool = selected_tool_type
+
+    if st.button(
+        "Submit Tool",
+        type="primary",
+        icon=":material/check:",
+        width="stretch",
+        key=f"btn_submit_slide_tool_{scenario_id}_{pitch_id}_{selected_step_key}",
+    ):
+        try:
+            target_we_id = str(active_rec.get("work_element_id") or "").strip()
+            yam_id = str(active_rec.get("yamazumi_element_id") or "").strip()
+            if not target_we_id and yam_id:
+                reconcile_yamazumi_to_process(project_id, scenario_id, [yam_id])
+                target_we_id = str(
+                    process_element_id_for_yamazumi(project_id, scenario_id, yam_id)
+                    or ""
+                ).strip()
+            if not target_we_id:
+                raise ValueError(
+                    "Could not resolve a Process work element for the selected step."
+                )
+            editor = st.session_state.get("current_editor", "")
+            update_work_element_tool_and_resource(
+                project_id,
+                scenario_id,
+                target_we_id,
+                tool=final_tool,
+                resource_type=existing_res_type or "Human",
+                resource_detail=existing_res_detail,
+                editor_name=editor,
+            )
+            request_table_editor_reset(f"process_editor_{scenario_id}")
+            record_audit_event(
+                project_id,
+                "Process plan",
+                "Tie tool from PAAG slide",
+                1,
+                editor,
+                {
+                    "scenario_id": scenario_id,
+                    "pitch_id": pitch_id,
+                    "work_element_id": target_we_id,
+                    "work_element": active_rec.get("description", ""),
+                    "tool": final_tool,
+                },
+            )
+            st.toast(
+                f"Tied tool '{final_tool or 'None'}' to '{active_rec.get('description', 'Work Element')}'",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+
+@st.dialog("Tools & Equipment Required", width="large")
+def tools_detail_dialog(
+    tools: list[dict],
+    project_id: str = "",
+    scenario_id: str = "",
+    pitch_id: str = "",
+    pitch_summary: dict | None = None,
+) -> None:
     if not tools:
         st.info("No equipment or PPE assigned to this pitch.")
         return
@@ -1377,6 +1672,106 @@ def edit_visual_media_dialog(
             st.rerun()
 
 
+@st.dialog("Copy Visual Aid", width="medium")
+def copy_visual_media_dialog(
+    media_id: str,
+    current_pitch_id: str,
+    current_caption: str,
+    current_sequence: int,
+    current_tags: list[str],
+    element_options: list[tuple[str, str]],
+    pitch_options: list[tuple[str, str]],
+    project_id: str,
+    scenario_id: str,
+) -> None:
+    st.markdown("#### Copy Visual Aid")
+    st.caption(
+        "Duplicate this visual aid on the current pitch or copy it to another pitch in this scenario. "
+        "Annotations, original photo layers, and media files are copied independently."
+    )
+    pitch_dict = dict(pitch_options)
+    pitch_ids = list(pitch_dict.keys()) if pitch_dict else [current_pitch_id]
+    default_pitch_idx = (
+        pitch_ids.index(current_pitch_id) if current_pitch_id in pitch_ids else 0
+    )
+
+    dest_pitch_id = st.selectbox(
+        "Destination Pitch",
+        options=pitch_ids,
+        index=default_pitch_idx,
+        format_func=lambda pid: (
+            f"{pitch_dict.get(pid, pid)} (Current pitch)"
+            if pid == current_pitch_id
+            else pitch_dict.get(pid, pid)
+        ),
+        key=f"copy_media_dest_pitch_{media_id}",
+        help="Keep the current pitch selected to duplicate this visual aid in place, or choose another pitch to copy it there.",
+    )
+
+    if dest_pitch_id == current_pitch_id:
+        dest_element_options = element_options
+    else:
+        try:
+            dest_summary = process_pitch_visual_summary(
+                project_id, scenario_id, dest_pitch_id
+            )
+            dest_rows = dest_summary.get("elements") or []
+        except Exception:
+            dest_rows = []
+        dest_element_options = [
+            (
+                str(el.get("work_element_id") or el.get("id")),
+                f"{idx + 1} · {el.get('op_id') + ' — ' if el.get('op_id') and el.get('op_id') != 'Yamazumi link required' else ''}{el.get('operation') or el.get('yamazumi_description') or 'Work Step'}",
+            )
+            for idx, el in enumerate(dest_rows)
+            if el.get("work_element_id") or el.get("id")
+        ]
+
+    tag_dict = dict(dest_element_options)
+    default_tags = [t for t in current_tags if t in tag_dict]
+
+    with st.form(f"form_copy_media_{media_id}_{dest_pitch_id}"):
+        new_caption = st.text_input(
+            "Caption / Yellow Callout Note", value=current_caption
+        )
+        new_sequence = st.number_input(
+            "Sequence Order", value=int(current_sequence), step=5
+        )
+        new_tags = st.multiselect(
+            "Tag to PAAG Work Elements (Destination Pitch)",
+            options=list(tag_dict.keys()),
+            default=default_tags,
+            format_func=lambda tid: tag_dict.get(tid, tid),
+            help="Select which work elements on the destination pitch this copied visual aid illustrates. Leave empty to show across all elements on that pitch.",
+        )
+
+        col1, col2 = st.columns([1, 1])
+        if col1.form_submit_button(
+            "Copy Visual Aid", icon=":material/content_copy:", type="primary"
+        ):
+            try:
+                copy_pitch_visual_media(
+                    project_id=project_id,
+                    scenario_id=scenario_id,
+                    media_id=media_id,
+                    target_pitch_id=dest_pitch_id,
+                    caption=new_caption,
+                    tagged_work_element_ids=new_tags,
+                    sequence=int(new_sequence),
+                    current_editor=st.session_state.get("current_editor", ""),
+                )
+                dest_label = pitch_dict.get(dest_pitch_id, dest_pitch_id)
+                st.toast(
+                    f"Visual aid copied to {dest_label}",
+                    icon=":material/check_circle:",
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+        if col2.form_submit_button("Cancel"):
+            st.rerun()
+
+
 @st.dialog("Delete Visual Aid?", dismissible=False)
 def delete_visual_media_dialog(
     media_id: str,
@@ -1402,6 +1797,51 @@ def delete_visual_media_dialog(
         st.rerun()
 
 
+def _build_annotator_catalog_photos(
+    project_id: str,
+    scenario_id: str,
+    pitch_id: str = "",
+) -> list[dict]:
+    """Build JSON-serializable Parts Catalog photo payloads for the in-canvas image annotator picker."""
+    if not project_id or not scenario_id:
+        return []
+    try:
+        catalog_items = catalog_part_photos_for_pitch(project_id, scenario_id, pitch_id)
+    except Exception:
+        return []
+    entries: list[dict] = []
+    for part in catalog_items:
+        p_num = str(part.get("part_number") or "").strip()
+        p_desc = str(
+            part.get("description") or part.get("factory_nickname") or ""
+        ).strip()
+        on_pitch = bool(part.get("on_pitch"))
+        for view in part.get("views") or []:
+            img_path_str = str(view.get("image_path") or "").strip()
+            if not img_path_str or img_path_str.startswith(("http://", "https://")):
+                continue
+            p_obj = Path(img_path_str)
+            if not p_obj.exists() and not p_obj.is_absolute():
+                p_obj = ROOT / img_path_str
+            if not p_obj.exists() or not p_obj.is_file():
+                continue
+            d_url = cached_image_data_url(p_obj, max_dim=480, output_format="PNG")
+            if not d_url:
+                continue
+            entries.append(
+                {
+                    "part_id": str(part.get("part_id") or ""),
+                    "part_number": p_num,
+                    "description": p_desc,
+                    "view_id": str(view.get("view_id") or ""),
+                    "view_label": str(view.get("view_label") or "Primary Image"),
+                    "on_pitch": on_pitch,
+                    "data_url": d_url,
+                }
+            )
+    return entries
+
+
 @st.dialog("Annotate Visual Aid", width="large")
 def annotate_visual_media_dialog(
     media_id: str,
@@ -1411,11 +1851,13 @@ def annotate_visual_media_dialog(
     caption: str,
     project_id: str,
     scenario_id: str,
+    pitch_id: str = "",
 ) -> None:
     st.markdown(f"#### Annotate Visual Aid: {caption or 'Visual Aid'}")
     st.caption(
-        "Crop, rotate in 90° increments, or add directional arrows, callout text boxes, focus boxes/circles, "
-        "step number badges (1, 2, 3), and freehand pen markup. Click **💾 Apply & Save Markup** when finished."
+        "Crop, rotate in 90° increments, insert overlay photos from the **Parts Catalog** (`📦 Part Photo`) or **Clipboard** (`📋 Paste Photo` / `Ctrl+V`), "
+        "or add directional arrows, callout text boxes, focus boxes/circles, step number badges (1, 2, 3), and freehand pen markup. "
+        "Click **💾 Apply & Save Markup** when finished."
     )
 
     source_path = None
@@ -1446,6 +1888,7 @@ def annotate_visual_media_dialog(
         image_data_url=data_url,
         annotations_json=annotations_json or "",
         key=f"annotator_existing_{media_id}",
+        catalog_photos=_build_annotator_catalog_photos(project_id, scenario_id, pitch_id),
     )
 
     save_payload = getattr(annotator_res, "save", None)
@@ -1467,13 +1910,17 @@ def annotate_visual_media_dialog(
         except Exception as exc:
             st.error(str(exc))
 
-    st.caption("Tip: Select existing shapes to move, recolor, resize, or delete them non-destructively.")
+    st.caption("Tip: Select existing shapes or inserted photos (`👆 Select`) to move, resize via corner handles, recolor borders, or delete them non-destructively.")
     if st.button("Close without saving", key=f"btn_close_annotator_{media_id}"):
         st.rerun()
 
 
 @st.dialog("Annotate Staged Visual Aid", width="large")
-def annotate_staged_media_dialog(pitch_id: str) -> None:
+def annotate_staged_media_dialog(
+    pitch_id: str,
+    project_id: str = "",
+    scenario_id: str = "",
+) -> None:
     staged = st.session_state.get(f"staged_media_{pitch_id}")
     if not staged or not staged.get("original_bytes"):
         st.info("No staged image found to annotate.")
@@ -1481,9 +1928,13 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
             st.rerun()
         return
 
+    resolved_project_id = project_id or str(st.session_state.get("project_id") or "")
+    resolved_scenario_id = scenario_id or str(st.session_state.get("scenario_id") or "")
+
     st.markdown("#### Annotate Staged Visual Aid")
     st.caption(
-        "Crop, rotate in 90° increments, or add arrows, callouts, shapes, and badges to this image before adding it to the PAAG slide. "
+        "Crop, rotate in 90° increments, insert overlay photos from the **Parts Catalog** (`📦 Part Photo`) or **Clipboard** (`📋 Paste Photo` / `Ctrl+V`), "
+        "or add arrows, callouts, shapes, and badges to this image before adding it to the PAAG slide. "
         "Click **💾 Apply & Save Markup** to apply your changes."
     )
 
@@ -1496,6 +1947,9 @@ def annotate_staged_media_dialog(pitch_id: str) -> None:
         image_data_url=data_url,
         annotations_json=staged.get("annotations_json", ""),
         key=f"annotator_staged_{pitch_id}",
+        catalog_photos=_build_annotator_catalog_photos(
+            resolved_project_id, resolved_scenario_id, pitch_id
+        ),
     )
 
     save_payload = getattr(annotator_res, "save", None)
@@ -1537,14 +1991,23 @@ def discard_staged_media_dialog(pitch_id: str) -> None:
         st.rerun()
 
 
-_paag_tab_options = ["Process plan", "Process Flow Diagram", "PAAG slides"]
+_paag_tab_options = ["Process Plan", "Process Flow Diagram", "PAAG Slides"]
+_paag_tab_legacy_aliases = {
+    "Process plan": "Process Plan",
+    "PAAG slides": "PAAG Slides",
+}
 _qp_paag_tab = str(st.query_params.get("paag_tab", "") or "").strip()
+_qp_paag_tab = _paag_tab_legacy_aliases.get(_qp_paag_tab, _qp_paag_tab)
 if _qp_paag_tab in _paag_tab_options:
     st.session_state["paag_tab"] = _qp_paag_tab
     try:
         del st.query_params["paag_tab"]
     except Exception:
         pass
+if st.session_state.get("paag_tab") in _paag_tab_legacy_aliases:
+    st.session_state["paag_tab"] = _paag_tab_legacy_aliases[st.session_state["paag_tab"]]
+if "paag_tab" not in st.session_state and st.query_params.get("active_pitch"):
+    st.session_state["paag_tab"] = "PAAG Slides"
 
 tab_plan, tab_flow, tab_slides = guarded_tabs(
     _paag_tab_options,
@@ -1559,13 +2022,13 @@ if tab_plan.open:
         with hdr_col_links:
             hdr_links_bar = st.container(horizontal=True, horizontal_alignment="right")
             hdr_links_bar.link_button(
-                "Open Slides in new window",
-                url=build_page_url("process", query_params={"paag_tab": "PAAG slides"}),
+                "Open Slides in New Window",
+                url=build_page_url("process", query_params={"paag_tab": "PAAG Slides"}),
                 icon=":material/open_in_new:",
                 help="Open PAAG Slides in a separate browser window to view slides alongside your process plan",
             )
             hdr_links_bar.link_button(
-                "Open Parts in new window",
+                "Open Parts in New Window",
                 url=build_page_url("parts"),
                 icon=":material/open_in_new:",
                 help="Open Parts Catalog in a separate browser window to cross-reference parts",
@@ -1579,14 +2042,14 @@ if tab_plan.open:
         else:
             process_section_key = f"process_pairing_section_{scenario_id}"
             section_id = st.selectbox(
-                "Fishbone section",
+                "Fishbone Section",
                 section_ids,
                 index=None if process_section_key in st.session_state else 0,
                 format_func=lambda value: section_labels.get(value, value),
                 key=process_section_key,
             )
             pairing_search = st.text_input(
-                "Filter work elements or parts",
+                "Filter Work Elements or Parts",
                 placeholder="Search descriptions, pitches, part numbers, or uses",
                 key=f"process_pairing_search_{scenario_id}_{section_id}",
             ).strip().casefold()
@@ -1789,7 +2252,7 @@ if tab_plan.open:
             work_selection_expired = False
             part_selection_expired = False
             with work_column.container(border=True, height="stretch"):
-                st.markdown("#### Yamazumi work elements")
+                st.markdown("#### Yamazumi Work Elements")
                 st.caption("Select the work element that uses the parts.")
 
                 work_filter_cols = st.columns([1, 1], vertical_alignment="bottom")
@@ -1908,7 +2371,7 @@ if tab_plan.open:
                     ]
 
             with part_column.container(border=True, height="stretch"):
-                st.markdown("#### Available fishbone parts")
+                st.markdown("#### Available Fishbone Parts")
                 st.caption("Select one or more catalog parts from this section.")
                 st.caption(
                     "Don't see your part? Check whether it is in another fishbone section, "
@@ -5370,7 +5833,13 @@ elif tab_flow.open:
 
 elif tab_slides.open:
     with tab_slides:
-        scenario_pitches_df = yamazumi_pitches_for_scenario(project_id, scenario_id)
+        all_scenario_pitches_df = yamazumi_pitches_for_scenario(project_id, scenario_id)
+        if not all_scenario_pitches_df.empty and "element_count" in all_scenario_pitches_df.columns:
+            scenario_pitches_df = all_scenario_pitches_df.loc[
+                pd.to_numeric(all_scenario_pitches_df["element_count"], errors="coerce").fillna(0) > 0
+            ].copy()
+        else:
+            scenario_pitches_df = all_scenario_pitches_df
         pitch_options = [
             (str(row["id"]), f"{row['pitch_number']} — {row['pitch_name'] or 'Pitch'}")
             for _, row in scenario_pitches_df.iterrows()
@@ -5475,6 +5944,9 @@ elif tab_slides.open:
                 selected_pitch_id = pitch_options[0][0]
                 st.session_state[selected_pitch_key] = selected_pitch_id
                 st.session_state[pitch_page_key] = 1
+            else:
+                selected_pitch_id = ""
+                st.session_state.pop(selected_pitch_key, None)
 
         if not pitch_options:
             st.info("No pitches defined for this planning scenario yet. Create pitches in the Yamazumi module to view PAAG slides.")
@@ -5668,13 +6140,33 @@ elif tab_slides.open:
                 tools_cnt = len(pitch_summary.get("tools", []))
                 t_label = f"Tools ({tools_cnt})" if tools_cnt > 0 else "Tools"
                 if slide_action_bar.button(t_label, icon=":material/construction:", key=f"btn_tools_{scenario_id}", help="View tools and equipment details"):
-                    tools_detail_dialog(pitch_summary.get("tools", []))
+                    tools_detail_dialog(
+                        pitch_summary.get("tools", []),
+                        project_id=project_id,
+                        scenario_id=scenario_id,
+                        pitch_id=selected_pitch_id,
+                        pitch_summary=pitch_summary,
+                    )
+
+                if slide_action_bar.button(
+                    "+ Tie Tool",
+                    icon=":material/build:",
+                    key=f"btn_tie_tool_slide_{scenario_id}",
+                    help="Tie a tool to a work element on this pitch",
+                ):
+                    tie_tool_slide_dialog(
+                        project_id=project_id,
+                        scenario_id=scenario_id,
+                        pitch_id=selected_pitch_id,
+                        pitch_summary=pitch_summary,
+                    )
+
 
                 slide_action_bar.link_button(
                     "Open Plan",
-                    url=build_page_url("process", query_params={"paag_tab": "Process plan"}),
+                    url=build_page_url("process", query_params={"paag_tab": "Process Plan"}),
                     icon=":material/open_in_new:",
-                    help="Open Process plan in a separate browser window or tab to edit elements alongside slides",
+                    help="Open Process Plan in a separate browser window or tab to edit elements alongside slides",
                 )
 
                 if st.session_state.get(f"paag_present_active_{scenario_id}"):
@@ -5850,7 +6342,11 @@ elif tab_slides.open:
                                             st.caption("No annotations added yet. Click below to crop, rotate 90°, or add arrows, focus boxes, callouts, or step numbers.")
                                         staged_act_bar = st.container(horizontal=True)
                                         if staged_act_bar.button("Annotate / Add Shapes", icon=":material/draw:", key=f"btn_ann_staged_{selected_pitch_id}", type="secondary"):
-                                            annotate_staged_media_dialog(selected_pitch_id)
+                                            annotate_staged_media_dialog(
+                                                selected_pitch_id,
+                                                project_id=project_id,
+                                                scenario_id=scenario_id,
+                                            )
                                         if staged_act_bar.button("Delete", icon=":material/delete:", key=f"destructive_discard_staged_{selected_pitch_id}"):
                                             discard_staged_media_dialog(selected_pitch_id)
 
@@ -6209,7 +6705,7 @@ elif tab_slides.open:
                                 with g_col3:
                                     g_act_bar = st.container(horizontal=True)
                                     if media_item.get("media_type") == "image" and not str(media_item.get("file_path", "")).startswith(("http://", "https://")):
-                                        if g_act_bar.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges"):
+                                        if g_act_bar.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Crop, rotate 90°, insert Parts Catalog or clipboard photos, or add/edit arrows, text callouts, shapes, and badges"):
                                             annotate_visual_media_dialog(
                                                 media_id=media_item["id"],
                                                 file_path=media_item.get("file_path", ""),
@@ -6218,6 +6714,7 @@ elif tab_slides.open:
                                                 caption=media_item.get("caption", ""),
                                                 project_id=project_id,
                                                 scenario_id=scenario_id,
+                                                pitch_id=selected_pitch_id,
                                             )
                                     if g_act_bar.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
                                         edit_visual_media_dialog(
@@ -6229,6 +6726,18 @@ elif tab_slides.open:
                                             project_id=project_id,
                                             scenario_id=scenario_id,
                                             current_url=media_item.get("file_path", "") if media_item.get("media_type") == "link" or str(media_item.get("file_path", "")).startswith(("http://", "https://")) else "",
+                                        )
+                                    if g_act_bar.button("Copy", icon=":material/content_copy:", key=f"btn_copy_media_{media_item['id']}", help="Duplicate this visual aid on this pitch or copy it to another pitch"):
+                                        copy_visual_media_dialog(
+                                            media_id=media_item["id"],
+                                            current_pitch_id=selected_pitch_id,
+                                            current_caption=media_item.get("caption", ""),
+                                            current_sequence=media_item.get("sequence", 10),
+                                            current_tags=[t["work_element_id"] for t in tags if "work_element_id" in t],
+                                            element_options=element_options,
+                                            pitch_options=pitch_options,
+                                            project_id=project_id,
+                                            scenario_id=scenario_id,
                                         )
                                     if g_act_bar.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{media_item['id']}"):
                                         delete_visual_media_dialog(

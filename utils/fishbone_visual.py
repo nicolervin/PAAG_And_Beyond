@@ -17,6 +17,7 @@ _HTML = """
       <span id="fishbone-summary"></span>
     </div>
     <div class="fishbone-actions">
+      <button id="print-fishbone-btn" type="button" title="Print the fishbone diagram with readable part numbers" class="btn-tool">🖨️ Print</button>
       <button id="add-section-btn" type="button" title="Add new section block" class="btn-tool" style="background:#2563eb; color:white; border-color:#2563eb; font-weight:700;">➕ Add Section</button>
       <button id="toggle-palette" type="button" title="Toggle parts palette" class="btn-tool">📦 Parts palette</button>
       <button id="auto-arrange" type="button" title="Auto-arrange sections" class="btn-tool">⚡ Auto-arrange</button>
@@ -24,7 +25,7 @@ _HTML = """
       <button id="zoom-out" type="button" title="Zoom out">−</button>
       <button id="zoom-in" type="button" title="Zoom in">+</button>
       <button id="fit-view" type="button" title="Fit the entire fishbone">Fit</button>
-      <button id="full-screen" type="button" title="Open the fishbone full screen">Full screen</button>
+      <button id="full-screen" type="button" title="Open the fishbone full screen" aria-pressed="false">Full Screen</button>
     </div>
   </div>
   <div class="fishbone-body">
@@ -123,6 +124,7 @@ _HTML = """
             <label class="modal-label">
               Section name
               <input type="text" id="add-section-name" placeholder="e.g. Door Subassembly, Freezer Op 1" style="box-sizing:border-box; width:100%; padding:8px 10px; border:1px solid var(--st-border-color); border-radius:6px; background:var(--st-background-color); color:var(--st-text-color); font-size:.88rem; font-family:inherit;" />
+              <div id="add-section-error" style="display:none; color:#dc2626; font-size:.8rem; font-weight:600; margin-top:4px;"></div>
             </label>
             <label class="modal-label">
               Section type
@@ -214,13 +216,19 @@ _HTML = """
 _CSS = """
 :host { color: var(--st-text-color); font-family: var(--st-font); }
 .fishbone-shell { box-sizing: border-box; width: 100%; height: 750px; min-height: 750px; display: flex; flex-direction: column; border: 1px solid var(--st-border-color); border-radius: var(--st-base-radius); overflow: hidden; background: var(--st-background-color); }
-.fishbone-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--st-border-color); background: var(--st-secondary-background-color); flex-shrink: 0; }
-.fishbone-title { min-width: 0; display: flex; align-items: baseline; gap: 10px; }
-.fishbone-title span { color: var(--st-secondary-text-color); font-size: .84rem; white-space: nowrap; }
-.fishbone-actions { display: flex; gap: 6px; align-items: center; }
-.fishbone-actions button { min-width: 32px; height: 32px; padding: 0 10px; border: 1px solid var(--st-border-color); border-radius: var(--st-button-radius); color: var(--st-text-color); background: var(--st-background-color); cursor: pointer; font: inherit; font-size: .84rem; font-weight: 600; }
+.fishbone-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 14px; border-bottom: 1px solid var(--st-border-color); background: var(--st-secondary-background-color); flex-shrink: 0; }
+.fishbone-title { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.fishbone-title strong { white-space: nowrap; }
+.fishbone-title span { color: var(--st-secondary-text-color); font-size: .82rem; white-space: nowrap; }
+.fishbone-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.fishbone-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 30px; min-height: 30px; height: auto; padding: 4px 10px; white-space: nowrap; flex-shrink: 0; line-height: 1.2; box-sizing: border-box; border: 1px solid var(--st-border-color); border-radius: var(--st-button-radius); color: var(--st-text-color); background: var(--st-background-color); cursor: pointer; font: inherit; font-size: .81rem; font-weight: 600; }
 .fishbone-actions button:hover { border-color: var(--st-primary-color); color: var(--st-primary-color); }
 .fishbone-actions button.btn-tool { background: var(--st-secondary-background-color); }
+@media (max-width: 1100px) {
+  .fishbone-toolbar { padding: 8px 10px; gap: 6px 10px; }
+  .fishbone-actions { gap: 5px; }
+  .fishbone-actions button { padding: 4px 8px; font-size: .78rem; min-height: 28px; }
+}
 
 .fishbone-body { display: flex; flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; }
 
@@ -235,7 +243,12 @@ _CSS = """
 .palette-list { flex: 1 1 auto; overflow-y: auto; padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
 .palette-card { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--st-border-color); border-radius: 8px; background: var(--st-background-color); cursor: grab; user-select: none; transition: border-color .15s ease, box-shadow .15s ease; }
 .palette-card:hover { border-color: var(--st-primary-color); box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
-.palette-card.placed { opacity: 0.65; border-style: dashed; }
+.palette-card.placed { opacity: 0.78; border-style: dashed; cursor: pointer; }
+.palette-card.placed:hover { opacity: 1; border-color: #f59e0b; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.22); }
+.palette-card.search-focused { opacity: 1 !important; border-style: solid !important; border-color: #f59e0b !important; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.28) !important; background: color-mix(in srgb, #fef3c7 22%, var(--st-background-color)); }
+.palette-sec-pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.palette-sec-pill { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 999px; font-size: .66rem; font-weight: 600; background: rgba(245, 158, 11, 0.14); color: #b45309; border: 1px solid rgba(245, 158, 11, 0.38); cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-sec-pill:hover { background: #f59e0b; color: white; border-color: #d97706; }
 .palette-thumb { width: 38px; height: 38px; border-radius: 4px; object-fit: contain; background: var(--st-secondary-background-color); flex-shrink: 0; }
 .palette-no-thumb { width: 38px; height: 38px; border-radius: 4px; background: var(--st-secondary-background-color); display: grid; place-items: center; font-size: .65rem; color: var(--st-secondary-text-color); flex-shrink: 0; }
 .palette-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; flex: 1; }
@@ -294,7 +307,14 @@ _CSS = """
 .part-card > rect { transition: stroke-width .12s ease, filter .12s ease; }
 .part-card:hover > rect { stroke-width: 2.5; stroke: var(--st-primary-color); filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .2)); }
 .part-card.part-card-stack-target > rect { stroke: #4f46e5 !important; stroke-width: 3px !important; stroke-dasharray: 4 2; filter: drop-shadow(0 0 8px rgba(79, 70, 229, 0.65)); }
-.part-cluster { user-select: none; }
+.part-cluster { user-select: none; transition: opacity .18s ease, filter .18s ease; }
+.section-node { transition: opacity .18s ease; }
+#fishbone-world.search-highlight-active .section-node:not(.search-highlight) { opacity: 0.52; }
+#fishbone-world.search-highlight-active .section-node.search-highlight { opacity: 1; }
+.section-node.search-highlight .section-node-rect { stroke: #f59e0b !important; stroke-width: 3.5px !important; filter: drop-shadow(0 0 12px rgba(245, 158, 11, 0.58)); }
+#fishbone-world.search-highlight-active .part-cluster:not(.search-highlight) { opacity: 0.35; }
+#fishbone-world.search-highlight-active .part-cluster.search-highlight { opacity: 1; filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.85)); }
+.part-card.search-highlight > rect:first-of-type { stroke: #f59e0b !important; stroke-width: 3px !important; fill: color-mix(in srgb, #fef3c7 42%, var(--st-background-color)) !important; }
 .cascade-badge { cursor: pointer; }
 .cascade-badge rect { transition: fill .12s ease, transform .12s ease; }
 .cascade-badge:hover rect { fill: #312e81; }
@@ -307,7 +327,7 @@ _CSS = """
 .part-multiuse-badge { cursor: pointer; }
 .part-multiuse-badge rect { transition: fill .12s ease; }
 .part-multiuse-badge:hover rect { fill: #0369a1; }
-.palette-replicate-btn { margin-left: auto; padding: 2px 6px; font-size: .7rem; font-weight: 700; border: 1px solid #0284c7; border-radius: 4px; background: rgba(2, 132, 199, 0.1); color: #0284c7; cursor: pointer; flex-shrink: 0; }
+.palette-replicate-btn { margin-left: auto; padding: 2px 6px; font-size: .7rem; font-weight: 700; border: 1px solid #0284c7; border-radius: 4px; background: rgba(2, 132, 199, 0.1); color: #0284c7; cursor: pointer; flex-shrink: 0; white-space: nowrap; }
 .palette-replicate-btn:hover { background: #0284c7; color: white; }
 .part-drag-ghost { pointer-events: none; }
 
@@ -716,6 +736,7 @@ export default function renderFishbone(component) {
   const togglePaletteBtn = parentElement.querySelector("#toggle-palette")
   const autoArrangeBtn = parentElement.querySelector("#auto-arrange")
   const clearFishboneBtn = parentElement.querySelector("#clear-fishbone-btn")
+  const printFishboneBtn = parentElement.querySelector("#print-fishbone-btn")
 
   const assemblyModal = parentElement.querySelector("#assembly-drop-modal")
   const assemblyDropDesc = parentElement.querySelector("#assembly-drop-desc")
@@ -860,6 +881,15 @@ export default function renderFishbone(component) {
     }
   })
   const paletteByPartId = new Map(paletteItems.map(item => [item.part_id, item]))
+  const sectionNameById = new Map(allSections.map(s => [s.id, s.name]))
+  function partMatchesQuery(p, query) {
+    if (!query) return false
+    return (
+      String(p.part_number || "").toLowerCase().includes(query) ||
+      String(p.description || "").toLowerCase().includes(query) ||
+      String(p.use_description || "").toLowerCase().includes(query)
+    )
+  }
   if (state.signature !== dataSignature) {
     state.signature = dataSignature
   }
@@ -877,6 +907,72 @@ export default function renderFishbone(component) {
 
   // Add Section Modal Handling
   if (addSectionBtn && addSectionModal) {
+    const addSectionError = parentElement.querySelector("#add-section-error")
+
+    function findExistingSectionByName(rawName) {
+      const normalized = String(rawName || "").trim().toLowerCase()
+      if (!normalized) return null
+      const pool = Array.isArray(allSections) && allSections.length > 0 ? allSections : sections
+      return pool.find(s => String(s.name || "").trim().toLowerCase() === normalized) || null
+    }
+
+    function validateAddSectionName(showEmptyError = false) {
+      const name = (addSectionName ? addSectionName.value : "").trim()
+      const duplicate = name ? findExistingSectionByName(name) : null
+      if (duplicate) {
+        if (addSectionError) {
+          addSectionError.textContent = `A section named "${duplicate.name}" already exists. Section names must be unique.`
+          addSectionError.style.display = "block"
+        }
+        if (addSectionName) {
+          addSectionName.style.borderColor = "#dc2626"
+        }
+        if (btnAddSectionConfirm) {
+          btnAddSectionConfirm.disabled = true
+          btnAddSectionConfirm.style.opacity = "0.55"
+          btnAddSectionConfirm.style.cursor = "not-allowed"
+        }
+        return false
+      }
+      if (!name && showEmptyError) {
+        if (addSectionError) {
+          addSectionError.textContent = "Please enter a unique section name."
+          addSectionError.style.display = "block"
+        }
+        if (addSectionName) {
+          addSectionName.style.borderColor = "#dc2626"
+        }
+        return false
+      }
+      if (addSectionError) {
+        addSectionError.textContent = ""
+        addSectionError.style.display = "none"
+      }
+      if (addSectionName) {
+        addSectionName.style.borderColor = "var(--st-border-color)"
+      }
+      if (btnAddSectionConfirm) {
+        btnAddSectionConfirm.disabled = false
+        btnAddSectionConfirm.style.opacity = ""
+        btnAddSectionConfirm.style.cursor = ""
+      }
+      return Boolean(name)
+    }
+
+    if (addSectionName) {
+      addSectionName.oninput = () => {
+        validateAddSectionName(false)
+      }
+      addSectionName.onkeydown = (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault()
+          if (btnAddSectionConfirm) btnAddSectionConfirm.click()
+        } else if (e.key === "Escape") {
+          e.preventDefault()
+          addSectionModal.hidden = true
+        }
+      }
+    }
     function updateAddSectionParentVisibility() {
       const isSupport = addSectionType ? addSectionType.value === "Support Operations" : false
       const parentTitle = parentElement.querySelector("#add-section-parent-title")
@@ -893,6 +989,7 @@ export default function renderFishbone(component) {
         noneOpt.textContent = isSupport ? "(None - Standalone fabrication)" : "(None - Root / final assembly)"
         addSectionParent.appendChild(noneOpt)
         allSections.forEach(s => {
+          if (s.inactive) return
           const opt = document.createElement("option")
           opt.value = s.id
           opt.textContent = `${s.name}`
@@ -903,6 +1000,7 @@ export default function renderFishbone(component) {
 
     addSectionBtn.onclick = () => {
       if (addSectionName) addSectionName.value = ""
+      validateAddSectionName(false)
       if (addSectionType) addSectionType.value = "Assembly"
       updateAddSectionParentVisibility()
       addSectionModal.hidden = false
@@ -921,6 +1019,10 @@ export default function renderFishbone(component) {
 
     if (btnAddSectionConfirm) {
       btnAddSectionConfirm.onclick = () => {
+        if (!validateAddSectionName(true)) {
+          if (addSectionName) addSectionName.focus()
+          return
+        }
         const name = (addSectionName ? addSectionName.value : "").trim()
         if (!name) {
           alert("Please enter a section name.")
@@ -1767,8 +1869,10 @@ export default function renderFishbone(component) {
 
     const filtered = paletteItems.filter(item => {
       const isPlaced = placedPartIds.has(item.part_id)
-      if (unplacedOnly && isPlaced) return false
-      if (!query) return true
+      if (!query) {
+        if (unplacedOnly && isPlaced) return false
+        return true
+      }
       return (
         (item.part_number || "").toLowerCase().includes(query) ||
         (item.description || "").toLowerCase().includes(query)
@@ -1779,8 +1883,9 @@ export default function renderFishbone(component) {
 
     filtered.forEach(item => {
       const isPlaced = placedPartIds.has(item.part_id)
+      const isFocused = Boolean(state.focusedPartId && state.focusedPartId === item.part_id)
       const card = document.createElement("div")
-      card.className = `palette-card${isPlaced ? " placed" : ""}`
+      card.className = `palette-card${isPlaced ? " placed" : ""}${isFocused ? " search-focused" : ""}`
       card.draggable = true
       card.dataset.partId = item.part_id
       card.dataset.partNumber = item.part_number
@@ -1812,6 +1917,33 @@ export default function renderFishbone(component) {
       desc.textContent = item.description || "—"
       info.appendChild(desc)
 
+      if (isPlaced && partSectionsMap.has(item.part_id)) {
+        const secMap = partSectionsMap.get(item.part_id)
+        const pillsWrap = document.createElement("div")
+        pillsWrap.className = "palette-sec-pills"
+        secMap.forEach((_, secId) => {
+          const secName = sectionNameById.get(secId) || "Section"
+          const pill = document.createElement("span")
+          pill.className = "palette-sec-pill"
+          pill.textContent = `📍 ${secName}`
+          pill.title = `Click to zoom to "${secName}" and highlight ${item.part_number}`
+          pill.onclick = (e) => {
+            e.stopPropagation()
+            state.focusedPartId = item.part_id
+            state.focusedSectionId = secId
+            if (syncClusterActiveIndicesForSearch()) {
+              state.pendingSearchZoom = true
+              renderWorld()
+            } else {
+              renderPalette()
+              applySearchHighlightAndZoom({ zoomToMatch: true })
+            }
+          }
+          pillsWrap.appendChild(pill)
+        })
+        info.appendChild(pillsWrap)
+      }
+
       const meta = document.createElement("div")
       meta.className = "palette-meta"
       const secCount = partSectionsMap.has(item.part_id) ? partSectionsMap.get(item.part_id).size : 0
@@ -1840,6 +1972,22 @@ export default function renderFishbone(component) {
 
       card.appendChild(info)
 
+      if (isPlaced) {
+        card.title = "Click to zoom to and highlight this part in the Fishbone (or drag to place again)"
+        card.onclick = (e) => {
+          if (e.target.closest(".palette-replicate-btn") || e.target.closest(".palette-sec-pill")) return
+          state.focusedPartId = item.part_id
+          state.focusedSectionId = null
+          if (syncClusterActiveIndicesForSearch()) {
+            state.pendingSearchZoom = true
+            renderWorld()
+          } else {
+            renderPalette()
+            applySearchHighlightAndZoom({ zoomToMatch: true })
+          }
+        }
+      }
+
       card.ondragstart = (e) => {
         e.dataTransfer.setData("application/json", JSON.stringify(item))
         e.dataTransfer.effectAllowed = "copy"
@@ -1849,8 +1997,20 @@ export default function renderFishbone(component) {
     })
   }
 
-  paletteSearch.oninput = renderPalette
-  paletteUnplacedOnly.onchange = renderPalette
+  paletteSearch.oninput = () => {
+    state.focusedPartId = null
+    state.focusedSectionId = null
+    if (syncClusterActiveIndicesForSearch()) {
+      state.pendingSearchZoom = true
+      renderWorld()
+    } else {
+      renderPalette()
+      applySearchHighlightAndZoom({ zoomToMatch: true })
+    }
+  }
+  paletteUnplacedOnly.onchange = () => {
+    renderPalette()
+  }
   renderPalette()
 
   // Helper for clustering similar parts (same base drawing number, differing suffix, segregated by P vs G, or manual Variant group)
@@ -1990,6 +2150,35 @@ export default function renderFishbone(component) {
 
     sectionById.set(sec.id, sec)
   })
+
+  function syncClusterActiveIndicesForSearch() {
+    const query = (paletteSearch.value || "").trim().toLowerCase()
+    const focusedPartId = state.focusedPartId ? String(state.focusedPartId) : null
+    const focusedSectionId = state.focusedSectionId ? String(state.focusedSectionId) : null
+    if (!query && !focusedPartId) return false
+    let changed = false
+    sections.forEach((sec) => {
+      if (focusedSectionId && String(sec.id) !== focusedSectionId) return
+      ;(sec.partClusters || []).forEach((cl) => {
+        if (!cl.parts || cl.parts.length <= 1) return
+        const curIdx = (cl.activeIdx || 0) % cl.parts.length
+        const curPart = cl.parts[curIdx]
+        const matchesTarget = (p) => {
+          if (focusedPartId) return String(p.part_id || p.id) === focusedPartId
+          return partMatchesQuery(p, query)
+        }
+        if (curPart && matchesTarget(curPart)) return
+        const matchIdx = cl.parts.findIndex(matchesTarget)
+        if (matchIdx >= 0 && matchIdx !== curIdx) {
+          cl.activeIdx = matchIdx
+          state.clusterActiveIndices.set(cl.clusterKey, matchIdx)
+          changed = true
+        }
+      })
+    })
+    return changed
+  }
+  syncClusterActiveIndicesForSearch()
 
   // Layers
   const edgeLayer = svgElement("g", { id: "edge-layer" })
@@ -2414,6 +2603,7 @@ export default function renderFishbone(component) {
       transform: `translate(${section.sx} ${section.sy})`,
       "data-section-id": section.id
     })
+    section.nodeElem = group
 
     // Card background
     const bgRect = svgElement("rect", {
@@ -2630,6 +2820,7 @@ export default function renderFishbone(component) {
           class: `part-cluster${hasMultiple ? " cascaded" : ""}`,
           "data-base-code": cluster.baseCode
         })
+        cluster.clusterElem = clusterGroup
 
         // Cascading background cards if multiple variants share base code
         if (hasMultiple) {
@@ -2684,11 +2875,14 @@ export default function renderFishbone(component) {
           card.appendChild(noImg)
         }
 
+        const pnStr = activePart.part_number || ""
         const pnText = svgElement("text", {
           x: cardX + cardW / 2, y: cardY + 66, "text-anchor": "middle",
-          fill: "var(--st-text-color)", "font-size": 8.8, "font-weight": 700
+          fill: "var(--st-text-color)", "font-size": 8.8, "font-weight": 700,
+          class: "part-number-text",
+          "data-full-pn": pnStr,
+          "data-card-w": cardW
         })
-        const pnStr = activePart.part_number || ""
         pnText.textContent = pnStr.length > 10 ? `${pnStr.slice(0, 9)}…` : pnStr
         card.appendChild(pnText)
 
@@ -3967,6 +4161,99 @@ export default function renderFishbone(component) {
     return true
   }
 
+  function applySearchHighlightAndZoom(options = {}) {
+    const zoomToMatch = Boolean(options.zoomToMatch)
+    const query = (paletteSearch.value || "").trim().toLowerCase()
+    const focusedPartId = state.focusedPartId ? String(state.focusedPartId) : null
+    const focusedSectionId = state.focusedSectionId ? String(state.focusedSectionId) : null
+
+    if (!query && !focusedPartId) {
+      world.classList.remove("search-highlight-active")
+      sections.forEach((sec) => {
+        if (sec.nodeElem) sec.nodeElem.classList.remove("search-highlight")
+        ;(sec.partClusters || []).forEach((cl) => {
+          if (cl.clusterElem) cl.clusterElem.classList.remove("search-highlight")
+          if (cl.cardElem) cl.cardElem.classList.remove("search-highlight")
+        })
+      })
+      return
+    }
+
+    const matchedSections = []
+    const matchedClusters = []
+
+    sections.forEach((sec) => {
+      const secEligible = !focusedSectionId || String(sec.id) === focusedSectionId
+      let secHasMatch = false
+      ;(sec.partClusters || []).forEach((cl) => {
+        const isMatch = secEligible && (cl.parts || []).some((p) => {
+          if (focusedPartId) return String(p.part_id || p.id) === focusedPartId
+          return partMatchesQuery(p, query)
+        })
+        if (cl.clusterElem) cl.clusterElem.classList.toggle("search-highlight", isMatch)
+        if (cl.cardElem) cl.cardElem.classList.toggle("search-highlight", isMatch)
+        if (isMatch) {
+          secHasMatch = true
+          matchedClusters.push({ sec, cl })
+        }
+      })
+      if (sec.nodeElem) sec.nodeElem.classList.toggle("search-highlight", secHasMatch)
+      if (secHasMatch) matchedSections.push(sec)
+    })
+
+    if (matchedSections.length === 0) {
+      world.classList.remove("search-highlight-active")
+      return
+    }
+
+    world.classList.add("search-highlight-active")
+
+    if (!zoomToMatch) return
+    const rect = viewport.getBoundingClientRect()
+    if (!rect.width || !rect.height || rect.width < 80 || rect.height < 80) return
+
+    let secMinX = Infinity, secMaxX = -Infinity, secMinY = Infinity, secMaxY = -Infinity
+    matchedSections.forEach((s) => {
+      const hw = (s.secWidth || 220) / 2
+      const hh = (s.secHeight || 80) / 2
+      secMinX = Math.min(secMinX, s.sx - hw)
+      secMaxX = Math.max(secMaxX, s.sx + hw)
+      secMinY = Math.min(secMinY, s.sy - hh)
+      secMaxY = Math.max(secMaxY, s.sy + hh)
+    })
+
+    let cardMinX = Infinity, cardMaxX = -Infinity
+    matchedClusters.forEach(({ sec, cl }) => {
+      const cx0 = sec.sx + (Number(cl.cardX) || 0)
+      const cx1 = cx0 + (Number(cl.cardW) || 68)
+      cardMinX = Math.min(cardMinX, cx0)
+      cardMaxX = Math.max(cardMaxX, cx1)
+    })
+
+    const padX = 64
+    const padY = 64
+    const availW = Math.max(rect.width - 60, 140)
+    const availH = Math.max(rect.height - 60, 140)
+
+    const secSpanW = Math.max(secMaxX - secMinX + padX * 2, 260)
+    const secSpanH = Math.max(secMaxY - secMinY + padY * 2, 200)
+    let targetScale = clamp(Math.min(availW / secSpanW, availH / secSpanH), 0.45, 1.2)
+    let targetMidX = (secMinX + secMaxX) / 2
+    let targetMidY = (secMinY + secMaxY) / 2
+
+    if (matchedSections.length === 1 && targetScale < 0.88 && isFinite(cardMinX) && isFinite(cardMaxX)) {
+      const focusSpanW = Math.max(cardMaxX - cardMinX + 240, 320)
+      targetScale = clamp(Math.min(availW / focusSpanW, availH / secSpanH), 0.88, 1.2)
+      targetMidX = (cardMinX + cardMaxX) / 2
+    }
+
+    state.scale = targetScale
+    state.x = rect.width / 2 - targetMidX * targetScale
+    state.y = rect.height / 2 - targetMidY * targetScale
+    state.fitted = true
+    updateTransform()
+  }
+
   if (!state.fitted) {
     const ok = fitView()
     if (!ok) {
@@ -3977,6 +4264,10 @@ export default function renderFishbone(component) {
   } else {
     updateTransform()
   }
+
+  const shouldZoomToSearch = Boolean(state.pendingSearchZoom)
+  state.pendingSearchZoom = false
+  applySearchHighlightAndZoom({ zoomToMatch: shouldZoomToSearch })
 
   // Setup ResizeObserver and IntersectionObserver so canvas defaults to Fit screen when clicked or revealed
   if (!state.observerAttached && typeof ResizeObserver !== "undefined") {
@@ -4014,12 +4305,20 @@ export default function renderFishbone(component) {
   // Pan interaction
   svg.onmousedown = (e) => {
     if (e.target !== svg && e.target.tagName !== "svg") return
+    if (state.focusedPartId && !(paletteSearch.value || "").trim()) {
+      state.focusedPartId = null
+      state.focusedSectionId = null
+      renderPalette()
+      applySearchHighlightAndZoom({ zoomToMatch: false })
+    }
     state.dragging = true
     state.pointerX = e.clientX
     state.pointerY = e.clientY
     svg.classList.add("dragging")
   }
-  window.addEventListener("mousemove", (e) => {
+  if (state._panMoveHandler) window.removeEventListener("mousemove", state._panMoveHandler)
+  if (state._panUpHandler) window.removeEventListener("mouseup", state._panUpHandler)
+  state._panMoveHandler = (e) => {
     if (!state.dragging) return
     state.hasUserInteracted = true
     state.x += (e.clientX - state.pointerX)
@@ -4027,13 +4326,15 @@ export default function renderFishbone(component) {
     state.pointerX = e.clientX
     state.pointerY = e.clientY
     updateTransform()
-  })
-  window.addEventListener("mouseup", () => {
+  }
+  state._panUpHandler = () => {
     if (state.dragging) {
       state.dragging = false
       svg.classList.remove("dragging")
     }
-  })
+  }
+  window.addEventListener("mousemove", state._panMoveHandler)
+  window.addEventListener("mouseup", state._panUpHandler)
 
   // Zoom interaction
   viewport.onwheel = (e) => {
@@ -4076,18 +4377,523 @@ export default function renderFishbone(component) {
     state.hasUserInteracted = true
     fitView()
   }
-  parentElement.querySelector("#full-screen").onclick = () => {
-    if (!document.fullscreenElement) {
-      shell.requestFullscreen().catch(() => {})
+
+  function printFishbone() {
+    const MAX_COLS_PER_ROW = 7
+    const MAX_ROWS_PER_PAGE = 3
+    const MAX_CLUSTERS_PER_PAGE = MAX_COLS_PER_ROW * MAX_ROWS_PER_PAGE
+    const CARD_W = 68
+    const CARD_H = 78
+    const COL_GAP = 12
+    const ROW_GAP = 16
+    const HEADER_H = 42
+    const TOP_PAD = 50
+    const BOTTOM_PAD = 18
+    const PAGE_ASPECT = 820 / 575
+
+    const orderedSections = [...sections].sort((a, b) => {
+      const rowA = Math.round((Number(a.sy) || 0) / 100)
+      const rowB = Math.round((Number(b.sy) || 0) / 100)
+      if (rowA !== rowB) return rowA - rowB
+      return (Number(a.sx) || 0) - (Number(b.sx) || 0)
+    })
+
+    const pageSpecs = []
+    if (orderedSections.length === 0) {
+      pageSpecs.push({
+        isEmptyState: true,
+        section: null,
+        chunk: [],
+        chunkIdx: 0,
+        totalSectionChunks: 1,
+        incomingLabels: [],
+        outgoingLabels: []
+      })
     } else {
-      document.exitFullscreen().catch(() => {})
+      orderedSections.forEach(sec => {
+        const secNode = svg.querySelector(`.section-node[data-section-id="${sec.id}"]`)
+        const clusterNodes = secNode ? [...secNode.querySelectorAll(".part-cluster")] : []
+        const clusters = sec.partClusters || []
+        const pairedClusters = clusters.map((cluster, idx) => ({
+          cluster,
+          domNode: clusterNodes[idx] || null
+        }))
+
+        const incomingLabels = resolvedConns
+          .filter(rc => rc.end && rc.end.id === sec.id && rc.start)
+          .map(rc => rc.start.type === "Support Operations"
+            ? `${rc.start.name} (Buffer / Storage)`
+            : rc.start.name
+          )
+        const outgoingLabels = resolvedConns
+          .filter(rc => rc.start && rc.start.id === sec.id && rc.end)
+          .map(rc => rc.end.name)
+
+        if (pairedClusters.length === 0) {
+          pageSpecs.push({
+            isEmptyState: false,
+            section: sec,
+            chunk: [],
+            chunkIdx: 0,
+            totalSectionChunks: 1,
+            incomingLabels,
+            outgoingLabels
+          })
+        } else {
+          const totalSectionChunks = Math.ceil(pairedClusters.length / MAX_CLUSTERS_PER_PAGE)
+          for (let cIdx = 0; cIdx < totalSectionChunks; cIdx++) {
+            const chunk = pairedClusters.slice(
+              cIdx * MAX_CLUSTERS_PER_PAGE,
+              (cIdx + 1) * MAX_CLUSTERS_PER_PAGE
+            )
+            pageSpecs.push({
+              isEmptyState: false,
+              section: sec,
+              chunk,
+              chunkIdx: cIdx,
+              totalSectionChunks,
+              incomingLabels,
+              outgoingLabels
+            })
+          }
+        }
+      })
+    }
+
+    const oldFrame = document.getElementById("paag-fishbone-print-frame")
+    if (oldFrame) oldFrame.remove()
+
+    const iframe = document.createElement("iframe")
+    iframe.id = "paag-fishbone-print-frame"
+    iframe.style.position = "fixed"
+    iframe.style.right = "0"
+    iframe.style.bottom = "0"
+    iframe.style.width = "1100px"
+    iframe.style.height = "800px"
+    iframe.style.border = "0"
+    iframe.style.opacity = "0"
+    iframe.style.pointerEvents = "none"
+    iframe.style.zIndex = "-1"
+    document.body.appendChild(iframe)
+
+    const printDoc = iframe.contentDocument || iframe.contentWindow.document
+    printDoc.open()
+    printDoc.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Interactive Fishbone Print</title>
+<style>
+  :root {
+    --st-background-color: #ffffff;
+    --st-secondary-background-color: #f8fafc;
+    --st-border-color: #94a3b8;
+    --st-text-color: #0f172a;
+    --st-secondary-text-color: #475569;
+    --st-primary-color: #2563eb;
+  }
+  @page {
+    size: landscape;
+    margin: 0.18in;
+  }
+  * {
+    box-sizing: border-box;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+    color: #0f172a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .print-sheet {
+    width: 100%;
+    height: 98.5vh;
+    max-height: 98.5vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    page-break-after: always;
+    break-after: page;
+  }
+  .print-sheet:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+  .print-page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 10px;
+    margin-bottom: 4px;
+    border-bottom: 1.5px solid #cbd5e1;
+    background: #f8fafc;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+  .print-page-title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 12px;
+    color: #0f172a;
+  }
+  .print-page-title strong {
+    font-size: 13px;
+    font-weight: 800;
+  }
+  .print-page-title span {
+    font-size: 11px;
+    color: #475569;
+  }
+  .print-page-badge {
+    font-size: 11px;
+    font-weight: 700;
+    color: #1e40af;
+    background: #dbeafe;
+    border: 1px solid #93c5fd;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .print-flow-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    padding: 3px 10px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: #334155;
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+  .print-flow-bar strong {
+    color: #0f172a;
+    font-weight: 700;
+  }
+  .print-svg-stage {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #ffffff;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .print-fishbone-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+</style>
+</head>
+<body><div id="print-root"></div></body>
+</html>`)
+    printDoc.close()
+
+    const printRoot = printDoc.getElementById("print-root")
+    const summaryText = summary ? summary.textContent : ""
+    const totalPages = pageSpecs.length
+    const NS = "http://www.w3.org/2000/svg"
+    const makeSvgEl = (tag, attrs = {}) => {
+      const el = printDoc.createElementNS(NS, tag)
+      Object.entries(attrs).forEach(([k, v]) => {
+        if (v !== undefined && v !== null) el.setAttribute(k, String(v))
+      })
+      return el
+    }
+
+    pageSpecs.forEach((spec, idx) => {
+      const sheet = printDoc.createElement("section")
+      sheet.className = "print-sheet"
+
+      const header = printDoc.createElement("div")
+      header.className = "print-page-header"
+
+      const titleWrap = printDoc.createElement("div")
+      titleWrap.className = "print-page-title"
+      const strong = printDoc.createElement("strong")
+      if (spec.section) {
+        const partSuffix = spec.totalSectionChunks > 1
+          ? ` (Part ${spec.chunkIdx + 1} of ${spec.totalSectionChunks})`
+          : ""
+        strong.textContent = `Interactive assembly fishbone · ${spec.section.name}${partSuffix}`
+      } else {
+        strong.textContent = "Interactive assembly fishbone"
+      }
+      const span = printDoc.createElement("span")
+      span.textContent = summaryText
+      titleWrap.appendChild(strong)
+      titleWrap.appendChild(span)
+
+      const badge = printDoc.createElement("div")
+      badge.className = "print-page-badge"
+      if (spec.section) {
+        const secLabel = spec.totalSectionChunks > 1
+          ? `${spec.section.name} · ${spec.chunkIdx + 1}/${spec.totalSectionChunks}`
+          : spec.section.name
+        badge.textContent = `Page ${idx + 1} of ${totalPages} (${secLabel})`
+      } else {
+        badge.textContent = `Page ${idx + 1} of ${totalPages}`
+      }
+
+      header.appendChild(titleWrap)
+      header.appendChild(badge)
+      sheet.appendChild(header)
+
+      if (spec.section && (spec.incomingLabels.length > 0 || spec.outgoingLabels.length > 0)) {
+        const flowBar = printDoc.createElement("div")
+        flowBar.className = "print-flow-bar"
+        if (spec.incomingLabels.length > 0) {
+          const inSpan = printDoc.createElement("span")
+          const inBold = printDoc.createElement("strong")
+          inBold.textContent = "⬅ Feeds from: "
+          inSpan.appendChild(inBold)
+          inSpan.appendChild(printDoc.createTextNode(spec.incomingLabels.join(", ")))
+          flowBar.appendChild(inSpan)
+        }
+        if (spec.outgoingLabels.length > 0) {
+          const outSpan = printDoc.createElement("span")
+          const outBold = printDoc.createElement("strong")
+          outBold.textContent = "➔ Feeds into: "
+          outSpan.appendChild(outBold)
+          outSpan.appendChild(printDoc.createTextNode(spec.outgoingLabels.join(", ")))
+          flowBar.appendChild(outSpan)
+        }
+        sheet.appendChild(flowBar)
+      }
+
+      const stage = printDoc.createElement("div")
+      stage.className = "print-svg-stage"
+
+      const pageSvg = makeSvgEl("svg", {
+        class: "print-fishbone-svg",
+        preserveAspectRatio: "xMidYMid meet"
+      })
+
+      if (spec.isEmptyState || !spec.section) {
+        pageSvg.setAttribute("viewBox", "-240 -140 480 280")
+        const emptyCard = makeSvgEl("rect", {
+          x: -180, y: -50, width: 360, height: 100, rx: 12,
+          fill: "#f8fafc", stroke: "#94a3b8", "stroke-width": 1.5
+        })
+        pageSvg.appendChild(emptyCard)
+        const emptyTitle = makeSvgEl("text", {
+          x: 0, y: -8, "text-anchor": "middle", fill: "#0f172a", "font-size": 15, "font-weight": 700
+        })
+        emptyTitle.textContent = "No Fishbone Sections Placed"
+        pageSvg.appendChild(emptyTitle)
+      } else {
+        const section = spec.section
+        const isSupport = section.type === "Support Operations"
+        const secParts = partsBySection.get(section.id) || []
+        const chunk = spec.chunk
+        const rowsCount = chunk.length > 0 ? Math.ceil(chunk.length / MAX_COLS_PER_ROW) : 0
+
+        let maxRowCardsW = 0
+        const rows = []
+        for (let r = 0; r < rowsCount; r++) {
+          const rowItems = chunk.slice(r * MAX_COLS_PER_ROW, (r + 1) * MAX_COLS_PER_ROW)
+          const rowCardsW = rowItems.reduce(
+            (sum, item, cIdx) => sum + (item.cluster.cardW || CARD_W) + (cIdx > 0 ? COL_GAP : 0),
+            0
+          )
+          if (rowCardsW > maxRowCardsW) maxRowCardsW = rowCardsW
+          rows.push(rowItems)
+        }
+
+        const titleLabel = spec.totalSectionChunks > 1
+          ? `${section.name} (${spec.chunkIdx + 1}/${spec.totalSectionChunks})`
+          : section.name
+        const minHeaderW = Math.max(240, titleLabel.length * 8.5 + 48)
+        const boxWidth = Math.max(minHeaderW, maxRowCardsW + 28)
+        const boxHeight = rowsCount > 0
+          ? (TOP_PAD + rowsCount * CARD_H + (rowsCount - 1) * ROW_GAP + BOTTOM_PAD)
+          : 92
+
+        const group = makeSvgEl("g", { class: "section-node" })
+        const bgRect = makeSvgEl("rect", {
+          x: -boxWidth / 2,
+          y: -boxHeight / 2,
+          width: boxWidth,
+          height: boxHeight,
+          rx: 10,
+          fill: isSupport ? "#1e293b" : "#f8fafc",
+          stroke: isSupport ? "#475569" : "#94a3b8",
+          "stroke-width": 2
+        })
+        group.appendChild(bgRect)
+
+        const headerBg = makeSvgEl("rect", {
+          x: -boxWidth / 2,
+          y: -boxHeight / 2,
+          width: boxWidth,
+          height: HEADER_H,
+          rx: 10,
+          fill: isSupport ? "#334155" : "#1e40af"
+        })
+        group.appendChild(headerBg)
+
+        const label = makeSvgEl("text", {
+          x: -boxWidth / 2 + 12,
+          y: -boxHeight / 2 + 18,
+          fill: "white",
+          "font-size": 13,
+          "font-weight": 700
+        })
+        label.textContent = titleLabel
+        group.appendChild(label)
+
+        const count = makeSvgEl("text", {
+          x: -boxWidth / 2 + 12,
+          y: -boxHeight / 2 + 33,
+          fill: "rgba(255, 255, 255, 0.88)",
+          "font-size": 10
+        })
+        const chunkRangeText = spec.totalSectionChunks > 1
+          ? ` · Showing cards ${spec.chunkIdx * MAX_CLUSTERS_PER_PAGE + 1}–${spec.chunkIdx * MAX_CLUSTERS_PER_PAGE + chunk.length} of ${(section.partClusters || []).length}`
+          : ""
+        if (isSupport) {
+          const targetName = spec.outgoingLabels.length > 0 ? spec.outgoingLabels.join(", ") : ""
+          count.textContent = targetName
+            ? `🏭 Built here ➔ Feeds ${targetName} · ${secParts.length} parts${chunkRangeText}`
+            : `🏭 Fabrication / Support Ops · ${secParts.length} parts${chunkRangeText}`
+        } else {
+          count.textContent = `${secParts.length} part${secParts.length === 1 ? "" : "s"} assigned${chunkRangeText}`
+        }
+        group.appendChild(count)
+
+        if (chunk.length === 0) {
+          const placeholder = makeSvgEl("text", {
+            x: 0,
+            y: -boxHeight / 2 + 66,
+            "text-anchor": "middle",
+            fill: isSupport ? "#cbd5e1" : "#64748b",
+            "font-size": 10.5,
+            "font-style": "italic"
+          })
+          placeholder.textContent = "No parts assigned to this section"
+          group.appendChild(placeholder)
+        } else {
+          rows.forEach((rowItems, rIdx) => {
+            let curX = -boxWidth / 2 + 14
+            const targetY = -boxHeight / 2 + TOP_PAD + rIdx * (CARD_H + ROW_GAP)
+            rowItems.forEach(({ cluster, domNode }) => {
+              const clusterW = cluster.cardW || CARD_W
+              if (domNode) {
+                const clClone = domNode.cloneNode(true)
+                clClone.classList.remove("search-highlight")
+                clClone.querySelectorAll(".part-remove-btn, .part-replicate-btn").forEach(el => el.remove())
+                clClone.querySelectorAll(".part-card").forEach(el => {
+                  el.classList.remove("search-highlight")
+                  el.style.cursor = "default"
+                })
+                clClone.querySelectorAll(".part-number-text").forEach(pnEl => {
+                  const fullPn = pnEl.getAttribute("data-full-pn") || pnEl.textContent || ""
+                  const cardW = Number(pnEl.getAttribute("data-card-w")) || CARD_W
+                  pnEl.textContent = fullPn
+                  if (fullPn.length > 10) {
+                    pnEl.setAttribute("font-size", fullPn.length > 13 ? "7.8" : "8.4")
+                    pnEl.setAttribute("textLength", String(cardW - 5))
+                    pnEl.setAttribute("lengthAdjust", "spacingAndGlyphs")
+                  } else {
+                    pnEl.setAttribute("font-size", "9.2")
+                  }
+                })
+                const dx = curX - (Number(cluster.cardX) || 0)
+                const dy = targetY - (Number(cluster.cardY) || 0)
+                clClone.setAttribute("transform", `translate(${dx.toFixed(1)} ${dy.toFixed(1)})`)
+                group.appendChild(clClone)
+              }
+              curX += clusterW + COL_GAP
+            })
+          })
+        }
+
+        pageSvg.appendChild(group)
+
+        let viewW = Math.max(460, boxWidth + 28)
+        let viewH = Math.max(280, boxHeight + 28)
+        if (viewW / viewH > PAGE_ASPECT) {
+          viewH = viewW / PAGE_ASPECT
+        } else {
+          viewW = viewH * PAGE_ASPECT
+        }
+        pageSvg.setAttribute(
+          "viewBox",
+          `${(-viewW / 2).toFixed(1)} ${(-viewH / 2).toFixed(1)} ${viewW.toFixed(1)} ${viewH.toFixed(1)}`
+        )
+      }
+
+      stage.appendChild(pageSvg)
+      sheet.appendChild(stage)
+      printRoot.appendChild(sheet)
+    })
+
+    setTimeout(() => {
+      const printWin = iframe.contentWindow
+      if (printWin) {
+        printWin.focus()
+        printWin.print()
+      }
+    }, 180)
+  }
+
+  if (printFishboneBtn) {
+    printFishboneBtn.onclick = printFishbone
+  }
+
+  const fullScreenBtn = parentElement.querySelector("#full-screen")
+  function isFishboneFullScreen() {
+    const fsElement = document.fullscreenElement || document.webkitFullscreenElement
+    return Boolean(fsElement && (fsElement === shell || shell.contains(fsElement)))
+  }
+  function updateFullScreenControl() {
+    if (!fullScreenBtn) return
+    const isFullScreen = isFishboneFullScreen()
+    fullScreenBtn.textContent = isFullScreen ? "Exit Full Screen" : "Full Screen"
+    fullScreenBtn.title = isFullScreen ? "Exit full screen (Esc)" : "Open the fishbone full screen"
+    fullScreenBtn.setAttribute("aria-pressed", isFullScreen ? "true" : "false")
+  }
+  shell._updateFullScreenControl = updateFullScreenControl
+  if (!shell._fullscreenListenerAttached) {
+    shell._fullscreenListenerAttached = true
+    const onFullscreenChange = () => {
+      if (typeof shell._updateFullScreenControl === "function") {
+        shell._updateFullScreenControl()
+      }
+    }
+    document.addEventListener("fullscreenchange", onFullscreenChange)
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange)
+  }
+  updateFullScreenControl()
+  if (fullScreenBtn) {
+    fullScreenBtn.onclick = () => {
+      if (!isFishboneFullScreen()) {
+        if (shell.requestFullscreen) {
+          shell.requestFullscreen().then(updateFullScreenControl).catch(() => {})
+        }
+      } else if (document.exitFullscreen) {
+        document.exitFullscreen().then(updateFullScreenControl).catch(() => {})
+      }
     }
   }
 }
 """
 
+_FISHBONE_VISUAL_HOT_RELOAD_REV = 6
+
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v35",
+    "paag_interactive_fishbone_builder_v41",
     html=_HTML,
     css=_CSS,
     js=_JS,

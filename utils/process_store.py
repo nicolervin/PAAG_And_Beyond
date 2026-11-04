@@ -2535,6 +2535,123 @@ def copy_part_photo_to_pitch_visual_media(
     )
 
 
+def copy_pitch_visual_media(
+    project_id: str,
+    scenario_id: str,
+    media_id: str,
+    target_pitch_id: str | None = None,
+    caption: str | None = None,
+    tagged_work_element_ids: list[str] | None = None,
+    sequence: int | None = None,
+    current_editor: str = "Collaborator",
+) -> dict:
+    """Duplicate an existing visual aid onto the same pitch or another pitch in the scenario."""
+    normalized_media_id = str(media_id or "").strip()
+    if not normalized_media_id:
+        raise ValueError("Choose a visual aid to copy.")
+
+    with connection() as conn:
+        source = conn.execute(
+            """SELECT m.id, m.pitch_id, m.media_type, m.file_path, m.original_file_path,
+                      m.annotations_json, m.caption, m.sequence, pitch.pitch_number
+               FROM process_visual_media m
+               JOIN yamazumi_pitches pitch ON pitch.id=m.pitch_id
+               WHERE m.id=? AND m.project_id=? AND m.scenario_id=?""",
+            (normalized_media_id, project_id, scenario_id),
+        ).fetchone()
+        if not source:
+            raise ValueError("Visual aid not found in this scenario.")
+
+        existing_tag_rows = conn.execute(
+            """SELECT work_element_id
+               FROM process_visual_media_tags
+               WHERE media_id=? AND project_id=? AND scenario_id=?""",
+            (normalized_media_id, project_id, scenario_id),
+        ).fetchall()
+        existing_tag_ids = [
+            str(r["work_element_id"])
+            for r in existing_tag_rows
+            if r["work_element_id"]
+        ]
+
+    resolved_pitch_id = str(target_pitch_id or source["pitch_id"] or "").strip()
+    if not resolved_pitch_id:
+        raise ValueError("Choose a destination Yamazumi pitch.")
+
+    resolved_caption = (
+        str(caption).strip()
+        if caption is not None
+        else str(source["caption"] or "").strip()
+    )
+    resolved_sequence = (
+        int(sequence)
+        if sequence is not None
+        else int(source["sequence"] or 10)
+    )
+    if tagged_work_element_ids is not None:
+        resolved_tags = list(tagged_work_element_ids)
+    elif resolved_pitch_id == str(source["pitch_id"] or "").strip():
+        resolved_tags = existing_tag_ids
+    else:
+        resolved_tags = []
+
+    file_path_str = str(source["file_path"] or "").strip()
+    orig_path_str = str(source["original_file_path"] or "").strip()
+    m_type = str(source["media_type"] or "image").strip()
+    annotations_json = str(source["annotations_json"] or "").strip()
+
+    if m_type == "link" or file_path_str.startswith(("http://", "https://")):
+        copied = save_pitch_visual_media_url(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            pitch_id=resolved_pitch_id,
+            url=file_path_str,
+            caption=resolved_caption,
+            tagged_work_element_ids=resolved_tags,
+            sequence=resolved_sequence,
+            current_editor=current_editor,
+        )
+    else:
+        src_path = Path(file_path_str)
+        if not src_path.exists() or not src_path.is_file():
+            raise ValueError("The source visual aid file could not be found on disk.")
+        file_bytes = src_path.read_bytes()
+        orig_bytes: bytes | None = None
+        if orig_path_str and not orig_path_str.startswith(("http://", "https://")):
+            orig_path = Path(orig_path_str)
+            if orig_path.exists() and orig_path.is_file():
+                orig_bytes = orig_path.read_bytes()
+        copied = save_pitch_visual_media(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            pitch_id=resolved_pitch_id,
+            filename=src_path.name,
+            file_bytes=file_bytes,
+            media_type=m_type if m_type in {"image", "video", "cad"} else None,
+            caption=resolved_caption,
+            tagged_work_element_ids=resolved_tags,
+            sequence=resolved_sequence,
+            current_editor=current_editor,
+            annotations_json=annotations_json,
+            original_file_bytes=orig_bytes,
+        )
+
+    record_audit_event(
+        project_id,
+        "process_visual_media",
+        "Copy visual aid",
+        1,
+        str(current_editor or "").strip(),
+        {
+            "summary": f"Copied {m_type} visual aid from pitch {source['pitch_number']}: '{resolved_caption or normalized_media_id}'",
+            "source_media_id": normalized_media_id,
+            "new_media_id": copied.get("id", ""),
+            "target_pitch_id": resolved_pitch_id,
+        },
+    )
+    return copied
+
+
 def update_pitch_visual_media(
     project_id: str,
     scenario_id: str,
@@ -2979,7 +3096,7 @@ def process_pitch_visual_summary(
 
         rows = conn.execute(
             """SELECT work.id AS work_element_id, work.operation,
-                      work.model_applicability, work.sequence AS process_sequence,
+                      work.model_applicability, work.sequence AS process_sequence, work.tool, work.resource_type, work.resource_detail,
                       yamazumi.id AS yamazumi_element_id,
                       yamazumi.description AS yamazumi_description,
                       yamazumi.time_s, yamazumi.sequence AS stack_sequence
@@ -3591,6 +3708,7 @@ def process_pitch_visual_summary(
         "scenario_takt_unit": scenario_takt_unit,
         "op_id_summary": op_id_summary,
         "elements": cards,
+        "yamazumi_elements": [dict(yel) for yel in yamazumi_pitch_elements],
         "tools": tools_list,
         "parts": final_parts,
         "yamazumi_stacks": variant_stacks,
@@ -4510,8 +4628,8 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
         }
 
 
-_PROCESS_STORE_REV_20261102 = 6
-__domain_exports__ = ['catalog_part_photos_for_pitch', 'copy_part_photo_to_pitch_visual_media', '_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'acknowledge_materials_upstream_changes', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'unlink_part_from_process_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'work_element_validation_contexts', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
+_PROCESS_STORE_REV_20261102 = 8
+__domain_exports__ = ['catalog_part_photos_for_pitch', 'copy_part_photo_to_pitch_visual_media', 'copy_pitch_visual_media', '_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'acknowledge_materials_upstream_changes', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'unlink_part_from_process_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'work_element_validation_contexts', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

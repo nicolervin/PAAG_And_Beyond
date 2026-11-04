@@ -8,6 +8,8 @@ from utils.cache_store import cached_store_read
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
+_FISHBONE_STORE_HOT_RELOAD_REV = 2
+
 @cached_store_read
 def assembly_sections(project_id: str) -> pd.DataFrame:
     rows = query(
@@ -903,6 +905,16 @@ def add_assembly_section(
     section_id = str(uuid4())
     try:
         with connection() as conn:
+            existing = conn.execute(
+                """SELECT name FROM assembly_sections
+                   WHERE project_id=? AND LOWER(TRIM(name)) = LOWER(TRIM(?))
+                   LIMIT 1""",
+                (project_id, name),
+            ).fetchone()
+            if existing:
+                raise ValueError(
+                    f"A section named '{existing['name']}' already exists in this project. Section names must be unique."
+                )
             if section_type == "Support Operations" and parent_id:
                 parent_exists = conn.execute(
                     "SELECT 1 FROM assembly_sections WHERE id=? AND project_id=?",
