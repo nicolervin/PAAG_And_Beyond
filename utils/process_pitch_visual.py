@@ -2836,8 +2836,9 @@ def render_pitch_canvas(
       .motion-bar.green {{ background: #35c84a; }}
       .motion-bar.orange {{ background: #ea580c; }}
       .motion-bar.gray {{ background: #64748b; }}
-      .block-label {{ white-space: normal; overflow-wrap: anywhere; word-break: break-word; line-height: 1.18; min-width: 0; }}
-      .block-time {{ font-weight: 800; flex-shrink: 0; }}
+      .stack-block, .stack-block.type-cycle, .stack-block.type-periodic, .stack-block.type-fluctuation {{ color: #000000 !important; }}
+      .block-label {{ white-space: normal; overflow-wrap: anywhere; word-break: break-word; line-height: 1.18; min-width: 0; color: #000000; }}
+      .block-time {{ font-weight: 800; flex-shrink: 0; color: #000000; }}
       .takt-line {{
         position: absolute;
         left: 0;
@@ -4209,4 +4210,4 @@ def render_printable_paag_deck(
 </html>"""
 
 
-_PROCESS_PITCH_VISUAL_REV_20261102 = 7
+_PROCESS_PITCH_VISUAL_REV_20261102 = 8

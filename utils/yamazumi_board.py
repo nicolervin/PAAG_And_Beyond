@@ -310,7 +310,7 @@ _CSS = """
 .stack.takt-scale { min-height:155px; }
 .drop-slot { flex:0 0 8px; min-height:8px; margin:-4px 0; position:relative; z-index:3; }
 .drop-slot.dragover { min-height:14px; flex-basis:14px; margin:-7px 0; background:color-mix(in srgb, var(--st-primary-color) 28%, transparent); outline:2px dashed var(--st-primary-color); }
-.element { position:relative; box-sizing:border-box; height:var(--element-height, 34px); flex:0 0 var(--element-height, 34px); min-height:0; padding:5px 38px 5px 6px; border-top:1px solid rgba(0,0,0,.14); font-size:.72rem; cursor:grab; overflow:hidden; transition:min-height .12s ease, box-shadow .12s ease; }
+.element { position:relative; box-sizing:border-box; height:var(--element-height, 34px); flex:0 0 var(--element-height, 34px); min-height:0; padding:5px 38px 5px 6px; border-top:1px solid rgba(0,0,0,.14); font-size:.72rem; color:#000000; cursor:grab; overflow:hidden; transition:min-height .12s ease, box-shadow .12s ease; }
 .board:not(.is-dragging) .element:hover, .board:not(.is-dragging) .element:focus-within { height:auto; flex:0 0 auto; min-height:max(var(--element-height, 34px), 38px); overflow:visible; z-index:5; box-shadow:0 2px 6px rgba(0,0,0,.18); }
 .board:not(.is-dragging) .element.has-criticality:hover, .board:not(.is-dragging) .element.has-criticality:focus-within { min-height:max(var(--element-height, 34px), 52px); padding-bottom:22px; }
 .element strong { position:absolute; top:4px; right:38px; margin-left:5px; white-space:nowrap; }
@@ -1552,10 +1552,10 @@ export default function(component) {
 }
 """
 
-_YAMAZUMI_BOARD_HOT_RELOAD_REV = 20
+_YAMAZUMI_BOARD_HOT_RELOAD_REV = 21
 
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v47",
+    "paag_yamazumi_drag_board_v48",
     html=_HTML,
     css=_CSS,
     js=_JS,

@@ -1674,7 +1674,7 @@ elif review_tab.open:
 
             st.markdown(f"#### Annotate Visual Aid: {media_item.get('caption') or 'Visual Aid'}")
             st.caption(
-                "Crop, rotate in 90° increments, or add directional arrows, callout text boxes, focus boxes/circles, "
+                "Crop, rotate in 90° increments, or add directional arrows, callout text boxes (adjust font size with **Text** / **A−** / **A+** or drag the callout corner), focus boxes/circles, "
                 "step number badges (1, 2, 3), and freehand pen markup non-destructively. "
                 "Click **💾 Apply & Save Markup** when finished."
             )
@@ -1978,6 +1978,10 @@ elif review_tab.open:
                             if isinstance(cur_st, dict) and cur_st.get("source") == "upload":
                                 st.session_state[disc_up_key] = cur_st.get("hash")
                             st.session_state.pop(st_key, None)
+                            st.session_state.pop(f"last_ergo_paste_hash_{discard_rid}", None)
+                            st.session_state.pop(f"last_ergo_upload_hash_{discard_rid}", None)
+                            st.session_state.pop(disc_up_key, None)
+                            st.session_state[f"ergo_up_nonce_{discard_rid}"] = int(st.session_state.get(f"ergo_up_nonce_{discard_rid}", 0)) + 1
                             st.session_state.pop(f"ergo_pending_discard_staged_{scenario_id}", None)
                             st.rerun()
 
@@ -2052,20 +2056,22 @@ elif review_tab.open:
                     "Images can be cropped, rotated in 90° increments, and annotated with arrows, callouts, boxes, circles, and step badges before or after attaching."
                 )
 
+                ergo_up_nonce_key = f"ergo_up_nonce_{curr_rid}"
+                ergo_up_nonce = int(st.session_state.get(ergo_up_nonce_key, 0))
                 up_c1, up_c2 = st.columns([1.5, 1])
                 with up_c1:
                     uploaded_file = st.file_uploader(
                         "Upload photo or video clip (PNG, JPG, WEBP max 10MB / MP4, MOV, WEBM max 25MB)",
                         type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
-                        key=f"ergo_file_upload_{curr_rid}",
+                        key=f"ergo_file_upload_{curr_rid}_{ergo_up_nonce}",
                     )
                     st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
-                    pasted = clipboard_image(key=f"ergo_paste_{curr_rid}")
+                    pasted = clipboard_image(key=f"ergo_paste_{curr_rid}_{ergo_up_nonce}")
 
                 with up_c2:
                     new_caption = st.text_input(
                         "Caption / Yellow Callout Note",
-                        key=f"ergo_new_caption_{curr_rid}",
+                        key=f"ergo_new_caption_{curr_rid}_{ergo_up_nonce}",
                         placeholder="e.g. Ensure 2-hand palm button clear of pinch hazard",
                     )
                     new_seq = st.number_input(
@@ -2073,7 +2079,7 @@ elif review_tab.open:
                         min_value=1,
                         value=(len(attached_media) + 1) * 10,
                         step=5,
-                        key=f"ergo_new_seq_{curr_rid}",
+                        key=f"ergo_new_seq_{curr_rid}_{ergo_up_nonce}",
                     )
 
                 staged_ergo_key = f"ergo_staged_media_{curr_rid}"
@@ -2192,6 +2198,11 @@ elif review_tab.open:
                             if current_staged.get("source") == "upload":
                                 st.session_state[discarded_ergo_up_key] = current_staged.get("hash")
                             st.session_state.pop(staged_ergo_key, None)
+                            st.session_state.pop(staged_ergo_key, None)
+                            st.session_state.pop(last_ergo_paste_hash_key, None)
+                            st.session_state.pop(last_ergo_upload_hash_key, None)
+                            st.session_state.pop(discarded_ergo_up_key, None)
+                            st.session_state[ergo_up_nonce_key] = ergo_up_nonce + 1
                             st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
                             st.rerun()
                         except Exception as save_err:
@@ -2208,6 +2219,11 @@ elif review_tab.open:
                                 sequence=int(new_seq),
                                 current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
                             )
+                            st.session_state.pop(staged_ergo_key, None)
+                            st.session_state.pop(last_ergo_paste_hash_key, None)
+                            st.session_state.pop(last_ergo_upload_hash_key, None)
+                            st.session_state.pop(discarded_ergo_up_key, None)
+                            st.session_state[ergo_up_nonce_key] = ergo_up_nonce + 1
                             st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
                             st.rerun()
                         except Exception as save_err:

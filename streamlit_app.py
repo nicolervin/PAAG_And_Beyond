@@ -1,3 +1,4 @@
+from pathlib import Path
 import streamlit as st
 import importlib as _importlib
 import sys as _sys
@@ -85,10 +86,36 @@ from utils.store import (
 )
 
 
-st.set_page_config(page_title="Process at a Glance", page_icon=":material/precision_manufacturing:", layout="wide")
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_GE_LOGO_HORIZONTAL = _ASSETS_DIR / "ge_appliances_horizontal.png"
+_GE_LOGO_STACKED = _ASSETS_DIR / "ge_appliances_stacked.png"
+
+st.set_page_config(page_title="iBOP Studio", page_icon=":material/precision_manufacturing:", layout="wide")
+if _GE_LOGO_HORIZONTAL.is_file():
+    st.logo(
+        str(_GE_LOGO_HORIZONTAL),
+        size="large",
+        icon_image=str(_GE_LOGO_STACKED) if _GE_LOGO_STACKED.is_file() else None,
+    )
 st.html(
     """
     <style>
+    [data-testid="stSidebarHeader"] {
+        align-items: center !important;
+        padding-top: 0.9rem !important;
+        padding-bottom: 0.25rem !important;
+    }
+    [data-testid="stSidebarHeader"] img[data-testid="stLogo"],
+    img[data-testid="stLogo"] {
+        height: 2.75rem !important;
+        max-height: 2.75rem !important;
+        width: auto !important;
+        max-width: 215px !important;
+        object-fit: contain !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+        padding-top: 0.35rem !important;
+    }
     div[class*="st-key-destructive_"] button {
         background-color: #c62828 !important;
         border-color: #c62828 !important;
@@ -594,7 +621,7 @@ def _on_current_editor_change(value_key: str) -> None:
     st.session_state[value_key] = str(st.session_state.get("current_editor") or "")
 
 with st.sidebar:
-    st.header("Process at a Glance")
+    st.header("iBOP Studio")
     if all_projects:
         name_counts: dict[str, int] = {}
         for project in all_projects:
