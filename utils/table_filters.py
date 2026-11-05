@@ -109,19 +109,27 @@ def filter_table(
         else tuple(str(index) for index in visible.index)
     )
     signature_key = f"{key}_visible_rows"
-    if st.session_state.get(signature_key) != row_identity:
+    prev_identity = st.session_state.get(signature_key)
+    if prev_identity != row_identity:
         st.session_state[signature_key] = row_identity
-        for widget_key in reset_widget_keys:
-            logical_widget_key = logical_table_editor_key(widget_key)
-            st.session_state.pop(f"_select_all_{logical_widget_key}", None)
-            prior_widget_state = get_effective_table_editor_state(widget_key)
-            st.session_state.pop(widget_key, None)
-            if isinstance(prior_widget_state, dict) and (
-                prior_widget_state.get("added_rows")
-                or prior_widget_state.get("edited_rows")
-                or prior_widget_state.get("deleted_rows")
-            ):
-                request_table_editor_reset(widget_key)
+        same_visible_id_set = (
+            "id" in visible.columns
+            and isinstance(prev_identity, tuple)
+            and len(prev_identity) == len(row_identity)
+            and set(prev_identity) == set(row_identity)
+        )
+        if not same_visible_id_set:
+            for widget_key in reset_widget_keys:
+                logical_widget_key = logical_table_editor_key(widget_key)
+                st.session_state.pop(f"_select_all_{logical_widget_key}", None)
+                prior_widget_state = get_effective_table_editor_state(widget_key)
+                st.session_state.pop(widget_key, None)
+                if isinstance(prior_widget_state, dict) and (
+                    prior_widget_state.get("added_rows")
+                    or prior_widget_state.get("edited_rows")
+                    or prior_widget_state.get("deleted_rows")
+                ):
+                    request_table_editor_reset(widget_key)
     st.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
     return visible.copy().reset_index(drop=True)
 
@@ -245,13 +253,18 @@ def apply_id_keyed_editor_draft(
         for index, value in result[id_column].items()
         if value is not None and not pd.isna(value) and str(value).strip()
     }
+    live_cells_before_draft: dict[str, dict[str, Any]] = {}
     for stable_id, changes in draft_by_id.items():
-        row_index = row_by_id.get(str(stable_id).strip())
+        sid_str = str(stable_id).strip()
+        row_index = row_by_id.get(sid_str)
         if row_index is None:
             continue
         for column, value in (changes or {}).items():
             if column in result.columns and column != id_column:
+                live_cells_before_draft.setdefault(sid_str, {})[column] = dataframe.at[row_index, column]
                 result.at[row_index, column] = value
+    st.session_state["_pending_id_draft_patches"] = deepcopy(draft_by_id)
+    st.session_state["_pending_id_draft_live_cells"] = live_cells_before_draft
     return result
 
 
@@ -862,15 +875,49 @@ def _apply_seed_to_dataframe(
         return display_df
 
 
+def _editor_state_has_data_changes(state: dict[str, Any] | None) -> bool:
+    if not isinstance(state, dict):
+        return False
+    if state.get("added_rows") or state.get("deleted_rows"):
+        return True
+    return any(
+        any(col != "selected" for col in (changes or {}))
+        for changes in (state.get("edited_rows") or {}).values()
+    )
+
+
 def _wrap_data_editor(data, *args, **kwargs):
     key = kwargs.get("key")
     if not key or not isinstance(data, pd.DataFrame):
         return _ORIG_DATA_EDITOR(data, *args, **kwargs)
 
     logical_key = logical_table_editor_key(str(key))
+    id_draft_patches = st.session_state.pop("_pending_id_draft_patches", None)
+    id_draft_live_cells = st.session_state.pop("_pending_id_draft_live_cells", None)
+    live_df = data.copy()
+    if (
+        isinstance(id_draft_live_cells, dict)
+        and id_draft_live_cells
+        and "id" in live_df.columns
+    ):
+        row_idx_by_id = {
+            str(val).strip(): idx
+            for idx, val in live_df["id"].items()
+            if val is not None and not pd.isna(val) and str(val).strip()
+        }
+        for sid_str, col_map in id_draft_live_cells.items():
+            r_idx = row_idx_by_id.get(str(sid_str).strip())
+            if r_idx is None:
+                continue
+            for col_name, live_val in (col_map or {}).items():
+                if col_name in live_df.columns:
+                    try:
+                        live_df.at[r_idx, col_name] = live_val
+                    except Exception:
+                        pass
+
     base_len = len(data)
     st.session_state[f"_table_undo_base_len_{logical_key}"] = base_len
-    _capture_editor_undo_meta(logical_key, data, kwargs.get("column_config"))
     seed = _normalize_editor_state(
         st.session_state.get(f"_table_undo_seed_{logical_key}")
     )
@@ -895,6 +942,33 @@ def _wrap_data_editor(data, *args, **kwargs):
         else _empty_editor_state()
     )
     has_raw_before = _editor_state_has_changes(raw_before)
+    has_data_edits = (
+        _editor_state_has_data_changes(raw_before)
+        or _editor_state_has_data_changes(seed)
+        or bool(id_draft_patches)
+    )
+    clean_base_key = f"_table_clean_base_df_{logical_key}"
+    if not has_data_edits or clean_base_key not in st.session_state:
+        existing_base = st.session_state.get(clean_base_key)
+        if (
+            not has_data_edits
+            and isinstance(existing_base, pd.DataFrame)
+            and "id" in existing_base.columns
+            and "id" in live_df.columns
+            and not existing_base.empty
+        ):
+            live_ids = set(live_df["id"].dropna().astype(str).str.strip())
+            kept_hidden = existing_base[
+                ~existing_base["id"].fillna("").astype(str).str.strip().isin(live_ids)
+            ].copy()
+            st.session_state[clean_base_key] = pd.concat(
+                [kept_hidden, live_df.copy()], ignore_index=True, sort=False
+            )
+        else:
+            st.session_state[clean_base_key] = live_df.copy()
+    st.session_state[f"_table_live_df_{logical_key}"] = live_df.copy()
+    st.session_state[f"_table_id_draft_{logical_key}"] = deepcopy(id_draft_patches or {})
+
     frozen_key = f"_table_editor_frozen_base_{key}"
     if not has_raw_before:
         st.session_state[frozen_key] = display_df.copy()
@@ -908,6 +982,8 @@ def _wrap_data_editor(data, *args, **kwargs):
             display_df = frozen_df.copy()
         else:
             st.session_state[frozen_key] = display_df.copy()
+    st.session_state[f"_table_display_df_{logical_key}"] = display_df.copy()
+    _capture_editor_undo_meta(logical_key, display_df, kwargs.get("column_config"))
     result_df = _ORIG_DATA_EDITOR(display_df, *args, **kwargs)
 
     state_obj = st.session_state.get(key)
@@ -922,6 +998,51 @@ def _wrap_data_editor(data, *args, **kwargs):
             st.session_state[f"_table_undo_mutated_obj_id_{key}"] = id(state_obj)
         else:
             st.session_state.pop(f"_table_undo_mutated_obj_id_{key}", None)
+
+    if (
+        has_data_edits
+        and isinstance(result_df, pd.DataFrame)
+        and "id" in result_df.columns
+        and "id" in live_df.columns
+    ):
+        eff_state = get_effective_table_editor_state(str(key))
+        edited_cols_by_id: dict[str, set[str]] = {}
+        for rid_k, chg_map in (id_draft_patches or {}).items():
+            if isinstance(chg_map, dict):
+                edited_cols_by_id.setdefault(str(rid_k).strip(), set()).update(
+                    str(c) for c in chg_map.keys()
+                )
+        for raw_pos, chg_map in (eff_state.get("edited_rows") or {}).items():
+            try:
+                pos_i = int(raw_pos)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= pos_i < len(display_df) and isinstance(chg_map, dict):
+                rid_val = display_df.iloc[pos_i].get("id")
+                rid_str = "" if rid_val is None or pd.isna(rid_val) else str(rid_val).strip()
+                if rid_str:
+                    edited_cols_by_id.setdefault(rid_str, set()).update(
+                        str(c) for c in chg_map.keys()
+                    )
+        live_by_id: dict[str, pd.Series] = {}
+        for _, l_row in live_df.iterrows():
+            l_id = l_row.get("id")
+            if l_id is not None and not pd.isna(l_id) and str(l_id).strip():
+                live_by_id[str(l_id).strip()] = l_row
+        for r_idx in result_df.index:
+            r_id_val = result_df.at[r_idx, "id"]
+            r_id_str = "" if r_id_val is None or pd.isna(r_id_val) else str(r_id_val).strip()
+            if not r_id_str or r_id_str.startswith("__draft_new__") or r_id_str not in live_by_id:
+                continue
+            user_cols = edited_cols_by_id.get(r_id_str, set())
+            l_row = live_by_id[r_id_str]
+            for col_name in result_df.columns:
+                if col_name in ("id", "selected") or col_name in user_cols or col_name not in l_row.index:
+                    continue
+                try:
+                    result_df.at[r_idx, col_name] = l_row[col_name]
+                except Exception:
+                    pass
 
     _sync_table_undo_history(str(key))
     st.session_state.pop(f"_just_undid_last_edit_{logical_key}", None)
@@ -1028,6 +1149,13 @@ def apply_pending_table_editor_reset(key: str) -> str:
             st.session_state.pop(f"_table_redo_history_{logical_key}", None)
             st.session_state.pop(f"_table_undo_seed_{logical_key}", None)
             st.session_state.pop(f"_just_undid_last_edit_{logical_key}", None)
+            st.session_state.pop(f"_table_clean_base_df_{logical_key}", None)
+            st.session_state.pop(f"_table_live_df_{logical_key}", None)
+            st.session_state.pop(f"_table_display_df_{logical_key}", None)
+            st.session_state.pop(f"_table_id_draft_{logical_key}", None)
+            st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
+            st.session_state.pop(f"_confirm_save_conflict_overwrite_{logical_key}", None)
+            st.session_state.pop(f"_confirm_save_conflict_discard_{logical_key}", None)
         generation += 1
         st.session_state[generation_key] = generation
     return f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"

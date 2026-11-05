@@ -110,6 +110,7 @@ from utils.table_filters import (
     split_filter_values,
 )
 from utils.table_ui import (
+    compare_record_field_conflicts,
     dataframe_to_excel,
     editable_table_footer,
     editable_table_heading,
@@ -117,6 +118,7 @@ from utils.table_ui import (
     guarded_tabs,
     native_selected_rows,
     prepare_editor_selection_column,
+    render_inline_conflict_resolution,
     render_select_all_control,
     required_field_errors,
     resolve_editor_selected_rows,
@@ -1472,6 +1474,17 @@ def tie_tool_slide_dialog(
     existing_tool = str(active_rec.get("tool") or "").strip()
     existing_res_type = str(active_rec.get("resource_type") or "Human").strip()
     existing_res_detail = str(active_rec.get("resource_detail") or "").strip()
+    tie_tool_base_key = f"tie_tool_slide_base_{scenario_id}_{pitch_id}_{selected_step_key}"
+    if tie_tool_base_key not in st.session_state:
+        st.session_state[tie_tool_base_key] = {"tool": existing_tool}
+    tie_tool_conflict_key = f"tie_tool_slide_conflict_{scenario_id}_{pitch_id}_{selected_step_key}"
+    tie_tool_conflict_res = render_inline_conflict_resolution(tie_tool_conflict_key)
+    if tie_tool_conflict_res == "discard":
+        st.session_state.pop(tie_tool_base_key, None)
+        st.session_state.pop(f"slide_tie_tool_type_{scenario_id}_{pitch_id}_{selected_step_key}", None)
+        st.session_state.pop(f"slide_tie_tool_custom_{scenario_id}_{pitch_id}_{selected_step_key}", None)
+        st.toast("Discarded conflicting tool edit", icon=":material/undo:")
+        st.rerun()
 
     all_types_df = equipment_types(project_id)
     type_labels = [
@@ -1543,7 +1556,7 @@ def tie_tool_slide_dialog(
         icon=":material/check:",
         width="stretch",
         key=f"btn_submit_slide_tool_{scenario_id}_{pitch_id}_{selected_step_key}",
-    ):
+    ) or tie_tool_conflict_res == "overwrite":
         try:
             target_we_id = str(active_rec.get("work_element_id") or "").strip()
             yam_id = str(active_rec.get("yamazumi_element_id") or "").strip()
@@ -1557,16 +1570,36 @@ def tie_tool_slide_dialog(
                 raise ValueError(
                     "Could not resolve a Process work element for the selected step."
                 )
+            live_we_row = we_by_id.get(target_we_id, {})
+            live_tool_val = str(live_we_row.get("tool") if live_we_row else existing_tool or "").strip()
+            live_res_type = str(live_we_row.get("resource_type") or existing_res_type or "Human").strip()
+            live_res_detail = str(live_we_row.get("resource_detail") if live_we_row else existing_res_detail or "").strip()
+            base_tool_snap = st.session_state.get(tie_tool_base_key, {"tool": existing_tool})
+            _, tool_conflicts = compare_record_field_conflicts(
+                base_tool_snap,
+                {"tool": live_tool_val},
+                {"tool": final_tool},
+                field_labels={"tool": "Tool"},
+                row_label=str(active_rec.get("description") or "Work Element"),
+            )
+            if tool_conflicts and tie_tool_conflict_res != "overwrite":
+                st.session_state[f"_inline_conflict_{tie_tool_conflict_key}"] = {
+                    "conflicts": tool_conflicts,
+                    "editor_name": get_last_write_metadata().get("editor_name") or "another collaborator",
+                }
+                st.rerun()
             editor = st.session_state.get("current_editor", "")
             update_work_element_tool_and_resource(
                 project_id,
                 scenario_id,
                 target_we_id,
                 tool=final_tool,
-                resource_type=existing_res_type or "Human",
-                resource_detail=existing_res_detail,
+                resource_type=live_res_type or "Human",
+                resource_detail=live_res_detail,
                 editor_name=editor,
             )
+            st.session_state.pop(tie_tool_base_key, None)
+            st.session_state.pop(f"_inline_conflict_{tie_tool_conflict_key}", None)
             request_table_editor_reset(f"process_editor_{scenario_id}")
             record_audit_event(
                 project_id,
@@ -1628,9 +1661,16 @@ def edit_visual_media_dialog(
     project_id: str,
     scenario_id: str,
     current_url: str = "",
+    pitch_id: str = "",
 ) -> None:
     st.markdown("#### Edit Visual Aid Details")
     is_link = bool(current_url and current_url.startswith(("http://", "https://")))
+    conflict_key = f"edit_media_conflict_{media_id}"
+    conflict_res = render_inline_conflict_resolution(conflict_key)
+    if conflict_res == "discard":
+        st.session_state.pop(f"_pending_edit_media_kwargs_{media_id}", None)
+        st.rerun()
+
     with st.form(f"form_edit_media_{media_id}"):
         new_url_input = None
         if is_link:
@@ -1652,8 +1692,74 @@ def edit_visual_media_dialog(
             st.caption(f"ℹ️ Also attached to {len(other_pitch_tags)} element(s) on other workstation pitches (preserved).")
 
         col1, col2 = st.columns([1, 1])
-        if col1.form_submit_button("Save changes", icon=":material/save:", type="primary"):
-            final_tags = list(dict.fromkeys(new_tags + other_pitch_tags))
+        submit_media_edit = col1.form_submit_button("Save changes", icon=":material/save:", type="primary")
+        cancel_media_edit = col2.form_submit_button("Cancel")
+
+    if cancel_media_edit:
+        st.session_state.pop(f"_pending_edit_media_kwargs_{media_id}", None)
+        st.session_state.pop(f"_inline_conflict_{conflict_key}", None)
+        st.rerun()
+
+    if submit_media_edit or conflict_res == "overwrite":
+        final_tags = list(dict.fromkeys(new_tags + other_pitch_tags))
+        live_item = None
+        if pitch_id:
+            live_item = next(
+                (m for m in get_pitch_visual_media(project_id, scenario_id, pitch_id) if str(m.get("id")) == str(media_id)),
+                None,
+            )
+        baseline_media = {
+            "caption": str(current_caption or ""),
+            "sequence": int(current_sequence or 10),
+            "tags": ", ".join(sorted(str(t) for t in current_tags)),
+            "url": str(current_url or "").strip(),
+        }
+        user_media = {
+            "caption": str(new_caption or ""),
+            "sequence": int(new_sequence or 10),
+            "tags": ", ".join(sorted(str(t) for t in final_tags)),
+            "url": str(new_url_input or "").strip() if is_link and new_url_input is not None else str(current_url or "").strip(),
+        }
+        if live_item is not None and conflict_res != "overwrite":
+            live_tags = [str(t["work_element_id"]) for t in (live_item.get("tagged_work_elements") or []) if "work_element_id" in t]
+            live_media = {
+                "caption": str(live_item.get("caption") or ""),
+                "sequence": int(live_item.get("sequence") or 10),
+                "tags": ", ".join(sorted(live_tags)),
+                "url": str(live_item.get("file_path") or "").strip() if is_link else str(current_url or "").strip(),
+            }
+            merged_media, media_conflicts = compare_record_field_conflicts(
+                row_label=str(current_caption or "Visual Aid"),
+                baseline=baseline_media,
+                live=live_media,
+                user_values=user_media,
+                field_labels={
+                    "caption": "Caption",
+                    "sequence": "Sequence Order",
+                    "tags": "Tagged Work Elements",
+                    "url": "Web Link URL",
+                },
+            )
+            if media_conflicts:
+                st.session_state[f"_inline_conflict_{conflict_key}"] = media_conflicts
+                st.rerun()
+            effective_tags = (
+                final_tags
+                if user_media["tags"] != baseline_media["tags"]
+                else live_tags
+            )
+            update_kwargs = {
+                "project_id": project_id,
+                "scenario_id": scenario_id,
+                "media_id": media_id,
+                "caption": merged_media["caption"],
+                "sequence": int(merged_media["sequence"]),
+                "tagged_work_element_ids": effective_tags,
+                "current_editor": st.session_state.get("current_editor", ""),
+            }
+            if is_link and new_url_input is not None:
+                update_kwargs["url"] = str(merged_media["url"]).strip()
+        else:
             update_kwargs = {
                 "project_id": project_id,
                 "scenario_id": scenario_id,
@@ -1665,11 +1771,9 @@ def edit_visual_media_dialog(
             }
             if is_link and new_url_input is not None:
                 update_kwargs["url"] = new_url_input.strip()
-            update_pitch_visual_media(**update_kwargs)
-            st.toast("Visual aid updated", icon=":material/check_circle:")
-            st.rerun()
-        if col2.form_submit_button("Cancel"):
-            st.rerun()
+        update_pitch_visual_media(**update_kwargs)
+        st.toast("Visual aid updated", icon=":material/check_circle:")
+        st.rerun()
 
 
 @st.dialog("Copy Visual Aid", width="medium")
@@ -1884,6 +1988,13 @@ def annotate_visual_media_dialog(
         b64 = base64.b64encode(raw_bytes).decode("ascii")
         data_url = f"data:{mime};base64,{b64}"
 
+    conflict_key = f"annotate_media_conflict_{media_id}"
+    pending_payload_key = f"_pending_annotator_payload_{media_id}"
+    conflict_res = render_inline_conflict_resolution(conflict_key)
+    if conflict_res == "discard":
+        st.session_state.pop(pending_payload_key, None)
+        st.rerun()
+
     annotator_res = image_annotator(
         image_data_url=data_url,
         annotations_json=annotations_json or "",
@@ -1892,10 +2003,35 @@ def annotate_visual_media_dialog(
     )
 
     save_payload = getattr(annotator_res, "save", None)
+    if conflict_res == "overwrite" and isinstance(st.session_state.get(pending_payload_key), dict):
+        save_payload = st.session_state.pop(pending_payload_key, None)
     if save_payload:
         try:
             new_annotations = save_payload.get("annotations_json", "")
             new_data_url = save_payload.get("data_url", "")
+            if pitch_id and conflict_res != "overwrite":
+                live_item = next(
+                    (m for m in get_pitch_visual_media(project_id, scenario_id, pitch_id) if str(m.get("id")) == str(media_id)),
+                    None,
+                )
+                if live_item is not None:
+                    live_annotations = str(live_item.get("annotations_json") or "")
+                    base_annotations = str(annotations_json or "")
+                    if live_annotations != base_annotations and live_annotations != str(new_annotations or ""):
+                        st.session_state[pending_payload_key] = {
+                            "annotations_json": new_annotations,
+                            "data_url": new_data_url,
+                        }
+                        st.session_state[f"_inline_conflict_{conflict_key}"] = [
+                            {
+                                "Row": str(caption or "Visual Aid"),
+                                "Field": "Image Markup / Annotations",
+                                "Original Value": "Annotated" if base_annotations else "Unannotated",
+                                "Saved by Collaborator": "Updated markup by collaborator",
+                                "Your Unsaved Edit": "Updated markup in your editor",
+                            }
+                        ]
+                        st.rerun()
             composite_bytes = decode_data_url(new_data_url) if new_data_url else None
             update_pitch_visual_annotations(
                 project_id=project_id,
@@ -1905,6 +2041,7 @@ def annotate_visual_media_dialog(
                 composite_image_bytes=composite_bytes,
                 current_editor=st.session_state.get("current_editor", ""),
             )
+            st.session_state.pop(pending_payload_key, None)
             st.toast("Annotations saved!", icon=":material/check_circle:")
             st.rerun()
         except Exception as exc:
@@ -1912,6 +2049,8 @@ def annotate_visual_media_dialog(
 
     st.caption("Tip: Select existing shapes or inserted photos (`👆 Select`) to move, resize via corner handles, recolor borders, or delete them non-destructively.")
     if st.button("Close without saving", key=f"btn_close_annotator_{media_id}"):
+        st.session_state.pop(pending_payload_key, None)
+        st.session_state.pop(f"_inline_conflict_{conflict_key}", None)
         st.rerun()
 
 
@@ -4272,6 +4411,11 @@ if tab_plan.open:
 
         def current_process_editor_rows() -> pd.DataFrame:
             """Capture cell edits without treating native row selection as deletion."""
+            if isinstance(edited, pd.DataFrame) and not edited.empty and "id" in edited.columns:
+                draft = edited.copy()
+                if "selected" in draft.columns and "selected" in visible_elements.columns:
+                    draft["selected"] = False
+                return draft
             state = st.session_state.get(process_editor_key, {}) or {}
             draft = visible_elements.copy()
             for raw_position, changes in (state.get("edited_rows") or {}).items():
@@ -4626,12 +4770,13 @@ if tab_plan.open:
                     if any(col != "selected" for col in (row_changes or {}).keys())
                 ]
                 affected_ids = []
-                if edited_indices and not visible_elements.empty:
+                ref_df = edited if isinstance(edited, pd.DataFrame) and "id" in edited.columns and not edited.empty else visible_elements
+                if edited_indices and not ref_df.empty:
                     for idx in edited_indices:
                         try:
                             pos = int(idx)
-                            if 0 <= pos < len(visible_elements):
-                                affected_ids.append(str(visible_elements.iloc[pos]["id"]))
+                            if 0 <= pos < len(ref_df):
+                                affected_ids.append(str(ref_df.iloc[pos]["id"]))
                         except (ValueError, TypeError, IndexError):
                             pass
                 impact = work_element_downstream_impact(project_id, scenario_id, affected_ids) if affected_ids else {"quality_count": 0, "pfmea_count": 0}
@@ -4759,7 +4904,10 @@ if tab_plan.open:
             confirm_pairing_bulk_removal()
 
         def close_edit_process_line_dialog() -> None:
-            st.session_state.pop(edit_line_dialog_key, None)
+            prev_tid = str(st.session_state.pop(edit_line_dialog_key, "") or "").strip()
+            if prev_tid:
+                st.session_state.pop(f"edit_process_line_baseline_{scenario_id}_{prev_tid}", None)
+                st.session_state.pop(f"_inline_conflict_edit_process_line_conflict_{scenario_id}_{prev_tid}", None)
             st.session_state.pop(f"process_selected_line_id_{scenario_id}", None)
             if not table_has_unsaved_changes(process_editor_key, native_row_selection=True):
                 request_table_editor_reset(process_editor_key)
@@ -4776,6 +4924,29 @@ if tab_plan.open:
                 close_edit_process_line_dialog()
                 st.rerun()
             line_row = match_rows.iloc[0]
+            baseline_line_key = f"edit_process_line_baseline_{scenario_id}_{target_id}"
+            conflict_line_key = f"edit_process_line_conflict_{scenario_id}_{target_id}"
+            live_line_fields = {
+                "tool": str(line_row.get("tool") or "").strip(),
+                "resource_type": str(line_row.get("resource_type") or "Operator").strip() or "Operator",
+                "resource_detail": str(line_row.get("resource_detail") or "").strip(),
+                "cycle_time_s": round(
+                    0.0 if pd.isna(line_row.get("cycle_time_s")) else float(line_row.get("cycle_time_s") or 0.0),
+                    2,
+                ),
+                "sequence": 0 if pd.isna(line_row.get("sequence")) else int(line_row.get("sequence") or 0),
+                "status": str(line_row.get("status") or "Draft").strip() or "Draft",
+                "model_applicability": ", ".join(
+                    str(m)
+                    for m in (
+                        line_row.get("model_applicability")
+                        if isinstance(line_row.get("model_applicability"), list)
+                        else ["All models"]
+                    )
+                ),
+            }
+            if baseline_line_key not in st.session_state:
+                st.session_state[baseline_line_key] = dict(live_line_fields)
 
             line_op_id = str(line_row.get("op_id") or "").strip()
             line_pitch_name = str(
@@ -5557,6 +5728,11 @@ if tab_plan.open:
                 key=f"edit_line_status_{scenario_id}_{target_id}",
             )
 
+            conflict_res = render_inline_conflict_resolution(conflict_line_key)
+            if conflict_res == "discard":
+                close_edit_process_line_dialog()
+                st.rerun()
+
             dialog_actions = st.container(horizontal=True)
             if dialog_actions.button(
                 "Cancel",
@@ -5564,13 +5740,62 @@ if tab_plan.open:
             ):
                 close_edit_process_line_dialog()
                 st.rerun()
-            if dialog_actions.button(
+            save_line_clicked = dialog_actions.button(
                 "Save PAAG Element",
                 type="primary",
                 icon=":material/save:",
                 key=f"edit_line_save_{scenario_id}_{target_id}",
-            ):
+            )
+            if save_line_clicked or conflict_res == "overwrite":
                 try:
+                    baseline_line = st.session_state.get(baseline_line_key, live_line_fields)
+                    user_line_fields = {
+                        "tool": str(edit_final_tool or "").strip(),
+                        "resource_type": str(edit_resource_type or "Operator").strip() or "Operator",
+                        "resource_detail": str(edit_resource_detail or "").strip(),
+                        "cycle_time_s": round(float(edit_cycle_time), 2),
+                        "sequence": int(edit_sequence),
+                        "status": str(edit_status or "Draft").strip() or "Draft",
+                        "model_applicability": ", ".join(
+                            str(m) for m in (edit_models or ["All models"])
+                        ),
+                    }
+                    merged_line_fields, line_conflicts = compare_record_field_conflicts(
+                        row_label=line_work_element or target_id,
+                        baseline=baseline_line,
+                        live=live_line_fields,
+                        user_values=user_line_fields,
+                        field_labels={
+                            "tool": "Tool",
+                            "resource_type": "Resource Type",
+                            "resource_detail": "Resource Detail",
+                            "cycle_time_s": "Time (s)",
+                            "sequence": "Seq.",
+                            "status": "PAAG Status",
+                            "model_applicability": "Feature / Models",
+                        },
+                    )
+                    if line_conflicts and conflict_res != "overwrite":
+                        st.session_state[f"_inline_conflict_{conflict_line_key}"] = line_conflicts
+                        st.rerun()
+
+                    effective_tool = str(merged_line_fields["tool"])
+                    effective_res_type = str(merged_line_fields["resource_type"])
+                    effective_res_detail = str(merged_line_fields["resource_detail"])
+                    effective_cycle_time = float(merged_line_fields["cycle_time_s"])
+                    effective_sequence = int(merged_line_fields["sequence"])
+                    effective_status = str(merged_line_fields["status"])
+                    effective_models = (
+                        list(edit_models or ["All models"])
+                        if conflict_res == "overwrite"
+                        or user_line_fields["model_applicability"] != baseline_line.get("model_applicability")
+                        else (
+                            list(line_row.get("model_applicability"))
+                            if isinstance(line_row.get("model_applicability"), list)
+                            else ["All models"]
+                        )
+                    )
+
                     final_group_name = ""
                     if req_mode != "__NONE__":
                         if not edit_sec_id:
@@ -5616,21 +5841,21 @@ if tab_plan.open:
                             exclude_group_id=editing_group_id,
                             work_element_id=target_id,
                             target_variants=tuple(
-                                str(m) for m in (edit_models or ["All models"])
+                                str(m) for m in effective_models
                             ),
                         )
 
                     updated_elements = elements.copy()
                     row_mask = updated_elements["id"].astype(str) == target_id
-                    updated_elements.loc[row_mask, "tool"] = edit_final_tool
-                    updated_elements.loc[row_mask, "resource_type"] = edit_resource_type
-                    updated_elements.loc[row_mask, "resource_detail"] = edit_resource_detail
-                    updated_elements.loc[row_mask, "cycle_time_s"] = float(edit_cycle_time)
-                    updated_elements.loc[row_mask, "sequence"] = int(edit_sequence)
-                    updated_elements.loc[row_mask, "status"] = str(edit_status)
+                    updated_elements.loc[row_mask, "tool"] = effective_tool
+                    updated_elements.loc[row_mask, "resource_type"] = effective_res_type
+                    updated_elements.loc[row_mask, "resource_detail"] = effective_res_detail
+                    updated_elements.loc[row_mask, "cycle_time_s"] = effective_cycle_time
+                    updated_elements.loc[row_mask, "sequence"] = effective_sequence
+                    updated_elements.loc[row_mask, "status"] = effective_status
                     for idx in updated_elements.index[row_mask]:
                         updated_elements.at[idx, "model_applicability"] = (
-                            edit_models or ["All models"]
+                            effective_models
                         )
                     updated_elements["model_applicability"] = updated_elements[
                         "model_applicability"
@@ -5647,9 +5872,9 @@ if tab_plan.open:
                         project_id,
                         scenario_id,
                         target_id,
-                        tool=edit_final_tool,
-                        resource_type=edit_resource_type,
-                        resource_detail=edit_resource_detail,
+                        tool=effective_tool,
+                        resource_type=effective_res_type,
+                        resource_detail=effective_res_detail,
                     )
                     if edit_selected_equipment_id and line_pitch_id:
                         try:
@@ -5713,11 +5938,11 @@ if tab_plan.open:
                             "scenario_id": scenario_id,
                             "work_element_id": target_id,
                             "work_element": line_work_element,
-                            "tool": edit_final_tool,
-                            "resource_type": edit_resource_type,
-                            "resource_detail": edit_resource_detail,
-                            "cycle_time_s": float(edit_cycle_time),
-                            "sequence": int(edit_sequence),
+                            "tool": effective_tool,
+                            "resource_type": effective_res_type,
+                            "resource_detail": effective_res_detail,
+                            "cycle_time_s": effective_cycle_time,
+                            "sequence": effective_sequence,
                         },
                     )
                     request_table_editor_reset(process_editor_key)
@@ -6751,6 +6976,7 @@ elif tab_slides.open:
                                             project_id=project_id,
                                             scenario_id=scenario_id,
                                             current_url=media_item.get("file_path", "") if media_item.get("media_type") == "link" or str(media_item.get("file_path", "")).startswith(("http://", "https://")) else "",
+                                            pitch_id=selected_pitch_id,
                                         )
                                     if g_act_bar.button("Copy", icon=":material/content_copy:", key=f"btn_copy_media_{media_item['id']}", help="Duplicate this visual aid on this pitch or copy it to another pitch"):
                                         copy_visual_media_dialog(

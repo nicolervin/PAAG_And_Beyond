@@ -58,13 +58,17 @@ from utils.table_filters import (
     was_table_editor_undo_reset,
 )
 from utils.table_ui import (
+    check_standalone_conflict_resolution,
+    compare_record_field_conflicts,
     dataframe_to_excel,
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
     native_selected_rows,
     prepare_editor_selection_column,
+    render_inline_conflict_resolution,
     render_select_all_control,
+    render_standalone_conflict_dialog,
     required_field_errors,
     resolve_editor_selected_rows,
     count_table_create_and_edit_rows, render_audit_history_table, selectable_dataframe,
@@ -73,6 +77,7 @@ from utils.table_ui import (
     standard_details_column_config,
     direct_entry_editor_rows,
     table_has_unsaved_changes,
+    trigger_standalone_conflict_dialog,
 )
 
 
@@ -1925,36 +1930,68 @@ def annotate_part_primary_image_dialog(part_row: dict, active_project_id: str) -
         f"**Part:** `{part_row.get('part_number', '')}` — Crop, rotate in 90° increments, or draw arrows, callouts (adjust font size with **Text** / **A−** / **A+** or drag the callout corner), shapes, and badges. "
         "Click **💾 Apply & Save Markup** in the toolbar when finished."
     )
+    prim_conflict_key = f"ann_part_prim_conflict_{part_row['id']}"
+    prim_pending_key = f"_pending_ann_part_prim_{part_row['id']}"
+    prim_conflict_res = render_inline_conflict_resolution(prim_conflict_key)
+    if prim_conflict_res == "discard":
+        st.session_state.pop(prim_pending_key, None)
+        st.rerun()
+
     annotator_res = image_annotator(
         image_data_url=data_url,
         annotations_json=str(part_row.get("annotations_json") or ""),
         key=f"annotator_part_prim_{part_row['id']}",
     )
-    if annotator_res is not None:
-        save_payload = getattr(annotator_res, "save", None)
-        cancel_payload = getattr(annotator_res, "cancel", None)
-        if isinstance(save_payload, dict):
-            new_annotations = str(save_payload.get("annotations_json") or "")
-            new_data_url = str(
-                save_payload.get("data_url")
-                or save_payload.get("composite_data_url")
-                or ""
+    save_payload = getattr(annotator_res, "save", None) if annotator_res is not None else None
+    cancel_payload = getattr(annotator_res, "cancel", None) if annotator_res is not None else None
+    if prim_conflict_res == "overwrite" and isinstance(st.session_state.get(prim_pending_key), dict):
+        save_payload = st.session_state.pop(prim_pending_key, None)
+    if isinstance(save_payload, dict):
+        new_annotations = str(save_payload.get("annotations_json") or "")
+        new_data_url = str(
+            save_payload.get("data_url")
+            or save_payload.get("composite_data_url")
+            or ""
+        )
+        if prim_conflict_res != "overwrite":
+            live_parts_df = project_table(active_project_id, "parts")
+            live_match = live_parts_df.loc[live_parts_df["id"].astype(str) == str(part_row["id"])] if not live_parts_df.empty else pd.DataFrame()
+            if not live_match.empty:
+                live_ann = str(live_match.iloc[0].get("annotations_json") or "")
+                base_ann = str(part_row.get("annotations_json") or "")
+                if live_ann != base_ann and live_ann != new_annotations:
+                    st.session_state[prim_pending_key] = {
+                        "annotations_json": new_annotations,
+                        "data_url": new_data_url,
+                    }
+                    st.session_state[f"_inline_conflict_{prim_conflict_key}"] = [
+                        {
+                            "Row": str(part_row.get("part_number") or part_row["id"]),
+                            "Field": "Primary Image Markup",
+                            "Original Value": "Annotated" if base_ann else "Unannotated",
+                            "Saved by Collaborator": "Updated markup by collaborator",
+                            "Your Unsaved Edit": "Updated markup in your editor",
+                        }
+                    ]
+                    st.rerun()
+        composite_bytes = decode_data_url(new_data_url) if new_data_url else None
+        try:
+            update_part_primary_image_annotations(
+                project_id=active_project_id,
+                part_id=str(part_row["id"]),
+                annotations_json=new_annotations,
+                composite_image_bytes=composite_bytes,
+                current_editor=st.session_state.get("current_editor", "Collaborator"),
             )
-            composite_bytes = decode_data_url(new_data_url) if new_data_url else None
-            try:
-                update_part_primary_image_annotations(
-                    project_id=active_project_id,
-                    part_id=str(part_row["id"]),
-                    annotations_json=new_annotations,
-                    composite_image_bytes=composite_bytes,
-                    current_editor=st.session_state.get("current_editor", "Collaborator"),
-                )
-                st.toast("Annotations saved!", icon=":material/check_circle:")
-                st.rerun()
-            except ValueError as err:
-                st.error(str(err))
-        elif cancel_payload:
+            st.session_state.pop(prim_pending_key, None)
+            st.toast("Annotations saved!", icon=":material/check_circle:")
             st.rerun()
+        except ValueError as err:
+            st.error(str(err))
+    elif cancel_payload:
+        st.session_state.pop(prim_pending_key, None)
+        st.session_state.pop(f"_inline_conflict_{prim_conflict_key}", None)
+        st.rerun()
 
 
 @st.dialog("Annotate Additional Part View", width="large")
@@ -1981,36 +2018,68 @@ def annotate_part_supplemental_image_dialog(supplemental: dict, active_project_i
         f"**View:** {view_label} — Crop, rotate in 90° increments, or draw arrows, callouts (adjust font size with **Text** / **A−** / **A+** or drag the callout corner), shapes, and badges. "
         "Click **💾 Apply & Save Markup** in the toolbar when finished."
     )
+    supp_conflict_key = f"ann_part_supp_conflict_{supplemental['id']}"
+    supp_pending_key = f"_pending_ann_part_supp_{supplemental['id']}"
+    supp_conflict_res = render_inline_conflict_resolution(supp_conflict_key)
+    if supp_conflict_res == "discard":
+        st.session_state.pop(supp_pending_key, None)
+        st.rerun()
+
     annotator_res = image_annotator(
         image_data_url=data_url,
         annotations_json=str(supplemental.get("annotations_json") or ""),
         key=f"annotator_part_supp_{supplemental['id']}",
     )
-    if annotator_res is not None:
-        save_payload = getattr(annotator_res, "save", None)
-        cancel_payload = getattr(annotator_res, "cancel", None)
-        if isinstance(save_payload, dict):
-            new_annotations = str(save_payload.get("annotations_json") or "")
-            new_data_url = str(
-                save_payload.get("data_url")
-                or save_payload.get("composite_data_url")
-                or ""
+    save_payload = getattr(annotator_res, "save", None) if annotator_res is not None else None
+    cancel_payload = getattr(annotator_res, "cancel", None) if annotator_res is not None else None
+    if supp_conflict_res == "overwrite" and isinstance(st.session_state.get(supp_pending_key), dict):
+        save_payload = st.session_state.pop(supp_pending_key, None)
+    if isinstance(save_payload, dict):
+        new_annotations = str(save_payload.get("annotations_json") or "")
+        new_data_url = str(
+            save_payload.get("data_url")
+            or save_payload.get("composite_data_url")
+            or ""
+        )
+        if supp_conflict_res != "overwrite" and supplemental.get("part_id"):
+            live_supp_df = part_images(str(supplemental["part_id"]))
+            live_match = live_supp_df.loc[live_supp_df["id"].astype(str) == str(supplemental["id"])] if not live_supp_df.empty else pd.DataFrame()
+            if not live_match.empty:
+                live_ann = str(live_match.iloc[0].get("annotations_json") or "")
+                base_ann = str(supplemental.get("annotations_json") or "")
+                if live_ann != base_ann and live_ann != new_annotations:
+                    st.session_state[supp_pending_key] = {
+                        "annotations_json": new_annotations,
+                        "data_url": new_data_url,
+                    }
+                    st.session_state[f"_inline_conflict_{supp_conflict_key}"] = [
+                        {
+                            "Row": str(view_label),
+                            "Field": "Additional View Markup",
+                            "Original Value": "Annotated" if base_ann else "Unannotated",
+                            "Saved by Collaborator": "Updated markup by collaborator",
+                            "Your Unsaved Edit": "Updated markup in your editor",
+                        }
+                    ]
+                    st.rerun()
+        composite_bytes = decode_data_url(new_data_url) if new_data_url else None
+        try:
+            update_part_supplemental_image_annotations(
+                project_id=active_project_id,
+                image_id=str(supplemental["id"]),
+                annotations_json=new_annotations,
+                composite_image_bytes=composite_bytes,
+                current_editor=st.session_state.get("current_editor", "Collaborator"),
             )
-            composite_bytes = decode_data_url(new_data_url) if new_data_url else None
-            try:
-                update_part_supplemental_image_annotations(
-                    project_id=active_project_id,
-                    image_id=str(supplemental["id"]),
-                    annotations_json=new_annotations,
-                    composite_image_bytes=composite_bytes,
-                    current_editor=st.session_state.get("current_editor", "Collaborator"),
-                )
-                st.toast("Annotations saved!", icon=":material/check_circle:")
-                st.rerun()
-            except ValueError as err:
-                st.error(str(err))
-        elif cancel_payload:
+            st.session_state.pop(supp_pending_key, None)
+            st.toast("Annotations saved!", icon=":material/check_circle:")
             st.rerun()
+        except ValueError as err:
+            st.error(str(err))
+    elif cancel_payload:
+        st.session_state.pop(supp_pending_key, None)
+        st.session_state.pop(f"_inline_conflict_{supp_conflict_key}", None)
+        st.rerun()
 
 
 @st.dialog("Annotate Staged Part Image", width="large")
@@ -2259,6 +2328,22 @@ with image_col.container(border=True):
                 st.rerun()
 
     with tab_url:
+        cad_base_key = f"part_cad_link_base_{part['id']}"
+        cad_conflict_key = f"part_cad_link_conflict_{part['id']}"
+        live_cad_dict = {
+            "url": raw_img if is_url else "",
+            "caption": prim_caption if is_url else "",
+        }
+        if cad_base_key not in st.session_state:
+            st.session_state[cad_base_key] = dict(live_cad_dict)
+
+        cad_conflict_res, cad_conflict_payload = check_standalone_conflict_resolution(cad_conflict_key)
+        if cad_conflict_res == "discard":
+            st.session_state[cad_base_key] = dict(live_cad_dict)
+            st.session_state.pop(f"url_cad_{part['id']}", None)
+            st.session_state.pop(f"prim_url_caption_{part['id']}", None)
+            st.rerun()
+
         cad_url = st.text_input(
             "Attach CAD / PLM / Web Link",
             value=raw_img if is_url else "",
@@ -2272,12 +2357,41 @@ with image_col.container(border=True):
             placeholder="Optional photo notes, revision, or callout summary...",
             key=f"prim_url_caption_{part['id']}",
         )
-        if st.button("Save CAD Link", type="primary", icon=":material/link:", key=f"btn_save_cad_url_{part['id']}"):
-            if not cad_url or not cad_url.strip().startswith(("http://", "https://")):
+        save_cad_clicked = st.button("Save CAD Link", type="primary", icon=":material/link:", key=f"btn_save_cad_url_{part['id']}")
+        if save_cad_clicked or cad_conflict_res is True:
+            if cad_conflict_res is True and isinstance(cad_conflict_payload, dict):
+                final_cad_url = str(cad_conflict_payload.get("url") or "").strip()
+                final_cad_caption = str(cad_conflict_payload.get("caption") or "").strip()
+            else:
+                final_cad_url = str(cad_url or "").strip()
+                final_cad_caption = str(prim_url_caption or "").strip()
+            if not final_cad_url or not final_cad_url.startswith(("http://", "https://")):
                 st.error("Please enter a valid URL starting with http:// or https://")
             else:
-                had_previous = bool(raw_img and raw_img != cad_url.strip())
-                set_part_image_url(part["id"], cad_url.strip(), caption=prim_url_caption)
+                if cad_conflict_res is not True:
+                    base_cad = st.session_state.get(cad_base_key, live_cad_dict)
+                    merged_cad, cad_conflicts = compare_record_field_conflicts(
+                        row_label=str(part["part_number"]),
+                        baseline=base_cad,
+                        live=live_cad_dict,
+                        user_values={"url": final_cad_url, "caption": final_cad_caption},
+                        field_labels={
+                            "url": "CAD / Web Link URL",
+                            "caption": "Caption / Notes",
+                        },
+                    )
+                    if cad_conflicts:
+                        trigger_standalone_conflict_dialog(
+                            cad_conflict_key,
+                            cad_conflicts,
+                            payload={"url": final_cad_url, "caption": final_cad_caption},
+                        )
+                        st.rerun()
+                    final_cad_url = str(merged_cad["url"]).strip()
+                    final_cad_caption = str(merged_cad["caption"]).strip()
+                had_previous = bool(raw_img and raw_img != final_cad_url)
+                set_part_image_url(part["id"], final_cad_url, caption=final_cad_caption)
+                st.session_state[cad_base_key] = {"url": final_cad_url, "caption": final_cad_caption}
                 record_audit_event(
                     project_id,
                     "Parts",
@@ -2287,8 +2401,8 @@ with image_col.container(border=True):
                     {
                         "part_id": str(part["id"]),
                         "part_number": str(part["part_number"]),
-                        "url": cad_url.strip(),
-                        "caption": str(prim_url_caption or "").strip(),
+                        "url": final_cad_url,
+                        "caption": final_cad_caption,
                         "archived_previous_primary": had_previous,
                     },
                 )
@@ -2299,6 +2413,7 @@ with image_col.container(border=True):
                     icon=":material/check_circle:",
                 )
                 st.rerun()
+        render_standalone_conflict_dialog(cad_conflict_key)
 
     @st.dialog("Delete Primary CAD / Web Link?", dismissible=False)
     def _confirm_del_prim_url_dialog() -> None:

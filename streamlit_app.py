@@ -32,10 +32,21 @@ if (
     if "utils.store" in _sys.modules:
         _sys.modules["utils.store"].init_db()
 
-from streamlit.runtime.scriptrunner import StopException
+from streamlit.runtime.scriptrunner import StopException, get_script_run_ctx
+import html as _html
+import os as _os
+import time as _time
+from uuid import uuid4 as _uuid4
 
+from utils.cache_store import (
+    get_active_collaborators,
+    get_last_write_metadata,
+    get_write_epoch,
+    record_collaborator_heartbeat,
+)
+from utils.gcp_storage import is_gcs_sync_enabled
 from utils.time_units import format_seconds
-from utils.gcp_auth import detect_authenticated_user_email
+from utils.gcp_auth import detect_authenticated_user_email, detect_verified_sso_email
 from utils.scope_ui import scenario_view_selector, sync_active_scenario_state
 
 from utils.split_workspace import (
@@ -265,7 +276,9 @@ if (
     "project_id" not in st.session_state
     or str(st.session_state.get("project_id") or "") not in valid_project_ids
 ):
-    last_workspace = get_last_active_workspace()
+    last_workspace = get_last_active_workspace(
+        editor_name=st.session_state.get("current_editor") or None
+    )
     remembered_project_id = str(last_workspace.get("project_id") or "")
     remembered_scenario_id = str(last_workspace.get("scenario_id") or "") or None
     default_project_id = (
@@ -702,6 +715,7 @@ with st.sidebar:
             set_last_active_workspace(
                 st.session_state.project_id,
                 resolved_scenario_id,
+                editor_name=st.session_state.get("current_editor") or None,
             )
             st.session_state["_last_persisted_workspace"] = workspace_pair
         if active_scenario:
@@ -740,11 +754,22 @@ with st.sidebar:
         st.divider()
         editor_default_key = f"editor_defaulted_{st.session_state.project_id}"
         editor_value_key = f"editor_value_{st.session_state.project_id}"
-        if not st.session_state.get(editor_default_key):
+        verified_sso_email = detect_verified_sso_email()
+        multi_user_cloud_mode = bool(
+            verified_sso_email
+            or is_gcs_sync_enabled()
+            or str(_os.environ.get("PAAG_MULTI_USER_MODE") or "").strip().lower() in {"1", "true", "yes"}
+        )
+        if verified_sso_email:
+            st.session_state[editor_value_key] = verified_sso_email
+            st.session_state.current_editor = verified_sso_email
+            st.session_state[editor_default_key] = True
+        elif not st.session_state.get(editor_default_key):
+            owner_fallback = "" if multi_user_cloud_mode else str((active_project or {}).get("owner") or "")
             default_editor = str(
                 st.session_state.get("current_editor")
                 or detect_authenticated_user_email()
-                or (active_project or {}).get("owner")
+                or owner_fallback
                 or ""
             )
             st.session_state[editor_value_key] = default_editor
@@ -758,10 +783,155 @@ with st.sidebar:
             "Current editor",
             key="current_editor",
             placeholder="Enter your name",
-            help="This name is recorded in table history for this browser session.",
+            disabled=bool(verified_sso_email),
+            help=(
+                "Verified corporate login identity (locked for audit integrity)."
+                if verified_sso_email
+                else "This name is recorded in table history for this browser session."
+            ),
             on_change=_on_current_editor_change,
             args=(editor_value_key,),
         )
+        collab_session_id = str(st.session_state.setdefault("_collab_session_id", str(_uuid4())))
+        st.session_state.setdefault("_rendered_write_epoch", get_write_epoch())
+        record_collaborator_heartbeat(
+            collab_session_id,
+            editor_name=str(st.session_state.get("current_editor") or ""),
+            project_id=str(st.session_state.get("project_id") or ""),
+            scenario_id=str(st.session_state.get("scenario_id") or ""),
+            page_title=str(getattr(navigation, "title", "") or "Overview"),
+        )
+        _ctx = get_script_run_ctx()
+        _is_headless_test = bool(_ctx and _ctx.session_id == "test session id")
+        if not _is_headless_test:
+            _full_run_seq = int(st.session_state.get("_collab_full_run_seq", 0) or 0) + 1
+            st.session_state["_collab_full_run_seq"] = _full_run_seq
+
+            @st.fragment(run_every=4)
+            def _live_collaboration_monitor() -> None:
+                cur_full_seq = int(st.session_state.get("_collab_full_run_seq", 0) or 0)
+                seen_full_seq = int(st.session_state.get("_collab_seen_full_run_seq", 0) or 0)
+                is_periodic_fragment_tick = seen_full_seq == cur_full_seq
+                st.session_state["_collab_seen_full_run_seq"] = cur_full_seq
+
+                sid = str(st.session_state.get("_collab_session_id") or "")
+                pid = str(st.session_state.get("project_id") or "")
+                scid = str(st.session_state.get("scenario_id") or "")
+                ed_name = str(st.session_state.get("current_editor") or "")
+                pg_title = str(getattr(navigation, "title", "") or "Overview")
+                record_collaborator_heartbeat(
+                    sid,
+                    editor_name=ed_name,
+                    project_id=pid,
+                    scenario_id=scid,
+                    page_title=pg_title,
+                )
+                peers = get_active_collaborators(
+                    project_id=pid,
+                    exclude_session_id=sid,
+                )
+                if peers:
+                    peer_labels: list[str] = []
+                    for p in peers[:5]:
+                        p_ed = str(p.get("editor_name") or "Collaborator")
+                        p_pg = str(p.get("page_title") or "Overview")
+                        peer_labels.append(f"{p_ed} ({p_pg})")
+                    extra = f" +{len(peers) - 5} more" if len(peers) > 5 else ""
+                    st.caption(f"🟢 **Live ({len(peers)}):** {', '.join(peer_labels)}{extra}")
+
+                notifications_paused = st.toggle(
+                    "Pause live notifications",
+                    key="mute_live_collab_notifications",
+                    help=(
+                        "Mute bottom-left live notifications when other collaborators save changes. "
+                        "All changes and editor attribution continue to be tracked in each page's History table."
+                    ),
+                )
+
+                rendered_epoch = int(st.session_state.get("_rendered_write_epoch", 0) or 0)
+                live_epoch = get_write_epoch()
+                if live_epoch > rendered_epoch:
+                    meta = get_last_write_metadata()
+                    meta_pid = str(meta.get("project_id") or "")
+                    meta_sid = str(meta.get("session_id") or "")
+                    if meta_sid and meta_sid == sid:
+                        st.session_state["_rendered_write_epoch"] = live_epoch
+                    elif not pid or not meta_pid or pid == meta_pid:
+                        who = str(meta.get("editor_name") or "a collaborator").strip()
+                        tbl = str(meta.get("table_name") or "project data").strip()
+                        act = str(meta.get("action") or "Updated").strip()
+                        st.session_state["_collab_last_notice"] = {
+                            "epoch": live_epoch,
+                            "who": who,
+                            "table": tbl,
+                            "action": act,
+                            "shown_at": _time.time(),
+                        }
+                        if not has_active_unsaved_changes():
+                            st.session_state["_rendered_write_epoch"] = live_epoch
+                            if is_periodic_fragment_tick:
+                                st.rerun()
+                        else:
+                            st.warning(
+                                f"**{who}** just updated **{tbl}**. Save or discard your edits, or click below to reload.",
+                                icon=":material/sync_problem:",
+                            )
+                            if st.button(
+                                "Reload latest data",
+                                icon=":material/refresh:",
+                                key="collab_reload_latest_btn",
+                                width="stretch",
+                            ):
+                                st.session_state["_rendered_write_epoch"] = live_epoch
+                                st.rerun()
+
+                notice = st.session_state.get("_collab_last_notice")
+                if isinstance(notice, dict):
+                    elapsed = _time.time() - float(notice.get("shown_at") or 0.0)
+                    if elapsed >= 10.0:
+                        st.session_state.pop("_collab_last_notice", None)
+                    elif not notifications_paused:
+                        remaining = max(0.5, 10.0 - elapsed)
+                        n_epoch = int(notice.get("epoch") or 0)
+                        n_who = _html.escape(str(notice.get("who") or "Collaborator"))
+                        n_tbl = _html.escape(str(notice.get("table") or "project data"))
+                        n_act = _html.escape(str(notice.get("action") or "Updated"))
+                        st.html(
+                            f"""
+                            <style>
+                            @keyframes paagCollabFade_{n_epoch} {{
+                                0% {{ opacity: 1; transform: translateY(0); visibility: visible; }}
+                                92% {{ opacity: 1; transform: translateY(0); visibility: visible; }}
+                                100% {{ opacity: 0; transform: translateY(6px); visibility: hidden; pointer-events: none; }}
+                            }}
+                            #paag-collab-notice-{n_epoch} {{
+                                position: fixed;
+                                bottom: 16px;
+                                left: 16px;
+                                z-index: 999999;
+                                background: #17212B;
+                                color: #F8FAFC;
+                                border-left: 4px solid #38BDF8;
+                                border-radius: 8px;
+                                padding: 10px 14px;
+                                box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+                                font-size: 0.82rem;
+                                line-height: 1.35;
+                                max-width: 340px;
+                                pointer-events: none;
+                                animation: paagCollabFade_{n_epoch} {remaining:.2f}s ease-out forwards;
+                            }}
+                            </style>
+                            <div id="paag-collab-notice-{n_epoch}">
+                                <div style="font-weight: 600; color: #38BDF8; margin-bottom: 2px;">
+                                    Live update · {n_who}
+                                </div>
+                                <div>{n_tbl} — {n_act}</div>
+                            </div>
+                            """
+                        )
+
+            _live_collaboration_monitor()
     else:
         set_last_active_workspace(None, None)
         if active_page_key == "recycle_bin" and "overview" in page_by_url_path:

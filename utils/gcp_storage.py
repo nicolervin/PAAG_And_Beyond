@@ -36,6 +36,37 @@ _SHUTDOWN_HOOKS_REGISTERED = False
 _GCS_CLIENT_CACHE: dict[str, Any] = {}
 
 _UPLOAD_PATH_MARKER_RE = re.compile(r"(?:^|[\\/])uploads[\\/]([^\\/]+)$", re.IGNORECASE)
+_SYNC_UPLOAD_HYDRATION_MAX_FILES = 25
+_SYNC_UPLOAD_HYDRATION_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+_IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
+_BLOCKED_EXTENSIONS: frozenset[str] = frozenset(
+    {".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi", ".scr", ".com", ".sh", ".elf"}
+)
+
+
+def validate_upload_bytes_safety(filename: str, header_bytes: bytes) -> tuple[bool, str]:
+    """Verify that an upload file is not a disguised executable or active script payload."""
+    clean_name = str(filename or "").strip()
+    if not clean_name or "/" in clean_name or "\\" in clean_name or ".." in clean_name:
+        return False, "Invalid upload filename."
+    ext = Path(clean_name).suffix.lower()
+    if ext in _BLOCKED_EXTENSIONS:
+        return False, f"Executable file extension '{ext}' is not allowed."
+    head = bytes(header_bytes[:512]) if header_bytes else b""
+    if not head:
+        return False, "Empty upload payload."
+    if head.startswith(b"MZ"):
+        return False, "Disguised Windows executable (PE/MZ header) rejected."
+    if head.startswith(b"\x7fELF"):
+        return False, "Disguised Linux executable (ELF header) rejected."
+    if head.startswith(b"#!"):
+        return False, "Executable shell script header (#!) rejected."
+    if ext in _IMAGE_EXTENSIONS:
+        lowered = head.lower()
+        if b"<script" in lowered or b"<?php" in lowered or b"<html" in lowered:
+            return False, "Script/HTML payload disguised as an image file rejected."
+    return True, ""
 
 
 def gcs_bucket_name() -> str:
@@ -124,8 +155,42 @@ def create_consistent_sqlite_snapshot(source_db_path: Path, target_snapshot_path
         return False
 
 
-def bootstrap_from_gcs_if_needed(db_path: Path, upload_dir: Path) -> bool:
-    """Hydrate `paag.db` and `uploads/` from GCS once per process startup when configured."""
+def _hydrate_upload_blobs(blobs_to_fetch: list[tuple[Any, str, Path]], upload_dir: Path) -> bool:
+    """Download a list of `(blob, rel_name, local_file)` items into `upload_dir` safely."""
+    restored_any = False
+    for blob, rel_name, local_file in blobs_to_fetch:
+        if local_file.exists() and local_file.is_file():
+            continue
+        fd, tmp_upload = tempfile.mkstemp(prefix=".upload_restore_", dir=str(upload_dir))
+        os.close(fd)
+        tmp_upload_path = Path(tmp_upload)
+        try:
+            blob.download_to_filename(str(tmp_upload_path))
+            shutil.move(str(tmp_upload_path), str(local_file))
+            with _SYNC_LOCK:
+                _UPLOADED_FILE_SIGNATURES[rel_name] = _file_sig(local_file)
+            restored_any = True
+        except Exception as exc:
+            logger.debug("Background/startup upload restore failed for %s: %s", rel_name, exc)
+        finally:
+            tmp_upload_path.unlink(missing_ok=True)
+    return restored_any
+
+
+def bootstrap_from_gcs_if_needed(
+    db_path: Path,
+    upload_dir: Path,
+    *,
+    async_uploads: bool | None = None,
+) -> bool:
+    """Hydrate `paag.db` and `uploads/` from GCS once per process startup when configured.
+
+    `paag.db` is always restored synchronously first so the database is immediately ready.
+    Small upload sets (<= 25 files and <= 10 MB) are restored synchronously; larger upload
+    sets (or when `async_uploads=True` / `PAAG_GCS_ASYNC_UPLOAD_RESTORE=1`) are hydrated in
+    a background daemon thread while `ensure_upload_file_local()` serves any requested file
+    immediately on-demand.
+    """
     bucket_name = gcs_bucket_name()
     if not bucket_name:
         return False
@@ -170,9 +235,11 @@ def bootstrap_from_gcs_if_needed(db_path: Path, upload_dir: Path) -> bool:
     except Exception as exc:
         logger.warning("Failed to restore paag.db from gs://%s/%s: %s", bucket_name, db_blob_key, exc)
 
-    # 2. Hydrate uploaded files from GCS
+    # 2. Hydrate uploaded files from GCS (synchronous for small sets, background thread for large sets)
     uploads_prefix = _blob_name("uploads/")
     try:
+        missing_blobs: list[tuple[Any, str, Path]] = []
+        total_missing_bytes = 0
         for blob in bucket.list_blobs(prefix=uploads_prefix):
             rel_name = str(blob.name)[len(uploads_prefix) :].strip("/")
             if not rel_name or "/" in rel_name or "\\" in rel_name:
@@ -187,17 +254,36 @@ def bootstrap_from_gcs_if_needed(db_path: Path, upload_dir: Path) -> bool:
                         continue
                 except OSError:
                     pass
-            fd, tmp_upload = tempfile.mkstemp(prefix=".upload_restore_", dir=str(upload_dir))
-            os.close(fd)
-            tmp_upload_path = Path(tmp_upload)
-            try:
-                blob.download_to_filename(str(tmp_upload_path))
-                shutil.move(str(tmp_upload_path), str(local_file))
-                with _SYNC_LOCK:
-                    _UPLOADED_FILE_SIGNATURES[rel_name] = _file_sig(local_file)
+            missing_blobs.append((blob, rel_name, local_file))
+            total_missing_bytes += max(0, remote_size)
+
+        if missing_blobs:
+            env_async = str(os.environ.get("PAAG_GCS_ASYNC_UPLOAD_RESTORE") or "").strip().lower()
+            if async_uploads is None:
+                if env_async in {"1", "true", "yes"}:
+                    run_async = True
+                elif env_async in {"0", "false", "no"}:
+                    run_async = False
+                else:
+                    run_async = (
+                        len(missing_blobs) > _SYNC_UPLOAD_HYDRATION_MAX_FILES
+                        or total_missing_bytes > _SYNC_UPLOAD_HYDRATION_MAX_BYTES
+                    )
+            else:
+                run_async = bool(async_uploads)
+
+            if run_async:
+                worker = threading.Thread(
+                    target=_hydrate_upload_blobs,
+                    args=(missing_blobs, upload_dir),
+                    name="paag-gcs-upload-hydrator",
+                    daemon=True,
+                )
+                worker.start()
                 restored_any = True
-            finally:
-                tmp_upload_path.unlink(missing_ok=True)
+            else:
+                if _hydrate_upload_blobs(missing_blobs, upload_dir):
+                    restored_any = True
     except Exception as exc:
         logger.warning("Failed to restore uploads from gs://%s/%s: %s", bucket_name, uploads_prefix, exc)
 
@@ -285,6 +371,12 @@ def sync_state_to_gcs_now(db_path: Path, upload_dir: Path, *, force_db: bool = F
                 if _UPLOADED_FILE_SIGNATURES.get(fname) == sig:
                     continue
                 try:
+                    with fpath.open("rb") as fh:
+                        header_sample = fh.read(512)
+                    is_safe, reason = validate_upload_bytes_safety(fname, header_sample)
+                    if not is_safe:
+                        logger.warning("Skipped syncing unsafe upload %s to GCS: %s", fname, reason)
+                        continue
                     blob = bucket.blob(_blob_name(f"uploads/{fname}"))
                     blob.upload_from_filename(str(fpath))
                     _UPLOADED_FILE_SIGNATURES[fname] = sig

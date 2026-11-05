@@ -58,11 +58,15 @@ from utils.table_filters import (
     undo_last_table_edit,
 )
 from utils.table_ui import (
-    format_clean_number, render_audit_history_table,
+    check_standalone_conflict_resolution,
+    format_clean_number,
     guarded_tabs,
     has_active_unsaved_changes,
     register_unsaved_source,
+    render_audit_history_table,
+    render_standalone_conflict_dialog,
     request_unsaved_state_change,
+    trigger_standalone_conflict_dialog,
 )
 
 page_title_with_scope("BOM", scope="project")
@@ -1316,6 +1320,73 @@ if tab_view.open:
     _get_live_editor_items = get_live_bom_editor_items
 
 
+    def _norm_bom_row(it: dict[str, Any]) -> tuple[int, str, str, float]:
+        lvl = int(it.get("level", 1) or 1)
+        pn = clean_bom_cell_text(it.get("part_number")).upper()
+        desc = " ".join(clean_bom_cell_text(it.get("description")).split())
+        qty = round(float(it.get("quantity", 1.0) or 1.0), 5)
+        return (lvl, pn, desc, qty)
+
+    def _fmt_bom_tuple(t: tuple[int, str, str, float] | None) -> str:
+        if t is None:
+            return "(Not in BOM)"
+        lvl, pn, desc, qty = t
+        return f"L{lvl} · {pn} ({desc or 'No desc'}) × {qty:g}"
+
+    def _compare_bom_draft_conflicts(
+        baseline_rows: list[dict[str, Any]],
+        live_rows: list[dict[str, Any]],
+        user_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        base_seq = [_norm_bom_row(r) for r in baseline_rows if clean_bom_cell_text(r.get("part_number"))]
+        live_seq = [_norm_bom_row(r) for r in live_rows if clean_bom_cell_text(r.get("part_number"))]
+        user_seq = [_norm_bom_row(r) for r in user_rows if clean_bom_cell_text(r.get("part_number"))]
+        if live_seq == base_seq or live_seq == user_seq:
+            return []
+
+        def _index_by_occ(seq: list[tuple[int, str, str, float]]) -> dict[tuple[str, int], tuple[int, str, str, float]]:
+            counts: dict[str, int] = {}
+            out: dict[tuple[str, int], tuple[int, str, str, float]] = {}
+            for item in seq:
+                pn = item[1]
+                occ = counts.get(pn, 0) + 1
+                counts[pn] = occ
+                out[(pn, occ)] = item
+            return out
+
+        base_map = _index_by_occ(base_seq)
+        live_map = _index_by_occ(live_seq)
+        user_map = _index_by_occ(user_seq)
+        all_keys = list(dict.fromkeys([*base_map.keys(), *live_map.keys(), *user_map.keys()]))
+        conflicts: list[dict[str, Any]] = []
+        for k in all_keys:
+            b_val = base_map.get(k)
+            l_val = live_map.get(k)
+            u_val = user_map.get(k)
+            if l_val != b_val and u_val != l_val:
+                pn_label = k[0] if k[1] == 1 else f"{k[0]} (#{k[1]})"
+                conflicts.append(
+                    {
+                        "Row": pn_label,
+                        "Field": "BOM Entry (Level · Part · Qty)",
+                        "Original Value": _fmt_bom_tuple(b_val),
+                        "Saved by Collaborator": _fmt_bom_tuple(l_val),
+                        "Your Unsaved Edit": _fmt_bom_tuple(u_val),
+                    }
+                )
+        if not conflicts:
+            conflicts.append(
+                {
+                    "Row": "BOM Sequence",
+                    "Field": "Hierarchy Order",
+                    "Original Value": f"{len(base_seq)} row(s)",
+                    "Saved by Collaborator": f"{len(live_seq)} row(s) (reordered)",
+                    "Your Unsaved Edit": f"{len(user_seq)} row(s)",
+                }
+            )
+        return conflicts
+
+
     def _commit_bom_save(
         proj_id: str,
         curr_model_id: str,
@@ -1343,6 +1414,7 @@ if tab_view.open:
                 if "_uid" not in it:
                     it["_uid"] = str(uuid4())[:8]
             st.session_state[d_key] = final_items
+            st.session_state[f"_bom_clean_baseline_{proj_id}_{curr_model_id}"] = [dict(it) for it in final_items]
             st.session_state.pop(s_model_key, None)
             st.session_state.pop(f"_bom_predicted_{proj_id}_{curr_model_id}", None)
             st.session_state.pop(f"_draft_modified_{curr_model_id}", None)
@@ -2196,6 +2268,8 @@ elif tab_author.open:
             )
 
             draft_key = f"_bom_draft_{project_id}_{selected_model_id}"
+            bom_baseline_key = f"_bom_clean_baseline_{project_id}_{selected_model_id}"
+            bom_conflict_key = f"bom_save_conflict_{selected_model_id}"
             source_model_key = f"_bom_source_model_{project_id}_{selected_model_id}"
             bom_editor_logical_key = f"bom_grid_editor_{selected_model_id}"
 
@@ -2206,14 +2280,20 @@ elif tab_author.open:
                         if "_uid" not in it:
                             it["_uid"] = str(uuid4())[:8]
                     st.session_state[draft_key] = saved_bom
+                    st.session_state[bom_baseline_key] = [dict(it) for it in saved_bom]
                 else:
                     st.session_state[draft_key] = [
                         {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
                     ]
+                    st.session_state[bom_baseline_key] = []
             else:
+                if bom_baseline_key not in st.session_state:
+                    st.session_state[bom_baseline_key] = [dict(it) for it in get_manual_model_bom(project_id, selected_model_id)]
                 for it in st.session_state[draft_key]:
                     if "_uid" not in it:
                         it["_uid"] = str(uuid4())[:8]
+
+            bom_conflict_res, bom_conflict_payload = check_standalone_conflict_resolution(bom_conflict_key)
 
             # Check if a pending group conflict or save prompt flow is awaiting user action
             if f"_pending_group_conflict_{selected_model_id}" in st.session_state:
@@ -2232,6 +2312,8 @@ elif tab_author.open:
                     bom_editor_logical_key,
                     source_model_key,
                 )
+            else:
+                render_standalone_conflict_dialog(bom_conflict_key)
 
 
             # ── Banner if draft was copied from a model or predicted from features ──
@@ -2357,17 +2439,19 @@ elif tab_author.open:
                     help="Discard all unsaved edits and reload from the last saved BOM",
                     disabled=not is_unsaved,
                 )
-                if undo_bom_clicked or trigger_bom_discard:
+                if undo_bom_clicked or trigger_bom_discard or bom_conflict_res == "discard":
                     saved_bom = get_manual_model_bom(project_id, selected_model_id)
                     if saved_bom:
                         for it in saved_bom:
                             if "_uid" not in it:
                                 it["_uid"] = str(uuid4())[:8]
                         st.session_state[draft_key] = saved_bom
+                        st.session_state[bom_baseline_key] = [dict(it) for it in saved_bom]
                     else:
                         st.session_state[draft_key] = [
                             {"level": 1, "part_number": "", "description": "", "quantity": 1.0, "_uid": str(uuid4())[:8]}
                         ]
+                        st.session_state[bom_baseline_key] = []
                     st.session_state.pop(draft_mod_key, None)
                     st.session_state.pop(f"_bom_predicted_{project_id}_{selected_model_id}", None)
                     st.session_state.pop(f"row_tools_idx_{selected_model_id}", None)
@@ -2532,37 +2616,42 @@ elif tab_author.open:
                     st.rerun()
 
                 # ── Save action ──
-                if save_clicked:
-                    rows_to_save = []
-                    validation_errors = []
-                    for pos_idx, (_, r) in enumerate(edited_df.iterrows(), start=1):
-                        pn = clean_bom_cell_text(r.get("Part #"))
-                        desc = " ".join(clean_bom_cell_text(r.get("Description")).split())
-                        qty_raw = r.get("Qty")
-                        lvl_raw = r.get("Level")
-                        # Skip completely blank rows silently
-                        if not pn and not desc:
-                            continue
-                        if not pn:
-                            validation_errors.append(f"Row {pos_idx}: Part # is required.")
-                            continue
-                        try:
-                            lvl = int(float(lvl_raw)) if lvl_raw is not None and not pd.isna(lvl_raw) else 1
-                            lvl = max(1, min(11, lvl))
-                        except (TypeError, ValueError):
-                            lvl = 1
-                        try:
-                            qty = float(qty_raw) if qty_raw is not None and not pd.isna(qty_raw) else 1.0
-                            qty = max(0.00001, round(qty, 5))
-                        except (TypeError, ValueError):
-                            qty = 1.0
-                        rows_to_save.append({
-                            "level": lvl,
-                            "part_number": pn,
-                            "description": desc,
-                            "quantity": qty,
-                            "_uid": str(uuid4())[:8],
-                        })
+                if save_clicked or bom_conflict_res is True:
+                    if bom_conflict_res is True and isinstance(bom_conflict_payload, dict):
+                        rows_to_save = list(bom_conflict_payload.get("rows_to_save") or [])
+                        auto_add_grid = bool(bom_conflict_payload.get("auto_add_grid", auto_add_grid))
+                        validation_errors = []
+                    else:
+                        rows_to_save = []
+                        validation_errors = []
+                        for pos_idx, (_, r) in enumerate(edited_df.iterrows(), start=1):
+                            pn = clean_bom_cell_text(r.get("Part #"))
+                            desc = " ".join(clean_bom_cell_text(r.get("Description")).split())
+                            qty_raw = r.get("Qty")
+                            lvl_raw = r.get("Level")
+                            # Skip completely blank rows silently
+                            if not pn and not desc:
+                                continue
+                            if not pn:
+                                validation_errors.append(f"Row {pos_idx}: Part # is required.")
+                                continue
+                            try:
+                                lvl = int(float(lvl_raw)) if lvl_raw is not None and not pd.isna(lvl_raw) else 1
+                                lvl = max(1, min(11, lvl))
+                            except (TypeError, ValueError):
+                                lvl = 1
+                            try:
+                                qty = float(qty_raw) if qty_raw is not None and not pd.isna(qty_raw) else 1.0
+                                qty = max(0.00001, round(qty, 5))
+                            except (TypeError, ValueError):
+                                qty = 1.0
+                            rows_to_save.append({
+                                "level": lvl,
+                                "part_number": pn,
+                                "description": desc,
+                                "quantity": qty,
+                                "_uid": str(uuid4())[:8],
+                            })
 
                     if validation_errors:
                         for err in validation_errors:
@@ -2570,6 +2659,25 @@ elif tab_author.open:
                     elif not rows_to_save:
                         st.warning("No valid BOM rows to save. Fill in at least one Part # before saving.")
                     else:
+                        if bom_conflict_res is not True:
+                            live_bom_now = get_manual_model_bom(project_id, selected_model_id)
+                            base_bom_now = st.session_state.get(bom_baseline_key, [])
+                            bom_save_conflicts = _compare_bom_draft_conflicts(
+                                base_bom_now,
+                                live_bom_now,
+                                rows_to_save,
+                            )
+                            if bom_save_conflicts:
+                                trigger_standalone_conflict_dialog(
+                                    bom_conflict_key,
+                                    bom_save_conflicts,
+                                    payload={
+                                        "rows_to_save": rows_to_save,
+                                        "auto_add_grid": auto_add_grid,
+                                    },
+                                )
+                                st.rerun()
+
                         conflicts = check_group_number_conflicts(project_id, selected_model_id, rows_to_save)
                         if conflicts:
                             st.session_state[f"_pending_group_conflict_{selected_model_id}"] = {

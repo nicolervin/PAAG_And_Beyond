@@ -80,6 +80,14 @@ This standard is **locked** and replaces all screen-specific save button labels 
 
 Retrofitting existing screens to this standard is a separate future task. Do not modify screen code as part of documenting this standard.
 
+### Concurrent Save Conflict Protection
+
+Every save path in the application must protect collaborators from silently overwriting another user's concurrent changes and must auto-merge untouched fields from the live database:
+
+1. **Standard Editable Tables (`st.data_editor`):** The global `st.data_editor` wrapper in `utils/table_filters.py` and `editable_table_footer()` in `utils/table_ui.py` automatically snapshot clean baselines (`_table_clean_base_df_`), freeze mounted row order while edits are pending, auto-merge untouched columns from the live database on save, and open the non-dismissible **Save Conflict Detected** modal (**Keep Looking / Review**, **Discard My Changes**, **Overwrite Anyway**) whenever the same cell was modified by another collaborator. Every editable table must include its stable `"id"` column and resolve edited rows from the `st.data_editor` output rather than indexing into a re-queried DataFrame by position.
+2. **Modal Edit Dialogs (`@st.dialog`):** Every modal dialog that edits an existing record (`update_*`) must capture a baseline snapshot when opened, preserve in-progress widget edits across reruns, call `compare_record_field_conflicts()` on submit to auto-merge untouched fields from the live database, and render `render_inline_conflict_resolution()` inside the dialog if another collaborator modified the same field.
+3. **Interactive Canvases, Drag-and-Drop Boards, and Standalone Forms:** Custom components and non-table forms must capture baseline state when a draft begins, compare moved or edited items by stable ID against live database state before persisting, auto-merge non-overlapping records, and call `trigger_standalone_conflict_dialog()`, `check_standalone_conflict_resolution()`, and `render_standalone_conflict_dialog()` when a concurrent edit conflicts.
+
 ## Universal Row Creation Standard
 
 Editable tables that permit new records must allow contributors to type or paste one or many spreadsheet rows directly into Streamlit's native blank entry row. Do not expose a separate **Add row** button. Use `direct_entry_editor_rows(..., editor_key=...)` immediately before `st.data_editor(..., num_rows="dynamic")`.

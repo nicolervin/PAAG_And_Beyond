@@ -7,10 +7,14 @@ from utils.time_units import (
 from utils.scope_ui import page_title_with_scope, section_heading_with_scope
 from utils.table_filters import apply_pending_table_editor_reset, filter_table, merge_filtered_edits, request_table_editor_reset
 from utils.table_ui import (
+    check_standalone_conflict_resolution,
+    compare_record_field_conflicts,
     dataframe_to_excel, drop_untouched_new_rows, editable_table_footer,
     editable_table_heading,
-    native_selected_rows, render_audit_history_table, required_field_errors, selectable_dataframe,
+    native_selected_rows, render_audit_history_table, render_standalone_conflict_dialog,
+    required_field_errors, selectable_dataframe,
     direct_entry_editor_rows, standard_details_column_config,
+    trigger_standalone_conflict_dialog,
 )
 from utils.store import (
     audit_history, create_project, delete_project, format_eastern_timestamp,
@@ -518,12 +522,43 @@ with st.container(border=True):
             "Planning notes", value=project["notes"],
             placeholder="Assumptions, scope, milestones, or known changes…",
         )
-        if st.form_submit_button("Save project", type="primary", icon=":material/save:"):
+        proj_base_key = f"project_def_baseline_{project_id}"
+        proj_conflict_key = f"project_def_conflict_{project_id}"
+        live_proj_fields = {
+            "name": str(project.get("name") or "").strip(),
+            "program": str(project.get("program") or "").strip(),
+            "product_line": str(project.get("product_line") or "").strip(),
+            "building_location": str(project.get("building_location") or "").strip(),
+            "revision": str(project.get("revision") or "").strip(),
+            "takt_time_s": round(float(project.get("takt_time_s") or 60.0), 4),
+            "takt_time_unit": str(project.get("takt_time_unit") or "seconds"),
+            "baseline_parts": float(raw_base_parts) if has_base_parts else None,
+            "baseline_hpu": round(float(raw_base_hpu), 4) if has_base_hpu else None,
+            "baseline_cycle_time_s": round(float(raw_base_cycle), 4) if has_base_cycle else None,
+            "notes": str(project.get("notes") or ""),
+        }
+        if proj_base_key not in st.session_state:
+            st.session_state[proj_base_key] = dict(live_proj_fields)
+
+        save_project_submitted = st.form_submit_button("Save project", type="primary", icon=":material/save:")
+
+    proj_conflict_res, proj_conflict_payload = check_standalone_conflict_resolution(proj_conflict_key)
+    if proj_conflict_res == "discard":
+        st.session_state[proj_base_key] = dict(live_proj_fields)
+        st.rerun()
+
+    if save_project_submitted or proj_conflict_res is True:
+        if proj_conflict_res is True and isinstance(proj_conflict_payload, dict) and isinstance(proj_conflict_payload.get("project_values"), dict):
+            project_values = dict(proj_conflict_payload["project_values"])
+            valid_proj = True
+        else:
+            valid_proj = False
             if not name.strip():
                 st.error("Project name is required.")
             elif not building_location.strip():
                 st.error("Building location is required.")
             else:
+                valid_proj = True
                 project_takt_seconds = (
                     float(project["takt_time_s"])
                     if project_takt_unit != str(project.get("takt_time_unit") or "seconds")
@@ -543,50 +578,108 @@ with st.container(border=True):
                     baseline_cycle_seconds = display_to_seconds(
                         float(baseline_cycle_input), project_takt_unit
                     )
-                project_values = {
-                    "name": name.strip(), "program": program.strip(),
+                user_proj_fields = {
+                    "name": name.strip(),
+                    "program": program.strip(),
                     "product_line": product_line.strip(),
                     "building_location": building_location.strip(),
-                    "owner": project.get("owner", ""), "revision": revision.strip(),
-                    "status": project.get("status", "Draft"),
-                    "takt_time_s": project_takt_seconds,
-                    "takt_time_unit": project_takt_unit,
+                    "revision": revision.strip(),
+                    "takt_time_s": round(float(project_takt_seconds), 4),
+                    "takt_time_unit": str(project_takt_unit),
                     "baseline_parts": (
                         float(baseline_parts_input)
                         if baseline_parts_input is not None and float(baseline_parts_input) > 0
                         else None
                     ),
                     "baseline_hpu": (
-                        float(baseline_hpu_input)
+                        round(float(baseline_hpu_input), 4)
                         if baseline_hpu_input is not None and float(baseline_hpu_input) > 0
                         else None
                     ),
-                    "baseline_cycle_time_s": baseline_cycle_seconds,
-                    "notes": notes,
+                    "baseline_cycle_time_s": (
+                        round(float(baseline_cycle_seconds), 4)
+                        if baseline_cycle_seconds is not None
+                        else None
+                    ),
+                    "notes": str(notes or ""),
                 }
-                project_changed_fields = [
-                    field for field, value in project_values.items()
-                    if value != project.get(field)
-                ]
-                update_project(project_id, project_values)
-                record_audit_event(
-                    project_id,
-                    "Projects",
-                    "Save project",
-                    1,
-                    st.session_state.get("current_editor", ""),
-                    {
-                        "project_id": project_id,
-                        "project_name": name.strip(),
-                        "project_changed_fields": project_changed_fields,
+                base_proj_fields = st.session_state.get(proj_base_key, live_proj_fields)
+                merged_proj_fields, proj_conflicts = compare_record_field_conflicts(
+                    row_label="Project Definition",
+                    baseline=base_proj_fields,
+                    live=live_proj_fields,
+                    user_values=user_proj_fields,
+                    field_labels={
+                        "name": "Project Name",
+                        "program": "Program or Product",
+                        "product_line": "Product Line",
+                        "building_location": "Building Location",
+                        "revision": "Product Baseline Revision",
+                        "takt_time_s": "Default Takt (s)",
+                        "takt_time_unit": "Default Takt Unit",
+                        "baseline_parts": "Baseline Parts",
+                        "baseline_hpu": "Baseline HPU",
+                        "baseline_cycle_time_s": "Baseline Σ Cycle Time (s)",
+                        "notes": "Planning Notes",
                     },
                 )
-                st.toast(
-                    f"Saved project '{name.strip()}'"
-                    + (f" ({len(project_changed_fields)} field(s) updated)" if project_changed_fields else ""),
-                    icon=":material/check_circle:",
-                )
-                st.rerun()
+                project_values = {
+                    "name": merged_proj_fields["name"],
+                    "program": merged_proj_fields["program"],
+                    "product_line": merged_proj_fields["product_line"],
+                    "building_location": merged_proj_fields["building_location"],
+                    "owner": project.get("owner", ""),
+                    "revision": merged_proj_fields["revision"],
+                    "status": project.get("status", "Draft"),
+                    "takt_time_s": float(merged_proj_fields["takt_time_s"]),
+                    "takt_time_unit": merged_proj_fields["takt_time_unit"],
+                    "baseline_parts": merged_proj_fields["baseline_parts"],
+                    "baseline_hpu": merged_proj_fields["baseline_hpu"],
+                    "baseline_cycle_time_s": merged_proj_fields["baseline_cycle_time_s"],
+                    "notes": merged_proj_fields["notes"],
+                }
+                if proj_conflicts:
+                    overwrite_values = {
+                        **project_values,
+                        **user_proj_fields,
+                        "owner": project.get("owner", ""),
+                        "status": project.get("status", "Draft"),
+                    }
+                    trigger_standalone_conflict_dialog(
+                        proj_conflict_key,
+                        proj_conflicts,
+                        payload={"project_values": overwrite_values},
+                    )
+                    st.rerun()
+
+        if valid_proj:
+            project_changed_fields = [
+                field for field, value in project_values.items()
+                if value != project.get(field)
+            ]
+            update_project(project_id, project_values)
+            st.session_state[proj_base_key] = {
+                k: project_values.get(k) for k in live_proj_fields.keys()
+            }
+            record_audit_event(
+                project_id,
+                "Projects",
+                "Save project",
+                1,
+                st.session_state.get("current_editor", ""),
+                {
+                    "project_id": project_id,
+                    "project_name": str(project_values["name"]).strip(),
+                    "project_changed_fields": project_changed_fields,
+                },
+            )
+            st.toast(
+                f"Saved project '{str(project_values['name']).strip()}'"
+                + (f" ({len(project_changed_fields)} field(s) updated)" if project_changed_fields else ""),
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+    render_standalone_conflict_dialog(proj_conflict_key)
 
 if scenario:
     scenario_editor_key = f"overview_scenario_editor_{project_id}"

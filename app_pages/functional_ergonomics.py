@@ -69,6 +69,7 @@ from utils.table_ui import (
     native_selected_rows,
     register_unsaved_source,
     render_audit_history_table,
+    render_inline_conflict_resolution,
     selectable_dataframe,
     selected_dataframe_rows,
     stage_native_delete_confirmation,
@@ -1688,6 +1689,14 @@ elif review_tab.open:
             b64 = base64.b64encode(raw_bytes).decode("ascii")
             data_url = f"data:{mime};base64,{b64}"
 
+            conflict_key = f"ergo_ann_conflict_{media_id}"
+            pending_payload_key = f"_pending_ergo_ann_{media_id}"
+            conflict_res = render_inline_conflict_resolution(conflict_key)
+            if conflict_res == "discard":
+                st.session_state.pop(pending_payload_key, None)
+                st.session_state.pop(f"ergo_annotate_active_{scenario_id}", None)
+                st.rerun()
+
             annotator_res = image_annotator(
                 image_data_url=data_url,
                 annotations_json=media_item.get("annotations_json") or "",
@@ -1695,10 +1704,37 @@ elif review_tab.open:
             )
 
             save_payload = getattr(annotator_res, "save", None)
+            if conflict_res == "overwrite" and isinstance(st.session_state.get(pending_payload_key), dict):
+                save_payload = st.session_state.pop(pending_payload_key, None)
             if save_payload:
                 try:
                     new_annotations = save_payload.get("annotations_json", "")
                     new_data_url = save_payload.get("data_url", "")
+                    rev_id_str = _clean_text(media_item.get("review_id"))
+                    if rev_id_str and conflict_res != "overwrite":
+                        live_media_list = get_ergonomics_visual_media(project_id, scenario_id, rev_id_str)
+                        live_item = next(
+                            (m for m in live_media_list if str(m.get("id")) == str(media_id)),
+                            None,
+                        )
+                        if live_item is not None:
+                            live_ann = str(live_item.get("annotations_json") or "")
+                            base_ann = str(media_item.get("annotations_json") or "")
+                            if live_ann != base_ann and live_ann != str(new_annotations or ""):
+                                st.session_state[pending_payload_key] = {
+                                    "annotations_json": new_annotations,
+                                    "data_url": new_data_url,
+                                }
+                                st.session_state[f"_inline_conflict_{conflict_key}"] = [
+                                    {
+                                        "Row": str(media_item.get("caption") or "Ergonomics Visual Aid"),
+                                        "Field": "Image Markup / Annotations",
+                                        "Original Value": "Annotated" if base_ann else "Unannotated",
+                                        "Saved by Collaborator": "Updated markup by collaborator",
+                                        "Your Unsaved Edit": "Updated markup in your editor",
+                                    }
+                                ]
+                                st.rerun()
                     composite_bytes = decode_data_url(new_data_url) if new_data_url else None
                     update_ergonomics_visual_annotations(
                         project_id=project_id,
@@ -1708,6 +1744,7 @@ elif review_tab.open:
                         composite_image_bytes=composite_bytes,
                         current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
                     )
+                    st.session_state.pop(pending_payload_key, None)
                     st.toast("Annotations saved!", icon=":material/check_circle:")
                     st.session_state.pop(f"ergo_annotate_active_{scenario_id}", None)
                     st.rerun()
@@ -1716,6 +1753,8 @@ elif review_tab.open:
 
             st.caption("Tip: Select existing shapes to move, recolor, or delete them, or use Crop and Rotate 90° in the toolbar. Click 'Apply & Save Markup' inside the canvas to apply changes.")
             if st.button("Close without saving", key=f"btn_close_ergo_annotator_{media_id}"):
+                st.session_state.pop(pending_payload_key, None)
+                st.session_state.pop(f"_inline_conflict_{conflict_key}", None)
                 st.session_state.pop(f"ergo_annotate_active_{scenario_id}", None)
                 st.rerun()
 

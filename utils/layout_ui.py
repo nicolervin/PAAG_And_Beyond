@@ -64,9 +64,47 @@ from utils.layout_store import (
 )
 from utils.scope_ui import section_heading_with_scope
 from utils.store import assembly_sections, audit_history, format_eastern_timestamp
-from utils.table_ui import editable_table_footer, selectable_dataframe
+from utils.table_ui import (
+    check_standalone_conflict_resolution,
+    editable_table_footer,
+    render_standalone_conflict_dialog,
+    selectable_dataframe,
+    trigger_standalone_conflict_dialog,
+)
 
 _LAYOUT_UI_HOT_RELOAD_REV = 2
+
+
+def _shape_compare_signature(s: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a Pin Map shape dict for concurrent-edit comparison."""
+    return {
+        "shape_type": str(s.get("shape_type") or "rectangle").strip(),
+        "label": str(s.get("label") or "").strip(),
+        "x": round(float(s.get("x") or 0.0), 2),
+        "y": round(float(s.get("y") or 0.0), 2),
+        "width": round(float(s.get("width") or 0.0), 2),
+        "height": round(float(s.get("height") or 0.0), 2),
+        "rotation_deg": round(float(s.get("rotation_deg") or 0.0), 2),
+        "color": str(s.get("color") or "").strip(),
+        "opacity": round(float(s.get("opacity") if s.get("opacity") is not None else 0.45), 2),
+        "z_index": int(s.get("z_index") or 0),
+        "layer_id": str(s.get("layer_id") or "").strip(),
+        "pitch_id": str(s.get("pitch_id") or "").strip(),
+        "section_id": str(s.get("section_id") or "").strip(),
+        "points_json": str(s.get("points_json") or "[]").strip(),
+        "style_json": str(s.get("style_json") or "{}").strip(),
+        "metadata_json": str(s.get("metadata_json") or "{}").strip(),
+    }
+
+
+def _shape_summary_text(s: dict[str, Any] | None) -> str:
+    """Return a compact human-readable summary of a shape for conflict tables."""
+    if not s:
+        return "(Deleted)"
+    sig = _shape_compare_signature(s)
+    lbl = sig["label"] or sig["shape_type"]
+    return f"{lbl} @ ({sig['x']}, {sig['y']}) [{sig['width']}×{sig['height']}]"
+
 
 SHAPE_TYPES: list[str] = [
     "rectangle",
@@ -1610,6 +1648,8 @@ def render_layouts_tab(
 
     draft_shapes_key = f"layout_shapes_draft_{rev_id}"
     draft_layers_key = f"layout_layers_draft_{rev_id}"
+    baseline_shapes_key = f"layout_baseline_shapes_{rev_id}"
+    conflict_logical_key = f"layout_canvas_conflict_{rev_id}"
     has_unsaved_shapes_key = f"layout_shapes_has_unsaved_{rev_id}"
     selected_shape_id_key = f"layout_selected_shape_{rev_id}"
     last_commit_sig_key = f"layout_last_commit_sig_{rev_id}"
@@ -1617,6 +1657,8 @@ def render_layouts_tab(
 
     persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
     persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+    if baseline_shapes_key not in st.session_state:
+        st.session_state[baseline_shapes_key] = [dict(s) for s in persisted_shapes]
 
     def handle_select_shape() -> None:
         state = st.session_state.get(canvas_key)
@@ -1646,51 +1688,56 @@ def render_layouts_tab(
             st.session_state[draft_shapes_key] = draft
             st.session_state[selected_shape_id_key] = s_id
 
-    def handle_canvas_commit() -> bool:
-        state = st.session_state.get(canvas_key)
-        trigger = getattr(state, "canvas_commit", None) if state is not None else None
-        if not trigger and isinstance(state, dict):
-            trigger = state.get("canvas_commit")
-        if not trigger or not isinstance(trigger, dict):
-            return False
+    def handle_canvas_commit(confirmed_payload: dict[str, Any] | None = None) -> bool:
+        if confirmed_payload is not None and isinstance(confirmed_payload.get("trigger"), dict):
+            trigger = confirmed_payload["trigger"]
+        else:
+            state = st.session_state.get(canvas_key)
+            trigger = getattr(state, "canvas_commit", None) if state is not None else None
+            if not trigger and isinstance(state, dict):
+                trigger = state.get("canvas_commit")
+            if not trigger or not isinstance(trigger, dict):
+                return False
+
+            action = str(trigger.get("action") or "save")
+            bg_raw = str(trigger.get("background_data_url") or "")
+            bg_digest = hashlib.sha256(bg_raw.encode("utf-8")).hexdigest() if bg_raw else ""
+            sig_payload = json.dumps(
+                {
+                    "cid": trigger.get("commit_id"),
+                    "a": action,
+                    "shapes": trigger.get("shapes"),
+                    "layers": trigger.get("layers"),
+                    "sel": trigger.get("selected_shape_id"),
+                    "cal": trigger.get("scale_calibration"),
+                    "su": trigger.get("scale_update"),
+                    "wv": trigger.get("width_value"),
+                    "hv": trigger.get("height_value"),
+                    "u": trigger.get("unit"),
+                    "pxd": trigger.get("pixel_distance"),
+                    "phd": trigger.get("physical_distance") or trigger.get("real_distance"),
+                    "pt": trigger.get("page_title") or trigger.get("page_name"),
+                    "pid": trigger.get("target_page_id") or trigger.get("page_id"),
+                    "cs": trigger.get("custom_stencil"),
+                    "csid": trigger.get("stencil_id"),
+                    "bg": bg_digest,
+                },
+                sort_keys=True,
+                default=str,
+            )
+            commit_sig = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()
+            if st.session_state.get(last_commit_sig_key) == commit_sig:
+                return False
+            st.session_state[last_commit_sig_key] = commit_sig
 
         action = str(trigger.get("action") or "save")
-        bg_raw = str(trigger.get("background_data_url") or "")
-        bg_digest = hashlib.sha256(bg_raw.encode("utf-8")).hexdigest() if bg_raw else ""
-        sig_payload = json.dumps(
-            {
-                "cid": trigger.get("commit_id"),
-                "a": action,
-                "shapes": trigger.get("shapes"),
-                "layers": trigger.get("layers"),
-                "sel": trigger.get("selected_shape_id"),
-                "cal": trigger.get("scale_calibration"),
-                "su": trigger.get("scale_update"),
-                "wv": trigger.get("width_value"),
-                "hv": trigger.get("height_value"),
-                "u": trigger.get("unit"),
-                "pxd": trigger.get("pixel_distance"),
-                "phd": trigger.get("physical_distance") or trigger.get("real_distance"),
-                "pt": trigger.get("page_title") or trigger.get("page_name"),
-                "pid": trigger.get("target_page_id") or trigger.get("page_id"),
-                "cs": trigger.get("custom_stencil"),
-                "csid": trigger.get("stencil_id"),
-                "bg": bg_digest,
-            },
-            sort_keys=True,
-            default=str,
-        )
-        commit_sig = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()
-        if st.session_state.get(last_commit_sig_key) == commit_sig:
-            return False
-        st.session_state[last_commit_sig_key] = commit_sig
-
         if "selected_shape_id" in trigger:
             st.session_state[selected_shape_id_key] = trigger.get("selected_shape_id") or None
 
-        # Persist layers and shapes whenever included in the commit payload
-        incoming_layers = trigger.get("layers") if isinstance(trigger.get("layers"), list) else persisted_layers
-        incoming_shapes = trigger.get("shapes") if isinstance(trigger.get("shapes"), list) else persisted_shapes
+        live_db_layers = [dict(l) for l in list_layout_layers(rev_id)]
+        live_db_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+        incoming_layers = trigger.get("layers") if isinstance(trigger.get("layers"), list) else live_db_layers
+        incoming_shapes = trigger.get("shapes") if isinstance(trigger.get("shapes"), list) else live_db_shapes
         try:
             layer_id_map = _sync_draft_layers_to_db(
                 project_id=project_id,
@@ -1705,18 +1752,101 @@ def render_layouts_tab(
                 if raw_lid in layer_id_map:
                     s_copy["layer_id"] = layer_id_map[raw_lid]
                 cleaned_shapes.append(s_copy)
+
+            if confirmed_payload is None:
+                baseline_shapes = st.session_state.get(baseline_shapes_key, live_db_shapes)
+                base_by_id = {str(s.get("id") or ""): dict(s) for s in baseline_shapes if s.get("id")}
+                live_by_id = {str(s.get("id") or ""): dict(s) for s in live_db_shapes if s.get("id")}
+                inc_by_id = {str(s.get("id") or ""): dict(s) for s in cleaned_shapes if s.get("id")}
+
+                merged_shapes: list[dict[str, Any]] = []
+                shape_conflicts: list[dict[str, Any]] = []
+
+                for s_copy in cleaned_shapes:
+                    sid = str(s_copy.get("id") or "")
+                    if not sid:
+                        merged_shapes.append(s_copy)
+                        continue
+                    inc_sig = _shape_compare_signature(s_copy)
+                    if sid in base_by_id and sid in live_by_id:
+                        base_sig = _shape_compare_signature(base_by_id[sid])
+                        live_sig = _shape_compare_signature(live_by_id[sid])
+                        if inc_sig == base_sig and live_sig != base_sig:
+                            merged_shapes.append(dict(live_by_id[sid]))
+                            continue
+                        if inc_sig != base_sig and live_sig != base_sig and inc_sig != live_sig:
+                            shape_conflicts.append(
+                                {
+                                    "Row": str(s_copy.get("label") or s_copy.get("shape_type") or sid[:8]),
+                                    "Field": "Pin Map Shape",
+                                    "Original Value": _shape_summary_text(base_by_id[sid]),
+                                    "Saved by Collaborator": _shape_summary_text(live_by_id[sid]),
+                                    "Your Unsaved Edit": _shape_summary_text(s_copy),
+                                }
+                            )
+                    elif sid in base_by_id and sid not in live_by_id:
+                        base_sig = _shape_compare_signature(base_by_id[sid])
+                        if inc_sig == base_sig:
+                            # Collaborator deleted a shape the current user did not touch; honor deletion
+                            continue
+                        shape_conflicts.append(
+                            {
+                                "Row": str(s_copy.get("label") or s_copy.get("shape_type") or sid[:8]),
+                                "Field": "Pin Map Shape",
+                                "Original Value": _shape_summary_text(base_by_id[sid]),
+                                "Saved by Collaborator": "(Deleted by collaborator)",
+                                "Your Unsaved Edit": _shape_summary_text(s_copy),
+                            }
+                        )
+                    merged_shapes.append(s_copy)
+
+                for sid, live_s in live_by_id.items():
+                    if sid not in inc_by_id:
+                        if sid not in base_by_id:
+                            # Newly added by another collaborator; preserve it
+                            merged_shapes.append(dict(live_s))
+                        else:
+                            # Current user deleted this shape; check if collaborator modified it
+                            base_sig = _shape_compare_signature(base_by_id[sid])
+                            live_sig = _shape_compare_signature(live_s)
+                            if live_sig != base_sig:
+                                shape_conflicts.append(
+                                    {
+                                        "Row": str(live_s.get("label") or live_s.get("shape_type") or sid[:8]),
+                                        "Field": "Pin Map Shape",
+                                        "Original Value": _shape_summary_text(base_by_id[sid]),
+                                        "Saved by Collaborator": _shape_summary_text(live_s),
+                                        "Your Unsaved Edit": "(Deleted in your draft)",
+                                    }
+                                )
+
+                if shape_conflicts:
+                    st.session_state[draft_shapes_key] = merged_shapes
+                    st.session_state[has_unsaved_shapes_key] = True
+                    trigger_standalone_conflict_dialog(
+                        conflict_logical_key,
+                        shape_conflicts,
+                        payload={"trigger": trigger, "cleaned_shapes": merged_shapes},
+                    )
+                    return False
+                cleaned_shapes = merged_shapes
+            elif isinstance(confirmed_payload.get("cleaned_shapes"), list):
+                cleaned_shapes = [dict(s) for s in confirmed_payload["cleaned_shapes"]]
+
             save_layout_shapes(
                 project_id=project_id,
                 revision_id=rev_id,
                 shapes=cleaned_shapes,
                 editor_name=effective_editor,
             )
-            st.session_state[draft_shapes_key] = cleaned_shapes
+            fresh_saved_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+            st.session_state[draft_shapes_key] = fresh_saved_shapes
+            st.session_state[baseline_shapes_key] = fresh_saved_shapes
             st.session_state[draft_layers_key] = [dict(l) for l in list_layout_layers(rev_id)]
             st.session_state[has_unsaved_shapes_key] = False
         except ValueError as exc:
             st.error(str(exc))
-            return
+            return False
 
         try:
             if action == "calibrate_scale":
@@ -1868,8 +1998,20 @@ def render_layouts_tab(
             return False
         return True
 
+    conflict_res, saved_conflict_payload = check_standalone_conflict_resolution(conflict_logical_key)
+    if conflict_res == "discard":
+        fresh_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+        st.session_state[draft_shapes_key] = fresh_shapes
+        st.session_state[baseline_shapes_key] = fresh_shapes
+        st.session_state[has_unsaved_shapes_key] = False
+        st.rerun()
+
     # Process any pending canvas commit before building props so post-commit state is fresh
-    committed = handle_canvas_commit()
+    committed = (
+        handle_canvas_commit(confirmed_payload=saved_conflict_payload)
+        if conflict_res is True and isinstance(saved_conflict_payload, dict)
+        else handle_canvas_commit()
+    )
 
     if committed:
         # Reload active page/revision/shapes/layers/background after commit processing
@@ -1894,11 +2036,16 @@ def render_layouts_tab(
 
         draft_shapes_key = f"layout_shapes_draft_{rev_id}"
         draft_layers_key = f"layout_layers_draft_{rev_id}"
+        baseline_shapes_key = f"layout_baseline_shapes_{rev_id}"
+        conflict_logical_key = f"layout_canvas_conflict_{rev_id}"
+        has_unsaved_shapes_key = f"layout_shapes_has_unsaved_{rev_id}"
         selected_shape_id_key = f"layout_selected_shape_{rev_id}"
         canvas_key = f"layout_canvas_{rev_id}"
 
         persisted_layers = [dict(l) for l in list_layout_layers(rev_id)]
         persisted_shapes = [dict(s) for s in list_layout_shapes(rev_id)]
+        st.session_state[baseline_shapes_key] = [dict(s) for s in persisted_shapes]
+        st.session_state[has_unsaved_shapes_key] = False
 
     w_in = float(active_rev.get("scale_width_in") or 2400.0)
     h_in = float(active_rev.get("scale_height_in") or 1200.0)
@@ -1946,8 +2093,14 @@ def render_layouts_tab(
                 if mapped_pid:
                     cross_scenario_pitch_aliases[raw_pid] = mapped_pid
 
-    st.session_state[draft_shapes_key] = persisted_shapes
+    if not st.session_state.get(has_unsaved_shapes_key):
+        st.session_state[draft_shapes_key] = persisted_shapes
     st.session_state[draft_layers_key] = persisted_layers
+    canvas_shapes = (
+        st.session_state.get(draft_shapes_key, persisted_shapes)
+        if st.session_state.get(has_unsaved_shapes_key)
+        else persisted_shapes
+    )
 
     other_revs = [r for r in revisions if str(r["id"]) != rev_id]
     cad_file_name = str(active_rev.get("cad_file_name") or "").strip()
@@ -2056,6 +2209,8 @@ def render_layouts_tab(
             active_rev,
             effective_editor,
         )
+    elif not pending_dlg:
+        render_standalone_conflict_dialog(conflict_logical_key)
 
     section_standards = get_section_pitch_standards(active_layout_id)
     pitch_metrics = (
@@ -2090,7 +2245,7 @@ def render_layouts_tab(
         scale_factor_px_per_in_x=px_per_in_x,
         scale_factor_px_per_in_y=px_per_in_y,
         unit=unit,
-        shapes=persisted_shapes,
+        shapes=canvas_shapes,
         layers=persisted_layers,
         pitches=project_pitches,
         pitch_metrics=pitch_metrics,
